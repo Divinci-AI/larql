@@ -60,7 +60,9 @@ larql serve output/gemma3-4b.vindex --api-key "sk-abc123" --tls-cert cert.pem --
 | `--no-infer` | Disable inference (browse-only, saves memory) | false |
 | `--cors` | Enable CORS headers | false |
 | `--api-key <KEY>` | Require Bearer token auth (health exempt) | — |
+| `--rate-limit <SPEC>` | Per-IP rate limit (e.g., "100/min", "10/sec") | — |
 | `--max-concurrent <N>` | Max concurrent requests | 100 |
+| `--cache-ttl <SECS>` | Cache TTL for DESCRIBE results (0 = disabled) | 0 |
 | `--tls-cert <PATH>` | TLS certificate for HTTPS | — |
 | `--tls-key <PATH>` | TLS private key for HTTPS | — |
 | `--log-level <LEVEL>` | Logging level | info |
@@ -212,24 +214,65 @@ POST /v1/infer
 }
 ```
 
+### Streaming Endpoint
+
+#### WS /v1/stream
+
+WebSocket endpoint for layer-by-layer streaming DESCRIBE. Client sends a JSON message, server streams per-layer results.
+
+```
+→ {"type": "describe", "entity": "France", "band": "all"}
+← {"type": "layer", "layer": 14, "edges": []}
+← {"type": "layer", "layer": 15, "edges": [{"target": "French", "gate_score": 35.2}]}
+← {"type": "layer", "layer": 27, "edges": [{"relation": "capital", "target": "Paris", "gate_score": 1436.9, "source": "probe"}]}
+← {"type": "done", "entity": "France", "total_edges": 6, "latency_ms": 12.3}
+```
+
+### Decoupled Inference Endpoint
+
+#### POST /v1/walk-ffn
+
+Client sends a residual vector, server runs gate KNN and returns selected features. Enables distributed inference where the client runs attention locally.
+
+**Single layer:**
+
+```json
+POST /v1/walk-ffn
+{"layer": 26, "residual": [0.12, -0.34, ...], "top_k": 8092}
+→ {"layer": 26, "features": [9515, 4532, ...], "scores": [1436.9, 26.1, ...], "latency_ms": 0.01}
+```
+
+**Batched (all layers in one round-trip):**
+
+```json
+POST /v1/walk-ffn
+{"layers": [0, 1, ..., 33], "residual": [0.12, -0.34, ...]}
+→ {"results": [{"layer": 0, "features": [...], "scores": [...]}, ...], "latency_ms": 0.3}
+```
+
 ### Patch Endpoints
 
 #### POST /v1/patches/apply
 
-Apply a patch in-memory (does not modify base files).
+Apply a patch in-memory (does not modify base files). Session-aware: include `X-Session-Id` header to scope patches to a session.
 
 ```json
 POST /v1/patches/apply
 {"patch": {"version": 1, "base_model": "...", "operations": [...]}}
 ```
 
+```bash
+# Session-scoped patch
+curl -H "X-Session-Id: sess-a" -X POST http://localhost:8080/v1/patches/apply -d '{"patch": {...}}'
+```
+
 #### GET /v1/patches
 
-List active patches.
+List active patches (session-aware).
 
 #### DELETE /v1/patches/{name}
 
-Remove a patch by description.
+Remove a patch by description (session-aware).
 
 ### Management Endpoints
 
@@ -261,6 +304,83 @@ curl -H "Authorization: Bearer sk-abc123" "http://localhost:8080/v1/describe?ent
 
 Requests without a valid token receive 401 Unauthorized.
 
+## Rate Limiting
+
+Per-IP token bucket rate limiting. Supports `N/sec`, `N/min`, `N/hour` formats. `/v1/health` is exempt.
+
+```bash
+larql serve output/gemma3-4b.vindex --rate-limit "100/min"
+```
+
+Excess requests receive `429 Too Many Requests`. The limiter also respects `X-Forwarded-For` headers for clients behind proxies.
+
+## DESCRIBE Cache
+
+Cache DESCRIBE responses in memory with a configurable TTL. Useful for popular entities queried repeatedly.
+
+```bash
+larql serve output/gemma3-4b.vindex --cache-ttl 300  # 5 minute cache
+```
+
+Cache keys include: model ID, entity, band, limit, min_score. Expired entries are evicted automatically.
+
+## Sessions
+
+Per-session patch isolation via the `X-Session-Id` header. Each session gets its own PatchedVindex overlay — patches applied to one session don't affect others or the global state.
+
+```bash
+# Session A applies a medical patch
+curl -H "X-Session-Id: sess-a" \
+     -X POST http://localhost:8080/v1/patches/apply \
+     -d '{"patch": {"version": 1, ...}}'
+
+# Session A sees patched edges
+curl -H "X-Session-Id: sess-a" "http://localhost:8080/v1/describe?entity=aspirin"
+
+# Session B (or no header) sees unpatched edges
+curl "http://localhost:8080/v1/describe?entity=aspirin"
+```
+
+Sessions expire after 1 hour of inactivity. Without an `X-Session-Id` header, patches go to the global (shared) state.
+
+## Error Codes
+
+| Status | When |
+|--------|------|
+| 200 | Success |
+| 400 | Bad request (empty prompt, missing required params) |
+| 401 | Unauthorized (missing/invalid API key) |
+| 404 | Model not found (multi-model), patch not found |
+| 429 | Rate limit exceeded |
+| 503 | Inference unavailable (`--no-infer` or no model weights) |
+| 500 | Internal server error |
+
+All errors return `{"error": "message"}`.
+
+## Layer Bands
+
+Models are divided into three functional bands based on architecture:
+
+| Band | Gemma 3 4B | What it encodes |
+|------|-----------|-----------------|
+| `syntax` | L0-13 | Morphology, grammar, function words |
+| `knowledge` | L14-27 | Factual relations (capital, language, etc.) |
+| `output` | L28-33 | Answer formatting, token selection |
+
+DESCRIBE defaults to `band=knowledge`. Use `band=all` to scan everything.
+
+## Probe Labels
+
+If the vindex contains `feature_labels.json`, probe-confirmed relation labels appear in DESCRIBE and WALK responses:
+
+```json
+{"relation": "capital", "target": "Paris", "gate_score": 1436.9, "layer": 27, "source": "probe"}
+```
+
+Format of `feature_labels.json`: `{"L27_F9515": "capital", "L24_F4532": "language", ...}`
+
+SELECT also supports filtering by relation: `{"relation": "capital"}` returns only edges with that probe label.
+
 ## REPL Integration
 
 The LQL REPL connects to a remote server transparently:
@@ -274,6 +394,14 @@ WALK "Einstein" TOP 10;
 INFER "The capital of France is" TOP 5;
 STATS;
 SHOW RELATIONS;
+
+-- Mutations forwarded to server as patches
+INSERT ("aspirin", "treats", "headache");
+
+-- Local patches stay client-side (server never sees them)
+APPLY PATCH "private-facts.vlp";
+DESCRIBE "aspirin";          -- merges server + local patch edges
+SHOW PATCHES;                -- shows local patches only
 ```
 
 ## Multi-Model Serving
@@ -300,21 +428,27 @@ larql-server/
 │   ├── server_demo.rs          Synthetic vindex API demo
 │   └── server_bench.rs         Endpoint latency benchmarks
 ├── tests/
-│   └── test_api.rs             Integration tests
+│   └── test_api.rs             Integration tests (76 tests)
 └── src/
     ├── main.rs                 CLI parsing, vindex loading, server startup
     ├── state.rs                AppState: loaded models, probe labels, lazy weights
     ├── error.rs                ServerError → HTTP status codes
     ├── auth.rs                 API key Bearer token middleware
+    ├── ratelimit.rs            Per-IP token bucket rate limiting
+    ├── cache.rs                TTL cache for DESCRIBE results
+    ├── session.rs              Per-session PatchedVindex isolation
+    ├── etag.rs                 ETag generation for CDN caching
     └── routes/
         ├── mod.rs              Router setup (single + multi-model)
-        ├── describe.rs         GET /v1/describe (with relation labels)
-        ├── walk.rs             GET /v1/walk
-        ├── select.rs           POST /v1/select
+        ├── describe.rs         GET /v1/describe (cached, ETag, relation labels)
+        ├── walk.rs             GET /v1/walk (with relation labels)
+        ├── select.rs           POST /v1/select (relation filter)
         ├── relations.rs        GET /v1/relations
         ├── stats.rs            GET /v1/stats
         ├── infer.rs            POST /v1/infer (walk/dense/compare)
-        ├── patches.rs          POST/GET/DELETE /v1/patches
+        ├── stream.rs           WS /v1/stream (layer-by-layer streaming)
+        ├── walk_ffn.rs         POST /v1/walk-ffn (decoupled inference)
+        ├── patches.rs          POST/GET/DELETE /v1/patches (session-aware)
         ├── health.rs           GET /v1/health
         └── models.rs           GET /v1/models
 ```

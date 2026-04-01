@@ -5,6 +5,8 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::{Path, Query, State};
+use axum::http::HeaderMap;
+use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 
 use crate::error::ServerError;
@@ -203,33 +205,84 @@ fn describe_entity(
     }))
 }
 
-pub async fn handle_describe(
-    State(state): State<Arc<AppState>>,
-    Query(params): Query<DescribeParams>,
-) -> Result<Json<serde_json::Value>, ServerError> {
-    state.bump_requests();
-    let model = state
-        .model(None)
-        .ok_or_else(|| ServerError::NotFound("no model loaded".into()))?;
+async fn describe_with_cache(
+    state: &Arc<AppState>,
+    model: &Arc<LoadedModel>,
+    headers: &HeaderMap,
+    params: DescribeParams,
+) -> Result<Response, ServerError> {
+    // Check cache.
+    let cache_key = if state.describe_cache.is_enabled() {
+        let key = crate::cache::DescribeCache::key(
+            &model.id,
+            &params.entity,
+            &params.band,
+            params.limit,
+            params.min_score,
+        );
+        if let Some(cached) = state.describe_cache.get(&key) {
+            let etag = crate::etag::compute_etag(&cached);
+            let if_none_match = headers.get("if-none-match").and_then(|v| v.to_str().ok());
+            if crate::etag::matches_etag(if_none_match, &etag) {
+                return Ok((
+                    axum::http::StatusCode::NOT_MODIFIED,
+                    [("etag", etag)],
+                ).into_response());
+            }
+            return Ok((
+                [
+                    ("etag", etag),
+                    ("cache-control", "public, max-age=86400".into()),
+                ],
+                Json(cached),
+            ).into_response());
+        }
+        Some(key)
+    } else {
+        None
+    };
+
     let model = Arc::clone(model);
     let result = tokio::task::spawn_blocking(move || describe_entity(&model, &params))
         .await
         .map_err(|e| ServerError::Internal(e.to_string()))??;
-    Ok(Json(result))
+
+    // Store in cache.
+    if let Some(key) = cache_key {
+        state.describe_cache.put(key, result.clone());
+    }
+
+    let etag = crate::etag::compute_etag(&result);
+    Ok((
+        [
+            ("etag", etag),
+            ("cache-control", "public, max-age=86400".into()),
+        ],
+        Json(result),
+    ).into_response())
+}
+
+pub async fn handle_describe(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(params): Query<DescribeParams>,
+) -> Result<Response, ServerError> {
+    state.bump_requests();
+    let model = state
+        .model(None)
+        .ok_or_else(|| ServerError::NotFound("no model loaded".into()))?;
+    describe_with_cache(&state, model, &headers, params).await
 }
 
 pub async fn handle_describe_multi(
     State(state): State<Arc<AppState>>,
     Path(model_id): Path<String>,
+    headers: HeaderMap,
     Query(params): Query<DescribeParams>,
-) -> Result<Json<serde_json::Value>, ServerError> {
+) -> Result<Response, ServerError> {
     state.bump_requests();
     let model = state
         .model(Some(&model_id))
         .ok_or_else(|| ServerError::NotFound(format!("model '{}' not found", model_id)))?;
-    let model = Arc::clone(model);
-    let result = tokio::task::spawn_blocking(move || describe_entity(&model, &params))
-        .await
-        .map_err(|e| ServerError::Internal(e.to_string()))??;
-    Ok(Json(result))
+    describe_with_cache(&state, model, &headers, params).await
 }

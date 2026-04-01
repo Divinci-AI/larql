@@ -33,7 +33,7 @@ baked.save_vindex(&output_path, &mut config)?;
 
 ## Features
 
-- **Extract** from safetensors, GGUF, or MLX models (any gated FFN architecture)
+- **Extract** from safetensors, GGUF, or MLX models (streaming — no full model load)
 - **Gate KNN** via BLAS matmul — 0.008ms per layer
 - **Walk** across all layers with down-meta annotation
 - **Readonly base** — base vindex files are never modified after extraction
@@ -54,45 +54,48 @@ baked.save_vindex(&output_path, &mut config)?;
 
 ```
 larql-vindex/src/
-│
 ├── lib.rs                      Crate root + re-exports
 ├── error.rs                    VindexError
 ├── describe.rs                 DescribeEdge, LabelSource
 │
 ├── config/                     Configuration types
 │   ├── types.rs                VindexConfig, ExtractLevel, LayerBands, MoeConfig
-│   └── dtype.rs                StorageDtype (f32/f16), conversion utilities
+│   └── dtype.rs                StorageDtype (f32/f16), encode/decode
 │
-├── index/                      In-memory KNN engine
+├── index/                      In-memory KNN engine (zero-copy mmap)
 │   ├── core.rs                 VectorIndex, FeatureMeta, gate_knn, walk
-│   └── mutate.rs               set/delete features, find_free_feature, save to disk
+│   └── mutate.rs               set/delete features, save to disk
 │
-├── format/                     File I/O
-│   ├── load.rs                 load_vindex, load_embeddings, load_tokenizer, load_config
-│   ├── loader.rs               safetensors → ModelWeights (model loading)
+├── format/                     Vindex file I/O
+│   ├── load.rs                 load_vindex, load_embeddings, load_tokenizer
 │   ├── down_meta.rs            Binary down_meta read/write
 │   ├── weights.rs              Split weight files (attn, up, down, norms, lm_head)
-│   └── checksums.rs            SHA256 computation + verification
+│   ├── checksums.rs            SHA256 computation + verification
+│   ├── huggingface.rs          HuggingFace Hub download/publish
+│   └── quant/mod.rs            Re-exports from larql_models::quant
 │
 ├── extract/                    Build pipeline (model → vindex)
-│   ├── callbacks.rs            IndexBuildCallbacks trait
 │   ├── build.rs                build_vindex (full extraction + clustering)
-│   └── build_from_vectors.rs   Build from pre-extracted NDJSON vectors
+│   ├── streaming.rs            Streaming extraction (mmap, no full model load)
+│   ├── callbacks.rs            IndexBuildCallbacks trait
+│   └── build_from_vectors.rs   Build from pre-extracted NDJSON
 │
 ├── patch/                      Patch system
-│   └── core.rs                 VindexPatch, PatchOp, PatchedVindex, base64 gate encoding
+│   └── core.rs                 VindexPatch, PatchOp, PatchedVindex
 │
-└── clustering/                 Relation discovery
-    ├── kmeans.rs               k-means clustering
-    ├── labeling.rs             Pattern detection, TF-IDF labels
-    ├── categories.rs           Entity category word lists
-    ├── pair_matching.rs        Wikidata/WordNet output matching
-    └── probe.rs                Probe label loading
-
+├── clustering/                 Relation discovery
+│   ├── kmeans.rs               k-means clustering
+│   ├── labeling.rs             Pattern detection, TF-IDF labels
+│   ├── categories.rs           Entity category word lists
+│   ├── pair_matching.rs        Wikidata/WordNet output matching
+│   └── probe.rs                Probe label loading
+│
 └── vindexfile/                 Declarative model builds
-    ├── mod.rs                  Build executor (FROM + PATCH + INSERT → VectorIndex)
+    ├── mod.rs                  Build executor (FROM + PATCH + INSERT → bake_down)
     └── parser.rs               Vindexfile parser (FROM, PATCH, INSERT, DELETE, LABELS, EXPOSE, STAGE)
 ```
+
+Model loading (safetensors, GGUF, MLX) and quantization (f16, Q4_0, MXFP4) live in `larql-models`.
 
 ## Supported Architectures
 

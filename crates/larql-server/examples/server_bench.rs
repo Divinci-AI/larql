@@ -131,6 +131,18 @@ fn main() {
         patched.walk(&query_strong, &knowledge_layers, 10)
     });
 
+    println!("\n── Walk-FFN (decoupled inference) ──");
+    bench("walk-ffn single layer", 100, 10000, || {
+        patched.gate_knn(4, &query_strong, 8092)
+    });
+    bench("walk-ffn batched 8 layers", 50, 5000, || {
+        let mut results = Vec::with_capacity(8);
+        for &l in &all_layers {
+            results.push(patched.gate_knn(l, &query_strong, 8092));
+        }
+        results
+    });
+
     println!("\n── Describe simulation (walk + aggregate) ──");
     bench("describe (walk + edge merge)", 50, 2000, || {
         let trace = patched.walk(&query_strong, &all_layers, 20);
@@ -241,9 +253,52 @@ fn main() {
     });
 
     println!("\n── Patch operations ──");
-    bench("apply + remove patch (1 op)", 50, 5000, || {
-        let index2 = bench_index();
-        let mut p = PatchedVindex::new(index2);
+    let test_patch = || larql_vindex::VindexPatch {
+        version: 1,
+        base_model: "bench".into(),
+        base_checksum: None,
+        created_at: "2026-04-01".into(),
+        description: None,
+        author: None,
+        tags: vec![],
+        operations: vec![
+            larql_vindex::PatchOp::Delete { layer: 0, feature: 0, reason: None },
+        ],
+    };
+    // Measure apply+remove on a fresh PatchedVindex (reuses existing base via clone).
+    // Note: clone cost dominates in debug builds. Run with --release for accurate numbers.
+    bench("apply + remove patch (1 op)", 20, 200, || {
+        let mut p = PatchedVindex::new(patched.base().clone());
+        p.apply_patch(test_patch());
+        p.remove_patch(0);
+    });
+
+    println!("\n── Cache simulation ──");
+    // Simulate DESCRIBE cache behavior
+    let mut cache: std::collections::HashMap<String, serde_json::Value> =
+        std::collections::HashMap::new();
+
+    bench("cache miss (HashMap lookup)", 1000, 100000, || {
+        cache.get("model:France:knowledge:20:5")
+    });
+
+    // Populate cache
+    for i in 0..1000 {
+        let key = format!("model:entity{}:knowledge:20:5", i);
+        cache.insert(key, serde_json::json!({"entity": format!("entity{}", i)}));
+    }
+
+    bench("cache hit (HashMap lookup)", 1000, 100000, || {
+        cache.get("model:entity500:knowledge:20:5")
+    });
+
+    bench("cache key construction", 1000, 100000, || {
+        format!("{}:{}:{}:{}:{}", "model", "France", "knowledge", 20, 5)
+    });
+
+    println!("\n── Session simulation ──");
+    bench("session clone + patch", 10, 200, || {
+        let mut session = PatchedVindex::new(patched.base().clone());
         let patch = larql_vindex::VindexPatch {
             version: 1,
             base_model: "bench".into(),
@@ -254,15 +309,40 @@ fn main() {
             tags: vec![],
             operations: vec![
                 larql_vindex::PatchOp::Delete { layer: 0, feature: 0, reason: None },
+                larql_vindex::PatchOp::Delete { layer: 1, feature: 1, reason: None },
             ],
         };
-        p.apply_patch(patch);
-        p.remove_patch(0);
+        session.apply_patch(patch);
+        session
+    });
+
+    bench("session walk (after patch)", 50, 2000, || {
+        patched.walk(&query_strong, &all_layers, 10)
+    });
+
+    println!("\n── JSON serialization ──");
+    let sample_response = serde_json::json!({
+        "entity": "France",
+        "model": "google/gemma-3-4b-it",
+        "edges": [
+            {"relation": "capital", "target": "Paris", "gate_score": 1436.9, "layer": 27, "source": "probe"},
+            {"target": "French", "gate_score": 35.2, "layer": 24},
+            {"target": "Europe", "gate_score": 14.4, "layer": 25},
+        ],
+        "latency_ms": 12.3
+    });
+
+    bench("JSON serialize (describe resp)", 1000, 50000, || {
+        serde_json::to_string(&sample_response).unwrap()
+    });
+
+    bench("JSON serialize (small)", 1000, 100000, || {
+        serde_json::to_string(&serde_json::json!({"status": "ok"})).unwrap()
     });
 
     println!("\n── Summary ──");
     let total_features: usize = all_layers.iter().map(|l| patched.num_features(*l)).sum();
     println!("  Index: {} layers, {} features/layer, {} total, hidden={}", all_layers.len(), 1024, total_features, hidden);
     println!("  All times include full operation (KNN + sort + truncate + metadata)");
-    println!("\n  Expected server latency = operation time + serialization (~0.1ms) + network RTT");
+    println!("\n  Expected server latency = operation time + serialization + network RTT");
 }

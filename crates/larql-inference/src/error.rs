@@ -16,4 +16,6 @@ pub enum InferenceError {
     Io(#[from] std::io::Error),
     #[error("vindex error: {0}")]
     Vindex(#[from] larql_vindex::VindexError),
+    #[error("model error: {0}")]
+    Model(#[from] larql_models::ModelError),
 }

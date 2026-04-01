@@ -201,9 +201,17 @@ struct ServeArgs {
     #[arg(long)]
     api_key: Option<String>,
 
+    /// Rate limit per IP (e.g., "100/min", "10/sec").
+    #[arg(long)]
+    rate_limit: Option<String>,
+
     /// Max concurrent requests.
     #[arg(long, default_value = "100")]
     max_concurrent: usize,
+
+    /// Cache TTL for DESCRIBE results in seconds (0 = disabled).
+    #[arg(long, default_value = "0")]
+    cache_ttl: u64,
 
     /// TLS certificate path.
     #[arg(long)]
@@ -311,6 +319,14 @@ fn main() {
             if let Some(ref key) = args.api_key {
                 cmd_args.push("--api-key".into());
                 cmd_args.push(key.clone());
+            }
+            if let Some(ref rl) = args.rate_limit {
+                cmd_args.push("--rate-limit".into());
+                cmd_args.push(rl.clone());
+            }
+            if args.cache_ttl > 0 {
+                cmd_args.push("--cache-ttl".into());
+                cmd_args.push(args.cache_ttl.to_string());
             }
             if let Some(ref cert) = args.tls_cert {
                 cmd_args.push("--tls-cert".into());

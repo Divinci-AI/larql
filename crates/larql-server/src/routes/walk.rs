@@ -68,12 +68,16 @@ fn walk_prompt(
         .iter()
         .flat_map(|(layer, hits)| {
             hits.iter().map(move |hit| {
-                serde_json::json!({
+                let mut h = serde_json::json!({
                     "layer": layer,
                     "feature": hit.feature,
                     "gate_score": (hit.gate_score * 10.0).round() / 10.0,
                     "target": hit.meta.top_token.trim(),
-                })
+                });
+                if let Some(label) = model.probe_labels.get(&(*layer, hit.feature)) {
+                    h["relation"] = serde_json::json!(label);
+                }
+                h
             })
         })
         .collect();

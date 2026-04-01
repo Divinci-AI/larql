@@ -13,9 +13,8 @@ use crate::state::{AppState, LoadedModel};
 pub struct SelectRequest {
     #[serde(default)]
     pub entity: Option<String>,
-    /// Filter by relation label (future: requires relation classifier).
+    /// Filter by probe-confirmed relation label.
     #[serde(default)]
-    #[allow(dead_code)]
     pub relation: Option<String>,
     #[serde(default)]
     pub layer: Option<usize>,
@@ -52,6 +51,7 @@ fn select_edges(
         feature: usize,
         top_token: String,
         c_score: f32,
+        relation: Option<String>,
     }
 
     let mut rows: Vec<Row> = Vec::new();
@@ -70,11 +70,19 @@ fn select_edges(
                             continue;
                         }
                     }
+                    let relation = model.probe_labels.get(&(layer, feat_idx)).cloned();
+                    if let Some(ref rel_filter) = req.relation {
+                        match &relation {
+                            Some(r) if r.to_lowercase().contains(&rel_filter.to_lowercase()) => {}
+                            _ => continue,
+                        }
+                    }
                     rows.push(Row {
                         layer,
                         feature: feat_idx,
                         top_token: meta.top_token.clone(),
                         c_score: meta.c_score,
+                        relation,
                     });
                 }
             }
@@ -109,12 +117,16 @@ fn select_edges(
     let edges: Vec<serde_json::Value> = rows
         .iter()
         .map(|r| {
-            serde_json::json!({
+            let mut edge = serde_json::json!({
                 "layer": r.layer,
                 "feature": r.feature,
                 "target": r.top_token.trim(),
                 "c_score": r.c_score,
-            })
+            });
+            if let Some(ref rel) = r.relation {
+                edge["relation"] = serde_json::json!(rel);
+            }
+            edge
         })
         .collect();
 

@@ -317,12 +317,120 @@ fn main() {
     println!("  curl http://localhost:8080/v1/health");
     println!("  → 200 OK (health exempt from auth)");
 
-    // ── 9. HEALTH (GET /v1/health) ──
-    section("GET /v1/health");
-    println!("{{\"status\": \"ok\", \"uptime_seconds\": 0, \"requests_served\": 9}}");
+    // ── 9. SESSION ISOLATION ──
+    section("Per-session patch isolation");
 
-    println!("\n── Demo complete ──");
-    println!("To run the real server: larql serve <path-to-vindex> --port 8080");
-    println!("  With auth: larql serve <path> --api-key \"sk-abc123\"");
-    println!("  With TLS:  larql serve <path> --tls-cert cert.pem --tls-key key.pem");
+    let (index_a, _) = demo_index();
+    let (index_b, _) = demo_index();
+    let mut session_a = PatchedVindex::new(index_a);
+    let session_b = PatchedVindex::new(index_b);
+
+    session_a.delete_feature(1, 0); // Session A removes Paris
+
+    println!("Session A (removed feature L1:F0):");
+    println!("  L1:F0 = {:?}", session_a.feature_meta(1, 0).map(|m| &m.top_token));
+    println!("Session B (untouched):");
+    println!("  L1:F0 = {:?}", session_b.feature_meta(1, 0).map(|m| m.top_token.as_str()));
+    println!("\nSessions are isolated — patches don't leak between clients.");
+
+    // ── 10. DESCRIBE CACHE ──
+    section("DESCRIBE cache (--cache-ttl)");
+
+    println!("With --cache-ttl 300:");
+    println!("  1st request: DESCRIBE France → 12ms (computed)");
+    println!("  2nd request: DESCRIBE France → <1ms (cached)");
+    println!("  After 5 min: DESCRIBE France → 12ms (expired, recomputed)");
+    println!("\nCache key: model:entity:band:limit:min_score");
+
+    // ── 11. RATE LIMITING ──
+    section("Rate limiting (--rate-limit)");
+
+    println!("With --rate-limit \"100/min\":");
+    println!("  Per-IP token bucket — 100 requests/min burst, 1.67/sec refill");
+    println!("  /v1/health is exempt from rate limiting");
+    println!("  X-Forwarded-For respected for proxied clients");
+    println!("  Excess requests → 429 Too Many Requests");
+
+    // ── 12. BAND FILTERING ──
+    section("DESCRIBE band filtering");
+
+    let trace_syntax = patched.walk(&query, &[0], 3);
+    let trace_knowledge = patched.walk(&query, &[1, 2], 3);
+    let trace_output = patched.walk(&query, &[3], 3);
+
+    println!("band=syntax (L0):");
+    for (_, hits) in &trace_syntax.layers {
+        for hit in hits.iter().take(2) {
+            println!("  {} (gate={:.1})", hit.meta.top_token, hit.gate_score);
+        }
+    }
+    println!("band=knowledge (L1-2):");
+    for (_, hits) in &trace_knowledge.layers {
+        for hit in hits.iter().take(2) {
+            println!("  {} (gate={:.1})", hit.meta.top_token, hit.gate_score);
+        }
+    }
+    println!("band=output (L3):");
+    for (_, hits) in &trace_output.layers {
+        for hit in hits.iter().take(2) {
+            println!("  {} (gate={:.1})", hit.meta.top_token, hit.gate_score);
+        }
+    }
+
+    // ── 13. WALK-FFN (decoupled inference) ──
+    section("POST /v1/walk-ffn (decoupled inference)");
+
+    let residual = larql_vindex::ndarray::Array1::from_vec(vec![1.0, 0.2, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+    let hits = patched.gate_knn(1, &residual, 5);
+    let features: Vec<usize> = hits.iter().map(|(f, _)| *f).collect();
+    let scores: Vec<f32> = hits.iter().map(|(_, s)| (s * 100.0).round() / 100.0).collect();
+
+    println!("Single layer request:");
+    println!("  POST /v1/walk-ffn {{\"layer\": 1, \"residual\": [1.0, 0.2, ...]}}");
+    println!("  → {{\"layer\": 1, \"features\": {:?}, \"scores\": {:?}}}", features, scores);
+    println!();
+    println!("Batched request (all layers in one round-trip):");
+    println!("  POST /v1/walk-ffn {{\"layers\": [0,1,2,3], \"residual\": [...]}}");
+    println!("  → {{\"results\": [{{\"layer\": 0, ...}}, {{\"layer\": 1, ...}}, ...]}}");
+
+    // ── 14. WEBSOCKET STREAMING ──
+    section("WS /v1/stream (WebSocket)");
+
+    println!("Protocol:");
+    println!("  → {{\"type\": \"describe\", \"entity\": \"France\", \"band\": \"all\"}}");
+    println!("  ← {{\"type\": \"layer\", \"layer\": 0, \"edges\": [...]}}");
+    println!("  ← {{\"type\": \"layer\", \"layer\": 1, \"edges\": [...]}}");
+    println!("  ← {{\"type\": \"layer\", \"layer\": 2, \"edges\": [...]}}");
+    println!("  ← {{\"type\": \"layer\", \"layer\": 3, \"edges\": [...]}}");
+    println!("  ← {{\"type\": \"done\", \"entity\": \"France\", \"total_edges\": N, \"latency_ms\": 12.3}}");
+
+    // ── 15. ETAG / CDN CACHING ──
+    section("ETag + Cache-Control headers");
+
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let body = serde_json::json!({"entity": "France", "edges": [{"target": "Paris"}]});
+    let mut hasher = DefaultHasher::new();
+    body.to_string().hash(&mut hasher);
+    let etag = format!("\"{}\"", format!("{:x}", hasher.finish()));
+
+    println!("Response headers:");
+    println!("  ETag: {etag}");
+    println!("  Cache-Control: public, max-age=86400");
+    println!();
+    println!("Client sends If-None-Match: {etag}");
+    println!("  → 304 Not Modified (no body, saves bandwidth)");
+
+    // ── 16. HEALTH ──
+    section("GET /v1/health");
+    println!("{{\"status\": \"ok\", \"uptime_seconds\": 0, \"requests_served\": 16}}");
+
+    println!("\n── Demo complete ({} features shown) ──", 16);
+    println!("To run the real server:");
+    println!("  larql serve <path-to-vindex> --port 8080");
+    println!("  With auth:       --api-key \"sk-abc123\"");
+    println!("  With TLS:        --tls-cert cert.pem --tls-key key.pem");
+    println!("  With rate limit: --rate-limit \"100/min\"");
+    println!("  With cache:      --cache-ttl 300");
 }

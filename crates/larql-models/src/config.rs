@@ -35,6 +35,18 @@ pub enum FfnType {
     Standard,
 }
 
+/// How expert weights are stored in a MoE model.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ExpertFormat {
+    /// Per-expert separate tensors (Mixtral, DeepSeek).
+    /// Keys: `experts.{id}.w1.weight`, `experts.{id}.w2.weight`, etc.
+    PerExpert,
+    /// Packed MXFP4 (GPT-OSS/OpenAI).
+    /// All experts fused into one tensor with block quantization.
+    /// Keys: `experts.gate_up_proj_blocks`, `experts.gate_up_proj_scales`, etc.
+    PackedMxfp4,
+}
+
 /// RoPE scaling configuration (YaRN, linear, dynamic).
 #[derive(Debug, Clone)]
 pub struct RopeScaling {
@@ -305,6 +317,11 @@ pub trait ModelArchitecture: Send + Sync {
 
     // ── MoE (Mixture of Experts) ──
 
+    /// How expert weights are stored in this model.
+    fn expert_format(&self) -> ExpertFormat {
+        ExpertFormat::PerExpert
+    }
+
     /// Whether this model uses Mixture of Experts.
     fn is_moe(&self) -> bool {
         false
@@ -344,6 +361,17 @@ pub trait ModelArchitecture: Send + Sync {
     fn expert_ffn_down_key(&self, _layer: usize, _expert_id: usize) -> Option<String> {
         None
     }
+
+    // ── Packed expert keys (MXFP4 models) ──
+
+    /// Packed gate+up projection blocks key (all experts fused, MXFP4).
+    fn packed_gate_up_blocks_key(&self, _layer: usize) -> Option<String> { None }
+    /// Packed gate+up projection scales key.
+    fn packed_gate_up_scales_key(&self, _layer: usize) -> Option<String> { None }
+    /// Packed down projection blocks key.
+    fn packed_down_blocks_key(&self, _layer: usize) -> Option<String> { None }
+    /// Packed down projection scales key.
+    fn packed_down_scales_key(&self, _layer: usize) -> Option<String> { None }
 
     /// Shared expert FFN gate weight key.
     fn shared_expert_gate_key(&self, _layer: usize) -> Option<String> {

@@ -75,7 +75,7 @@ fn run_gguf_to_vindex(
 ) -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("Loading GGUF: {}", input.display());
 
-    let gguf = larql_vindex::format::gguf::GgufFile::open(input)?;
+    let gguf = larql_models::loading::gguf::GgufFile::open(input)?;
 
     // Show metadata summary
     if let Some(name) = gguf.metadata.get("general.name") {
@@ -86,7 +86,7 @@ fn run_gguf_to_vindex(
     }
 
     eprintln!("  Loading and dequantizing tensors...");
-    let weights = larql_vindex::load_gguf(input)?;
+    let weights = larql_models::load_gguf(input)?;
 
     eprintln!(
         "  {} layers, hidden_size={}, intermediate_size={}, vocab_size={}",
@@ -151,7 +151,7 @@ fn run_safetensors_to_vindex(
 ) -> Result<(), Box<dyn std::error::Error>> {
     // This is essentially extract-index
     eprintln!("Loading safetensors: {}", input.display());
-    let weights = larql_vindex::load_model_dir(input)?;
+    let weights = larql_models::load_model_dir(input)?;
     let tokenizer = larql_vindex::load_vindex_tokenizer(input)
         .or_else(|_| {
             // Try to load from the model directory
@@ -195,7 +195,7 @@ fn run_safetensors_to_vindex(
 }
 
 fn run_gguf_info(input: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
-    let gguf = larql_vindex::format::gguf::GgufFile::open(input)?;
+    let gguf = larql_models::loading::gguf::GgufFile::open(input)?;
 
     println!("GGUF: {}", input.display());
     println!();
@@ -207,14 +207,14 @@ fn run_gguf_info(input: &std::path::Path) -> Result<(), Box<dyn std::error::Erro
     for key in &keys {
         let val = &gguf.metadata[*key];
         match val {
-            larql_vindex::format::gguf::GgufValue::String(s) => {
+            larql_models::loading::gguf::GgufValue::String(s) => {
                 if s.len() > 80 {
                     println!("  {}: \"{}...\"", key, &s[..80]);
                 } else {
                     println!("  {}: \"{}\"", key, s);
                 }
             }
-            larql_vindex::format::gguf::GgufValue::Array(arr) => {
+            larql_models::loading::gguf::GgufValue::Array(arr) => {
                 println!("  {}: [{} elements]", key, arr.len());
             }
             other => println!("  {}: {:?}", key, other),

@@ -38,7 +38,11 @@ impl Session {
         let layers = stats["layers"].as_u64().unwrap_or(0);
         let features = stats["features"].as_u64().unwrap_or(0);
 
-        self.backend = Backend::Remote { url: url.clone(), client };
+        self.backend = Backend::Remote {
+            url: url.clone(),
+            client,
+            local_patches: Vec::new(),
+        };
         self.patch_recording = None;
         self.auto_patch = false;
 
@@ -56,8 +60,17 @@ impl Session {
     /// Get the remote URL and client, or error.
     fn require_remote(&self) -> Result<(&str, &reqwest::blocking::Client), LqlError> {
         match &self.backend {
-            Backend::Remote { url, client } => Ok((url, client)),
+            Backend::Remote { url, client, .. } => Ok((url, client)),
             _ => Err(LqlError::Execution("not connected to a remote server".into())),
+        }
+    }
+
+    /// Number of local patches applied to the remote session.
+    #[allow(dead_code)]
+    fn local_patch_count(&self) -> usize {
+        match &self.backend {
+            Backend::Remote { local_patches, .. } => local_patches.len(),
+            _ => 0,
         }
     }
 
@@ -120,6 +133,50 @@ impl Session {
 
         if let Some(ms) = body["latency_ms"].as_f64() {
             out.push(format!("\n{:.1}ms (remote)", ms));
+        }
+
+        // Overlay local patch edges.
+        if let Backend::Remote { local_patches, .. } = &self.backend {
+            if !local_patches.is_empty() {
+                let entity_lower = entity.to_lowercase();
+                let mut local_edges = Vec::new();
+                for patch in local_patches {
+                    for op in &patch.operations {
+                        if let larql_vindex::PatchOp::Insert {
+                            entity: ent,
+                            target,
+                            relation,
+                            layer,
+                            confidence,
+                            ..
+                        } = op
+                        {
+                            if ent.to_lowercase() == entity_lower {
+                                local_edges.push((
+                                    relation.as_deref().unwrap_or(""),
+                                    target.as_str(),
+                                    *layer,
+                                    confidence.unwrap_or(0.9),
+                                ));
+                            }
+                        }
+                    }
+                }
+                if !local_edges.is_empty() {
+                    out.push("  Local patch edges:".into());
+                    for (relation, target, layer, conf) in &local_edges {
+                        let label = if relation.is_empty() {
+                            format!("{:<12}", "")
+                        } else {
+                            format!("{:<12}", relation)
+                        };
+                        out.push(format!(
+                            "    {} → {:20} {:>7.2}  L{:<3}  (local)",
+                            label, target, conf, layer,
+                        ));
+                    }
+                }
+            }
         }
 
         Ok(out)
@@ -316,5 +373,183 @@ impl Session {
         }
 
         Ok(out)
+    }
+
+    // ── Remote mutations (forwarded to server as patches) ──
+
+    pub(crate) fn remote_insert(
+        &self,
+        entity: &str,
+        relation: &str,
+        target: &str,
+        layer: Option<u32>,
+        confidence: Option<f32>,
+    ) -> Result<Vec<String>, LqlError> {
+        let (url, client) = self.require_remote()?;
+
+        let op = larql_vindex::PatchOp::Insert {
+            layer: layer.unwrap_or(26) as usize,
+            feature: 0, // server assigns
+            relation: Some(relation.to_string()),
+            entity: entity.to_string(),
+            target: target.to_string(),
+            confidence,
+            gate_vector_b64: None,
+            down_meta: Some(larql_vindex::patch::core::PatchDownMeta {
+                top_token: target.to_string(),
+                top_token_id: 0,
+                c_score: confidence.unwrap_or(0.9),
+            }),
+        };
+
+        let patch = larql_vindex::VindexPatch {
+            version: 1,
+            base_model: String::new(),
+            base_checksum: None,
+            created_at: String::new(),
+            description: Some(format!("INSERT ({entity}, {relation}, {target})")),
+            author: None,
+            tags: vec![],
+            operations: vec![op],
+        };
+
+        let resp = client
+            .post(format!("{url}/v1/patches/apply"))
+            .json(&serde_json::json!({"patch": patch}))
+            .send()
+            .map_err(|e| LqlError::Execution(format!("request failed: {e}")))?;
+
+        if !resp.status().is_success() {
+            let text = resp.text().unwrap_or_default();
+            return Err(LqlError::Execution(format!("INSERT failed: {text}")));
+        }
+
+        Ok(vec![format!(
+            "Inserted: ({entity}, {relation}, {target}) → remote server"
+        )])
+    }
+
+    pub(crate) fn remote_delete(
+        &self,
+        conditions: &[crate::ast::Condition],
+    ) -> Result<Vec<String>, LqlError> {
+        let (url, client) = self.require_remote()?;
+
+        // Build delete operations from conditions.
+        let mut ops = Vec::new();
+        let layer = conditions
+            .iter()
+            .find(|c| c.field == "layer")
+            .and_then(|c| match &c.value {
+                crate::ast::Value::Integer(n) => Some(*n as usize),
+                _ => None,
+            })
+            .unwrap_or(0);
+        let feature = conditions
+            .iter()
+            .find(|c| c.field == "feature")
+            .and_then(|c| match &c.value {
+                crate::ast::Value::Integer(n) => Some(*n as usize),
+                _ => None,
+            })
+            .unwrap_or(0);
+
+        ops.push(larql_vindex::PatchOp::Delete {
+            layer,
+            feature,
+            reason: Some("remote DELETE".into()),
+        });
+
+        let patch = larql_vindex::VindexPatch {
+            version: 1,
+            base_model: String::new(),
+            base_checksum: None,
+            created_at: String::new(),
+            description: Some(format!("DELETE L{layer} F{feature}")),
+            author: None,
+            tags: vec![],
+            operations: ops,
+        };
+
+        let resp = client
+            .post(format!("{url}/v1/patches/apply"))
+            .json(&serde_json::json!({"patch": patch}))
+            .send()
+            .map_err(|e| LqlError::Execution(format!("request failed: {e}")))?;
+
+        if !resp.status().is_success() {
+            let text = resp.text().unwrap_or_default();
+            return Err(LqlError::Execution(format!("DELETE failed: {text}")));
+        }
+
+        Ok(vec![format!("Deleted: L{layer} F{feature} → remote server")])
+    }
+
+    // ── Local patch management (client-side overlay) ──
+
+    pub(crate) fn remote_apply_local_patch(&mut self, path: &str) -> Result<Vec<String>, LqlError> {
+        let patch_path = std::path::PathBuf::from(path);
+        if !patch_path.exists() {
+            return Err(LqlError::Execution(format!("patch not found: {path}")));
+        }
+
+        let patch = larql_vindex::VindexPatch::load(&patch_path)
+            .map_err(|e| LqlError::Execution(format!("failed to load patch: {e}")))?;
+
+        let (ins, upd, del) = patch.counts();
+        let total = patch.len();
+
+        match &mut self.backend {
+            Backend::Remote { local_patches, .. } => {
+                local_patches.push(patch);
+                Ok(vec![format!(
+                    "Applied locally: {path} ({total} ops: {ins} ins, {upd} upd, {del} del)\n\
+                     Patch stays client-side — server never sees it."
+                )])
+            }
+            _ => Err(LqlError::Execution("not connected to a remote server".into())),
+        }
+    }
+
+    pub(crate) fn remote_show_patches(&self) -> Result<Vec<String>, LqlError> {
+        let local_patches = match &self.backend {
+            Backend::Remote { local_patches, .. } => local_patches,
+            _ => return Err(LqlError::Execution("not connected to a remote server".into())),
+        };
+
+        let mut out = Vec::new();
+        if local_patches.is_empty() {
+            out.push("  (no local patches)".into());
+        } else {
+            out.push("Local patches (client-side only):".into());
+            for (i, patch) in local_patches.iter().enumerate() {
+                let (ins, upd, del) = patch.counts();
+                let name = patch.description.as_deref().unwrap_or("(unnamed)");
+                out.push(format!(
+                    "  {}. {:<40} {} ops ({} ins, {} upd, {} del)",
+                    i + 1, name, patch.len(), ins, upd, del,
+                ));
+            }
+        }
+        Ok(out)
+    }
+
+    pub(crate) fn remote_remove_local_patch(&mut self, name: &str) -> Result<Vec<String>, LqlError> {
+        let local_patches = match &mut self.backend {
+            Backend::Remote { local_patches, .. } => local_patches,
+            _ => return Err(LqlError::Execution("not connected to a remote server".into())),
+        };
+
+        let pos = local_patches
+            .iter()
+            .position(|p| p.description.as_deref().unwrap_or("unnamed") == name);
+
+        match pos {
+            Some(i) => {
+                local_patches.remove(i);
+                Ok(vec![format!("Removed local patch: {name}")])
+            }
+            None => Err(LqlError::Execution(format!("local patch not found: {name}"))),
+        }
     }
 }

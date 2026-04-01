@@ -39,7 +39,9 @@ larql serve --dir <DIR> [OPTIONS]
 | `--no-infer` | Disable inference endpoint (browse-only, saves memory) | false |
 | `--cors` | Enable CORS headers for browser access | false |
 | `--api-key <KEY>` | Require Bearer token auth (health exempt) | — |
+| `--rate-limit <SPEC>` | Per-IP rate limit (e.g., "100/min", "10/sec") | — |
 | `--max-concurrent <N>` | Max concurrent requests | 100 |
+| `--cache-ttl <SECS>` | Cache TTL for DESCRIBE results (0 = disabled) | 0 |
 | `--tls-cert <PATH>` | TLS certificate for HTTPS | — |
 | `--tls-key <PATH>` | TLS private key for HTTPS | — |
 | `--log-level <LEVEL>` | Logging level | info |
@@ -57,6 +59,8 @@ larql serve --dir <DIR> [OPTIONS]
 | POST | `/v1/patches/apply` | Apply a patch in-memory |
 | GET | `/v1/patches` | List active patches |
 | DELETE | `/v1/patches/{name}` | Remove a patch |
+| POST | `/v1/walk-ffn` | Decoupled inference (client sends residual, server returns features) |
+| WS | `/v1/stream` | WebSocket streaming (layer-by-layer DESCRIBE) |
 | GET | `/v1/health` | Health check (auth exempt) |
 | GET | `/v1/models` | List loaded models |
 
@@ -80,12 +84,18 @@ larql serve output/gemma3-4b-v2.vindex --no-infer --cors --port 8080
 # With auth + HTTPS
 larql serve output/gemma3-4b.vindex --api-key "sk-abc123" --tls-cert cert.pem --tls-key key.pem
 
+# With rate limiting + DESCRIBE cache
+larql serve output/gemma3-4b.vindex --rate-limit "100/min" --cache-ttl 300
+
 # Query from the REPL
 larql repl
 > USE REMOTE "http://localhost:8080";
 > DESCRIBE "France";
 > INFER "The capital of France is" TOP 5;
+> APPLY PATCH "local-facts.vlp";    -- stays client-side
 ```
+
+**Sessions:** Clients can send `X-Session-Id` header to isolate patches per session. Without the header, patches apply globally.
 
 See `crates/larql-server/README.md` and `docs/vindex-server-spec.md` for full API documentation.
 

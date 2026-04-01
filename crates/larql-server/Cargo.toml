@@ -15,7 +15,7 @@ larql-vindex = { path = "../larql-vindex" }
 larql-inference = { path = "../larql-inference" }
 larql-models = { path = "../larql-models" }
 
-axum = "0.8"
+axum = { version = "0.8", features = ["ws"] }
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 tokio = { version = "1", features = ["full"] }
 tower = { version = "0.5", features = ["limit"] }

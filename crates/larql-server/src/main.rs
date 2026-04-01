@@ -1,8 +1,12 @@
 //! larql-server — HTTP server for vindex knowledge queries.
 
 mod auth;
+mod cache;
 mod error;
+mod etag;
+mod ratelimit;
 mod routes;
+mod session;
 mod state;
 
 use std::path::PathBuf;
@@ -18,6 +22,8 @@ use larql_vindex::{
     load_vindex_config, load_vindex_embeddings, load_vindex_tokenizer,
 };
 
+use cache::DescribeCache;
+use session::SessionManager;
 use state::{AppState, LoadedModel, model_id_from_name, load_probe_labels};
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
@@ -57,9 +63,17 @@ struct Cli {
     #[arg(long)]
     api_key: Option<String>,
 
+    /// Rate limit per IP (e.g., "100/min", "10/sec").
+    #[arg(long)]
+    rate_limit: Option<String>,
+
     /// Max concurrent requests.
     #[arg(long, default_value = "100")]
     max_concurrent: usize,
+
+    /// Cache TTL for DESCRIBE results in seconds (0 = disabled).
+    #[arg(long, default_value = "0")]
+    cache_ttl: u64,
 
     /// Logging level.
     #[arg(long, default_value = "info")]
@@ -105,7 +119,6 @@ fn load_single_vindex(path_str: &str, no_infer: bool) -> Result<LoadedModel, Box
     info!("  Embeddings: {}x{}", embeddings.shape()[0], embeddings.shape()[1]);
 
     let tokenizer = load_vindex_tokenizer(&path)?;
-
     let patched = PatchedVindex::new(index);
 
     let probe_labels = load_probe_labels(&path);
@@ -194,12 +207,32 @@ async fn main() -> Result<(), BoxError> {
         return Err("no vindexes loaded".into());
     }
 
+    // Parse rate limiter if specified.
+    let rate_limiter = cli.rate_limit.as_ref().and_then(|spec| {
+        match ratelimit::RateLimiter::parse(spec) {
+            Some(rl) => {
+                info!("Rate limit: {}", spec);
+                Some(Arc::new(rl))
+            }
+            None => {
+                warn!("Invalid rate limit format: {} (expected e.g. '100/min')", spec);
+                None
+            }
+        }
+    });
+
     let state = Arc::new(AppState {
         models: models.clone(),
         started_at: std::time::Instant::now(),
         requests_served: std::sync::atomic::AtomicU64::new(0),
         api_key: cli.api_key.clone(),
+        sessions: SessionManager::new(3600),
+        describe_cache: DescribeCache::new(cli.cache_ttl),
     });
+
+    if cli.cache_ttl > 0 {
+        info!("DESCRIBE cache: {}s TTL", cli.cache_ttl);
+    }
 
     let is_multi = state.is_multi_model();
     let mut app = if is_multi {
@@ -213,6 +246,14 @@ async fn main() -> Result<(), BoxError> {
         info!("Single-model mode: {}", m.config.model);
         routes::single_model_router(Arc::clone(&state))
     };
+
+    // Rate limiting middleware.
+    if let Some(ref rl) = rate_limiter {
+        app = app.layer(middleware::from_fn_with_state(
+            Arc::clone(rl),
+            ratelimit::rate_limit_middleware,
+        ));
+    }
 
     // Auth middleware (if --api-key set).
     if cli.api_key.is_some() {

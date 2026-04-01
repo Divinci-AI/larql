@@ -8,7 +8,9 @@ pub mod patches;
 pub mod relations;
 pub mod select;
 pub mod stats;
+pub mod stream;
 pub mod walk;
+pub mod walk_ffn;
 
 use std::sync::Arc;
 
@@ -29,6 +31,8 @@ pub fn single_model_router(state: Arc<AppState>) -> Router {
         .route("/v1/patches/apply", post(patches::handle_apply_patch))
         .route("/v1/patches", get(patches::handle_list_patches))
         .route("/v1/patches/{name}", delete(patches::handle_remove_patch))
+        .route("/v1/walk-ffn", post(walk_ffn::handle_walk_ffn))
+        .route("/v1/stream", get(stream::handle_stream))
         .route("/v1/health", get(health::handle_health))
         .route("/v1/models", get(models::handle_models))
         .with_state(state)

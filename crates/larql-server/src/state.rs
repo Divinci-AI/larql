@@ -1,13 +1,15 @@
 //! AppState: loaded vindex + config, shared across all handlers.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-
-use std::collections::HashMap;
 
 use larql_models::ModelWeights;
 use larql_vindex::{PatchedVindex, VindexConfig, ndarray::Array2, tokenizers};
 use tokio::sync::RwLock;
+
+use crate::cache::DescribeCache;
+use crate::session::SessionManager;
 
 /// A single loaded model.
 pub struct LoadedModel {
@@ -42,7 +44,6 @@ impl LoadedModel {
         let mut cb = larql_vindex::SilentLoadCallbacks;
         let weights = larql_vindex::load_model_weights(&self.path, &mut cb)
             .map_err(|e| format!("failed to load model weights: {e}"))?;
-        // Race is fine — OnceLock guarantees only one wins.
         let _ = self.weights.set(weights);
         Ok(self.weights.get().unwrap())
     }
@@ -58,6 +59,10 @@ pub struct AppState {
     pub requests_served: std::sync::atomic::AtomicU64,
     /// Optional API key for authentication.
     pub api_key: Option<String>,
+    /// Per-session PatchedVindex manager.
+    pub sessions: SessionManager,
+    /// DESCRIBE result cache.
+    pub describe_cache: DescribeCache,
 }
 
 impl AppState {

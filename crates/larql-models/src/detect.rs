@@ -6,6 +6,7 @@ use crate::architectures::deepseek::DeepSeekArch;
 use crate::architectures::gemma2::Gemma2Arch;
 use crate::architectures::gemma3::Gemma3Arch;
 use crate::architectures::generic::GenericArch;
+use crate::architectures::gpt_oss::GptOssArch;
 use crate::architectures::granite::GraniteArch;
 use crate::architectures::llama::LlamaArch;
 use crate::architectures::mistral::MistralArch;
@@ -21,6 +22,16 @@ pub enum ModelError {
     Io(#[from] std::io::Error),
     #[error("JSON parse error: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("parse error: {0}")]
+    Parse(String),
+    #[error("unsupported dtype: {0}")]
+    UnsupportedDtype(String),
+    #[error("missing tensor: {0}")]
+    MissingTensor(String),
+    #[error("not a directory: {0}")]
+    NotADirectory(std::path::PathBuf),
+    #[error("no safetensors files in {0}")]
+    NoSafetensors(std::path::PathBuf),
 }
 
 /// Read config.json from a model directory and return the architecture.
@@ -51,6 +62,8 @@ pub fn detect_from_json(config: &serde_json::Value) -> Box<dyn ModelArchitecture
         "mistral" => Box::new(MistralArch::from_config(model_config)),
         // Mixtral (MoE) — block_sparse_moe pattern
         "mixtral" => Box::new(MixtralArch::from_config(model_config)),
+        // GPT-OSS (MoE, MXFP4 packed experts)
+        "gpt_oss" => Box::new(GptOssArch::from_config(model_config)),
         // Qwen family (dense and MoE share same keys)
         t if t.starts_with("qwen") => Box::new(QwenArch::from_config(model_config)),
         // DeepSeek family (MoE + MLA)

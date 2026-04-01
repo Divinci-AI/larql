@@ -403,7 +403,7 @@ impl VectorIndex {
                     crate::config::dtype::StorageDtype::F16 => {
                         // Per-layer decode from f16 bytes
                         let raw = &mmap[byte_offset..byte_end];
-                        let floats = crate::config::dtype::f16_bytes_to_f32(raw);
+                        let floats = larql_models::quant::half::decode_f16(raw);
                         let view = ArrayView2::from_shape(
                             (slice.num_features, self.hidden_size), &floats
                         ).unwrap();

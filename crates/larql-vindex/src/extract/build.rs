@@ -20,7 +20,7 @@ fn write_floats(w: &mut impl Write, data: &[f32], dtype: StorageDtype) -> Result
 }
 
 /// Simple ISO 8601 timestamp without chrono dependency.
-fn chrono_now() -> String {
+pub(crate) fn chrono_now() -> String {
     let d = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
@@ -52,7 +52,7 @@ struct ClusterData {
 
 /// Build the whole-word vocabulary: tokens that decode as 3+ char alphabetic words.
 /// Returns (token_ids, reduced_embedding_matrix).
-fn build_whole_word_vocab(
+pub(crate) fn build_whole_word_vocab(
     tokenizer: &tokenizers::Tokenizer,
     embed: &Array2<f32>,
     vocab_size: usize,

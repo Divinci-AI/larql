@@ -21,4 +21,6 @@ pub enum VindexError {
     },
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("model error: {0}")]
+    Model(#[from] larql_models::ModelError),
 }

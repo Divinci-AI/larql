@@ -121,6 +121,60 @@ fn main() {
         println!("  Layer {:2}: {}", layer, attn_type);
     }
 
+    // ── GPT-OSS (MoE + MXFP4) ──
+    let gpt_oss_config = serde_json::json!({
+        "model_type": "gpt_oss",
+        "hidden_size": 2880,
+        "num_hidden_layers": 36,
+        "intermediate_size": 2880,
+        "num_attention_heads": 64,
+        "num_key_value_heads": 8,
+        "num_local_experts": 128,
+        "num_experts_per_tok": 4,
+        "head_dim": 64,
+        "rope_theta": 150000.0,
+    });
+
+    let gpt_oss = detect_from_json(&gpt_oss_config);
+    print_architecture(&*gpt_oss);
+
+    // Show ExpertFormat difference
+    println!("=== Expert Format Comparison ===\n");
+    println!("  Mixtral:  {:?} → per-expert tensor keys", larql_models::ExpertFormat::PerExpert);
+    println!("  GPT-OSS:  {:?} → packed MXFP4 blocks+scales\n", larql_models::ExpertFormat::PackedMxfp4);
+
+    if let Some(key) = gpt_oss.packed_gate_up_blocks_key(0) {
+        println!("  GPT-OSS packed keys (layer 0):");
+        println!("    gate+up blocks: {}", key);
+        println!("    gate+up scales: {}", gpt_oss.packed_gate_up_scales_key(0).unwrap_or_default());
+        println!("    down blocks:    {}", gpt_oss.packed_down_blocks_key(0).unwrap_or_default());
+        println!("    down scales:    {}", gpt_oss.packed_down_scales_key(0).unwrap_or_default());
+        println!("    router:         {}", gpt_oss.moe_router_key(0).unwrap_or_default());
+    }
+
+    // ── Quantization formats ──
+    println!("\n=== Quantization Formats ===\n");
+
+    // f16
+    let f16_data = larql_models::quant::half::encode_f16(&[1.0, -2.0, 3.14]);
+    let f16_back = larql_models::quant::half::decode_f16(&f16_data);
+    println!("  f16: [1.0, -2.0, 3.14] → {} bytes → [{:.2}, {:.2}, {:.2}]",
+        f16_data.len(), f16_back[0], f16_back[1], f16_back[2]);
+
+    // GGML Q8_0
+    println!("  GGML types: {}, {}, {}, {}",
+        larql_models::quant::ggml::type_name(0),
+        larql_models::quant::ggml::type_name(1),
+        larql_models::quant::ggml::type_name(2),
+        larql_models::quant::ggml::type_name(6));
+
+    // MXFP4 e8m0 scales
+    print!("  MXFP4 e8m0: ");
+    for exp in [0u8, 126, 127, 128, 130] {
+        print!("{}→{} ", exp, larql_models::quant::mxfp4::e8m0_to_f32(exp));
+    }
+    println!();
+
     // ── Component constants ──
     println!("\n=== Vector Components ===\n");
     for comp in larql_models::ALL_COMPONENTS {

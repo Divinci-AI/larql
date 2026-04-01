@@ -1,9 +1,13 @@
 //! POST/GET/DELETE /v1/patches — patch management endpoints.
+//!
+//! Session-aware: if `X-Session-Id` header is present, patches are scoped
+//! to that session. Otherwise, patches go to the global shared state.
 
 use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::{Path, State};
+use axum::http::HeaderMap;
 use serde::Deserialize;
 
 use crate::error::ServerError;
@@ -17,85 +21,117 @@ pub struct ApplyPatchRequest {
     pub patch: Option<larql_vindex::VindexPatch>,
 }
 
+/// Extract session ID from headers (if present).
+fn session_id(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get("x-session-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+}
+
+/// Resolve a patch from the request body (inline or URL).
+fn resolve_patch(req: &ApplyPatchRequest) -> Result<(larql_vindex::VindexPatch, String), ServerError> {
+    if let Some(ref patch) = req.patch {
+        let name = req
+            .url
+            .clone()
+            .or_else(|| patch.description.clone())
+            .unwrap_or_else(|| "inline-patch".into());
+        return Ok((patch.clone(), name));
+    }
+
+    if let Some(ref url) = req.url {
+        let path = if larql_vindex::is_hf_path(url) {
+            let resolved = larql_vindex::resolve_hf_vindex(url)
+                .map_err(|e| ServerError::Internal(format!("failed to resolve HF path: {e}")))?;
+            let vlp_path = resolved.join("patch.vlp");
+            if vlp_path.exists() {
+                vlp_path
+            } else {
+                return Err(ServerError::BadRequest(format!("no patch.vlp found at {url}")));
+            }
+        } else {
+            std::path::PathBuf::from(url)
+        };
+        let patch = larql_vindex::VindexPatch::load(&path)
+            .map_err(|e| ServerError::Internal(format!("failed to load patch: {e}")))?;
+        return Ok((patch, url.clone()));
+    }
+
+    Err(ServerError::BadRequest("must provide 'url' or 'patch' in request body".into()))
+}
+
 async fn apply_patch_to_model(
     state: &AppState,
     model_id: Option<&str>,
+    headers: &HeaderMap,
     req: ApplyPatchRequest,
 ) -> Result<Json<serde_json::Value>, ServerError> {
     let model = state
         .model(model_id)
         .ok_or_else(|| ServerError::NotFound("model not found".into()))?;
 
-    let patch = if let Some(patch) = req.patch {
-        patch
-    } else if let Some(url) = &req.url {
-        // Load patch from URL or HuggingFace path.
-        let path = if larql_vindex::is_hf_path(url) {
-            let resolved = larql_vindex::resolve_hf_vindex(url)
-                .map_err(|e| ServerError::Internal(format!("failed to resolve HF path: {e}")))?;
-            // Look for .vlp files in the resolved directory
-            let vlp_path = resolved.join("patch.vlp");
-            if vlp_path.exists() {
-                vlp_path
-            } else {
-                return Err(ServerError::BadRequest(format!(
-                    "no patch.vlp found at {url}"
-                )));
-            }
-        } else {
-            std::path::PathBuf::from(url)
-        };
-        larql_vindex::VindexPatch::load(&path)
-            .map_err(|e| ServerError::Internal(format!("failed to load patch: {e}")))?
-    } else {
-        return Err(ServerError::BadRequest(
-            "must provide 'url' or 'patch' in request body".into(),
-        ));
-    };
-
-    let name = req
-        .url
-        .clone()
-        .or_else(|| patch.description.clone())
-        .unwrap_or_else(|| "inline-patch".into());
+    let (patch, name) = resolve_patch(&req)?;
     let op_count = patch.operations.len();
 
-    let mut patched = model.patched.write().await;
-    patched.apply_patch(patch);
-    let active = patched.num_patches();
-
-    Ok(Json(serde_json::json!({
-        "applied": name,
-        "operations": op_count,
-        "active_patches": active,
-    })))
+    // Session-scoped or global?
+    if let Some(sid) = session_id(headers) {
+        let (ops, active) = state.sessions.apply_patch(&sid, model, patch).await;
+        Ok(Json(serde_json::json!({
+            "applied": name,
+            "operations": ops,
+            "active_patches": active,
+            "session": sid,
+        })))
+    } else {
+        let mut patched = model.patched.write().await;
+        patched.apply_patch(patch);
+        let active = patched.num_patches();
+        Ok(Json(serde_json::json!({
+            "applied": name,
+            "operations": op_count,
+            "active_patches": active,
+        })))
+    }
 }
 
 pub async fn handle_apply_patch(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(req): Json<ApplyPatchRequest>,
 ) -> Result<Json<serde_json::Value>, ServerError> {
     state.bump_requests();
-    apply_patch_to_model(&state, None, req).await
+    apply_patch_to_model(&state, None, &headers, req).await
 }
 
 pub async fn handle_apply_patch_multi(
     State(state): State<Arc<AppState>>,
     Path(model_id): Path<String>,
+    headers: HeaderMap,
     Json(req): Json<ApplyPatchRequest>,
 ) -> Result<Json<serde_json::Value>, ServerError> {
     state.bump_requests();
-    apply_patch_to_model(&state, Some(&model_id), req).await
+    apply_patch_to_model(&state, Some(&model_id), &headers, req).await
 }
 
 async fn list_patches_for_model(
     state: &AppState,
     model_id: Option<&str>,
+    headers: &HeaderMap,
 ) -> Result<Json<serde_json::Value>, ServerError> {
-    let model = state
+    let _model = state
         .model(model_id)
         .ok_or_else(|| ServerError::NotFound("model not found".into()))?;
 
+    if let Some(sid) = session_id(headers) {
+        let patches = state.sessions.list_patches(&sid).await;
+        return Ok(Json(serde_json::json!({
+            "patches": patches,
+            "session": sid,
+        })));
+    }
+
+    let model = state.model(model_id).unwrap();
     let patched = model.patched.read().await;
     let patches: Vec<serde_json::Value> = patched
         .patches
@@ -114,24 +150,40 @@ async fn list_patches_for_model(
 
 pub async fn handle_list_patches(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, ServerError> {
     state.bump_requests();
-    list_patches_for_model(&state, None).await
+    list_patches_for_model(&state, None, &headers).await
 }
 
 pub async fn handle_list_patches_multi(
     State(state): State<Arc<AppState>>,
     Path(model_id): Path<String>,
+    headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, ServerError> {
     state.bump_requests();
-    list_patches_for_model(&state, Some(&model_id)).await
+    list_patches_for_model(&state, Some(&model_id), &headers).await
 }
 
 async fn remove_patch_from_model(
     state: &AppState,
     model_id: Option<&str>,
+    headers: &HeaderMap,
     name: &str,
 ) -> Result<Json<serde_json::Value>, ServerError> {
+    if let Some(sid) = session_id(headers) {
+        let remaining = state
+            .sessions
+            .remove_patch(&sid, name)
+            .await
+            .map_err(|e| ServerError::NotFound(e))?;
+        return Ok(Json(serde_json::json!({
+            "removed": name,
+            "active_patches": remaining,
+            "session": sid,
+        })));
+    }
+
     let model = state
         .model(model_id)
         .ok_or_else(|| ServerError::NotFound("model not found".into()))?;
@@ -141,9 +193,7 @@ async fn remove_patch_from_model(
     let idx = patched
         .patches
         .iter()
-        .position(|p| {
-            p.description.as_deref().unwrap_or("unnamed") == name
-        })
+        .position(|p| p.description.as_deref().unwrap_or("unnamed") == name)
         .ok_or_else(|| ServerError::NotFound(format!("patch '{}' not found", name)))?;
 
     patched.remove_patch(idx);
@@ -156,16 +206,18 @@ async fn remove_patch_from_model(
 
 pub async fn handle_remove_patch(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Path(name): Path<String>,
 ) -> Result<Json<serde_json::Value>, ServerError> {
     state.bump_requests();
-    remove_patch_from_model(&state, None, &name).await
+    remove_patch_from_model(&state, None, &headers, &name).await
 }
 
 pub async fn handle_remove_patch_multi(
     State(state): State<Arc<AppState>>,
     Path((model_id, name)): Path<(String, String)>,
+    headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, ServerError> {
     state.bump_requests();
-    remove_patch_from_model(&state, Some(&model_id), &name).await
+    remove_patch_from_model(&state, Some(&model_id), &headers, &name).await
 }

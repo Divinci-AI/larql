@@ -32,9 +32,11 @@ pub(crate) enum Backend {
         relation_classifier: Option<RelationClassifier>,
     },
     /// Remote server backend — queries forwarded via HTTP.
+    /// Local patches can be applied for client-side overlay.
     Remote {
         url: String,
         client: reqwest::blocking::Client,
+        local_patches: Vec<larql_vindex::VindexPatch>,
     },
     None,
 }
@@ -169,6 +171,13 @@ impl Session {
             }
             Statement::Stats { .. } => self.remote_stats(),
             Statement::ShowRelations { .. } => self.remote_show_relations(),
+            Statement::Insert { entity, relation, target, layer, confidence } => {
+                self.remote_insert(entity, relation, target, *layer, *confidence)
+            }
+            Statement::Delete { conditions } => self.remote_delete(conditions),
+            Statement::ApplyPatch { path } => self.remote_apply_local_patch(path),
+            Statement::ShowPatches => self.remote_show_patches(),
+            Statement::RemovePatch { path } => self.remote_remove_local_patch(path),
             Statement::Pipe { left, right } => {
                 let mut out = self.execute(left)?;
                 out.extend(self.execute(right)?);
@@ -176,7 +185,8 @@ impl Session {
             }
             _ => Err(LqlError::Execution(
                 "this statement is not supported on a remote backend. \
-                 Supported: DESCRIBE, WALK, INFER, STATS, SHOW RELATIONS, USE"
+                 Supported: DESCRIBE, WALK, INFER, STATS, SHOW RELATIONS, \
+                 APPLY PATCH, SHOW PATCHES, REMOVE PATCH, USE"
                     .into(),
             )),
         }

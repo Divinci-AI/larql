@@ -3,7 +3,7 @@
 //! Covers: build, KNN, walk, PatchedVindex (readonly base + overlay), layer bands,
 //! MoE layout, binary down_meta, f16 storage, source provenance, checksum verification,
 //! patches (create, apply, revert, bake down), extract pipeline, GGUF key normalization,
-//! Vindexfile parsing, and HuggingFace path handling.
+//! Vindexfile parsing, HuggingFace path handling, and quantization formats.
 //!
 //! Run: cargo run -p larql-vindex --example vindex_demo
 
@@ -137,13 +137,13 @@ fn main() {
     let idx16 = build_demo_index();
     // Manually write gate vectors as f16
     let gate_data = idx16.gate_vectors_at(0).unwrap().as_slice().unwrap();
-    let f16_bytes = larql_vindex::config::dtype::f32_to_f16_bytes(gate_data);
+    let f16_bytes = larql_models::quant::half::encode_f16(gate_data);
     let f32_bytes_len = gate_data.len() * 4;
     println!("  Gate L0: {} bytes (f32) → {} bytes (f16) = {:.0}% smaller",
         f32_bytes_len, f16_bytes.len(), (1.0 - f16_bytes.len() as f64 / f32_bytes_len as f64) * 100.0);
 
     // Round-trip: f32 → f16 → f32
-    let decoded = larql_vindex::config::dtype::f16_bytes_to_f32(&f16_bytes);
+    let decoded = larql_models::quant::half::decode_f16(&f16_bytes);
     let max_err: f32 = gate_data.iter().zip(decoded.iter())
         .map(|(a, b)| (a - b).abs())
         .fold(0.0f32, f32::max);
@@ -299,7 +299,7 @@ fn main() {
         ("blk.3.ffn_down.weight", "layers.3.mlp.down_proj.weight"),
     ];
     for (gguf_key, expected) in &keys {
-        let normalized = larql_vindex::format::gguf::normalize_gguf_key(gguf_key);
+        let normalized = larql_models::loading::gguf::normalize_gguf_key(gguf_key);
         let status = if normalized == *expected { "OK" } else { "MISMATCH" };
         println!("  {} → {} ({})", gguf_key, normalized, status);
     }
@@ -358,7 +358,71 @@ STAGE edge
     println!("  CLI: larql hf download user/repo [-o local/]");
     println!("  CLI: larql hf publish ./local.vindex --repo user/repo");
 
-    println!("\n=== Done ({} features demonstrated) ===", 15);
+    // ── 16. Quantization formats ──
+    section("16. Quantization formats (quant module)");
+
+    // f16 round-trip
+    let f16_vals = [0.0f32, 1.0, -1.0, 0.5, 100.0, 3.14];
+    let f16_encoded = larql_models::quant::half::encode_f16(&f16_vals);
+    let f16_decoded = larql_models::quant::half::decode_f16(&f16_encoded);
+    print!("  f16 round-trip: ");
+    for (orig, dec) in f16_vals.iter().zip(f16_decoded.iter()) {
+        let err = (orig - dec).abs();
+        print!("{orig}→{dec:.2}(err={err:.4}) ");
+    }
+    println!("✓");
+
+    // bf16 round-trip
+    let bf16_encoded = larql_models::quant::half::encode_bf16(&f16_vals);
+    let bf16_decoded = larql_models::quant::half::decode_bf16(&bf16_encoded);
+    print!("  bf16 round-trip: ");
+    for (orig, dec) in f16_vals.iter().zip(bf16_decoded.iter()) {
+        let err = (orig - dec).abs();
+        print!("{orig}→{dec:.2}(err={err:.4}) ");
+    }
+    println!("✓");
+
+    // GGML Q4_0
+    let mut q4_block = vec![0x00u8, 0x3C]; // scale=1.0
+    q4_block.extend_from_slice(&[0x19; 16]); // lo=9-8=1, hi=1-8=-7
+    let q4_result = larql_models::quant::ggml::dequantize(&q4_block, 2, 32).unwrap();
+    println!("  GGML Q4_0: scale=1.0, quant=0x19 → [{:.1}, {:.1}, ...] (32 values) ✓",
+        q4_result[0], q4_result[1]);
+
+    // GGML Q8_0
+    let mut q8_block = vec![0x00u8, 0x3C]; // scale=1.0
+    q8_block.push(42); q8_block.push(0xD6u8); // 42, -42 as i8
+    q8_block.extend_from_slice(&[0u8; 30]);
+    let q8_result = larql_models::quant::ggml::dequantize(&q8_block, 6, 32).unwrap();
+    println!("  GGML Q8_0: scale=1.0, quants=[42,-42,...] → [{:.1}, {:.1}, ...] ✓",
+        q8_result[0], q8_result[1]);
+
+    // MXFP4
+    let mxfp4_blocks = vec![0x37u8; 16]; // lo=7(6.0), hi=3(1.5)
+    let mxfp4_scales = vec![127u8]; // e8m0 = 1.0
+    let mxfp4_result = larql_models::quant::mxfp4::dequantize_expert(
+        &mxfp4_blocks, &mxfp4_scales, 1, 1,
+    );
+    println!("  MXFP4: scale=1.0(e8m0=127), quant=0x37 → [{:.1}, {:.1}, ...] (32 values) ✓",
+        mxfp4_result[0], mxfp4_result[1]);
+
+    // e8m0 scale examples
+    print!("  e8m0 scales: ");
+    for exp in [0u8, 125, 126, 127, 128, 129, 130] {
+        let val = larql_models::quant::mxfp4::e8m0_to_f32(exp);
+        print!("{exp}→{val} ");
+    }
+    println!("✓");
+
+    // Type info
+    println!("  GGML types: F32={}, F16={}, Q4_0={}, Q8_0={}",
+        larql_models::quant::ggml::type_name(0),
+        larql_models::quant::ggml::type_name(1),
+        larql_models::quant::ggml::type_name(2),
+        larql_models::quant::ggml::type_name(6));
+    println!("  Supported: f16, bf16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, MXFP4");
+
+    println!("\n=== Done ({} features demonstrated) ===", 16);
 }
 
 // ── Helpers ──

@@ -44,6 +44,7 @@ pub use describe::{DescribeEdge, LabelSource};
 // Extract
 pub use extract::{
     build_vindex, build_vindex_resume, build_vindex_from_vectors,
+    build_vindex_streaming,
     IndexBuildCallbacks, SilentBuildCallbacks,
 };
 
@@ -53,12 +54,11 @@ pub use format::down_meta;
 pub use format::load::{
     load_feature_labels, load_vindex_config, load_vindex_embeddings, load_vindex_tokenizer,
 };
-pub use format::gguf::load_gguf;
+// Model loading: use larql_models::{load_model_dir, resolve_model_path, load_gguf} directly
 pub use format::huggingface::{
     resolve_hf_vindex, download_hf_weights, publish_vindex,
     is_hf_path, PublishCallbacks, SilentPublishCallbacks,
 };
-pub use format::loader::{load_model_dir, resolve_model_path};
 pub use format::weights::{write_model_weights, load_model_weights};
 
 // Patch

@@ -152,23 +152,13 @@ pub fn run(args: ExtractIndexArgs) -> Result<(), Box<dyn std::error::Error>> {
             write_model_weights(model.weights(), &args.output, &mut callbacks)?;
         }
     } else {
-        // Build from model weights
+        // Build from model — streaming mode (mmap safetensors, no full model load)
         let model_name = args
             .model
             .as_deref()
             .ok_or("Either provide a model name or use --from-vectors")?;
 
-        eprintln!("Loading model: {}", model_name);
-        let start = Instant::now();
-        let model = InferenceModel::load(model_name)?;
-        eprintln!(
-            "  {} layers, hidden_size={}, intermediate_size={}, vocab_size={} ({:.1}s)",
-            model.num_layers(),
-            model.hidden_size(),
-            model.weights().intermediate_size,
-            model.weights().vocab_size,
-            start.elapsed().as_secs_f64()
-        );
+        let model_path = larql_models::resolve_model_path(model_name)?;
 
         let level_str = match level {
             larql_vindex::ExtractLevel::Browse => "browse",
@@ -179,41 +169,30 @@ pub fn run(args: ExtractIndexArgs) -> Result<(), Box<dyn std::error::Error>> {
             larql_vindex::StorageDtype::F32 => "f32",
             larql_vindex::StorageDtype::F16 => "f16",
         };
-        eprintln!("\nBuilding index: {} (level={}, dtype={})", args.output.display(), level_str, dtype_str);
+        eprintln!("Extracting: {} → {} (level={}, dtype={})",
+            model_path.display(), args.output.display(), level_str, dtype_str);
 
         let output = &args.output;
 
-        if args.resume {
-            let has_gate = output.join("gate_vectors.bin").exists();
-            let has_embed = output.join("embeddings.bin").exists();
-            let has_down = output.join("down_meta.bin").exists()
-                || (output.join("down_meta.jsonl").exists()
-                    && std::fs::metadata(output.join("down_meta.jsonl"))
-                        .map(|m| m.len() > 1000)
-                        .unwrap_or(false));
-
-            if has_gate && has_embed && has_down {
-                eprintln!("  Resuming: core files exist — skipping extraction");
-                larql_vindex::build_vindex_resume(
-                    model.weights(),
-                    model.tokenizer(),
-                    model_name,
-                    output,
-                    &mut callbacks,
-                )?;
-            } else {
-                eprintln!("  Resume: missing core files — full rebuild");
-                larql_vindex::build_vindex(
-                    model.weights(), model.tokenizer(), model_name,
-                    output, args.down_top_k, level, dtype, &mut callbacks,
-                )?;
-            }
+        // Find or create tokenizer
+        let tok_path = model_path.join("tokenizer.json");
+        let tokenizer = if tok_path.exists() {
+            larql_vindex::tokenizers::Tokenizer::from_file(&tok_path)
+                .map_err(|e| format!("failed to load tokenizer: {e}"))?
         } else {
-            larql_vindex::build_vindex(
-                model.weights(), model.tokenizer(), model_name,
-                output, args.down_top_k, level, dtype, &mut callbacks,
-            )?;
-        }
+            return Err(format!("tokenizer.json not found at {}", model_path.display()).into());
+        };
+
+        larql_vindex::build_vindex_streaming(
+            &model_path,
+            &tokenizer,
+            model_name,
+            output,
+            args.down_top_k,
+            level,
+            dtype,
+            &mut callbacks,
+        )?;
     }
 
     callbacks.feature_bar.finish_and_clear();

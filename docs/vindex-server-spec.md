@@ -574,11 +574,37 @@ Max concurrent requests via tower middleware:
 larql serve gemma3-4b.vindex --max-concurrent 100
 ```
 
-### 8.3 Rate Limiting (future)
+### 8.3 Rate Limiting (implemented)
 
-Per-IP rate limiting is not yet implemented. The concurrency limit covers most abuse cases.
+Per-IP token bucket rate limiting. Supports `N/sec`, `N/min`, `N/hour` formats. `/v1/health` is exempt. Respects `X-Forwarded-For` for proxied clients.
 
-### 8.3 Patch Validation
+```bash
+larql serve gemma3-4b.vindex --rate-limit "100/min"
+```
+
+Excess requests receive `429 Too Many Requests`.
+
+### 8.4 DESCRIBE Cache (implemented)
+
+In-memory TTL cache for DESCRIBE results. Keys include model ID, entity, band, limit, min_score.
+
+```bash
+larql serve gemma3-4b.vindex --cache-ttl 300  # 5 minute TTL
+```
+
+### 8.5 Per-Session Isolation (implemented)
+
+Patches can be scoped to a session via the `X-Session-Id` header. Each session gets its own PatchedVindex overlay. Sessions expire after 1 hour of inactivity.
+
+```
+POST /v1/patches/apply
+X-Session-Id: sess-medical-team
+{"patch": {...}}
+```
+
+Without the header, patches go to the global shared state.
+
+### 8.6 Patch Validation
 
 Patches uploaded via API are validated before application:
 - Base model checksum must match
@@ -700,14 +726,24 @@ $5-20/month VPS. No GPU. No Python. No CUDA drivers.
 ```
 larql-server/
 ├── Cargo.toml
+├── examples/
+│   ├── server_demo.rs          Synthetic vindex API demo
+│   └── server_bench.rs         Endpoint latency benchmarks
+├── tests/
+│   └── test_api.rs             Integration tests (76 tests)
 └── src/
     ├── main.rs                 CLI parsing, server startup
-    ├── state.rs                AppState: loaded VectorIndex + PatchedVindex per session
+    ├── state.rs                AppState: loaded models, probe labels, lazy weights
+    ├── auth.rs                 API key Bearer token middleware
+    ├── ratelimit.rs            Per-IP token bucket rate limiting
+    ├── cache.rs                TTL cache for DESCRIBE results
+    ├── session.rs              Per-session PatchedVindex isolation
+    ├── error.rs                ServerError → HTTP status codes
     ├── routes/
-    │   ├── mod.rs              Router setup
-    │   ├── describe.rs         GET /v1/describe
-    │   ├── walk.rs             GET /v1/walk
-    │   ├── select.rs           POST /v1/select
+    │   ├── mod.rs              Router setup (single + multi-model)
+    │   ├── describe.rs         GET /v1/describe (cached, relation labels)
+    │   ├── walk.rs             GET /v1/walk (with relation labels)
+    │   ├── select.rs           POST /v1/select (relation filter)
     │   ├── relations.rs        GET /v1/relations
     │   ├── stats.rs            GET /v1/stats
     │   ├── infer.rs            POST /v1/infer
@@ -723,49 +759,58 @@ larql-server/
 
 ---
 
-## 12. Future
+## 12. Advanced Endpoints
 
-### 12.1 WebSocket Streaming
+### 12.1 WebSocket Streaming (implemented)
 
-For streaming DESCRIBE results (layer by layer) and streaming INFER (token by token):
-
-```
-WS /v1/stream
-→ {"type": "describe", "entity": "France"}
-← {"layer": 14, "edges": []}
-← {"layer": 15, "edges": [{"relation": "language", "target": "French"}]}
-← {"layer": 18, "edges": [{"relation": "borders", "target": "Spain"}]}
-← {"type": "done", "total_edges": 6, "latency_ms": 12.3}
-```
-
-### 12.2 gRPC
-
-For high-throughput scenarios where JSON overhead matters. Protobuf message definitions mirror the REST API.
-
-### 12.3 Edge Caching
-
-Cache DESCRIBE results for popular entities at the CDN edge (Cloudflare, Fastly). The vindex is immutable — DESCRIBE results for the same entity never change unless labels update.
+Layer-by-layer streaming for DESCRIBE via `WS /v1/stream`:
 
 ```
-Cache-Control: public, max-age=86400, immutable
-ETag: "sha256-of-entity-response"
+→ {"type": "describe", "entity": "France", "band": "all"}
+← {"type": "layer", "layer": 14, "edges": []}
+← {"type": "layer", "layer": 15, "edges": [{"target": "French", "gate_score": 35.2}]}
+← {"type": "layer", "layer": 27, "edges": [{"relation": "capital", "target": "Paris", "gate_score": 1436.9, "source": "probe"}]}
+← {"type": "done", "entity": "France", "total_edges": 6, "latency_ms": 12.3}
 ```
 
-### 12.4 Decoupled Inference Protocol
+Edges include probe relation labels when available. Error messages: `{"type": "error", "message": "..."}`.
 
-For the client-side attention + server-side knowledge architecture:
+### 12.2 gRPC (future)
+
+For high-throughput scenarios where JSON overhead matters. Protobuf message definitions would mirror the REST API.
+
+### 12.3 Edge Caching (implemented)
+
+DESCRIBE responses include ETag and Cache-Control headers for CDN edge caching:
 
 ```
-Client sends:  POST /v1/walk-ffn
-  {"layer": 26, "residual": [0.12, -0.34, ...]}  // 2560 floats
-
-Server returns:
-  {"output": [0.05, 0.11, ...]}  // FFN output, 2560 floats
+Cache-Control: public, max-age=86400
+ETag: "a1b2c3d4"
 ```
 
-The client runs attention locally, sends each layer's residual to the server, server runs gate KNN + down projection, returns the FFN output. Full inference, distributed across client and server.
+Clients can send `If-None-Match` to receive `304 Not Modified` when the response hasn't changed. Combined with `--cache-ttl` for server-side caching.
 
-This is 34 round-trips per token. At 10ms per round-trip LAN: 340ms per token. At 50ms internet: 1.7s per token. Viable for LAN, marginal for internet. Batching all 34 layers into one request reduces to one round-trip: ~200ms per token anywhere.
+### 12.4 Decoupled Inference Protocol (implemented)
+
+`POST /v1/walk-ffn` — client sends a residual vector, server runs gate KNN and returns selected features + scores.
+
+**Single layer:**
+
+```json
+POST /v1/walk-ffn
+{"layer": 26, "residual": [0.12, -0.34, ...], "top_k": 8092}
+→ {"layer": 26, "features": [9515, 4532, ...], "scores": [1436.9, 26.1, ...], "latency_ms": 0.01}
+```
+
+**Batched (all layers in one round-trip):**
+
+```json
+POST /v1/walk-ffn
+{"layers": [0, 1, ..., 33], "residual": [0.12, -0.34, ...]}
+→ {"results": [{"layer": 0, "features": [...], "scores": [...]}, ...], "latency_ms": 0.3}
+```
+
+Single-layer mode: 34 round-trips per token. Batched mode: 1 round-trip (~200ms per token anywhere). Validates that residual length matches hidden_size.
 
 ---
 

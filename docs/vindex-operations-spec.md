@@ -291,7 +291,7 @@ LoRA is for broad behaviour adaptation (tone, style). Vindex patches are for spe
 
 ### 3.1 Extract from Model
 
-Supports safetensors (HuggingFace), GGUF (llama.cpp, dequantized to f32), and MLX (Apple, safetensors layout). Auto-detected from file extension and directory structure. Vindexes can be published to and downloaded from HuggingFace Hub.
+Supports safetensors (HuggingFace), GGUF (llama.cpp, dequantized to f32), and MLX (Apple, safetensors layout). Auto-detected from file extension and directory structure. **Streaming mode** — mmaps safetensors shards and processes one layer at a time. Peak memory = embeddings + 1 layer, not the full model. Vindexes can be published to and downloaded from HuggingFace Hub.
 
 ```bash
 # From safetensors (HuggingFace)
@@ -314,7 +314,7 @@ larql extract-index google/gemma-3-4b-it -o gemma3-4b.vindex --level all --f16
 ```
 
 **Build steps:**
-1. Load model from safetensors, GGUF, or MLX (dequantize to f32 if needed)
+1. Mmap safetensors shards (streaming — no full model load)
 2. Extract gate vectors → `gate_vectors.bin`
 3. Extract embeddings → `embeddings.bin`
 4. Compute down metadata → `down_meta.bin`
@@ -498,17 +498,19 @@ larql-vindex/
     │   ├── core.rs                 VectorIndex, FeatureMeta, gate_knn, walk
     │   └── mutate.rs               set/delete features, find_free_feature, save to disk
     │
-    ├── format/                     File I/O
-    │   ├── load.rs                 load_vindex, load_embeddings, load_tokenizer, load_config
-    │   ├── loader.rs               safetensors → ModelWeights (model loading)
+    ├── format/                     Vindex file I/O
+    │   ├── load.rs                 load_vindex, load_embeddings, load_tokenizer
     │   ├── down_meta.rs            Binary down_meta read/write
     │   ├── weights.rs              Split weight files (attn, up, down, norms, lm_head)
-    │   └── checksums.rs            SHA256 computation + verification
+    │   ├── checksums.rs            SHA256 computation + verification
+    │   ├── huggingface.rs          HuggingFace Hub download/publish
+    │   └── quant/mod.rs            Re-exports from larql_models::quant
     │
     ├── extract/                    Build pipeline (model → vindex)
-    │   ├── callbacks.rs            IndexBuildCallbacks trait
     │   ├── build.rs                build_vindex (full extraction + clustering)
-    │   └── build_from_vectors.rs   Build from pre-extracted NDJSON vectors
+    │   ├── streaming.rs            Streaming extraction (mmap, no full model load)
+    │   ├── callbacks.rs            IndexBuildCallbacks trait
+    │   └── build_from_vectors.rs   Build from pre-extracted NDJSON
     │
     ├── patch/                      Patch system
     │   └── core.rs                 VindexPatch, PatchOp, PatchedVindex, base64 gate encoding
@@ -525,7 +527,9 @@ larql-vindex/
         └── parser.rs               Vindexfile parser
 ```
 
-**Dependencies:** `larql-models` (ModelWeights, TopKEntry), `ndarray` (BLAS), `serde`/`serde_json`, `tokenizers`, `thiserror`
+**Dependencies:** `larql-models` (ModelWeights, architectures, quant, loading), `ndarray` (BLAS), `serde`/`serde_json`, `tokenizers`, `thiserror`
+
+Model loading (safetensors, GGUF, MLX) and quantization (f16, Q4_0, MXFP4) live in `larql-models`.
 
 ---
 
