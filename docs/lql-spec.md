@@ -985,21 +985,29 @@ pub enum ExtractLevel {
 | USE / STATS | ✅ Done — vindex loading, stats display |
 | SHOW (RELATIONS, LAYERS, FEATURES, MODELS) | ✅ Done |
 | SELECT / DESCRIBE | ✅ Done — vindex edge query, layer band grouping |
-| DESCRIBE layer bands (SYNTAX/KNOWLEDGE/OUTPUT/ALL) | 🔶 Partial — Knowledge + Output done, SYNTAX + ALL planned |
+| DESCRIBE layer bands (SYNTAX/KNOWLEDGE/OUTPUT/ALL) | ✅ Done — all bands, per-family boundaries from config |
 | WALK / EXPLAIN WALK | ✅ Done — gate KNN, per-layer feature trace |
 | INFER | ✅ Done — full forward pass with walk FFN (requires `--include-weights`) |
 | EXPLAIN INFER | ✅ Done — inference trace with relation labels |
 | Label loading (feature_labels.json) | ✅ Done — probe-confirmed labels override cluster labels |
 | Cluster-based labels (relation_clusters.json) | ✅ Done — k=512, offset clustering, Wikidata + WordNet + pattern matching |
-| EXTRACT | 🔶 Stub — wiring to existing `extract-index` CLI |
-| INSERT | 🔴 Planned — requires gate/down/up vector synthesis |
-| DELETE | 🔴 Planned — requires vector zeroing |
-| UPDATE | 🔴 Planned — requires vector replacement |
-| COMPILE | 🔴 Planned — requires vindex → safetensors writer |
-| DIFF | 🔴 Planned — requires vindex comparison |
-| MERGE | 🔴 Planned — requires graph union with conflict |
-| W_up in vindex | 🔴 Planned — needed for COMPILE |
+| EXTRACT | ✅ Done — full pipeline: gate, embed, down_meta, clustering, split weights |
+| INSERT | ✅ Done — cluster-centre gate synthesis, auto-layer, patch overlay (base readonly) |
+| DELETE | ✅ Done — by layer+feature or entity match, patch overlay |
+| UPDATE | ✅ Done — target/confidence update, patch overlay |
+| COMPILE INTO VINDEX | ✅ Done — bake_down patches into clean vindex |
+| COMPILE INTO MODEL | ✅ Done — reconstructs safetensors from split weight files |
+| DIFF | ✅ Done — feature-level comparison, INTO PATCH export |
+| MERGE | ✅ Done — graph union with KeepSource/KeepTarget/HighestConfidence strategies |
+| BEGIN/SAVE/APPLY/SHOW/REMOVE PATCH | ✅ Done — full patch lifecycle |
+| Auto-patch on mutation | ✅ Done — INSERT/DELETE/UPDATE auto-start anonymous patch session |
+| Readonly base | ✅ Done — base vindex files never modified, all edits via PatchedVindex overlay |
+| Split weight files | ✅ Done — attn, up, down, norms, lm_head (no gate duplication) |
+| f16 storage | ✅ Done — `--f16` flag, halves file sizes |
+| Vindexfile | ✅ Done — declarative builds (FROM + PATCH + INSERT), `larql build` CLI |
 | WeightBackend (USE MODEL) | 🔴 Planned — direct safetensors access |
+| USE REMOTE | 🔴 Planned — remote vindex via HTTP |
+| GGUF output format | 🔴 Planned — COMPILE INTO MODEL FORMAT gguf |
 
 ### 8.5 INSERT Semantics — How Edge Becomes Vector
 

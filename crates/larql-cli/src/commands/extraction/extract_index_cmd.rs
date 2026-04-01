@@ -26,14 +26,31 @@ pub struct ExtractIndexArgs {
     #[arg(long, default_value = "10")]
     down_top_k: usize,
 
-    /// Include full model weights (attention + FFN + norms) for self-contained inference.
-    /// Adds model_weights.bin (~4.5GB for Gemma 3 4B). Enables --predict without --model.
+    /// Extract level: browse (gate+embed+down_meta), inference (+attention+norms),
+    /// all (+up+down+lm_head for COMPILE).
+    #[arg(long, default_value = "browse", value_parser = parse_extract_level)]
+    level: larql_vindex::ExtractLevel,
+
+    /// Include full model weights. Alias for --level all (deprecated, use --level instead).
     #[arg(long)]
     include_weights: bool,
+
+    /// Store weights in f16 (half precision). Halves file sizes with negligible accuracy loss.
+    #[arg(long)]
+    f16: bool,
 
     /// Skip stages that already have output files (resume interrupted builds).
     #[arg(long)]
     resume: bool,
+}
+
+fn parse_extract_level(s: &str) -> Result<larql_vindex::ExtractLevel, String> {
+    match s.to_lowercase().as_str() {
+        "browse" => Ok(larql_vindex::ExtractLevel::Browse),
+        "inference" => Ok(larql_vindex::ExtractLevel::Inference),
+        "all" => Ok(larql_vindex::ExtractLevel::All),
+        _ => Err(format!("unknown extract level: {s} (expected: browse, inference, all)")),
+    }
 }
 
 struct CliBuildCallbacks {
@@ -106,6 +123,19 @@ pub fn run(args: ExtractIndexArgs) -> Result<(), Box<dyn std::error::Error>> {
     let mut callbacks = CliBuildCallbacks::new();
     let build_start = Instant::now();
 
+    // Resolve extract level: --include-weights upgrades to All (backwards compat)
+    let level = if args.include_weights {
+        larql_vindex::ExtractLevel::All
+    } else {
+        args.level
+    };
+
+    let dtype = if args.f16 {
+        larql_vindex::StorageDtype::F16
+    } else {
+        larql_vindex::StorageDtype::F32
+    };
+
     if let Some(ref vectors_dir) = args.from_vectors {
         // Build from existing NDJSON files
         eprintln!("Building vindex from vectors: {}", vectors_dir.display());
@@ -113,10 +143,9 @@ pub fn run(args: ExtractIndexArgs) -> Result<(), Box<dyn std::error::Error>> {
 
         larql_vindex::build_vindex_from_vectors(vectors_dir, &args.output, &mut callbacks)?;
 
-        if args.include_weights {
-            // Need model for weights even when building from vectors
+        if matches!(level, larql_vindex::ExtractLevel::Inference | larql_vindex::ExtractLevel::All) {
             let model_name = args.model.as_deref().ok_or(
-                "--model required with --include-weights (need model to extract attention/norm weights)",
+                "--model required with --level inference/all (need model to extract weights)",
             )?;
             eprintln!("\nLoading model for weights: {}", model_name);
             let model = InferenceModel::load(model_name)?;
@@ -141,23 +170,30 @@ pub fn run(args: ExtractIndexArgs) -> Result<(), Box<dyn std::error::Error>> {
             start.elapsed().as_secs_f64()
         );
 
-        eprintln!("\nBuilding index: {}", args.output.display());
+        let level_str = match level {
+            larql_vindex::ExtractLevel::Browse => "browse",
+            larql_vindex::ExtractLevel::Inference => "inference",
+            larql_vindex::ExtractLevel::All => "all",
+        };
+        let dtype_str = match dtype {
+            larql_vindex::StorageDtype::F32 => "f32",
+            larql_vindex::StorageDtype::F16 => "f16",
+        };
+        eprintln!("\nBuilding index: {} (level={}, dtype={})", args.output.display(), level_str, dtype_str);
 
         let output = &args.output;
 
         if args.resume {
-            // Skip stages that already have output files
             let has_gate = output.join("gate_vectors.bin").exists();
             let has_embed = output.join("embeddings.bin").exists();
-            let has_down = output.join("down_meta.jsonl").exists()
-                && std::fs::metadata(output.join("down_meta.jsonl"))
-                    .map(|m| m.len() > 1000)
-                    .unwrap_or(false);
-            let has_weights = output.join("model_weights.bin").exists();
+            let has_down = output.join("down_meta.bin").exists()
+                || (output.join("down_meta.jsonl").exists()
+                    && std::fs::metadata(output.join("down_meta.jsonl"))
+                        .map(|m| m.len() > 1000)
+                        .unwrap_or(false));
 
             if has_gate && has_embed && has_down {
-                eprintln!("  Resuming: gate_vectors, embeddings, down_meta exist — skipping");
-                // Just write index.json, tokenizer, clustering, and optionally weights
+                eprintln!("  Resuming: core files exist — skipping extraction");
                 larql_vindex::build_vindex_resume(
                     model.weights(),
                     model.tokenizer(),
@@ -167,46 +203,16 @@ pub fn run(args: ExtractIndexArgs) -> Result<(), Box<dyn std::error::Error>> {
                 )?;
             } else {
                 eprintln!("  Resume: missing core files — full rebuild");
-                let level = if args.include_weights {
-                    larql_vindex::ExtractLevel::All
-                } else {
-                    larql_vindex::ExtractLevel::Browse
-                };
                 larql_vindex::build_vindex(
-                    model.weights(),
-                    model.tokenizer(),
-                    model_name,
-                    output,
-                    args.down_top_k,
-                    level,
-                    larql_vindex::StorageDtype::F32,
-                    &mut callbacks,
+                    model.weights(), model.tokenizer(), model_name,
+                    output, args.down_top_k, level, dtype, &mut callbacks,
                 )?;
             }
-
-            if args.include_weights && !has_weights {
-                write_model_weights(model.weights(), output, &mut callbacks)?;
-            } else if has_weights {
-                eprintln!("  Resuming: model_weights.bin exists — skipping");
-            }
         } else {
-            let level = if args.include_weights {
-                larql_vindex::ExtractLevel::All
-            } else {
-                larql_vindex::ExtractLevel::Browse
-            };
             larql_vindex::build_vindex(
-                model.weights(),
-                model.tokenizer(),
-                model_name,
-                output,
-                args.down_top_k,
-                level,
-                    larql_vindex::StorageDtype::F32,
-                &mut callbacks,
+                model.weights(), model.tokenizer(), model_name,
+                output, args.down_top_k, level, dtype, &mut callbacks,
             )?;
-
-            // Model weights are written by build_vindex when extract_level != Browse
         }
     }
 

@@ -9,24 +9,26 @@ A vindex (vector index) is a directory containing a transformer model's weights 
 ```rust
 use larql_vindex::*;
 
-// Load
+// Load (readonly base)
 let index = VectorIndex::load_vindex(&path, &mut SilentLoadCallbacks)?;
+let mut patched = PatchedVindex::new(index);
 
 // Query — which features fire for "France"?
-let hits = index.gate_knn(layer, &query, 10);  // 0.008ms/layer
+let hits = patched.gate_knn(layer, &query, 10);  // 0.008ms/layer
 
 // Walk — multi-layer feature scan
-let trace = index.walk(&query, &layers, 10);
+let trace = patched.walk(&query, &layers, 10);
 
-// Mutate — insert a fact
-index.set_gate_vector(layer, feature, &gate_vec);
-index.set_feature_meta(layer, feature, meta);
-index.save_down_meta(&path)?;
+// Mutate via patch overlay (base files never modified)
+patched.insert_feature(layer, feature, gate_vec, meta);
 
-// Patch — lightweight knowledge diff
+// Apply a saved patch
 let patch = VindexPatch::load("medical.vlp")?;
-let mut patched = PatchedVindex::new(index);
 patched.apply_patch(patch);
+
+// Bake patches into a new clean VectorIndex
+let baked = patched.bake_down();
+baked.save_vindex(&output_path, &mut config)?;
 ```
 
 ## Features
@@ -34,14 +36,16 @@ patched.apply_patch(patch);
 - **Extract** from safetensors models (any gated FFN architecture)
 - **Gate KNN** via BLAS matmul — 0.008ms per layer
 - **Walk** across all layers with down-meta annotation
-- **Mutate** — insert, delete, update features with disk persistence
+- **Readonly base** — base vindex files are never modified after extraction
+- **Patch overlay** — all mutations go through PatchedVindex (INSERT/DELETE/UPDATE)
 - **Patches** — stackable, reversible knowledge diffs (.vlp files)
+- **Vindexfile** — declarative model builds (FROM + PATCH + INSERT, like Dockerfile)
 - **Split weight files** — gate, up, down, attn, norms, lm_head (no duplication)
-- **Binary down_meta** — 5x smaller than JSONL
+- **Binary down_meta** — 80x smaller than JSONL
 - **f16 storage** — halves file sizes with negligible accuracy loss
 - **MoE support** — Mixtral, DeepSeek (experts as contiguous features)
 - **Layer bands** — per-family boundaries (Gemma, Llama, Qwen, etc.)
-- **Checksums** — SHA256 integrity verification
+- **Checksums** — SHA256 integrity verification for all binary files
 - **Provenance** — model source, timestamp, version tracking
 
 ## Crate Structure
@@ -82,6 +86,10 @@ larql-vindex/src/
     ├── categories.rs           Entity category word lists
     ├── pair_matching.rs        Wikidata/WordNet output matching
     └── probe.rs                Probe label loading
+
+└── vindexfile/                 Declarative model builds
+    ├── mod.rs                  Build executor (FROM + PATCH + INSERT → VectorIndex)
+    └── parser.rs               Vindexfile parser (FROM, PATCH, INSERT, DELETE, LABELS, EXPOSE, STAGE)
 ```
 
 ## Supported Architectures

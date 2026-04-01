@@ -21,15 +21,17 @@ cargo run -p larql-cli -- lql 'SHOW MODELS;'
 ### 1. Extract a model
 
 ```sql
--- Browse-only (~6 GB, fast queries, no inference)
+-- Browse-only (~3 GB f16 / ~6 GB f32, fast queries, no inference)
 EXTRACT MODEL "google/gemma-3-4b-it" INTO "gemma3-4b.vindex";
 
--- With inference support (~9 GB, enables INFER)
+-- With inference support (~6 GB f16 / ~12 GB f32, enables INFER)
 EXTRACT MODEL "google/gemma-3-4b-it" INTO "gemma3-4b.vindex" WITH INFERENCE;
 
--- Full (~12 GB, enables COMPILE for recompilation)
+-- Full (~10 GB f16 / ~18 GB f32, enables COMPILE for recompilation)
 EXTRACT MODEL "google/gemma-3-4b-it" INTO "gemma3-4b.vindex" WITH ALL;
 ```
+
+CLI equivalent: `larql extract-index google/gemma-3-4b-it -o gemma3-4b.vindex --level inference --f16`
 
 ### 2. Connect
 

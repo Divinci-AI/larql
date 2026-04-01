@@ -32,8 +32,11 @@ larql> INFER "The capital of France is" TOP 3;
 # Build
 cargo build --release
 
-# Extract a model into a vindex (browse-only, ~6 GB)
-larql extract-index google/gemma-3-4b-it -o gemma3-4b.vindex
+# Extract a model into a vindex (browse-only, ~3 GB at f16)
+larql extract-index google/gemma-3-4b-it -o gemma3-4b.vindex --f16
+
+# Extract with inference weights (~6 GB at f16)
+larql extract-index google/gemma-3-4b-it -o gemma3-4b.vindex --level inference --f16
 
 # Start the REPL
 larql repl
@@ -59,23 +62,25 @@ gemma3-4b.vindex/
 
 Three extraction levels:
 
-| Level | Command | Size (f16) | Enables |
-|-------|---------|-----------|---------|
-| Browse | `EXTRACT MODEL ... INTO ...` | ~3 GB | DESCRIBE, WALK, SELECT |
-| Inference | `... WITH INFERENCE` | ~6 GB | + INFER |
-| All | `... WITH ALL` | ~10 GB | + COMPILE |
+| Level | CLI Flag | LQL Syntax | Size (f16) | Enables |
+|-------|----------|-----------|-----------|---------|
+| Browse | `--level browse` (default) | `EXTRACT MODEL ... INTO ...` | ~3 GB | DESCRIBE, WALK, SELECT |
+| Inference | `--level inference` | `... WITH INFERENCE` | ~6 GB | + INFER |
+| All | `--level all` | `... WITH ALL` | ~10 GB | + COMPILE |
+
+Add `--f16` to halve file sizes with negligible accuracy loss.
 
 ## Architecture
 
 Seven crates. Clean dependency chain.
 
 ```
-larql-models      Model config, architecture traits, tensor keys
+larql-models      Model config, architecture traits, ModelWeights
     ↓
-larql-vindex      Vindex format, KNN index, load/save/mutate, patches
+larql-vindex      Complete vindex lifecycle: extract, load, query, mutate, patch, save
     ↓
 larql-core        Graph algorithms, merge, diff
-larql-inference   Forward pass, attention, FFN, build pipeline
+larql-inference   Forward pass, attention, WalkFfn (uses vindex KNN)
     ↓
 larql-lql         LQL parser, executor, REPL
     ↓
@@ -84,14 +89,21 @@ larql-cli         CLI commands
 
 ### larql-vindex
 
-Owns the vindex format. KNN via BLAS matmul. Load, save, mutate, patch overlay.
+Owns the complete vindex lifecycle. Extract from safetensors, KNN via BLAS matmul,
+load/save with split weight files, mutate, patch overlay, clustering, f16 storage.
 
 ```rust
+// Load (readonly base)
 let index = VectorIndex::load_vindex(&path, &mut cb)?;
-let hits = index.gate_knn(layer, &query, 10);  // 0.008ms/layer
-let trace = index.walk(&query, &layers, 10);   // multi-layer scan
-index.set_feature_meta(layer, feature, meta);   // mutation
-index.save_down_meta(&dir)?;                    // persist
+let patched = PatchedVindex::new(index);
+
+// Query
+let hits = patched.gate_knn(layer, &query, 10);  // 0.008ms/layer
+let trace = patched.walk(&query, &layers, 10);    // multi-layer scan
+
+// Mutate (patch overlay — base files never modified)
+patched.insert_feature(layer, feature, gate_vec, meta);
+patched.apply_patch(VindexPatch::load("edits.vlp")?);
 ```
 
 ### larql-lql
@@ -124,9 +136,10 @@ WALK "The capital of France is" TOP 10;
 -- Run inference (needs model weights in vindex)
 INFER "The capital of France is" TOP 5 COMPARE;
 
--- Edit knowledge
+-- Edit knowledge (auto-patch: base files never modified)
 INSERT INTO EDGES (entity, relation, target)
     VALUES ("John Coyle", "lives-in", "Colchester");
+-- "Auto-patch started (use SAVE PATCH to persist)"
 
 -- Patches (lightweight, shareable knowledge diffs)
 BEGIN PATCH "medical.vlp";
@@ -161,6 +174,28 @@ DIFF "base.vindex" "edited.vindex" INTO PATCH "changes.vlp";
 ```
 
 A single fact is ~10 KB. A 1,000-fact domain patch is ~10 MB. Compared to the full model at 8 GB, that's 1/800th the size. No fine-tuning, no GPU, no retraining.
+
+The base vindex is always readonly. INSERT/DELETE/UPDATE automatically create a patch overlay. Edits are never written to base files.
+
+## Vindexfile
+
+Declarative model builds. Like a Dockerfile for model knowledge.
+
+```dockerfile
+# Vindexfile
+FROM hf://chrishayuk/gemma-3-4b-it-vindex
+PATCH hf://medical-ai/drug-interactions@2.1.0
+PATCH ./patches/company-facts.vlp
+INSERT ("Acme Corp", "headquarters", "London")
+LABELS hf://chrishayuk/gemma-3-4b-it-labels@latest
+EXPOSE browse inference
+```
+
+```bash
+larql build .                          # build from Vindexfile
+larql build . --stage prod             # named stage
+larql build . --output custom.vindex   # custom output path
+```
 
 ## Model Support
 
@@ -203,7 +238,9 @@ MoE models store all experts' features in one flat index. Gate KNN naturally sel
 | Doc | Description |
 |---|---|
 | [docs/lql-spec.md](docs/lql-spec.md) | LQL language specification (v0.3) |
-| [docs/vindex-spec.md](docs/vindex-spec.md) | Vindex format specification (v0.2) |
+| [docs/vindex-format-spec.md](docs/vindex-format-spec.md) | Vindex file format specification (v0.3) |
+| [docs/vindex-operations-spec.md](docs/vindex-operations-spec.md) | Vindex operations, API, patches |
+| [docs/vindex-ecosystem-spec.md](docs/vindex-ecosystem-spec.md) | Distributed hosting, HuggingFace, Vindexfile |
 | [docs/lql-guide.md](docs/lql-guide.md) | LQL quick start guide |
 | [docs/cli.md](docs/cli.md) | CLI reference |
 | [docs/knowledge-pipeline.md](docs/knowledge-pipeline.md) | Knowledge labelling pipeline |
@@ -212,7 +249,7 @@ MoE models store all experts' features in one flat index. Gate KNN naturally sel
 
 ```bash
 cargo build --release       # optimized build
-cargo test                  # 523 tests across all crates
+cargo test                  # 550 tests across all crates
 cargo run -p larql-vindex --example vindex_demo    # vindex feature demo
 cargo run -p larql-vindex --example vindex_bench --release  # benchmarks
 cargo run -p larql-lql --example parser_demo       # parser demo

@@ -52,7 +52,11 @@ impl Session {
                     rc_status,
                 )];
 
-                self.backend = Backend::Vindex { path, config, index, relation_classifier };
+                let patched = larql_vindex::PatchedVindex::new(index);
+                self.backend = Backend::Vindex { path, config, patched, relation_classifier };
+                // Reset any previous patch session
+                self.patch_recording = None;
+                self.auto_patch = false;
                 Ok(out)
             }
             UseTarget::Model { id, auto_extract } => {
@@ -74,7 +78,8 @@ impl Session {
 
     pub(crate) fn exec_stats(&self, _vindex_path: Option<&str>) -> Result<Vec<String>, LqlError> {
         match &self.backend {
-            Backend::Vindex { path, config, index, relation_classifier } => {
+            Backend::Vindex { path, config, patched, relation_classifier } => {
+                let index = patched.base();
                 let total_features: usize = config.layers.iter().map(|l| l.num_features).sum();
                 let file_size = dir_size(path);
 
@@ -297,10 +302,11 @@ impl Session {
             format_number(total_features),
         ));
 
+        let patched = larql_vindex::PatchedVindex::new(index);
         self.backend = Backend::Vindex {
             path: output_dir,
             config,
-            index,
+            patched,
             relation_classifier,
         };
 
@@ -384,13 +390,21 @@ impl Session {
         std::fs::create_dir_all(&output_dir)
             .map_err(|e| LqlError::Execution(format!("failed to create output dir: {e}")))?;
 
-        // Load the current vindex (with any mutations applied)
-        let (path, config, index) = self.require_vindex()?;
+        // Load the current vindex with patches applied
+        let (path, config, patched) = self.require_vindex()?;
+
+        // Bake patches into a clean VectorIndex
+        let baked = if patched.num_overrides() > 0 {
+            patched.bake_down()
+        } else {
+            // No patches — use base directly (avoid unnecessary clone)
+            patched.base().clone()
+        };
 
         // Save gate vectors + down_meta + config to the new directory
-        let layer_infos = index.save_gate_vectors(&output_dir)
+        let layer_infos = baked.save_gate_vectors(&output_dir)
             .map_err(|e| LqlError::Execution(format!("failed to save gate vectors: {e}")))?;
-        let dm_count = index.save_down_meta(&output_dir)
+        let dm_count = baked.save_down_meta(&output_dir)
             .map_err(|e| LqlError::Execution(format!("failed to save down_meta: {e}")))?;
 
         // Copy embeddings

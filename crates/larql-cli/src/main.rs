@@ -85,6 +85,9 @@ enum Commands {
     /// Build a .vindex — the model decompiled to a standalone vector index.
     ExtractIndex(extract_index_cmd::ExtractIndexArgs),
 
+    /// Build a custom model from a Vindexfile (declarative: FROM + PATCH + INSERT).
+    Build(build_cmd::BuildArgs),
+
     /// Graph-routed walk with banded layer strategy (graph FFN + highway skip).
     GraphWalk(graph_walk_cmd::GraphWalkArgs),
 
@@ -181,6 +184,7 @@ fn main() {
         Commands::KgBench(args) => kg_bench_cmd::run(args),
         Commands::FfnThroughput(args) => ffn_throughput_cmd::run(args),
         Commands::ExtractIndex(args) => extract_index_cmd::run(args),
+        Commands::Build(args) => build_cmd::run(args),
         Commands::GraphWalk(args) => graph_walk_cmd::run(args),
         Commands::TrajectoryTrace(args) => trajectory_trace_cmd::run(args),
         Commands::VindexBench(args) => vindex_bench_cmd::run(args),

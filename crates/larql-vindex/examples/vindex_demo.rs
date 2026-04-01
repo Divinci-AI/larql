@@ -66,16 +66,24 @@ fn main() {
         }
     }
 
-    // ── 6. Mutate ──
-    section("6. Mutate (insert + delete)");
-    let mut index = build_demo_index();
-    let slot = index.find_free_feature(0).unwrap();
-    index.set_gate_vector(0, slot, &Array1::from_vec(vec![0.0, 0.0, 0.0, 10.0]));
-    index.set_feature_meta(0, slot, meta("Canberra", 104, 0.85));
-    println!("  Inserted F{} → Canberra", slot);
-    index.delete_feature_meta(0, 2);
-    println!("  Deleted F2 (was Tokyo)");
-    println!("  Free slot: {:?}", index.find_free_feature(0));
+    // ── 6. Mutate (via PatchedVindex — base is readonly) ──
+    section("6. Mutate via PatchedVindex (readonly base, patch overlay)");
+    let base = build_demo_index();
+    let mut patched = larql_vindex::PatchedVindex::new(base);
+    let slot = patched.find_free_feature(0).unwrap();
+    patched.insert_feature(
+        0, slot,
+        vec![0.0, 0.0, 0.0, 10.0],
+        meta("Canberra", 104, 0.85),
+    );
+    println!("  Inserted F{} → Canberra (patch overlay)", slot);
+    patched.delete_feature(0, 2);
+    println!("  Deleted F2 (was Tokyo, patch overlay)");
+    println!("  Overrides: {}", patched.num_overrides());
+
+    // Bake down to a clean VectorIndex for saving
+    let index = patched.bake_down();
+    println!("  Baked down: base files untouched, new index has changes");
 
     // ── 7. f32 save + checksums ──
     section("7. Save (f32, binary down_meta, checksums)");

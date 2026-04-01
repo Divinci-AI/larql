@@ -47,6 +47,7 @@ impl IndexLoadCallbacks for SilentLoadCallbacks {}
 ///
 /// Gate vectors for KNN matching + down token metadata for output lookup.
 /// Loaded from the NDJSON files produced by `vector-extract`.
+#[derive(Clone)]
 pub struct VectorIndex {
     /// Per-layer gate vectors: gate_vectors[layer] is (num_features, hidden_size).
     /// Used for KNN via BLAS matmul.

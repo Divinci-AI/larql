@@ -1,4 +1,7 @@
 /// Mutation executor: INSERT, DELETE, UPDATE, MERGE.
+///
+/// All mutations go through the PatchedVindex overlay.
+/// Base vindex files on disk are never modified.
 
 use std::path::PathBuf;
 
@@ -9,9 +12,9 @@ use super::{Backend, Session};
 impl Session {
     // ── INSERT ──
     //
-    // Adds an edge to the vindex. Finds a free feature slot, sets the metadata
-    // to map entity → target with the given relation. The gate vector is set to
-    // the entity's embedding so the feature fires when the entity is queried.
+    // Adds an edge to the vindex via the patch overlay. Finds a free feature slot,
+    // synthesises a gate vector from the entity embedding + relation cluster centre,
+    // and records the operation for SAVE PATCH.
 
     pub(crate) fn exec_insert(
         &mut self,
@@ -33,14 +36,13 @@ impl Session {
         let (cluster_centre, typical_layer, matched_label) = relation_info
             .unwrap_or((None, None, None));
 
-        let (path, config, index) = self.require_vindex_mut()?;
+        let (path, config, patched) = self.require_patched_mut()?;
 
         // Determine layer: user hint > relation's typical layer > knowledge band middle
         let insert_layer = layer_hint
             .map(|l| l as usize)
             .or(typical_layer)
             .unwrap_or_else(|| {
-                // Use middle of knowledge band
                 config.layer_bands.as_ref()
                     .map(|b| (b.knowledge.0 + b.knowledge.1) / 2)
                     .unwrap_or(config.num_layers * 3 / 5)
@@ -53,8 +55,8 @@ impl Session {
             )));
         }
 
-        // Find a feature slot (empty or weakest)
-        let feature = index.find_free_feature(insert_layer).ok_or_else(|| {
+        // Find a feature slot (empty or weakest) from the base
+        let feature = patched.find_free_feature(insert_layer).ok_or_else(|| {
             LqlError::Execution(format!("no feature slot at layer {insert_layer}"))
         })?;
 
@@ -80,18 +82,12 @@ impl Session {
         }
         entity_embed /= entity_ids.len() as f32;
 
-        // Synthesize gate vector using relation cluster centre if available.
-        // The gate vector should point in a direction that combines:
-        //   - Entity identity (so the feature fires for this entity)
-        //   - Relation geometry (so the feature is in the right cluster)
+        // Synthesize gate vector using relation cluster centre if available
         let gate_vec = if let Some(ref centre) = cluster_centre {
-            // Use cluster centre direction + entity embedding
-            // The centre captures the relation's geometric direction
             let centre_arr = larql_vindex::ndarray::Array1::from_vec(centre.clone());
             if centre_arr.len() == hidden {
                 // Blend: 70% entity + 30% relation direction
-                let blended = &entity_embed * 0.7 + &centre_arr * 0.3;
-                blended
+                &entity_embed * 0.7 + &centre_arr * 0.3
             } else {
                 entity_embed.clone()
             }
@@ -101,7 +97,7 @@ impl Session {
 
         // Scale gate vector to match existing magnitudes at this layer
         let mut gate_vec = gate_vec;
-        if let Some(gate_matrix) = index.gate_vectors_at(insert_layer) {
+        if let Some(gate_matrix) = patched.base().gate_vectors_at(insert_layer) {
             let sample = gate_matrix.shape()[0].min(100);
             let avg_norm: f32 = (0..sample)
                 .filter_map(|i| {
@@ -117,8 +113,6 @@ impl Session {
             }
         }
 
-        index.set_gate_vector(insert_layer, feature, &gate_vec);
-
         // Tokenize target for metadata
         let target_encoding = tokenizer
             .encode(target, false)
@@ -132,24 +126,41 @@ impl Session {
             top_token: target.to_string(),
             top_token_id: target_id,
             c_score,
-            top_k: vec![larql_inference::larql_models::TopKEntry {
+            top_k: vec![larql_models::TopKEntry {
                 token: target.to_string(),
                 token_id: target_id,
-                logit: c_score as f32,
+                logit: c_score,
             }],
         };
 
-        index.set_feature_meta(insert_layer, feature, meta);
+        // Encode gate vector for patch recording
+        let gate_vec_slice = gate_vec.as_slice().unwrap();
+        let gate_b64 = larql_vindex::patch::core::encode_gate_vector(gate_vec_slice);
 
-        // Save changes to disk
-        index.save_down_meta(path)
-            .map_err(|e| LqlError::Execution(format!("failed to save: {e}")))?;
-        index.save_gate_vectors(path)
-            .map_err(|e| LqlError::Execution(format!("failed to save gate vectors: {e}")))?;
+        // Insert into the patch overlay (base files untouched)
+        patched.insert_feature(insert_layer, feature, gate_vec_slice.to_vec(), meta.clone());
+
+        // Record to patch session
+        if let Some(ref mut recording) = self.patch_recording {
+            recording.operations.push(larql_vindex::PatchOp::Insert {
+                layer: insert_layer,
+                feature,
+                relation: Some(relation.to_string()),
+                entity: entity.to_string(),
+                target: target.to_string(),
+                confidence: Some(c_score),
+                gate_vector_b64: Some(gate_b64),
+                down_meta: Some(larql_vindex::patch::core::PatchDownMeta {
+                    top_token: target.to_string(),
+                    top_token_id: target_id,
+                    c_score,
+                }),
+            });
+        }
 
         let mut out = Vec::new();
         out.push(format!(
-            "Inserted: {} —[{}]→ {} at L{} F{}",
+            "Inserted: {} —[{}]→ {} at L{} F{} (patch overlay)",
             entity, relation, target, insert_layer, feature
         ));
         out.push(format!("  confidence: {:.2}", c_score));
@@ -170,56 +181,48 @@ impl Session {
     // ── DELETE ──
 
     pub(crate) fn exec_delete(&mut self, conditions: &[Condition]) -> Result<Vec<String>, LqlError> {
-        let (_path, _config, index) = self.require_vindex_mut()?;
-
-        let entity_filter = conditions.iter().find(|c| c.field == "entity").and_then(|c| {
-            if let Value::String(ref s) = c.value { Some(s.as_str()) } else { None }
-        });
         let layer_filter = conditions.iter().find(|c| c.field == "layer").and_then(|c| {
             if let Value::Integer(n) = c.value { Some(n as usize) } else { None }
         });
         let feature_filter = conditions.iter().find(|c| c.field == "feature").and_then(|c| {
             if let Value::Integer(n) = c.value { Some(n as usize) } else { None }
         });
+        let entity_filter = conditions.iter().find(|c| c.field == "entity").and_then(|c| {
+            if let Value::String(ref s) = c.value { Some(s.as_str()) } else { None }
+        });
 
-        // If specific layer+feature given, delete directly
-        if let (Some(layer), Some(feature)) = (layer_filter, feature_filter) {
-            index.delete_feature_meta(layer, feature);
+        // Collect deletions, then apply
+        let deletes: Vec<(usize, usize)>;
+        {
+            let (_path, _config, patched) = self.require_patched_mut()?;
 
-            let path = match &self.backend {
-                Backend::Vindex { path, .. } => path.clone(),
-                _ => unreachable!(),
-            };
-            if let Backend::Vindex { index, .. } = &self.backend {
-                index.save_down_meta(&path)
-                    .map_err(|e| LqlError::Execution(format!("failed to save: {e}")))?;
+            if let (Some(layer), Some(feature)) = (layer_filter, feature_filter) {
+                patched.delete_feature(layer, feature);
+                deletes = vec![(layer, feature)];
+            } else {
+                let matches = patched.base().find_features(entity_filter, None, layer_filter);
+                if matches.is_empty() {
+                    return Ok(vec!["  (no matching features found)".into()]);
+                }
+                for &(layer, feature) in &matches {
+                    patched.delete_feature(layer, feature);
+                }
+                deletes = matches;
             }
-
-            return Ok(vec![format!("Deleted feature L{} F{}", layer, feature)]);
         }
 
-        // Otherwise, find matching features
-        let matches = index.find_features(entity_filter, None, layer_filter);
-
-        if matches.is_empty() {
-            return Ok(vec!["  (no matching features found)".into()]);
+        // Record to patch session
+        for &(layer, feature) in &deletes {
+            if let Some(ref mut recording) = self.patch_recording {
+                recording.operations.push(larql_vindex::PatchOp::Delete {
+                    layer,
+                    feature,
+                    reason: None,
+                });
+            }
         }
 
-        let count = matches.len();
-        for (layer, feature) in &matches {
-            index.delete_feature_meta(*layer, *feature);
-        }
-
-        let path = match &self.backend {
-            Backend::Vindex { path, .. } => path.clone(),
-            _ => unreachable!(),
-        };
-        if let Backend::Vindex { index, .. } = &self.backend {
-            index.save_down_meta(&path)
-                .map_err(|e| LqlError::Execution(format!("failed to save: {e}")))?;
-        }
-
-        Ok(vec![format!("Deleted {} features", count)])
+        Ok(vec![format!("Deleted {} features (patch overlay)", deletes.len())])
     }
 
     // ── UPDATE ──
@@ -229,8 +232,6 @@ impl Session {
         set: &[Assignment],
         conditions: &[Condition],
     ) -> Result<Vec<String>, LqlError> {
-        let (_path, _config, index) = self.require_vindex_mut()?;
-
         let entity_filter = conditions.iter().find(|c| c.field == "entity").and_then(|c| {
             if let Value::String(ref s) = c.value { Some(s.as_str()) } else { None }
         });
@@ -238,50 +239,59 @@ impl Session {
             if let Value::Integer(n) = c.value { Some(n as usize) } else { None }
         });
 
-        let matches = index.find_features(entity_filter, None, layer_filter);
+        // Collect updates, then record
+        let mut update_ops: Vec<(usize, usize, larql_vindex::FeatureMeta)> = Vec::new();
+        {
+            let (_path, _config, patched) = self.require_patched_mut()?;
+            let matches = patched.base().find_features(entity_filter, None, layer_filter);
 
-        if matches.is_empty() {
-            return Ok(vec!["  (no matching features found)".into()]);
-        }
+            if matches.is_empty() {
+                return Ok(vec!["  (no matching features found)".into()]);
+            }
 
-        let mut updated = 0;
-        for &(layer, feature) in &matches {
-            if let Some(meta) = index.feature_meta(layer, feature).cloned() {
-                let mut new_meta = meta;
-
-                for assignment in set {
-                    match assignment.field.as_str() {
-                        "target" | "top_token" => {
-                            if let Value::String(ref s) = assignment.value {
-                                new_meta.top_token = s.clone();
+            for &(layer, feature) in &matches {
+                if let Some(meta) = patched.feature_meta(layer, feature).cloned() {
+                    let mut new_meta = meta;
+                    for assignment in set {
+                        match assignment.field.as_str() {
+                            "target" | "top_token" => {
+                                if let Value::String(ref s) = assignment.value {
+                                    new_meta.top_token = s.clone();
+                                }
                             }
-                        }
-                        "confidence" | "c_score" => {
-                            if let Value::Number(n) = assignment.value {
-                                new_meta.c_score = n as f32;
-                            } else if let Value::Integer(n) = assignment.value {
-                                new_meta.c_score = n as f32;
+                            "confidence" | "c_score" => {
+                                if let Value::Number(n) = assignment.value {
+                                    new_meta.c_score = n as f32;
+                                } else if let Value::Integer(n) = assignment.value {
+                                    new_meta.c_score = n as f32;
+                                }
                             }
+                            _ => {}
                         }
-                        _ => {}
                     }
+                    patched.update_feature_meta(layer, feature, new_meta.clone());
+                    update_ops.push((layer, feature, new_meta));
                 }
-
-                index.set_feature_meta(layer, feature, new_meta);
-                updated += 1;
             }
         }
 
-        let path = match &self.backend {
-            Backend::Vindex { path, .. } => path.clone(),
-            _ => unreachable!(),
-        };
-        if let Backend::Vindex { index, .. } = &self.backend {
-            index.save_down_meta(&path)
-                .map_err(|e| LqlError::Execution(format!("failed to save: {e}")))?;
+        // Record to patch session
+        for (layer, feature, meta) in &update_ops {
+            if let Some(ref mut recording) = self.patch_recording {
+                recording.operations.push(larql_vindex::PatchOp::Update {
+                    layer: *layer,
+                    feature: *feature,
+                    gate_vector_b64: None,
+                    down_meta: Some(larql_vindex::patch::core::PatchDownMeta {
+                        top_token: meta.top_token.clone(),
+                        top_token_id: meta.top_token_id,
+                        c_score: meta.c_score,
+                    }),
+                });
+            }
         }
 
-        Ok(vec![format!("Updated {} features", updated)])
+        Ok(vec![format!("Updated {} features (patch overlay)", update_ops.len())])
     }
 
     // ── MERGE ──
@@ -300,7 +310,6 @@ impl Session {
             )));
         }
 
-        // Determine target — either explicit path or current backend
         let target_path = if let Some(t) = target {
             let p = PathBuf::from(t);
             if !p.exists() {
@@ -324,8 +333,8 @@ impl Session {
         let source_index = larql_vindex::VectorIndex::load_vindex(&source_path, &mut cb)
             .map_err(|e| LqlError::Execution(format!("failed to load source: {e}")))?;
 
-        // Get mutable access to the target
-        let (_path, _config, target_index) = self.require_vindex_mut()?;
+        // Merge into the patch overlay
+        let (_path, _config, patched) = self.require_patched_mut()?;
 
         let mut merged = 0;
         let mut skipped = 0;
@@ -335,7 +344,7 @@ impl Session {
             if let Some(source_metas) = source_index.down_meta_at(layer) {
                 for (feature, meta_opt) in source_metas.iter().enumerate() {
                     if let Some(source_meta) = meta_opt {
-                        let existing = target_index.feature_meta(layer, feature);
+                        let existing = patched.feature_meta(layer, feature);
 
                         let should_write = match (existing, &strategy) {
                             (None, _) => true,
@@ -347,7 +356,7 @@ impl Session {
                         };
 
                         if should_write {
-                            target_index.set_feature_meta(layer, feature, source_meta.clone());
+                            patched.update_feature_meta(layer, feature, source_meta.clone());
                             merged += 1;
                         } else {
                             skipped += 1;
@@ -357,19 +366,9 @@ impl Session {
             }
         }
 
-        // Save
-        let target_save_path = match &self.backend {
-            Backend::Vindex { path, .. } => path.clone(),
-            _ => unreachable!(),
-        };
-        if let Backend::Vindex { index, .. } = &self.backend {
-            index.save_down_meta(&target_save_path)
-                .map_err(|e| LqlError::Execution(format!("failed to save: {e}")))?;
-        }
-
         let mut out = Vec::new();
         out.push(format!(
-            "Merged {} → {}",
+            "Merged {} → {} (patch overlay)",
             source_path.display(),
             target_path.display()
         ));
@@ -378,28 +377,5 @@ impl Session {
             merged, skipped, strategy
         ));
         Ok(out)
-    }
-
-    // ── Backend mutable accessor ──
-
-    pub(crate) fn require_vindex_mut(
-        &mut self,
-    ) -> Result<
-        (
-            &std::path::Path,
-            &larql_vindex::VindexConfig,
-            &mut larql_vindex::VectorIndex,
-        ),
-        LqlError,
-    > {
-        match &mut self.backend {
-            Backend::Vindex {
-                path,
-                config,
-                index,
-                ..
-            } => Ok((path, config, index)),
-            Backend::None => Err(LqlError::NoBackend),
-        }
     }
 }

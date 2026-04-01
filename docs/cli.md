@@ -4,9 +4,24 @@
 larql <COMMAND> [OPTIONS]
 ```
 
-## Extraction commands
+## Core commands
 
-### `larql weight-extract`
+The primary workflow: extract a vindex, launch the REPL, or build from a Vindexfile.
+
+| Command | Description |
+|---|---|
+| `extract-index` | Build a .vindex from a model (safetensors → queryable format) |
+| `build` | Build a custom model from a Vindexfile (FROM + PATCH + INSERT) |
+| `repl` | Launch the LQL interactive REPL |
+| `lql` | Execute a single LQL statement |
+| `walk` | Walk the model as a local vector index (gate KNN + down lookup) |
+| `vindex-bench` | Benchmark vindex walk: accuracy vs dense, throughput |
+
+## Legacy extraction commands
+
+These commands predate the REPL and vindex format. They remain available for low-level extraction, debugging, and research but most users should use `extract-index` + `repl` instead.
+
+### `larql weight-extract` (legacy)
 
 Extract edges from FFN weight matrices. Zero forward passes. Pure matrix multiplication.
 
@@ -49,7 +64,7 @@ larql weight-extract google/gemma-3-4b-it \
 larql weight-extract google/gemma-3-4b-it -o knowledge.larql.bin
 ```
 
-### `larql attention-extract`
+### `larql attention-extract` (legacy)
 
 Extract routing edges from attention OV circuits. Zero forward passes.
 
@@ -76,7 +91,7 @@ larql attention-extract google/gemma-3-4b-it -o attention.larql.json
 larql attention-extract google/gemma-3-4b-it --layer 12 -o attention-L12.larql.json
 ```
 
-### `larql predict`
+### `larql predict` (legacy)
 
 Run a full transformer forward pass from extracted safetensors weights and return top-k next-token predictions. Pure Rust inference — no MLX, no PyTorch.
 
@@ -111,7 +126,7 @@ larql predict google/gemma-3-4b-it --prompt "The largest planet is" -k 3
 larql predict google/gemma-3-4b-it -p "Water freezes at" -k 10
 ```
 
-### `larql index-gates`
+### `larql index-gates` (legacy)
 
 Build a precomputed gate index for graph-based FFN. Offline step — run once per model. Eliminates the gate matmul at inference time.
 
@@ -134,7 +149,7 @@ larql index-gates google/gemma-3-4b-it -o gates.gate-index.jsonl
 larql index-gates google/gemma-3-4b-it -o gates.gate-index.jsonl --layers 24-33
 ```
 
-### `larql extract-routes`
+### `larql extract-routes` (legacy)
 
 Extract attention routing patterns from forward passes. Captures which FFN features activate for each entity/relation combination.
 
@@ -196,7 +211,7 @@ larql walk --prompt "The capital of France is" \
 larql walk --prompt "The capital of France is" --index model.vindex --model google/gemma-3-4b-it --compare
 ```
 
-### `larql attention-capture`
+### `larql attention-capture` (legacy)
 
 Capture and compare attention patterns across multiple prompts. Shows which heads attend similarly or differently.
 
@@ -223,7 +238,7 @@ larql attention-capture google/gemma-3-4b-it \
     --layers 20-33 --threshold 0.2
 ```
 
-### `larql qk-templates`
+### `larql qk-templates` (legacy)
 
 Extract attention template circuits from QK weight decomposition. Identifies which heads are "fixed" (same pattern regardless of entity) vs "variable".
 
@@ -246,7 +261,7 @@ larql qk-templates google/gemma-3-4b-it
 larql qk-templates google/gemma-3-4b-it --layers 20-33 --threshold 0.90
 ```
 
-### `larql ov-gate`
+### `larql ov-gate` (legacy)
 
 Map attention OV circuits to FFN gate features. Shows what each attention head activates in the next layer's FFN.
 
@@ -281,24 +296,61 @@ larql extract-index [MODEL] --output <OUTPUT> [OPTIONS]
 |---|---|
 | `<MODEL>` | Model path or HuggingFace model ID (not needed with `--from-vectors`) |
 | `-o, --output <OUTPUT>` | Output path for the `.vindex` directory |
+| `--level <LEVEL>` | Extract level: `browse` (default), `inference`, `all` |
+| `--f16` | Store weights in f16 (half precision, halves file sizes) |
 | `--from-vectors <PATH>` | Build from already-extracted NDJSON vector files instead of model weights |
 | `--down-top-k <N>` | Top-K tokens per feature in down metadata [default: 10] |
-| `--include-weights` | Include full model weights for self-contained inference |
+| `--include-weights` | Alias for `--level all` (deprecated) |
+| `--resume` | Skip stages that already have output files |
 
 **Examples:**
 
 ```bash
-# Build from model directly
-larql extract-index google/gemma-3-4b-it -o model.vindex
+# Browse-only (~3 GB at f16, enables DESCRIBE/WALK/SELECT)
+larql extract-index google/gemma-3-4b-it -o model.vindex --f16
+
+# With inference weights (~6 GB at f16, enables INFER)
+larql extract-index google/gemma-3-4b-it -o model.vindex --level inference --f16
+
+# All weights (~10 GB at f16, enables COMPILE)
+larql extract-index google/gemma-3-4b-it -o model.vindex --level all --f16
 
 # Build from pre-extracted vectors
 larql extract-index -o model.vindex --from-vectors vectors/
 
-# Include weights for self-contained predict
-larql extract-index google/gemma-3-4b-it -o model.vindex --include-weights
+# Resume an interrupted build
+larql extract-index google/gemma-3-4b-it -o model.vindex --f16 --resume
 ```
 
-### `larql vector-extract`
+### `larql build`
+
+Build a custom model from a Vindexfile (declarative: FROM + PATCH + INSERT).
+
+```
+larql build [DIR] [OPTIONS]
+```
+
+| Flag | Description |
+|---|---|
+| `[DIR]` | Directory containing the Vindexfile [default: `.`] |
+| `--stage <NAME>` | Build stage (e.g. `dev`, `prod`, `edge`) |
+| `-o, --output <PATH>` | Output directory for the built vindex [default: `./build/vindex/`] |
+| `--compile <FORMAT>` | Compile output to a model format after building |
+
+**Examples:**
+
+```bash
+# Build from Vindexfile in current directory
+larql build .
+
+# Build a specific stage
+larql build . --stage prod
+
+# Build to a custom output path
+larql build . --output custom.vindex
+```
+
+### `larql vector-extract` (legacy)
 
 Extract full weight vectors to intermediate NDJSON files for SurrealDB ingestion.
 
@@ -326,7 +378,7 @@ larql vector-extract google/gemma-3-4b-it -o vectors/ \
     --components ffn_down --layers 25,26,27,28,29,30,31,32,33
 ```
 
-### `larql vector-load`
+### `larql vector-load` (legacy)
 
 Load extracted vectors into SurrealDB with HNSW indexes.
 
@@ -355,7 +407,7 @@ larql vector-load vectors/ --ns larql --db gemma3_4b
 larql vector-load vectors/ --ns larql --db gemma3_4b --layers 25,26,33 --batch-size 1000
 ```
 
-### `larql vector-import`
+### `larql vector-import` (legacy)
 
 Import vectors into SurrealDB via batched `surreal import` CLI. Handles large tables (embeddings, FFN) that exceed HTTP body limits by writing temporary `.surql` batch files and importing each one.
 
@@ -393,7 +445,7 @@ larql vector-import output/vectors --tables ffn_gate,ffn_down,ffn_up \
     --ns larql --db gemma3_4b --resume
 ```
 
-### `larql vector-export-surql`
+### `larql vector-export-surql` (legacy)
 
 Export vectors to `.surql` files for manual `surreal import`. Useful if you want to inspect the SQL or import on a different machine.
 
@@ -422,7 +474,7 @@ surreal import --endpoint http://localhost:8000 \
     output/surql/embeddings.surql
 ```
 
-### `larql residuals capture`
+### `larql residuals capture` (legacy)
 
 Capture residual stream vectors for entities via forward passes. The residuals are the hidden state at a specific layer — the signal that the next layer's features actually see during inference.
 
@@ -479,7 +531,7 @@ larql residuals capture google/gemma-3-4b-it \
 {"id": "France_L25", "layer": 25, "feature": 0, "vector": [...], "top_token": "Paris", "c_score": 12.4, ...}
 ```
 
-### `larql bfs`
+### `larql bfs` (legacy)
 
 BFS extraction from a running model endpoint.
 
@@ -524,7 +576,7 @@ larql bfs \
 
 ## Query commands
 
-### `larql query`
+### `larql query` (legacy)
 
 Select edges from a subject, optionally filtered by relation.
 
@@ -537,7 +589,7 @@ larql query --graph knowledge.larql.json France
 larql query --graph knowledge.larql.json France capital-of
 ```
 
-### `larql describe`
+### `larql describe` (legacy)
 
 Show all outgoing and incoming edges for an entity.
 
@@ -549,7 +601,7 @@ larql describe --graph <GRAPH> <ENTITY>
 larql describe --graph knowledge.larql.json France
 ```
 
-### `larql stats`
+### `larql stats` (legacy)
 
 Show graph statistics: entity count, edge count, relation count, connected components, average degree, average confidence, source distribution.
 
@@ -561,7 +613,7 @@ larql stats <GRAPH>
 larql stats knowledge.larql.json
 ```
 
-### `larql validate`
+### `larql validate` (legacy)
 
 Check a graph file for issues: zero-confidence edges, self-loops, empty subjects/objects.
 
@@ -573,7 +625,7 @@ larql validate <GRAPH>
 larql validate knowledge.larql.json
 ```
 
-### `larql merge`
+### `larql merge` (legacy)
 
 Merge multiple graph files into one.
 

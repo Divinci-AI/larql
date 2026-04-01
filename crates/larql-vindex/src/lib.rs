@@ -15,6 +15,7 @@ pub mod extract;
 pub mod format;
 pub mod index;
 pub mod patch;
+pub mod vindexfile;
 
 // ── Re-export dependencies ──
 pub use ndarray;
@@ -57,3 +58,6 @@ pub use format::weights::{write_model_weights, load_model_weights};
 
 // Patch
 pub use patch::core::{PatchOp, PatchedVindex, VindexPatch};
+
+// Vindexfile
+pub use vindexfile::{Vindexfile, VindexfileDirective, VindexfileStage, parse_vindexfile, build_from_vindexfile};

@@ -13,9 +13,9 @@ impl Session {
         layer_filter: Option<u32>,
         with_examples: bool,
     ) -> Result<Vec<String>, LqlError> {
-        let (_path, _config, index) = self.require_vindex()?;
+        let (_path, _config, patched) = self.require_vindex()?;
 
-        let all_layers = index.loaded_layers();
+        let all_layers = patched.loaded_layers();
         let scan_layers: Vec<usize> = if let Some(l) = layer_filter {
             vec![l as usize]
         } else {
@@ -34,7 +34,7 @@ impl Session {
         let mut tokens: HashMap<String, TokenInfo> = HashMap::new();
 
         for &layer in &scan_layers {
-            if let Some(metas) = index.down_meta_at(layer) {
+            if let Some(metas) = patched.down_meta_at(layer) {
                 for meta_opt in metas.iter() {
                     if let Some(meta) = meta_opt {
                         let tok = meta.top_token.trim();
@@ -116,9 +116,9 @@ impl Session {
     }
 
     pub(crate) fn exec_show_layers(&self, range: Option<&Range>) -> Result<Vec<String>, LqlError> {
-        let (_path, _config, index) = self.require_vindex()?;
+        let (_path, _config, patched) = self.require_vindex()?;
 
-        let all_layers = index.loaded_layers();
+        let all_layers = patched.loaded_layers();
         let show_layers: Vec<usize> = if let Some(r) = range {
             (r.start as usize..=r.end as usize)
                 .filter(|l| all_layers.contains(l))
@@ -135,11 +135,11 @@ impl Session {
         out.push("-".repeat(48));
 
         for layer in &show_layers {
-            let gate_count = index
+            let gate_count = patched
                 .gate_vectors_at(*layer)
                 .map(|m| m.shape()[0])
                 .unwrap_or(0);
-            let (meta_count, top_tok) = if let Some(metas) = index.down_meta_at(*layer) {
+            let (meta_count, top_tok) = if let Some(metas) = patched.down_meta_at(*layer) {
                 let count = metas.iter().filter(|m| m.is_some()).count();
                 let mut freq: HashMap<&str, usize> = HashMap::new();
                 for m in metas.iter().flatten() {
@@ -173,7 +173,7 @@ impl Session {
         conditions: &[Condition],
         limit: Option<u32>,
     ) -> Result<Vec<String>, LqlError> {
-        let (_path, _config, index) = self.require_vindex()?;
+        let (_path, _config, patched) = self.require_vindex()?;
         let limit = limit.unwrap_or(20) as usize;
 
         // Extract filters from WHERE conditions
@@ -188,7 +188,7 @@ impl Session {
             }
         });
 
-        let metas = index
+        let metas = patched
             .down_meta_at(layer as usize)
             .ok_or_else(|| LqlError::Execution(format!("no metadata for layer {layer}")))?;
 

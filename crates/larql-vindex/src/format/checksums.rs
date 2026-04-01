@@ -31,8 +31,13 @@ pub fn compute_checksums(dir: &Path) -> Result<HashMap<String, String>, VindexEr
     let files = [
         "gate_vectors.bin",
         "embeddings.bin",
+        "down_meta.bin",
         "down_meta.jsonl",
-        "model_weights.bin",
+        "attn_weights.bin",
+        "up_weights.bin",
+        "down_weights.bin",
+        "norms.bin",
+        "lm_head.bin",
     ];
 
     for filename in &files {

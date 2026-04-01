@@ -1,4 +1,7 @@
 /// LQL Executor — dispatches parsed AST statements to backend operations.
+///
+/// The base vindex is always readonly. All mutations go through a patch overlay.
+/// INSERT/DELETE/UPDATE auto-start an anonymous patch session if none is active.
 
 mod helpers;
 mod introspection;
@@ -16,11 +19,15 @@ use crate::error::LqlError;
 use crate::relations::RelationClassifier;
 
 /// The active backend for the session.
+/// The base vindex is always loaded readonly. A PatchedVindex overlay
+/// handles all mutations without modifying base files on disk.
 pub(crate) enum Backend {
     Vindex {
         path: PathBuf,
         config: larql_vindex::VindexConfig,
-        index: larql_vindex::VectorIndex,
+        /// Patched overlay on the readonly base. All queries and mutations
+        /// go through this. The base files on disk are never modified.
+        patched: larql_vindex::PatchedVindex,
         relation_classifier: Option<RelationClassifier>,
     },
     None,
@@ -29,10 +36,11 @@ pub(crate) enum Backend {
 /// Session state for the REPL / batch executor.
 pub struct Session {
     pub(crate) backend: Backend,
-    /// Active patch session: captures operations for SAVE PATCH.
+    /// Active patch recording session (between BEGIN PATCH and SAVE PATCH).
+    /// If None and a mutation happens, an anonymous patch is auto-started.
     pub(crate) patch_recording: Option<PatchRecording>,
-    /// Applied patch stack.
-    pub(crate) patch_stack: Vec<(String, larql_vindex::VindexPatch)>,
+    /// Whether the current patch was auto-started (anonymous).
+    pub(crate) auto_patch: bool,
 }
 
 /// Active patch recording session (between BEGIN PATCH and SAVE PATCH).
@@ -46,8 +54,22 @@ impl Session {
         Self {
             backend: Backend::None,
             patch_recording: None,
-            patch_stack: Vec::new(),
+            auto_patch: false,
         }
+    }
+
+    /// Ensure a patch session is active. If not, auto-start an anonymous one.
+    /// Returns messages about auto-patch start (empty if already active).
+    pub(crate) fn ensure_patch_session(&mut self) -> Vec<String> {
+        if self.patch_recording.is_some() {
+            return vec![];
+        }
+        self.patch_recording = Some(PatchRecording {
+            path: String::new(), // anonymous
+            operations: Vec::new(),
+        });
+        self.auto_patch = true;
+        vec!["Auto-patch started (use SAVE PATCH \"file.vlp\" to persist, or edits are lost on exit)".into()]
     }
 
     pub fn execute(&mut self, stmt: &Statement) -> Result<Vec<String>, LqlError> {
@@ -92,66 +114,22 @@ impl Session {
                 self.exec_diff(a, b, *layer, relation.as_deref(), *limit, into_patch.as_deref())
             }
             Statement::Insert { entity, relation, target, layer, confidence } => {
-                let result = self.exec_insert(entity, relation, target, *layer, *confidence);
-                // Record to patch if session active
-                if result.is_ok() {
-                    if let Some(ref mut recording) = self.patch_recording {
-                        recording.operations.push(larql_vindex::PatchOp::Insert {
-                            layer: layer.unwrap_or(0) as usize,
-                            feature: 0, // filled by exec_insert
-                            relation: Some(relation.clone()),
-                            entity: entity.clone(),
-                            target: target.clone(),
-                            confidence: *confidence,
-                            gate_vector_b64: None,
-                            down_meta: None,
-                        });
-                    }
-                }
-                result
+                let mut out = self.ensure_patch_session();
+                out.extend(self.exec_insert(entity, relation, target, *layer, *confidence)?);
+                Ok(out)
             }
             Statement::Infer { prompt, top, compare } => {
                 self.exec_infer(prompt, *top, *compare)
             }
             Statement::Delete { conditions } => {
-                let result = self.exec_delete(conditions);
-                if result.is_ok() {
-                    if let Some(ref mut recording) = self.patch_recording {
-                        // Record delete with best-effort field extraction
-                        let layer = conditions.iter().find(|c| c.field == "layer")
-                            .and_then(|c| if let Value::Integer(n) = c.value { Some(n as usize) } else { None })
-                            .unwrap_or(0);
-                        let feature = conditions.iter().find(|c| c.field == "feature")
-                            .and_then(|c| if let Value::Integer(n) = c.value { Some(n as usize) } else { None })
-                            .unwrap_or(0);
-                        recording.operations.push(larql_vindex::PatchOp::Delete {
-                            layer,
-                            feature,
-                            reason: None,
-                        });
-                    }
-                }
-                result
+                let mut out = self.ensure_patch_session();
+                out.extend(self.exec_delete(conditions)?);
+                Ok(out)
             }
             Statement::Update { set, conditions } => {
-                let result = self.exec_update(set, conditions);
-                if result.is_ok() {
-                    if let Some(ref mut recording) = self.patch_recording {
-                        let layer = conditions.iter().find(|c| c.field == "layer")
-                            .and_then(|c| if let Value::Integer(n) = c.value { Some(n as usize) } else { None })
-                            .unwrap_or(0);
-                        let feature = conditions.iter().find(|c| c.field == "feature")
-                            .and_then(|c| if let Value::Integer(n) = c.value { Some(n as usize) } else { None })
-                            .unwrap_or(0);
-                        recording.operations.push(larql_vindex::PatchOp::Update {
-                            layer,
-                            feature,
-                            gate_vector_b64: None,
-                            down_meta: None,
-                        });
-                    }
-                }
-                result
+                let mut out = self.ensure_patch_session();
+                out.extend(self.exec_update(set, conditions)?);
+                Ok(out)
             }
             Statement::Merge { source, target, conflict } => {
                 self.exec_merge(source, target.as_deref(), *conflict)
@@ -168,15 +146,22 @@ impl Session {
     // ── Patch execution ──
 
     fn exec_begin_patch(&mut self, path: &str) -> Result<Vec<String>, LqlError> {
-        if self.patch_recording.is_some() {
+        if self.patch_recording.is_some() && !self.auto_patch {
             return Err(LqlError::Execution(
                 "patch session already active. Run SAVE PATCH or discard first.".into(),
             ));
         }
+        // If there was an auto-patch, upgrade it to a named one
         self.patch_recording = Some(PatchRecording {
             path: path.to_string(),
-            operations: Vec::new(),
+            operations: if self.auto_patch {
+                // Keep existing operations from auto-patch
+                self.patch_recording.take().map(|r| r.operations).unwrap_or_default()
+            } else {
+                Vec::new()
+            },
         });
+        self.auto_patch = false;
         Ok(vec![format!("Patch session started: {path}")])
     }
 
@@ -184,6 +169,12 @@ impl Session {
         let recording = self.patch_recording.take().ok_or_else(|| {
             LqlError::Execution("no active patch session. Run BEGIN PATCH first.".into())
         })?;
+
+        if recording.path.is_empty() {
+            return Err(LqlError::Execution(
+                "anonymous patch session — use SAVE PATCH \"filename.vlp\" or BEGIN PATCH \"filename.vlp\" first.".into(),
+            ));
+        }
 
         let model_name = match &self.backend {
             Backend::Vindex { config, .. } => config.model.clone(),
@@ -194,7 +185,7 @@ impl Session {
             version: 1,
             base_model: model_name,
             base_checksum: None,
-            created_at: String::new(), // TODO: timestamp
+            created_at: String::new(),
             description: None,
             author: None,
             tags: vec![],
@@ -206,9 +197,11 @@ impl Session {
         patch.save(&path)
             .map_err(|e| LqlError::Execution(format!("failed to save patch: {e}")))?;
 
+        self.auto_patch = false;
+
         Ok(vec![format!(
             "Saved: {} ({} inserts, {} updates, {} deletes)",
-            recording.path, ins, upd, del,
+            path.display(), ins, upd, del,
         )])
     }
 
@@ -224,37 +217,13 @@ impl Session {
         let (ins, upd, del) = patch.counts();
         let total = patch.len();
 
-        // Apply operations to the vindex
-        let (_path, _config, index) = self.require_vindex_mut()?;
-        for op in &patch.operations {
-            match op {
-                larql_vindex::PatchOp::Insert { layer, feature, target, confidence, .. } => {
-                    let meta = larql_vindex::FeatureMeta {
-                        top_token: target.clone(),
-                        top_token_id: 0,
-                        c_score: confidence.unwrap_or(0.9),
-                        top_k: vec![],
-                    };
-                    index.set_feature_meta(*layer, *feature, meta);
-                }
-                larql_vindex::PatchOp::Update { layer, feature, down_meta, .. } => {
-                    if let Some(dm) = down_meta {
-                        let meta = larql_vindex::FeatureMeta {
-                            top_token: dm.top_token.clone(),
-                            top_token_id: dm.top_token_id,
-                            c_score: dm.c_score,
-                            top_k: vec![],
-                        };
-                        index.set_feature_meta(*layer, *feature, meta);
-                    }
-                }
-                larql_vindex::PatchOp::Delete { layer, feature, .. } => {
-                    index.delete_feature_meta(*layer, *feature);
-                }
+        // Apply through the PatchedVindex overlay (base files untouched)
+        match &mut self.backend {
+            Backend::Vindex { patched, .. } => {
+                patched.apply_patch(patch);
             }
+            Backend::None => return Err(LqlError::NoBackend),
         }
-
-        self.patch_stack.push((path.to_string(), patch));
 
         Ok(vec![format!(
             "Applied: {path} ({total} operations: {ins} inserts, {upd} updates, {del} deletes)"
@@ -262,42 +231,85 @@ impl Session {
     }
 
     fn exec_show_patches(&self) -> Result<Vec<String>, LqlError> {
+        let patched = self.require_patched()?;
         let mut out = Vec::new();
-        if self.patch_stack.is_empty() {
+
+        if patched.patches.is_empty() && patched.num_overrides() == 0 {
             out.push("  (no patches applied)".into());
         } else {
-            for (i, (path, patch)) in self.patch_stack.iter().enumerate() {
+            for (i, patch) in patched.patches.iter().enumerate() {
                 let (ins, upd, del) = patch.counts();
+                let name = patch.description.as_deref().unwrap_or("(unnamed)");
                 out.push(format!(
                     "  {}. {:<40} {} ops ({} ins, {} upd, {} del)",
-                    i + 1, path, patch.len(), ins, upd, del,
+                    i + 1, name, patch.len(), ins, upd, del,
                 ));
             }
-            let total: usize = self.patch_stack.iter().map(|(_, p)| p.len()).sum();
-            out.push(format!("  Total: {} operations", total));
+            if patched.num_overrides() > 0 && patched.patches.is_empty() {
+                out.push(format!("  (anonymous session: {} overrides)", patched.num_overrides()));
+            }
+            let file_total: usize = patched.patches.iter().map(|p| p.len()).sum();
+            let overlay_total = patched.num_overrides();
+            if file_total > 0 || overlay_total > 0 {
+                out.push(format!("  Total: {} from files, {} in session", file_total, overlay_total));
+            }
         }
+
+        if let Some(ref recording) = self.patch_recording {
+            let label = if recording.path.is_empty() { "(anonymous)" } else { &recording.path };
+            out.push(format!("  Recording: {} ({} ops pending)", label, recording.operations.len()));
+        }
+
         Ok(out)
     }
 
     fn exec_remove_patch(&mut self, path: &str) -> Result<Vec<String>, LqlError> {
-        let pos = self.patch_stack.iter().position(|(p, _)| p == path);
+        let patched = match &mut self.backend {
+            Backend::Vindex { patched, .. } => patched,
+            Backend::None => return Err(LqlError::NoBackend),
+        };
+
+        let pos = patched.patches.iter().position(|p| {
+            p.description.as_deref() == Some(path)
+        });
         match pos {
             Some(i) => {
-                let (removed_path, _) = self.patch_stack.remove(i);
-                Ok(vec![format!("Removed: {removed_path}")])
+                patched.remove_patch(i);
+                Ok(vec![format!("Removed patch #{}", i + 1)])
             }
-            None => Err(LqlError::Execution(format!("patch not found in stack: {path}"))),
+            None => Err(LqlError::Execution(format!("patch not found: {path}"))),
         }
     }
 
     // ── Backend accessors ──
 
+    /// Get readonly access to the patched vindex (base + overlay).
+    pub(crate) fn require_patched(
+        &self,
+    ) -> Result<&larql_vindex::PatchedVindex, LqlError> {
+        match &self.backend {
+            Backend::Vindex { patched, .. } => Ok(patched),
+            Backend::None => Err(LqlError::NoBackend),
+        }
+    }
+
+    /// Get mutable access to the patched overlay.
+    pub(crate) fn require_patched_mut(
+        &mut self,
+    ) -> Result<(&Path, &larql_vindex::VindexConfig, &mut larql_vindex::PatchedVindex), LqlError> {
+        match &mut self.backend {
+            Backend::Vindex { path, config, patched, .. } => Ok((path, config, patched)),
+            Backend::None => Err(LqlError::NoBackend),
+        }
+    }
+
+    /// Get readonly access to path + config + base index.
     pub(crate) fn require_vindex(
         &self,
-    ) -> Result<(&Path, &larql_vindex::VindexConfig, &larql_vindex::VectorIndex), LqlError>
+    ) -> Result<(&Path, &larql_vindex::VindexConfig, &larql_vindex::PatchedVindex), LqlError>
     {
         match &self.backend {
-            Backend::Vindex { path, config, index, .. } => Ok((path, config, index)),
+            Backend::Vindex { path, config, patched, .. } => Ok((path, config, patched)),
             Backend::None => Err(LqlError::NoBackend),
         }
     }

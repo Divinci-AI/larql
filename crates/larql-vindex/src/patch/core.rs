@@ -217,9 +217,9 @@ pub struct PatchedVindex {
     pub patches: Vec<VindexPatch>,
     /// Resolved overrides: (layer, feature) → effective operation.
     /// Later patches override earlier ones for the same feature.
-    overrides_meta: HashMap<(usize, usize), Option<FeatureMeta>>,
-    overrides_gate: HashMap<(usize, usize), Vec<f32>>,
-    deleted: std::collections::HashSet<(usize, usize)>,
+    pub(crate) overrides_meta: HashMap<(usize, usize), Option<FeatureMeta>>,
+    pub(crate) overrides_gate: HashMap<(usize, usize), Vec<f32>>,
+    pub(crate) deleted: std::collections::HashSet<(usize, usize)>,
 }
 
 impl PatchedVindex {
@@ -232,6 +232,49 @@ impl PatchedVindex {
             overrides_gate: HashMap::new(),
             deleted: std::collections::HashSet::new(),
         }
+    }
+
+    /// Insert a feature directly into the overlay (auto-patch mode).
+    pub fn insert_feature(
+        &mut self,
+        layer: usize,
+        feature: usize,
+        gate_vec: Vec<f32>,
+        meta: FeatureMeta,
+    ) {
+        let key = (layer, feature);
+        self.overrides_meta.insert(key, Some(meta));
+        self.overrides_gate.insert(key, gate_vec);
+        self.deleted.remove(&key);
+    }
+
+    /// Delete a feature via the overlay.
+    pub fn delete_feature(&mut self, layer: usize, feature: usize) {
+        let key = (layer, feature);
+        self.overrides_meta.insert(key, None);
+        self.deleted.insert(key);
+        self.overrides_gate.remove(&key);
+    }
+
+    /// Update feature metadata via the overlay.
+    pub fn update_feature_meta(&mut self, layer: usize, feature: usize, meta: FeatureMeta) {
+        let key = (layer, feature);
+        self.overrides_meta.insert(key, Some(meta));
+    }
+
+    /// Check if a (layer, feature) has been overridden.
+    pub fn is_overridden(&self, layer: usize, feature: usize) -> bool {
+        self.overrides_meta.contains_key(&(layer, feature))
+    }
+
+    /// Access the underlying base index (readonly).
+    pub fn base(&self) -> &VectorIndex {
+        &self.base
+    }
+
+    /// Find a free feature slot in the base (weakest or empty).
+    pub fn find_free_feature(&self, layer: usize) -> Option<usize> {
+        self.base.find_free_feature(layer)
     }
 
     /// Apply a patch. Operations are resolved into the override maps.
@@ -430,5 +473,38 @@ impl PatchedVindex {
     /// Total override count.
     pub fn num_overrides(&self) -> usize {
         self.overrides_meta.len()
+    }
+
+    // ── Forwarding methods to base (for compatibility) ──
+
+    /// Layers that have gate vectors loaded (delegates to base).
+    pub fn loaded_layers(&self) -> Vec<usize> {
+        self.base.loaded_layers()
+    }
+
+    /// Number of features at a layer (delegates to base).
+    pub fn num_features(&self, layer: usize) -> usize {
+        self.base.num_features(layer)
+    }
+
+    /// Access down metadata for a layer (base only — does not include overrides).
+    /// For override-aware lookups, use `feature_meta()`.
+    pub fn down_meta_at(&self, layer: usize) -> Option<&[Option<FeatureMeta>]> {
+        self.base.down_meta_at(layer)
+    }
+
+    /// Access gate vectors matrix for a layer (base only).
+    pub fn gate_vectors_at(&self, layer: usize) -> Option<&ndarray::Array2<f32>> {
+        self.base.gate_vectors_at(layer)
+    }
+
+    /// Number of layers (delegates to base).
+    pub fn num_layers(&self) -> usize {
+        self.base.num_layers
+    }
+
+    /// Hidden size (delegates to base).
+    pub fn hidden_size(&self) -> usize {
+        self.base.hidden_size
     }
 }

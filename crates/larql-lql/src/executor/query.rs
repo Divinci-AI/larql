@@ -21,7 +21,7 @@ impl Session {
         mode: Option<WalkMode>,
         compare: bool,
     ) -> Result<Vec<String>, LqlError> {
-        let (path, _config, index) = self.require_vindex()?;
+        let (path, _config, patched) = self.require_vindex()?;
         let top_k = top.unwrap_or(10) as usize;
 
         let (embed, embed_scale) = larql_vindex::load_vindex_embeddings(path)
@@ -47,7 +47,7 @@ impl Session {
         let query: larql_vindex::ndarray::Array1<f32> =
             embed_row.mapv(|v| v * embed_scale);
 
-        let all_layers = index.loaded_layers();
+        let all_layers = patched.loaded_layers();
         let walk_layers: Vec<usize> = if let Some(range) = layers {
             (range.start as usize..=range.end as usize)
                 .filter(|l| all_layers.contains(l))
@@ -57,7 +57,7 @@ impl Session {
         };
 
         let start = std::time::Instant::now();
-        let trace = index.walk(&query, &walk_layers, top_k);
+        let trace = patched.walk(&query, &walk_layers, top_k);
         let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
 
         let mode_str = match mode {
@@ -120,19 +120,15 @@ impl Session {
         top: Option<u32>,
         compare: bool,
     ) -> Result<Vec<String>, LqlError> {
-        let (path, config, index) = self.require_vindex()?;
+        let (path, config, patched) = self.require_vindex()?;
         let top_k = top.unwrap_or(5) as usize;
 
         if !config.has_model_weights {
             return Err(LqlError::Execution(format!(
                 "INFER requires model weights. This vindex was built without --include-weights.\n\
-                 Options:\n\
-                 1. Rebuild: larql extract-index --model \"{}\" --output \"{}\" --include-weights\n\
-                 2. Use the CLI: larql walk --index \"{}\" --predict --model \"{}\"",
+                 Rebuild: EXTRACT MODEL \"{}\" INTO \"{}\" WITH INFERENCE",
                 config.model,
                 path.display(),
-                path.display(),
-                config.model,
             )));
         }
 
@@ -148,8 +144,8 @@ impl Session {
         let token_ids: Vec<u32> = encoding.get_ids().to_vec();
 
         // 8092 features per layer is proven lossless (97.91% on France→Paris).
-        // Trace captures all but output shows top 3 per layer.
-        let walk_ffn = larql_inference::vindex::WalkFfn::new(&weights, index, 8092);
+        // TODO: use PatchedVindex for WalkFfn once it supports it
+        let walk_ffn = larql_inference::vindex::WalkFfn::new(&weights, patched.base(), 8092);
         let start = std::time::Instant::now();
         let result = larql_inference::predict_with_ffn(
             &weights,
@@ -236,7 +232,7 @@ impl Session {
         relations_only: bool,
         verbose: bool,
     ) -> Result<Vec<String>, LqlError> {
-        let (path, config, index) = self.require_vindex()?;
+        let (path, config, patched) = self.require_vindex()?;
 
         let (embed, embed_scale) = larql_vindex::load_vindex_embeddings(path)
             .map_err(|e| LqlError::Execution(format!("failed to load embeddings: {e}")))?;
@@ -276,7 +272,7 @@ impl Session {
                 output: (0, last),
             });
 
-        let all_layers = index.loaded_layers();
+        let all_layers = patched.loaded_layers();
 
         // Apply band + layer filter using config-driven boundaries
         let scan_layers: Vec<usize> = if let Some(l) = layer {
@@ -302,7 +298,7 @@ impl Session {
             }
         };
 
-        let trace = index.walk(&query, &scan_layers, 20);
+        let trace = patched.walk(&query, &scan_layers, 20);
 
         struct EdgeInfo {
             gate: f32,
@@ -548,14 +544,14 @@ impl Session {
         order: Option<&OrderBy>,
         limit: Option<u32>,
     ) -> Result<Vec<String>, LqlError> {
-        let (path, _config, index) = self.require_vindex()?;
+        let (path, _config, patched) = self.require_vindex()?;
 
         // Handle NEAREST TO clause — KNN lookup
         if let Some(nc) = nearest {
-            return self.exec_select_nearest(index, path, nc, limit);
+            return self.exec_select_nearest(patched, path, nc, limit);
         }
 
-        let all_layers = index.loaded_layers();
+        let all_layers = patched.loaded_layers();
         let limit = limit.unwrap_or(20) as usize;
 
         let entity_filter = conditions.iter().find(|c| c.field == "entity").and_then(|c| {
@@ -587,7 +583,7 @@ impl Session {
         };
 
         for layer in &scan_layers {
-            if let Some(metas) = index.down_meta_at(*layer) {
+            if let Some(metas) = patched.down_meta_at(*layer) {
                 for (feat_idx, meta_opt) in metas.iter().enumerate() {
                     if let Some(feature_f) = feature_filter {
                         if feat_idx != feature_f {
@@ -655,7 +651,7 @@ impl Session {
     /// SELECT NEAREST TO — KNN lookup at a specific layer.
     fn exec_select_nearest(
         &self,
-        index: &larql_vindex::VectorIndex,
+        index: &larql_vindex::PatchedVindex,
         path: &std::path::Path,
         nc: &NearestClause,
         limit: Option<u32>,
@@ -724,7 +720,7 @@ impl Session {
         layers: Option<&Range>,
         verbose: bool,
     ) -> Result<Vec<String>, LqlError> {
-        let (path, _config, index) = self.require_vindex()?;
+        let (path, _config, patched) = self.require_vindex()?;
 
         let (embed, embed_scale) = larql_vindex::load_vindex_embeddings(path)
             .map_err(|e| LqlError::Execution(format!("failed to load embeddings: {e}")))?;
@@ -745,7 +741,7 @@ impl Session {
         let query: larql_vindex::ndarray::Array1<f32> =
             embed_row.mapv(|v| v * embed_scale);
 
-        let all_layers = index.loaded_layers();
+        let all_layers = patched.loaded_layers();
         let walk_layers: Vec<usize> = if let Some(range) = layers {
             (range.start as usize..=range.end as usize)
                 .filter(|l| all_layers.contains(l))
@@ -755,7 +751,7 @@ impl Session {
         };
 
         let top_k = if verbose { 10 } else { 5 };
-        let trace = index.walk(&query, &walk_layers, top_k);
+        let trace = patched.walk(&query, &walk_layers, top_k);
 
         let mut out = Vec::new();
         for (layer, hits) in &trace.layers {
@@ -788,12 +784,12 @@ impl Session {
         prompt: &str,
         top: Option<u32>,
     ) -> Result<Vec<String>, LqlError> {
-        let (path, config, index) = self.require_vindex()?;
+        let (path, config, patched) = self.require_vindex()?;
         let top_k = top.unwrap_or(5) as usize;
 
         if !config.has_model_weights {
             return Err(LqlError::Execution(
-                "EXPLAIN INFER requires model weights. Rebuild with --include-weights.".into(),
+                "EXPLAIN INFER requires model weights. Rebuild with WITH INFERENCE.".into(),
             ));
         }
 
@@ -808,9 +804,8 @@ impl Session {
             .map_err(|e| LqlError::Execution(format!("tokenize error: {e}")))?;
         let token_ids: Vec<u32> = encoding.get_ids().to_vec();
 
-        // 8092 features per layer is proven lossless (97.91% on France→Paris).
-        // Trace captures all but output shows top 3 per layer.
-        let walk_ffn = larql_inference::vindex::WalkFfn::new(&weights, index, 8092);
+        // TODO: use PatchedVindex for WalkFfn once it supports it
+        let walk_ffn = larql_inference::vindex::WalkFfn::new(&weights, patched.base(), 8092);
         let start = std::time::Instant::now();
         let result = larql_inference::predict_with_ffn(
             &weights, &tokenizer, &token_ids, top_k, &walk_ffn,
