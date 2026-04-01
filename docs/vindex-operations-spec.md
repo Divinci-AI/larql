@@ -289,19 +289,30 @@ LoRA is for broad behaviour adaptation (tone, style). Vindex patches are for spe
 
 ### 3.1 Extract from Model
 
+Supports safetensors (HuggingFace), GGUF (llama.cpp, dequantized to f32), and MLX (Apple, safetensors layout). Auto-detected from file extension and directory structure. Vindexes can be published to and downloaded from HuggingFace Hub.
+
 ```bash
-# Browse-only (default)
-larql extract-index google/gemma-3-4b-it -o gemma3-4b.vindex
+# From safetensors (HuggingFace)
+larql extract-index google/gemma-3-4b-it -o gemma3-4b.vindex --f16
+
+# From GGUF
+larql convert gguf-to-vindex model-Q4_K_M.gguf -o model.vindex --f16
+
+# Download pre-built vindex from HuggingFace
+larql hf download chrishayuk/gemma-3-4b-it-vindex
+
+# Or use directly in the REPL (auto-downloads)
+# USE "hf://chrishayuk/gemma-3-4b-it-vindex";
 
 # With inference weights
-larql extract-index google/gemma-3-4b-it -o gemma3-4b.vindex --level inference
+larql extract-index google/gemma-3-4b-it -o gemma3-4b.vindex --level inference --f16
 
 # With all weights
-larql extract-index google/gemma-3-4b-it -o gemma3-4b.vindex --level all
+larql extract-index google/gemma-3-4b-it -o gemma3-4b.vindex --level all --f16
 ```
 
 **Build steps:**
-1. Load model from safetensors
+1. Load model from safetensors, GGUF, or MLX (dequantize to f32 if needed)
 2. Extract gate vectors → `gate_vectors.bin`
 3. Extract embeddings → `embeddings.bin`
 4. Compute down metadata → `down_meta.bin` + `down_meta.jsonl`

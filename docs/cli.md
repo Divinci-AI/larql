@@ -10,8 +10,10 @@ The primary workflow: extract a vindex, launch the REPL, or build from a Vindexf
 
 | Command | Description |
 |---|---|
-| `extract-index` | Build a .vindex from a model (safetensors → queryable format) |
+| `extract-index` | Build a .vindex from a model (safetensors/GGUF/MLX → queryable format) |
 | `build` | Build a custom model from a Vindexfile (FROM + PATCH + INSERT) |
+| `convert` | Convert between formats (GGUF → vindex, safetensors → vindex, gguf-info) |
+| `hf` | HuggingFace Hub: download or publish vindexes |
 | `repl` | Launch the LQL interactive REPL |
 | `lql` | Execute a single LQL statement |
 | `walk` | Walk the model as a local vector index (gate KNN + down lookup) |
@@ -349,6 +351,73 @@ larql build . --stage prod
 # Build to a custom output path
 larql build . --output custom.vindex
 ```
+
+### `larql convert`
+
+Convert between model formats.
+
+```
+larql convert <SUBCOMMAND>
+```
+
+| Subcommand | Description |
+|---|---|
+| `gguf-to-vindex` | Convert a GGUF model to a vindex (dequantized to f32) |
+| `safetensors-to-vindex` | Convert safetensors model to a vindex |
+| `gguf-info` | Show GGUF file metadata and detected architecture |
+
+**Examples:**
+
+```bash
+# Convert GGUF to vindex
+larql convert gguf-to-vindex model-Q4_K_M.gguf -o model.vindex --f16
+
+# Show GGUF metadata
+larql convert gguf-info model-Q4_K_M.gguf
+
+# Convert safetensors to vindex
+larql convert safetensors-to-vindex ./model/ -o model.vindex --level inference --f16
+```
+
+Supported GGUF quantization types for reading: F32, F16, BF16, Q4_0, Q4_1, Q8_0. All tensors are dequantized to f32 during conversion.
+
+### `larql hf`
+
+HuggingFace Hub: download or publish vindexes.
+
+```
+larql hf <SUBCOMMAND>
+```
+
+| Subcommand | Description |
+|---|---|
+| `download` | Download a vindex from HuggingFace to local cache |
+| `publish` | Upload a local vindex to HuggingFace |
+
+**Examples:**
+
+```bash
+# Download a vindex
+larql hf download chrishayuk/gemma-3-4b-it-vindex
+
+# Download to a specific directory
+larql hf download chrishayuk/gemma-3-4b-it-vindex -o ./gemma3-4b.vindex
+
+# Download a specific version
+larql hf download chrishayuk/gemma-3-4b-it-vindex --revision v2.0
+
+# Publish a vindex
+larql hf publish ./gemma3-4b.vindex --repo chrishayuk/gemma-3-4b-it-vindex
+```
+
+HuggingFace vindexes can also be used directly from the REPL:
+
+```sql
+larql> USE "hf://chrishayuk/gemma-3-4b-it-vindex";
+larql> DESCRIBE "France";
+```
+
+Publishing requires `HF_TOKEN` environment variable or `huggingface-cli login`.
 
 ### `larql vector-extract` (legacy)
 

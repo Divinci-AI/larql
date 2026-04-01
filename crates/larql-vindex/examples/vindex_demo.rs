@@ -1,8 +1,9 @@
 //! Vindex Feature Showcase — demonstrates the complete larql-vindex API.
 //!
-//! Covers: build, KNN, walk, mutate, layer bands, MoE layout,
-//! binary down_meta, f16 storage, source provenance, checksum verification,
-//! patches (create, apply, revert, bake down), and extract pipeline.
+//! Covers: build, KNN, walk, PatchedVindex (readonly base + overlay), layer bands,
+//! MoE layout, binary down_meta, f16 storage, source provenance, checksum verification,
+//! patches (create, apply, revert, bake down), extract pipeline, GGUF key normalization,
+//! Vindexfile parsing, and HuggingFace path handling.
 //!
 //! Run: cargo run -p larql-vindex --example vindex_demo
 
@@ -286,7 +287,76 @@ fn main() {
     println!("  Edge: {} → {} ({:.1}, {})",
         edge.relation.as_deref().unwrap_or("?"), edge.target, edge.gate_score, edge.source);
 
-    println!("\n=== Done ({} features demonstrated) ===", 12);
+    // ── 13. GGUF key normalization ──
+    section("13. GGUF key normalization");
+    let keys = [
+        ("blk.0.attn_q.weight", "layers.0.self_attn.q_proj.weight"),
+        ("blk.15.ffn_gate.weight", "layers.15.mlp.gate_proj.weight"),
+        ("token_embd.weight", "embed_tokens.weight"),
+        ("output.weight", "lm_head.weight"),
+        ("blk.3.ffn_down.weight", "layers.3.mlp.down_proj.weight"),
+    ];
+    for (gguf_key, expected) in &keys {
+        let normalized = larql_vindex::format::gguf::normalize_gguf_key(gguf_key);
+        let status = if normalized == *expected { "OK" } else { "MISMATCH" };
+        println!("  {} → {} ({})", gguf_key, normalized, status);
+    }
+
+    // ── 14. Vindexfile parsing ──
+    section("14. Vindexfile parsing");
+    let vf_str = r#"
+FROM ./base.vindex
+PATCH ./medical.vlp
+PATCH ./company.vlp
+INSERT ("Acme Corp", "headquarters", "London")
+DELETE entity = "OldCo" AND relation = "status" AND target = "active"
+LABELS ./labels.json
+EXPOSE browse inference
+
+STAGE prod
+  PATCH ./production-only.vlp
+  EXPOSE browse inference
+
+STAGE edge
+  EXPOSE browse
+"#;
+    let vf = larql_vindex::vindexfile::parse_vindexfile_str(vf_str).unwrap();
+    println!("  Directives: {}", vf.directives.len());
+    println!("  Stages: {}", vf.stages.len());
+    for d in &vf.directives {
+        match d {
+            larql_vindex::VindexfileDirective::From(p) => println!("    FROM {}", p),
+            larql_vindex::VindexfileDirective::Patch(p) => println!("    PATCH {}", p),
+            larql_vindex::VindexfileDirective::Insert { entity, relation, target } =>
+                println!("    INSERT ({}, {}, {})", entity, relation, target),
+            larql_vindex::VindexfileDirective::Delete { entity, relation, target } =>
+                println!("    DELETE entity={} relation={} target={}", entity, relation, target),
+            larql_vindex::VindexfileDirective::Labels(p) => println!("    LABELS {}", p),
+            larql_vindex::VindexfileDirective::Expose(levels) => println!("    EXPOSE {:?}", levels),
+        }
+    }
+    for stage in &vf.stages {
+        println!("  Stage '{}': {} directives", stage.name, stage.directives.len());
+    }
+
+    // ── 15. HuggingFace path handling ──
+    section("15. HuggingFace path handling");
+    let hf_paths = [
+        ("hf://chrishayuk/gemma-3-4b-it-vindex", true),
+        ("hf://user/repo@v2.0", true),
+        ("./local.vindex", false),
+        ("/absolute/path", false),
+    ];
+    for (path, expected) in &hf_paths {
+        let is_hf = larql_vindex::is_hf_path(path);
+        let status = if is_hf == *expected { "OK" } else { "MISMATCH" };
+        println!("  {} → hf={} ({})", path, is_hf, status);
+    }
+    println!("  Supported: USE \"hf://user/repo\"; downloads and loads automatically");
+    println!("  CLI: larql hf download user/repo [-o local/]");
+    println!("  CLI: larql hf publish ./local.vindex --repo user/repo");
+
+    println!("\n=== Done ({} features demonstrated) ===", 15);
 }
 
 // ── Helpers ──

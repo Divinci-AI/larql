@@ -38,11 +38,18 @@ larql extract-index google/gemma-3-4b-it -o gemma3-4b.vindex --f16
 # Extract with inference weights (~6 GB at f16)
 larql extract-index google/gemma-3-4b-it -o gemma3-4b.vindex --level inference --f16
 
+# Or convert from GGUF
+larql convert gguf-to-vindex model.gguf -o model.vindex --f16
+
+# Or download from HuggingFace
+larql hf download chrishayuk/gemma-3-4b-it-vindex
+
 # Start the REPL
 larql repl
 
-# Or execute a single statement
+# Use a local vindex or HuggingFace vindex directly
 larql lql 'USE "gemma3-4b.vindex"; DESCRIBE "France";'
+larql lql 'USE "hf://chrishayuk/gemma-3-4b-it-vindex"; DESCRIBE "France";'
 ```
 
 ## What is a Vindex?
@@ -199,6 +206,8 @@ larql build . --output custom.vindex   # custom output path
 
 ## Model Support
 
+Input formats: **safetensors** (HuggingFace), **GGUF** (llama.cpp, dequantized to f32), **MLX** (Apple, same safetensors layout).
+
 | Family | Models | FFN Type |
 |--------|--------|----------|
 | Gemma | Gemma 2/3 (2B-27B) | Gated (GeGLU) |
@@ -249,7 +258,7 @@ MoE models store all experts' features in one flat index. Gate KNN naturally sel
 
 ```bash
 cargo build --release       # optimized build
-cargo test                  # 550 tests across all crates
+cargo test                  # 566 tests across all crates
 cargo run -p larql-vindex --example vindex_demo    # vindex feature demo
 cargo run -p larql-vindex --example vindex_bench --release  # benchmarks
 cargo run -p larql-lql --example parser_demo       # parser demo

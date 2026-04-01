@@ -15,7 +15,7 @@
 
 mod parser;
 
-pub use parser::{Vindexfile, VindexfileDirective, VindexfileStage, parse_vindexfile};
+pub use parser::{Vindexfile, VindexfileDirective, VindexfileStage, parse_vindexfile, parse_vindexfile_str};
 
 use std::path::Path;
 

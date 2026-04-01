@@ -1653,6 +1653,7 @@ fn extract_synthetic_model_f32() {
     assert!(dir.join("gate_vectors.bin").exists());
     assert!(dir.join("embeddings.bin").exists());
     assert!(dir.join("down_meta.jsonl").exists());
+    assert!(dir.join("down_meta.bin").exists(), "binary down_meta should be written during extract");
     assert!(dir.join("index.json").exists());
     assert!(dir.join("attn_weights.bin").exists());
     assert!(dir.join("up_weights.bin").exists());
@@ -1660,6 +1661,12 @@ fn extract_synthetic_model_f32() {
     assert!(dir.join("norms.bin").exists());
     assert!(dir.join("lm_head.bin").exists());
     assert!(dir.join("weight_manifest.json").exists());
+
+    // Both formats should be non-empty
+    let bin_size = std::fs::metadata(dir.join("down_meta.bin")).unwrap().len();
+    let jsonl_size = std::fs::metadata(dir.join("down_meta.jsonl")).unwrap().len();
+    assert!(bin_size > 0, "binary down_meta should be non-empty");
+    assert!(jsonl_size > 0, "JSONL down_meta should be non-empty");
 
     // Verify config
     let config = larql_vindex::load_vindex_config(&dir).unwrap();
@@ -1708,6 +1715,10 @@ fn extract_synthetic_model_f16() {
         larql_vindex::StorageDtype::F16,
         &mut cb,
     ).unwrap();
+
+    // Verify both down_meta formats written
+    assert!(dir.join("down_meta.bin").exists(), "binary down_meta should be written during f16 extract");
+    assert!(dir.join("down_meta.jsonl").exists());
 
     // Verify f16 files are smaller
     let gate_size = std::fs::metadata(dir.join("gate_vectors.bin")).unwrap().len();
@@ -1902,4 +1913,218 @@ fn extract_with_patches_bake_down() {
     assert_eq!(baked.total_gate_vectors(), 8);
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// GGUF tests
+// ═══════════════════════════════════════════════════════════════
+
+#[test]
+fn gguf_key_normalization() {
+    let key = larql_vindex::format::gguf::normalize_gguf_key("blk.5.attn_q.weight");
+    assert_eq!(key, "layers.5.self_attn.q_proj.weight");
+
+    let key = larql_vindex::format::gguf::normalize_gguf_key("blk.0.ffn_gate.weight");
+    assert_eq!(key, "layers.0.mlp.gate_proj.weight");
+
+    let key = larql_vindex::format::gguf::normalize_gguf_key("token_embd.weight");
+    assert_eq!(key, "embed_tokens.weight");
+
+    let key = larql_vindex::format::gguf::normalize_gguf_key("output.weight");
+    assert_eq!(key, "lm_head.weight");
+}
+
+#[test]
+fn gguf_config_from_metadata() {
+    use larql_vindex::format::gguf::{GgufFile, GgufValue};
+    let gguf = GgufFile {
+        metadata: {
+            let mut m = std::collections::HashMap::new();
+            m.insert("general.architecture".into(), GgufValue::String("llama".into()));
+            m.insert("llama.embedding_length".into(), GgufValue::U32(4096));
+            m.insert("llama.block_count".into(), GgufValue::U32(32));
+            m.insert("llama.feed_forward_length".into(), GgufValue::U32(11008));
+            m.insert("llama.attention.head_count".into(), GgufValue::U32(32));
+            m.insert("llama.attention.head_count_kv".into(), GgufValue::U32(32));
+            m.insert("llama.attention.key_length".into(), GgufValue::U32(128));
+            m.insert("llama.rope.freq_base".into(), GgufValue::F32(10000.0));
+            m
+        },
+        tensor_infos: vec![],
+        data_offset: 0,
+        path: std::path::PathBuf::new(),
+    };
+    let config = gguf.to_config_json();
+    assert_eq!(config["model_type"], "llama");
+    assert_eq!(config["hidden_size"], 4096);
+    assert_eq!(config["num_hidden_layers"], 32);
+    assert_eq!(config["intermediate_size"], 11008);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// PatchedVindex insert/delete/gate_knn tests
+// ═══════════════════════════════════════════════════════════════
+
+#[test]
+fn patched_vindex_insert_feature() {
+    let index = test_index();
+    let mut patched = larql_vindex::PatchedVindex::new(index);
+
+    patched.insert_feature(0, 2, vec![0.0, 0.0, 0.0, 1.0], make_meta("Canberra", 99, 0.8));
+    assert_eq!(patched.feature_meta(0, 2).unwrap().top_token, "Canberra");
+    assert_eq!(patched.num_overrides(), 1);
+    // Base unchanged
+    assert_eq!(patched.feature_meta(0, 0).unwrap().top_token, "Paris");
+}
+
+#[test]
+fn patched_vindex_delete_feature() {
+    let index = test_index();
+    let mut patched = larql_vindex::PatchedVindex::new(index);
+
+    patched.delete_feature(0, 0);
+    assert!(patched.feature_meta(0, 0).is_none());
+    // Other features at layer 0 remain
+    assert_eq!(patched.feature_meta(0, 1).unwrap().top_token, "French");
+}
+
+#[test]
+fn patched_vindex_gate_knn_includes_inserts() {
+    let index = test_index();
+    let mut patched = larql_vindex::PatchedVindex::new(index);
+
+    patched.insert_feature(0, 2, vec![0.0, 0.0, 0.0, 100.0], make_meta("Inserted", 55, 5.0));
+    let query = Array1::from_vec(vec![0.0, 0.0, 0.0, 1.0]);
+    let hits = patched.gate_knn(0, &query, 5);
+    assert!(!hits.is_empty());
+    assert_eq!(hits[0].0, 2); // inserted feature should dominate
+}
+
+#[test]
+fn patched_vindex_gate_knn_excludes_deletes() {
+    let index = test_index();
+    let mut patched = larql_vindex::PatchedVindex::new(index);
+
+    patched.delete_feature(0, 0); // delete Paris
+    let query = Array1::from_vec(vec![1.0, 0.0, 0.0, 0.0]);
+    let hits = patched.gate_knn(0, &query, 5);
+    assert!(hits.iter().all(|(f, _)| *f != 0)); // Paris should not appear
+}
+
+#[test]
+fn patched_vindex_bake_down_preserves() {
+    let index = test_index();
+    let mut patched = larql_vindex::PatchedVindex::new(index);
+
+    patched.insert_feature(0, 2, vec![0.0, 0.0, 0.0, 1.0], make_meta("New", 77, 3.0));
+    patched.delete_feature(1, 0);
+
+    let baked = patched.bake_down();
+    assert_eq!(baked.feature_meta(0, 2).unwrap().top_token, "New");
+    assert!(baked.feature_meta(1, 0).is_none());
+    assert_eq!(baked.feature_meta(0, 0).unwrap().top_token, "Paris");
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Vindexfile parse + build test
+// ═══════════════════════════════════════════════════════════════
+
+#[test]
+fn vindexfile_parse_and_build() {
+    let base_dir = std::env::temp_dir().join("larql_test_vindexfile_base");
+    let _ = std::fs::remove_dir_all(&base_dir);
+    std::fs::create_dir_all(&base_dir).unwrap();
+
+    // Save a base vindex
+    let index = test_index();
+    let mut config = VindexConfig {
+        version: 2,
+        model: "test/vindexfile".into(),
+        family: "llama".into(),
+        dtype: larql_vindex::StorageDtype::F32,
+        source: None,
+        checksums: None,
+        num_layers: 2,
+        hidden_size: 4,
+        intermediate_size: 3,
+        vocab_size: 10,
+        embed_scale: 1.0,
+        extract_level: larql_vindex::ExtractLevel::Browse,
+        has_model_weights: false,
+        layer_bands: None,
+        layers: vec![],
+        down_top_k: 5,
+        model_config: None,
+    };
+    index.save_vindex(&base_dir, &mut config).unwrap();
+
+    // Create a patch
+    let patch_dir = std::env::temp_dir().join("larql_test_vindexfile_patch");
+    let _ = std::fs::remove_dir_all(&patch_dir);
+    std::fs::create_dir_all(&patch_dir).unwrap();
+
+    let patch = larql_vindex::VindexPatch {
+        version: 1,
+        base_model: "test/vindexfile".into(),
+        base_checksum: None,
+        created_at: String::new(),
+        description: Some("test".into()),
+        author: None,
+        tags: vec![],
+        operations: vec![
+            larql_vindex::PatchOp::Update {
+                layer: 0, feature: 0,
+                gate_vector_b64: None,
+                down_meta: Some(larql_vindex::patch::core::PatchDownMeta {
+                    top_token: "PATCHED".into(),
+                    top_token_id: 999,
+                    c_score: 9.0,
+                }),
+            },
+        ],
+    };
+    let patch_path = patch_dir.join("test.vlp");
+    patch.save(&patch_path).unwrap();
+
+    // Build from Vindexfile
+    let vf_content = format!("FROM {}\nPATCH {}\n", base_dir.display(), patch_path.display());
+    let vf = larql_vindex::vindexfile::parse_vindexfile_str(&vf_content).unwrap();
+    let result = larql_vindex::build_from_vindexfile(&vf, None, &std::env::temp_dir()).unwrap();
+
+    assert_eq!(result.index.feature_meta(0, 0).unwrap().top_token, "PATCHED");
+    assert_eq!(result.index.feature_meta(0, 1).unwrap().top_token, "French");
+    assert_eq!(result.layers.len(), 2);
+
+    let _ = std::fs::remove_dir_all(&base_dir);
+    let _ = std::fs::remove_dir_all(&patch_dir);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// HuggingFace path tests
+// ═══════════════════════════════════════════════════════════════
+
+#[test]
+fn hf_path_detection() {
+    assert!(larql_vindex::is_hf_path("hf://chrishayuk/gemma-3-4b-it-vindex"));
+    assert!(larql_vindex::is_hf_path("hf://user/repo@v2.0"));
+    assert!(!larql_vindex::is_hf_path("./local.vindex"));
+    assert!(!larql_vindex::is_hf_path("/absolute/path"));
+    assert!(!larql_vindex::is_hf_path("google/gemma-3-4b-it"));
+}
+
+#[test]
+fn hf_path_with_revision() {
+    let path = "hf://chrishayuk/gemma-3-4b-it-vindex@v2.0";
+    assert!(larql_vindex::is_hf_path(path));
+    let stripped = path.strip_prefix("hf://").unwrap();
+    let (repo, rev) = stripped.split_once('@').unwrap();
+    assert_eq!(repo, "chrishayuk/gemma-3-4b-it-vindex");
+    assert_eq!(rev, "v2.0");
+}
+
+#[test]
+fn hf_resolve_invalid_path_fails() {
+    // Non-hf:// path should fail
+    let result = larql_vindex::resolve_hf_vindex("./not-an-hf-path");
+    assert!(result.is_err());
 }

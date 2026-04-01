@@ -1,5 +1,7 @@
 pub mod attn_bottleneck_cmd;
 pub mod build_cmd;
+pub mod convert_cmd;
+pub mod hf_cmd;
 pub mod attention_capture_cmd;
 pub mod attention_walk_cmd;
 pub mod bfs_cmd;

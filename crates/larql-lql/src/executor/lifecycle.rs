@@ -11,14 +11,21 @@ use super::helpers::{format_number, format_bytes, dir_size};
 impl Session {
     pub(crate) fn exec_use(&mut self, target: &UseTarget) -> Result<Vec<String>, LqlError> {
         match target {
-            UseTarget::Vindex(path) => {
-                let path = PathBuf::from(path);
-                if !path.exists() {
-                    return Err(LqlError::Execution(format!(
-                        "vindex not found: {}",
-                        path.display()
-                    )));
-                }
+            UseTarget::Vindex(path_str) => {
+                // Resolve hf:// paths to local cache
+                let path = if larql_vindex::is_hf_path(path_str) {
+                    larql_vindex::resolve_hf_vindex(path_str)
+                        .map_err(|e| LqlError::Execution(format!("HuggingFace download failed: {e}")))?
+                } else {
+                    let p = PathBuf::from(path_str);
+                    if !p.exists() {
+                        return Err(LqlError::Execution(format!(
+                            "vindex not found: {}",
+                            p.display()
+                        )));
+                    }
+                    p
+                };
 
                 let config = larql_vindex::load_vindex_config(&path)
                     .map_err(|e| LqlError::Execution(format!("failed to load vindex config: {e}")))?;

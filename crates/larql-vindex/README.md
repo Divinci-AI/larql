@@ -33,13 +33,14 @@ baked.save_vindex(&output_path, &mut config)?;
 
 ## Features
 
-- **Extract** from safetensors models (any gated FFN architecture)
+- **Extract** from safetensors, GGUF, or MLX models (any gated FFN architecture)
 - **Gate KNN** via BLAS matmul — 0.008ms per layer
 - **Walk** across all layers with down-meta annotation
 - **Readonly base** — base vindex files are never modified after extraction
 - **Patch overlay** — all mutations go through PatchedVindex (INSERT/DELETE/UPDATE)
 - **Patches** — stackable, reversible knowledge diffs (.vlp files)
 - **Vindexfile** — declarative model builds (FROM + PATCH + INSERT, like Dockerfile)
+- **HuggingFace Hub** — download and publish vindexes (`hf://user/repo` URI scheme)
 - **Split weight files** — gate, up, down, attn, norms, lm_head (no duplication)
 - **Binary down_meta** — 80x smaller than JSONL
 - **f16 storage** — halves file sizes with negligible accuracy loss

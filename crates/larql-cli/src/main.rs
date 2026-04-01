@@ -88,6 +88,12 @@ enum Commands {
     /// Build a custom model from a Vindexfile (declarative: FROM + PATCH + INSERT).
     Build(build_cmd::BuildArgs),
 
+    /// Convert between model formats (GGUF → vindex, safetensors → vindex).
+    Convert(convert_cmd::ConvertArgs),
+
+    /// HuggingFace Hub: download or publish vindexes.
+    Hf(hf_cmd::HfArgs),
+
     /// Graph-routed walk with banded layer strategy (graph FFN + highway skip).
     GraphWalk(graph_walk_cmd::GraphWalkArgs),
 
@@ -185,6 +191,8 @@ fn main() {
         Commands::FfnThroughput(args) => ffn_throughput_cmd::run(args),
         Commands::ExtractIndex(args) => extract_index_cmd::run(args),
         Commands::Build(args) => build_cmd::run(args),
+        Commands::Convert(args) => convert_cmd::run(args),
+        Commands::Hf(args) => hf_cmd::run(args),
         Commands::GraphWalk(args) => graph_walk_cmd::run(args),
         Commands::TrajectoryTrace(args) => trajectory_trace_cmd::run(args),
         Commands::VindexBench(args) => vindex_bench_cmd::run(args),

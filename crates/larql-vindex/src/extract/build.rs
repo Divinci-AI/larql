@@ -408,6 +408,9 @@ pub use crate::extract::callbacks::IndexBuildCallbacks;
         let down_path = output_dir.join("down_meta.jsonl");
         let mut down_file = BufWriter::new(std::fs::File::create(&down_path)?);
 
+        // Collect down_meta in memory for binary format
+        let mut all_down_meta: Vec<Option<Vec<Option<crate::FeatureMeta>>>> = vec![None; num_layers];
+
         // Collect offset directions for knowledge layers (L14-28) for relation clustering
         let cluster_layer_min = 14.min(num_layers);
         let cluster_layer_max = 28.min(num_layers);
@@ -563,6 +566,27 @@ pub use crate::extract::callbacks::IndexBuildCallbacks;
                 serde_json::to_writer(&mut down_file, &record)
                     .map_err(|e| VindexError::Parse(e.to_string()))?;
                 down_file.write_all(b"\n")?;
+
+                // Collect for binary format
+                let feat_idx = feature_offset + feat;
+                if all_down_meta[layer].is_none() {
+                    all_down_meta[layer] = Some(Vec::new());
+                }
+                if let Some(ref mut metas) = all_down_meta[layer] {
+                    while metas.len() <= feat_idx {
+                        metas.push(None);
+                    }
+                    metas[feat_idx] = Some(crate::FeatureMeta {
+                        top_token: record.top_token.clone(),
+                        top_token_id: record.top_token_id,
+                        c_score: record.c_score,
+                        top_k: record.top_k.iter().map(|t| TopKEntry {
+                            token: t.token.clone(),
+                            token_id: t.token_id,
+                            logit: t.logit,
+                        }).collect(),
+                    });
+                }
             }
             } // end batch
 
@@ -572,6 +596,10 @@ pub use crate::extract::callbacks::IndexBuildCallbacks;
             callbacks.on_layer_done("down", layer, start.elapsed().as_secs_f64() * 1000.0);
         }
         down_file.flush()?;
+
+        // Write binary down_meta
+        crate::format::down_meta::write_binary(output_dir, &all_down_meta, down_top_k)?;
+
         callbacks.on_stage_done("down_meta", 0.0);
 
         // ── 3b. Cluster down directions to discover relation types ──
@@ -643,12 +671,10 @@ pub use crate::extract::callbacks::IndexBuildCallbacks;
         std::fs::write(output_dir.join("index.json"), config_json)?;
 
         // Write model weights if extract level requires them
+        // (write_model_weights handles its own on_stage callback)
         if extract_level != crate::ExtractLevel::Browse {
-            callbacks.on_stage("model_weights");
-            let start = std::time::Instant::now();
             crate::format::weights::write_model_weights(weights, output_dir, callbacks)?;
             config.has_model_weights = true;
-            callbacks.on_stage_done("model_weights", start.elapsed().as_secs_f64() * 1000.0);
         }
 
         // Add provenance and checksums (final index.json overwrite)

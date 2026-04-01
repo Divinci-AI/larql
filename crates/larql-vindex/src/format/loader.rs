@@ -12,14 +12,45 @@ use ndarray::Array2;
 use larql_models::ModelWeights;
 use crate::error::VindexError;
 
-/// Load all safetensors files from a model directory.
-/// Detects architecture from config.json and loads all weight tensors.
+/// Load model weights from a directory or file.
+///
+/// Auto-detects the format:
+/// - Directory with `.safetensors` files → safetensors loading
+/// - Directory with `.gguf` file → GGUF loading (dequantized to f32)
+/// - Single `.gguf` file → GGUF loading
+///
+/// Detects architecture from config.json (safetensors) or GGUF metadata.
 pub fn load_model_dir(path: impl AsRef<Path>) -> Result<ModelWeights, VindexError> {
     let path = path.as_ref();
+
+    // Single GGUF file
+    if path.is_file() {
+        if path.extension().is_some_and(|ext| ext == "gguf") {
+            return super::gguf::load_gguf(path);
+        }
+        return Err(VindexError::NotADirectory(path.to_path_buf()));
+    }
+
     if !path.is_dir() {
         return Err(VindexError::NotADirectory(path.to_path_buf()));
     }
 
+    // Check for GGUF files in directory
+    let gguf_files: Vec<PathBuf> = std::fs::read_dir(path)?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|ext| ext == "gguf"))
+        .collect();
+
+    if !gguf_files.is_empty() {
+        // Use the first (or largest) GGUF file
+        let gguf_path = gguf_files.into_iter()
+            .max_by_key(|p| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0))
+            .unwrap();
+        return super::gguf::load_gguf(&gguf_path);
+    }
+
+    // Safetensors loading (also handles MLX format — same files, sometimes in weights/ subdir)
     let arch = larql_models::detect_architecture(path)
         .map_err(|e| VindexError::Parse(e.to_string()))?;
     let prefixes = arch.key_prefixes_to_strip();
@@ -29,6 +60,18 @@ pub fn load_model_dir(path: impl AsRef<Path>) -> Result<ModelWeights, VindexErro
         .map(|e| e.path())
         .filter(|p| p.extension().is_some_and(|ext| ext == "safetensors"))
         .collect();
+
+    // MLX models sometimes put weights in a weights/ subdirectory
+    if st_files.is_empty() {
+        let weights_dir = path.join("weights");
+        if weights_dir.is_dir() {
+            st_files = std::fs::read_dir(&weights_dir)?
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| p.extension().is_some_and(|ext| ext == "safetensors"))
+                .collect();
+        }
+    }
     st_files.sort();
 
     if st_files.is_empty() {
@@ -94,10 +137,14 @@ pub fn load_model_dir(path: impl AsRef<Path>) -> Result<ModelWeights, VindexErro
     })
 }
 
-/// Resolve a HuggingFace model ID or path to a local directory.
+/// Resolve a HuggingFace model ID or path to a local directory or GGUF file.
 pub fn resolve_model_path(model: &str) -> Result<PathBuf, VindexError> {
     let path = PathBuf::from(model);
     if path.is_dir() {
+        return Ok(path);
+    }
+    // Single GGUF file
+    if path.is_file() && path.extension().is_some_and(|ext| ext == "gguf") {
         return Ok(path);
     }
 
@@ -122,6 +169,11 @@ pub fn resolve_model_path(model: &str) -> Result<PathBuf, VindexError> {
     }
 
     Err(VindexError::NotADirectory(path))
+}
+
+/// Normalize a tensor key by stripping known prefixes.
+pub(crate) fn normalize_key_pub(key: &str, prefixes: &[&str]) -> String {
+    normalize_key(key, prefixes)
 }
 
 fn normalize_key(key: &str, prefixes: &[&str]) -> String {
@@ -159,6 +211,12 @@ fn tensor_to_f32(view: &safetensors::tensor::TensorView<'_>) -> Result<Vec<f32>,
         other => Err(VindexError::UnsupportedDtype(format!("{other:?}"))),
     }
 }
+
+/// Convert f16 bits to f32 (public for GGUF dequantization).
+pub(crate) fn half_to_f32_pub(bits: u16) -> f32 { half_to_f32(bits) }
+
+/// Convert bf16 bits to f32 (public for GGUF dequantization).
+pub(crate) fn bf16_to_f32_pub(bits: u16) -> f32 { bf16_to_f32(bits) }
 
 fn half_to_f32(bits: u16) -> f32 {
     let sign = ((bits >> 15) as u32) << 31;
