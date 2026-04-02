@@ -89,11 +89,17 @@ try:
 except ImportError:
     mlx = None
 
-# Sparse FFN: Rust feature selection + MLX matmul on Metal
+# Streaming: mmap'd weights, Metal pages from SSD on demand
 try:
-    from larql import sparse_ffn
+    from larql import streaming
 except ImportError:
-    sparse_ffn = None
+    streaming = None
+
+# Walk FFN: MLX attention + Rust sparse FFN (editable knowledge layer)
+try:
+    from larql import walk_ffn
+except ImportError:
+    walk_ffn = None
 
 __version__ = "0.1.0"
 

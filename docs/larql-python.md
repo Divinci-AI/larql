@@ -165,59 +165,76 @@ vindex.compile("mlx-model/", format="mlx")
 
 ## 3. MLX Integration
 
-### 3.1 Hybrid Inference
+### 3.1 Three Inference Modes
 
-Use MLX for attention and vindex for knowledge queries. Skip inference entirely when a knowledge lookup suffices.
+All use full weights. No feature dropping. Correct output.
 
 ```python
 import mlx_lm
+
+# 1. Dense — all weights in GPU memory. Fast. For models that fit.
+import larql
+model, tokenizer = larql.mlx.load("gemma3-4b.vindex")
+response = mlx_lm.generate(model, tokenizer, prompt="The capital of France is", max_tokens=20)
+
+# 2. Streaming — mmap'd weights, Metal pages from SSD on demand.
+#    For models that don't fit in GPU memory. 120B on 8GB MacBook.
+from larql.streaming import load
+model, tokenizer = load("gpt-oss-120b.vindex")
+response = mlx_lm.generate(model, tokenizer, prompt="The capital of France is", max_tokens=20)
+
+# 3. Walk FFN — FFN in Rust, vindex as editable knowledge layer.
+#    INSERT/DELETE/UPDATE mutations reflected in inference. Slower.
+from larql.walk_ffn import load
+model, tokenizer = load("gemma3-4b.vindex")
+response = mlx_lm.generate(model, tokenizer, prompt="The capital of France is", max_tokens=20)
+```
+
+| Mode | Load | Speed | Memory | Editable |
+|------|------|-------|--------|----------|
+| Dense (`larql.mlx`) | Slow (eval all) | Fast | Full model in GPU | No |
+| Streaming (`larql.streaming`) | Fast (lazy) | Same* | ~1 layer at a time | No |
+| Walk FFN (`larql.walk_ffn`) | Fast | Slow (CPU FFN) | Attention only | Yes |
+
+\* Streaming matches dense speed when the OS page cache keeps weights hot.
+For models that exceed physical memory, speed is SSD-bound (~1.5s/token at 3 GB/s NVMe).
+
+### 3.2 Knowledge Queries (No Inference)
+
+Skip inference entirely when a knowledge lookup suffices.
+
+```python
 import larql
 
-# Load both
-model, tokenizer = mlx_lm.load("google/gemma-3-4b-it")
 vindex = larql.load("gemma3-4b.vindex")
 
 # Knowledge query — no inference needed (0ms)
 edges = vindex.describe("France")
 capital = next(e.target for e in edges if e.relation == "capital")
 # "Paris"
-
-# Generation — MLX inference when needed
-response = mlx_lm.generate(model, tokenizer, "Write a poem about France")
 ```
 
-### 3.2 Vindex Walk FFN with MLX Attention
+### 3.3 Walk FFN with Editable Knowledge
 
-Replace the dense FFN with vindex gate KNN during MLX inference. MLX handles attention, vindex handles FFN.
+Walk FFN uses the vindex for feature selection. INSERT/DELETE/UPDATE mutations
+are reflected in inference output.
 
 ```python
 import larql
-import mlx.core as mx
+import mlx_lm
+from larql.walk_ffn import load
 
-vindex = larql.load("gemma3-4b.vindex", level="inference")
-model, tokenizer = mlx_lm.load("google/gemma-3-4b-it")
+model, tokenizer = load("gemma3-4b.vindex")
 
-# Custom forward pass: MLX attention + vindex walk FFN
-def hybrid_forward(tokens):
-    h = model.embed(tokens)
-    for layer_idx in range(34):
-        # MLX attention (unchanged)
-        h = model.layers[layer_idx].attention(h)
-        
-        # Vindex walk FFN (replaces dense matmul)
-        residual = h[:, -1, :].numpy()  # Last token residual
-        h_ffn = vindex.walk_ffn(layer_idx, residual)
-        h[:, -1, :] = mx.array(h_ffn)
-    
-    return model.lm_head(h)
+# Insert a fact into the vindex
+vindex = larql.load("gemma3-4b.vindex")
+vindex.insert("aspirin", "side_effect", "bleeding")
 
-# Patched inference — inserted facts affect output
-vindex.apply_patch("medical.vlp")
-result = hybrid_forward(tokenizer.encode("The side effects of aspirin include"))
-# "bleeding" — from the patch
+# Walk FFN inference uses the mutated vindex
+response = mlx_lm.generate(model, tokenizer, prompt="The side effects of aspirin include", max_tokens=20)
 ```
 
-### 3.3 Residual Capture for Probing
+### 3.4 Residual Capture for Probing
 
 Capture MLX residuals and feed them to vindex for analysis.
 
@@ -506,6 +523,9 @@ larql-python/
   python/
     larql/
       __init__.py
+      mlx.py          # Dense MLX loading from vindex
+      streaming.py    # Streaming mmap'd inference (large models)
+      walk_ffn.py     # Walk FFN: Rust FFN + MLX attention
       types.py        # Dataclass definitions for type hints
       _native.pyi     # Stub file for IDE support
   tests/

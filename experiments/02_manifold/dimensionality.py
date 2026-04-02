@@ -12,9 +12,7 @@ import json
 import sys
 import os
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-
-import _larql_core as larql
+import larql
 
 
 def run_experiment(vindex_path: str, sample_per_layer: int = 0):
