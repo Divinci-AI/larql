@@ -4,10 +4,7 @@ use ndarray::Array2;
 
 use crate::attention::AttentionWeights;
 use crate::ffn::{FfnBackend, WeightFfn};
-use crate::forward::{dot_proj, add_bias};
 use crate::model::ModelWeights;
-use crate::residual::{rms_norm, rms_norm_heads};
-use larql_models::NormType;
 
 use super::types::*;
 
@@ -55,7 +52,7 @@ pub fn trace_residuals(
     for layer in 0..num_layers {
         let pre = h.clone();
 
-        let (h_post_attn, attn_weights) = match run_attention_decomposed(
+        let (h_post_attn, _attn_projected, attn_weights) = match run_attention_decomposed(
             weights, &h, layer, capture_attention,
         ) {
             Some(r) => r,
@@ -120,81 +117,12 @@ fn embed_tokens_raw(weights: &ModelWeights, token_ids: &[u32]) -> Array2<f32> {
     h
 }
 
-fn apply_norm(
-    weights: &ModelWeights, x: &Array2<f32>, weight_key: &str, norm_offset: f32,
-) -> Array2<f32> {
-    match weights.arch.norm_type() {
-        NormType::LayerNorm => {
-            let bias_key = weight_key.replace(".weight", ".bias");
-            crate::residual::layer_norm(x, weights.vectors.get(weight_key), weights.vectors.get(&bias_key))
-        }
-        _ => rms_norm(x, weights.vectors.get(weight_key), norm_offset),
-    }
-}
-
+/// Run attention for decomposed tracing. Delegates to shared run_attention_block.
+/// Returns (h_post_attn, attn_projected_pre_residual, optional_weights).
 fn run_attention_decomposed(
     weights: &ModelWeights, h: &Array2<f32>, layer: usize, capture_attention: bool,
-) -> Option<(Array2<f32>, Option<AttentionWeights>)> {
-    let arch = &*weights.arch;
-    let head_dim = weights.head_dim;
-    let num_q = weights.num_q_heads;
-    let num_kv = weights.num_kv_heads;
-    let reps = num_q / num_kv;
-    let scale = if arch.attention_multiplier() != 1.0 {
-        arch.attention_multiplier() as f64
-    } else { arch.attention_scale() };
-    let seq_len = h.shape()[0];
-    let norm_offset = arch.norm_weight_offset();
-
-    let h_norm = apply_norm(weights, h, &arch.input_layernorm_key(layer), norm_offset);
-
-    let w_q = weights.tensors.get(&arch.attn_q_key(layer))?;
-    let w_k = weights.tensors.get(&arch.attn_k_key(layer))?;
-    let w_v = weights.tensors.get(&arch.attn_v_key(layer))?;
-    let w_o = weights.tensors.get(&arch.attn_o_key(layer))?;
-
-    let mut q_full = dot_proj(&h_norm, w_q);
-    let mut k_full = dot_proj(&h_norm, w_k);
-    let mut v_full = dot_proj(&h_norm, w_v);
-
-    if let Some(bias) = arch.attn_q_bias_key(layer).and_then(|k| weights.vectors.get(&k)) { add_bias(&mut q_full, bias); }
-    if let Some(bias) = arch.attn_k_bias_key(layer).and_then(|k| weights.vectors.get(&k)) { add_bias(&mut k_full, bias); }
-    if let Some(bias) = arch.attn_v_bias_key(layer).and_then(|k| weights.vectors.get(&k)) { add_bias(&mut v_full, bias); }
-
-    let qk_offset = weights.arch.qk_norm_weight_offset();
-    let qk_norm_off = if qk_offset != 0.0 { qk_offset } else { norm_offset };
-    let q_normed = match arch.attn_q_norm_key(layer).and_then(|k| weights.vectors.get(&k)) {
-        Some(norm_w) => rms_norm_heads(&q_full, norm_w, num_q, head_dim, qk_norm_off),
-        None => q_full,
-    };
-    let k_normed = match arch.attn_k_norm_key(layer).and_then(|k| weights.vectors.get(&k)) {
-        Some(norm_w) => rms_norm_heads(&k_full, norm_w, num_kv, head_dim, qk_norm_off),
-        None => k_full,
-    };
-
-    let layer_rope_base = arch.rope_base_for_layer(layer);
-    let q_rope = crate::attention::apply_rope(&q_normed, num_q, head_dim, layer_rope_base);
-    let k_rope = crate::attention::apply_rope(&k_normed, num_kv, head_dim, layer_rope_base);
-
-    let softcap = arch.attn_logit_softcapping();
-    let (attn_out, attn_weights) = crate::attention::gqa_attention_with_weights(
-        &q_rope, &k_rope, &v_full, num_q, head_dim, reps, scale, seq_len,
-        capture_attention, softcap,
-    );
-    let mut attn_projected = dot_proj(&attn_out, w_o);
-    if let Some(bias) = arch.attn_o_bias_key(layer).and_then(|k| weights.vectors.get(&k)) { add_bias(&mut attn_projected, bias); }
-
-    let res_mult = arch.residual_multiplier();
-    let h_post_attn = if arch.has_post_norms() {
-        let normed = apply_norm(weights, &attn_projected, &arch.post_attention_layernorm_key(layer), norm_offset);
-        if res_mult != 1.0 { h + &(&normed * res_mult) } else { h + &normed }
-    } else if res_mult != 1.0 {
-        h + &(&attn_projected * res_mult)
-    } else {
-        h + &attn_projected
-    };
-
-    Some((h_post_attn, attn_weights))
+) -> Option<(Array2<f32>, Array2<f32>, Option<AttentionWeights>)> {
+    crate::attention::run_attention_block(weights, h, layer, capture_attention)
 }
 
 fn run_ffn_decomposed(
@@ -209,8 +137,8 @@ fn run_ffn_decomposed(
         Some(arch.post_attention_layernorm_key(layer))
     };
     let h_ffn = match pre_ffn_key {
-        Some(key) => apply_norm(weights, h_post_attn, &key, norm_offset),
-        None => rms_norm(h_post_attn, None, norm_offset),
+        Some(key) => crate::forward::apply_norm(weights, h_post_attn, &key, norm_offset),
+        None => crate::residual::rms_norm(h_post_attn, None, norm_offset),
     };
 
     let ffn_out = ffn.forward(layer, &h_ffn);
@@ -218,8 +146,8 @@ fn run_ffn_decomposed(
     let res_mult = arch.residual_multiplier();
     if arch.has_post_norms() {
         let normed = match arch.post_feedforward_layernorm_key(layer) {
-            Some(key) => apply_norm(weights, &ffn_out, &key, norm_offset),
-            None => rms_norm(&ffn_out, None, norm_offset),
+            Some(key) => crate::forward::apply_norm(weights, &ffn_out, &key, norm_offset),
+            None => crate::residual::rms_norm(&ffn_out, None, norm_offset),
         };
         if res_mult != 1.0 { h_post_attn + &(&normed * res_mult) } else { h_post_attn + &normed }
     } else if res_mult != 1.0 {

@@ -138,7 +138,21 @@ No sweet spot — France breaks before Atlantis benefits.
 | 0.75 | 6.0 | Pose (91.9%) | a (26.7%) |
 | 1.00 | 8.0 | Pose (33.7%) | Pose (38.5%) |
 
-**alpha=0.25 per layer is the sweet spot.** Atlantis at 94.6%, France preserved at rank 1.
+### Spread thinner — the Pareto frontier
+
+More layers with smaller alpha reduces degradation:
+
+| Config | Atlantis | Paris | Paris degradation |
+|---|---|---|---|
+| 8L × 0.25 | 94.6% | 60.5% | -20.0 pts |
+| 12L × 0.15 | 91.1% | 57.9% | -22.6 pts |
+| 16L × 0.10 | 63.0% | 70.4% | **-10.1 pts** |
+| **16L × 0.12** | **78.4%** | **66.8%** | **-13.7 pts** |
+| 20L × 0.10 | 39.4% | 70.6% | -9.9 pts |
+
+**16L × 0.12 is the recommended config.** Atlantis at 78%, Paris degradation only 14 points. For maximum new-fact confidence, use 8L × 0.25 (94.6% but 20 points degradation). For minimal degradation, use 20L × 0.08 (26% but only 7 points degradation).
+
+Orthogonal down vectors (removing the Paris component) did not help — degradation comes from residual perturbation magnitude, not Paris logit direction.
 
 ## Experiment series
 

@@ -335,8 +335,8 @@ fn run_predict_inner(
     let token_ids: Vec<u32> = encoding.get_ids().to_vec();
     vlog!(verbose, "Prompt: {:?} ({} tokens)", args.prompt, token_ids.len());
 
-    // Walk FFN forward pass
-    let walk_ffn = WalkFfn::new(weights, index, args.top_k);
+    // Walk FFN forward pass (with trace for analysis output)
+    let walk_ffn = WalkFfn::new_with_trace(weights, index, args.top_k);
     let start = Instant::now();
     let result = predict_with_ffn(
         weights,

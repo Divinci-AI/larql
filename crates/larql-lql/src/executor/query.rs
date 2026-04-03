@@ -174,7 +174,7 @@ impl Session {
 
         // 8092 features per layer is proven lossless (97.91% on France→Paris).
         // PatchedVindex implements GateIndex — INSERT/DELETE/UPDATE affects inference.
-        let walk_ffn = larql_inference::vindex::WalkFfn::new(&weights, patched, 8092);
+        let walk_ffn = larql_inference::vindex::WalkFfn::new_with_trace(&weights, patched, 8092);
         let start = std::time::Instant::now();
         let result = larql_inference::predict_with_ffn(
             &weights,
@@ -983,7 +983,7 @@ impl Session {
         let token_ids: Vec<u32> = encoding.get_ids().to_vec();
 
         // PatchedVindex implements GateIndex — INSERT/DELETE/UPDATE affects inference.
-        let walk_ffn = larql_inference::vindex::WalkFfn::new(&weights, patched, 8092);
+        let walk_ffn = larql_inference::vindex::WalkFfn::new_with_trace(&weights, patched, 8092);
         let start = std::time::Instant::now();
         let result = larql_inference::predict_with_ffn(
             &weights, &tokenizer, &token_ids, top_k, &walk_ffn,

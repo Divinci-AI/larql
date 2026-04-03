@@ -6,11 +6,11 @@
 
 use ndarray::Array2;
 
-use crate::attention::{apply_rope, gqa_attention_with_weights, AttentionWeights};
+use crate::attention::AttentionWeights;
 use crate::ffn::{FfnBackend, LayerFfnRouter, WeightFfn};
 use crate::model::ModelWeights;
 use larql_models::NormType;
-use crate::residual::{rms_norm, rms_norm_heads};
+use crate::residual::rms_norm;
 
 /// Per-head attention pattern for the last token at one layer.
 pub struct LayerAttentionCapture {
@@ -59,7 +59,7 @@ pub enum LayerMode<'a> {
 }
 
 /// Apply the appropriate norm (RMSNorm or LayerNorm) based on architecture.
-fn apply_norm(
+pub fn apply_norm(
     weights: &ModelWeights,
     x: &Array2<f32>,
     weight_key: &str,
@@ -122,93 +122,15 @@ fn run_attention(weights: &ModelWeights, h: &Array2<f32>, layer: usize) -> Optio
 }
 
 /// Run attention with optional per-head weight capture.
+/// Delegates to the shared `run_attention_block` in attention.rs.
 fn run_attention_inner(
     weights: &ModelWeights,
     h: &Array2<f32>,
     layer: usize,
     capture_attention: bool,
 ) -> Option<(Array2<f32>, Option<AttentionWeights>)> {
-    let arch = &*weights.arch;
-    let head_dim = weights.head_dim;
-    let num_q = weights.num_q_heads;
-    let num_kv = weights.num_kv_heads;
-    let reps = num_q / num_kv;
-    let scale = if arch.attention_multiplier() != 1.0 {
-        // Granite: attention_multiplier replaces the default 1/sqrt(head_dim) scale
-        arch.attention_multiplier() as f64
-    } else {
-        arch.attention_scale()
-    };
-    let seq_len = h.shape()[0];
-    let norm_offset = arch.norm_weight_offset();
-
-    let h_norm = apply_norm(weights, h, &arch.input_layernorm_key(layer), norm_offset);
-
-    let w_q = weights.tensors.get(&arch.attn_q_key(layer))?;
-    let w_k = weights.tensors.get(&arch.attn_k_key(layer)).unwrap();
-    let w_v = weights.tensors.get(&arch.attn_v_key(layer)).unwrap();
-    let w_o = weights.tensors.get(&arch.attn_o_key(layer)).unwrap();
-
-    // f64 accumulation for linear projections to match MLX Metal precision
-    let mut q_full = dot_proj(&h_norm, w_q);
-    let mut k_full = dot_proj(&h_norm, w_k);
-    let mut v_full = dot_proj(&h_norm, w_v);
-
-    // Add attention bias if present (e.g., Qwen2/2.5)
-    if let Some(bias) = arch.attn_q_bias_key(layer).and_then(|k| weights.vectors.get(&k)) {
-        add_bias(&mut q_full, bias);
-    }
-    if let Some(bias) = arch.attn_k_bias_key(layer).and_then(|k| weights.vectors.get(&k)) {
-        add_bias(&mut k_full, bias);
-    }
-    if let Some(bias) = arch.attn_v_bias_key(layer).and_then(|k| weights.vectors.get(&k)) {
-        add_bias(&mut v_full, bias);
-    }
-
-    let qk_offset = weights.arch.qk_norm_weight_offset();
-    let qk_norm_off = if qk_offset != 0.0 { qk_offset } else { norm_offset };
-    let q_normed = match arch
-        .attn_q_norm_key(layer)
-        .and_then(|k| weights.vectors.get(&k))
-    {
-        Some(norm_w) => rms_norm_heads(&q_full, norm_w, num_q, head_dim, qk_norm_off),
-        None => q_full,
-    };
-    let k_normed = match arch
-        .attn_k_norm_key(layer)
-        .and_then(|k| weights.vectors.get(&k))
-    {
-        Some(norm_w) => rms_norm_heads(&k_full, norm_w, num_kv, head_dim, qk_norm_off),
-        None => k_full,
-    };
-
-    let layer_rope_base = arch.rope_base_for_layer(layer);
-    let q_rope = apply_rope(&q_normed, num_q, head_dim, layer_rope_base);
-    let k_rope = apply_rope(&k_normed, num_kv, head_dim, layer_rope_base);
-
-    let softcap = arch.attn_logit_softcapping();
-    let (attn_out, attn_weights) = gqa_attention_with_weights(
-        &q_rope, &k_rope, &v_full, num_q, head_dim, reps, scale, seq_len, capture_attention, softcap,
-    );
-    let mut attn_projected = dot_proj(&attn_out, w_o);
-    if let Some(bias) = arch.attn_o_bias_key(layer).and_then(|k| weights.vectors.get(&k)) {
-        add_bias(&mut attn_projected, bias);
-    }
-
-    let res_mult = arch.residual_multiplier();
-    let h_post_attn = if arch.has_post_norms() {
-        let normed = apply_norm(weights, &attn_projected, &arch.post_attention_layernorm_key(layer), norm_offset);
-        if res_mult != 1.0 {
-            h + &(&normed * res_mult)
-        } else {
-            h + &normed
-        }
-    } else if res_mult != 1.0 {
-        h + &(&attn_projected * res_mult)
-    } else {
-        h + &attn_projected
-    };
-
+    let (h_post_attn, _attn_projected, attn_weights) =
+        crate::attention::run_attention_block(weights, h, layer, capture_attention)?;
     Some((h_post_attn, attn_weights))
 }
 

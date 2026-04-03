@@ -1,274 +1,14 @@
 {
-  "L11_F8558": {
-    "primary": "deathplace",
-    "confidence": 0.6,
-    "hits": 5,
-    "entity_count": 2,
-    "entities": [
-      "Nora Tynan O'Mahony",
-      "Se\u00e1n Cromien"
-    ],
-    "outputs": [
-      "dublin"
-    ],
+  "L10_F6794": {
+    "primary": "instrument",
+    "confidence": 0.714,
+    "hits": 7,
+    "entity_count": 0,
+    "entities": [],
+    "outputs": [],
     "relations": {
-      "deathplace": 3,
-      "capital": 2
-    }
-  },
-  "L0_F7861": {
-    "primary": "birthplace",
-    "confidence": 0.636,
-    "hits": 11,
-    "entity_count": 7,
-    "entities": [
-      "Ameen Khan",
-      "Anish Dayal Singh",
-      "Ashok Chandna",
-      "Bharosi Lal Jatav",
-      "Dharmendra Singh Senthwar",
-      "Divya Sripada",
-      "Paltu Ram"
-    ],
-    "outputs": [
-      "pradesh",
-      "rajasthan"
-    ],
-    "relations": {
-      "birthplace": 7,
-      "capital": 3,
-      "deathplace": 1
-    }
-  },
-  "L9_F9801": {
-    "primary": "language",
-    "confidence": 1.0,
-    "hits": 9,
-    "entity_count": 3,
-    "entities": [
-      "Fiji",
-      "India",
-      "South Africa"
-    ],
-    "outputs": [
-      "hindi"
-    ],
-    "relations": {
-      "language": 9
-    }
-  },
-  "L0_F7669": {
-    "primary": "language",
-    "confidence": 1.0,
-    "hits": 33,
-    "entity_count": 33,
-    "entities": [
-      "Belgium",
-      "Benin",
-      "Canada",
-      "Canada (New France)",
-      "Central African Republic",
-      "Chad",
-      "Comoros",
-      "Council of Europe",
-      "Djibouti",
-      "Equatorial Guinea",
-      "France",
-      "French Algeria",
-      "Gabon",
-      "Guinea",
-      "Illyrian Provinces",
-      "Isle Saint-Jean",
-      "Ivory Coast",
-      "Khmer Republic",
-      "Kingdom of Laos",
-      "Luxembourg"
-    ],
-    "outputs": [
-      "french"
-    ],
-    "relations": {
-      "language": 33
-    }
-  },
-  "L12_F9704": {
-    "primary": "language",
-    "confidence": 1.0,
-    "hits": 6,
-    "entity_count": 4,
-    "entities": [
-      "Bolivia",
-      "Comoros",
-      "Nogai Horde",
-      "Norway"
-    ],
-    "outputs": [
-      "languages"
-    ],
-    "relations": {
-      "language": 6
-    }
-  },
-  "L4_F7309": {
-    "primary": "currency",
-    "confidence": 1.0,
-    "hits": 2,
-    "entity_count": 2,
-    "entities": [
-      "South Sudan",
-      "Sudan"
-    ],
-    "outputs": [
-      "sudanese"
-    ],
-    "relations": {
-      "currency": 2
-    }
-  },
-  "L3_F3167": {
-    "primary": "currency",
-    "confidence": 0.605,
-    "hits": 38,
-    "entity_count": 13,
-    "entities": [
-      "Abbasid Caliphate",
-      "Banda State (Ghana)",
-      "Kingdom of Niani",
-      "Kingdom of Twifo",
-      "Taifa of Guadix and Baza",
-      "Taifa of Lorca",
-      "Taifa of Menorca",
-      "Taifa of M\u00e1laga",
-      "Taifa of Purchena",
-      "Taifa of Segura",
-      "Taifa of Silves",
-      "Twifo",
-      "Twifo-Heman"
-    ],
-    "outputs": [
-      "gold"
-    ],
-    "relations": {
-      "currency": 23,
-      "team_color": 8,
-      "birthplace": 3,
-      "founder": 2,
-      "flag_colors": 1,
-      "python:if": 1
-    }
-  },
-  "L7_F6394": {
-    "primary": "currency",
-    "confidence": 0.625,
-    "hits": 48,
-    "entity_count": 10,
-    "entities": [
-      "Amazonas Province (Brazil)",
-      "Brazil",
-      "Cabe\u00e7a do Cachorro",
-      "Captaincy General of Chile",
-      "Captaincy General of Venezuela",
-      "Colonial Brazil",
-      "Empire of Brazil",
-      "Iberian Union",
-      "Spanish Formosa",
-      "State of Maranh\u00e3o and Piau\u00ed"
-    ],
-    "outputs": [
-      "real"
-    ],
-    "relations": {
-      "currency": 30,
-      "team": 9,
-      "team_rival": 6,
-      "wn:synonym": 1,
-      "wn:derivation": 1,
-      "python:def": 1
-    }
-  },
-  "L11_F3146": {
-    "primary": "currency",
-    "confidence": 0.6,
-    "hits": 5,
-    "entity_count": 2,
-    "entities": [
-      "Amazonas Province (Brazil)",
-      "Brazil"
-    ],
-    "outputs": [
-      "brazilian"
-    ],
-    "relations": {
-      "currency": 3,
-      "founder": 2
-    }
-  },
-  "L4_F1580": {
-    "primary": "currency",
-    "confidence": 0.615,
-    "hits": 13,
-    "entity_count": 4,
-    "entities": [
-      "British Hong Kong",
-      "Eastern Xia",
-      "H\u1ed3 dynasty",
-      "Jin (Later Tang precursor)"
-    ],
-    "outputs": [
-      "cash"
-    ],
-    "relations": {
-      "currency": 8,
-      "producer_artist": 3,
-      "wn:synonym": 1,
-      "wn:derivation": 1
-    }
-  },
-  "L12_F8543": {
-    "primary": "currency",
-    "confidence": 1.0,
-    "hits": 3,
-    "entity_count": 1,
-    "entities": [
-      "Georgia (country)"
-    ],
-    "outputs": [
-      "lari"
-    ],
-    "relations": {
-      "currency": 3
-    }
-  },
-  "L3_F8403": {
-    "primary": "starring",
-    "confidence": 0.667,
-    "hits": 3,
-    "entity_count": 1,
-    "entities": [
-      "Running with Speed"
-    ],
-    "outputs": [
-      "salt"
-    ],
-    "relations": {
-      "starring": 2,
-      "currency": 1
-    }
-  },
-  "L5_F5718": {
-    "primary": "currency",
-    "confidence": 0.667,
-    "hits": 3,
-    "entity_count": 1,
-    "entities": [
-      "Council of the Haida Nation"
-    ],
-    "outputs": [
-      "canadian"
-    ],
-    "relations": {
-      "currency": 2,
-      "player_nationality": 1
+      "instrument": 5,
+      "language": 2
     }
   },
   "L11_F6642": {
@@ -284,1158 +24,15 @@
       "ceo": 1
     }
   },
-  "L10_F6992": {
-    "primary": "area",
-    "confidence": 0.714,
-    "hits": 7,
-    "entity_count": 4,
-    "entities": [
-      "China",
-      "Nauru",
-      "Tuvalu",
-      "United States"
-    ],
-    "outputs": [
-      "fourth",
-      "third"
-    ],
-    "relations": {
-      "area": 5,
-      "elevation": 1,
-      "subsidiary": 1
-    }
-  },
-  "L3_F2724": {
-    "primary": "driving_side",
-    "confidence": 0.97,
-    "hits": 33,
-    "entity_count": 16,
-    "entities": [
-      "Brazil",
-      "Canada",
-      "China",
-      "France",
-      "Germany",
-      "Italy",
-      "Mexico",
-      "Netherlands",
-      "Norway",
-      "Poland",
-      "Russia",
-      "South Korea",
-      "Spain",
-      "Sweden",
-      "Turkey",
-      "United States"
-    ],
-    "outputs": [
-      "right"
-    ],
-    "relations": {
-      "driving_side": 32,
-      "party": 1
-    }
-  },
-  "L11_F4630": {
-    "primary": "flag_colors",
-    "confidence": 1.0,
-    "hits": 13,
-    "entity_count": 11,
-    "entities": [
-      "Argentina",
-      "Brazil",
-      "Colombia",
-      "France",
-      "Netherlands",
-      "Norway",
-      "Russia",
-      "South Africa",
-      "South Korea",
-      "Sweden",
-      "United Kingdom"
-    ],
-    "outputs": [
-      "blue"
-    ],
-    "relations": {
-      "flag_colors": 13
-    }
-  },
-  "L2_F10123": {
-    "primary": "event_country",
-    "confidence": 0.667,
-    "hits": 6,
-    "entity_count": 2,
-    "entities": [
-      "Fall of the Berlin Wall",
-      "Spanish Inquisition"
-    ],
-    "outputs": [
-      "germany",
-      "spain"
-    ],
-    "relations": {
-      "event_country": 4,
-      "city_country": 1,
-      "university_country": 1
-    }
-  },
-  "L3_F8335": {
-    "primary": "deathplace",
-    "confidence": 0.571,
-    "hits": 7,
-    "entity_count": 4,
-    "entities": [
-      "B\u00e9b\u00e9 Carri\u00e8re",
-      "Chung-Yun Hse",
-      "I. M. E. Blandin",
-      "Julius Otto Duncan"
-    ],
-    "outputs": [
-      "texas"
-    ],
-    "relations": {
-      "deathplace": 4,
-      "birthplace": 2,
-      "city_state": 1
-    }
-  },
-  "L3_F6329": {
-    "primary": "landmark",
-    "confidence": 0.667,
-    "hits": 3,
-    "entity_count": 1,
-    "entities": [
-      "Singapore"
-    ],
-    "outputs": [
-      "sands"
-    ],
-    "relations": {
-      "landmark": 2,
-      "spouse": 1
-    }
-  },
-  "L10_F5849": {
-    "primary": "landmark",
-    "confidence": 1.0,
-    "hits": 2,
-    "entity_count": 1,
-    "entities": [
-      "Hong Kong"
-    ],
-    "outputs": [
-      "peak"
-    ],
-    "relations": {
-      "landmark": 2
-    }
-  },
-  "L6_F4863": {
-    "primary": "timezone",
-    "confidence": 1.0,
-    "hits": 2,
-    "entity_count": 1,
-    "entities": [
-      "Singapore"
-    ],
-    "outputs": [
-      "sgt"
-    ],
-    "relations": {
-      "timezone": 2
-    }
-  },
-  "L10_F4437": {
-    "primary": "elevation",
-    "confidence": 1.0,
-    "hits": 4,
-    "entity_count": 2,
-    "entities": [
-      "Amsterdam",
-      "New Orleans"
-    ],
-    "outputs": [
-      "below"
-    ],
-    "relations": {
-      "elevation": 4
-    }
-  },
-  "L5_F3642": {
-    "primary": "elevation",
-    "confidence": 0.857,
-    "hits": 7,
-    "entity_count": 2,
-    "entities": [
-      "Dead Sea",
-      "Mount Everest"
-    ],
-    "outputs": [
-      "earth"
-    ],
-    "relations": {
-      "elevation": 6,
-      "wn:derivation": 1
-    }
-  },
-  "L6_F6780": {
-    "primary": "occupation",
-    "confidence": 1.0,
-    "hits": 89,
-    "entity_count": 41,
-    "entities": [
-      "Adeline Frances Fitz",
-      "Aldemaro Romero",
-      "Alexander von Zemlinsky",
-      "Alfred Gr\u00fcnfeld",
-      "Andreas D\u00fcben",
-      "Anne Nassanga",
-      "Bach",
-      "Beethoven",
-      "Benson Taylor",
-      "Bernhard Ruchti",
-      "Bob Thompson (pianist)",
-      "Carl Mayotte",
-      "Carlo Tenan",
-      "Chopin",
-      "Dae-Ho Eom",
-      "Dafydd Llywelyn (composer)",
-      "Dama\u015b",
-      "Daniel Kluger (composer)",
-      "Daniela Padr\u00f3n",
-      "Davide Remigio"
-    ],
-    "outputs": [
-      "composer"
-    ],
-    "relations": {
-      "occupation": 89
-    }
-  },
   "L12_F7040": {
     "primary": "occupation",
-    "confidence": 0.7,
-    "hits": 10,
+    "confidence": 1.0,
+    "hits": 7,
     "entity_count": 0,
     "entities": [],
     "outputs": [],
     "relations": {
-      "occupation": 7,
-      "wn:derivation": 3
-    }
-  },
-  "L3_F2577": {
-    "primary": "occupation",
-    "confidence": 0.98,
-    "hits": 50,
-    "entity_count": 48,
-    "entities": [
-      "Ada Vox",
-      "Admira Thunderpussy",
-      "Alvilda (drag queen)",
-      "Amanda Tori Meating",
-      "Asifa Lahore",
-      "Beth (drag queen)",
-      "Carmen Farala",
-      "Cheryl (drag queen)",
-      "Cheryl Hole",
-      "DeeDee Mari\u00e9 Holliday",
-      "Denim (drag queen)",
-      "Dennis Simoes",
-      "DiDa Ritz",
-      "Drag Couenne",
-      "Dwayne Cooper",
-      "Farida Kant",
-      "Hana Beshie",
-      "Iz Hesketh",
-      "John F. Sheridan",
-      "Joshua Kelley (sailor)"
-    ],
-    "outputs": [
-      "drag"
-    ],
-    "relations": {
-      "occupation": 49,
-      "genre": 1
-    }
-  },
-  "L0_F117": {
-    "primary": "occupation",
-    "confidence": 1.0,
-    "hits": 5,
-    "entity_count": 5,
-    "entities": [
-      "Federer",
-      "Jacques Yvon Ndolou",
-      "Jordan",
-      "Lizzy Ashcroft",
-      "Wilfrid Mbapp\u00e9"
-    ],
-    "outputs": [
-      "basketball",
-      "football",
-      "tennis"
-    ],
-    "relations": {
-      "occupation": 5
-    }
-  },
-  "L11_F3500": {
-    "primary": "wn:hypernym",
-    "confidence": 0.714,
-    "hits": 7,
-    "entity_count": 5,
-    "entities": [
-      "radiography",
-      "radioscopy",
-      "sonography",
-      "telephotography",
-      "xerography"
-    ],
-    "outputs": [
-      "imaging",
-      "photography"
-    ],
-    "relations": {
-      "wn:hypernym": 5,
-      "occupation": 2
-    }
-  },
-  "L0_F2159": {
-    "primary": "occupation",
-    "confidence": 0.917,
-    "hits": 24,
-    "entity_count": 22,
-    "entities": [
-      "Adolf Rading",
-      "Alan Nangle",
-      "Alexis de Chateauneuf",
-      "Alfred Messel",
-      "Arie Dudai",
-      "Bruno Taut",
-      "Chip Detweiler",
-      "Ema Peter",
-      "Francis W. Wynkoop",
-      "Hans Konrad Pestalozzi",
-      "Herbert Dennis",
-      "Husref Red\u017ei\u0107",
-      "Marta Martins da Silva",
-      "Oleg Drozdov",
-      "Peter J. Weber",
-      "Pietro Cantoni",
-      "Renate Prince",
-      "Sergio Alemparte",
-      "Tep Vattho",
-      "Vittorio De Feo"
-    ],
-    "outputs": [
-      "architect",
-      "architectural"
-    ],
-    "relations": {
-      "occupation": 22,
-      "designer": 2
-    }
-  },
-  "L8_F1917": {
-    "primary": "subsidiary",
-    "confidence": 0.59,
-    "hits": 61,
-    "entity_count": 12,
-    "entities": [
-      "21st Century Fox",
-      "Anna Kitex Group",
-      "BRG Sports",
-      "China Minmetals",
-      "Deseret Management Corporation",
-      "Hesteel Group",
-      "IHH Healthcare",
-      "MS&AD Insurance Group",
-      "Manhattan Research",
-      "Phoenix Venture Holdings",
-      "Piramal Enterprises",
-      "Piramal Group"
-    ],
-    "outputs": [
-      "group"
-    ],
-    "relations": {
-      "subsidiary": 36,
-      "developer": 12,
-      "occupation": 3,
-      "party": 3,
-      "founder": 3,
-      "architect": 3,
-      "python:class_inherits": 1
-    }
-  },
-  "L1_F4857": {
-    "primary": "occupation",
-    "confidence": 1.0,
-    "hits": 2,
-    "entity_count": 2,
-    "entities": [
-      "Janet Bannister",
-      "Lydia Jett"
-    ],
-    "outputs": [
-      "venture"
-    ],
-    "relations": {
-      "occupation": 2
-    }
-  },
-  "L1_F1978": {
-    "primary": "occupation",
-    "confidence": 1.0,
-    "hits": 4,
-    "entity_count": 4,
-    "entities": [
-      "Bob Thompson (pianist)",
-      "Carl Mayotte",
-      "Daniela Padr\u00f3n",
-      "Kapil Kapilan"
-    ],
-    "outputs": [
-      "arrangement"
-    ],
-    "relations": {
-      "occupation": 4
-    }
-  },
-  "L3_F7852": {
-    "primary": "occupation",
-    "confidence": 0.6,
-    "hits": 10,
-    "entity_count": 4,
-    "entities": [
-      "Bob Thompson (pianist)",
-      "Carl Mayotte",
-      "Daniela Padr\u00f3n",
-      "Kapil Kapilan"
-    ],
-    "outputs": [
-      "arrangement"
-    ],
-    "relations": {
-      "occupation": 6,
-      "country_leader": 3,
-      "wn:hypernym": 1
-    }
-  },
-  "L3_F3252": {
-    "primary": "occupation",
-    "confidence": 1.0,
-    "hits": 2,
-    "entity_count": 2,
-    "entities": [
-      "Killing of Samantha Woll",
-      "Samantha Woll"
-    ],
-    "outputs": [
-      "agree"
-    ],
-    "relations": {
-      "occupation": 2
-    }
-  },
-  "L12_F6710": {
-    "primary": "occupation",
-    "confidence": 1.0,
-    "hits": 2,
-    "entity_count": 2,
-    "entities": [
-      "Killing of Samantha Woll",
-      "Samantha Woll"
-    ],
-    "outputs": [
-      "downtown"
-    ],
-    "relations": {
-      "occupation": 2
-    }
-  },
-  "L7_F7393": {
-    "primary": "occupation",
-    "confidence": 0.6,
-    "hits": 15,
-    "entity_count": 3,
-    "entities": [
-      "Abhishek Nath",
-      "Badr Mohammed Al Meer",
-      "Jay S. Cohen"
-    ],
-    "outputs": [
-      "executive"
-    ],
-    "relations": {
-      "occupation": 9,
-      "founder": 6
-    }
-  },
-  "L4_F2600": {
-    "primary": "occupation",
-    "confidence": 1.0,
-    "hits": 5,
-    "entity_count": 5,
-    "entities": [
-      "Abhishek Nath",
-      "Badr Mohammed Al Meer",
-      "Jay S. Cohen",
-      "Phil de Young",
-      "Thomas E. Moore"
-    ],
-    "outputs": [
-      "officer"
-    ],
-    "relations": {
-      "occupation": 5
-    }
-  },
-  "L0_F8442": {
-    "primary": "occupation",
-    "confidence": 1.0,
-    "hits": 3,
-    "entity_count": 3,
-    "entities": [
-      "Jacques Yvon Ndolou",
-      "Lizzy Ashcroft",
-      "Wilfrid Mbapp\u00e9"
-    ],
-    "outputs": [
-      "football"
-    ],
-    "relations": {
-      "occupation": 3
-    }
-  },
-  "L11_F3819": {
-    "primary": "occupation",
-    "confidence": 1.0,
-    "hits": 2,
-    "entity_count": 1,
-    "entities": [
-      "Magomed Torijev"
-    ],
-    "outputs": [
-      "committee"
-    ],
-    "relations": {
-      "occupation": 2
-    }
-  },
-  "L12_F2927": {
-    "primary": "developer",
-    "confidence": 0.618,
-    "hits": 68,
-    "entity_count": 14,
-    "entities": [
-      "Bass Pro Shops: The Strike",
-      "Beecarbonize",
-      "Bejeweled Blitz",
-      "Joe Danger",
-      "Joe Danger 2: The Movie",
-      "Joe Danger Infinity",
-      "Karate Phants: Gloves of Glory",
-      "Laser Squad",
-      "MechWarrior 5: Mercenaries",
-      "Need for Speed: Undercover",
-      "No Man's Sky",
-      "Sleeping Dogs (video game)",
-      "The Last Campfire",
-      "Titan Quest II"
-    ],
-    "outputs": [
-      "games"
-    ],
-    "relations": {
-      "developer": 42,
-      "manufacturer": 12,
-      "book_series": 3,
-      "subsidiary": 3,
-      "designer": 3,
-      "music_era": 2,
-      "occupation": 1,
-      "genre": 1,
-      "instrument": 1
-    }
-  },
-  "L2_F1131": {
-    "primary": "instrument",
-    "confidence": 0.667,
-    "hits": 3,
-    "entity_count": 1,
-    "entities": [
-      "Christopher Willits"
-    ],
-    "outputs": [
-      "computer"
-    ],
-    "relations": {
-      "instrument": 2,
-      "occupation": 1
-    }
-  },
-  "L4_F2773": {
-    "primary": "occupation",
-    "confidence": 1.0,
-    "hits": 3,
-    "entity_count": 3,
-    "entities": [
-      "Elmo Jayawardena",
-      "Fred J. Wiseman",
-      "Stephen Kiggundu"
-    ],
-    "outputs": [
-      "pilot"
-    ],
-    "relations": {
-      "occupation": 3
-    }
-  },
-  "L4_F9912": {
-    "primary": "occupation",
-    "confidence": 1.0,
-    "hits": 2,
-    "entity_count": 1,
-    "entities": [
-      "Anthony V. Lupo"
-    ],
-    "outputs": [
-      "arent"
-    ],
-    "relations": {
-      "occupation": 2
-    }
-  },
-  "L0_F6935": {
-    "primary": "birthplace",
-    "confidence": 1.0,
-    "hits": 2,
-    "entity_count": 2,
-    "entities": [
-      "CKay",
-      "Chilufya Tayali"
-    ],
-    "outputs": [
-      "kaduna",
-      "zambia"
-    ],
-    "relations": {
-      "birthplace": 2
-    }
-  },
-  "L5_F6647": {
-    "primary": "starring",
-    "confidence": 0.667,
-    "hits": 3,
-    "entity_count": 2,
-    "entities": [
-      "Hearts and Hari",
-      "Remember, Hari"
-    ],
-    "outputs": [
-      "park"
-    ],
-    "relations": {
-      "starring": 2,
-      "birthplace": 1
-    }
-  },
-  "L12_F8088": {
-    "primary": "birthplace",
-    "confidence": 0.6,
-    "hits": 5,
-    "entity_count": 3,
-    "entities": [
-      "Abhishek Porel",
-      "Alpesh Ramjani",
-      "Ashok Vaswani"
-    ],
-    "outputs": [
-      "india"
-    ],
-    "relations": {
-      "birthplace": 3,
-      "nationality": 2
-    }
-  },
-  "L12_F3970": {
-    "primary": "birthplace",
-    "confidence": 1.0,
-    "hits": 2,
-    "entity_count": 2,
-    "entities": [
-      "Erick Zambrano",
-      "Torsak Sukvimol"
-    ],
-    "outputs": [
-      "province"
-    ],
-    "relations": {
-      "birthplace": 2
-    }
-  },
-  "L12_F7927": {
-    "primary": "birthplace",
-    "confidence": 1.0,
-    "hits": 2,
-    "entity_count": 2,
-    "entities": [
-      "D. Del Reverda-Jennings",
-      "Emily Schrader"
-    ],
-    "outputs": [
-      "states"
-    ],
-    "relations": {
-      "birthplace": 2
-    }
-  },
-  "L1_F10195": {
-    "primary": "olympic_sport",
-    "confidence": 0.571,
-    "hits": 7,
-    "entity_count": 4,
-    "entities": [
-      "Ian Thorpe",
-      "Katie Ledecky",
-      "Mark Spitz",
-      "Michael Phelps"
-    ],
-    "outputs": [
-      "swimming"
-    ],
-    "relations": {
-      "olympic_sport": 4,
-      "birthplace": 2,
-      "nationality": 1
-    }
-  },
-  "L1_F561": {
-    "primary": "nationality",
-    "confidence": 0.571,
-    "hits": 7,
-    "entity_count": 4,
-    "entities": [
-      "Karol Basz",
-      "Krzysztof Rogowski (boxer)",
-      "Mateusz Szersze\u0144",
-      "Piotr Prusakiewicz"
-    ],
-    "outputs": [
-      "poland",
-      "polish"
-    ],
-    "relations": {
-      "nationality": 4,
-      "birthplace": 1,
-      "player_nationality": 1,
-      "cuisine_origin": 1
-    }
-  },
-  "L2_F2895": {
-    "primary": "developer",
-    "confidence": 0.667,
-    "hits": 3,
-    "entity_count": 1,
-    "entities": [
-      "IBM Spectrum LSF"
-    ],
-    "outputs": [
-      "computing"
-    ],
-    "relations": {
-      "developer": 2,
-      "deathplace": 1
-    }
-  },
-  "L8_F6345": {
-    "primary": "subsidiary",
-    "confidence": 0.6,
-    "hits": 5,
-    "entity_count": 1,
-    "entities": [
-      "Cambridge Assessment English"
-    ],
-    "outputs": [
-      "language"
-    ],
-    "relations": {
-      "subsidiary": 3,
-      "nationality": 2
-    }
-  },
-  "L7_F1654": {
-    "primary": "nationality",
-    "confidence": 0.75,
-    "hits": 4,
-    "entity_count": 3,
-    "entities": [
-      "Elizabeth Legge",
-      "Katherine Priddy",
-      "William Peckham (landowner)"
-    ],
-    "outputs": [
-      "england"
-    ],
-    "relations": {
-      "nationality": 3,
-      "religion": 1
-    }
-  },
-  "L8_F2678": {
-    "primary": "instrument",
-    "confidence": 0.667,
-    "hits": 6,
-    "entity_count": 3,
-    "entities": [
-      "Andy Irvine (musician)",
-      "Brian McNeill",
-      "The Trials of Cato"
-    ],
-    "outputs": [
-      "irish"
-    ],
-    "relations": {
-      "instrument": 4,
-      "nationality": 2
-    }
-  },
-  "L11_F2316": {
-    "primary": "subsidiary",
-    "confidence": 0.75,
-    "hits": 4,
-    "entity_count": 1,
-    "entities": [
-      "Ole Distribution"
-    ],
-    "outputs": [
-      "history"
-    ],
-    "relations": {
-      "subsidiary": 3,
-      "nationality": 1
-    }
-  },
-  "L9_F5985": {
-    "primary": "nationality",
-    "confidence": 1.0,
-    "hits": 2,
-    "entity_count": 1,
-    "entities": [
-      "Edward Red Eagle"
-    ],
-    "outputs": [
-      "nation"
-    ],
-    "relations": {
-      "nationality": 2
-    }
-  },
-  "L12_F8600": {
-    "primary": "spouse",
-    "confidence": 1.0,
-    "hits": 3,
-    "entity_count": 1,
-    "entities": [
-      "May Romm"
-    ],
-    "outputs": [
-      "alexis"
-    ],
-    "relations": {
-      "spouse": 3
-    }
-  },
-  "L1_F5578": {
-    "primary": "spouse",
-    "confidence": 0.667,
-    "hits": 6,
-    "entity_count": 2,
-    "entities": [
-      "George Hough Bucher",
-      "Ulu Aiono"
-    ],
-    "outputs": [
-      "name"
-    ],
-    "relations": {
-      "spouse": 4,
-      "ts:type_alias": 1,
-      "python:def": 1
-    }
-  },
-  "L1_F7144": {
-    "primary": "manufacturer",
-    "confidence": 0.675,
-    "hits": 40,
-    "entity_count": 27,
-    "entities": [
-      "Cruise-O-Matic",
-      "Ford 335 engine",
-      "Ford AOD transmission",
-      "Ford Bronco",
-      "Ford C4 transmission",
-      "Ford C6 transmission",
-      "Ford Cargo",
-      "Ford Contour",
-      "Ford DN5 platform",
-      "Ford Duratec V6 engine",
-      "Ford Expedition",
-      "Ford F-150 Lightning Rod",
-      "Ford HSC engine",
-      "Ford Mighty F-350",
-      "Ford Model U",
-      "Ford Mondeo (fifth generation)",
-      "Ford Mondeo (first generation)",
-      "Ford Mondeo Sport",
-      "Ford Probe",
-      "Ford Ranger (T6)"
-    ],
-    "outputs": [
-      "ford"
-    ],
-    "relations": {
-      "manufacturer": 27,
-      "designer": 4,
-      "spouse": 2,
-      "founder": 2,
-      "subsidiary": 2,
-      "inventor": 2,
-      "architect": 1
-    }
-  },
-  "L4_F576": {
-    "primary": "spouse",
-    "confidence": 1.0,
-    "hits": 3,
-    "entity_count": 3,
-    "entities": [
-      "Bridget Dowling",
-      "Ernst Florian Winter",
-      "William Chapman Potter"
-    ],
-    "outputs": [
-      "family"
-    ],
-    "relations": {
-      "spouse": 3
-    }
-  },
-  "L3_F9855": {
-    "primary": "instrument",
-    "confidence": 0.571,
-    "hits": 7,
-    "entity_count": 2,
-    "entities": [
-      "Y2K (music producer)",
-      "Y2K (record producer)"
-    ],
-    "outputs": [
-      "live"
-    ],
-    "relations": {
-      "instrument": 4,
-      "spouse": 3
-    }
-  },
-  "L2_F504": {
-    "primary": "spouse",
-    "confidence": 1.0,
-    "hits": 2,
-    "entity_count": 2,
-    "entities": [
-      "Anne Bowes-Lyon",
-      "Countess Emilia of Nassau"
-    ],
-    "outputs": [
-      "prince"
-    ],
-    "relations": {
-      "spouse": 2
-    }
-  },
-  "L2_F8483": {
-    "primary": "spouse",
-    "confidence": 1.0,
-    "hits": 2,
-    "entity_count": 1,
-    "entities": [
-      "Elke Breitenbach"
-    ],
-    "outputs": [
-      "nord"
-    ],
-    "relations": {
-      "spouse": 2
-    }
-  },
-  "L8_F7755": {
-    "primary": "spouse",
-    "confidence": 1.0,
-    "hits": 5,
-    "entity_count": 2,
-    "entities": [
-      "D\u00e9sir\u00e9e Nosbusch",
-      "Ethel-Michele de Villiers"
-    ],
-    "outputs": [
-      "harald"
-    ],
-    "relations": {
-      "spouse": 5
-    }
-  },
-  "L5_F5941": {
-    "primary": "spouse",
-    "confidence": 0.609,
-    "hits": 23,
-    "entity_count": 5,
-    "entities": [
-      "Ada of Scotland",
-      "Ada, Countess of Holland",
-      "Adelaide of Guelders",
-      "Amalie of Brandenburg",
-      "Elisabeth of Hesse-Marburg"
-    ],
-    "outputs": [
-      "count"
-    ],
-    "relations": {
-      "spouse": 14,
-      "book_character": 3,
-      "wn:hypernym": 2,
-      "wn:derivation": 1,
-      "python:call": 1,
-      "rs:function_def": 1,
-      "rs:variable_bind": 1
-    }
-  },
-  "L10_F4154": {
-    "primary": "painter",
-    "confidence": 0.667,
-    "hits": 3,
-    "entity_count": 1,
-    "entities": [
-      "Girl with a Pearl Earring"
-    ],
-    "outputs": [
-      "johannes"
-    ],
-    "relations": {
-      "painter": 2,
-      "spouse": 1
-    }
-  },
-  "L3_F9903": {
-    "primary": "historical_figure",
-    "confidence": 0.8,
-    "hits": 5,
-    "entity_count": 4,
-    "entities": [
-      "Cleopatra",
-      "Hatshepsut",
-      "Ramesses II",
-      "Saladin"
-    ],
-    "outputs": [
-      "egypt"
-    ],
-    "relations": {
-      "historical_figure": 4,
-      "spouse": 1
-    }
-  },
-  "L11_F5268": {
-    "primary": "spouse",
-    "confidence": 0.667,
-    "hits": 3,
-    "entity_count": 1,
-    "entities": [
-      "Galeazzo Maria Sforza"
-    ],
-    "outputs": [
-      "bona"
-    ],
-    "relations": {
-      "spouse": 2,
-      "wn:synonym": 1
-    }
-  },
-  "L10_F2673": {
-    "primary": "developer",
-    "confidence": 0.55,
-    "hits": 109,
-    "entity_count": 20,
-    "entities": [
-      "Android Pay",
-      "Bigtable",
-      "Chrome Remote Desktop",
-      "ChromiumOS",
-      "Cilium (computing)",
-      "Cpplint",
-      "Doodle Champion Island Games",
-      "Google Authenticator",
-      "Google Desktop",
-      "Google Docs Editors",
-      "Google Now",
-      "Google Pinyin",
-      "Google Toolbar",
-      "Google Wallet",
-      "Google Web Server",
-      "LevelDB",
-      "Lmctfy",
-      "Nearby Share",
-      "Read Along",
-      "Tables (Google)"
-    ],
-    "outputs": [
-      "google"
-    ],
-    "relations": {
-      "developer": 60,
-      "religion": 21,
-      "framework": 12,
-      "operating_system": 6,
-      "founder": 3,
-      "subsidiary": 3,
-      "manufacturer": 3,
-      "wn:derivation": 1
-    }
-  },
-  "L4_F7113": {
-    "primary": "religion",
-    "confidence": 1.0,
-    "hits": 3,
-    "entity_count": 3,
-    "entities": [
-      "Bishop Westcott Girls' School",
-      "Frederick Buckley Newell",
-      "Irob people"
-    ],
-    "outputs": [
-      "church"
-    ],
-    "relations": {
-      "religion": 3
-    }
-  },
-  "L3_F2525": {
-    "primary": "academic_field",
-    "confidence": 0.667,
-    "hits": 3,
-    "entity_count": 1,
-    "entities": [
-      "Caltech"
-    ],
-    "outputs": [
-      "physics"
-    ],
-    "relations": {
-      "academic_field": 2,
-      "award": 1
+      "occupation": 7
     }
   },
   "L12_F9270": {
@@ -1451,85 +48,6 @@
       "award": 2
     }
   },
-  "L2_F9908": {
-    "primary": "party",
-    "confidence": 0.8,
-    "hits": 10,
-    "entity_count": 8,
-    "entities": [
-      "Armoogum Parsooraman",
-      "Armoogum Parsuramen",
-      "Choong Shiau Yoon",
-      "Daroyah Alwi",
-      "Haniza Mohamed Talha",
-      "Kailash Ruhee",
-      "Larry Sng",
-      "Mohd Nasir Hashim"
-    ],
-    "outputs": [
-      "parti"
-    ],
-    "relations": {
-      "party": 8,
-      "wn:derivation": 2
-    }
-  },
-  "L2_F7094": {
-    "primary": "party",
-    "confidence": 1.0,
-    "hits": 5,
-    "entity_count": 5,
-    "entities": [
-      "Abdul Rashid Asari",
-      "Afif Bahardin",
-      "Azmin Ali",
-      "Khir Toyo",
-      "Noorazley Yahya"
-    ],
-    "outputs": [
-      "indigenous"
-    ],
-    "relations": {
-      "party": 5
-    }
-  },
-  "L8_F10097": {
-    "primary": "developer",
-    "confidence": 0.571,
-    "hits": 7,
-    "entity_count": 3,
-    "entities": [
-      "Europa Universalis III",
-      "Spec Ops: The Line",
-      "Yager"
-    ],
-    "outputs": [
-      "development"
-    ],
-    "relations": {
-      "developer": 4,
-      "party": 1,
-      "subsidiary": 1,
-      "wn:hypernym": 1
-    }
-  },
-  "L10_F4612": {
-    "primary": "party",
-    "confidence": 1.0,
-    "hits": 3,
-    "entity_count": 3,
-    "entities": [
-      "Jo\u00e3o Franco",
-      "Trinitario Ruiz Valarino",
-      "\u00c1ngel Urzaiz"
-    ],
-    "outputs": [
-      "liberal"
-    ],
-    "relations": {
-      "party": 3
-    }
-  },
   "L11_F9820": {
     "primary": "party",
     "confidence": 0.963,
@@ -1542,156 +60,13 @@
       "morph:nominalization": 1
     }
   },
-  "L0_F9685": {
-    "primary": "party",
-    "confidence": 1.0,
-    "hits": 11,
-    "entity_count": 11,
-    "entities": [
-      "Ernst Graf zu Reventlow",
-      "Friedrich Hildebrandt",
-      "Gisela Elsner",
-      "Herbert Czaja",
-      "Herbert Mies",
-      "Julius Streicher",
-      "Karl Holz (Nazi)",
-      "Kurt Bachmann (politician)",
-      "Ludwig Quidde",
-      "Max Reimann",
-      "Otto Strasser"
-    ],
-    "outputs": [
-      "german"
-    ],
-    "relations": {
-      "party": 11
-    }
-  },
-  "L7_F6337": {
-    "primary": "party",
-    "confidence": 1.0,
-    "hits": 2,
-    "entity_count": 1,
-    "entities": [
-      "Michael Tien"
-    ],
-    "outputs": [
-      "roundtable"
-    ],
-    "relations": {
-      "party": 2
-    }
-  },
-  "L11_F4677": {
-    "primary": "party",
-    "confidence": 1.0,
-    "hits": 3,
-    "entity_count": 3,
-    "entities": [
-      "Gabriel Bornoroni",
-      "Manuel Adorni",
-      "Sandra Pettovello"
-    ],
-    "outputs": [
-      "libertad"
-    ],
-    "relations": {
-      "party": 3
-    }
-  },
-  "L6_F5310": {
-    "primary": "party",
-    "confidence": 0.6,
-    "hits": 5,
-    "entity_count": 3,
-    "entities": [
-      "Andrew Jenner",
-      "Craig Garland",
-      "Rebekah Pentland"
-    ],
-    "outputs": [
-      "network"
-    ],
-    "relations": {
-      "party": 3,
-      "developer": 2
-    }
-  },
-  "L6_F4165": {
-    "primary": "party",
-    "confidence": 1.0,
-    "hits": 2,
-    "entity_count": 2,
-    "entities": [
-      "Angelo Tsirekas",
-      "Julius Streicher"
-    ],
-    "outputs": [
-      "community"
-    ],
-    "relations": {
-      "party": 2
-    }
-  },
-  "L12_F2778": {
-    "primary": "party",
-    "confidence": 1.0,
-    "hits": 2,
-    "entity_count": 2,
-    "entities": [
-      "Etim Jack Okpoyo",
-      "Ibrahim Shekarau"
-    ],
-    "outputs": [
-      "peoples"
-    ],
-    "relations": {
-      "party": 2
-    }
-  },
-  "L12_F6280": {
-    "primary": "party",
-    "confidence": 1.0,
-    "hits": 2,
-    "entity_count": 1,
-    "entities": [
-      "Natalia Davidovici"
-    ],
-    "outputs": [
-      "solidarity"
-    ],
-    "relations": {
-      "party": 2
-    }
-  },
   "L9_F1251": {
-    "primary": "subsidiary",
-    "confidence": 0.6,
-    "hits": 5,
-    "entity_count": 1,
-    "entities": [
-      "Minute Maid"
-    ],
-    "outputs": [
-      "simply"
-    ],
-    "relations": {
-      "subsidiary": 3,
-      "party": 2
-    }
-  },
-  "L3_F7745": {
     "primary": "party",
     "confidence": 1.0,
     "hits": 2,
-    "entity_count": 2,
-    "entities": [
-      "Jorge Rafael Videla",
-      "Roberto Eduardo Viola"
-    ],
-    "outputs": [
-      "navy"
-    ],
+    "entity_count": 0,
+    "entities": [],
+    "outputs": [],
     "relations": {
       "party": 2
     }
@@ -1711,1845 +86,17 @@
       "designer": 2
     }
   },
-  "L6_F4898": {
-    "primary": "league",
-    "confidence": 0.938,
-    "hits": 320,
-    "entity_count": 140,
-    "entities": [
-      "1981\u201382 Gillingham F.C. season",
-      "1982\u201383 Gillingham F.C. season",
-      "1983\u201384 Gillingham F.C. season",
-      "2002\u201303 K.R.C. Genk season",
-      "2002\u201303 KRC Genk season",
-      "2014 Arsenal L.F.C. season",
-      "2015 Arsenal L.F.C. season",
-      "2015 Persebaya Surabaya season",
-      "2015\u201316 K.A.A. Gent season",
-      "2015\u201316 KAA Gent season",
-      "2017\u201318 K.A.A. Gent season",
-      "2017\u201318 KAA Gent season",
-      "2018\u201319 K.R.C. Genk season",
-      "2018\u201319 KRC Genk season",
-      "2019\u201320 K.A.A. Gent season",
-      "2019\u201320 K.R.C. Genk season",
-      "2019\u201320 KAA Gent season",
-      "2019\u201320 KRC Genk season",
-      "2020\u201321 K.A.A. Gent season",
-      "2020\u201321 K.R.C. Genk season"
-    ],
-    "outputs": [
-      "league",
-      "ligue"
-    ],
-    "relations": {
-      "league": 300,
-      "championship": 8,
-      "subsidiary": 6,
-      "founder": 2,
-      "party": 1,
-      "team": 1,
-      "morph:adverb": 1,
-      "rs:function_def": 1
-    }
-  },
-  "L1_F4061": {
-    "primary": "position",
-    "confidence": 1.0,
-    "hits": 3,
-    "entity_count": 3,
-    "entities": [
-      "Angela Merkel",
-      "Helmut Kohl",
-      "Willy Brandt"
-    ],
-    "outputs": [
-      "chancellor"
-    ],
-    "relations": {
-      "position": 3
-    }
-  },
-  "L2_F146": {
-    "primary": "position",
-    "confidence": 1.0,
-    "hits": 9,
-    "entity_count": 9,
-    "entities": [
-      "Abraham Lincoln",
-      "Barack Obama",
-      "Charles de Gaulle",
-      "Fidel Castro",
-      "Franklin D. Roosevelt",
-      "George Washington",
-      "Nelson Mandela",
-      "Ronald Reagan",
-      "Theodore Roosevelt"
-    ],
-    "outputs": [
-      "president"
-    ],
-    "relations": {
-      "position": 9
-    }
-  },
-  "L3_F9103": {
-    "primary": "position",
-    "confidence": 1.0,
-    "hits": 2,
-    "entity_count": 2,
-    "entities": [
-      "Joseph Stalin",
-      "Mikhail Gorbachev"
-    ],
-    "outputs": [
-      "general"
-    ],
-    "relations": {
-      "position": 2
-    }
-  },
-  "L0_F123": {
-    "primary": "founder",
-    "confidence": 0.667,
-    "hits": 3,
-    "entity_count": 2,
-    "entities": [
-      "Mohamed Bin Hamad Holding",
-      "Muwatin Media Network"
-    ],
-    "outputs": [
-      "mohammed"
-    ],
-    "relations": {
-      "founder": 2,
-      "country_leader": 1
-    }
-  },
-  "L12_F8932": {
-    "primary": "player_position",
-    "confidence": 0.667,
-    "hits": 3,
-    "entity_count": 1,
-    "entities": [
-      "Diego Maradona"
-    ],
-    "outputs": [
-      "attacking"
-    ],
-    "relations": {
-      "player_position": 2,
-      "cabinet_position": 1
-    }
-  },
-  "L5_F1197": {
-    "primary": "genre",
-    "confidence": 1.0,
-    "hits": 6,
-    "entity_count": 6,
-    "entities": [
-      "Andy Irvine (musician)",
-      "Inyal",
-      "Jako (song)",
-      "Jamie Webster",
-      "Rolling Down to Rio",
-      "The Moon Shines Bright"
-    ],
-    "outputs": [
-      "folk"
-    ],
-    "relations": {
-      "genre": 6
-    }
-  },
-  "L2_F7921": {
-    "primary": "genre",
-    "confidence": 1.0,
-    "hits": 20,
-    "entity_count": 10,
-    "entities": [
-      "Carol Ventura",
-      "Christian Gates",
-      "Dance the Night",
-      "DeathbyRomy",
-      "Ellise",
-      "Korolova (DJ)",
-      "Nessa Barrett",
-      "Not My Fault (song)",
-      "The Music's Got Me!",
-      "Toki Yo Tomare"
-    ],
-    "outputs": [
-      "styles"
-    ],
-    "relations": {
-      "genre": 20
-    }
-  },
-  "L0_F2608": {
-    "primary": "genre",
-    "confidence": 1.0,
-    "hits": 2,
-    "entity_count": 1,
-    "entities": [
-      "XiRCON"
-    ],
-    "outputs": [
-      "irc"
-    ],
-    "relations": {
-      "genre": 2
-    }
-  },
-  "L5_F2814": {
-    "primary": "genre",
-    "confidence": 1.0,
-    "hits": 2,
-    "entity_count": 1,
-    "entities": [
-      "XiRCON"
-    ],
-    "outputs": [
-      "irc"
-    ],
-    "relations": {
-      "genre": 2
-    }
-  },
-  "L6_F3256": {
-    "primary": "genre",
-    "confidence": 1.0,
-    "hits": 3,
-    "entity_count": 1,
-    "entities": [
-      "Vinitha"
-    ],
-    "outputs": [
-      "book"
-    ],
-    "relations": {
-      "genre": 3
-    }
-  },
-  "L6_F9410": {
-    "primary": "genre",
-    "confidence": 0.667,
-    "hits": 6,
-    "entity_count": 3,
-    "entities": [
-      "BET Presents: The Encore",
-      "Binibini",
-      "MTV Hustle Namma Pettai"
-    ],
-    "outputs": [
-      "music"
-    ],
-    "relations": {
-      "genre": 4,
-      "manufacturer": 2
-    }
-  },
-  "L0_F8273": {
-    "primary": "developer",
-    "confidence": 0.625,
-    "hits": 32,
-    "entity_count": 10,
-    "entities": [
-      "Cube: 3D Puzzle Mayhem",
-      "Full Auto",
-      "Howrse",
-      "Hugo (video game)",
-      "MySims SkyHeroes",
-      "Naughty Bear",
-      "Scrabble (video game)",
-      "Scrabble video games",
-      "Vectorman 3",
-      "XDefiant"
-    ],
-    "outputs": [
-      "interactive"
-    ],
-    "relations": {
-      "developer": 20,
-      "genre": 12
-    }
-  },
-  "L11_F638": {
-    "primary": "genre",
-    "confidence": 0.816,
-    "hits": 49,
-    "entity_count": 24,
-    "entities": [
-      "Akka Arrh",
-      "Austin Powers: Oh, Behave!",
-      "Battle Bay",
-      "Bentley's Hackpack",
-      "Dogfight 1942",
-      "Dragon's Lair (GBC video game)",
-      "Field Guide to Memory",
-      "Gene Shift Auto",
-      "Heart: The City Beneath",
-      "Lego Fortnite",
-      "LifeAfter",
-      "Looping (video game)",
-      "Picnic Paranoia",
-      "Picnic Paranoia (video game)",
-      "Run for the Money (video game)",
-      "Shift (series)",
-      "Silica (video game)",
-      "Space Ace (SNES video game)",
-      "Squabble (video game)",
-      "Steel Assault"
-    ],
-    "outputs": [
-      "game"
-    ],
-    "relations": {
-      "genre": 40,
-      "designer": 3,
-      "subsidiary": 2,
-      "developer": 2,
-      "wn:hypernym": 2
-    }
-  },
-  "L10_F657": {
-    "primary": "genre",
-    "confidence": 1.0,
-    "hits": 2,
-    "entity_count": 1,
-    "entities": [
-      "Journal (Apple)"
-    ],
-    "outputs": [
-      "journal"
-    ],
-    "relations": {
-      "genre": 2
-    }
-  },
-  "L2_F1867": {
-    "primary": "industry",
-    "confidence": 0.8,
-    "hits": 5,
-    "entity_count": 2,
-    "entities": [
-      "McDonald's",
-      "Nestle"
-    ],
-    "outputs": [
-      "food"
-    ],
-    "relations": {
-      "industry": 4,
-      "genre": 1
-    }
-  },
-  "L6_F5781": {
-    "primary": "genre",
-    "confidence": 0.571,
-    "hits": 7,
-    "entity_count": 2,
-    "entities": [
-      "Cycling on CBS",
-      "Cycling on NBC"
-    ],
-    "outputs": [
-      "stage"
-    ],
-    "relations": {
-      "genre": 4,
-      "manufacturer": 2,
-      "wn:derivation": 1
-    }
-  },
-  "L4_F486": {
-    "primary": "genre",
-    "confidence": 0.667,
-    "hits": 3,
-    "entity_count": 1,
-    "entities": [
-      "Sambre - Anatomy of a Crime"
-    ],
-    "outputs": [
-      "true"
-    ],
-    "relations": {
-      "genre": 2,
-      "ts:extends_cls": 1
-    }
-  },
-  "L0_F3601": {
-    "primary": "company_revenue",
-    "confidence": 0.647,
-    "hits": 17,
-    "entity_count": 9,
-    "entities": [
-      "Alphabet",
-      "Amazon",
-      "ExxonMobil",
-      "JPMorgan Chase",
-      "Sinopec",
-      "Toyota",
-      "UnitedHealth",
-      "Volkswagen",
-      "Walmart"
-    ],
-    "outputs": [
-      "revenue"
-    ],
-    "relations": {
-      "company_revenue": 11,
-      "instrument": 5,
-      "film_genre": 1
-    }
-  },
-  "L0_F850": {
-    "primary": "instrument",
-    "confidence": 1.0,
-    "hits": 13,
-    "entity_count": 13,
-    "entities": [
-      "Alexander B\u0103l\u0103nescu",
-      "Alma Ros\u00e9",
-      "Charlie Burchill",
-      "Daniela Padr\u00f3n",
-      "Erkan O\u011fur",
-      "Julian Rachlin",
-      "Kishi Bashi",
-      "Mik Kaminski",
-      "Paul Kowert",
-      "Sammy Cahn",
-      "Svetlana Surganova",
-      "Thomas Bergersen",
-      "Viktoria Mullova"
-    ],
-    "outputs": [
-      "violin"
-    ],
-    "relations": {
-      "instrument": 13
-    }
-  },
-  "L2_F5878": {
-    "primary": "instrument",
-    "confidence": 1.0,
-    "hits": 18,
-    "entity_count": 9,
-    "entities": [
-      "Ahmed Abdul-Malik",
-      "Arild Andersen",
-      "Curley Russell",
-      "Henry Strzelecki",
-      "John Clayton (bassist)",
-      "Miles Mosley",
-      "Orlando \"Cacha\u00edto\" L\u00f3pez",
-      "Paul Kowert",
-      "Steve Brown (bass player)"
-    ],
-    "outputs": [
-      "double"
-    ],
-    "relations": {
-      "instrument": 18
-    }
-  },
-  "L0_F8993": {
-    "primary": "league",
-    "confidence": 0.919,
-    "hits": 74,
-    "entity_count": 34,
-    "entities": [
-      "1981 CR Flamengo season",
-      "1990 Santos FC season",
-      "2009 CR Flamengo season",
-      "2009 Cruzeiro EC season",
-      "2012 Cruzeiro EC season",
-      "2016 Cruzeiro EC season",
-      "2017 Cruzeiro EC season",
-      "2018 CR Flamengo season",
-      "2018 Cruzeiro EC season",
-      "2019 CR Flamengo season",
-      "2019 Cruzeiro EC season",
-      "2020 CR Flamengo season",
-      "2021 CR Flamengo season",
-      "2022 Botafogo FR season",
-      "2022 CR Flamengo season",
-      "2023 CR Flamengo season",
-      "2023 Clube do Remo season",
-      "2023 Cruzeiro EC season",
-      "2023 Gr\u00eamio FBPA season",
-      "2023 SE Palmeiras season"
-    ],
-    "outputs": [
-      "s\u00e9rie"
-    ],
-    "relations": {
-      "league": 68,
-      "instrument": 6
-    }
-  },
-  "L11_F6518": {
-    "primary": "instrument",
-    "confidence": 0.583,
-    "hits": 12,
-    "entity_count": 3,
-    "entities": [
-      "Chutney parang",
-      "Dominica Verges",
-      "Elitsa Todorova"
-    ],
-    "outputs": [
-      "claves"
-    ],
-    "relations": {
-      "instrument": 7,
-      "team": 3,
-      "producer_artist": 1,
-      "tv_network": 1
-    }
-  },
-  "L1_F9338": {
-    "primary": "band_member",
-    "confidence": 1.0,
-    "hits": 2,
-    "entity_count": 1,
-    "entities": [
-      "U2"
-    ],
-    "outputs": [
-      "edge"
-    ],
-    "relations": {
-      "band_member": 2
-    }
-  },
-  "L3_F1204": {
-    "primary": "band_member",
-    "confidence": 1.0,
-    "hits": 2,
-    "entity_count": 1,
-    "entities": [
-      "Nirvana"
-    ],
-    "outputs": [
-      "kurt"
-    ],
-    "relations": {
-      "band_member": 2
-    }
-  },
-  "L2_F8258": {
-    "primary": "founder",
-    "confidence": 0.75,
-    "hits": 4,
-    "entity_count": 3,
-    "entities": [
-      "Biv 10 Records",
-      "Liberation Music",
-      "Platinum Dunes"
-    ],
-    "outputs": [
-      "michael"
-    ],
-    "relations": {
-      "founder": 3,
-      "album_artist": 1
-    }
-  },
-  "L4_F4737": {
-    "primary": "producer_artist",
-    "confidence": 1.0,
-    "hits": 2,
-    "entity_count": 1,
-    "entities": [
-      "Danger Mouse"
-    ],
-    "outputs": [
-      "keys"
-    ],
-    "relations": {
-      "producer_artist": 2
-    }
-  },
-  "L10_F8725": {
-    "primary": "composer",
-    "confidence": 0.667,
-    "hits": 3,
-    "entity_count": 1,
-    "entities": [
-      "Young Werther"
-    ],
-    "outputs": [
-      "owen"
-    ],
-    "relations": {
-      "composer": 2,
-      "architect": 1
-    }
-  },
-  "L5_F9571": {
-    "primary": "wn:synonym",
-    "confidence": 0.8,
-    "hits": 10,
-    "entity_count": 8,
-    "entities": [
-      "angry",
-      "barbarian",
-      "furious",
-      "raging",
-      "savage",
-      "tempestuous",
-      "uncivilised",
-      "uncivilized"
-    ],
-    "outputs": [
-      "wild"
-    ],
-    "relations": {
-      "wn:synonym": 8,
-      "composer": 2
-    }
-  },
-  "L10_F6361": {
-    "primary": "composer",
-    "confidence": 1.0,
-    "hits": 3,
-    "entity_count": 1,
-    "entities": [
-      "Sugar Factory (film)"
-    ],
-    "outputs": [
-      "rafi"
-    ],
-    "relations": {
-      "composer": 3
-    }
-  },
-  "L3_F7280": {
-    "primary": "composer",
-    "confidence": 1.0,
-    "hits": 2,
-    "entity_count": 1,
-    "entities": [
-      "Blade: The Iron Cross"
-    ],
-    "outputs": [
-      "band"
-    ],
-    "relations": {
-      "composer": 2
-    }
-  },
-  "L7_F3783": {
-    "primary": "composer",
-    "confidence": 1.0,
-    "hits": 6,
-    "entity_count": 2,
-    "entities": [
-      "Sharafat Chhod Di Main Ne",
-      "Sharafat Chod Di Maine"
-    ],
-    "outputs": [
-      "madan"
-    ],
-    "relations": {
-      "composer": 6
-    }
-  },
-  "L2_F1190": {
-    "primary": "composer",
-    "confidence": 1.0,
-    "hits": 2,
-    "entity_count": 1,
-    "entities": [
-      "Out of It (1969 film)"
-    ],
-    "outputs": [
-      "small"
-    ],
-    "relations": {
-      "composer": 2
-    }
-  },
-  "L11_F8540": {
-    "primary": "director",
-    "confidence": 1.0,
-    "hits": 8,
-    "entity_count": 4,
-    "entities": [
-      "Psycho",
-      "Rear Window",
-      "The Birds",
-      "Vertigo"
-    ],
-    "outputs": [
-      "hitchcock"
-    ],
-    "relations": {
-      "director": 8
-    }
-  },
-  "L0_F674": {
-    "primary": "author",
-    "confidence": 0.667,
-    "hits": 6,
-    "entity_count": 2,
-    "entities": [
-      "Hockey is for Everybody",
-      "The Gathering (TV series)"
-    ],
-    "outputs": [
-      "walsh"
-    ],
-    "relations": {
-      "author": 4,
-      "director": 2
-    }
-  },
-  "L4_F784": {
-    "primary": "director",
-    "confidence": 0.667,
-    "hits": 3,
-    "entity_count": 1,
-    "entities": [
-      "Madness of Two"
-    ],
-    "outputs": [
-      "hugh"
-    ],
-    "relations": {
-      "director": 2,
-      "architect": 1
-    }
-  },
-  "L6_F9417": {
-    "primary": "director",
-    "confidence": 1.0,
-    "hits": 2,
-    "entity_count": 1,
-    "entities": [
-      "Hotel Silence (film)"
-    ],
-    "outputs": [
-      "pool"
-    ],
-    "relations": {
-      "director": 2
-    }
-  },
-  "L3_F1907": {
-    "primary": "director",
-    "confidence": 0.667,
-    "hits": 3,
-    "entity_count": 1,
-    "entities": [
-      "About Memory and Loss"
-    ],
-    "outputs": [
-      "hardy"
-    ],
-    "relations": {
-      "director": 2,
-      "wn:synonym": 1
-    }
-  },
-  "L11_F6612": {
-    "primary": "director",
-    "confidence": 1.0,
-    "hits": 2,
-    "entity_count": 1,
-    "entities": [
-      "Noah's Ark (2024 film)"
-    ],
-    "outputs": [
-      "machado"
-    ],
-    "relations": {
-      "director": 2
-    }
-  },
-  "L10_F6944": {
-    "primary": "director",
-    "confidence": 0.75,
-    "hits": 4,
-    "entity_count": 1,
-    "entities": [
-      "The Spirit (1987 film)"
-    ],
-    "outputs": [
-      "schultz"
-    ],
-    "relations": {
-      "director": 3,
-      "wn:synonym": 1
-    }
-  },
-  "L3_F9568": {
-    "primary": "starring",
-    "confidence": 0.667,
-    "hits": 3,
-    "entity_count": 2,
-    "entities": [
-      "Artificial (2012 film)",
-      "Artificial (film)"
-    ],
-    "outputs": [
-      "star"
-    ],
-    "relations": {
-      "starring": 2,
-      "morph:plural": 1
-    }
-  },
-  "L11_F6447": {
-    "primary": "starring",
-    "confidence": 1.0,
-    "hits": 2,
-    "entity_count": 2,
-    "entities": [
-      "Ghostlight (2024 film)",
-      "The Missing (2023 film)"
-    ],
-    "outputs": [
-      "dolly"
-    ],
-    "relations": {
-      "starring": 2
-    }
-  },
-  "L6_F2247": {
-    "primary": "starring",
-    "confidence": 1.0,
-    "hits": 2,
-    "entity_count": 2,
-    "entities": [
-      "Deceit (2021 miniseries)",
-      "The Left Behind (2019 film)"
-    ],
-    "outputs": [
-      "daniel"
-    ],
-    "relations": {
-      "starring": 2
-    }
-  },
-  "L7_F7577": {
-    "primary": "starring",
-    "confidence": 1.0,
-    "hits": 2,
-    "entity_count": 1,
-    "entities": [
-      "Anything's Possible (film)"
-    ],
-    "outputs": [
-      "reign"
-    ],
-    "relations": {
-      "starring": 2
-    }
-  },
-  "L11_F9893": {
-    "primary": "starring",
-    "confidence": 0.75,
-    "hits": 4,
-    "entity_count": 1,
-    "entities": [
-      "Tell Me Everything (TV series)"
-    ],
-    "outputs": [
-      "liang"
-    ],
-    "relations": {
-      "starring": 3,
-      "ticker": 1
-    }
-  },
-  "L1_F7562": {
-    "primary": "film_genre",
-    "confidence": 1.0,
-    "hits": 3,
-    "entity_count": 3,
-    "entities": [
-      "Psycho",
-      "The Exorcist",
-      "The Shining"
-    ],
-    "outputs": [
-      "horror"
-    ],
-    "relations": {
-      "film_genre": 3
-    }
-  },
-  "L0_F2997": {
-    "primary": "film_studio",
-    "confidence": 0.667,
-    "hits": 6,
-    "entity_count": 4,
-    "entities": [
-      "E.T.",
-      "Fast and Furious",
-      "Jaws",
-      "Jurassic Park"
-    ],
-    "outputs": [
-      "universal"
-    ],
-    "relations": {
-      "film_studio": 4,
-      "developer": 2
-    }
-  },
-  "L7_F762": {
-    "primary": "subsidiary",
-    "confidence": 0.667,
-    "hits": 3,
-    "entity_count": 2,
-    "entities": [
-      "Rochester Regional Health",
-      "Streamtech"
-    ],
-    "outputs": [
-      "system"
-    ],
-    "relations": {
-      "subsidiary": 2,
-      "tv_network": 1
-    }
-  },
-  "L4_F5117": {
-    "primary": "screenwriter",
-    "confidence": 1.0,
-    "hits": 3,
-    "entity_count": 1,
-    "entities": [
-      "Parasite"
-    ],
-    "outputs": [
-      "bong"
-    ],
-    "relations": {
-      "screenwriter": 3
-    }
-  },
-  "L7_F2976": {
-    "primary": "film_award",
-    "confidence": 0.957,
-    "hits": 46,
-    "entity_count": 17,
-    "entities": [
-      "12 Years a Slave",
-      "Annie Hall",
-      "Birdman",
-      "Casablanca",
-      "Forrest Gump",
-      "Gone with the Wind",
-      "Moonlight",
-      "No Country for Old Men",
-      "Nomadland",
-      "Oppenheimer",
-      "Parasite",
-      "Rocky",
-      "Schindler's List",
-      "The Godfather",
-      "The Hurt Locker",
-      "The Silence of the Lambs",
-      "Titanic"
-    ],
-    "outputs": [
-      "best"
-    ],
-    "relations": {
-      "film_award": 44,
-      "wn:hypernym": 1,
-      "wn:third_person": 1
-    }
-  },
-  "L7_F104": {
-    "primary": "film_award",
-    "confidence": 0.974,
-    "hits": 39,
-    "entity_count": 17,
-    "entities": [
-      "12 Years a Slave",
-      "Annie Hall",
-      "Birdman",
-      "Casablanca",
-      "Forrest Gump",
-      "Gone with the Wind",
-      "Moonlight",
-      "No Country for Old Men",
-      "Nomadland",
-      "Oppenheimer",
-      "Parasite",
-      "Rocky",
-      "Schindler's List",
-      "The Godfather",
-      "The Hurt Locker",
-      "The Silence of the Lambs",
-      "Titanic"
-    ],
-    "outputs": [
-      "best"
-    ],
-    "relations": {
-      "film_award": 38,
-      "wn:synonym": 1
-    }
-  },
-  "L2_F8489": {
-    "primary": "author",
-    "confidence": 1.0,
-    "hits": 2,
-    "entity_count": 2,
-    "entities": [
-      "Metamorphosis",
-      "The Trial"
-    ],
-    "outputs": [
-      "kafka"
-    ],
-    "relations": {
-      "author": 2
-    }
-  },
-  "L2_F3920": {
-    "primary": "author",
-    "confidence": 1.0,
-    "hits": 3,
-    "entity_count": 3,
-    "entities": [
-      "Hands Up (Cole play)",
-      "Hands Up (play)",
-      "The King of the Road"
-    ],
-    "outputs": [
-      "cole"
-    ],
-    "relations": {
-      "author": 3
-    }
-  },
-  "L2_F4645": {
-    "primary": "author",
-    "confidence": 0.667,
-    "hits": 6,
-    "entity_count": 4,
-    "entities": [
-      "James the Second (novel)",
-      "Old Court (novel)",
-      "The Foundling of the Forest",
-      "The Spanish Match (novel)"
-    ],
-    "outputs": [
-      "william"
-    ],
-    "relations": {
-      "author": 4,
-      "poet": 2
-    }
-  },
-  "L3_F7099": {
-    "primary": "developer",
-    "confidence": 0.667,
-    "hits": 3,
-    "entity_count": 1,
-    "entities": [
-      "Maddigan's Quest"
-    ],
-    "outputs": [
-      "lang"
-    ],
-    "relations": {
-      "developer": 2,
-      "author": 1
-    }
-  },
-  "L12_F2933": {
-    "primary": "literary_genre",
-    "confidence": 1.0,
-    "hits": 3,
-    "entity_count": 1,
-    "entities": [
-      "Animal Farm"
-    ],
-    "outputs": [
-      "political"
-    ],
-    "relations": {
-      "literary_genre": 3
-    }
-  },
-  "L1_F197": {
-    "primary": "book_series",
-    "confidence": 0.667,
-    "hits": 9,
-    "entity_count": 3,
-    "entities": [
-      "Dune",
-      "Ender's Game",
-      "Foundation"
-    ],
-    "outputs": [
-      "series"
-    ],
-    "relations": {
-      "book_series": 6,
-      "championship": 3
-    }
-  },
-  "L2_F552": {
-    "primary": "book_series",
-    "confidence": 1.0,
-    "hits": 2,
-    "entity_count": 1,
-    "entities": [
-      "Dune"
-    ],
-    "outputs": [
-      "dune"
-    ],
-    "relations": {
-      "book_series": 2
-    }
-  },
-  "L9_F973": {
-    "primary": "book_series",
-    "confidence": 0.75,
-    "hits": 4,
-    "entity_count": 1,
-    "entities": [
-      "Twilight"
-    ],
-    "outputs": [
-      "twilight"
-    ],
-    "relations": {
-      "book_series": 3,
-      "wn:synonym": 1
-    }
-  },
-  "L3_F5897": {
-    "primary": "team",
-    "confidence": 1.0,
-    "hits": 3,
-    "entity_count": 3,
-    "entities": [
-      "Ally Cook",
-      "Anne Bailey Colombo",
-      "Ava Tankersley"
-    ],
-    "outputs": [
-      "high"
-    ],
-    "relations": {
-      "team": 3
-    }
-  },
-  "L1_F4554": {
-    "primary": "team",
-    "confidence": 1.0,
-    "hits": 2,
-    "entity_count": 1,
-    "entities": [
-      "Andrew Buah"
-    ],
-    "outputs": [
-      "port"
-    ],
-    "relations": {
-      "team": 2
-    }
-  },
-  "L0_F4513": {
-    "primary": "team",
-    "confidence": 1.0,
-    "hits": 2,
-    "entity_count": 2,
-    "entities": [
-      "2022 FIFA Club World Cup final",
-      "Paula Comendador"
-    ],
-    "outputs": [
-      "madrid"
-    ],
-    "relations": {
-      "team": 2
-    }
-  },
-  "L4_F10195": {
-    "primary": "team",
-    "confidence": 1.0,
-    "hits": 6,
-    "entity_count": 2,
-    "entities": [
-      "Ali Imam (footballer)",
-      "Pran Govinda Kundu"
-    ],
-    "outputs": [
-      "bangla"
-    ],
-    "relations": {
-      "team": 6
-    }
-  },
-  "L3_F210": {
-    "primary": "team",
-    "confidence": 1.0,
-    "hits": 3,
-    "entity_count": 3,
-    "entities": [
-      "1906 Copa de Honor MCBA Final",
-      "1909 Copa de Honor MCBA Final",
-      "2023 Supercopa Argentina"
-    ],
-    "outputs": [
-      "estudiantes"
-    ],
-    "relations": {
-      "team": 3
-    }
-  },
-  "L10_F9981": {
-    "primary": "league",
-    "confidence": 0.727,
-    "hits": 22,
-    "entity_count": 16,
-    "entities": [
-      "Braden Huff",
-      "Bryson Tucker",
-      "Charlie Ward",
-      "DeShawn Harris-Smith",
-      "Derrick Michael Xzavierro",
-      "Emanuel Sharp",
-      "Eric Dailey Jr.",
-      "Ian Jackson (basketball)",
-      "Isaiah Evans",
-      "Isaiah Swope",
-      "Jackson Shelstad",
-      "Owen Freeman",
-      "Robbie Avila",
-      "Roddy Gayle Jr.",
-      "Tarris Reed",
-      "Trey Kaufman-Renn"
-    ],
-    "outputs": [
-      "conference"
-    ],
-    "relations": {
-      "league": 16,
-      "manufacturer": 5,
-      "designer": 1
-    }
-  },
-  "L0_F680": {
-    "primary": "league",
-    "confidence": 0.667,
-    "hits": 3,
-    "entity_count": 1,
-    "entities": [
-      "Marc Johnstone"
-    ],
-    "outputs": [
-      "ahl"
-    ],
-    "relations": {
-      "league": 2,
-      "wn:derivation": 1
-    }
-  },
-  "L0_F6720": {
-    "primary": "league",
-    "confidence": 1.0,
-    "hits": 4,
-    "entity_count": 2,
-    "entities": [
-      "Marios Moniatis",
-      "Polychronis Tsigkas"
-    ],
-    "outputs": [
-      "cyprus"
-    ],
-    "relations": {
-      "league": 4
-    }
-  },
-  "L0_F6283": {
-    "primary": "league",
-    "confidence": 1.0,
-    "hits": 6,
-    "entity_count": 3,
-    "entities": [
-      "2022\u201323 PFC CSKA Moscow season",
-      "Turbina Balakovo",
-      "Vladivostok Speedway"
-    ],
-    "outputs": [
-      "russian"
-    ],
-    "relations": {
-      "league": 6
-    }
-  },
-  "L6_F2001": {
-    "primary": "league",
-    "confidence": 1.0,
-    "hits": 3,
-    "entity_count": 1,
-    "entities": [
-      "Barrancas F\u00fatbol Club"
-    ],
-    "outputs": [
-      "amateur"
-    ],
-    "relations": {
-      "league": 3
-    }
-  },
   "L9_F2836": {
     "primary": "league",
-    "confidence": 0.538,
-    "hits": 13,
+    "confidence": 0.778,
+    "hits": 9,
     "entity_count": 0,
     "entities": [],
     "outputs": [],
     "relations": {
       "league": 7,
-      "wn:derivation": 2,
       "operating_system": 1,
-      "architect": 1,
-      "wn:hypernym": 1,
-      "python:async def": 1
-    }
-  },
-  "L2_F6889": {
-    "primary": "league",
-    "confidence": 1.0,
-    "hits": 10,
-    "entity_count": 5,
-    "entities": [
-      "2023 Atlanta United 2 season",
-      "2024 Atlanta United 2 season",
-      "2024 Carolina Core FC season",
-      "2025 Atlanta United 2 season",
-      "2025 Carolina Core FC season"
-    ],
-    "outputs": [
-      "next"
-    ],
-    "relations": {
-      "league": 10
-    }
-  },
-  "L8_F1595": {
-    "primary": "player_position",
-    "confidence": 1.0,
-    "hits": 6,
-    "entity_count": 6,
-    "entities": [
-      "Cristiano Ronaldo",
-      "Lionel Messi",
-      "Neymar",
-      "Pele",
-      "Ronaldinho",
-      "Wayne Rooney"
-    ],
-    "outputs": [
-      "forward"
-    ],
-    "relations": {
-      "player_position": 6
-    }
-  },
-  "L10_F7455": {
-    "primary": "subsidiary",
-    "confidence": 0.75,
-    "hits": 4,
-    "entity_count": 1,
-    "entities": [
-      "21st Century Fox"
-    ],
-    "outputs": [
-      "movies"
-    ],
-    "relations": {
-      "subsidiary": 3,
-      "player_position": 1
-    }
-  },
-  "L4_F6612": {
-    "primary": "championship",
-    "confidence": 1.0,
-    "hits": 3,
-    "entity_count": 3,
-    "entities": [
-      "Green Bay Packers",
-      "Kansas City Chiefs",
-      "New England Patriots"
-    ],
-    "outputs": [
-      "bowl"
-    ],
-    "relations": {
-      "championship": 3
-    }
-  },
-  "L2_F8891": {
-    "primary": "sports_award",
-    "confidence": 1.0,
-    "hits": 2,
-    "entity_count": 2,
-    "entities": [
-      "Roger Federer",
-      "Usain Bolt"
-    ],
-    "outputs": [
-      "world"
-    ],
-    "relations": {
-      "sports_award": 2
-    }
-  },
-  "L11_F1443": {
-    "primary": "sports_award",
-    "confidence": 1.0,
-    "hits": 16,
-    "entity_count": 6,
-    "entities": [
-      "Michael Phelps",
-      "Novak Djokovic",
-      "Rafael Nadal",
-      "Serena Williams",
-      "Tiger Woods",
-      "Usain Bolt"
-    ],
-    "outputs": [
-      "year"
-    ],
-    "relations": {
-      "sports_award": 16
-    }
-  },
-  "L2_F1760": {
-    "primary": "team_color",
-    "confidence": 1.0,
-    "hits": 5,
-    "entity_count": 5,
-    "entities": [
-      "Arsenal",
-      "Bayern Munich",
-      "Liverpool",
-      "Manchester United",
-      "Red Sox"
-    ],
-    "outputs": [
-      "red"
-    ],
-    "relations": {
-      "team_color": 5
-    }
-  },
-  "L10_F7559": {
-    "primary": "founder",
-    "confidence": 1.0,
-    "hits": 3,
-    "entity_count": 1,
-    "entities": [
-      "Mistral AI"
-    ],
-    "outputs": [
-      "mensch"
-    ],
-    "relations": {
-      "founder": 3
-    }
-  },
-  "L11_F106": {
-    "primary": "founder",
-    "confidence": 1.0,
-    "hits": 3,
-    "entity_count": 1,
-    "entities": [
-      "Mano Maritime"
-    ],
-    "outputs": [
-      "moshe"
-    ],
-    "relations": {
-      "founder": 3
-    }
-  },
-  "L6_F208": {
-    "primary": "founder",
-    "confidence": 1.0,
-    "hits": 2,
-    "entity_count": 1,
-    "entities": [
-      "Platinum Dunes"
-    ],
-    "outputs": [
-      "brad"
-    ],
-    "relations": {
-      "founder": 2
-    }
-  },
-  "L9_F5323": {
-    "primary": "founder",
-    "confidence": 1.0,
-    "hits": 2,
-    "entity_count": 1,
-    "entities": [
-      "Arena (swimwear)"
-    ],
-    "outputs": [
-      "horst"
-    ],
-    "relations": {
-      "founder": 2
-    }
-  },
-  "L3_F256": {
-    "primary": "founder",
-    "confidence": 1.0,
-    "hits": 2,
-    "entity_count": 2,
-    "entities": [
-      "Mister World Philippines",
-      "Mr World Philippines"
-    ],
-    "outputs": [
-      "cory"
-    ],
-    "relations": {
-      "founder": 2
-    }
-  },
-  "L0_F919": {
-    "primary": "headquarters",
-    "confidence": 1.0,
-    "hits": 3,
-    "entity_count": 1,
-    "entities": [
-      "Google"
-    ],
-    "outputs": [
-      "view"
-    ],
-    "relations": {
-      "headquarters": 3
-    }
-  },
-  "L8_F1279": {
-    "primary": "subsidiary",
-    "confidence": 0.75,
-    "hits": 4,
-    "entity_count": 1,
-    "entities": [
-      "Areva"
-    ],
-    "outputs": [
-      "cycle"
-    ],
-    "relations": {
-      "subsidiary": 3,
-      "wn:derivation": 1
-    }
-  },
-  "L5_F862": {
-    "primary": "subsidiary",
-    "confidence": 1.0,
-    "hits": 4,
-    "entity_count": 2,
-    "entities": [
-      "7-Eleven",
-      "John Keells Holdings"
-    ],
-    "outputs": [
-      "stores"
-    ],
-    "relations": {
-      "subsidiary": 4
-    }
-  },
-  "L2_F2217": {
-    "primary": "subsidiary",
-    "confidence": 1.0,
-    "hits": 2,
-    "entity_count": 1,
-    "entities": [
-      "BCE Inc."
-    ],
-    "outputs": [
-      "fiber"
-    ],
-    "relations": {
-      "subsidiary": 2
-    }
-  },
-  "L2_F7650": {
-    "primary": "subsidiary",
-    "confidence": 0.667,
-    "hits": 3,
-    "entity_count": 2,
-    "entities": [
-      "HNA Aviation",
-      "John Keells Holdings"
-    ],
-    "outputs": [
-      "grand"
-    ],
-    "relations": {
-      "subsidiary": 2,
-      "wn:synonym": 1
-    }
-  },
-  "L11_F6920": {
-    "primary": "subsidiary",
-    "confidence": 1.0,
-    "hits": 3,
-    "entity_count": 1,
-    "entities": [
-      "World Relief"
-    ],
-    "outputs": [
-      "liability"
-    ],
-    "relations": {
-      "subsidiary": 3
-    }
-  },
-  "L12_F2062": {
-    "primary": "subsidiary",
-    "confidence": 1.0,
-    "hits": 3,
-    "entity_count": 1,
-    "entities": [
-      "Grupo Cisneros"
-    ],
-    "outputs": [
-      "plus"
-    ],
-    "relations": {
-      "subsidiary": 3
-    }
-  },
-  "L11_F8060": {
-    "primary": "subsidiary",
-    "confidence": 1.0,
-    "hits": 3,
-    "entity_count": 1,
-    "entities": [
-      "Platinum Airlines"
-    ],
-    "outputs": [
-      "platinum"
-    ],
-    "relations": {
-      "subsidiary": 3
-    }
-  },
-  "L12_F5791": {
-    "primary": "subsidiary",
-    "confidence": 1.0,
-    "hits": 2,
-    "entity_count": 1,
-    "entities": [
-      "Udenna Corporation"
-    ],
-    "outputs": [
-      "colleges"
-    ],
-    "relations": {
-      "subsidiary": 2
-    }
-  },
-  "L5_F689": {
-    "primary": "subsidiary",
-    "confidence": 1.0,
-    "hits": 2,
-    "entity_count": 1,
-    "entities": [
-      "The Trump Organization"
-    ],
-    "outputs": [
-      "organization"
-    ],
-    "relations": {
-      "subsidiary": 2
-    }
-  },
-  "L8_F5559": {
-    "primary": "ticker",
-    "confidence": 1.0,
-    "hits": 2,
-    "entity_count": 1,
-    "entities": [
-      "Coca-Cola"
-    ],
-    "outputs": [
-      "ko"
-    ],
-    "relations": {
-      "ticker": 2
-    }
-  },
-  "L7_F3458": {
-    "primary": "ticker",
-    "confidence": 1.0,
-    "hits": 3,
-    "entity_count": 1,
-    "entities": [
-      "Goldman Sachs"
-    ],
-    "outputs": [
-      "gs"
-    ],
-    "relations": {
-      "ticker": 3
-    }
-  },
-  "L5_F296": {
-    "primary": "company_revenue",
-    "confidence": 1.0,
-    "hits": 2,
-    "entity_count": 1,
-    "entities": [
-      "Apple"
-    ],
-    "outputs": [
-      "tech"
-    ],
-    "relations": {
-      "company_revenue": 2
-    }
-  },
-  "L6_F5284": {
-    "primary": "designer",
-    "confidence": 1.0,
-    "hits": 3,
-    "entity_count": 2,
-    "entities": [
-      "HardBall II",
-      "Stonekeep"
-    ],
-    "outputs": [
-      "taylor"
-    ],
-    "relations": {
-      "designer": 3
-    }
-  },
-  "L3_F4218": {
-    "primary": "designer",
-    "confidence": 0.75,
-    "hits": 4,
-    "entity_count": 2,
-    "entities": [
-      "Bangladesh Railway Class 3000",
-      "SJ T41"
-    ],
-    "outputs": [
-      "diesel"
-    ],
-    "relations": {
-      "designer": 3,
-      "wn:synonym": 1
-    }
-  },
-  "L8_F4019": {
-    "primary": "designer",
-    "confidence": 0.667,
-    "hits": 3,
-    "entity_count": 1,
-    "entities": [
-      "Heath Parasol"
-    ],
-    "outputs": [
-      "heath"
-    ],
-    "relations": {
-      "designer": 2,
-      "wn:hypernym": 1
-    }
-  },
-  "L6_F3732": {
-    "primary": "designer",
-    "confidence": 1.0,
-    "hits": 2,
-    "entity_count": 1,
-    "entities": [
-      "William Jasper Monument"
-    ],
-    "outputs": [
-      "doyle"
-    ],
-    "relations": {
-      "designer": 2
-    }
-  },
-  "L0_F7609": {
-    "primary": "developer",
-    "confidence": 1.0,
-    "hits": 4,
-    "entity_count": 4,
-    "entities": [
-      "Howrse",
-      "Scrabble (video game)",
-      "Scrabble video games",
-      "XDefiant"
-    ],
-    "outputs": [
-      "barcelona"
-    ],
-    "relations": {
-      "developer": 4
-    }
-  },
-  "L4_F5217": {
-    "primary": "developer",
-    "confidence": 1.0,
-    "hits": 3,
-    "entity_count": 1,
-    "entities": [
-      "Oddworld: Munch's Oddysee"
-    ],
-    "outputs": [
-      "water"
-    ],
-    "relations": {
-      "developer": 3
-    }
-  },
-  "L8_F2479": {
-    "primary": "field_of_study",
-    "confidence": 1.0,
-    "hits": 3,
-    "entity_count": 1,
-    "entities": [
-      "Claude Shannon"
-    ],
-    "outputs": [
-      "theory"
-    ],
-    "relations": {
-      "field_of_study": 3
-    }
-  },
-  "L4_F5115": {
-    "primary": "chemical_symbol",
-    "confidence": 0.667,
-    "hits": 3,
-    "entity_count": 1,
-    "entities": [
-      "tin"
-    ],
-    "outputs": [
-      "sn"
-    ],
-    "relations": {
-      "chemical_symbol": 2,
-      "python:if": 1
+      "architect": 1
     }
   },
   "L10_F466": {
@@ -3563,157 +110,6 @@
       "chemical_symbol": 8
     }
   },
-  "L0_F3259": {
-    "primary": "chemical_symbol",
-    "confidence": 1.0,
-    "hits": 2,
-    "entity_count": 1,
-    "entities": [
-      "silver"
-    ],
-    "outputs": [
-      "ag"
-    ],
-    "relations": {
-      "chemical_symbol": 2
-    }
-  },
-  "L4_F5557": {
-    "primary": "chemical_symbol",
-    "confidence": 1.0,
-    "hits": 2,
-    "entity_count": 2,
-    "entities": [
-      "nickel",
-      "sodium"
-    ],
-    "outputs": [
-      "na",
-      "ni"
-    ],
-    "relations": {
-      "chemical_symbol": 2
-    }
-  },
-  "L1_F4834": {
-    "primary": "chemical_symbol",
-    "confidence": 1.0,
-    "hits": 2,
-    "entity_count": 1,
-    "entities": [
-      "magnesium"
-    ],
-    "outputs": [
-      "mg"
-    ],
-    "relations": {
-      "chemical_symbol": 2
-    }
-  },
-  "L10_F7278": {
-    "primary": "wn:synonym",
-    "confidence": 0.9,
-    "hits": 10,
-    "entity_count": 9,
-    "entities": [
-      "ample",
-      "asleep",
-      "copious",
-      "deceased",
-      "deep",
-      "departed",
-      "kaput",
-      "plenteous",
-      "plentiful"
-    ],
-    "outputs": [
-      "gone",
-      "rich"
-    ],
-    "relations": {
-      "wn:synonym": 9,
-      "framework": 1
-    }
-  },
-  "L8_F625": {
-    "primary": "framework",
-    "confidence": 1.0,
-    "hits": 2,
-    "entity_count": 1,
-    "entities": [
-      "Django"
-    ],
-    "outputs": [
-      "software"
-    ],
-    "relations": {
-      "framework": 2
-    }
-  },
-  "L3_F8214": {
-    "primary": "framework",
-    "confidence": 1.0,
-    "hits": 2,
-    "entity_count": 1,
-    "entities": [
-      "Laravel"
-    ],
-    "outputs": [
-      "taylor"
-    ],
-    "relations": {
-      "framework": 2
-    }
-  },
-  "L5_F8766": {
-    "primary": "ingredient",
-    "confidence": 1.0,
-    "hits": 3,
-    "entity_count": 3,
-    "entities": [
-      "cheese",
-      "mozzarella",
-      "yogurt"
-    ],
-    "outputs": [
-      "milk"
-    ],
-    "relations": {
-      "ingredient": 3
-    }
-  },
-  "L3_F2176": {
-    "primary": "food_category",
-    "confidence": 1.0,
-    "hits": 3,
-    "entity_count": 3,
-    "entities": [
-      "bread",
-      "oat",
-      "rice"
-    ],
-    "outputs": [
-      "grain"
-    ],
-    "relations": {
-      "food_category": 3
-    }
-  },
-  "L12_F9087": {
-    "primary": "art_museum",
-    "confidence": 1.0,
-    "hits": 2,
-    "entity_count": 1,
-    "entities": [
-      "The Scream"
-    ],
-    "outputs": [
-      "oslo"
-    ],
-    "relations": {
-      "art_museum": 2
-    }
-  },
   "L9_F864": {
     "primary": "architect",
     "confidence": 1.0,
@@ -3725,174 +121,6 @@
       "architect": 31
     }
   },
-  "L3_F4897": {
-    "primary": "architect",
-    "confidence": 1.0,
-    "hits": 3,
-    "entity_count": 3,
-    "entities": [
-      "Albert Sullivan House",
-      "Alexander Brown House",
-      "Craigie Arms"
-    ],
-    "outputs": [
-      "wright"
-    ],
-    "relations": {
-      "architect": 3
-    }
-  },
-  "L0_F985": {
-    "primary": "architect",
-    "confidence": 1.0,
-    "hits": 2,
-    "entity_count": 2,
-    "entities": [
-      "Cigar Factory",
-      "Continental Mill Housing"
-    ],
-    "outputs": [
-      "amos"
-    ],
-    "relations": {
-      "architect": 2
-    }
-  },
-  "L3_F1518": {
-    "primary": "architect",
-    "confidence": 1.0,
-    "hits": 2,
-    "entity_count": 2,
-    "entities": [
-      "Beaumont Commercial District",
-      "Jefferson Theatre"
-    ],
-    "outputs": [
-      "weil"
-    ],
-    "relations": {
-      "architect": 2
-    }
-  },
-  "L0_F9575": {
-    "primary": "architect",
-    "confidence": 1.0,
-    "hits": 2,
-    "entity_count": 2,
-    "entities": [
-      "40 Charter Street",
-      "Shanghai North Bund Center"
-    ],
-    "outputs": [
-      "pedersen"
-    ],
-    "relations": {
-      "architect": 2
-    }
-  },
-  "L3_F4864": {
-    "primary": "architect",
-    "confidence": 1.0,
-    "hits": 2,
-    "entity_count": 2,
-    "entities": [
-      "Christchurch Bus Exchange",
-      "Don Valley Stadium"
-    ],
-    "outputs": [
-      "council"
-    ],
-    "relations": {
-      "architect": 2
-    }
-  },
-  "L6_F5126": {
-    "primary": "architect",
-    "confidence": 1.0,
-    "hits": 2,
-    "entity_count": 1,
-    "entities": [
-      "Runcorn Shopping City"
-    ],
-    "outputs": [
-      "roche"
-    ],
-    "relations": {
-      "architect": 2
-    }
-  },
-  "L3_F25": {
-    "primary": "architect",
-    "confidence": 1.0,
-    "hits": 3,
-    "entity_count": 3,
-    "entities": [
-      "Alfred Phillips House",
-      "All Saints Church, Thelwall",
-      "All Saints Notting Hill"
-    ],
-    "outputs": [
-      "born"
-    ],
-    "relations": {
-      "architect": 3
-    }
-  },
-  "L11_F9455": {
-    "primary": "era",
-    "confidence": 1.0,
-    "hits": 5,
-    "entity_count": 3,
-    "entities": [
-      "Dark Ages",
-      "Enlightenment",
-      "Renaissance"
-    ],
-    "outputs": [
-      "europe"
-    ],
-    "relations": {
-      "era": 5
-    }
-  },
-  "L8_F2652": {
-    "primary": "animal_class",
-    "confidence": 0.885,
-    "hits": 26,
-    "entity_count": 8,
-    "entities": [
-      "eagle",
-      "flamingo",
-      "hawk",
-      "owl",
-      "parrot",
-      "penguin",
-      "robin",
-      "sparrow"
-    ],
-    "outputs": [
-      "bird"
-    ],
-    "relations": {
-      "animal_class": 23,
-      "wn:meronym": 3
-    }
-  },
-  "L10_F8908": {
-    "primary": "university_city",
-    "confidence": 1.0,
-    "hits": 3,
-    "entity_count": 1,
-    "entities": [
-      "Duke"
-    ],
-    "outputs": [
-      "durham"
-    ],
-    "relations": {
-      "university_city": 3
-    }
-  },
   "L9_F8795": {
     "primary": "university_country",
     "confidence": 1.0,
@@ -3902,179 +130,6 @@
     "outputs": [],
     "relations": {
       "university_country": 2
-    }
-  },
-  "L5_F1451": {
-    "primary": "religion_text",
-    "confidence": 1.0,
-    "hits": 3,
-    "entity_count": 1,
-    "entities": [
-      "Taoism"
-    ],
-    "outputs": [
-      "ching"
-    ],
-    "relations": {
-      "religion_text": 3
-    }
-  },
-  "L2_F10107": {
-    "primary": "philosopher_era",
-    "confidence": 1.0,
-    "hits": 4,
-    "entity_count": 2,
-    "entities": [
-      "Baruch Spinoza",
-      "Rene Descartes"
-    ],
-    "outputs": [
-      "early"
-    ],
-    "relations": {
-      "philosopher_era": 4
-    }
-  },
-  "L0_F3187": {
-    "primary": "manufacturer",
-    "confidence": 1.0,
-    "hits": 2,
-    "entity_count": 1,
-    "entities": [
-      "CONTOUR"
-    ],
-    "outputs": [
-      "applied"
-    ],
-    "relations": {
-      "manufacturer": 2
-    }
-  },
-  "L1_F4668": {
-    "primary": "manufacturer",
-    "confidence": 1.0,
-    "hits": 2,
-    "entity_count": 1,
-    "entities": [
-      "CONTOUR"
-    ],
-    "outputs": [
-      "applied"
-    ],
-    "relations": {
-      "manufacturer": 2
-    }
-  },
-  "L11_F5376": {
-    "primary": "manufacturer",
-    "confidence": 1.0,
-    "hits": 5,
-    "entity_count": 2,
-    "entities": [
-      "China Railway CR300AF",
-      "Lohner B.II"
-    ],
-    "outputs": [
-      "transportation"
-    ],
-    "relations": {
-      "manufacturer": 5
-    }
-  },
-  "L8_F1850": {
-    "primary": "manufacturer",
-    "confidence": 1.0,
-    "hits": 2,
-    "entity_count": 2,
-    "entities": [
-      "SAI KZ I",
-      "SAI KZ II"
-    ],
-    "outputs": [
-      "industri"
-    ],
-    "relations": {
-      "manufacturer": 2
-    }
-  },
-  "L1_F809": {
-    "primary": "manufacturer",
-    "confidence": 1.0,
-    "hits": 2,
-    "entity_count": 1,
-    "entities": [
-      "Little Wing Autogyro"
-    ],
-    "outputs": [
-      "wing"
-    ],
-    "relations": {
-      "manufacturer": 2
-    }
-  },
-  "L6_F904": {
-    "primary": "airport_city",
-    "confidence": 1.0,
-    "hits": 2,
-    "entity_count": 1,
-    "entities": [
-      "Dubai International"
-    ],
-    "outputs": [
-      "dubai"
-    ],
-    "relations": {
-      "airport_city": 2
-    }
-  },
-  "L4_F7707": {
-    "primary": "language_speakers",
-    "confidence": 1.0,
-    "hits": 10,
-    "entity_count": 5,
-    "entities": [
-      "Arabic",
-      "Hindi",
-      "Japanese",
-      "Mandarin",
-      "Spanish"
-    ],
-    "outputs": [
-      "speakers"
-    ],
-    "relations": {
-      "language_speakers": 10
-    }
-  },
-  "L8_F4576": {
-    "primary": "language_speakers",
-    "confidence": 1.0,
-    "hits": 3,
-    "entity_count": 1,
-    "entities": [
-      "French"
-    ],
-    "outputs": [
-      "africa"
-    ],
-    "relations": {
-      "language_speakers": 3
-    }
-  },
-  "L11_F8748": {
-    "primary": "wn:synonym",
-    "confidence": 1.0,
-    "hits": 2,
-    "entity_count": 2,
-    "entities": [
-      "dull",
-      "obtuse"
-    ],
-    "outputs": [
-      "slow"
-    ],
-    "relations": {
-      "wn:synonym": 2
     }
   },
   "L9_F9747": {
@@ -4111,6 +166,101 @@
     "relations": {
       "wn:antonym": 2,
       "wn:synonym": 1
+    }
+  },
+  "L10_F7278": {
+    "primary": "wn:synonym",
+    "confidence": 1.0,
+    "hits": 9,
+    "entity_count": 9,
+    "entities": [
+      "ample",
+      "asleep",
+      "copious",
+      "deceased",
+      "deep",
+      "departed",
+      "kaput",
+      "plenteous",
+      "plentiful"
+    ],
+    "outputs": [
+      "gone",
+      "rich"
+    ],
+    "relations": {
+      "wn:synonym": 9
+    }
+  },
+  "L11_F8748": {
+    "primary": "wn:synonym",
+    "confidence": 1.0,
+    "hits": 2,
+    "entity_count": 2,
+    "entities": [
+      "dull",
+      "obtuse"
+    ],
+    "outputs": [
+      "slow"
+    ],
+    "relations": {
+      "wn:synonym": 2
+    }
+  },
+  "L3_F2756": {
+    "primary": "wn:synonym",
+    "confidence": 1.0,
+    "hits": 3,
+    "entity_count": 3,
+    "entities": [
+      "aureate",
+      "gilt",
+      "gold"
+    ],
+    "outputs": [
+      "golden"
+    ],
+    "relations": {
+      "wn:synonym": 3
+    }
+  },
+  "L5_F9571": {
+    "primary": "wn:synonym",
+    "confidence": 1.0,
+    "hits": 8,
+    "entity_count": 8,
+    "entities": [
+      "angry",
+      "barbarian",
+      "furious",
+      "raging",
+      "savage",
+      "tempestuous",
+      "uncivilised",
+      "uncivilized"
+    ],
+    "outputs": [
+      "wild"
+    ],
+    "relations": {
+      "wn:synonym": 8
+    }
+  },
+  "L4_F3797": {
+    "primary": "wn:synonym",
+    "confidence": 1.0,
+    "hits": 2,
+    "entity_count": 2,
+    "entities": [
+      "blunt",
+      "candid"
+    ],
+    "outputs": [
+      "frank"
+    ],
+    "relations": {
+      "wn:synonym": 2
     }
   },
   "L6_F7": {
@@ -4181,6 +331,25 @@
       "wn:synonym": 2
     }
   },
+  "L7_F8600": {
+    "primary": "wn:hypernym",
+    "confidence": 0.8,
+    "hits": 5,
+    "entity_count": 4,
+    "entities": [
+      "bifurcation",
+      "divarication",
+      "fibrillation",
+      "trifurcation"
+    ],
+    "outputs": [
+      "branching"
+    ],
+    "relations": {
+      "wn:hypernym": 4,
+      "wn:synonym": 1
+    }
+  },
   "L12_F6861": {
     "primary": "wn:hypernym",
     "confidence": 0.571,
@@ -4201,23 +370,22 @@
       "python:async def": 1
     }
   },
-  "L7_F8600": {
+  "L11_F4317": {
     "primary": "wn:hypernym",
-    "confidence": 0.8,
-    "hits": 5,
+    "confidence": 1.0,
+    "hits": 4,
     "entity_count": 4,
     "entities": [
-      "bifurcation",
-      "divarication",
-      "fibrillation",
-      "trifurcation"
+      "header",
+      "hop",
+      "leap",
+      "vault"
     ],
     "outputs": [
-      "branching"
+      "jump"
     ],
     "relations": {
-      "wn:hypernym": 4,
-      "wn:synonym": 1
+      "wn:hypernym": 4
     }
   },
   "L7_F2846": {
@@ -4238,38 +406,38 @@
       "wn:hypernym": 4
     }
   },
-  "L11_F4317": {
+  "L2_F4920": {
     "primary": "wn:hypernym",
     "confidence": 1.0,
-    "hits": 4,
-    "entity_count": 4,
+    "hits": 3,
+    "entity_count": 3,
     "entities": [
-      "header",
-      "hop",
-      "leap",
-      "vault"
+      "comparison",
+      "scan",
+      "testing"
     ],
     "outputs": [
-      "jump"
+      "examination"
     ],
     "relations": {
-      "wn:hypernym": 4
+      "wn:hypernym": 3
     }
   },
-  "L7_F8670": {
+  "L5_F1827": {
     "primary": "wn:hypernym",
     "confidence": 1.0,
-    "hits": 2,
-    "entity_count": 2,
+    "hits": 3,
+    "entity_count": 3,
     "entities": [
-      "down",
-      "left"
+      "foray",
+      "liberation",
+      "shot"
     ],
     "outputs": [
-      "turn"
+      "attempt"
     ],
     "relations": {
-      "wn:hypernym": 2
+      "wn:hypernym": 3
     }
   },
   "L2_F572": {
@@ -4293,77 +461,6 @@
       "wn:gerund": 1,
       "wn:past_tense": 1,
       "wn:third_person": 1
-    }
-  },
-  "L2_F4920": {
-    "primary": "wn:hypernym",
-    "confidence": 1.0,
-    "hits": 3,
-    "entity_count": 3,
-    "entities": [
-      "comparison",
-      "scan",
-      "testing"
-    ],
-    "outputs": [
-      "examination"
-    ],
-    "relations": {
-      "wn:hypernym": 3
-    }
-  },
-  "L3_F751": {
-    "primary": "wn:hypernym",
-    "confidence": 1.0,
-    "hits": 3,
-    "entity_count": 3,
-    "entities": [
-      "blockbuster",
-      "bunt",
-      "plunk"
-    ],
-    "outputs": [
-      "hit"
-    ],
-    "relations": {
-      "wn:hypernym": 3
-    }
-  },
-  "L2_F5451": {
-    "primary": "wn:hypernym",
-    "confidence": 0.833,
-    "hits": 6,
-    "entity_count": 5,
-    "entities": [
-      "conversion",
-      "move",
-      "substitution",
-      "switch",
-      "updating"
-    ],
-    "outputs": [
-      "change"
-    ],
-    "relations": {
-      "wn:hypernym": 5,
-      "morph:gerund": 1
-    }
-  },
-  "L5_F1827": {
-    "primary": "wn:hypernym",
-    "confidence": 1.0,
-    "hits": 3,
-    "entity_count": 3,
-    "entities": [
-      "foray",
-      "liberation",
-      "shot"
-    ],
-    "outputs": [
-      "attempt"
-    ],
-    "relations": {
-      "wn:hypernym": 3
     }
   },
   "L7_F3335": {
@@ -4397,6 +494,99 @@
     "relations": {
       "wn:hypernym": 2,
       "morph:plural": 1
+    }
+  },
+  "L7_F8670": {
+    "primary": "wn:hypernym",
+    "confidence": 1.0,
+    "hits": 2,
+    "entity_count": 2,
+    "entities": [
+      "down",
+      "left"
+    ],
+    "outputs": [
+      "turn"
+    ],
+    "relations": {
+      "wn:hypernym": 2
+    }
+  },
+  "L2_F5451": {
+    "primary": "wn:hypernym",
+    "confidence": 0.833,
+    "hits": 6,
+    "entity_count": 5,
+    "entities": [
+      "conversion",
+      "move",
+      "substitution",
+      "switch",
+      "updating"
+    ],
+    "outputs": [
+      "change"
+    ],
+    "relations": {
+      "wn:hypernym": 5,
+      "morph:gerund": 1
+    }
+  },
+  "L3_F751": {
+    "primary": "wn:hypernym",
+    "confidence": 1.0,
+    "hits": 3,
+    "entity_count": 3,
+    "entities": [
+      "blockbuster",
+      "bunt",
+      "plunk"
+    ],
+    "outputs": [
+      "hit"
+    ],
+    "relations": {
+      "wn:hypernym": 3
+    }
+  },
+  "L12_F1415": {
+    "primary": "wn:hypernym",
+    "confidence": 0.571,
+    "hits": 7,
+    "entity_count": 4,
+    "entities": [
+      "foraging",
+      "frisk",
+      "manhunt",
+      "ransacking"
+    ],
+    "outputs": [
+      "search"
+    ],
+    "relations": {
+      "wn:hypernym": 4,
+      "wn:derivation": 3
+    }
+  },
+  "L11_F46": {
+    "primary": "wn:hypernym",
+    "confidence": 0.857,
+    "hits": 7,
+    "entity_count": 6,
+    "entities": [
+      "duster",
+      "fastball",
+      "knuckleball",
+      "screwball",
+      "sinker",
+      "spitball"
+    ],
+    "outputs": [
+      "pitch"
+    ],
+    "relations": {
+      "wn:hypernym": 6,
+      "wn:derivation": 1
     }
   },
   "L1_F9386": {
@@ -4447,25 +637,39 @@
       "wn:hypernym": 2
     }
   },
-  "L11_F46": {
+  "L11_F201": {
     "primary": "wn:hypernym",
-    "confidence": 0.875,
-    "hits": 8,
-    "entity_count": 6,
+    "confidence": 1.0,
+    "hits": 5,
+    "entity_count": 5,
     "entities": [
-      "duster",
-      "fastball",
-      "knuckleball",
-      "screwball",
-      "sinker",
-      "spitball"
+      "galvanization",
+      "lubrication",
+      "plastering",
+      "scumble",
+      "waxing"
     ],
     "outputs": [
-      "pitch"
+      "application"
     ],
     "relations": {
-      "wn:hypernym": 7,
-      "wn:derivation": 1
+      "wn:hypernym": 5
+    }
+  },
+  "L8_F6049": {
+    "primary": "wn:hypernym",
+    "confidence": 1.0,
+    "hits": 2,
+    "entity_count": 2,
+    "entities": [
+      "passage",
+      "reflex"
+    ],
+    "outputs": [
+      "reaction"
+    ],
+    "relations": {
+      "wn:hypernym": 2
     }
   },
   "L4_F3077": {
@@ -4514,39 +718,37 @@
       "rs:variable_bind": 1
     }
   },
-  "L8_F6049": {
+  "L11_F638": {
     "primary": "wn:hypernym",
     "confidence": 1.0,
     "hits": 2,
     "entity_count": 2,
     "entities": [
-      "passage",
-      "reflex"
+      "nightcap",
+      "pinball"
     ],
     "outputs": [
-      "reaction"
+      "game"
     ],
     "relations": {
       "wn:hypernym": 2
     }
   },
-  "L11_F201": {
-    "primary": "wn:hypernym",
-    "confidence": 1.0,
-    "hits": 5,
-    "entity_count": 5,
+  "L7_F1515": {
+    "primary": "wn:meronym",
+    "confidence": 0.667,
+    "hits": 3,
+    "entity_count": 2,
     "entities": [
-      "galvanization",
-      "lubrication",
-      "plastering",
-      "scumble",
-      "waxing"
+      "break",
+      "carom"
     ],
     "outputs": [
-      "application"
+      "pool"
     ],
     "relations": {
-      "wn:hypernym": 5
+      "wn:meronym": 2,
+      "wn:hypernym": 1
     }
   },
   "L8_F5413": {
@@ -4567,27 +769,6 @@
       "wn:derivation": 1
     }
   },
-  "L9_F6708": {
-    "primary": "wn:hypernym",
-    "confidence": 0.545,
-    "hits": 11,
-    "entity_count": 6,
-    "entities": [
-      "abduction",
-      "apprehension",
-      "conquest",
-      "enslavement",
-      "kidnapping",
-      "usurpation"
-    ],
-    "outputs": [
-      "capture"
-    ],
-    "relations": {
-      "wn:hypernym": 6,
-      "wn:derivation": 5
-    }
-  },
   "L8_F10018": {
     "primary": "wn:hypernym",
     "confidence": 0.667,
@@ -4603,6 +784,26 @@
     "relations": {
       "wn:hypernym": 2,
       "morph:gerund": 1
+    }
+  },
+  "L9_F6708": {
+    "primary": "wn:hypernym",
+    "confidence": 1.0,
+    "hits": 6,
+    "entity_count": 6,
+    "entities": [
+      "abduction",
+      "apprehension",
+      "conquest",
+      "enslavement",
+      "kidnapping",
+      "usurpation"
+    ],
+    "outputs": [
+      "capture"
+    ],
+    "relations": {
+      "wn:hypernym": 6
     }
   },
   "L12_F4850": {
@@ -4633,22 +834,6 @@
     ],
     "outputs": [
       "lock"
-    ],
-    "relations": {
-      "wn:hypernym": 2
-    }
-  },
-  "L5_F9101": {
-    "primary": "wn:hypernym",
-    "confidence": 1.0,
-    "hits": 2,
-    "entity_count": 2,
-    "entities": [
-      "emergence",
-      "reappearance"
-    ],
-    "outputs": [
-      "appearance"
     ],
     "relations": {
       "wn:hypernym": 2
@@ -4691,6 +876,59 @@
       "wn:hypernym": 3
     }
   },
+  "L5_F9101": {
+    "primary": "wn:hypernym",
+    "confidence": 1.0,
+    "hits": 2,
+    "entity_count": 2,
+    "entities": [
+      "emergence",
+      "reappearance"
+    ],
+    "outputs": [
+      "appearance"
+    ],
+    "relations": {
+      "wn:hypernym": 2
+    }
+  },
+  "L11_F3500": {
+    "primary": "wn:hypernym",
+    "confidence": 1.0,
+    "hits": 5,
+    "entity_count": 5,
+    "entities": [
+      "radiography",
+      "radioscopy",
+      "sonography",
+      "telephotography",
+      "xerography"
+    ],
+    "outputs": [
+      "imaging",
+      "photography"
+    ],
+    "relations": {
+      "wn:hypernym": 5
+    }
+  },
+  "L1_F6223": {
+    "primary": "wn:hypernym",
+    "confidence": 1.0,
+    "hits": 3,
+    "entity_count": 3,
+    "entities": [
+      "domestication",
+      "habituation",
+      "readjustment"
+    ],
+    "outputs": [
+      "adjustment"
+    ],
+    "relations": {
+      "wn:hypernym": 3
+    }
+  },
   "L2_F6871": {
     "primary": "wn:hypernym",
     "confidence": 0.667,
@@ -4722,23 +960,6 @@
     ],
     "relations": {
       "wn:hypernym": 2
-    }
-  },
-  "L1_F6223": {
-    "primary": "wn:hypernym",
-    "confidence": 1.0,
-    "hits": 3,
-    "entity_count": 3,
-    "entities": [
-      "domestication",
-      "habituation",
-      "readjustment"
-    ],
-    "outputs": [
-      "adjustment"
-    ],
-    "relations": {
-      "wn:hypernym": 3
     }
   },
   "L6_F988": {
@@ -4774,15 +995,21 @@
       "wn:derivation": 1
     }
   },
-  "L9_F8806": {
-    "primary": "wn:derivation",
+  "L8_F2652": {
+    "primary": "wn:meronym",
     "confidence": 1.0,
-    "hits": 2,
-    "entity_count": 0,
-    "entities": [],
-    "outputs": [],
+    "hits": 3,
+    "entity_count": 3,
+    "entities": [
+      "furcula",
+      "pennon",
+      "uropygium"
+    ],
+    "outputs": [
+      "bird"
+    ],
     "relations": {
-      "wn:derivation": 2
+      "wn:meronym": 3
     }
   },
   "L7_F5279": {
@@ -4817,17 +1044,17 @@
       "wn:derivation": 2
     }
   },
-  "L2_F6258": {
+  "L2_F9908": {
     "primary": "wn:derivation",
     "confidence": 1.0,
     "hits": 2,
     "entity_count": 2,
     "entities": [
-      "advisable",
-      "advisory"
+      "partial",
+      "partitive"
     ],
     "outputs": [
-      "advise"
+      "part"
     ],
     "relations": {
       "wn:derivation": 2
@@ -4851,45 +1078,17 @@
       "python:call": 1
     }
   },
-  "L10_F9222": {
-    "primary": "wn:derivation",
-    "confidence": 1.0,
-    "hits": 3,
-    "entity_count": 0,
-    "entities": [],
-    "outputs": [],
-    "relations": {
-      "wn:derivation": 3
-    }
-  },
-  "L2_F6396": {
+  "L2_F6258": {
     "primary": "wn:derivation",
     "confidence": 1.0,
     "hits": 2,
     "entity_count": 2,
     "entities": [
-      "schematic",
-      "scholarly"
+      "advisable",
+      "advisory"
     ],
     "outputs": [
-      "scheme",
-      "scholar"
-    ],
-    "relations": {
-      "wn:derivation": 2
-    }
-  },
-  "L2_F2347": {
-    "primary": "wn:derivation",
-    "confidence": 1.0,
-    "hits": 2,
-    "entity_count": 2,
-    "entities": [
-      "extendible",
-      "extensive"
-    ],
-    "outputs": [
-      "extend"
+      "advise"
     ],
     "relations": {
       "wn:derivation": 2
@@ -4939,6 +1138,55 @@
     "outputs": [
       "conscience",
       "consciousness"
+    ],
+    "relations": {
+      "wn:derivation": 2
+    }
+  },
+  "L2_F2347": {
+    "primary": "wn:derivation",
+    "confidence": 1.0,
+    "hits": 2,
+    "entity_count": 2,
+    "entities": [
+      "extendible",
+      "extensive"
+    ],
+    "outputs": [
+      "extend"
+    ],
+    "relations": {
+      "wn:derivation": 2
+    }
+  },
+  "L2_F6396": {
+    "primary": "wn:derivation",
+    "confidence": 1.0,
+    "hits": 2,
+    "entity_count": 2,
+    "entities": [
+      "schematic",
+      "scholarly"
+    ],
+    "outputs": [
+      "scheme",
+      "scholar"
+    ],
+    "relations": {
+      "wn:derivation": 2
+    }
+  },
+  "L6_F926": {
+    "primary": "wn:derivation",
+    "confidence": 1.0,
+    "hits": 2,
+    "entity_count": 2,
+    "entities": [
+      "prototypal",
+      "prototypical"
+    ],
+    "outputs": [
+      "prototype"
     ],
     "relations": {
       "wn:derivation": 2

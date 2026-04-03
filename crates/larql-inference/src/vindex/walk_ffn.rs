@@ -3,6 +3,9 @@
 //! Gate KNN from the (potentially patched) vindex selects which features fire.
 //! The actual FFN computation uses the model's up/down weights for those features.
 //! This means INSERT/DELETE/UPDATE to the vindex affect inference output.
+//!
+//! Optimized hot path: gate_knn_batch (one BLAS gemm) → sparse FFN.
+//! Trace recording is deferred — only computed when take_trace() is called.
 
 use ndarray::Array2;
 
@@ -17,14 +20,16 @@ use larql_vindex::{GateIndex, WalkHit, WalkTrace};
 /// The gate matmul IS the KNN. `residual × gate_vectors^T` is both the gate
 /// computation and the similarity search. Same operation, different framing.
 ///
-/// When the vindex has been patched (INSERT/DELETE/UPDATE), the KNN uses the
-/// patched gate vectors. The selected features then go through the model's
-/// actual up/down weights for the FFN computation.
+/// Hot path (forward): gate_knn_batch → sparse/dense FFN. No trace overhead.
+/// Cold path (take_trace): re-runs gate_knn on last residual to build trace.
 pub struct WalkFfn<'a> {
     pub weights: &'a ModelWeights,
     pub index: &'a dyn GateIndex,
     pub top_k: usize,
-    trace: std::cell::RefCell<Vec<(usize, Vec<WalkHit>)>>,
+    /// Deferred trace: stores (layer, last_position_residual) for lazy trace building.
+    trace_residuals: std::cell::RefCell<Vec<(usize, Vec<f32>)>>,
+    /// Whether to record residuals for deferred trace. Default: true.
+    record_trace: bool,
 }
 
 impl<'a> WalkFfn<'a> {
@@ -33,36 +38,43 @@ impl<'a> WalkFfn<'a> {
             weights,
             index,
             top_k,
-            trace: std::cell::RefCell::new(Vec::new()),
+            trace_residuals: std::cell::RefCell::new(Vec::new()),
+            record_trace: false,
+        }
+    }
+
+    /// Create a WalkFfn with trace recording enabled.
+    /// Only use this when you need to call take_trace() afterwards.
+    pub fn new_with_trace(weights: &'a ModelWeights, index: &'a dyn GateIndex, top_k: usize) -> Self {
+        Self {
+            weights,
+            index,
+            top_k,
+            trace_residuals: std::cell::RefCell::new(Vec::new()),
+            record_trace: true,
         }
     }
 
     /// Take the accumulated walk trace (clears internal state).
+    /// Lazily computes gate KNN + feature_meta for each recorded layer.
     pub fn take_trace(&self) -> WalkTrace {
-        let layers = self.trace.borrow_mut().drain(..).collect();
-        WalkTrace { layers }
-    }
+        let residuals = self.trace_residuals.borrow_mut().drain(..).collect::<Vec<_>>();
+        let mut layers = Vec::with_capacity(residuals.len());
 
-    /// Gate KNN for a single position, capturing trace and returning feature indices.
-    fn knn_select_and_trace(&self, layer: usize, x_row: &ndarray::ArrayView1<f32>) -> Vec<usize> {
-        if self.index.num_features(layer) == 0 {
-            return vec![];
+        for (layer, residual) in residuals {
+            let r = ndarray::Array1::from_vec(residual);
+            let hits = self.index.gate_knn(layer, &r, self.top_k);
+            let walk_hits: Vec<WalkHit> = hits
+                .into_iter()
+                .filter_map(|(feature, gate_score)| {
+                    let meta = self.index.feature_meta(layer, feature)?.clone();
+                    Some(WalkHit { layer, feature, gate_score, meta })
+                })
+                .collect();
+            layers.push((layer, walk_hits));
         }
 
-        let hits = self.index.gate_knn(layer, &x_row.to_owned(), self.top_k);
-
-        // Capture trace (which features fired and what they mean)
-        let walk_hits: Vec<WalkHit> = hits
-            .iter()
-            .filter_map(|&(feature, gate_score)| {
-                let meta = self.index.feature_meta(layer, feature)?.clone();
-                Some(WalkHit { layer, feature, gate_score, meta })
-            })
-            .collect();
-        self.trace.borrow_mut().push((layer, walk_hits));
-
-        // Return feature indices for sparse FFN computation
-        hits.into_iter().map(|(f, _)| f).collect()
+        WalkTrace { layers }
     }
 }
 
@@ -76,34 +88,33 @@ impl<'a> FfnBackend for WalkFfn<'a> {
         layer: usize,
         x: &Array2<f32>,
     ) -> (Array2<f32>, Array2<f32>) {
-        let seq_len = x.shape()[0];
+        let num_features = self.index.num_features(layer);
+        if num_features == 0 {
+            // No vindex data for this layer — fall back to dense
+            let dense_ffn = crate::ffn::WeightFfn { weights: self.weights };
+            return dense_ffn.forward_with_activation(layer, x);
+        }
 
-        // If vindex has features for this layer, use KNN-based sparse FFN
-        if self.index.num_features(layer) > 0 {
-            // Select features per position via vindex gate KNN, union them
-            let mut all_features = std::collections::BTreeSet::new();
-            for s in 0..seq_len {
-                let x_row = x.row(s);
-                let feats = self.knn_select_and_trace(layer, &x_row);
-                all_features.extend(feats);
-            }
-            let features: Vec<usize> = all_features.into_iter().collect();
+        // Batched gate KNN: one BLAS gemm for all positions, union top-K
+        let features = self.index.gate_knn_batch(layer, x, self.top_k);
 
-            // Collect down vector overrides for selected features
+        // Record last-position residual for deferred trace (cheap: just a vec copy)
+        if self.record_trace {
+            let seq_len = x.shape()[0];
+            let last_row = x.row(seq_len - 1).to_vec();
+            self.trace_residuals.borrow_mut().push((layer, last_row));
+        }
+
+        // Check for down vector overrides (patched features)
+        let has_overrides = features.iter().any(|&f| self.index.down_override(layer, f).is_some());
+
+        if has_overrides {
             let overrides: Vec<(usize, &[f32])> = features.iter()
                 .filter_map(|&f| self.index.down_override(layer, f).map(|v| (f, v)))
                 .collect();
-
-            // Sparse FFN: compute gate/up/down for selected features only
-            if overrides.is_empty() {
-                sparse_ffn_forward(self.weights, layer, x, &features)
-            } else {
-                sparse_ffn_forward_with_overrides(self.weights, layer, x, &features, &overrides)
-            }
+            sparse_ffn_forward_with_overrides(self.weights, layer, x, &features, &overrides)
         } else {
-            // No vindex data for this layer — fall back to dense
-            let dense_ffn = crate::ffn::WeightFfn { weights: self.weights };
-            dense_ffn.forward_with_activation(layer, x)
+            sparse_ffn_forward(self.weights, layer, x, &features)
         }
     }
 
