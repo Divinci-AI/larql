@@ -39,7 +39,8 @@ impl ModelWeights {
         let mut freed = 0usize;
         let ffn_patterns = ["gate_proj", "up_proj", "down_proj",
                            "ffn_gate", "ffn_up", "ffn_down",
-                           "mlp.experts"];
+                           "mlp.experts", "block_sparse_moe.experts",
+                           "packed_gate_up_blocks", "packed_down_blocks"];
         let keys_to_remove: Vec<String> = self.tensors.keys()
             .filter(|k| ffn_patterns.iter().any(|p| k.contains(p)))
             .cloned()

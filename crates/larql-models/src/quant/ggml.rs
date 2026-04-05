@@ -64,6 +64,8 @@ pub fn dequantize(data: &[u8], tensor_type: u32, n_elements: usize) -> Result<Ve
         TYPE_Q4_0 => dequantize_q4_0(data, n_elements),
         TYPE_Q4_1 => dequantize_q4_1(data, n_elements),
         TYPE_Q8_0 => dequantize_q8_0(data, n_elements),
+        TYPE_Q5_0 => dequantize_q5_0(data, n_elements),
+        TYPE_Q5_1 => dequantize_q5_1(data, n_elements),
         other => Err(ModelError::UnsupportedDtype(format!("GGML type {other}"))),
     }
 }
@@ -128,6 +130,69 @@ fn dequantize_q8_0(data: &[u8], n_elements: usize) -> Result<Vec<f32>, ModelErro
 
         for j in 0..32 {
             out.push(quants[j] as i8 as f32 * scale);
+        }
+    }
+    Ok(out)
+}
+
+/// Q5_0: block = f16 scale (2B) + 4 bytes high bits + 16 bytes low nibbles. 32 elements per block.
+/// combined = lo4 | (hi1 << 4), value = (combined - 16) * scale
+pub fn dequantize_q5_0(data: &[u8], n_elements: usize) -> Result<Vec<f32>, ModelError> {
+    let block_size = 22;
+    let n_blocks = n_elements / 32;
+    let mut out = Vec::with_capacity(n_elements);
+
+    for i in 0..n_blocks {
+        let block = &data[i * block_size..(i + 1) * block_size];
+        let scale = f16_to_f32(u16::from_le_bytes([block[0], block[1]]));
+        let high_bits = u32::from_le_bytes([block[2], block[3], block[4], block[5]]);
+        let quants = &block[6..];
+
+        for j in 0..16 {
+            let byte = quants[j];
+            let lo_lo4 = (byte & 0x0F) as u8;
+            let hi_lo4 = ((byte >> 4) & 0x0F) as u8;
+
+            let lo_hi1 = ((high_bits >> (j * 2)) & 1) as u8;
+            let hi_hi1 = ((high_bits >> (j * 2 + 1)) & 1) as u8;
+
+            let lo_combined = lo_lo4 | (lo_hi1 << 4);
+            let hi_combined = hi_lo4 | (hi_hi1 << 4);
+
+            out.push((lo_combined as i32 - 16) as f32 * scale);
+            out.push((hi_combined as i32 - 16) as f32 * scale);
+        }
+    }
+    Ok(out)
+}
+
+/// Q5_1: block = f16 scale (2B) + f16 min (2B) + 4 bytes high bits + 16 bytes low nibbles.
+/// combined = lo4 | (hi1 << 4), value = combined * scale + min
+pub fn dequantize_q5_1(data: &[u8], n_elements: usize) -> Result<Vec<f32>, ModelError> {
+    let block_size = 24;
+    let n_blocks = n_elements / 32;
+    let mut out = Vec::with_capacity(n_elements);
+
+    for i in 0..n_blocks {
+        let block = &data[i * block_size..(i + 1) * block_size];
+        let scale = f16_to_f32(u16::from_le_bytes([block[0], block[1]]));
+        let min = f16_to_f32(u16::from_le_bytes([block[2], block[3]]));
+        let high_bits = u32::from_le_bytes([block[4], block[5], block[6], block[7]]);
+        let quants = &block[8..];
+
+        for j in 0..16 {
+            let byte = quants[j];
+            let lo_lo4 = (byte & 0x0F) as u8;
+            let hi_lo4 = ((byte >> 4) & 0x0F) as u8;
+
+            let lo_hi1 = ((high_bits >> (j * 2)) & 1) as u8;
+            let hi_hi1 = ((high_bits >> (j * 2 + 1)) & 1) as u8;
+
+            let lo_combined = lo_lo4 | (lo_hi1 << 4);
+            let hi_combined = hi_lo4 | (hi_hi1 << 4);
+
+            out.push(lo_combined as f32 * scale + min);
+            out.push(hi_combined as f32 * scale + min);
         }
     }
     Ok(out)
@@ -318,5 +383,101 @@ mod tests {
             .collect();
         let result = dequantize(&data, TYPE_F32, 3).unwrap();
         assert_eq!(result, vec![1.0, -2.0, 3.0]);
+    }
+
+    // ── Q5_0 ──
+
+    #[test]
+    fn q5_0_basic() {
+        // scale=1.0, high_bits=0, quants=0x88 → lo4=8, hi4=8, hi1=0
+        // combined=8, value=(8-16)*1.0=-8.0
+        let mut block = vec![0x00, 0x3C]; // f16 1.0
+        block.extend_from_slice(&[0x00; 4]); // high bits all zero
+        block.extend_from_slice(&[0x88; 16]); // quants
+        let result = dequantize_q5_0(&block, 32).unwrap();
+        assert_eq!(result.len(), 32);
+        assert!((result[0] - (-8.0)).abs() < 0.01);
+        assert!((result[1] - (-8.0)).abs() < 0.01);
+    }
+
+    #[test]
+    fn q5_0_with_high_bits() {
+        // scale=1.0, high_bits=0xFFFFFFFF (all 1), quants=0x00
+        // lo4=0, hi1=1, combined=0|16=16, value=(16-16)*1.0=0.0
+        let mut block = vec![0x00, 0x3C]; // f16 1.0
+        block.extend_from_slice(&[0xFF; 4]); // high bits all one
+        block.extend_from_slice(&[0x00; 16]); // quants all zero nibbles
+        let result = dequantize_q5_0(&block, 32).unwrap();
+        assert_eq!(result.len(), 32);
+        assert!((result[0] - 0.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn q5_0_mixed() {
+        // scale=2.0, high_bits=0x00000001 (bit 0 set), quants[0]=0x53
+        // element 0: lo4=3, hi1=bit0=1, combined=3|16=19, value=(19-16)*2=6.0
+        // element 1: lo4=5, hi1=bit1=0, combined=5, value=(5-16)*2=-22.0
+        let mut block = vec![0x00, 0x40]; // f16 2.0
+        block.extend_from_slice(&0x00000001u32.to_le_bytes()); // high bits
+        block.push(0x53); // quants[0]: lo=3, hi=5
+        block.extend_from_slice(&[0x00; 15]); // rest zero
+        let result = dequantize_q5_0(&block, 32).unwrap();
+        assert!((result[0] - 6.0).abs() < 0.01);
+        assert!((result[1] - (-22.0)).abs() < 0.01);
+    }
+
+    #[test]
+    fn q5_0_zero_scale() {
+        let mut block = vec![0x00, 0x00]; // scale=0
+        block.extend_from_slice(&[0xFF; 4]);
+        block.extend_from_slice(&[0xFF; 16]);
+        let result = dequantize_q5_0(&block, 32).unwrap();
+        assert!(result.iter().all(|&v| v == 0.0));
+    }
+
+    // ── Q5_1 ──
+
+    #[test]
+    fn q5_1_basic() {
+        // scale=1.0, min=0.5, high_bits=0, quants=0x00
+        // combined=0, value=0*1.0+0.5=0.5
+        let mut block = vec![0x00, 0x3C, 0x00, 0x38]; // scale=1.0, min=0.5
+        block.extend_from_slice(&[0x00; 4]); // high bits
+        block.extend_from_slice(&[0x00; 16]); // quants
+        let result = dequantize_q5_1(&block, 32).unwrap();
+        assert_eq!(result.len(), 32);
+        assert!((result[0] - 0.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn q5_1_with_high_bits() {
+        // scale=2.0, min=1.0, high_bits=0xFFFFFFFF, quants=0xFF
+        // lo4=15, hi1=1, combined=15|16=31, value=31*2.0+1.0=63.0
+        let mut block = vec![0x00, 0x40, 0x00, 0x3C]; // scale=2.0, min=1.0
+        block.extend_from_slice(&[0xFF; 4]); // high bits all one
+        block.extend_from_slice(&[0xFF; 16]); // quants all 0xF nibbles
+        let result = dequantize_q5_1(&block, 32).unwrap();
+        assert!((result[0] - 63.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn q5_1_via_dequantize() {
+        // Verify dispatch works through the main dequantize() function
+        let mut block = vec![0x00, 0x3C, 0x00, 0x00]; // scale=1.0, min=0.0
+        block.extend_from_slice(&[0x00; 4]); // high bits zero
+        block.extend_from_slice(&[0x33; 16]); // lo=3, hi=3, combined=3
+        let result = dequantize(&block, TYPE_Q5_1, 32).unwrap();
+        assert!((result[0] - 3.0).abs() < 0.01);
+        assert!((result[1] - 3.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn q5_0_via_dequantize() {
+        // Verify dispatch works through the main dequantize() function
+        let mut block = vec![0x00, 0x3C]; // scale=1.0
+        block.extend_from_slice(&[0x00; 4]); // high bits zero
+        block.extend_from_slice(&[0x88; 16]); // lo=8,hi=8, combined=8, value=(8-16)=-8
+        let result = dequantize(&block, TYPE_Q5_0, 32).unwrap();
+        assert!((result[0] - (-8.0)).abs() < 0.01);
     }
 }

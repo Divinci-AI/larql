@@ -178,3 +178,153 @@ fn all_architectures_have_attn_keys() {
         assert!(!arch.attn_o_key(0).is_empty(), "{} has empty O key", arch.family());
     }
 }
+
+// ═══════════════════════════════════════════════════════════════
+// ModelWeights: drop_ffn_weights
+// ═══════════════════════════════════════════════════════════════
+
+#[test]
+fn drop_ffn_weights_removes_ffn_tensors() {
+    use larql_models::{ModelWeights, WeightArray};
+    use std::collections::HashMap;
+
+    let arch = detect_from_json(&serde_json::json!({
+        "model_type": "llama",
+        "hidden_size": 4,
+        "num_hidden_layers": 2,
+        "intermediate_size": 8,
+        "num_attention_heads": 2,
+        "num_key_value_heads": 2
+    }));
+
+    let small = WeightArray::zeros((2, 4));
+
+    let mut tensors = HashMap::new();
+    // FFN tensors (should be removed)
+    tensors.insert("layers.0.mlp.gate_proj.weight".into(), small.clone());
+    tensors.insert("layers.0.mlp.up_proj.weight".into(), small.clone());
+    tensors.insert("layers.0.mlp.down_proj.weight".into(), small.clone());
+    tensors.insert("layers.1.mlp.gate_proj.weight".into(), small.clone());
+    tensors.insert("layers.1.mlp.up_proj.weight".into(), small.clone());
+    tensors.insert("layers.1.mlp.down_proj.weight".into(), small.clone());
+    // Attention tensors (should be kept)
+    tensors.insert("layers.0.self_attn.q_proj.weight".into(), small.clone());
+    tensors.insert("layers.0.self_attn.k_proj.weight".into(), small.clone());
+    // Norm (should be kept)
+    tensors.insert("layers.0.input_layernorm.weight".into(), small.clone());
+
+    let mut weights = ModelWeights {
+        tensors,
+        vectors: HashMap::new(),
+        embed: small.clone(),
+        lm_head: small.clone(),
+        arch,
+        num_layers: 2,
+        hidden_size: 4,
+        intermediate_size: 8,
+        vocab_size: 100,
+        head_dim: 2,
+        num_q_heads: 2,
+        num_kv_heads: 2,
+        rope_base: 10000.0,
+    };
+
+    assert_eq!(weights.tensors.len(), 9);
+    let freed = weights.drop_ffn_weights();
+
+    // 6 FFN tensors removed (2 layers × gate/up/down)
+    assert_eq!(weights.tensors.len(), 3, "should keep attn + norm only");
+    assert!(freed > 0, "should report freed bytes");
+
+    // Verify correct tensors remain
+    assert!(weights.tensors.contains_key("layers.0.self_attn.q_proj.weight"));
+    assert!(weights.tensors.contains_key("layers.0.self_attn.k_proj.weight"));
+    assert!(weights.tensors.contains_key("layers.0.input_layernorm.weight"));
+
+    // Verify FFN tensors are gone
+    assert!(!weights.tensors.contains_key("layers.0.mlp.gate_proj.weight"));
+    assert!(!weights.tensors.contains_key("layers.1.mlp.down_proj.weight"));
+}
+
+#[test]
+fn drop_ffn_weights_removes_moe_experts() {
+    use larql_models::{ModelWeights, WeightArray};
+    use std::collections::HashMap;
+
+    let arch = detect_from_json(&serde_json::json!({
+        "model_type": "mixtral",
+        "hidden_size": 4,
+        "num_hidden_layers": 1,
+        "intermediate_size": 8,
+        "num_attention_heads": 2,
+        "num_key_value_heads": 2,
+        "num_local_experts": 4,
+        "num_experts_per_tok": 2
+    }));
+
+    let small = WeightArray::zeros((2, 4));
+    let mut tensors = HashMap::new();
+    // MoE expert tensors
+    tensors.insert("layers.0.block_sparse_moe.experts.0.w1.weight".into(), small.clone());
+    tensors.insert("layers.0.block_sparse_moe.experts.0.w2.weight".into(), small.clone());
+    tensors.insert("layers.0.block_sparse_moe.experts.0.w3.weight".into(), small.clone());
+    // Attention (keep)
+    tensors.insert("layers.0.self_attn.q_proj.weight".into(), small.clone());
+
+    let mut weights = ModelWeights {
+        tensors,
+        vectors: HashMap::new(),
+        embed: small.clone(),
+        lm_head: small.clone(),
+        arch,
+        num_layers: 1,
+        hidden_size: 4,
+        intermediate_size: 8,
+        vocab_size: 100,
+        head_dim: 2,
+        num_q_heads: 2,
+        num_kv_heads: 2,
+        rope_base: 10000.0,
+    };
+
+    weights.drop_ffn_weights();
+    // mlp.experts matches the "mlp.experts" pattern
+    assert_eq!(weights.tensors.len(), 1, "should only keep attn");
+    assert!(weights.tensors.contains_key("layers.0.self_attn.q_proj.weight"));
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Q4 round-trip: quantize then dequantize
+// ═══════════════════════════════════════════════════════════════
+
+#[test]
+fn q4_0_round_trip() {
+    use larql_models::quant::ggml;
+
+    let data: Vec<f32> = (0..64).map(|i| (i as f32 - 32.0) * 0.25).collect();
+    let q4 = ggml::quantize_q4_0(&data);
+    let decoded = ggml::dequantize_q4_0(&q4, 64).unwrap();
+
+    assert_eq!(decoded.len(), 64);
+    let max_err: f32 = data.iter().zip(decoded.iter())
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f32, f32::max);
+    // Q4 is lossy but should be within ~2x the quantization step
+    assert!(max_err < 2.0, "Q4 round-trip max error {max_err} exceeds 2.0");
+}
+
+#[test]
+fn q8_0_round_trip() {
+    use larql_models::quant::ggml;
+
+    let data: Vec<f32> = (0..32).map(|i| (i as f32 - 16.0) * 0.1).collect();
+    let q8 = ggml::quantize_q8_0(&data);
+    let decoded = ggml::dequantize(&q8, ggml::TYPE_Q8_0, 32).unwrap();
+
+    assert_eq!(decoded.len(), 32);
+    let max_err: f32 = data.iter().zip(decoded.iter())
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f32, f32::max);
+    // Q8 should be much more accurate than Q4
+    assert!(max_err < 0.02, "Q8 round-trip max error {max_err} exceeds 0.02");
+}

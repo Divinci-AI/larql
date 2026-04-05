@@ -80,7 +80,7 @@ Data format encoding and decoding. Compute operations (matvec, vecmat) are in `l
 quant/
 ├── half.rs      f16/bf16 ↔ f32 (encode + decode)
 ├── ggml.rs      GGML block quantization:
-│                  - Dequantize: Q4_0, Q4_1, Q5_0, Q5_1, Q8_0
+│                  - Dequantize: Q4_0, Q4_1, Q5_0, Q5_1, Q8_0 (all implemented)
 │                  - Quantize: Q4_0, Q8_0 (f32 → packed bytes)
 │                  - Format metadata: tensor_data_size, type_name
 └── mxfp4.rs     MXFP4 microscaling (e8m0 scales + 4-bit values)
@@ -122,7 +122,7 @@ larql-models/src/
 ## Testing
 
 ```bash
-cargo test -p larql-models                              # 74 tests
+cargo test -p larql-models                              # 86 tests
 cargo run -p larql-models --example architecture_demo   # Architecture showcase
 ```
 
