@@ -81,6 +81,28 @@ pub struct Session {
         (usize, usize),
         larql_vindex::ndarray::Array1<f32>,
     >,
+    /// Per-install fact metadata. Enables cross-fact balance: when a
+    /// new INSERT's local balance converges, we replay every prior
+    /// install's canonical prompt through INFER and scale the NEW
+    /// install's down_col further if any prior fact regressed below
+    /// the retrieval floor. Without this, a single install at N=5+
+    /// can grow a gate that fires on template-matched siblings,
+    /// hijacking their prior install's target (observed as "H" on
+    /// every template query after Hyrule→Hateno install).
+    #[allow(dead_code)]
+    pub(crate) installed_facts: Vec<InstalledFact>,
+}
+
+/// Metadata for an installed fact. Populated at INSERT time, used by
+/// subsequent INSERTs' cross-fact balance check.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub(crate) struct InstalledFact {
+    pub layer: usize,
+    pub feature: usize,
+    pub canonical_prompt: String,
+    pub target: String,
+    pub target_id: u32,
 }
 
 /// Active patch recording session (between BEGIN PATCH and SAVE PATCH).
@@ -103,6 +125,7 @@ impl Session {
             auto_patch: false,
             decoy_residual_cache: std::collections::HashMap::new(),
             raw_install_residuals: std::collections::HashMap::new(),
+            installed_facts: Vec::new(),
         }
     }
 
@@ -175,11 +198,11 @@ impl Session {
             Statement::Diff { a, b, layer, relation, limit, into_patch } => {
                 self.exec_diff(a, b, *layer, relation.as_deref(), *limit, into_patch.as_deref())
             }
-            Statement::Insert { entity, relation, target, layer, confidence, alpha } => {
+            Statement::Insert { entity, relation, target, layer, confidence, alpha, mode } => {
                 let mut out = self.ensure_patch_session();
                 out.extend(self.exec_insert(
                     entity, relation, target,
-                    *layer, *confidence, *alpha,
+                    *layer, *confidence, *alpha, *mode,
                 )?);
                 Ok(out)
             }
@@ -199,6 +222,10 @@ impl Session {
             Statement::Merge { source, target, conflict } => {
                 self.exec_merge(source, target.as_deref(), *conflict)
             }
+            Statement::Rebalance { max_iters, floor, ceiling } => {
+                self.exec_rebalance(*max_iters, *floor, *ceiling)
+            }
+
             // ── Patch commands ──
             Statement::BeginPatch { path } => self.exec_begin_patch(path),
             Statement::SavePatch => self.exec_save_patch(),
@@ -227,10 +254,10 @@ impl Session {
             }
             Statement::Stats { .. } => self.remote_stats(),
             Statement::ShowRelations { mode, with_examples, .. } => self.remote_show_relations(*mode, *with_examples),
-            Statement::Insert { entity, relation, target, layer, confidence, alpha: _ } => {
-                // Remote backend doesn't forward ALPHA — the HTTP
-                // protocol doesn't have a schema for it yet. Local
-                // backend honours alpha via `exec_insert`.
+            Statement::Insert { entity, relation, target, layer, confidence, alpha: _, mode: _ } => {
+                // Remote backend doesn't forward ALPHA or MODE — the
+                // HTTP protocol doesn't have a schema for them yet.
+                // Local backend honours both via `exec_insert`.
                 self.remote_insert(entity, relation, target, *layer, *confidence)
             }
             Statement::Delete { conditions } => self.remote_delete(conditions),

@@ -751,13 +751,14 @@ fn parse_insert_minimal() {
         r#"INSERT INTO EDGES (entity, relation, target) VALUES ("John Coyle", "lives-in", "Colchester");"#,
     ).unwrap();
     match stmt {
-        Statement::Insert { entity, relation, target, layer, confidence, alpha } => {
+        Statement::Insert { entity, relation, target, layer, confidence, alpha, mode } => {
             assert_eq!(entity, "John Coyle");
             assert_eq!(relation, "lives-in");
             assert_eq!(target, "Colchester");
             assert!(layer.is_none());
             assert!(confidence.is_none());
             assert!(alpha.is_none());
+            assert_eq!(mode, InsertMode::Knn);
         }
         _ => panic!("expected Insert"),
     }

@@ -196,11 +196,31 @@ impl Session {
             larql_inference::predict_with_ffn(&weights, &tokenizer, &token_ids, top_k, &walk_ffn);
         let walk_ms = start.elapsed().as_secs_f64() * 1000.0;
 
-        // UNIFIED architecture: inserted facts are FFN features in the
-        // overlay. They fire naturally during the walk above, contributing
-        // to `result.predictions` via the normal logit pathway. No
-        // separate KNN override branch needed.
+        // DUAL-MODE: compose-mode inserts participate in the walk above
+        // via the FFN overlay (their features fire during the normal
+        // logit pathway). KNN-mode inserts are a side-channel override
+        // — we check the per-layer KnnStore against captured residuals
+        // and, if any stored key matches at cos > 0.75, emit the stored
+        // target token as a top-1 override. KNN entries don't participate
+        // in the forward pass; they intercept the output at inference.
         let residuals = walk_ffn.take_residuals();
+
+        const KNN_COSINE_THRESHOLD: f32 = 0.75;
+        let knn_layers = patched.knn_store.layers();
+        let mut knn_override: Option<(String, f32, usize)> = None;
+        if !knn_layers.is_empty() {
+            for (layer, residual) in &residuals {
+                if !knn_layers.contains(layer) {
+                    continue;
+                }
+                if let Some((entry, cosine)) = patched.knn_store.query_top1(*layer, residual) {
+                    if cosine > KNN_COSINE_THRESHOLD {
+                        knn_override = Some((entry.target_token.clone(), cosine, *layer));
+                        break;
+                    }
+                }
+            }
+        }
 
         // Build trace from residuals (same logic as take_trace but inline)
         let mut trace_layers = Vec::with_capacity(residuals.len());
@@ -224,8 +244,18 @@ impl Session {
 
         let mut out = Vec::new();
         out.push("Predictions (walk FFN):".into());
-        for (i, (tok, prob)) in result.predictions.iter().enumerate() {
-            out.push(format!("  {:2}. {:20} ({:.2}%)", i + 1, tok, prob * 100.0));
+        if let Some((ref token, cosine, knn_layer)) = knn_override {
+            out.push(format!(
+                "   1. {:20} (KNN override, cos={:.2}, L{})",
+                token, cosine, knn_layer,
+            ));
+            for (i, (tok, prob)) in result.predictions.iter().enumerate() {
+                out.push(format!("  {:2}. {:20} ({:.2}%)", i + 2, tok, prob * 100.0));
+            }
+        } else {
+            for (i, (tok, prob)) in result.predictions.iter().enumerate() {
+                out.push(format!("  {:2}. {:20} ({:.2}%)", i + 1, tok, prob * 100.0));
+            }
         }
         out.push(format!("  {:.0}ms", walk_ms));
 

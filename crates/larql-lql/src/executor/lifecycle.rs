@@ -557,6 +557,45 @@ impl Session {
             }
         }
 
+        // ── Step 0: MEMIT pass over compose-mode inserts ──
+        //
+        // Compose-mode INSERT emits PatchOp::Insert, which specifies
+        // a free slot and the heuristic install_compiled_slot gate/up/
+        // down overlays. Those overlays work at N≤10 per layer but hit
+        // a Hopfield cap past that because the per-fact install is a
+        // strong, non-orthogonal edit.
+        //
+        // MEMIT solves for ΔW_down in closed form across ALL inserted
+        // facts jointly, routing edits through the null-space of typical
+        // activations. The resulting delta scales to 200+ facts per
+        // layer (validated Python reference). Baking ΔW_down into the
+        // compiled vindex's `down_weights.bin` gives the same quality
+        // compilation COMPILE INTO MODEL produces — just in vindex format.
+        let memit_facts = collect_memit_facts(patched, path)?;
+        // Only run MEMIT when model weights are present. Without weights
+        // (browse-only vindexes) the compile falls back to the legacy
+        // column-replace bake of gate/up/down overlays, matching the
+        // pre-MEMIT behaviour used by unit tests that exercise the bake
+        // path without shipping a real model.
+        let memit_results = if !memit_facts.is_empty() && config.has_model_weights {
+            let mut cb = larql_vindex::SilentLoadCallbacks;
+            let weights = larql_vindex::load_model_weights(path, &mut cb)
+                .map_err(|e| LqlError::exec("load weights for MEMIT", e))?;
+            let tokenizer = larql_vindex::load_vindex_tokenizer(path)
+                .map_err(|e| LqlError::exec("load tokenizer for MEMIT", e))?;
+            let results = larql_inference::run_memit(
+                &weights,
+                &memit_facts,
+                0.1, // ridge
+                5.0, // target_alpha
+                &tokenizer,
+            )
+            .map_err(|e| LqlError::Execution(format!("MEMIT solve failed: {e}")))?;
+            Some(results)
+        } else {
+            None
+        };
+
         // ── Step 1: gate_vectors.bin and down_meta.bin ──
         //
         // Both are written from a clone of the patched base. The clone path
@@ -704,6 +743,21 @@ impl Session {
         larql_vindex::VectorIndex::save_config(&new_config, &output_dir)
             .map_err(|e| LqlError::exec("failed to save config", e))?;
 
+        // ── Step 4.5: apply MEMIT ΔW_down to baked down_weights.bin ──
+        //
+        // MEMIT produces additive deltas across the full W_down matrix
+        // per layer. We read the current layer slab, add ΔW to it, and
+        // write it back. This is applied AFTER the column-replace
+        // `patch_down_weights` call so both mechanisms can coexist:
+        // MEMIT handles compose-mode PatchOp::Insert (the scale path),
+        // and column-replace handles any legacy per-slot edits that
+        // may have sneaked in via older patches.
+        let mut memit_layers_touched = 0usize;
+        if let Some(ref results) = memit_results {
+            apply_memit_deltas_to_down_weights(&output_dir, config, results)?;
+            memit_layers_touched = results.len();
+        }
+
         // ── Step 5: serialize KNN store (Architecture B) ──
         let knn_count = patched.knn_store.len();
         if knn_count > 0 {
@@ -730,6 +784,12 @@ impl Session {
                 "Down overrides baked: {} ({} layers touched)",
                 overrides_applied,
                 down_overrides.keys().map(|(l, _)| *l).collect::<std::collections::HashSet<_>>().len(),
+            ));
+        }
+        if let Some(ref results) = memit_results {
+            let total_facts: usize = results.iter().map(|r| r.fact_results.len()).sum();
+            out.push(format!(
+                "MEMIT ΔW_down applied: {total_facts} compose fact(s) across {memit_layers_touched} layer(s)"
             ));
         }
         if knn_count > 0 {
@@ -1160,6 +1220,114 @@ fn patch_down_weights(
         file.write_all(&buf)
             .map_err(|e| LqlError::exec("write down_weights slab", e))?;
     }
+    Ok(())
+}
+
+/// Apply MEMIT ΔW_down deltas to the compiled vindex's
+/// `down_weights.bin`. Each `MemitResult` carries a dense f32 delta of
+/// shape `[hidden, intermediate]` for one layer; we add it element-wise
+/// to the layer's slab, handling f16 storage by round-tripping through
+/// f32 for the arithmetic.
+///
+/// This runs AFTER `patch_down_weights` — the column-replace path
+/// covers legacy arch-A inserts, MEMIT covers compose-mode inserts.
+/// Both add their contribution to the final compiled down_weights.
+fn apply_memit_deltas_to_down_weights(
+    dest_dir: &std::path::Path,
+    config: &larql_vindex::VindexConfig,
+    results: &[larql_inference::MemitResult],
+) -> Result<(), LqlError> {
+    let dst = dest_dir.join("down_weights.bin");
+    if !dst.exists() {
+        return Err(LqlError::Execution(
+            "apply_memit_deltas: down_weights.bin not found in output dir".into(),
+        ));
+    }
+
+    let total = std::fs::metadata(&dst)
+        .map_err(|e| LqlError::exec("stat down_weights.bin", e))?
+        .len() as usize;
+
+    let hidden = config.hidden_size;
+    let intermediate = config.intermediate_size;
+    let num_layers = config.num_layers;
+    let elements_per_layer = hidden * intermediate;
+    let total_elements = num_layers * elements_per_layer;
+
+    let dtype_bytes: usize = if total == total_elements * 4 {
+        4
+    } else if total == total_elements * 2 {
+        2
+    } else {
+        return Err(LqlError::Execution(format!(
+            "down_weights.bin size {total} matches neither f32 ({}) nor f16 ({})",
+            total_elements * 4,
+            total_elements * 2
+        )));
+    };
+
+    let layer_bytes = elements_per_layer * dtype_bytes;
+
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&dst)
+        .map_err(|e| LqlError::exec("open down_weights.bin for MEMIT apply", e))?;
+
+    let mut buf = vec![0u8; layer_bytes];
+
+    for result in results {
+        let layer = result.layer;
+        if layer >= num_layers {
+            return Err(LqlError::Execution(format!(
+                "MEMIT result references layer {layer} but vindex has {num_layers} layers"
+            )));
+        }
+
+        let shape = result.delta_w.shape();
+        if shape[0] != hidden || shape[1] != intermediate {
+            return Err(LqlError::Execution(format!(
+                "MEMIT ΔW shape {:?} mismatches vindex shape [{hidden}, {intermediate}] at L{layer}",
+                shape
+            )));
+        }
+
+        let layer_offset = (layer * layer_bytes) as u64;
+        file.seek(SeekFrom::Start(layer_offset))
+            .map_err(|e| LqlError::exec("seek down_weights slab", e))?;
+        file.read_exact(&mut buf)
+            .map_err(|e| LqlError::exec("read down_weights slab", e))?;
+
+        // Row-major layout: cell = (row * intermediate + feature) * dtype_bytes
+        for row in 0..hidden {
+            for feat in 0..intermediate {
+                let cell = (row * intermediate + feat) * dtype_bytes;
+                let delta = result.delta_w[[row, feat]];
+                if delta == 0.0 {
+                    continue;
+                }
+                if dtype_bytes == 4 {
+                    let cur = f32::from_le_bytes([
+                        buf[cell], buf[cell + 1], buf[cell + 2], buf[cell + 3],
+                    ]);
+                    let next = cur + delta;
+                    buf[cell..cell + 4].copy_from_slice(&next.to_le_bytes());
+                } else {
+                    let cur_half = u16::from_le_bytes([buf[cell], buf[cell + 1]]);
+                    let cur = larql_models::quant::half::f16_to_f32(cur_half);
+                    let next = cur + delta;
+                    let next_half = larql_models::quant::half::f32_to_f16(next);
+                    buf[cell..cell + 2].copy_from_slice(&next_half.to_le_bytes());
+                }
+            }
+        }
+
+        file.seek(SeekFrom::Start(layer_offset))
+            .map_err(|e| LqlError::exec("seek down_weights slab (write)", e))?;
+        file.write_all(&buf)
+            .map_err(|e| LqlError::exec("write down_weights slab", e))?;
+    }
+
     Ok(())
 }
 

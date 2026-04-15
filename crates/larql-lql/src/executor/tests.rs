@@ -1206,7 +1206,7 @@ fn compile_into_model_requires_model_weights() {
 // pending a rewrite against the unified path (task #37).
 
 #[test]
-#[ignore = "pre-unification: asserts KnnStore count behavior; rewrite for overlay path"]
+// restored: dual-mode INSERT defaults to KNN
 fn knn_store_insert_populates_store() {
     // INSERT on a browse-only vindex (no model weights) uses embedding-key fallback
     let (mut session, dir) = vindex_session("knn_insert");
@@ -1230,7 +1230,7 @@ fn knn_store_insert_populates_store() {
 }
 
 #[test]
-#[ignore = "pre-unification: asserts KnnStore count behavior; rewrite for overlay path"]
+// restored: dual-mode INSERT defaults to KNN
 fn knn_store_insert_multiple_facts() {
     let (mut session, dir) = vindex_session("knn_multi");
 
@@ -1259,7 +1259,7 @@ fn knn_store_insert_multiple_facts() {
 }
 
 #[test]
-#[ignore = "pre-unification: asserts KnnStore count behavior; rewrite for overlay path"]
+// restored: dual-mode INSERT defaults to KNN
 fn knn_store_describe_shows_inserted_edges() {
     let (mut session, dir) = vindex_session("knn_describe");
 
@@ -1279,7 +1279,7 @@ fn knn_store_describe_shows_inserted_edges() {
 }
 
 #[test]
-#[ignore = "pre-unification: asserts KnnStore count behavior; rewrite for overlay path"]
+// restored: dual-mode INSERT defaults to KNN
 fn knn_store_delete_removes_entries() {
     let (mut session, dir) = vindex_session("knn_delete");
 
@@ -1306,7 +1306,7 @@ fn knn_store_delete_removes_entries() {
 }
 
 #[test]
-#[ignore = "pre-unification: asserts knn_store.bin in compiled vindex; rewrite for overlay path"]
+// restored: dual-mode INSERT defaults to KNN
 fn knn_store_compile_saves_and_loads() {
     let (mut session, dir) = vindex_session("knn_compile");
 
@@ -1410,7 +1410,7 @@ fn knn_store_delete_knn_patch_op() {
 }
 
 #[test]
-#[ignore = "pre-unification: asserts KnnStore count behavior; rewrite for overlay path"]
+// restored: dual-mode INSERT defaults to KNN
 fn knn_store_insert_at_layer_hint() {
     let (mut session, dir) = vindex_session("knn_layer_hint");
 
