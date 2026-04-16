@@ -75,7 +75,14 @@ impl Session {
                     }
                 }
 
-                self.backend = Backend::Vindex { path, config, patched, relation_classifier, router };
+                self.backend = Backend::Vindex {
+                    path,
+                    config,
+                    patched,
+                    relation_classifier,
+                    router,
+                    memit_store: larql_vindex::MemitStore::new(),
+                };
                 // Reset any previous patch session
                 self.patch_recording = None;
                 self.auto_patch = false;
@@ -373,6 +380,7 @@ impl Session {
             patched,
             relation_classifier,
             router,
+            memit_store: larql_vindex::MemitStore::new(),
         };
 
         Ok(out)

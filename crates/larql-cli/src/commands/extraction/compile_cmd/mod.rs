@@ -9,15 +9,15 @@
 //! - **Patch** (`--vindex`): replays Insert ops from .vlp patch files into
 //!   the model's FFN slots. Vindex-driven; many edges per run.
 //!
-//! The install primitive lives in [`larql_residual_abi::install_edge`] and
-//! mirrors the convention described in
-//! `experiments/07_wasm_compute/WASM_GATE_ARCHITECTURE.md` §3.1.2.
+//! The install primitive in [`edge::install_edge`] mirrors the convention
+//! described in `experiments/07_wasm_compute/WASM_GATE_ARCHITECTURE.md` §3.1.2.
 
 use std::path::PathBuf;
 
 use clap::Args;
 
 mod detect;
+mod edge;
 mod patch;
 mod save;
 mod single;

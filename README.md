@@ -79,9 +79,12 @@ Add `--f16` to halve file sizes with negligible accuracy loss.
 
 ## Architecture
 
-Eight crates. Clean dependency chain.
+Two crate families. LARQL-specific crates own the vindex + LQL + server stack;
+portable `model-*` crates carry primitives that any neural-model compiler
+(LARQL, TinyModel, others) can consume.
 
 ```
+# LARQL-specific
 larql-models      Model config, architecture traits, weight loading, quant/dequant
     ↓
 larql-vindex      Vindex lifecycle: extract, load, query, mutate, patch, save
@@ -93,7 +96,14 @@ larql-lql         LQL parser, executor, REPL, USE REMOTE client
     ↓
 larql-server      HTTP/gRPC server: serve vindexes over the network
 larql-cli         CLI commands (extract-index, build, serve, repl, convert, hf, verify)
+
+# Portable (no LARQL deps; extract to sibling repo later)
+model-compute         bounded compute: native kernels (default) + wasmtime (opt-in)
 ```
+
+The portable crate never imports `larql-*`. Flow is one-way: LARQL consumes
+it (e.g. compile-time resolution of `sum(1..100)` via `model_compute::native`).
+See [crates/model-compute/README.md](crates/model-compute/README.md).
 
 ### larql-vindex
 

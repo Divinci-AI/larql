@@ -261,7 +261,7 @@ pub fn build_vindex_streaming(
     let mut all_down_meta: Vec<Option<Vec<Option<crate::FeatureMeta>>>> = vec![None; num_layers];
 
     // Build whole-word vocab once
-    let (_ww_ids, _ww_embed) = super::build::build_whole_word_vocab(tokenizer, &embed, vocab_size, hidden_size);
+    let (_ww_ids, _ww_embed) = super::build_helpers::build_whole_word_vocab(tokenizer, &embed, vocab_size, hidden_size);
 
     for (layer, layer_down_meta) in all_down_meta.iter_mut().enumerate().take(num_layers) {
         callbacks.on_layer_start("down", layer, num_layers);
@@ -400,7 +400,7 @@ pub fn build_vindex_streaming(
             huggingface_repo: Some(model_name.to_string()),
             huggingface_revision: None,
             safetensors_sha256: None,
-            extracted_at: super::build::chrono_now(),
+            extracted_at: super::build_helpers::chrono_now(),
             larql_version: env!("CARGO_PKG_VERSION").to_string(),
         }),
         checksums: None,
@@ -511,8 +511,4 @@ fn normalize_key(key: &str, prefixes: &[&str]) -> String {
     key.to_string()
 }
 
-fn write_floats(w: &mut impl Write, data: &[f32], dtype: StorageDtype) -> Result<u64, VindexError> {
-    let bytes = crate::config::dtype::encode_floats(data, dtype);
-    w.write_all(&bytes)?;
-    Ok(bytes.len() as u64)
-}
+use crate::config::dtype::write_floats;

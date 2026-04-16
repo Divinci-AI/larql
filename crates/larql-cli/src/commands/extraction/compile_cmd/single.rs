@@ -9,8 +9,7 @@ use std::collections::HashMap;
 
 use ndarray::ArcArray2;
 
-use larql_residual_abi::install_edge;
-
+use super::edge::install_edge;
 use super::detect::detect_ffn_pattern;
 use super::save::{copy_model_config, merge_for_save, write_safetensors};
 use super::CompileArgs;

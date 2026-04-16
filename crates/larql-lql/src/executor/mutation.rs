@@ -514,58 +514,15 @@ impl Session {
 
                 // Collect every raw residual at this layer (all facts,
                 // including the one we just added).
-                let raw_inputs: Vec<((usize, usize), larql_vindex::ndarray::Array1<f32>)> =
-                    raw_residuals_snapshot
-                        .iter()
-                        .filter(|((l, _), _)| *l == layer)
-                        .map(|((l, f), r)| ((*l, *f), r.clone()))
-                        .collect();
-
-                // ── Template subtraction ──
-                //
-                // Raw residuals at install layers (e.g. L22-L28 on
-                // Gemma) are template-dominated: all "The {rel} of X
-                // is" captures share a near rank-1 direction, so
-                // Gram-Schmidt in `refine_gates` exhausts its
-                // orthogonal room around N=10. Subtracting the
-                // per-layer mean converts rank-1/2 raw captures into
-                // rank ~min(N, 40+) entity-only captures, lifting the
-                // Hopfield cap ~20× per layer.
-                //
-                // Diagnostic on Gemma 4B at L26 (N=50):
-                //   raw cos-similarity mean=0.988, rank99=2
-                //   mean-subtracted   mean=-0.019, rank99=44
-                //
-                // The refined `dir` becomes the entity-only direction;
-                // at inference `dir · x_raw` still fires because
-                // `dir · μ ≈ 0` by construction and `dir · e = ||e||`.
-                // Snapshot stays raw so future INSERTs recompute the
-                // mean from scratch (matches batch-refine semantics).
-                let inputs: Vec<larql_vindex::RefineInput> = if raw_inputs.len() >= 2 {
-                    let hidden = raw_inputs[0].1.len();
-                    let mut sum = larql_vindex::ndarray::Array1::<f32>::zeros(hidden);
-                    for (_, r) in &raw_inputs {
-                        sum = sum + r;
-                    }
-                    let mean = sum.mapv(|v| v / raw_inputs.len() as f32);
-                    raw_inputs
-                        .iter()
-                        .map(|((l, f), r)| larql_vindex::RefineInput {
-                            layer: *l,
-                            feature: *f,
-                            gate: r - &mean,
-                        })
-                        .collect()
-                } else {
-                    raw_inputs
-                        .iter()
-                        .map(|((l, f), r)| larql_vindex::RefineInput {
-                            layer: *l,
-                            feature: *f,
-                            gate: r.clone(),
-                        })
-                        .collect()
-                };
+                let inputs: Vec<larql_vindex::RefineInput> = raw_residuals_snapshot
+                    .iter()
+                    .filter(|((l, _), _)| *l == layer)
+                    .map(|((l, f), r)| larql_vindex::RefineInput {
+                        layer: *l,
+                        feature: *f,
+                        gate: r.clone(),
+                    })
+                    .collect();
                 if !inputs.is_empty() && (inputs.len() >= 2 || !layer_decoys.is_empty()) {
                     let result = larql_vindex::refine_gates(&inputs, layer_decoys);
 

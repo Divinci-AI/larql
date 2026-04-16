@@ -1,10 +1,10 @@
 [workspace]
 resolver = "2"
 members = [
+    # larql-specific
     "crates/larql-models",
     "crates/larql-compute",
     "crates/larql-core",
-    "crates/larql-residual-abi",
     "crates/larql-vindex",
     "crates/larql-inference",
     "crates/larql-lql",
@@ -12,18 +12,20 @@ members = [
     "crates/larql-server",
     "crates/larql-python",
     "crates/kv-cache-benchmark",
+    # portable (extract to sibling repos later, names stable)
+    "crates/model-compute",
 ]
 default-members = [
     "crates/larql-models",
     "crates/larql-compute",
     "crates/larql-core",
-    "crates/larql-residual-abi",
     "crates/larql-vindex",
     "crates/larql-inference",
     "crates/larql-lql",
     "crates/larql-cli",
     "crates/larql-server",
     "crates/kv-cache-benchmark",
+    "crates/model-compute",
 ]
 
 [workspace.package]

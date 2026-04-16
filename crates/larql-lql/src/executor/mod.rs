@@ -34,6 +34,14 @@ pub(crate) enum Backend {
         relation_classifier: Option<RelationClassifier>,
         /// MoE router index (if available). Used for MoE-aware DESCRIBE.
         router: Option<larql_vindex::RouterIndex>,
+        /// L2 store of MEMIT-decomposed `(key, decomposed_down)` pairs
+        /// produced by `COMPACT MAJOR`. Persists across the session so
+        /// subsequent COMPACT MAJOR runs accumulate cycles.
+        ///
+        /// (Eventually subsumed by a `StorageEngine` that wraps
+        /// `patched` + `memit_store` + the epoch / mutation counters
+        /// currently duplicated on `Session`.)
+        memit_store: larql_vindex::MemitStore,
     },
     /// Direct model weight access — no vindex extraction needed.
     /// Supports INFER, EXPLAIN INFER, and STATS. Browse/mutation ops
@@ -512,6 +520,17 @@ impl Session {
         self.epoch += 1;
         self.mutations_since_minor += 1;
         self.mutations_since_major += 1;
+    }
+
+    /// Mutable access to the Vindex backend's L2 MEMIT store.
+    /// Used by `COMPACT MAJOR` to persist decomposed (k, d) pairs.
+    pub(crate) fn memit_store_mut(
+        &mut self,
+    ) -> Result<&mut larql_vindex::MemitStore, LqlError> {
+        match &mut self.backend {
+            Backend::Vindex { memit_store, .. } => Ok(memit_store),
+            _ => Err(LqlError::NoBackend),
+        }
     }
 
     pub fn patched_overlay_mut(&mut self) -> Option<&mut larql_vindex::PatchedVindex> {

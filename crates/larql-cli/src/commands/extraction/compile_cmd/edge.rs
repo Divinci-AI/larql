@@ -1,4 +1,4 @@
-//! Compiled-edge install primitive.
+//! The compile-into-weights primitive.
 //!
 //! Writes one (gate, up, down) triple at `slot` so the FFN fires on `trigger`
 //! and contributes `write` (scaled) to the residual. Reference norms from the
@@ -6,7 +6,7 @@
 //! regime as the trained slots; this is what makes the contribution land
 //! cleanly without blowing out the residual.
 //!
-//! The convention matches `WASM_GATE_ARCHITECTURE.md` §3.1.2:
+//! Convention from `experiments/07_wasm_compute/WASM_GATE_ARCHITECTURE.md` §3.1.2:
 //!
 //! ```text
 //! gate[slot, :]  ← trigger̂ × g_norm × gate_scale
@@ -15,16 +15,20 @@
 //! ```
 //!
 //! `trigger` and `write` are normalised internally; pass any non-zero
-//! direction. `gate_scale` defaults are typically 30.0 (large enough to fire
-//! the gate strongly); `alpha_mul` defaults to 1.0 for residual-tag writes
-//! and 10.0 when the write is a token embedding routed through the LM head.
+//! direction. `gate_scale` typically 30.0 (fires gate strongly); `alpha_mul`
+//! typically 1.0 for residual-tag writes, 10.0 for token-embedding writes
+//! routed through the LM head.
+//!
+//! This primitive is the lowest level of the COMPILE verb — `larql compile`
+//! (CLI) calls it directly, and `COMPILE CURRENT INTO MODEL` (LQL) will
+//! eventually call it through the executor. Lives here rather than in its
+//! own crate because it has a single call site inside one crate; when a
+//! second consumer (TinyModel, larql-lql executor) needs it, extract then.
 
 use std::collections::HashMap;
 
 use ndarray::ArcArray2;
 use thiserror::Error;
-
-use crate::norm::{col_norm, row_norm, vec_norm};
 
 #[derive(Debug, Error)]
 pub enum EdgeError {
@@ -113,14 +117,26 @@ pub fn install_edge(
     Ok(EdgeStats { g_norm, u_norm, d_norm, alpha })
 }
 
+fn vec_norm(v: &[f32]) -> f32 {
+    v.iter().map(|x| x * x).sum::<f32>().sqrt()
+}
+
+fn row_norm(tensor: &ArcArray2<f32>, row: usize) -> f32 {
+    let r = tensor.row(row);
+    r.dot(&r).sqrt()
+}
+
+fn col_norm(tensor: &ArcArray2<f32>, col: usize) -> f32 {
+    let c = tensor.column(col);
+    c.dot(&c).sqrt()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use ndarray::Array2;
 
     fn fresh_layer(ffn_dim: usize, hidden: usize) -> HashMap<String, ArcArray2<f32>> {
-        // Initialise gate/up/down with non-zero rows/cols at slot 0 so
-        // reference norms aren't degenerate.
         let mut gate = Array2::<f32>::zeros((ffn_dim, hidden));
         let mut up = Array2::<f32>::zeros((ffn_dim, hidden));
         let mut down = Array2::<f32>::zeros((hidden, ffn_dim));
@@ -145,9 +161,7 @@ mod tests {
         let stats = install_edge(&mut t, "gate", "up", "down", 0, &trigger, &write, 30.0, 1.0).unwrap();
 
         let gate = t.get("gate").unwrap();
-        // gate[0, 0] = trigger[0] * g_norm * gate_scale / trigger_norm
-        // g_norm = sqrt(8 * 0.1^2) = sqrt(0.08), gate_scale=30, trigger_norm=1
-        let expected = 1.0 * stats.g_norm * 30.0 / 1.0;
+        let expected = stats.g_norm * 30.0;
         assert!((gate[[0, 0]] - expected).abs() < 1e-5);
     }
 
@@ -169,5 +183,54 @@ mod tests {
         let err = install_edge(&mut t, "missing_gate", "up", "down", 0, &trigger, &write, 30.0, 1.0)
             .unwrap_err();
         assert!(matches!(err, EdgeError::MissingTensor(k) if k == "missing_gate"));
+    }
+
+    #[test]
+    fn magnitude_preservation_invariant() {
+        let mut t = fresh_layer(4, 8);
+        for &scale in &[0.1_f32, 1.0, 100.0] {
+            let trigger: Vec<f32> = (0..8).map(|i| (i as f32 + 1.0) * scale).collect();
+            let write = vec![0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+            let stats = install_edge(&mut t, "gate", "up", "down", 0, &trigger, &write, 30.0, 1.0).unwrap();
+            let gate = t.get("gate").unwrap();
+            let gate_row_norm = (0..8).map(|j| gate[[0, j]].powi(2)).sum::<f32>().sqrt();
+            let expected = stats.g_norm * 30.0;
+            let rel_err = (gate_row_norm - expected).abs() / expected.max(1e-8);
+            assert!(rel_err < 1e-5, "scale={scale}: rel_err={rel_err}");
+        }
+    }
+
+    #[test]
+    fn write_down_alpha_matches_stats() {
+        let mut t = fresh_layer(4, 8);
+        let trigger = vec![1.0; 8];
+        let write = vec![0.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let stats = install_edge(&mut t, "gate", "up", "down", 0, &trigger, &write, 30.0, 1.0).unwrap();
+        let down = t.get("down").unwrap();
+        for j in 0..8 {
+            let expected = write[j] * stats.alpha;
+            assert!((down[[j, 0]] - expected).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn shorter_trigger_does_not_panic() {
+        let mut t = fresh_layer(4, 8);
+        let trigger = vec![1.0, 0.0, 0.0];
+        let write = vec![0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        install_edge(&mut t, "gate", "up", "down", 0, &trigger, &write, 30.0, 1.0).unwrap();
+        let gate = t.get("gate").unwrap();
+        assert!((gate[[0, 4]] - 0.1).abs() < 1e-5);
+    }
+
+    #[test]
+    fn alpha_mul_scales_write_linearly() {
+        let mut t = fresh_layer(4, 8);
+        let trigger = vec![1.0; 8];
+        let write = vec![0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let s1 = install_edge(&mut t, "gate", "up", "down", 0, &trigger, &write, 30.0, 1.0).unwrap();
+        let mut t2 = fresh_layer(4, 8);
+        let s2 = install_edge(&mut t2, "gate", "up", "down", 0, &trigger, &write, 30.0, 5.0).unwrap();
+        assert!((s2.alpha / s1.alpha - 5.0).abs() < 1e-5);
     }
 }

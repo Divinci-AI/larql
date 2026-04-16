@@ -249,7 +249,7 @@ impl Session {
                 ));
             }
 
-            // Store decomposed pairs in MemitStore
+            // Build decomposed (k, d) pairs and persist to L2 store.
             let mut memit_facts = Vec::with_capacity(n);
             for (i, (entity, relation, target)) in fact_meta.iter().enumerate() {
                 memit_facts.push(larql_vindex::MemitFact {
@@ -262,10 +262,15 @@ impl Session {
                 });
             }
 
-            // For now, store in session-level comment. Full MemitStore integration
-            // requires threading StorageEngine through Backend (deferred from Batch 3).
+            let cycle_id = self.memit_store_mut()?.add_cycle(
+                install_layer,
+                memit_facts,
+                result.frobenius_norm,
+                min_cos,
+                result.max_off_diagonal,
+            );
             out.push(format!(
-                "  Stored {n} decomposed (k, d) pairs for graph walk."
+                "  Stored {n} decomposed (k, d) pairs as cycle #{cycle_id} at layer {install_layer}."
             ));
             out.push(format!(
                 "COMPACT MAJOR complete: {n} facts compiled, {:.0}% quality.",

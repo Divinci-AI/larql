@@ -13,6 +13,7 @@ Three extraction levels gate which LQL statements work: `browse` (DESCRIBE/WALK/
 Cargo workspace at repo root with a strict dependency chain — respect this when adding modules:
 
 ```
+# LARQL-specific (depend on vindex, LQL, etc.)
 larql-models      model config, architecture traits, weight loading, quant/dequant
     ↓
 larql-compute     CPU/Metal matmul backends, pipeline
@@ -28,7 +29,20 @@ larql-server      HTTP + gRPC server serving vindexes
 larql-cli         top-level `larql` binary (every subcommand lives in commands/)
 larql-python      PyO3 bindings (maturin-built, module name `larql._native`)
 kv-cache-benchmark    standalone benchmark crate
+
+# Portable (no LARQL deps; extract to sibling repo later, name stable)
+model-compute         bounded native kernels (arithmetic/datetime) and optional
+                      wasmtime-hosted WASM modules (features: `native`/`wasm`)
 ```
+
+**`model-compute` never imports `larql-*`.** Dependency flow is one-way:
+LARQL may consume it (e.g. for compile-time `sum(1..100)` resolution); it
+knows nothing about vindex or LQL. When it moves to a sibling repo, the
+name stays the same so imports don't churn. The `install_edge` primitive
+that stamps a compiled edge into gate/up/down tensors lives at
+[crates/larql-cli/src/commands/extraction/compile_cmd/edge.rs](crates/larql-cli/src/commands/extraction/compile_cmd/edge.rs) —
+it's the lowest-level step of the `COMPILE` verb and isn't a separate crate
+until a second consumer needs it.
 
 The CLI is a thin dispatcher: each `larql <cmd>` lives in [crates/larql-cli/src/commands/extraction/](crates/larql-cli/src/commands/extraction/) or [crates/larql-cli/src/commands/query/](crates/larql-cli/src/commands/query/) and is wired into the `Commands` enum in [crates/larql-cli/src/main.rs](crates/larql-cli/src/main.rs). `larql serve` exec's into `larql-server`. `larql repl` and `larql lql` delegate to `larql_lql::run_repl`/`run_statement`.
 

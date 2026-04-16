@@ -8,9 +8,8 @@ use std::path::PathBuf;
 
 use ndarray::ArcArray2;
 
-use larql_residual_abi::install_edge;
-
 use super::detect::{decode_f32_b64, detect_ffn_pattern, ensure_cloned};
+use super::edge::install_edge;
 use super::save::{copy_model_config, merge_for_save, write_safetensors};
 use super::CompileArgs;
 
