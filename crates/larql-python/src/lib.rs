@@ -8,6 +8,7 @@ mod vindex;
 mod session;
 mod walk;
 mod trace_py;
+mod edit_py;
 
 use vindex::{PyVindex, PyFeatureMeta, PyWalkHit, PyDescribeEdge, PyRelation};
 use session::PySession;
@@ -788,6 +789,12 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Vindex functions (new)
     m.add_function(wrap_pyfunction!(load_vindex, m)?)?;
     m.add_function(wrap_pyfunction!(create_session, m)?)?;
+
+    // Mechanistic fact-editing (RFC-0001 Phase D)
+    m.add_function(wrap_pyfunction!(edit_py::crown, m)?)?;
+    m.add_function(wrap_pyfunction!(edit_py::edit, m)?)?;
+    m.add_function(wrap_pyfunction!(edit_py::apply_patch, m)?)?;
+    m.add_function(wrap_pyfunction!(edit_py::memit, m)?)?;
 
     Ok(())
 }
