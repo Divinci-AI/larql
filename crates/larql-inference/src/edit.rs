@@ -1,22 +1,22 @@
 //! Mechanistic fact-editing primitives.
 //!
-//! Implements the rank-1 ROME update on FFN `down_proj` and a tiny patch
-//! file format, wrapping the algorithms validated in Python in
-//! Divinci-AI/server notebooks/CHAPTER_20_HONEY.md (Phase 140) and
-//! CHAPTER_23_PER_EDIT_CROWN.md (Phase 143).
+//! Implements the rank-1 ROME update and the multi-fact MEMIT patch format,
+//! wrapping the algorithms validated in Python in Divinci-AI/server
+//! notebooks/CHAPTER_20_HONEY.md (Phase 140) and CHAPTER_22_DISTRIBUTED_STACK.md
+//! (Phase 142).
 //!
-//! The rank-1 update:
+//! Two patch kinds share the same on-disk envelope:
 //!
-//!   ΔW = d ⊗ k_norm        where  k_norm = k / (k · k)
+//!   `RankOne` — ΔW = d ⊗ k_norm (stored as two f32 vectors). ~55 KB for
+//!   Gemma 4 4B. Emitted by `larql edit`.
 //!
-//! satisfies exactly  `(W + ΔW) @ k = W @ k + d`  for any key `k`, and
-//! for other keys `k'` the perturbation is `d * (k · k') / (k · k)` —
-//! proportional to similarity with the edit's key, so orthogonal inputs
-//! are unaffected.
+//!   `Dense`   — ΔW stored flat row-major (hidden × intermediate). Larger
+//!   (~72 MB for Gemma 4 4B) but exact. Emitted by `larql memit` when the
+//!   covariance-based MEMIT solver produces a delta that isn't natively
+//!   a rank-1 outer product.
 //!
-//! This module is designed to be thin — the hard numerical work already
-//! lives in `forward::memit` for the multi-edit MEMIT path. `edit` is
-//! the simpler single-edit primitive.
+//! `apply_patch` dispatches on the kind and adds the resulting ΔW into
+//! `down_proj.weight` in place.
 
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
@@ -26,27 +26,38 @@ use larql_models::{ModelWeights, WeightArray};
 use ndarray::{Array1, Array2};
 use serde::{Deserialize, Serialize};
 
-/// A single-layer, rank-1 FFN down_proj patch.
+/// Envelope metadata written into every `.lqpatch` file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EditPatch {
     pub version: u32,
     pub layer: usize,
     pub module: String,
-    /// Hidden size (= d.len()).
+    /// Hidden size of the target model.
     pub hidden_size: usize,
-    /// Intermediate size (= k_norm.len()).
+    /// Intermediate size of the target model.
     pub intermediate_size: usize,
-    /// Binary-search scale that landed the edit (informational).
+    /// Kind tag (also implicit in the binary body layout). Default
+    /// "rank_one" for older (version=1) files.
+    #[serde(default = "default_kind")]
+    pub kind: String,
+    /// Scale factor used during creation (informational).
+    #[serde(default)]
     pub scale: f32,
-    /// Provenance — source prompt, old/new tokens, crown-delta. Optional.
+    /// Provenance.
     #[serde(default)]
     pub provenance: PatchProvenance,
-    /// Output-delta direction. Shape: [hidden_size].
+
+    // ── Binary body (not serialised to JSON; written separately) ──
     #[serde(skip)]
-    pub d: Vec<f32>,
-    /// Pre-normalized key: k / (k · k). Shape: [intermediate_size].
+    pub d: Vec<f32>, // hidden_size — populated only for kind="rank_one"
     #[serde(skip)]
-    pub k_norm: Vec<f32>,
+    pub k_norm: Vec<f32>, // intermediate_size — populated only for kind="rank_one"
+    #[serde(skip)]
+    pub delta_w: Vec<f32>, // hidden_size * intermediate_size (row-major) — populated only for kind="dense"
+}
+
+fn default_kind() -> String {
+    "rank_one".to_string()
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -59,26 +70,22 @@ pub struct PatchProvenance {
     pub created_at: String,
 }
 
-/// Binary patch file magic. 8 bytes: "LQPATCH\0".
+/// File magic for all .lqpatch files.
 const PATCH_MAGIC: &[u8; 8] = b"LQPATCH\0";
 
-/// Write an `EditPatch` to disk.
-///
-/// File layout:
-///   8 bytes  : magic "LQPATCH\0"
-///   4 bytes  : meta_json_len (u32, little-endian)
-///   N bytes  : meta JSON (UTF-8)
-///   4 bytes  : d_len  (u32 = hidden_size)
-///   N*4 bytes: d   as f32 little-endian
-///   4 bytes  : k_len (u32 = intermediate_size)
-///   N*4 bytes: k_norm as f32 little-endian
+// ── Writers ─────────────────────────────────────────────────────────
+
+/// Write an `EditPatch` to disk. Dispatches to rank-one or dense layout
+/// based on `patch.kind`.
 pub fn write_patch(path: impl AsRef<Path>, patch: &EditPatch) -> std::io::Result<()> {
     let mut w = BufWriter::new(File::create(path)?);
     w.write_all(PATCH_MAGIC)?;
 
+    // Serialise metadata with the body fields empty.
     let meta = EditPatch {
         d: Vec::new(),
         k_norm: Vec::new(),
+        delta_w: Vec::new(),
         ..patch.clone()
     };
     let meta_json = serde_json::to_vec(&meta)
@@ -86,19 +93,43 @@ pub fn write_patch(path: impl AsRef<Path>, patch: &EditPatch) -> std::io::Result
     w.write_all(&(meta_json.len() as u32).to_le_bytes())?;
     w.write_all(&meta_json)?;
 
-    w.write_all(&(patch.d.len() as u32).to_le_bytes())?;
-    for &v in &patch.d {
-        w.write_all(&v.to_le_bytes())?;
+    match patch.kind.as_str() {
+        "rank_one" => {
+            w.write_all(&(patch.d.len() as u32).to_le_bytes())?;
+            write_f32s(&mut w, &patch.d)?;
+            w.write_all(&(patch.k_norm.len() as u32).to_le_bytes())?;
+            write_f32s(&mut w, &patch.k_norm)?;
+        }
+        "dense" => {
+            let expected = patch.hidden_size * patch.intermediate_size;
+            if patch.delta_w.len() != expected {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "dense delta_w length {} != hidden*intermediate {}",
+                        patch.delta_w.len(),
+                        expected
+                    ),
+                ));
+            }
+            w.write_all(&(patch.delta_w.len() as u32).to_le_bytes())?;
+            write_f32s(&mut w, &patch.delta_w)?;
+        }
+        other => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("unknown patch kind: {other}"),
+            ));
+        }
     }
-    w.write_all(&(patch.k_norm.len() as u32).to_le_bytes())?;
-    for &v in &patch.k_norm {
-        w.write_all(&v.to_le_bytes())?;
-    }
+
     w.flush()?;
     Ok(())
 }
 
-/// Read an `EditPatch` from disk.
+// ── Readers ─────────────────────────────────────────────────────────
+
+/// Read an `EditPatch` from disk. Dispatches on the stored kind.
 pub fn read_patch(path: impl AsRef<Path>) -> std::io::Result<EditPatch> {
     let mut r = BufReader::new(File::open(path)?);
     let mut magic = [0u8; 8];
@@ -115,19 +146,42 @@ pub fn read_patch(path: impl AsRef<Path>) -> std::io::Result<EditPatch> {
     let mut patch: EditPatch = serde_json::from_slice(&meta_buf)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
-    let d_len = read_u32(&mut r)? as usize;
-    patch.d = read_f32s(&mut r, d_len)?;
-    let k_len = read_u32(&mut r)? as usize;
-    patch.k_norm = read_f32s(&mut r, k_len)?;
-
-    if patch.d.len() != patch.hidden_size || patch.k_norm.len() != patch.intermediate_size {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!(
-                "shape mismatch: d={} (hidden={}), k={} (intermediate={})",
-                patch.d.len(), patch.hidden_size, patch.k_norm.len(), patch.intermediate_size
-            ),
-        ));
+    match patch.kind.as_str() {
+        "rank_one" => {
+            let d_len = read_u32(&mut r)? as usize;
+            patch.d = read_f32s(&mut r, d_len)?;
+            let k_len = read_u32(&mut r)? as usize;
+            patch.k_norm = read_f32s(&mut r, k_len)?;
+            if patch.d.len() != patch.hidden_size
+                || patch.k_norm.len() != patch.intermediate_size
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "rank_one shape mismatch: d={} (hidden={}), k={} (intermediate={})",
+                        patch.d.len(), patch.hidden_size,
+                        patch.k_norm.len(), patch.intermediate_size
+                    ),
+                ));
+            }
+        }
+        "dense" => {
+            let dw_len = read_u32(&mut r)? as usize;
+            patch.delta_w = read_f32s(&mut r, dw_len)?;
+            let expected = patch.hidden_size * patch.intermediate_size;
+            if patch.delta_w.len() != expected {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("dense len {} != hidden*intermediate {}", patch.delta_w.len(), expected),
+                ));
+            }
+        }
+        other => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("unknown patch kind: {other}"),
+            ));
+        }
     }
     Ok(patch)
 }
@@ -148,14 +202,17 @@ fn read_f32s<R: Read>(r: &mut R, n: usize) -> std::io::Result<Vec<f32>> {
     Ok(out)
 }
 
-/// Compute the rank-1 edit patch from a captured key and desired output delta.
-///
-/// `k`     : the FFN intermediate activation vector (last-token position)
-///           at the crown layer for the SOURCE prompt. Length = intermediate_size.
-/// `d`     : the desired additional contribution to the FFN output at that
-///           position. Length = hidden_size.
-/// `scale` : how much of `d` to actually use (the caller decides after
-///           a binary/linear scale search).
+fn write_f32s<W: Write>(w: &mut W, xs: &[f32]) -> std::io::Result<()> {
+    for &v in xs {
+        w.write_all(&v.to_le_bytes())?;
+    }
+    Ok(())
+}
+
+// ── Construction helpers ────────────────────────────────────────────
+
+/// Build a rank-1 patch from captured key and desired output delta.
+/// (Phase B path — single-fact edit.)
 pub fn compute_rank1(
     k: &[f32],
     d: &[f32],
@@ -167,21 +224,54 @@ pub fn compute_rank1(
     let k_norm: Vec<f32> = k.iter().map(|&v| v / kk).collect();
     let d_scaled: Vec<f32> = d.iter().map(|&v| v * scale).collect();
     EditPatch {
-        version: 1,
+        version: 2,
         layer,
         module: "down_proj".to_string(),
         hidden_size: d.len(),
         intermediate_size: k.len(),
+        kind: "rank_one".to_string(),
         scale,
         provenance,
         d: d_scaled,
         k_norm,
+        delta_w: Vec::new(),
     }
 }
 
+/// Build a dense patch from a full ΔW matrix (hidden × intermediate, row-major).
+/// (Phase C path — MEMIT output.)
+pub fn compute_dense(
+    delta_w: &Array2<f32>,
+    layer: usize,
+    provenance: PatchProvenance,
+) -> EditPatch {
+    let (hidden, intermediate) = (delta_w.shape()[0], delta_w.shape()[1]);
+    // Row-major flatten.
+    let mut flat = Vec::with_capacity(hidden * intermediate);
+    for row in delta_w.rows() {
+        for &v in row {
+            flat.push(v);
+        }
+    }
+    EditPatch {
+        version: 2,
+        layer,
+        module: "down_proj".to_string(),
+        hidden_size: hidden,
+        intermediate_size: intermediate,
+        kind: "dense".to_string(),
+        scale: 1.0,
+        provenance,
+        d: Vec::new(),
+        k_norm: Vec::new(),
+        delta_w: flat,
+    }
+}
+
+// ── Apply ───────────────────────────────────────────────────────────
+
 /// Apply a patch to a model's `down_proj` weight at the target layer,
-/// in-place. `ΔW = d ⊗ k_norm`; the existing down_proj gets this outer
-/// product added. Reversible by calling with negated `d`.
+/// in-place. Handles both rank-1 and dense variants.
 pub fn apply_patch(weights: &mut ModelWeights, patch: &EditPatch) -> Result<(), String> {
     let w_down_key = weights.arch.ffn_down_key(patch.layer);
     let existing = weights
@@ -189,43 +279,54 @@ pub fn apply_patch(weights: &mut ModelWeights, patch: &EditPatch) -> Result<(), 
         .get(&w_down_key)
         .ok_or_else(|| format!("apply_patch: W_down not found at {w_down_key}"))?;
     let (rows, cols) = (existing.shape()[0], existing.shape()[1]);
-
-    // down_proj shape is either [hidden, intermediate] or [intermediate, hidden]
-    // depending on how the model stores it. We detect by size matching.
     let hidden = patch.hidden_size;
     let intermediate = patch.intermediate_size;
-    let (mut updated, transposed) = if rows == hidden && cols == intermediate {
-        (existing.as_standard_layout().to_owned(), false)
+
+    // Detect storage layout.
+    let transposed = if rows == hidden && cols == intermediate {
+        false
     } else if rows == intermediate && cols == hidden {
-        (existing.as_standard_layout().to_owned(), true)
+        true
     } else {
         return Err(format!(
             "apply_patch: W_down shape {rows}x{cols} doesn't match patch ({hidden}x{intermediate})"
         ));
     };
 
-    // Build the rank-1 outer product: delta[i,j] = d[i] * k_norm[j] (canonical),
-    // or d[j] * k_norm[i] if transposed layout.
-    let d = Array1::from(patch.d.clone());
-    let k = Array1::from(patch.k_norm.clone());
-    if !transposed {
-        // delta = d * k^T  →  shape (hidden, intermediate)
-        let delta: Array2<f32> = outer(&d, &k);
-        updated = &updated + &delta;
-    } else {
-        // delta = k * d^T  →  shape (intermediate, hidden)
-        let delta: Array2<f32> = outer(&k, &d);
-        updated = &updated + &delta;
+    let mut updated = existing.as_standard_layout().to_owned();
+
+    match patch.kind.as_str() {
+        "rank_one" => {
+            let d = Array1::from(patch.d.clone());
+            let k = Array1::from(patch.k_norm.clone());
+            let delta: Array2<f32> = if !transposed {
+                outer(&d, &k) // (hidden, intermediate)
+            } else {
+                outer(&k, &d) // (intermediate, hidden)
+            };
+            updated = &updated + &delta;
+        }
+        "dense" => {
+            // Reshape the flat row-major vector back into [hidden, intermediate].
+            let delta = Array2::from_shape_vec((hidden, intermediate), patch.delta_w.clone())
+                .map_err(|e| format!("dense reshape failed: {e}"))?;
+            if !transposed {
+                updated = &updated + &delta;
+            } else {
+                // Target storage is (intermediate, hidden); add the transpose.
+                updated = &updated + &delta.t();
+            }
+        }
+        other => return Err(format!("apply_patch: unknown kind {other}")),
     }
 
-    // Install back into the tensor map as a new ArcArray2.
     let updated_weight: WeightArray = updated.into_shared();
     weights.tensors.insert(w_down_key, updated_weight);
     Ok(())
 }
 
 fn outer(a: &Array1<f32>, b: &Array1<f32>) -> Array2<f32> {
-    let a_col = a.view().insert_axis(ndarray::Axis(1)); // (n, 1)
-    let b_row = b.view().insert_axis(ndarray::Axis(0)); // (1, m)
+    let a_col = a.view().insert_axis(ndarray::Axis(1));
+    let b_row = b.view().insert_axis(ndarray::Axis(0));
     a_col.dot(&b_row)
 }
