@@ -46,6 +46,12 @@ from larql._native import (
     dfs_traversal,
     weight_walk,
     attention_walk,
+
+    # Mechanistic fact-editing (RFC-0001 Phase D)
+    crown,
+    edit,
+    apply_patch,
+    memit,
 )
 
 
@@ -139,4 +145,10 @@ __all__ = [
     "dfs_traversal",
     "weight_walk",
     "attention_walk",
+
+    # Mechanistic fact-editing (RFC-0001 Phase D)
+    "crown",
+    "edit",
+    "apply_patch",
+    "memit",
 ]
