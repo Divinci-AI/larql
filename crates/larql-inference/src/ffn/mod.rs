@@ -16,6 +16,7 @@ pub mod sparse;
 pub mod sparse_compute;
 pub mod experimental;
 pub mod ablating;
+pub mod injecting;
 #[cfg(test)]
 mod tests;
 
@@ -40,6 +41,7 @@ pub trait FfnBackend {
 pub use weight::WeightFfn;
 pub use sparse::SparseFfn;
 pub use ablating::LastPositionAblatingFfn;
+pub use injecting::LastPositionInjectingFfn;
 pub use sparse_compute::{
     sparse_ffn_forward, sparse_ffn_forward_with_overrides,
     sparse_ffn_forward_with_full_overrides, FeatureSlotOverride,
