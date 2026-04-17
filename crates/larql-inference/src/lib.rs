@@ -33,7 +33,7 @@ pub use capture::{
     CaptureCallbacks, CaptureConfig, InferenceModel, TopKEntry, VectorFileHeader, VectorRecord,
 };
 pub use error::InferenceError;
-pub use ffn::{FfnBackend, HighwayFfn, LayerFfnRouter, SparseFfn, WeightFfn};
+pub use ffn::{FfnBackend, HighwayFfn, LastPositionAblatingFfn, LayerFfnRouter, SparseFfn, WeightFfn};
 pub use attention::AttentionWeights;
 pub use forward::{
     calibrate_scalar_gains, capture_decoy_residuals, capture_ffn_activation_matrix,

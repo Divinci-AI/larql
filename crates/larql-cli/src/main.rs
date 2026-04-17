@@ -63,6 +63,11 @@ enum Commands {
     /// Discover attention→FFN circuits from weight decomposition. No forward passes.
     CircuitDiscover(circuit_discover_cmd::CircuitDiscoverArgs),
 
+    /// Find the crown MLP layer for a given (prompt, expected-token) pair
+    /// by scanning per-layer last-position ablations. First step of the
+    /// mechanistic fact-editing pipeline (RFC-0001).
+    Crown(crown_cmd::CrownArgs),
+
     /// Bottleneck analysis of attention components.
     AttnBottleneck(attn_bottleneck_cmd::AttnBottleneckArgs),
 
@@ -231,6 +236,7 @@ fn main() {
         Commands::QkModes(args) => qk_modes_cmd::run(args),
         Commands::OvGate(args) => ov_gate_cmd::run(args),
         Commands::CircuitDiscover(args) => circuit_discover_cmd::run(args),
+        Commands::Crown(args) => crown_cmd::run(args),
         Commands::ExtractRoutes(args) => extract_routes_cmd::run(args),
         Commands::Walk(args) => walk_cmd::run(args),
         Commands::AttnBottleneck(args) => attn_bottleneck_cmd::run(args),
