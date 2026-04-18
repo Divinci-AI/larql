@@ -203,6 +203,8 @@ fn parse_model_config(config: &serde_json::Value) -> ModelConfig {
         .as_u64()
         .map(|v| v as usize)
         .filter(|&v| v > 0);
+    // Gemma 4 double-wide MLP flag (KV-shared layers widen to 2× intermediate_size).
+    let use_double_wide_mlp = text_config["use_double_wide_mlp"].as_bool().unwrap_or(false);
 
     ModelConfig {
         model_type,
@@ -237,6 +239,7 @@ fn parse_model_config(config: &serde_json::Value) -> ModelConfig {
         attention_k_eq_v,
         per_layer_embed_dim,
         num_kv_shared_layers,
+        use_double_wide_mlp,
     }
 }
 
@@ -1019,6 +1022,56 @@ mod tests {
         // No K=V on E2B
         assert!(!arch.config().attention_k_eq_v);
         assert!(!arch.v_shares_k(0));
+
+        // Double-wide MLP on KV-shared layers (layers 15-34), base on others.
+        // Verified against actual HF tensor shapes on google/gemma-4-e2b-it:
+        //   L0/L14: gate_proj=(6144, 1536); L15/L21/L34: gate_proj=(12288, 1536).
+        assert!(arch.config().use_double_wide_mlp);
+        assert_eq!(arch.intermediate_size_for_layer(0), 6144);
+        assert_eq!(arch.intermediate_size_for_layer(14), 6144);
+        assert_eq!(arch.intermediate_size_for_layer(15), 12288);
+        assert_eq!(arch.intermediate_size_for_layer(21), 12288);
+        assert_eq!(arch.intermediate_size_for_layer(34), 12288);
+    }
+
+    #[test]
+    fn test_gemma4_31b_no_double_wide() {
+        // 31B lacks `use_double_wide_mlp` and `num_kv_shared_layers` →
+        // `intermediate_size_for_layer` must return base for every layer.
+        let config = serde_json::json!({
+            "model_type": "gemma4",
+            "text_config": {
+                "model_type": "gemma4_text",
+                "hidden_size": 5376,
+                "intermediate_size": 21504,
+                "num_hidden_layers": 60,
+                "num_attention_heads": 32,
+                "num_key_value_heads": 16,
+                "head_dim": 256,
+                "global_head_dim": 512,
+                "num_global_key_value_heads": 4,
+            }
+        });
+        let arch = detect_from_json(&config);
+        assert!(!arch.config().use_double_wide_mlp);
+        for layer in [0usize, 21, 30, 59] {
+            assert_eq!(arch.intermediate_size_for_layer(layer), 21504);
+        }
+    }
+
+    #[test]
+    fn test_non_gemma4_intermediate_default() {
+        // Llama (no double-wide concept) must return base width for all layers.
+        let config = serde_json::json!({
+            "model_type": "llama",
+            "hidden_size": 4096,
+            "intermediate_size": 11008,
+            "num_hidden_layers": 32,
+            "num_attention_heads": 32
+        });
+        let arch = detect_from_json(&config);
+        assert_eq!(arch.intermediate_size_for_layer(0), 11008);
+        assert_eq!(arch.intermediate_size_for_layer(31), 11008);
     }
 
     #[test]

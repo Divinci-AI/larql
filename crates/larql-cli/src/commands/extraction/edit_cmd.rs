@@ -81,7 +81,6 @@ pub fn run(args: EditArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     let weights = model.weights();
     let hidden = weights.hidden_size;
-    let intermediate = weights.intermediate_size;
 
     let src_tokens = tokenize(&model, &args.src)?;
     let tgt_tokens = tokenize(&model, &args.tgt)?;
@@ -106,6 +105,8 @@ pub fn run(args: EditArgs) -> Result<(), Box<dyn std::error::Error>> {
             crown
         }
     };
+    // Per-layer FFN width (Gemma 4 double-wide MLP: KV-shared layers are 2× base).
+    let intermediate = weights.arch.intermediate_size_for_layer(layer);
 
     // 2. Capture k_src and k_tgt at crown layer.
     eprintln!("\nCapturing FFN intermediate activations at L{layer}...");
