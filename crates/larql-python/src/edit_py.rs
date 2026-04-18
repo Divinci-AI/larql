@@ -168,7 +168,6 @@ pub fn edit(
     let m = InferenceModel::load(model).map_err(py_err)?;
     let weights = m.weights();
     let hidden = weights.hidden_size;
-    let intermediate = weights.intermediate_size;
 
     let src_tokens = tokenize(&m, src)?;
     let tgt_tokens = tokenize(&m, tgt)?;
@@ -183,6 +182,8 @@ pub fn edit(
                 .ok_or_else(|| py_err("crown scan returned no candidate layer"))?
         }
     };
+    // Per-layer FFN width (Gemma 4 double-wide MLP has 2× intermediate on KV-shared layers).
+    let intermediate = weights.arch.intermediate_size_for_layer(chosen_layer);
 
     let act_src = capture_ffn_activation_matrix(weights, &src_tokens, chosen_layer)
         .ok_or_else(|| py_err(format!("capture failed for src at L{chosen_layer}")))?;
@@ -191,7 +192,10 @@ pub fn edit(
     let k_src = act_src.row(act_src.shape()[0] - 1).to_owned();
     let k_tgt = act_tgt.row(act_tgt.shape()[0] - 1).to_owned();
     if k_src.len() != intermediate || k_tgt.len() != intermediate {
-        return Err(py_err("intermediate-size mismatch in captured keys"));
+        return Err(py_err(format!(
+            "intermediate-size mismatch in captured keys at L{chosen_layer}: k_src={} k_tgt={} expected={}",
+            k_src.len(), k_tgt.len(), intermediate
+        )));
     }
 
     // d_base = W_down @ (k_tgt - k_src)

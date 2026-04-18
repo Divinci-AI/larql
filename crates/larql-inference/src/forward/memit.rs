@@ -157,7 +157,7 @@ fn memit_solve_layer(
 ) -> Result<MemitResult, String> {
     let n = facts.len();
     let hidden = weights.hidden_size;
-    let ffn_dim = weights.intermediate_size;
+    let ffn_dim = weights.arch.intermediate_size_for_layer(layer);
 
     // ── Step 1: Estimate covariance C at this layer ──
     let (cov_f32, sample_count) = estimate_ffn_covariance(weights, cov_tokens, layer)

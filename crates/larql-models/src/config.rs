@@ -110,6 +110,11 @@ pub struct ModelConfig {
     /// Number of layers at the end of the model that share KV from earlier layers.
     /// E.g., 20 means the last 20 layers reuse KV cache from earlier source layers.
     pub num_kv_shared_layers: Option<usize>,
+    /// Gemma 4 "double-wide" MLP: KV-shared layers have 2× `intermediate_size`
+    /// (each of gate_proj, up_proj, down_proj widens to 2 × base). Non-shared
+    /// layers keep the base width. Arch impls use this together with
+    /// `num_kv_shared_layers` in `intermediate_size_for_layer`.
+    pub use_double_wide_mlp: bool,
 }
 
 /// Architecture-specific behavior. Describes how a model is structured
@@ -308,6 +313,13 @@ pub trait ModelArchitecture: Send + Sync {
     /// Default: config.num_q_heads for all layers.
     fn num_q_heads_for_layer(&self, _layer: usize) -> usize {
         self.config().num_q_heads
+    }
+
+    /// FFN intermediate width for a given layer. Models with per-layer
+    /// variable MLP width (e.g., Gemma 4 `use_double_wide_mlp` — KV-shared
+    /// layers widen to 2× base) override this. Default: `config.intermediate_size`.
+    fn intermediate_size_for_layer(&self, _layer: usize) -> usize {
+        self.config().intermediate_size
     }
 
     /// Fraction of head_dim to apply RoPE to (0.0–1.0).

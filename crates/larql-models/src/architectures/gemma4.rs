@@ -123,6 +123,23 @@ impl ModelArchitecture for Gemma4Arch {
         self.config.num_q_heads
     }
 
+    fn intermediate_size_for_layer(&self, layer: usize) -> usize {
+        // Gemma 4: when `use_double_wide_mlp` is set, KV-shared layers widen
+        // gate/up/down_proj to 2× base. We reuse the precomputed `kv_sources`
+        // (Some → this layer reuses KV from an earlier layer → is-shared).
+        // Mirrors HuggingFace's `modeling_gemma4.py`:
+        //   use_double_wide_mlp = config.use_double_wide_mlp and is_kv_shared_layer
+        //   self.intermediate_size = config.intermediate_size * (2 if use_double_wide_mlp else 1)
+        let base = self.config.intermediate_size;
+        if self.config.use_double_wide_mlp
+            && self.kv_sources.get(layer).copied().flatten().is_some()
+        {
+            base * 2
+        } else {
+            base
+        }
+    }
+
     fn rotary_fraction_for_layer(&self, layer: usize) -> f64 {
         if self.is_global_layer(layer) {
             self.config.partial_rotary_factor.unwrap_or(1.0)
