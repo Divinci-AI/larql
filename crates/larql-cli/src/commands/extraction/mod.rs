@@ -7,6 +7,7 @@ pub mod attention_capture_cmd;
 pub mod attention_walk_cmd;
 pub mod bfs_cmd;
 pub mod circuit_discover_cmd;
+pub mod crown_cmd;
 pub mod extract_index_cmd;
 pub mod extract_routes_cmd;
 #[allow(deprecated)]
