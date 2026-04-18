@@ -106,6 +106,13 @@ impl InferenceModel {
         &self.weights
     }
 
+    /// Mutable access to the loaded weights — used by `larql apply-patch` to
+    /// install a rank-1 down_proj update into a specific layer in-place.
+    /// This only mutates the in-memory tensor map; the on-disk model is untouched.
+    pub fn weights_mut(&mut self) -> &mut ModelWeights {
+        &mut self.weights
+    }
+
     pub fn tokenizer(&self) -> &tokenizers::Tokenizer {
         &self.tokenizer
     }

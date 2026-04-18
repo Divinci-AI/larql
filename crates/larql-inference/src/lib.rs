@@ -2,6 +2,7 @@ extern crate blas_src;
 
 pub mod attention;
 pub mod capture;
+pub mod edit;
 pub mod error;
 pub mod ffn;
 pub mod forward;
@@ -33,7 +34,7 @@ pub use capture::{
     CaptureCallbacks, CaptureConfig, InferenceModel, TopKEntry, VectorFileHeader, VectorRecord,
 };
 pub use error::InferenceError;
-pub use ffn::{FfnBackend, HighwayFfn, LastPositionAblatingFfn, LayerFfnRouter, SparseFfn, WeightFfn};
+pub use ffn::{FfnBackend, HighwayFfn, LastPositionAblatingFfn, LastPositionInjectingFfn, LayerFfnRouter, SparseFfn, WeightFfn};
 pub use attention::AttentionWeights;
 pub use forward::{
     calibrate_scalar_gains, capture_decoy_residuals, capture_ffn_activation_matrix,
