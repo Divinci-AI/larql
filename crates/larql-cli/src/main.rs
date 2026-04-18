@@ -250,6 +250,12 @@ enum DevCommand {
     /// memory. Non-destructive; optionally runs a test prompt under the edit.
     ApplyPatch(apply_patch_cmd::ApplyPatchArgs),
 
+    /// Batch multi-fact editor via covariance-MEMIT. Reads edits.json,
+    /// auto-discovers each edit's crown layer if not specified, groups by
+    /// layer, runs the joint least-squares solver, and writes one dense
+    /// patch per affected layer. Phase C of RFC-0001.
+    Memit(memit_cmd::MemitArgs),
+
     /// Bottleneck analysis of attention components.
     AttnBottleneck(attn_bottleneck_cmd::AttnBottleneckArgs),
 
@@ -640,6 +646,7 @@ fn run_dev(cmd: DevCommand) -> Result<(), Box<dyn std::error::Error>> {
         DevCommand::Crown(a) => crown_cmd::run(a),
         DevCommand::Edit(a) => edit_cmd::run(a),
         DevCommand::ApplyPatch(a) => apply_patch_cmd::run(a),
+        DevCommand::Memit(a) => memit_cmd::run(a),
         DevCommand::AttnBottleneck(a) => attn_bottleneck_cmd::run(a),
         DevCommand::FfnBottleneck(a) => ffn_bottleneck_cmd::run(a),
         DevCommand::FfnOverlap(a) => ffn_overlap_cmd::run(a),

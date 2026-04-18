@@ -11,6 +11,7 @@ pub mod convert_cmd;
 pub mod crown_cmd;
 pub mod edit_cmd;
 pub mod embedding_jump_cmd;
+pub mod memit_cmd;
 pub mod extract_index_cmd;
 pub mod ffn_bottleneck_cmd;
 pub mod ffn_latency_cmd;
