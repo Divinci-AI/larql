@@ -10,6 +10,7 @@ pub mod apply_patch_cmd;
 pub mod circuit_discover_cmd;
 pub mod crown_cmd;
 pub mod edit_cmd;
+pub mod memit_cmd;
 pub mod extract_index_cmd;
 pub mod extract_routes_cmd;
 #[allow(deprecated)]
