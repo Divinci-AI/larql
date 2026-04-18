@@ -112,8 +112,11 @@ impl InferenceModel {
         &self.weights
     }
 
-    /// Mutable accessor — needed by the generate() entry point so the CPU
-    /// fallback can dequantise per-layer Q4K tensors into `weights.tensors`.
+    /// Mutable accessor. Used by:
+    /// - the `generate()` entry point so the CPU fallback can dequantise
+    ///   per-layer Q4K tensors into `weights.tensors`,
+    /// - `larql apply-patch` to install a rank-1 `down_proj` update into a
+    ///   specific layer in-place (in-memory only; on-disk model untouched).
     /// Metal-only callers can continue to use the shared `weights()`.
     pub fn weights_mut(&mut self) -> &mut ModelWeights {
         &mut self.weights

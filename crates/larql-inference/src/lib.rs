@@ -53,6 +53,7 @@ pub mod async_compute_backend;
 pub mod attention;
 pub mod capture;
 pub mod chat;
+pub mod edit;
 pub mod error;
 pub mod experts;
 pub mod ffn;
@@ -181,6 +182,7 @@ pub use chat::{wrap_chat_prompt, wrap_prompt_raw, wrap_with_vindex_template, Cha
 pub use error::InferenceError;
 pub use ffn::graph_backend::{GateIndex, IndexBuildCallbacks, SilentIndexCallbacks};
 pub use ffn::ablating::LastPositionAblatingFfn;
+pub use ffn::injecting::LastPositionInjectingFfn;
 pub use ffn::{
     BackendFfn, FfnBackend, LayerFfnRouter, LayerShardedBackend, MoeRouterWeights, RemoteFfnConfig,
     RemoteFfnError, RemoteLatencyStats, RemoteMoeBackend, RemoteMoeError, RemoteWalkBackend,

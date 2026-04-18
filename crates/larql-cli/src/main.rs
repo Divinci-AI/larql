@@ -240,6 +240,16 @@ enum DevCommand {
     /// mechanistic fact-editing pipeline (RFC-0001).
     Crown(crown_cmd::CrownArgs),
 
+    /// Rank-1 single-fact editor — compute a ΔW = d ⊗ k/(k·k) patch at the
+    /// crown layer of a (src, tgt) prompt pair. Writes a portable .lqpatch
+    /// file that `larql apply-patch` installs non-destructively. Phase B of
+    /// RFC-0001.
+    Edit(edit_cmd::EditArgs),
+
+    /// Load a `.lqpatch` and apply it to a model's `down_proj` weights in
+    /// memory. Non-destructive; optionally runs a test prompt under the edit.
+    ApplyPatch(apply_patch_cmd::ApplyPatchArgs),
+
     /// Bottleneck analysis of attention components.
     AttnBottleneck(attn_bottleneck_cmd::AttnBottleneckArgs),
 
@@ -628,6 +638,8 @@ fn run_dev(cmd: DevCommand) -> Result<(), Box<dyn std::error::Error>> {
         DevCommand::OvRd(a) => ov_rd::cmd::run(a),
         DevCommand::CircuitDiscover(a) => circuit_discover_cmd::run(a),
         DevCommand::Crown(a) => crown_cmd::run(a),
+        DevCommand::Edit(a) => edit_cmd::run(a),
+        DevCommand::ApplyPatch(a) => apply_patch_cmd::run(a),
         DevCommand::AttnBottleneck(a) => attn_bottleneck_cmd::run(a),
         DevCommand::FfnBottleneck(a) => ffn_bottleneck_cmd::run(a),
         DevCommand::FfnOverlap(a) => ffn_overlap_cmd::run(a),
