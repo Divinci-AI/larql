@@ -180,6 +180,7 @@ pub use capture::{
 pub use chat::{wrap_chat_prompt, wrap_prompt_raw, wrap_with_vindex_template, ChatWrap};
 pub use error::InferenceError;
 pub use ffn::graph_backend::{GateIndex, IndexBuildCallbacks, SilentIndexCallbacks};
+pub use ffn::ablating::LastPositionAblatingFfn;
 pub use ffn::{
     BackendFfn, FfnBackend, LayerFfnRouter, LayerShardedBackend, MoeRouterWeights, RemoteFfnConfig,
     RemoteFfnError, RemoteLatencyStats, RemoteMoeBackend, RemoteMoeError, RemoteWalkBackend,
@@ -194,16 +195,6 @@ pub use kv_engine::{DecodeStageSummary, EngineInfo, KvEngine};
 // in-crate examples/tests/benches that already import from the root. The
 // curated `research` module (below) re-sources these from subpaths so it
 // keeps working when individual root re-exports are dropped.
-//
-// Truly-unused root re-exports (no external + no inference example/test
-// usage) were dropped 2026-05-09: `capture_ffn_activation_matrix`,
-// `estimate_ffn_covariance`, `forward_raw_logits`, `infer_patched_q4k`,
-// `predict_from_hidden_with_ffn`, `predict_with_ffn_trace`,
-// `trace_forward_with_ffn`, `InferPatchedResult`, `LayerMode`,
-// `MemitFactResult`, `PredictResultWithAttention`,
-// `PredictResultWithResiduals`, `RawForward`, `SpecCapture`,
-// `TargetDelta`, `TraceResult`, `KNN_COSINE_THRESHOLD`. They remain
-// accessible via `larql_inference::forward::*` and `research::*`.
 pub use forward::{
     apply_knn_override, calibrate_scalar_gains, capture_decoy_residuals, capture_residuals,
     capture_spec_residuals, forward_from_layer, forward_to_layer, hidden_to_raw_logits,
