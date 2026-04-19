@@ -115,14 +115,26 @@ impl SessionManager {
         model: &Arc<LoadedModel>,
         patch: larql_vindex::VindexPatch,
     ) -> (usize, usize) {
-        let mut sessions = self.sessions.write().await;
+        // Pre-acquire base outside the write lock to avoid blocking_read inside async.
+        let base_for_new_session = {
+            let existing = self.sessions.read().await;
+            if existing.contains_key(session_id) {
+                None
+            } else {
+                drop(existing);
+                let base = model.patched.read().await;
+                Some(base.base().clone())
+            }
+        };
 
+        let mut sessions = self.sessions.write().await;
         let session = sessions
             .entry(session_id.to_string())
             .or_insert_with(|| {
-                // We need the base — block briefly.
-                let base = model.patched.blocking_read();
-                SessionState::new(base.base().clone(), Instant::now())
+                let base = base_for_new_session
+                    .clone()
+                    .unwrap_or_else(|| model.patched.blocking_read().base().clone());
+                SessionState::new(base, Instant::now())
             });
 
         session.touch();
