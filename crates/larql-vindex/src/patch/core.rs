@@ -571,6 +571,10 @@ impl PatchedVindex {
         self.overrides_meta.clear();
         self.overrides_gate.clear();
         self.deleted.clear();
+        // Clear base weight overrides so removed patches don't leak their
+        // down/up vectors into subsequent apply_patch calls.
+        self.base.down_overrides.clear();
+        self.base.up_overrides.clear();
         self.knn_store = super::knn_store::KnnStore::default();
         let patches: Vec<VindexPatch> = self.patches.drain(..).collect();
         for patch in patches {

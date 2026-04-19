@@ -92,8 +92,9 @@ fn run_infer(
     if use_walk {
         let (pred, walk_ms) = if let Some(sid) = session_id {
             // Session-scoped: use session's PatchedVindex
-            let sessions = state.sessions.sessions_blocking_write();
+            let sessions = state.sessions.sessions_blocking_read();
             if let Some(session) = sessions.get(sid) {
+                session.touch();
                 run_walk(&session.patched)
             } else {
                 drop(sessions);
