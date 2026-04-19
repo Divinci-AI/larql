@@ -1,0 +1,90 @@
+{
+  "version": 2,
+  "model": "test/tiny-vindex",
+  "family": "llama",
+  "source": null,
+  "checksums": null,
+  "num_layers": 8,
+  "hidden_size": 128,
+  "intermediate_size": 256,
+  "vocab_size": 512,
+  "embed_scale": 1.0,
+  "extract_level": "all",
+  "dtype": "f32",
+  "layer_bands": {
+    "syntax": [
+      0,
+      1
+    ],
+    "knowledge": [
+      2,
+      5
+    ],
+    "output": [
+      6,
+      7
+    ]
+  },
+  "layers": [
+    {
+      "layer": 0,
+      "num_features": 32,
+      "offset": 0,
+      "length": 16384
+    },
+    {
+      "layer": 1,
+      "num_features": 32,
+      "offset": 16384,
+      "length": 16384
+    },
+    {
+      "layer": 2,
+      "num_features": 32,
+      "offset": 32768,
+      "length": 16384
+    },
+    {
+      "layer": 3,
+      "num_features": 32,
+      "offset": 49152,
+      "length": 16384
+    },
+    {
+      "layer": 4,
+      "num_features": 32,
+      "offset": 65536,
+      "length": 16384
+    },
+    {
+      "layer": 5,
+      "num_features": 32,
+      "offset": 81920,
+      "length": 16384
+    },
+    {
+      "layer": 6,
+      "num_features": 32,
+      "offset": 98304,
+      "length": 16384
+    },
+    {
+      "layer": 7,
+      "num_features": 32,
+      "offset": 114688,
+      "length": 16384
+    }
+  ],
+  "down_top_k": 5,
+  "has_model_weights": true,
+  "model_config": {
+    "model_type": "llama",
+    "head_dim": 32,
+    "num_q_heads": 4,
+    "num_kv_heads": 2,
+    "rope_base": 10000.0,
+    "sliding_window": null,
+    "moe": null,
+    "attention_k_eq_v": false
+  }
+}
