@@ -1,0 +1,64 @@
+name: isolation-harness
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  gates:
+    # Skip forks to avoid secrets leaking to untrusted PRs
+    if: github.event.pull_request.head.repo.full_name == github.repository || github.event_name == 'push'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: harness-v1
+
+      - name: build larql-server
+        run: cargo build --release -p larql-server
+
+      - name: checkout isolation-harness
+        uses: actions/checkout@v4
+        with:
+          repository: Divinci-AI/larql-isolation-harness
+          token: ${{ secrets.HARNESS_REPO_TOKEN }}
+          path: harness
+          ref: main
+
+      - name: build isolation-harness
+        run: cargo build --release --manifest-path harness/Cargo.toml
+
+      - name: start larql-server
+        run: |
+          ./target/release/larql-server testdata/tiny-vindex --port 8787 &
+          echo $! > larql.pid
+          for i in {1..40}; do
+            curl -sf http://localhost:8787/v1/health && break
+            sleep 0.5
+          done
+          curl -sf http://localhost:8787/v1/health || (echo "server failed to start" && exit 1)
+
+      - name: T2 — concurrent read-lock (no serialization)
+        env:
+          LARQL_URL: http://localhost:8787
+        run: ./harness/target/release/isolation-harness concurrent --iterations 200
+
+      - name: T3 — session global-leak isolation
+        env:
+          LARQL_URL: http://localhost:8787
+        run: ./harness/target/release/isolation-harness global-leak
+
+      - name: T5 — patch revert down/up override leak
+        env:
+          LARQL_URL: http://localhost:8787
+        run: ./harness/target/release/isolation-harness revert
+
+      - name: stop larql-server
+        if: always()
+        run: kill $(cat larql.pid) 2>/dev/null || true
