@@ -7,30 +7,43 @@
 //! patches go to the global (shared) PatchedVindex.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use larql_vindex::PatchedVindex;
 use tokio::sync::RwLock;
 
 use crate::state::LoadedModel;
 
+fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 /// Per-session state — an isolated PatchedVindex overlay.
 pub struct SessionState {
     pub patched: PatchedVindex,
-    last_accessed: Instant,
+    last_accessed: AtomicU64,
 }
 
 impl SessionState {
-    pub fn new(base: larql_vindex::VectorIndex, now: Instant) -> Self {
+    pub fn new(base: larql_vindex::VectorIndex, _now: Instant) -> Self {
         Self {
             patched: PatchedVindex::new(base),
-            last_accessed: now,
+            last_accessed: AtomicU64::new(now_millis()),
         }
     }
 
-    pub fn touch(&mut self, now: Instant) {
-        self.last_accessed = now;
+    /// Update last-accessed timestamp; takes &self so read-lock holders can call it.
+    pub fn touch(&self) {
+        self.last_accessed.store(now_millis(), Ordering::Relaxed);
+    }
+
+    pub fn last_accessed_millis(&self) -> u64 {
+        self.last_accessed.load(Ordering::Relaxed)
     }
 }
 
@@ -59,10 +72,11 @@ impl SessionManager {
         let mut sessions = self.sessions.write().await;
 
         // Evict expired sessions opportunistically (max 10 per call).
-        let now = Instant::now();
+        let now_ms = now_millis();
+        let ttl_ms = self.ttl.as_millis() as u64;
         let expired: Vec<String> = sessions
             .iter()
-            .filter(|(_, s)| now.duration_since(s.last_accessed) > self.ttl)
+            .filter(|(_, s)| now_ms.saturating_sub(s.last_accessed_millis()) > ttl_ms)
             .take(10)
             .map(|(k, _)| k.clone())
             .collect();
@@ -71,7 +85,7 @@ impl SessionManager {
         }
 
         if let Some(session) = sessions.get_mut(session_id) {
-            session.last_accessed = now;
+            session.touch();
             // Clone the base and replay patches for isolation.
             let base = model.patched.read().await;
             let mut cloned = PatchedVindex::new(base.base().clone());
@@ -88,7 +102,7 @@ impl SessionManager {
             session_id.to_string(),
             SessionState {
                 patched: PatchedVindex::new(base.base().clone()),
-                last_accessed: now,
+                last_accessed: AtomicU64::new(now_millis()),
             },
         );
         patched
@@ -102,20 +116,16 @@ impl SessionManager {
         patch: larql_vindex::VindexPatch,
     ) -> (usize, usize) {
         let mut sessions = self.sessions.write().await;
-        let now = Instant::now();
 
         let session = sessions
             .entry(session_id.to_string())
             .or_insert_with(|| {
                 // We need the base — block briefly.
                 let base = model.patched.blocking_read();
-                SessionState {
-                    patched: PatchedVindex::new(base.base().clone()),
-                    last_accessed: now,
-                }
+                SessionState::new(base.base().clone(), Instant::now())
             });
 
-        session.last_accessed = now;
+        session.touch();
         let op_count = patch.operations.len();
         session.patched.apply_patch(patch);
         (op_count, session.patched.num_patches())
@@ -163,7 +173,12 @@ impl SessionManager {
         Ok(session.patched.num_patches())
     }
 
-    /// Blocking write access to sessions map (for use in spawn_blocking).
+    /// Blocking read access to sessions map — safe for concurrent INFER calls.
+    pub fn sessions_blocking_read(&self) -> tokio::sync::RwLockReadGuard<'_, HashMap<String, SessionState>> {
+        self.sessions.blocking_read()
+    }
+
+    /// Blocking write access to sessions map (for use in spawn_blocking / patch ops).
     pub fn sessions_blocking_write(&self) -> tokio::sync::RwLockWriteGuard<'_, HashMap<String, SessionState>> {
         self.sessions.blocking_write()
     }
