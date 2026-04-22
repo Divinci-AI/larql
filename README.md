@@ -1,5 +1,13 @@
 # LARQL
 
+[![Divinci AI](https://img.shields.io/badge/Divinci_AI-2D5A4F?style=flat&logoColor=white&labelColor=1E3A2B)](https://divinci.ai)
+[![Hugging Face](https://img.shields.io/badge/🤗_Hugging_Face-Divinci--AI-FFD21E?style=flat&labelColor=4D4D4D)](https://huggingface.co/Divinci-AI)
+[![Vindex Viewer](https://img.shields.io/badge/Vindex_Viewer-live-2D5A4F?style=flat&labelColor=1E3A2B)](https://huggingface.co/spaces/Divinci-AI/vindex-viewer)
+[![License](https://img.shields.io/badge/license-Apache_2.0-blue.svg)](LICENSE)
+[![Upstream](https://img.shields.io/badge/upstream-chrishayuk%2Flarql-555?style=flat)](https://github.com/chrishayuk/larql)
+
+> **Divinci-AI fork** — tracks upstream `chrishayuk/larql` and adds **RFC-0001 mechanistic fact-editing** (`crown` / `edit` / `apply-patch` / `memit`), **Phase-1 unlearning** (with revert-leak fix), Gemma 4 per-layer intermediate-size handling, and the CI isolation harness used by [Divinci AI](https://divinci.ai)'s LarQL service. Open vindex artifacts published at [huggingface.co/Divinci-AI](https://huggingface.co/Divinci-AI) (Gemma 4 E2B, Qwen3-0.6B/8B/35B-MoE, Llama 3.1-8B, Ministral-3B, MedGemma 1.5-4B, GPT-OSS 120B + two 1-bit dissolution controls). Try the [interactive viewer](https://huggingface.co/spaces/Divinci-AI/vindex-viewer) to explore them in 3D.
+
 The model IS the database. Query neural network weights like a graph database. No GPU required.
 
 LARQL decompiles transformer models into a queryable format called a **vindex** (vector index), then provides **LQL** (Lazarus Query Language) to browse, edit, and recompile the model's knowledge.
