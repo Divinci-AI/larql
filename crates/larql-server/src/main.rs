@@ -116,7 +116,10 @@ struct Cli {
     cors: bool,
 
     /// API key for authentication (clients send Authorization: Bearer <key>).
-    #[arg(long)]
+    /// Also readable from the `LARQL_API_KEY` env var so Cloud Run /
+    /// Kubernetes secret mounts flow directly into it (`$(VAR)` substitution
+    /// in args doesn't work for secret-sourced env vars on Cloud Run).
+    #[arg(long, env = "LARQL_API_KEY")]
     api_key: Option<String>,
 
     /// Rate limit per IP (e.g., "100/min", "10/sec").
