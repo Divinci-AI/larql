@@ -124,3 +124,72 @@ impl PatchedVindex {
         }
     }
 }
+
+#[cfg(test)]
+mod rebuild_overrides_tests {
+    //! Regression guard for the Divinci-AI Phase-1 unlearning revert path.
+    //!
+    //! `rebuild_overrides` runs after `remove_patch` to reset the overlay
+    //! state. It must clear *both* the per-PatchedVindex overlay maps
+    //! (`overrides_meta`, `overrides_gate`, `deleted`) AND the base-side
+    //! weight overrides on the underlying VectorIndex
+    //! (`base.down_overrides`, `base.up_overrides`) — otherwise weight-level
+    //! INSERT patches written via `set_down_vector` / `set_up_vector` leak
+    //! across `remove_patch` calls and the next `apply_patch` sees stale
+    //! base weights. Phase-1 unlearning revert depends on a clean reset.
+    //!
+    //! If a future refactor drops the `base.down_overrides.clear()` /
+    //! `base.up_overrides.clear()` lines in `rebuild_overrides`, this test
+    //! turns red.
+    use super::*;
+    use crate::index::core::VectorIndex;
+    use crate::patch::format::{PatchOp, VindexPatch};
+    use ndarray::Array2;
+
+    fn make_pv() -> super::PatchedVindex {
+        // Minimal 1-layer × 2-feature × 4-hidden synthetic vindex.
+        let gate0 = Array2::<f32>::zeros((2, 4));
+        let down_meta = vec![Some(vec![None, None])];
+        let index = VectorIndex::new(vec![Some(gate0)], down_meta, 1, 4);
+        super::PatchedVindex::new(index)
+    }
+
+    #[test]
+    fn rebuild_overrides_clears_base_down_and_up_overrides() {
+        let mut pv = make_pv();
+
+        // Simulate a COMPILE-WITH-REFINE write that lands on the base
+        // weight-override maps.
+        pv.set_down_vector(0, 0, vec![1.0, 2.0, 3.0, 4.0]);
+        pv.set_up_vector(0, 0, vec![0.5, 0.5, 0.5, 0.5]);
+        assert!(!pv.base.down_overrides.is_empty(), "precondition: base.down_overrides should be populated");
+        assert!(!pv.base.up_overrides.is_empty(),   "precondition: base.up_overrides should be populated");
+
+        // Push any patch onto the overlay so `remove_patch(0)` has something
+        // to remove and consequently triggers `rebuild_overrides`.
+        let patch = VindexPatch {
+            version: 1,
+            base_model: "test".into(),
+            base_checksum: None,
+            created_at: "1970-01-01T00:00:00Z".into(),
+            description: None,
+            author: None,
+            tags: vec![],
+            operations: vec![PatchOp::Delete { layer: 0, feature: 1, reason: None }],
+        };
+        pv.apply_patch(patch);
+        assert_eq!(pv.patches.len(), 1, "patch should be on the stack before remove");
+
+        // Critical: revert. rebuild_overrides should clear *both* layers.
+        pv.remove_patch(0);
+
+        assert!(pv.base.down_overrides.is_empty(),
+            "REGRESSION: rebuild_overrides did not clear base.down_overrides — \
+             weight-level patches will leak across revert and Phase-1 unlearning is broken.");
+        assert!(pv.base.up_overrides.is_empty(),
+            "REGRESSION: rebuild_overrides did not clear base.up_overrides — \
+             same leak path as above for up vectors.");
+        assert!(pv.overrides_meta.is_empty(), "overlay overrides_meta should also be empty after revert");
+        assert_eq!(pv.patches.len(), 0, "patch stack should be empty after remove");
+    }
+}
