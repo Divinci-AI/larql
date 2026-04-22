@@ -31,3 +31,6 @@ build/
 output/
 data/
 experiments/
+vindexes/
+.pids/
+docs/replay/
