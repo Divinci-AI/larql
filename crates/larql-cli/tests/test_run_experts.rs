@@ -49,8 +49,6 @@ fn experts_with_bogus_model_path_errors_cleanly() {
     );
 }
 
-<<<<<<< HEAD
-=======
 /// Find a Q4_K vindex usable for end-to-end tests. Honours `LARQL_TEST_VINDEX`
 /// and otherwise prefers instruction-tuned models (base models like
 /// `mistral-7b-v0.1` collapse on the multi-line system prompt the experts
@@ -164,7 +162,6 @@ fn experts_chat_mode_dispatches_via_stdin() {
     );
 }
 
->>>>>>> c9209ad (working on larql-models cleanup)
 #[test]
 fn experts_dir_override_validates_existence() {
     let cache = match std::env::var("HOME") {

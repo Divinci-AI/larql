@@ -23,8 +23,6 @@ use crate::experts::parser::{parse_op_call, OpCall};
 use crate::experts::registry::ExpertRegistry;
 use crate::prompt::ChatTemplate;
 
-<<<<<<< HEAD
-=======
 /// Minimal contract a session needs from its op-dispatch backend.
 ///
 /// Implemented for [`ExpertRegistry`] so production code uses real WASM
@@ -110,7 +108,6 @@ impl<D: Dispatcher> Dispatcher for FilteredDispatcher<D> {
     }
 }
 
->>>>>>> c9209ad (working on larql-models cleanup)
 /// Result of a successful expert dispatch.
 #[derive(Debug, Clone)]
 pub struct DispatchOutcome {
@@ -156,12 +153,8 @@ impl ExpertSession {
         self.registry
     }
 
-<<<<<<< HEAD
-    /// Build a model-agnostic system prompt enumerating every advertised op.
-=======
     /// Build a model-agnostic system prompt enumerating every advertised op
     /// in a dense, model-friendly format: `op_name{"arg1","arg2"}`.
->>>>>>> c9209ad (working on larql-models cleanup)
     ///
     /// The compact single-line ops list is tuned for small-to-mid
     /// instruction-tuned models (Mistral 7B Instruct, Gemma 3 4B). A
@@ -177,22 +170,6 @@ impl ExpertSession {
         ops.sort_unstable();
 
         let mut out = String::new();
-<<<<<<< HEAD
-        out.push_str("You are a tool-using assistant. When the user's request \
-                      can be solved by exactly one of the ops below, respond \
-                      with a single JSON object and nothing else:\n");
-        out.push_str("  {\"op\":\"<op_name>\",\"args\":{...}}\n\n");
-        out.push_str("Available ops:\n");
-        for op in ops {
-            out.push_str("  - ");
-            out.push_str(op);
-            out.push('\n');
-        }
-        out.push_str("\nRules:\n");
-        out.push_str("  - Emit the JSON object only. No prose, no code fences, no commentary.\n");
-        out.push_str("  - Use exact op names from the list above.\n");
-        out.push_str("  - All argument values must be JSON literals (numbers, strings, arrays, objects).\n");
-=======
         out.push_str(
             "Respond with ONLY a JSON object {\"op\":\"...\",\"args\":{...}}.\n",
         );
@@ -216,7 +193,6 @@ impl ExpertSession {
         }
         out.push_str("\n");
         out.push_str("No extra text.");
->>>>>>> c9209ad (working on larql-models cleanup)
         out
     }
 
@@ -387,8 +363,6 @@ mod tests {
         assert!(matches!(err, DispatchSkip::ExpertDeclined { ref op, .. } if op == "gcd"));
     }
 }
-<<<<<<< HEAD
-=======
 
 /// Mock-backed tests — exercise [`ExpertSession`] without WASM. These run
 /// unconditionally on every `cargo test` so the session contract is covered
@@ -601,4 +575,3 @@ mod mock_tests {
         assert_eq!(args["s"], serde_json::json!("日本語"));
     }
 }
->>>>>>> c9209ad (working on larql-models cleanup)
