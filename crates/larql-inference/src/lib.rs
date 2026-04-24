@@ -48,16 +48,10 @@ pub use capture::{
 };
 pub use error::InferenceError;
 pub use ffn::{
-<<<<<<< HEAD
     FfnBackend, HighwayFfn, LastPositionAblatingFfn, LastPositionInjectingFfn, LayerFfnRouter,
     RemoteFfnConfig, RemoteFfnError, RemoteLatencyStats, RemoteWalkBackend,
     SparseFfn, WeightFfn,
-    RemoteExpertBackend, RemoteExpertError, ShardConfig, MoeRouterWeights,
-=======
-    FfnBackend, LayerFfnRouter, RemoteFfnConfig, RemoteFfnError, RemoteWalkBackend,
-    RemoteLatencyStats, SparseFfn, WeightFfn,
     MoeRouterWeights, RemoteMoeBackend, RemoteMoeError, ShardConfig,
->>>>>>> 4751d25 (cleaning up codebase and working on gemma4 26b)
 };
 pub use attention::AttentionWeights;
 pub use forward::{

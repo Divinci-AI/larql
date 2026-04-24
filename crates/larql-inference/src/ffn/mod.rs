@@ -41,15 +41,10 @@ pub trait FfnBackend {
 
 pub use weight::WeightFfn;
 pub use sparse::SparseFfn;
-<<<<<<< HEAD
 pub use ablating::LastPositionAblatingFfn;
 pub use injecting::LastPositionInjectingFfn;
 pub use remote::{RemoteFfnConfig, RemoteFfnError, RemoteLatencyStats, RemoteWalkBackend};
-pub use remote_expert::{RemoteExpertBackend, RemoteExpertError, ShardConfig, MoeRouterWeights};
-=======
-pub use remote::{RemoteFfnConfig, RemoteFfnError, RemoteWalkBackend, RemoteLatencyStats};
 pub use moe_remote::{MoeRouterWeights, RemoteMoeBackend, RemoteMoeError, ShardConfig};
->>>>>>> 4751d25 (cleaning up codebase and working on gemma4 26b)
 pub use sparse_compute::{
     sparse_ffn_forward, sparse_ffn_forward_with_overrides,
     sparse_ffn_forward_with_full_overrides, FeatureSlotOverride,
