@@ -17,6 +17,7 @@ pub mod sparse_compute;
 pub mod ablating;
 pub mod injecting;
 pub mod remote;
+pub mod remote_expert;
 #[cfg(test)]
 mod tests;
 
@@ -43,6 +44,7 @@ pub use sparse::SparseFfn;
 pub use ablating::LastPositionAblatingFfn;
 pub use injecting::LastPositionInjectingFfn;
 pub use remote::{RemoteFfnConfig, RemoteFfnError, RemoteLatencyStats, RemoteWalkBackend};
+pub use remote_expert::{RemoteExpertBackend, RemoteExpertError, ShardConfig, MoeRouterWeights};
 pub use sparse_compute::{
     sparse_ffn_forward, sparse_ffn_forward_with_overrides,
     sparse_ffn_forward_with_full_overrides, FeatureSlotOverride,
