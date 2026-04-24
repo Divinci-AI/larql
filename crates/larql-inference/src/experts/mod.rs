@@ -8,4 +8,8 @@ pub use caller::{ExpertMetadata, ExpertResult};
 pub use loader::load_expert;
 pub use parser::{parse_op_call, OpCall};
 pub use registry::{ExpertHandle, ExpertRegistry, WasmInfo};
+<<<<<<< HEAD
 pub use session::{DispatchOutcome, DispatchSkip, ExpertSession};
+=======
+pub use session::{DispatchOutcome, DispatchSkip, Dispatcher, ExpertSession, FilteredDispatcher};
+>>>>>>> c9209ad (working on larql-models cleanup)

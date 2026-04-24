@@ -288,6 +288,7 @@ impl From<ChatArgs> for run_cmd::RunArgs {
             verbose: c.verbose,
             experts: false,
             experts_dir: None,
+            ops: Vec::new(),
         }
     }
 }

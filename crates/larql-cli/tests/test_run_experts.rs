@@ -49,6 +49,122 @@ fn experts_with_bogus_model_path_errors_cleanly() {
     );
 }
 
+<<<<<<< HEAD
+=======
+/// Find a Q4_K vindex usable for end-to-end tests. Honours `LARQL_TEST_VINDEX`
+/// and otherwise prefers instruction-tuned models (base models like
+/// `mistral-7b-v0.1` collapse on the multi-line system prompt the experts
+/// pipeline emits).
+fn find_test_vindex() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("LARQL_TEST_VINDEX") {
+        let path = PathBuf::from(p);
+        if path.is_dir() {
+            return Some(path);
+        }
+    }
+
+    // Workspace root = .../larql/crates/larql-cli/.. = .../larql.
+    let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let home = std::env::var("HOME").ok()?;
+
+    // Prefer larger instruction-tuned models — small Q4K models (Gemma 3 4B,
+    // Gemma 4 E2B) hallucinate op names + arg keys, while 7B+ instruct models
+    // dispatch correctly.
+    let candidates = [
+        PathBuf::from(&home).join(".cache/larql/local/mistral-7b-instruct-v0.3-q4k.vindex"),
+        workspace.join("output/gemma3-4b-q4k-v2.vindex"),
+        workspace.join("output/gemma4-e2b-q4k.vindex"),
+        PathBuf::from(&home).join(".cache/larql/local/llama2-7b-q4k.vindex"),
+        PathBuf::from(&home).join(".cache/larql/local/mistral-7b-v0.1-q4k.vindex"),
+    ];
+    candidates.into_iter().find(|p| p.is_dir())
+}
+
+/// Locate the WASM expert build directory for `--experts-dir`.
+fn find_wasm_dir() -> Option<PathBuf> {
+    let workspace_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../larql-experts/target/wasm32-wasip1/release");
+    if workspace_dir.is_dir()
+        && std::fs::read_dir(&workspace_dir)
+            .ok()?
+            .any(|e| e.ok().is_some_and(|e| e.path().extension().is_some_and(|x| x == "wasm")))
+    {
+        Some(workspace_dir)
+    } else {
+        None
+    }
+}
+
+#[test]
+#[ignore = "loads a 4B model + runs full Metal decode; minutes per call. Run with --ignored."]
+fn experts_chat_mode_dispatches_via_stdin() {
+    let Some(vindex_path) = find_test_vindex() else {
+        eprintln!("skip: no Q4_K vindex found. Set LARQL_TEST_VINDEX=<path> to override.");
+        return;
+    };
+    let Some(wasm_dir) = find_wasm_dir() else {
+        eprintln!("skip: WASM experts not built. Run `cargo build --target wasm32-wasip1 --release` in crates/larql-experts.");
+        return;
+    };
+
+    eprintln!("vindex: {}", vindex_path.display());
+    eprintln!("experts: {}", wasm_dir.display());
+
+    let mut child = Command::new(larql_bin())
+        .args([
+            "run",
+            vindex_path.to_str().unwrap(),
+            "--experts",
+            "--experts-dir",
+            wasm_dir.to_str().unwrap(),
+            "--metal",
+            "--max-tokens",
+            "64",
+            // Narrow the op set so the model isn't drowning in 126 choices.
+            // Smaller models pick the right op far more reliably this way.
+            "--ops",
+            "gcd,is_prime,factorial,to_roman,is_leap_year",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn larql");
+
+    {
+        let stdin = child.stdin.as_mut().expect("stdin");
+        // One prompt then EOF — the REPL should dispatch then exit on Ctrl-D.
+        writeln!(stdin, "What is the GCD of 144 and 60?").expect("write stdin");
+    }
+
+    let output = child.wait_with_output().expect("wait");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    eprintln!("--- stdout ---\n{stdout}");
+    eprintln!("--- stderr ---\n{stderr}");
+
+    assert!(output.status.success(), "larql exited non-zero: {stderr}");
+
+    // The chat-mode REPL prints successful dispatches to stdout and per-turn
+    // errors / no-op-call notices to stderr. Model output isn't deterministic,
+    // so we accept any of these as proof the pipeline ran end-to-end:
+    //
+    //   - stdout has `"op":` → successful dispatch JSON
+    //   - stderr has `"op":` → ExpertDeclined / UnknownOp message including the raw output
+    //   - stderr has "op-call" → NoOpCall path printed the raw model output
+    //
+    // What we are NOT testing here: the *correctness* of what the model said
+    // (depends on the model + prompt engineering). What we ARE testing: that
+    // the REPL loop wired the dispatcher through `parse_op_call` correctly.
+    let combined = format!("{stdout}\n{stderr}");
+    assert!(
+        combined.contains("\"op\"") || combined.contains("op-call"),
+        "expected dispatch evidence in stdout or stderr; got:\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}",
+    );
+}
+
+>>>>>>> c9209ad (working on larql-models cleanup)
 #[test]
 fn experts_dir_override_validates_existence() {
     let cache = match std::env::var("HOME") {
