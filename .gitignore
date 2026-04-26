@@ -33,4 +33,4 @@ data/
 experiments/
 vindexes/
 .pids/
-docs/replay/
+docs/replay/*.bak.bak
