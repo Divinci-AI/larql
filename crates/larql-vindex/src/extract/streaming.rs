@@ -223,7 +223,23 @@ pub fn build_vindex_streaming(
                 offset += length;
             }
         } else if is_moe && n_experts > 0 {
-            // Standard MoE (Mixtral): per-expert gate tensors
+            // Standard MoE (Mixtral): per-expert gate tensors. Two modes:
+            //
+            //  • Default: write the full per-expert gate matrix (shape
+            //    [num_features, hidden]) — fine for low-expert-count MoE
+            //    (Mixtral's 8 per layer = ~1.8 GB/layer at hidden=4096).
+            //
+            //  • Summary: when LARQL_SUMMARY_FEATURES_PER_EXPERT is set
+            //    to a positive integer K, do a top-K randomized SVD of
+            //    each expert's gate_proj and write only the top-K right
+            //    singular vectors (K × hidden floats per expert). Required
+            //    for many-experts MoE (DeepSeek-V4 family at 256-384
+            //    experts/layer would otherwise produce 100s of GB).
+            let summary_k = std::env::var("LARQL_SUMMARY_FEATURES_PER_EXPERT")
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(0);
+
             let mut total_features = 0usize;
             let mut layer_bytes = 0u64;
             let mut features_per_expert = 0usize;
@@ -235,10 +251,26 @@ pub fn build_vindex_streaming(
                 };
 
                 if let Some(tensor) = get_tensor_f32(&shard_mmaps, &tensor_index, &gate_key)? {
-                    features_per_expert = tensor.shape()[0];
-                    total_features += features_per_expert;
-                    let data = tensor.as_slice().unwrap();
-                    layer_bytes += write_floats(&mut gate_file, data, dtype)?;
+                    let data: Vec<f32>;
+                    let n_feat: usize;
+                    if summary_k > 0 && tensor.shape()[0] > summary_k {
+                        // SVD-summary path: top-K right singular vectors.
+                        // Seed with (layer, expert) so re-runs are deterministic
+                        // but per-expert uncorrelated.
+                        let seed = ((layer as u64) << 32) | (expert as u64);
+                        let vt = crate::extract::moe_svd::top_k_right_singular_vectors(
+                            tensor.view(), summary_k, /*p_iters=*/ 4, seed,
+                        );
+                        n_feat = summary_k;
+                        data = vt.as_slice().unwrap().to_vec();
+                    } else {
+                        // Full-matrix path: original behaviour.
+                        n_feat = tensor.shape()[0];
+                        data = tensor.as_slice().unwrap().to_vec();
+                    }
+                    features_per_expert = n_feat;
+                    total_features += n_feat;
+                    layer_bytes += write_floats(&mut gate_file, &data, dtype)?;
                 }
             }
 
