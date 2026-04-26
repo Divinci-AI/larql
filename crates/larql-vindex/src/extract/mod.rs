@@ -4,6 +4,7 @@ pub mod build;
 pub mod build_from_vectors;
 pub mod build_helpers;
 pub mod callbacks;
+pub mod moe_svd;
 pub mod streaming;
 
 pub use build::build_vindex;
