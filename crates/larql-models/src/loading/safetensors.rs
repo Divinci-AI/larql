@@ -158,10 +158,25 @@ pub fn load_model_dir_filtered(
                 }
             }
         } else {
+            // Per-expert MXFP4 path (DeepSeek-V4 family): each expert's gate/up/down
+            // is stored as a separate (.weight, .scale) pair instead of GPT-OSS's
+            // fused gate_up_proj_blocks + scales tensors. Detect by looking for
+            // an `experts.<digit>.w[123].weight` tensor with an I8 dtype.
+            //
+            // We dequantize these per-expert and skip the corresponding I8/.scale
+            // tensors below in the main loop.
+            let v4_dequantized_keys = dequantize_per_expert_mxfp4(
+                &st, &tensor_names, prefixes, &mut tensors,
+            )?;
+
             for (name, view) in st.tensors() {
                 let key = normalize_key(&name, prefixes);
                 let shape = view.shape();
                 if skip_key(&key) { continue; }
+
+                // Skip tensors that the V4 per-expert MXFP4 dequantizer already produced
+                // (or whose .weight/.scale companion was consumed by it).
+                if v4_dequantized_keys.contains(&name) { continue; }
 
                 // PackedBF16 expert tensors: preserve raw bytes, skip f32 conversion
                 if should_keep_raw(&key) {
@@ -380,6 +395,96 @@ fn dequantize_mxfp4_experts(
     }
 
     Ok(())
+}
+
+/// Per-expert MXFP4 dequantization (DeepSeek-V4 family).
+///
+/// DeepSeek-V4 stores expert weights one (.weight, .scale) pair per
+/// (expert, projection) — `layers.X.ffn.experts.E.w1.weight` (I8 packed FP4) +
+/// `layers.X.ffn.experts.E.w1.scale` (F8_E8M0 scales), ditto w2/w3. This is
+/// distinct from GPT-OSS's fused `experts.gate_up_proj_blocks` layout that
+/// `dequantize_mxfp4_experts` handles.
+///
+/// Detects the format by scanning for `*.experts.<digit>.w[123].weight` tensors
+/// with `I8` dtype. For each match, looks up the companion `.scale` (`F8_E8M0`)
+/// and dequantizes via `quant::mxfp4::dequantize_expert`.
+///
+/// Returns the set of tensor names that were consumed (both `.weight` and
+/// `.scale`) so the main loading loop can skip them.
+fn dequantize_per_expert_mxfp4(
+    st: &safetensors::SafeTensors,
+    tensor_names: &[String],
+    prefixes: &[&str],
+    tensors: &mut HashMap<String, crate::WeightArray>,
+) -> Result<std::collections::HashSet<String>, ModelError> {
+    use std::collections::HashSet;
+    let mut consumed: HashSet<String> = HashSet::new();
+
+    // Match V4-style per-expert weights: any tensor name containing
+    // ".experts.<int>.w<1|2|3>.weight" — broad enough to catch both the
+    // full `model.layers.X.ffn.experts.E.wY.weight` (HF default) and any
+    // shortened variant (`layers.X.ffn.experts.E.wY.weight`).
+    let is_v4_expert_weight = |name: &str| -> bool {
+        if !name.ends_with(".w1.weight") && !name.ends_with(".w2.weight") && !name.ends_with(".w3.weight") {
+            return false;
+        }
+        // Must have ".experts.<digit>" before the .wN.weight suffix
+        if let Some(idx) = name.rfind(".experts.") {
+            let after = &name[idx + ".experts.".len()..];
+            if let Some(dot) = after.find('.') {
+                return after[..dot].chars().all(|c| c.is_ascii_digit());
+            }
+        }
+        false
+    };
+
+    for name in tensor_names {
+        if !is_v4_expert_weight(name) { continue; }
+
+        let weight_view = match st.tensor(name) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        // V4 packed FP4 weights are stored as I8 (signed) per the safetensors header.
+        if weight_view.dtype() != safetensors::Dtype::I8 { continue; }
+
+        let scale_name = name.replacen(".weight", ".scale", 1);
+        let scale_view = match st.tensor(&scale_name) {
+            Ok(v) => v,
+            Err(_) => continue, // No scale companion → not MXFP4, leave to main loop.
+        };
+        if scale_view.dtype() != safetensors::Dtype::F8_E8M0 { continue; }
+
+        // Shape sanity. weight: (out_features, packed_in/2). scale: (out_features, groups).
+        let w_shape = weight_view.shape();
+        let s_shape = scale_view.shape();
+        if w_shape.len() != 2 || s_shape.len() != 2 { continue; }
+        if w_shape[0] != s_shape[0] { continue; }
+
+        let out_features = w_shape[0];
+        let groups = s_shape[1];
+        let in_features = groups * 32;
+
+        // Assert layout consistency: weight cols × 2 (nibbles per byte) == groups × 32.
+        if w_shape[1] * 2 != in_features { continue; }
+
+        let unpacked = crate::quant::mxfp4::dequantize_expert(
+            weight_view.data(),
+            scale_view.data(),
+            out_features,
+            groups,
+        );
+
+        let key = normalize_key(name, prefixes);
+        let arr = Array2::from_shape_vec((out_features, in_features), unpacked)
+            .map_err(|e| ModelError::Parse(e.to_string()))?;
+        tensors.insert(key, arr.into_shared());
+
+        consumed.insert(name.clone());
+        consumed.insert(scale_name);
+    }
+
+    Ok(consumed)
 }
 
 fn normalize_key(key: &str, prefixes: &[&str]) -> String {
