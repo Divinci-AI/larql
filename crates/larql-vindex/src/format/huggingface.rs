@@ -17,16 +17,38 @@ use std::path::{Path, PathBuf};
 use crate::error::VindexError;
 
 /// The files that make up a vindex, in priority order for lazy loading.
-const VINDEX_CORE_FILES: &[&str] = &[
+///
+/// Two-tier split: small metadata is always pulled by `resolve_hf_vindex`,
+/// while large binary tensors are deferred to the WALK / RUN code paths
+/// that actually read them. Without this split, `larql show` (which only
+/// needs `index.json`) would download a multi-GB `gate_vectors.bin`
+/// before printing 5 lines of metadata.
+const VINDEX_METADATA_FILES: &[&str] = &[
     "index.json",
+    "manifest.json",
+    "weight_manifest.json",
     "tokenizer.json",
-    "gate_vectors.bin",
-    "embeddings.bin",
     "down_meta.bin",
     "down_meta.jsonl",
     "relation_clusters.json",
     "feature_labels.json",
 ];
+
+/// Big-tensor files lazy-pulled on first walk/run. Caller can also fetch
+/// these eagerly via `resolve_hf_vindex_with_progress` (which still pulls
+/// METADATA + BIN together — preserves prior behavior for that entrypoint).
+const VINDEX_BIN_FILES: &[&str] = &[
+    "gate_vectors.bin",
+    "embeddings.bin",
+];
+
+/// Union of metadata + bin — preserves prior CORE behavior for the
+/// progress-aware entrypoint that is willing to wait on big files.
+fn vindex_core_files() -> Vec<&'static str> {
+    let mut v: Vec<&'static str> = VINDEX_METADATA_FILES.to_vec();
+    v.extend_from_slice(VINDEX_BIN_FILES);
+    v
+}
 
 const VINDEX_WEIGHT_FILES: &[&str] = &[
     "attn_weights.bin",
@@ -101,8 +123,12 @@ pub fn resolve_hf_vindex(hf_path: &str) -> Result<PathBuf, VindexError> {
         .ok_or_else(|| VindexError::Parse("cannot determine vindex directory".into()))?
         .to_path_buf();
 
-    // Download core files (needed for browse)
-    for filename in VINDEX_CORE_FILES {
+    // Download METADATA-only by default. Big tensor files (gate_vectors.bin,
+    // embeddings.bin) are deferred — `larql show` and similar metadata-only
+    // commands shouldn't pay for a multi-GB download. Callers that actually
+    // need the tensors (run / walk) use the progress-aware variant which
+    // still pulls them eagerly, or call `download_hf_weights`.
+    for filename in VINDEX_METADATA_FILES {
         if *filename == "index.json" {
             continue; // already downloaded
         }
@@ -403,7 +429,9 @@ where
         .ok_or_else(|| VindexError::Parse("cannot determine vindex directory".into()))?
         .to_path_buf();
 
-    for filename in VINDEX_CORE_FILES {
+    // Progress entrypoint: pull METADATA + big BIN files (callers here have
+    // committed to displaying a progress bar — they accept the wait).
+    for filename in vindex_core_files().iter() {
         if *filename == "index.json" {
             continue;
         }
