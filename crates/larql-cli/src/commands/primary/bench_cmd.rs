@@ -157,13 +157,8 @@ fn run_larql(
         .get_ids()
         .to_vec();
 
-    let backend: Box<dyn larql_compute::ComputeBackend> = if metal {
-        let b = larql_compute::metal::MetalBackend::new()
-            .ok_or("Metal backend unavailable — rebuild with `--features metal` on an M-series Mac")?;
-        Box::new(b)
-    } else {
-        Box::new(larql_compute::CpuBackend)
-    };
+    let backend: Box<dyn larql_compute::ComputeBackend> = Box::new(larql_compute::CpuBackend);
+    let _ = metal;
 
     let cached_layers = CachedLayerGraph::from_residuals(Vec::new());
 
