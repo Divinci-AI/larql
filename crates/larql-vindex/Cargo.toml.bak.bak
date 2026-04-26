@@ -31,7 +31,7 @@ sha2 = "0.10"
 base64 = "0.22"
 
 # Model weights (for safetensors loading during extract)
-safetensors = "0.7"
+safetensors = "0.5"
 memmap2 = "0.9"
 
 # OS-level mmap hints (madvise)
