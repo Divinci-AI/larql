@@ -56,28 +56,46 @@ pub fn resolve_hf_vindex(hf_path: &str) -> Result<PathBuf, VindexError> {
         (path.to_string(), None)
     };
 
-    // Use hf-hub to download
+    // Use hf-hub to download. Try Dataset first (legacy default for vindexes
+    // published before the migration), fall back to Model on failure — newer
+    // vindexes (e.g. those produced by the typed publish flow, or ones the
+    // HF UI converts via "Use as model" / "Use as dataset" menu) live under
+    // the model URL space.
     let api = hf_hub::api::sync::Api::new()
         .map_err(|e| VindexError::Parse(format!("HuggingFace API init failed: {e}")))?;
 
-    let repo = if let Some(ref rev) = revision {
-        api.repo(hf_hub::Repo::with_revision(
-            repo_id.clone(),
-            hf_hub::RepoType::Dataset,
-            rev.clone(),
-        ))
-    } else {
-        api.repo(hf_hub::Repo::new(
-            repo_id.clone(),
-            hf_hub::RepoType::Dataset,
-        ))
+    let make_repo = |repo_type: hf_hub::RepoType| -> hf_hub::api::sync::ApiRepo {
+        if let Some(ref rev) = revision {
+            api.repo(hf_hub::Repo::with_revision(
+                repo_id.clone(),
+                repo_type,
+                rev.clone(),
+            ))
+        } else {
+            api.repo(hf_hub::Repo::new(
+                repo_id.clone(),
+                repo_type,
+            ))
+        }
     };
 
-    // Download index.json first (small, tells us what we need)
-    let index_path = repo.get("index.json")
-        .map_err(|e| VindexError::Parse(format!(
-            "failed to download index.json from hf://{}: {e}", repo_id
-        )))?;
+    // Try Dataset → fall back to Model. Track which type succeeded so
+    // subsequent file fetches use the same one.
+    let (repo, index_path) = match make_repo(hf_hub::RepoType::Dataset).get("index.json") {
+        Ok(p) => (make_repo(hf_hub::RepoType::Dataset), p),
+        Err(dataset_err) => {
+            let model_repo = make_repo(hf_hub::RepoType::Model);
+            match model_repo.get("index.json") {
+                Ok(p) => (make_repo(hf_hub::RepoType::Model), p),
+                Err(model_err) => {
+                    return Err(VindexError::Parse(format!(
+                        "failed to download index.json from hf://{repo_id}: \
+                         tried as dataset ({dataset_err}); tried as model ({model_err})"
+                    )));
+                }
+            }
+        }
+    };
 
     let vindex_dir = index_path.parent()
         .ok_or_else(|| VindexError::Parse("cannot determine vindex directory".into()))?
@@ -109,17 +127,27 @@ pub fn download_hf_weights(hf_path: &str) -> Result<(), VindexError> {
     let api = hf_hub::api::sync::Api::new()
         .map_err(|e| VindexError::Parse(format!("HuggingFace API init failed: {e}")))?;
 
-    let repo = if let Some(ref rev) = revision {
-        api.repo(hf_hub::Repo::with_revision(
-            repo_id.clone(),
-            hf_hub::RepoType::Dataset,
-            rev.clone(),
-        ))
-    } else {
-        api.repo(hf_hub::Repo::new(
-            repo_id.clone(),
-            hf_hub::RepoType::Dataset,
-        ))
+    let make_repo = |repo_type: hf_hub::RepoType| -> hf_hub::api::sync::ApiRepo {
+        if let Some(ref rev) = revision {
+            api.repo(hf_hub::Repo::with_revision(
+                repo_id.clone(),
+                repo_type,
+                rev.clone(),
+            ))
+        } else {
+            api.repo(hf_hub::Repo::new(
+                repo_id.clone(),
+                repo_type,
+            ))
+        }
+    };
+
+    // Probe with the first weight file to detect repo type (Dataset or Model);
+    // mirrors `resolve_hf_vindex`'s fallback logic.
+    let probe = VINDEX_WEIGHT_FILES.first().copied().unwrap_or("index.json");
+    let repo = match make_repo(hf_hub::RepoType::Dataset).get(probe) {
+        Ok(_) => make_repo(hf_hub::RepoType::Dataset),
+        Err(_) => make_repo(hf_hub::RepoType::Model),
     };
 
     for filename in VINDEX_WEIGHT_FILES {
@@ -318,14 +346,35 @@ where
     let api = hf_hub::api::sync::Api::new()
         .map_err(|e| VindexError::Parse(format!("HuggingFace API init failed: {e}")))?;
 
-    let repo = if let Some(ref rev) = revision {
-        api.repo(hf_hub::Repo::with_revision(
-            repo_id.clone(),
-            hf_hub::RepoType::Dataset,
-            rev.clone(),
-        ))
-    } else {
-        api.repo(hf_hub::Repo::new(repo_id.clone(), hf_hub::RepoType::Dataset))
+    // Build repo handle for either RepoType so we can probe both.
+    let make_repo = |repo_type: hf_hub::RepoType| -> hf_hub::api::sync::ApiRepo {
+        if let Some(ref rev) = revision {
+            api.repo(hf_hub::Repo::with_revision(
+                repo_id.clone(),
+                repo_type,
+                rev.clone(),
+            ))
+        } else {
+            api.repo(hf_hub::Repo::new(repo_id.clone(), repo_type))
+        }
+    };
+
+    // Probe with index.json: try as Dataset first (legacy default), fall back
+    // to Model. Once we know which type works, all subsequent file fetches
+    // use that same type.
+    let (repo, index_path) = match make_repo(hf_hub::RepoType::Dataset).download_with_progress("index.json", progress("index.json")) {
+        Ok(path) => (make_repo(hf_hub::RepoType::Dataset), path),
+        Err(dataset_err) => {
+            match make_repo(hf_hub::RepoType::Model).download_with_progress("index.json", progress("index.json")) {
+                Ok(path) => (make_repo(hf_hub::RepoType::Model), path),
+                Err(model_err) => {
+                    return Err(VindexError::Parse(format!(
+                        "failed to fetch index.json from hf://{repo_id}: \
+                         tried as dataset ({dataset_err}); tried as model ({model_err})"
+                    )));
+                }
+            }
+        }
     };
 
     // Helper: one file, with cache short-circuit. Returns the resolved
@@ -334,9 +383,6 @@ where
     // see that the file was served from cache, not re-downloaded.
     let mut fetch = |filename: &str, label: &str| -> Option<PathBuf> {
         if let Some((cached_path, size)) = cached_snapshot_file(&repo_id, revision.as_deref(), filename) {
-            // Tag the progress message so the bar visibly distinguishes
-            // "cached" from "just downloaded very fast". Callers rendering
-            // the bar see the prefix at init time and can restyle.
             let mut p = progress(label);
             let tagged = format!("{filename} [cached]");
             p.init(size as usize, &tagged);
@@ -350,13 +396,8 @@ where
         }
     };
 
-    // index.json drives everything — we need its snapshot dir to know
-    // where the rest of the files live. Cache-hit or download.
-    let index_path = fetch("index.json", "index.json").ok_or_else(|| {
-        VindexError::Parse(format!(
-            "failed to fetch index.json from hf://{repo_id}"
-        ))
-    })?;
+    // index.json was already fetched above (during repo-type probe); reuse it.
+    let _ = fetch; // (kept available for callers that may add fetches below)
     let vindex_dir = index_path
         .parent()
         .ok_or_else(|| VindexError::Parse("cannot determine vindex directory".into()))?
