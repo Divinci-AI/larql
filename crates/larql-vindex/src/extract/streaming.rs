@@ -587,6 +587,33 @@ fn get_tensor_f32(
     let shape = view.shape();
     if shape.len() != 2 { return Ok(None); }
 
+    // Special case: I8 tensor with a `.scale` companion of dtype F8_E8M0 is
+    // MXFP4 packed-nibble (DeepSeek-V4 expert weight layout). Unpack to f32
+    // here using the existing mxfp4 primitive so the streaming extract gets
+    // proper float values, not raw nibble bytes.
+    if view.dtype() == safetensors::Dtype::I8 && tensor_name.ends_with(".weight") {
+        let scale_name = tensor_name.replacen(".weight", ".scale", 1);
+        if let Ok(scale_view) = st.tensor(&scale_name) {
+            if scale_view.dtype() == safetensors::Dtype::F8_E8M0 {
+                let s_shape = scale_view.shape();
+                if s_shape.len() == 2 && s_shape[0] == shape[0] {
+                    let cols_unpacked = shape[1] * 2;
+                    if s_shape[1] > 0 && cols_unpacked % s_shape[1] == 0 {
+                        let group_size = cols_unpacked / s_shape[1];
+                        if [16usize, 32, 64, 128].contains(&group_size) {
+                            let unpacked = crate::format::quant::mxfp4::dequantize_expert(
+                                view.data(), scale_view.data(), shape[0], s_shape[1],
+                            );
+                            let arr = Array2::from_shape_vec((shape[0], cols_unpacked), unpacked)
+                                .map_err(|e| VindexError::Parse(e.to_string()))?;
+                            return Ok(Some(arr));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     let data = match view.dtype() {
         safetensors::Dtype::F32 => {
             view.data().chunks_exact(4)
@@ -595,7 +622,7 @@ fn get_tensor_f32(
         }
         safetensors::Dtype::F16 => crate::format::quant::half::decode_f16(view.data()),
         safetensors::Dtype::BF16 => crate::format::quant::half::decode_bf16(view.data()),
-        _ => return Ok(None), // skip non-float
+        _ => return Ok(None), // skip non-float (and non-MXFP4) tensors
     };
 
     let arr = Array2::from_shape_vec((shape[0], shape[1]), data)
