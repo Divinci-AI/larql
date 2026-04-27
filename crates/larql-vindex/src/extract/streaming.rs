@@ -418,9 +418,30 @@ pub fn build_vindex_streaming(
             continue;
         }
 
+        // Same `LARQL_SUMMARY_FEATURES_PER_EXPERT` env that gates the gate-vectors
+        // SVD path also caps how many down_proj feature columns we compute meta
+        // for. Without this cap, many-experts MoE explodes:
+        //   43 layers × 256 experts × 2048 features × (vocab=129k × hidden=4k)
+        //   ≈ 12 PFLOPs ≈ 67 hours of CPU even on H100 host CPUs.
+        // With K=64: 43 × 256 × 64 features × matmul ≈ ~2 hrs total.
+        // Limitation: we record meta for the first K columns of down_proj rather
+        // than the SVD-selected most-important features. Acceptable for summary
+        // tier — full meta still available via `--summary-features-per-expert 0`.
+        let summary_k = std::env::var("LARQL_SUMMARY_FEATURES_PER_EXPERT")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(0);
+
         let mut feature_offset = 0usize;
         for w_down in &down_matrices {
-            let num_features = w_down.shape()[1];
+            // Truncate to first K features per expert when summary mode is on
+            // and the expert has more features than K.
+            let full_features = w_down.shape()[1];
+            let num_features = if summary_k > 0 && full_features > summary_k {
+                summary_k
+            } else {
+                full_features
+            };
             let batch_size = 1024;
 
             for batch_start in (0..num_features).step_by(batch_size) {
