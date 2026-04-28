@@ -128,6 +128,9 @@ pub fn detect_from_json(config: &serde_json::Value) -> Box<dyn ModelArchitecture
         "deepseek_v4" => Box::new(DeepSeekV4Arch::from_config(model_config)),
         // DeepSeek V2/V3 family (MoE + MLA, model.* prefixed keys)
         t if t.starts_with("deepseek") => Box::new(DeepSeekArch::from_config(model_config)),
+        // Kimi-K2 family reuses DSV3-style tensor naming
+        // (`model.layers.X.mlp.experts.E.{gate,up,down}_proj.weight`).
+        "kimi_k2" => Box::new(DeepSeekArch::from_config(model_config)),
         // StarCoder 2
         "starcoder2" => Box::new(StarCoder2Arch::from_config(model_config)),
         // Granite family (dense and MoE share same base keys)

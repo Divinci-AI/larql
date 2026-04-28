@@ -370,6 +370,42 @@ pub(super) fn get_tensor_f32(
         }
     }
 
+    // FP8 block-quant (Kimi-K2 / DeepSeek-V3 fp8 layout): `.weight` (F8_E4M3) +
+    // `.weight_scale_inv` (F32 [N/128, K/128]) companion. Each fp8 byte is
+    // decoded then multiplied by the F32 scale for its 128×128 block.
+    if view.dtype() == safetensors::Dtype::F8_E4M3 && tensor_name.ends_with(".weight") {
+        let scale_name = tensor_name.replacen(".weight", ".weight_scale_inv", 1);
+        if let Ok(scale_view) = st.tensor(&scale_name) {
+            if scale_view.dtype() == safetensors::Dtype::F32 {
+                let s_shape = scale_view.shape();
+                const BLOCK: usize = 128;
+                let exp_n = shape[0].div_ceil(BLOCK);
+                let exp_k = shape[1].div_ceil(BLOCK);
+                if s_shape.len() == 2 && s_shape[0] == exp_n && s_shape[1] == exp_k {
+                    let weight_bytes = view.data();
+                    let scales: Vec<f32> = scale_view
+                        .data()
+                        .chunks_exact(4)
+                        .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                        .collect();
+                    let decoded = larql_models::loading::safetensors::decode_f8_e4m3(weight_bytes);
+                    let (n, k) = (shape[0], shape[1]);
+                    let mut dequant = Vec::with_capacity(n * k);
+                    for i in 0..n {
+                        let bi = i / BLOCK;
+                        for j in 0..k {
+                            let bj = j / BLOCK;
+                            dequant.push(decoded[i * k + j] * scales[bi * exp_k + bj]);
+                        }
+                    }
+                    let arr = Array2::from_shape_vec((n, k), dequant)
+                        .map_err(|e| VindexError::Parse(e.to_string()))?;
+                    return Ok(Some(arr));
+                }
+            }
+        }
+    }
+
     let data = match view.dtype() {
         safetensors::Dtype::F32 => view
             .data()
@@ -378,7 +414,7 @@ pub(super) fn get_tensor_f32(
             .collect(),
         safetensors::Dtype::F16 => crate::format::quant::half::decode_f16(view.data()),
         safetensors::Dtype::BF16 => crate::format::quant::half::decode_bf16(view.data()),
-        _ => return Ok(None), // skip non-float (and non-MXFP4) tensors
+        _ => return Ok(None), // skip non-float (and non-MXFP4 / non-fp8-block) tensors
     };
 
     let arr = Array2::from_shape_vec((shape[0], shape[1]), data)
