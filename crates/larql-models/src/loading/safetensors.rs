@@ -169,6 +169,13 @@ pub fn load_model_dir_filtered(
                 &st, &tensor_names, prefixes, &mut tensors,
             )?;
 
+            // FP8 block-quant path (Kimi-K2 / DeepSeek-V3 fp8): tensors stored as
+            // (.weight: F8_E4M3, .weight_scale_inv: F32 [N/128, K/128]). Consumes
+            // both names so the main loop skips them.
+            let fp8_block_consumed = dequantize_fp8_block_companions(
+                &st, prefixes, &mut tensors,
+            )?;
+
             for (name, view) in st.tensors() {
                 let key = normalize_key(&name, prefixes);
                 let shape = view.shape();
@@ -177,6 +184,9 @@ pub fn load_model_dir_filtered(
                 // Skip tensors that the V4 per-expert MXFP4 dequantizer already produced
                 // (or whose .weight/.scale companion was consumed by it).
                 if v4_dequantized_keys.contains(&name) { continue; }
+
+                // Skip tensors consumed by the FP8 block-quant pre-pass (Kimi-K2).
+                if fp8_block_consumed.contains(&name) { continue; }
 
                 // PackedBF16 expert tensors: preserve raw bytes, skip f32 conversion
                 if should_keep_raw(&key) {
@@ -487,6 +497,102 @@ fn dequantize_per_expert_mxfp4(
     Ok(consumed)
 }
 
+/// Per-tensor FP8 block-quant dequantization (Kimi-K2 / DeepSeek-V3 fp8 family).
+///
+/// Kimi-K2 stores tensors as a `(.weight: F8_E4M3, .weight_scale_inv: F32)` pair
+/// where `.weight` has shape `[N, K]` and `.weight_scale_inv` has shape
+/// `[N/128, K/128]`. Each fp8 byte is decoded then multiplied by the F32 scale
+/// for its 128×128 block:
+///
+/// ```text
+/// dequant[i, j] = decode_f8_e4m3(weight[i, j]) * scale_inv[i / 128, j / 128]
+/// ```
+///
+/// (Following the DeepSeek-V3 reference impl convention — the stored
+/// `_scale_inv` is the multiplicative scale, not its reciprocal.)
+///
+/// This applies to ALL fp8 tensors in the shard — both per-expert MoE weights
+/// (`experts.E.gate_proj.weight`, etc.) and dense attention weights
+/// (`self_attn.q_a_proj.weight`, etc.). Detected by scanning for `.weight`
+/// tensors with F8_E4M3 dtype that have a `.weight_scale_inv` companion.
+///
+/// Returns the set of tensor names consumed (both `.weight` and
+/// `.weight_scale_inv`) so the main loading loop skips them.
+fn dequantize_fp8_block_companions(
+    st: &safetensors::SafeTensors,
+    prefixes: &[&str],
+    tensors: &mut HashMap<String, crate::WeightArray>,
+) -> Result<std::collections::HashSet<String>, ModelError> {
+    use std::collections::HashSet;
+    let mut consumed: HashSet<String> = HashSet::new();
+    const BLOCK: usize = 128;
+
+    let names: Vec<String> = st.names().iter().map(|s| s.to_string()).collect();
+
+    for name in &names {
+        // Only consider `*.weight` with companion `*.weight_scale_inv`.
+        if !name.ends_with(".weight") { continue; }
+        let scale_name = format!("{name}_scale_inv");
+        if !names.iter().any(|n| n == &scale_name) { continue; }
+
+        let weight_view = match st.tensor(name) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if weight_view.dtype() != safetensors::Dtype::F8_E4M3 { continue; }
+
+        let scale_view = match st.tensor(&scale_name) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if scale_view.dtype() != safetensors::Dtype::F32 { continue; }
+
+        let w_shape = weight_view.shape();
+        let s_shape = scale_view.shape();
+        if w_shape.len() != 2 || s_shape.len() != 2 { continue; }
+
+        let (n, k) = (w_shape[0], w_shape[1]);
+        // Scale shape must be ceil(N/BLOCK) × ceil(K/BLOCK).
+        let exp_n = n.div_ceil(BLOCK);
+        let exp_k = k.div_ceil(BLOCK);
+        if s_shape[0] != exp_n || s_shape[1] != exp_k {
+            // Companion exists but doesn't look like a block-scale — skip,
+            // let the main loop handle it via tensor_to_f32.
+            continue;
+        }
+
+        let weight_bytes = weight_view.data();
+        let scales = tensor_to_f32(&scale_view)?; // F32 → Vec<f32>
+        let mut dequant = Vec::with_capacity(n * k);
+        for i in 0..n {
+            let bi = i / BLOCK;
+            for j in 0..k {
+                let bj = j / BLOCK;
+                let s = scales[bi * exp_k + bj];
+                dequant.push(decode_f8_e4m3_byte(weight_bytes[i * k + j]) * s);
+            }
+        }
+
+        let key = normalize_key(name, prefixes);
+        let arr = Array2::from_shape_vec((n, k), dequant)
+            .map_err(|e| ModelError::Parse(e.to_string()))?;
+        tensors.insert(key, arr.into_shared());
+
+        consumed.insert(name.clone());
+        consumed.insert(scale_name);
+    }
+
+    Ok(consumed)
+}
+
+/// Decode a single F8_E4M3 byte to f32. Extracted so the block-quant
+/// dequantizer can call it per-byte without allocating a Vec for every tensor.
+#[inline]
+fn decode_f8_e4m3_byte(b: u8) -> f32 {
+    // Reuse the bulk decoder for now — single-byte allocation is small.
+    decode_f8_e4m3(&[b])[0]
+}
+
 fn normalize_key(key: &str, prefixes: &[&str]) -> String {
     for prefix in prefixes {
         if let Some(stripped) = key.strip_prefix(prefix) {
@@ -531,8 +637,11 @@ fn tensor_to_f32(view: &safetensors::tensor::TensorView<'_>) -> Result<Vec<f32>,
 
 /// FP8 E4M3 (FN, finite-only): 1 sign + 4 exponent + 3 mantissa bits, bias 7.
 /// NaN encoded at 0x7F / 0xFF (Open Compute convention).
+///
+/// Public so vindex extract (streaming `get_tensor_f32`) can reuse it for
+/// fp8 block-quant dequantization without duplicating the per-byte table.
 #[inline]
-fn decode_f8_e4m3(bytes: &[u8]) -> Vec<f32> {
+pub fn decode_f8_e4m3(bytes: &[u8]) -> Vec<f32> {
     bytes.iter().map(|&b| {
         let sign = (b >> 7) & 1;
         let exp_bits = (b >> 3) & 0x0F;
