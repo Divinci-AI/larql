@@ -116,6 +116,34 @@ pub fn build_vindex_streaming(
 
     callbacks.on_stage_done("loading", 0.0);
 
+    // ── Checkpoint setup with auto-resume (harvested from chrishayuk/larql 2026-04-29) ──
+    //
+    // A compatible checkpoint from a previous interrupted run is reused;
+    // phases it marked complete are skipped (their output files on disk
+    // are reused unchanged). An incompatible checkpoint (different
+    // model_dir / num_layers) is discarded.
+    let mut checkpoint = match super::checkpoint::Checkpoint::load(output_dir)? {
+        Some(prior) if prior.is_compatible_with(model_dir, model_name, num_layers) => {
+            eprintln!(
+                "  Resuming from checkpoint at {}/{} — phases already complete: {:?}",
+                output_dir.display(),
+                super::checkpoint::CHECKPOINT_FILE,
+                prior.completed,
+            );
+            prior
+        }
+        Some(_) => {
+            eprintln!(
+                "  Checkpoint at {}/{} is incompatible with this run \
+                 (different model / layer count) — discarding",
+                output_dir.display(),
+                super::checkpoint::CHECKPOINT_FILE,
+            );
+            super::checkpoint::Checkpoint::fresh(model_dir, model_name, num_layers)
+        }
+        None => super::checkpoint::Checkpoint::fresh(model_dir, model_name, num_layers),
+    };
+
     // ── 1. Gate vectors (streaming, one layer at a time) ──
     //
     // If `drop_gate_vectors` is set we still walk every layer to build
@@ -142,18 +170,36 @@ pub fn build_vindex_streaming(
             }
         }
     }
-    let mut gate_file: GateSink = if drop_gate_vectors {
+    // Auto-resume: if a prior run finished the gate phase and saved
+    // gate_layer_infos, reuse it and skip the gate loop entirely.
+    let resumed_gate = checkpoint.is_complete(super::checkpoint::ExtractPhase::Gate)
+        && checkpoint.gate_layer_infos.is_some();
+    let mut layer_infos: Vec<VindexLayerInfo> = if resumed_gate {
+        eprintln!(
+            "  Skipping gate phase ({} layer infos restored from checkpoint; \
+             reusing existing gate_vectors.bin)",
+            checkpoint.gate_layer_infos.as_ref().map(|v| v.len()).unwrap_or(0),
+        );
+        callbacks.on_stage_done("gate_vectors", 0.0);
+        checkpoint.gate_layer_infos.clone().unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    let mut gate_file: GateSink = if resumed_gate || drop_gate_vectors {
+        // Resume: don't truncate the existing gate_vectors.bin we're about to reuse.
         GateSink::Discard(std::io::sink())
     } else {
         GateSink::File(BufWriter::new(std::fs::File::create(&gate_path)?))
     };
-    let mut layer_infos: Vec<VindexLayerInfo> = Vec::new();
     let mut offset: u64 = 0;
 
     // Check expert format from the architecture
     let expert_format = arch.expert_format();
 
-    for layer in 0..num_layers {
+    // Skip the per-layer gate loop entirely on resume.
+    let layer_count_for_loop = if resumed_gate { 0 } else { num_layers };
+    for layer in 0..layer_count_for_loop {
         callbacks.on_layer_start("gate", layer, num_layers);
         let start = std::time::Instant::now();
 
@@ -303,10 +349,13 @@ pub fn build_vindex_streaming(
     // If we were only sinking bytes, don't leave a zero-byte
     // gate_vectors.bin behind for the loader to trip over.
     drop(gate_file);
-    if drop_gate_vectors && gate_path.exists() {
+    if drop_gate_vectors && gate_path.exists() && !resumed_gate {
         let _ = std::fs::remove_file(&gate_path);
     }
-    callbacks.on_stage_done("gate_vectors", 0.0);
+    if !resumed_gate {
+        callbacks.on_stage_done("gate_vectors", 0.0);
+        checkpoint.mark_gate_complete(layer_infos.clone(), output_dir)?;
+    }
 
     // ── 1b. Router weights (MoE models only) ──
     if is_moe {
@@ -350,13 +399,24 @@ pub fn build_vindex_streaming(
     callbacks.on_stage_done("embeddings", 0.0);
 
     // ── 3. Down meta (streaming) ──
+    //
+    // Auto-resume: skip the entire down_meta phase if the prior run
+    // already wrote down_meta.bin. The file is opaque to us here
+    // (we don't reload it), but the loader uses it directly off
+    // disk via mmap, and the config-write doesn't need any per-layer
+    // state from this phase — so a clean skip is safe.
+    let resumed_down = checkpoint.is_complete(super::checkpoint::ExtractPhase::DownMeta);
     callbacks.on_stage("down_meta");
+    if resumed_down {
+        eprintln!("  Skipping down_meta phase (reusing existing down_meta.bin)");
+    }
     let mut all_down_meta: Vec<Option<Vec<Option<crate::FeatureMeta>>>> = vec![None; num_layers];
 
     // Build whole-word vocab once
     let (_ww_ids, _ww_embed) = super::build_helpers::build_whole_word_vocab(tokenizer, &embed, vocab_size, hidden_size);
 
-    for (layer, layer_down_meta) in all_down_meta.iter_mut().enumerate().take(num_layers) {
+    let down_layer_count = if resumed_down { 0 } else { num_layers };
+    for (layer, layer_down_meta) in all_down_meta.iter_mut().enumerate().take(down_layer_count) {
         callbacks.on_layer_start("down", layer, num_layers);
         let start = std::time::Instant::now();
 
@@ -497,8 +557,11 @@ pub fn build_vindex_streaming(
         callbacks.on_layer_done("down", layer, start.elapsed().as_secs_f64() * 1000.0);
     }
 
-    crate::format::down_meta::write_binary(output_dir, &all_down_meta, down_top_k)?;
-    callbacks.on_stage_done("down_meta", 0.0);
+    if !resumed_down {
+        crate::format::down_meta::write_binary(output_dir, &all_down_meta, down_top_k)?;
+        callbacks.on_stage_done("down_meta", 0.0);
+        checkpoint.mark(super::checkpoint::ExtractPhase::DownMeta, output_dir)?;
+    }
 
     // ── 4. Tokenizer ──
     callbacks.on_stage("tokenizer");
@@ -616,6 +679,14 @@ pub fn build_vindex_streaming(
     let config_json = serde_json::to_string_pretty(&config)
         .map_err(|e| VindexError::Parse(e.to_string()))?;
     std::fs::write(output_dir.join("index.json"), config_json)?;
+
+    // Opportunistically snapshot HF metadata sidecars (chat template,
+    // generation config, special tokens map) into the vindex output.
+    // Non-fatal: missing files are silently skipped.
+    let _ = super::metadata::snapshot_hf_metadata(model_dir, output_dir);
+
+    // Extract complete — remove the checkpoint file.
+    super::checkpoint::Checkpoint::clear(output_dir)?;
 
     Ok(())
 }

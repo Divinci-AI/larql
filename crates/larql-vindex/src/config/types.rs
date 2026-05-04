@@ -333,7 +333,7 @@ fn default_router_type() -> String {
 }
 
 /// Per-layer info for gate_vectors.bin layout.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VindexLayerInfo {
     pub layer: usize,
     pub num_features: usize,
