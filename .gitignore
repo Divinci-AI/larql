@@ -25,7 +25,8 @@ build/
 *.swo
 *~
 .DS_Store
-.claude/
+.claude/*
+!.claude/skills/
 
 # Checkpoints / temp
 *.checkpoint
