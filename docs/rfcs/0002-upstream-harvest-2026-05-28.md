@@ -282,3 +282,37 @@ Nearly every deferred "isolated correctness fix" lives **inside** one of those s
 ### Why Wave 2a was not attempted in this session
 
 Conflict resolution across `extract/streaming.rs` / `extract/checkpoint.rs` / `gguf*` / `arch/` requires sustained judgment about how to reconcile fork-only code (harvest checkpoint, fp8-block-quant decode, MoE SVD summary) with upstream's new module boundaries. Doing this in a single session without intermediate validation would risk silently breaking the May 4 harvest work, the RFC-0001 surface, or the fp8-block-quant decode. **Recommended next session: dedicated Wave 2a with the conflict-mitigation strategy from this RFC's "Conflict mitigation strategy" section.**
+
+### Wave 2 results (2026-05-28 session)
+
+**Strategy change**: a direct merge of `upstream/main` produced 284 conflict files (236 source). After aborting that, switched to **reset-to-upstream + replay fork-only commits** — every conflict became bounded to one commit's scope, which is tractable.
+
+Branch: `feat/upstream-harvest-2026-05-28-wave2`. Reset to `upstream/main` (`b6d5e8d5`), then cherry-picked these in chronological order:
+
+| # | Commit | Result |
+|---|--------|--------|
+| 1 | `074d512c` RFC-0001 doc | ✅ clean |
+| 2 | `2324af46` crown command | ✅ manual: move `Crown` from `Commands` enum into `DevCommand` (upstream restructured commands into top-level vs `Dev` subcommand groups) |
+| 3 | `7c597f80` edit + apply-patch | ✅ manual: same `DevCommand` move for `Edit`/`ApplyPatch`; merge ablating/injecting module declarations |
+| 4 | `ed369cbf` memit | ✅ manual: same `DevCommand::Memit` wiring |
+| 5 | `186019ca` PyO3 bindings | ✅ manual: keep both upstream's `mod vindex; mod walk;` and our `mod edit_py;` |
+| 6 | `44d549bc` Gemma-4 per-layer | ⏭ **skipped** — already independently implemented in upstream (`config.rs::intermediate_size_for_layer`, `use_double_wide_mlp` parsing in `detect/parser.rs`) |
+| 7 | `3266558f` isolation harness | ⏭ **skipped** — bundles the Gemma-4 dup (already upstream) plus testdata + `harness.yml` CI + server/patch tweaks that don't apply cleanly to upstream's refactored server. Harness can be re-added later as an isolated effort |
+| 8 | `845537ad` README badges + regression test | ✅ partial: README badge change landed; the `rebuild_overrides` regression test was dropped because upstream already has an equivalent `rebuild_overrides_clears_base_down_and_up_overrides` in `overlay_apply.rs` |
+| 9 | `758a0523` `LARQL_API_KEY` env var | ⏭ **skipped** — already in upstream (`main.rs` arg has `#[arg(long, env = "LARQL_API_KEY")]`) |
+| 10 | `dfd9fc9a` fp8-block-quant decode | ✅ **manual surgery** — biggest port. Upstream renamed `extract/streaming.rs` → `extract/streaming/` and `larql-models/src/detect.rs` → `detect/`. Resolved by: (a) wiring `dequantize_fp8_block_companions` pre-pass into the new safetensors loop alongside the V4 MXFP4 detection; (b) adding parallel FP8 block-quant detection in `extract/streaming/tensor_io.rs::get_tensor_f32` next to the existing MXFP4 branch; (c) porting the `kimi_k2` arch mapping into `detect/mod.rs`; (d) making `decode_f8_e4m3` `pub` so the streaming consumer can reuse it. **The fp8-block-quant surface is now functionally equivalent to the May 4 fork, but lives in upstream's new module structure.** |
+| 11–12 | `1a450b5c` + `ba49b7e6` RFC-0002 docs | ✅ clean |
+
+**Validation:** `cargo check --workspace` passes. Test suites: `larql-models` (388 tests), `larql-vindex` (1077), `larql-inference` (1113) — all green, zero failures.
+
+**Net effect on the original wave plan:** because we reset to upstream/main, Wave 2 *also absorbs* all of Wave 3 (KV/compute refactor) and Wave 4 inventory (Nix flake, Swagger UI, BitNet, multi-modal, Dependabot, Android cross-compile, Shannon layers, etc.) — they're now in our `main` for free. The originally-deferred Wave 1 fixes (Gemma PLE, remote-FFN norms+Metal, lm_head 32-bit, MoE shards guard, Q3_K+Q5_K dequant, GGUF extract input) are also all present since they're part of upstream/main.
+
+**What was NOT brought forward and why:**
+- **Isolation-harness CI workflow** — bundled with code that didn't apply cleanly; deferred to a later effort. The `testdata/tiny-vindex/` fixtures are reproducible from `generate.py` if we want them back.
+- **fork-only `harvest checkpoint`, `MoE SVD summary`, `down_meta cap`, `MXFP4 streaming gate path`** — these were our verbatim ports of upstream PRs `#79`/`#80`/`#81` and the MXFP4 work; **all are now in upstream/main natively**, so the fork ports are no longer needed.
+
+**Carry-forward fork-only work** (preserved in this branch):
+- RFC-0001 surface: `crown` / `edit` / `apply-patch` / `memit` (CLI + PyO3 bindings)
+- fp8-block-quant decode (Kimi-K2 / DS-V3) — manually re-wired to upstream's new module layout
+- Divinci-AI README header + badges
+- RFC-0002 plan + execution log (this file)
