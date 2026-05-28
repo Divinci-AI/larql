@@ -228,3 +228,57 @@ done
 ## Appendix — Prior-art reference
 
 The May 4 harvest (`c037edf2`) used verbatim file ports rather than cherry-picks because the three modules (`checkpoint.rs`, `metadata.rs`, `stage_labels.rs`) were small, self-contained, and easy to attribute. **This harvest is large enough that cherry-pick (Wave 1) + real merge (Wave 2/3) is the right shape** — verbatim ports would lose upstream attribution and make the next harvest harder to plan.
+
+## Appendix — Execution log (2026-05-28 session)
+
+### Wave 1 results
+
+Branch: `feat/upstream-harvest-2026-05-28-wave1`
+
+**Landed cleanly (5 commits):**
+1. `a252e78d` (← `fe25575c`) — evalexpr v11.3.1 license pin **(critical: removed AGPL-3.0 exposure)**
+2. `71683599` (← `a4ea55f1`) — HF cache scan recognises model-repo pulls
+3. `bcbd9620` (← `4e4f7b29`) — rustfmt of cache.rs test
+4. `f6986961` (← `bcd63808`) — Router `matmul_transb` (manual conflict resolve: kept our `ComputeBackend` trait import)
+5. `bfb7a2a7` (← `32f78fe2`) — Signed-probe fix (partial: applied `probe_mlx.py` change only; pilot scripts don't exist in our fork)
+
+Workspace `cargo check --workspace` passes with only pre-existing warnings.
+
+**Deferred to Wave 2 (7 commits) — all blocked by upstream directory restructures we haven't yet absorbed:**
+
+| Commit | Blocker — file/dir we don't have |
+|--------|----------------------------------|
+| `ae35058b` + `716355fb` Gemma-4 PLE sidecars | `crates/larql-vindex/src/format/weights/{load/f32.rs,ple_sidecar.rs,write_f32.rs,write_kquant/}` |
+| `83345ad5` PLE in cached prefill/decode | same `format/weights/` split |
+| `5ab2d078` + `4b8ac8e1` Remote-FFN norms + Metal | `crates/larql-inference/src/layer_graph/grid/remote_ffn.rs` (no `grid/` dir at all) |
+| `834d0659` `lm_head` 32-bit overflow | `crates/larql-vindex/src/index/storage/lm_head/loaders.rs` (we have flat `index/lm_head.rs`) |
+| `49403543` MoE shards empty-q4 guard | `crates/larql-compute/src/pipeline_layer.rs` |
+| `f2a4c348` Q3_K + Q5_K dequant | `crates/larql-models/src/quant/ggml/{mod.rs,q3_k.rs,q5_k.rs,q4_k.rs}` (we have flat `quant/ggml.rs`) |
+| `58c849fa` Accept GGUF input in extract | Touches `extract_index_cmd.rs` heavily; 2 substantial conflict regions in the heart of our extract pipeline |
+
+### Key strategic insight
+
+The Wave 1 / Wave 2 split in the original plan was based on the assumption that bug fixes would be applicable to our existing file layout. **That assumption was wrong.** Upstream has done extensive modular directory restructuring since our May 4 harvest:
+
+- `gguf.rs` → `gguf/` (constants, loader, mod, orient, parser, reader, types) — PR `#145`
+- `ggml.rs` → `quant/ggml/` (mod, q3_k, q4_k, q5_k, …)
+- `format/weights/` flat → `format/weights/{load/,write_f32.rs,write_kquant/,ple_sidecar.rs,capabilities.rs}`
+- `index/lm_head.rs` → `index/storage/lm_head/loaders.rs`
+- `layer_graph/` → `layer_graph/grid/` (added)
+- `extract/streaming.rs` → `extract/streaming/{stages/,context.rs,tensor_io.rs,mod.rs}`
+
+Nearly every deferred "isolated correctness fix" lives **inside** one of those split directories — so the fix can't land until the structural split lands.
+
+### Revised plan
+
+**Wave 2 must come BEFORE the deferred Wave 1 fixes.** The corrected sequencing:
+
+1. ~~Wave 1~~ (✓ done — 5 fixes that were genuinely structure-independent)
+2. **Wave 2a — Structural absorption.** Merge upstream's directory restructures as a coherent block (likely the right shape is a real merge of upstream/main pinned to a pre-Wave-3 SHA, e.g. up through `c54875db` "gguf modular split"). Reconcile our `extract/` fork-only modules (`checkpoint.rs`, `metadata.rs`, `stage_labels.rs`, fp8-block-quant, MoE SVD summary, down_meta cap, MXFP4 streaming gate) against the new layout. **This is the load-bearing step and needs a dedicated 1-2 day session.**
+3. **Wave 2b — Deferred Wave 1 fixes.** With the directory layout aligned, cherry-pick the 7 deferred commits. Expected to land cleanly.
+4. **Wave 2c — MLA absorption + DS-V3 metadata** as originally planned.
+5. **Wave 3 / Wave 4** unchanged.
+
+### Why Wave 2a was not attempted in this session
+
+Conflict resolution across `extract/streaming.rs` / `extract/checkpoint.rs` / `gguf*` / `arch/` requires sustained judgment about how to reconcile fork-only code (harvest checkpoint, fp8-block-quant decode, MoE SVD summary) with upstream's new module boundaries. Doing this in a single session without intermediate validation would risk silently breaking the May 4 harvest work, the RFC-0001 surface, or the fp8-block-quant decode. **Recommended next session: dedicated Wave 2a with the conflict-mitigation strategy from this RFC's "Conflict mitigation strategy" section.**
