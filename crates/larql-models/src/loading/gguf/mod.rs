@@ -10,9 +10,11 @@ mod orient;
 mod parser;
 mod reader;
 mod types;
+mod writer;
 
 pub use loader::{load_gguf, load_gguf_validated, normalize_gguf_key};
 pub use types::{GgufFile, GgufTensorInfo, GgufValue, ShardInfo};
+pub use writer::{GgufTensor, GgufWriter};
 
 // Preserve original pub(crate) API surface — some items are consumed only within
 // this module today but were pub(crate) in the monolith and may gain external
