@@ -1059,6 +1059,13 @@ impl PyVindex {
         Ok(())
     }
 
+    /// Low-level: set a custom up vector override for a feature.
+    /// During inference, this vector is used instead of the model's up weight row.
+    fn set_up_vector(&mut self, layer: usize, feature: usize, vector: Vec<f32>) -> PyResult<()> {
+        self.index.set_up_vector(layer, feature, vector);
+        Ok(())
+    }
+
     /// Low-level: set feature metadata directly.
     #[pyo3(signature = (layer, feature, top_token, c_score=0.9))]
     fn set_feature_meta(
