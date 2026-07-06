@@ -57,9 +57,11 @@ pub fn quantize_q4_0(data: &[f32]) -> Vec<u8> {
             }
         };
         out.extend_from_slice(&f16.to_le_bytes());
+        // ggml planar nibble layout (`quantize_row_q4_0_ref`): byte j packs
+        // element j (low nibble) and element j+16 (high nibble).
         for j in 0..16 {
-            let lo = ((block[j * 2] * inv).round() as i32 + 8).clamp(0, 15) as u8;
-            let hi = ((block[j * 2 + 1] * inv).round() as i32 + 8).clamp(0, 15) as u8;
+            let lo = ((block[j] * inv).round() as i32 + 8).clamp(0, 15) as u8;
+            let hi = ((block[j + 16] * inv).round() as i32 + 8).clamp(0, 15) as u8;
             out.push(lo | (hi << 4));
         }
     }
@@ -237,21 +239,29 @@ pub fn quantize_q6_k(data: &[f32]) -> Vec<u8> {
             }
         }
 
-        // Pack lower 4 bits: 128 bytes (2 nibbles per byte)
+        // Pack per ggml's planar Q6_K layout (`quantize_row_q6_K_ref`):
+        // within each 128-element half, ql[l] holds element l in its low
+        // nibble and element l+64 in its high nibble; ql[l+32] holds
+        // elements l+32 / l+96. qh[l] packs the two high bits of elements
+        // l, l+32, l+64, l+96 at shifts 0/2/4/6.
         let mut ql = [0u8; 128];
-        for i in 0..128 {
-            ql[i] = (q6_vals[i * 2] & 0x0F) | ((q6_vals[i * 2 + 1] & 0x0F) << 4);
+        let mut qh = [0u8; 64];
+        for half in 0..2 {
+            let e = half * 128; // element base for this half
+            for l in 0..32 {
+                let q1 = q6_vals[e + l];
+                let q2 = q6_vals[e + l + 32];
+                let q3 = q6_vals[e + l + 64];
+                let q4 = q6_vals[e + l + 96];
+                ql[half * 64 + l] = (q1 & 0x0F) | ((q3 & 0x0F) << 4);
+                ql[half * 64 + l + 32] = (q2 & 0x0F) | ((q4 & 0x0F) << 4);
+                qh[half * 32 + l] = ((q1 >> 4) & 3)
+                    | (((q2 >> 4) & 3) << 2)
+                    | (((q3 >> 4) & 3) << 4)
+                    | (((q4 >> 4) & 3) << 6);
+            }
         }
         out.extend_from_slice(&ql);
-
-        // Pack upper 2 bits: 64 bytes (4 × 2 bits per byte)
-        let mut qh = [0u8; 64];
-        for (i, &q6_val) in q6_vals.iter().enumerate() {
-            let hi2 = (q6_val >> 4) & 0x03;
-            let byte_idx = i / 4;
-            let bit_offset = (i % 4) * 2;
-            qh[byte_idx] |= hi2 << bit_offset;
-        }
         out.extend_from_slice(&qh);
 
         // 16 × int8 scales

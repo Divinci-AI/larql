@@ -211,22 +211,13 @@ pub(super) fn decode_q6k_superblock_into(
 ) {
     const BLOCK_BYTES: usize = 210;
     let block = &w[row_base + sb * BLOCK_BYTES..row_base + (sb + 1) * BLOCK_BYTES];
-    let ql = &block[0..128];
-    let qh = &block[128..192];
     let scales = &block[192..208];
     let d = f16_to_f32(u16::from_le_bytes([block[208], block[209]]));
     for (j, &sc_byte) in scales.iter().enumerate() {
         let sc = d * (sc_byte as i8) as f32;
-        for i in 0..16 {
-            let idx = j * 16 + i;
-            let lo4 = if idx % 2 == 0 {
-                ql[idx / 2] & 0x0F
-            } else {
-                (ql[idx / 2] >> 4) & 0x0F
-            };
-            let hi2 = (qh[idx / 4] >> ((idx % 4) * 2)) & 0x03;
-            let val = ((lo4 as i32) | ((hi2 as i32) << 4)) - 32;
-            wf[idx] = sc * val as f32;
+        let vals = larql_models::quant::ggml::q6_k::q6k_subblock_vals(block, j);
+        for (i, &v) in vals.iter().enumerate() {
+            wf[j * 16 + i] = sc * v as f32;
         }
     }
 }

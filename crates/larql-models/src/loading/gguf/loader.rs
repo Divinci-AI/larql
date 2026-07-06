@@ -586,8 +586,7 @@ pub fn normalize_gguf_key(name: &str) -> String {
 /// on the floor, so gemma-specific replacements run first. Gemma 1 has
 /// the llama two-norm layout and stays on the generic path.
 pub fn normalize_gguf_key_for_arch(name: &str, arch: &str) -> String {
-    let gemma_layout =
-        matches!(arch, "gemma2" | "gemma3") || arch.starts_with("gemma4");
+    let gemma_layout = matches!(arch, "gemma2" | "gemma3") || arch.starts_with("gemma4");
     let name = if gemma_layout {
         GGUF_TO_HF_KEY_REPLACEMENTS_GEMMA
             .iter()
