@@ -547,6 +547,133 @@ Ordered actions:
     no malformed-message rate limit (`grid/service.rs:121`). [larql-server,
     larql-router]
 
+### DEC-readiness review (2026-07-22)
+
+Targeted review of the **DEC data-plane** ahead of the DEC funnel programme
+([`docs/dec-funnel.md`](docs/dec-funnel.md)) — the code the programme runs on
+rented x86 marketplace hosts, against non-Gemma models, over adversarial
+links. Four parallel readers (security, hardcoding/config, modularity,
+performance), verified findings only. Full record:
+[`docs/audits/dec-readiness-review-2026-07-22.md`](docs/audits/dec-readiness-review-2026-07-22.md).
+Verdict: structurally sound and the wire decoders are mostly hardened, but a
+**silent-corruption cluster** (produces a number, the number is a lie) is the
+dominant risk because the whole programme is a measurement exercise. The B-row
+f32/f16/i8 serving path is well-built; only the Q8K path — the wire DEC prefers
+— does not batch. Work through in the order below (roughly DEC-stage sequencing).
+
+**Batch A — silent corruption + the security HIGH (before any claim-bearing run): ✅ DONE (2026-07-22)**
+
+1. ✅ **Q8K batched compute** (P0, corrupts C1/C6, gates DEC-0) — `walk_ffn/q8k.rs:199`
+   ran B same-layer rows as B independent matvecs, each re-streaming the full
+   layer's weights, so the Q8K batch curve was ~linear by construction. Fixed:
+   the handler now groups request entries by layer; groups of >1 dequantise to
+   f32 and run ONE batched GEMM through `kquant_ffn_forward_layer` (preserving
+   the Q8K upload win, amortising weights across rows); singleton groups keep
+   the existing single-row Q4K×Q8K kernel unchanged (no batching problem there,
+   and it avoids dequantising gate/up on the latency-critical single-token
+   decode path). Numerical equivalence between the two paths is pinned by
+   `walk_ffn_kquant_layer_q8k_batched_gemm_matches_per_row_single_kernel`.
+   [larql-server, larql-inference]
+2. ✅ **Multi-layer decoder allocation bomb** (P0, security) — `Vec::with_capacity(n)`
+   from an attacker u32 → one 16-byte packet aborts the server
+   (`moe_remote/multi_layer_wire.rs:105,146,211,254,292`). Regression from the
+   repo's own `max_possible_entries` guard (PR 104). Fixed: mirrored the guard
+   at every task/result/expert-count allocation site, plus inside the shared
+   `read_f32_slice`/`read_i16_slice` helpers so `hidden`/`nb`-derived lengths
+   are bounded before any allocation, covering both `decode_multi_layer_request`
+   and the client-side `decode_multi_layer_response`. 8 new
+   `rejects_impossible_*_before_allocating` regression tests. [larql-inference]
+3. ✅ **Shard failure zero-fills FFN output** (P0, silent generation corruption) —
+   `sharded.rs:117` returned zeros on a panicked/unowned shard and decode
+   continued on a corrupt hidden state. Fixed: `forward_predispatch_all` now
+   panics loudly on an unowned layer or a shard's transport failure (propagating
+   the worker thread's panic via `resume_unwind` instead of swallowing it),
+   matching `RemoteWalkBackend::forward`'s existing panic-on-error convention.
+   [larql-inference]
+4. ✅ **Down-proj ignores its format tag on the Q8K fast path** (P0, gates
+   DEC-4/6) — `kquant_forward/walk_ffn.rs:135` fed `ffn[2].0` into a Q4_K-only
+   kernel without checking `ffn[2].1`; a non-Q4_K down slab (Inkling/K3) would
+   have decoded garbage. Fixed: the fast path now additionally gates on
+   `ffn[2].1 == "Q4_K"`, falling back to the format-aware `dequantize_matrix`
+   path otherwise. Fixed in both the `larql-inference` copy (the live serving
+   path) and the `larql-compute` twin (same bug, not yet wired to a serving
+   path — see item 4g). Regression:
+   `walk_ffn_kquant_layer_q8k_rejects_down_slab_with_non_q4k_format_tag`.
+   [larql-inference, larql-compute]
+5. ✅ **x86 scalar-fallback is silent** (P0 *observability*, gates DEC-0.5) —
+   `q4k_q8k_gate_up_into` (:1377) and `q6k_q8k_matvec_into` (:2119) have no AVX2
+   branch; the serving-path doc-comments falsely claimed "NEON/AVX2". Building
+   the AVX2 kernels remains **C-ladder** work (not done here). Fixed: added
+   `larql_compute::cpu::ops::q4k_q8k_dot::kernel_class_summary()`, logged once
+   at server startup (`larql-server/bootstrap.rs`), and corrected the false doc
+   comments on `q4k_q8k_gate_up_into` and the `q8k.rs` module doc — so no DEC
+   number is ever recorded on an unlogged scalar path. [larql-compute, larql-server]
+
+**Batch B — fleet/config landmines (before the x86 + Linux arms):**
+
+6. **`127.0.0.1` announce on `--join`** (P1, breaks multi-host grid) — refuse a
+   wildcard host without `--public-url`, or detect the outbound IP
+   (`bootstrap.rs:1222`). [larql-server]
+7. **Backend factory + capability dispatch** (P1, unblocks x86 + pre-work for
+   G-ladder) — replace the 7-site `if metal` cfg copy-paste with one
+   `backend_from_spec` factory and switch dispatch branches to `Capability`
+   probes (`run_cmd.rs:649,924`, `bench/remote_ffn_runtime.rs:77`,
+   `bench/local_runtime.rs:58`, `dec_bench/capture_runtime.rs:43`,
+   `shannon_cmd.rs:971`, `walk_cmd.rs:462`). Make the CPU/x86 capture story
+   explicit (pool is host-portable — capture on Metal, replay anywhere); do NOT
+   rush full CPU fused decode. [larql-cli, larql-compute]
+8. **`--metal` / `--backends metal` hardcoded for x86** (P1) — `DEC0_BACKEND`
+   env in `scripts/dec0-loopback.sh:80,97`, platform-conditional `--backends`
+   default (`bench/args.rs:26`). Couples to #7. [larql-cli]
+9. **`SKIP_MOE` vs `LARQL_SKIP_MOE` name split** (P1, corrupts the anchor's
+   ceiling arm) — one prefixed canonical name, alias the unprefixed one loudly;
+   fix the README/dec-funnel disagreement. Same for `SKIP_OUTER_NORM`,
+   `DECODE_DEBUG`. [larql-inference, larql-compute, docs]
+10. **DEC deployment auth posture** (P1, security) — the data plane is open
+    unless `--api-key` is set (`/v1/shard` streams the whole vindex as a tar);
+    router admin RPCs (`drain_server`/`assign_range`) and the grid port are
+    unauthenticated (`grid/service.rs:386,397,455`; overlaps 2026-06-12 item 1
+    follow-on). Decide: mandatory data-plane auth off-loopback, or private-network
+    binding as a documented DEC deployment rule. Constant-time the gRPC grid-key
+    compare (`service.rs:105`) while here. [larql-server, larql-router]
+11. **Timeout defaults + no-op grid-LAN timeout** (P2) — the 30/60/120s defaults
+    assume 26B+LAN and will 504 on Inkling cold-start (note at DEC-4/5
+    provisioning); `grid_lan_runtime.rs:179` timeout is a `let _ =` no-op (wire
+    it). Arch-tag the grid-regress baselines (`bench-grid-regress.sh:35`).
+    [larql-cli, larql-inference]
+
+**Batch C — structural pre-work (schedule per-ladder, not a DEC-0 blocker):**
+
+12. **Compute admission control** (P1, protects C3/DEC-2) — ~192 concurrent
+    multithreaded-BLAS `spawn_blocking` tasks at 4 clients × 48-layer fan-out
+    look like tier saturation but are oversubscription. Semaphore sized to
+    physical cores + `OPENBLAS_NUM_THREADS=1` for the serving build.
+    [larql-server]
+13. **q8k endpoint drain/heartbeat/latency blindness** (P1, breaks C7 router
+    demo) — add `RifGuard` + `requests_total` + per-layer `record` to the q8k
+    handler (`q8k.rs:41`). [larql-server]
+14. **dec_bench `Endpoint` seam + routing capture** (P1, gates the
+    routed-experts arm that gates the C1-on-MoE verdict) — introduce an
+    `Endpoint` enum (path + frame-builder + decoder + denominator source) and
+    capture per-layer `(expert_ids, weights)`; `/v1/stats` already serves the
+    MoE denominator. [larql-cli, larql-inference]
+15. **Server expert dispatcher** (P2, before G4 cuda-experts) — extract one
+    `run_experts(state, backend, …)` from the per-handler Metal/CPU branches
+    (`q8k.rs:107`, `grpc_expert.rs:178`, `expert/{layer,multi_layer}_batch.rs`).
+    [larql-server]
+16. **Wire consolidation** (P2, at the first new format — DEC-6a MXFP4) — single
+    shared wire module for the dense binary frame (5× CT-string + 2×
+    `BATCH_MARKER` + independent encoder/decoder); fold the dense stack toward
+    the single-sourced MoE/q8k discipline; fix the `call_q8k_layers` byte-counter
+    gap (`remote/http.rs:364`). [larql-inference, larql-server, larql-router]
+17. **MoE parity seams + hot-path cleanups** (P2) — make `build_moe_router_weights`
+    `pub` and share the combine math before the DEC-6b KDA/LatentMoE port
+    (`hidden.rs:93` vs `core.rs:111`); `model.patched` arc-swap so compute
+    doesn't hold the read lock across FFN (C3 shared-tier landmine); drop the
+    4–6 full-buffer request-lifecycle passes (`core.rs:48,235,284`,
+    `binary.rs:88`); gate `--release-mmap-after-request` on `requests_in_flight`;
+    persistent client fan-out pool. [larql-inference, larql-server]
+
 ---
 
 ## Cleanup / consolidation track (added 2026-06-12)

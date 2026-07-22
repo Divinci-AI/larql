@@ -75,7 +75,19 @@ pub fn encode_q8k_batch_request(layers: &[(usize, &Q8KActivation)]) -> Vec<u8> {
 // ── Decode (client ← server) ─────────────────────────────────────────────────
 
 /// Decode a Q8K batch response body into a `HashMap<layer_idx → output_floats>`.
+///
+/// Entries with a duplicate `layer_idx` collapse (last wins) — use
+/// [`decode_q8k_batch_response_entries`] when the request carried several rows
+/// for the same layer.
 pub fn decode_q8k_batch_response(body: &[u8]) -> Result<HashMap<usize, Vec<f32>>, String> {
+    Ok(decode_q8k_batch_response_entries(body)?
+        .into_iter()
+        .collect())
+}
+
+/// Decode a Q8K batch response body into ordered `(layer_idx, output_floats)`
+/// entries, preserving duplicates and wire order.
+pub fn decode_q8k_batch_response_entries(body: &[u8]) -> Result<Vec<(usize, Vec<f32>)>, String> {
     if body.len() < 4 {
         return Err(format!(
             "q8k batch response too short: {} bytes",
@@ -94,7 +106,7 @@ pub fn decode_q8k_batch_response(body: &[u8]) -> Result<HashMap<usize, Vec<f32>>
         ));
     }
     let mut offset = 4usize;
-    let mut out = HashMap::with_capacity(num_entries);
+    let mut out = Vec::with_capacity(num_entries);
     for i in 0..num_entries {
         if body.len() < offset + 8 {
             return Err(format!("q8k batch response: truncated entry header {i}"));
@@ -115,7 +127,7 @@ pub fn decode_q8k_batch_response(body: &[u8]) -> Result<HashMap<usize, Vec<f32>>
             .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
             .collect();
         offset += floats_bytes;
-        out.insert(layer_idx, floats);
+        out.push((layer_idx, floats));
     }
     Ok(out)
 }
@@ -274,6 +286,44 @@ mod tests {
         assert_eq!(map.len(), 2);
         assert_eq!(map[&5], out0);
         assert_eq!(map[&10], out1);
+    }
+
+    #[test]
+    fn response_entries_preserve_duplicate_layers_in_wire_order() {
+        // B-row replay sends B entries for the SAME layer; the ordered
+        // decode must keep all of them, in order. The HashMap variant
+        // collapses to one — that asymmetry is the reason this exists.
+        let out0 = vec![1.0f32, 2.0];
+        let out1 = vec![3.0f32, 4.0];
+        let out2 = vec![5.0f32, 6.0];
+        let entries: Vec<(usize, &[f32])> = vec![(7usize, &out0), (7usize, &out1), (7usize, &out2)];
+        let body = encode_q8k_batch_response(&entries);
+
+        let ordered = decode_q8k_batch_response_entries(&body).unwrap();
+        assert_eq!(ordered.len(), 3);
+        assert_eq!(ordered[0], (7, out0.clone()));
+        assert_eq!(ordered[1], (7, out1.clone()));
+        assert_eq!(ordered[2], (7, out2.clone()));
+
+        let collapsed = decode_q8k_batch_response(&body).unwrap();
+        assert_eq!(collapsed.len(), 1, "map variant collapses duplicates");
+        assert_eq!(collapsed[&7], out2, "last entry wins in the map variant");
+    }
+
+    #[test]
+    fn response_entries_truncated_returns_error() {
+        let out = vec![1.0f32, 2.0];
+        let entries: Vec<(usize, &[f32])> = vec![(0usize, &out)];
+        let mut body = encode_q8k_batch_response(&entries);
+        body.truncate(body.len() - 4);
+        assert!(decode_q8k_batch_response_entries(&body).is_err());
+    }
+
+    #[test]
+    fn response_entries_reject_impossible_entry_count() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&u32::MAX.to_le_bytes());
+        assert!(decode_q8k_batch_response_entries(&body).is_err());
     }
 
     #[test]

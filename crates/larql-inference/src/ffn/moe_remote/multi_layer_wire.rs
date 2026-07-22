@@ -102,12 +102,23 @@ pub fn encode_multi_layer_request(tasks: &[MultiLayerTask]) -> Vec<u8> {
 pub fn decode_multi_layer_request(bytes: &[u8]) -> Option<Vec<MultiLayerTask>> {
     let mut pos = 0;
     let n = read_u32(bytes, &mut pos)? as usize;
+    // Bound against the minimal 12-byte-per-task header (layer + hidden +
+    // num_experts) before reserving — an attacker-controlled `n` must not
+    // reach `Vec::with_capacity` directly. Mirrors q8k_wire.rs's
+    // `max_possible_entries` guard (PR 104 CI).
+    if n > bytes.len().saturating_sub(pos) / 12 {
+        return None;
+    }
     let mut tasks = Vec::with_capacity(n);
     for _ in 0..n {
         let layer = read_u32(bytes, &mut pos)? as usize;
         let hidden = read_u32(bytes, &mut pos)? as usize;
         let ne = read_u32(bytes, &mut pos)? as usize;
         let residual = read_f32_slice(bytes, &mut pos, hidden)?;
+        // Each expert entry needs 4 bytes now (id) + 4 bytes later (weight).
+        if ne > bytes.len().saturating_sub(pos) / 8 {
+            return None;
+        }
         let mut expert_ids = Vec::with_capacity(ne);
         for _ in 0..ne {
             expert_ids.push(read_u32(bytes, &mut pos)?);
@@ -143,6 +154,13 @@ pub fn encode_multi_layer_response(results: &[MultiLayerResult]) -> Vec<u8> {
 pub fn decode_multi_layer_response(bytes: &[u8]) -> Option<Vec<MultiLayerResult>> {
     let mut pos = 0;
     let n = read_u32(bytes, &mut pos)? as usize;
+    // Each result needs at least 8 bytes (layer + hidden) before its
+    // payload; guard the allocation against an attacker-controlled `n`
+    // (a malicious shard can send this response too — see
+    // docs/audits/dec-readiness-review-2026-07-22.md §2a).
+    if n > bytes.len().saturating_sub(pos) / 8 {
+        return None;
+    }
     let mut results = Vec::with_capacity(n);
     for _ in 0..n {
         let layer = read_u32(bytes, &mut pos)? as usize;
@@ -208,6 +226,11 @@ pub fn encode_multi_layer_request_q8k(tasks: &[MultiLayerTaskQ8K]) -> Vec<u8> {
 pub fn decode_multi_layer_request_q8k(bytes: &[u8]) -> Option<Vec<MultiLayerTaskQ8K>> {
     let mut pos = 0;
     let n = read_u32(bytes, &mut pos)? as usize;
+    // Bound against the minimal 12-byte-per-task header before reserving
+    // — same rationale as `decode_multi_layer_request` above.
+    if n > bytes.len().saturating_sub(pos) / 12 {
+        return None;
+    }
     let mut tasks = Vec::with_capacity(n);
     for _ in 0..n {
         let layer = read_u32(bytes, &mut pos)? as usize;
@@ -219,6 +242,9 @@ pub fn decode_multi_layer_request_q8k(bytes: &[u8]) -> Option<Vec<MultiLayerTask
         let d = read_f32_slice(bytes, &mut pos, nb)?;
         let sums = read_i16_slice(bytes, &mut pos, nb * SUMS_PER_Q8K_BLOCK)?;
         // Expert routing
+        if ne > bytes.len().saturating_sub(pos) / 8 {
+            return None;
+        }
         let mut expert_ids = Vec::with_capacity(ne);
         for _ in 0..ne {
             expert_ids.push(read_u32(bytes, &mut pos)?);
@@ -251,6 +277,11 @@ fn read_i8_slice(bytes: &[u8], pos: &mut usize, n: usize) -> Option<Vec<i8>> {
 }
 
 fn read_i16_slice(bytes: &[u8], pos: &mut usize, n: usize) -> Option<Vec<i16>> {
+    // `n` (e.g. `nb * SUMS_PER_Q8K_BLOCK`, derived from a wire `hidden`)
+    // must not reach `Vec::with_capacity` unbounded — see PR 104 CI.
+    if n > bytes.len().saturating_sub(*pos) / 2 {
+        return None;
+    }
     let mut v = Vec::with_capacity(n);
     for _ in 0..n {
         let end = pos.checked_add(2)?;
@@ -289,6 +320,13 @@ fn read_f32(bytes: &[u8], pos: &mut usize) -> Option<f32> {
 }
 
 fn read_f32_slice(bytes: &[u8], pos: &mut usize, n: usize) -> Option<Vec<f32>> {
+    // `n` is wire-controlled (e.g. `hidden` straight off the wire): a
+    // `[n=1][layer=0][hidden=0xFFFFFFFF]` request must not reach
+    // `Vec::with_capacity` unbounded (~17 GB reservation → SIGABRT).
+    // See docs/audits/dec-readiness-review-2026-07-22.md §2a / PR 104 CI.
+    if n > bytes.len().saturating_sub(*pos) / 4 {
+        return None;
+    }
     let mut v = Vec::with_capacity(n);
     for _ in 0..n {
         v.push(read_f32(bytes, pos)?);
@@ -369,6 +407,83 @@ mod tests {
         assert_eq!(encoded.len(), 4);
         let decoded = decode_multi_layer_response(&encoded).unwrap();
         assert!(decoded.is_empty());
+    }
+
+    // ── Allocation-bomb regressions (docs/audits/dec-readiness-review-2026-07-22.md §2a) ──
+
+    #[test]
+    fn decode_multi_layer_request_rejects_impossible_task_count_before_allocating() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&u32::MAX.to_le_bytes()); // num_tasks
+        assert!(decode_multi_layer_request(&body).is_none());
+    }
+
+    #[test]
+    fn decode_multi_layer_request_rejects_impossible_hidden_before_allocating() {
+        // [n=1][layer=0][hidden=0xFFFFFFFF][num_experts=0] — 16 bytes total.
+        // Before the fix, `hidden` reached `read_f32_slice`'s
+        // `Vec::with_capacity` unbounded (~17 GB reservation → SIGABRT).
+        let mut body = Vec::new();
+        body.extend_from_slice(&1u32.to_le_bytes()); // num_tasks
+        body.extend_from_slice(&0u32.to_le_bytes()); // layer
+        body.extend_from_slice(&u32::MAX.to_le_bytes()); // hidden
+        body.extend_from_slice(&0u32.to_le_bytes()); // num_experts
+        assert!(decode_multi_layer_request(&body).is_none());
+    }
+
+    #[test]
+    fn decode_multi_layer_request_rejects_impossible_expert_count_before_allocating() {
+        // A well-formed zero-length residual, then an attacker-controlled
+        // `num_experts` far beyond what the remaining body could hold.
+        let mut body = Vec::new();
+        body.extend_from_slice(&1u32.to_le_bytes()); // num_tasks
+        body.extend_from_slice(&0u32.to_le_bytes()); // layer
+        body.extend_from_slice(&0u32.to_le_bytes()); // hidden
+        body.extend_from_slice(&u32::MAX.to_le_bytes()); // num_experts
+        assert!(decode_multi_layer_request(&body).is_none());
+    }
+
+    #[test]
+    fn decode_multi_layer_response_rejects_impossible_result_count_before_allocating() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&u32::MAX.to_le_bytes()); // num_results
+        assert!(decode_multi_layer_response(&body).is_none());
+    }
+
+    #[test]
+    fn decode_multi_layer_response_rejects_impossible_hidden_before_allocating() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&1u32.to_le_bytes()); // num_results
+        body.extend_from_slice(&0u32.to_le_bytes()); // layer
+        body.extend_from_slice(&u32::MAX.to_le_bytes()); // hidden
+        assert!(decode_multi_layer_response(&body).is_none());
+    }
+
+    #[test]
+    fn decode_multi_layer_request_q8k_rejects_impossible_task_count_before_allocating() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&u32::MAX.to_le_bytes()); // num_tasks
+        assert!(decode_multi_layer_request_q8k(&body).is_none());
+    }
+
+    #[test]
+    fn decode_multi_layer_request_q8k_rejects_impossible_hidden_before_allocating() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&1u32.to_le_bytes()); // num_tasks
+        body.extend_from_slice(&0u32.to_le_bytes()); // layer
+        body.extend_from_slice(&u32::MAX.to_le_bytes()); // hidden
+        body.extend_from_slice(&0u32.to_le_bytes()); // num_experts
+        assert!(decode_multi_layer_request_q8k(&body).is_none());
+    }
+
+    #[test]
+    fn decode_multi_layer_request_q8k_rejects_impossible_expert_count_before_allocating() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&1u32.to_le_bytes()); // num_tasks
+        body.extend_from_slice(&0u32.to_le_bytes()); // layer
+        body.extend_from_slice(&0u32.to_le_bytes()); // hidden (0 blocks)
+        body.extend_from_slice(&u32::MAX.to_le_bytes()); // num_experts
+        assert!(decode_multi_layer_request_q8k(&body).is_none());
     }
 
     #[test]

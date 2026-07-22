@@ -60,10 +60,15 @@ mod http;
 pub mod q8k_wire;
 pub mod sharded;
 
-pub use codec::RemoteLatencyStats;
-pub use http::{RemoteFfnConfig, RemoteFfnError, RemoteWalkBackend, WirePreference};
+pub use codec::{
+    decode_single_response, encode_binary_request, RemoteLatencyStats, BINARY_CT, F16_CT, I8_CT,
+};
+pub use http::{
+    RemoteFfnConfig, RemoteFfnError, RemoteWalkBackend, WirePreference, STATS_PATH, WALK_FFN_PATH,
+    WALK_FFN_Q8K_PATH,
+};
 pub use q8k_wire::{
-    decode_q8k_batch_request, decode_q8k_batch_response, encode_q8k_batch_request,
-    encode_q8k_batch_response, Q8KRequestEntry, Q8K_BATCH_CT,
+    decode_q8k_batch_request, decode_q8k_batch_response, decode_q8k_batch_response_entries,
+    encode_q8k_batch_request, encode_q8k_batch_response, Q8KRequestEntry, Q8K_BATCH_CT,
 };
 pub use sharded::LayerShardedBackend;

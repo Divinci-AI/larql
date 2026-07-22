@@ -805,6 +805,7 @@ The full surface is documented in `crates/larql-inference/ROADMAP.md` §
 | [docs/adr/0012-grid-benchmarking.md](docs/adr/0012-grid-benchmarking.md) | Grid benchmarking infrastructure — criterion + CLI + CI gate |
 | [docs/diagnoses/shannon-cross-engine-divergence.md](docs/diagnoses/shannon-cross-engine-divergence.md) | Forward-pass correctness diagnostic via `larql shannon verify` — three-engine bits/char comparison against HF/PyTorch and MLX, plus the three bugs it surfaced |
 | [scripts/README_shannon_score.md](scripts/README_shannon_score.md) | Cross-engine Shannon scorers — `larql shannon verify` + standalone scripts for MLX and HF |
+| [docs/audits/dec-readiness-review-2026-07-22.md](docs/audits/dec-readiness-review-2026-07-22.md) | DEC-readiness review of the server/router/remote-FFN data plane ahead of the DEC funnel programme — silent-corruption + security findings, remediation tracked in ROADMAP |
 
 ## Platform Support
 

@@ -74,8 +74,12 @@ pub fn kquant_ffn_forward_layer(
 
 /// Q4_K × Q8_K variant: accepts a pre-quantised Q8_K activation vector
 /// (already RMS-normed by the client) and skips the dequant of gate/up by
-/// using the NEON/AVX2 `q4k_q8k_gate_up_into` kernel.  Down projection
-/// still goes through the f32 dequant path (no Q6K×Q8K kernel yet).
+/// using the `q4k_q8k_gate_up_into` kernel (NEON/hand-asm on aarch64;
+/// scalar-only on x86_64 today — see `q4k_q8k_gate_up_into`'s doc comment).
+/// Down projection takes the matching Q4_K×Q8_K matvec kernel only when the
+/// down slab's own format tag is `"Q4_K"`; any other format (a non-Q4_K
+/// down slab, e.g. from a model with a different quant mix) falls back to
+/// the f32 dequant path, which consults the tag correctly.
 ///
 /// `h_q8k.qs.len()` must equal `hidden` (= `x.ncols()`), which is a
 /// multiple of 256 (Q8_K block size).
@@ -129,17 +133,21 @@ pub fn kquant_ffn_forward_layer_q8k(
     // Down projection: Q4K×Q8K NEON — quantise the f32 activation once,
     // then call the NEON matvec directly on the mmap Q4K bytes.
     // No dequant, no large f32 allocation, no BLAS thread-pool collision.
-    // Guard: intermediate must be Q8K-block-aligned (multiple of the
-    // Q4_K/Q8_K super-block size).
-    // For non-aligned sizes (rare, non-production) fall back to OnceLock cache.
-    if intermediate.is_multiple_of(crate::ffn::Q4K_Q8K_SUPERBLOCK_ELEMS) {
+    // Guard: down's own format tag must be "Q4_K" (this kernel reads the
+    // Q4_K block layout only — feeding it Q6_K/Q5_K/… bytes decodes silent
+    // garbage, see docs/audits/dec-readiness-review-2026-07-22.md §1d) AND
+    // intermediate must be Q8K-block-aligned (multiple of the Q4_K/Q8_K
+    // super-block size). Either condition failing falls back to the
+    // format-aware dequant path below.
+    if ffn[2].1 == "Q4_K" && intermediate.is_multiple_of(crate::ffn::Q4K_Q8K_SUPERBLOCK_ELEMS) {
         let activation_flat = activation.as_slice().expect("activation contiguous");
         let act_q8k = quantize_x_to_q8k(activation_flat);
         let mut out = vec![0.0f32; hidden];
         q4k_q8k_matvec_into(&mut out, &act_q8k, ffn[2].0, hidden, intermediate);
         Array2::from_shape_vec((1, hidden), out).expect("down output shape")
     } else {
-        // Fallback: OnceLock cache + ndarray dot for non-256-aligned intermediate.
+        // Fallback: OnceLock cache + ndarray dot; consults `ffn[2].1` via
+        // `dequantize_matrix`, so any down format is handled correctly.
         let n = intermediate * hidden;
         if let Some(arc) = index.kquant_ffn_layer_once(layer, 2) {
             let w_down_t = ndarray::ArrayView2::from_shape((intermediate, hidden), &arc[..n])

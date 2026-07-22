@@ -21,9 +21,12 @@ use super::q8k_wire::{decode_q8k_batch_response, encode_q8k_batch_request, Q8K_B
 use crate::ffn::FfnBackend;
 use larql_compute::cpu::ops::q4k_q8k_dot::Q8KActivation;
 
-const STATS_PATH: &str = "/v1/stats";
-const WALK_FFN_PATH: &str = "/v1/walk-ffn";
-const WALK_FFN_Q8K_PATH: &str = "/v1/walk-ffn-q8k";
+/// Server stats endpoint (shared by the DEC loadgen driver).
+pub const STATS_PATH: &str = "/v1/stats";
+/// Dense-FFN endpoint (shared by the DEC loadgen driver).
+pub const WALK_FFN_PATH: &str = "/v1/walk-ffn";
+/// Q8K dense-FFN batch endpoint (shared by the DEC loadgen driver).
+pub const WALK_FFN_Q8K_PATH: &str = "/v1/walk-ffn-q8k";
 const HIDDEN_SIZE_KEY: &str = "hidden_size";
 
 // ── Config ───────────────────────────────────────────────────────────────────

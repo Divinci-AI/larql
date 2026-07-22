@@ -19,7 +19,10 @@ mod remote_moe;
 mod setup;
 mod timing;
 
-pub use remote_ffn::{generate_with_remote_ffn, generate_with_remote_ffn_batch};
+pub use remote_ffn::{
+    generate_with_remote_ffn, generate_with_remote_ffn_batch,
+    generate_with_remote_ffn_batch_captured, ResidualCaptureSink,
+};
 pub use remote_moe::{generate_with_remote_moe, generate_with_remote_moe_batch};
 
 // ── Bottleneck diagnostic ────────────────────────────────────────────────────

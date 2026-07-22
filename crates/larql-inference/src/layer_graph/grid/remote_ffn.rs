@@ -279,6 +279,17 @@ fn dispatch_ffn_with_q8k_fallback(
     postnorm_layers(weights, raw_results)
 }
 
+/// Per-prompt residual capture written by
+/// [`generate_with_remote_ffn_batch_captured`]: `steps[step][layer]` is the
+/// pre-normed post-attention residual (length = hidden) exactly as the final
+/// FFN dispatch of that decode step sent it over the wire. Pre-normed capture
+/// makes replay model-free — a replay driver needs no weights or norms to
+/// reproduce the bytes the server saw.
+#[derive(Debug, Default)]
+pub struct ResidualCaptureSink {
+    pub steps: Vec<Vec<Vec<f32>>>,
+}
+
 /// Batch pre-dispatch variant of [`generate_with_remote_ffn`].
 #[allow(clippy::too_many_arguments)]
 pub fn generate_with_remote_ffn_batch(
@@ -291,6 +302,39 @@ pub fn generate_with_remote_ffn_batch(
     remote: &LayerShardedBackend,
     eos: &EosConfig,
     predispatch_iters: usize,
+) -> Result<GridGenerateResult, RemoteMoeError> {
+    generate_with_remote_ffn_batch_captured(
+        weights,
+        tokenizer,
+        prompt_ids,
+        max_tokens,
+        index,
+        backend,
+        remote,
+        eos,
+        predispatch_iters,
+        None,
+    )
+}
+
+/// [`generate_with_remote_ffn_batch`] with an optional residual-capture sink.
+///
+/// When `sink` is `Some`, each decode step appends the pre-normed per-layer
+/// residuals that the final predispatch iteration dispatched to the remote —
+/// the DEC loadgen's capture hook. `None` is byte-identical to the plain
+/// batch path.
+#[allow(clippy::too_many_arguments)]
+pub fn generate_with_remote_ffn_batch_captured(
+    weights: &ModelWeights,
+    tokenizer: &tokenizers::Tokenizer,
+    prompt_ids: Vec<u32>,
+    max_tokens: usize,
+    index: &VectorIndex,
+    backend: &dyn larql_compute::ComputeBackend,
+    remote: &LayerShardedBackend,
+    eos: &EosConfig,
+    predispatch_iters: usize,
+    mut sink: Option<&mut ResidualCaptureSink>,
 ) -> Result<GridGenerateResult, RemoteMoeError> {
     let runtime = GridRuntimeConfig::from_env();
     let predispatch_iters = predispatch_iters.max(1);
@@ -418,6 +462,11 @@ pub fn generate_with_remote_ffn_batch(
 
         for iter in 0..predispatch_iters {
             let is_final = iter + 1 == predispatch_iters;
+            if is_final {
+                if let Some(s) = sink.as_deref_mut() {
+                    s.steps.push(prenorm_layers(weights, &h_capture));
+                }
+            }
             let t_ffn = std::time::Instant::now();
             let h2 = dispatch_ffn_with_q8k_fallback(remote, weights, &h_capture);
             step_ffn_ms += t_ffn.elapsed().as_secs_f64() * 1000.0;
