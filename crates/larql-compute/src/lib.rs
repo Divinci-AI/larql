@@ -59,11 +59,16 @@
 //!
 //! ## Adding a quant format
 //!
-//! Adding e.g. FP4 = one [`QuantFormat`] variant + one match arm in
+//! Adding e.g. FP4 = one [`QuantFormat`] variant + one arm in
+//! [`QuantFormat::route`] (the [`FormatRoute`] registry — dequant +
+//! matvec + matmul kernel pointers in one place) + one match arm in
 //! [`QuantMatVec::quant_matvec`]'s default impl + one CPU kernel +
 //! one shader per GPU-backend crate.  The shader-side wiring is
 //! local to each backend crate, so a new format doesn't require
-//! touching every consumer.
+//! touching every consumer.  Formats whose weights carry side
+//! metadata (I2S trit scales, MXFP4 E8M0 scales) follow the
+//! `ternary_matvec` parallel-path template instead — see the
+//! unknown-format contract in [`quant_route`].
 
 #[cfg(any(
     target_os = "linux",
@@ -89,6 +94,7 @@ pub mod options;
 pub mod per_layer_decode_state;
 pub mod pipeline;
 pub mod pipeline_layer;
+pub mod quant_route;
 pub mod residual;
 pub mod state_handle;
 
@@ -113,8 +119,9 @@ pub use pipeline::{
 // ── Re-exports: backend ──
 
 pub use backend::{
-    dot_proj_gpu, matmul_gpu, Capability, ComputeBackend, DecodeBackend, DecodeStateDump, MatMul,
-    MatMulOp, ProfileTimings, QuantMatVec, StateDumpMask,
+    backend_from_spec, dot_proj_gpu, matmul_gpu, BackendCtor, BackendKind, BackendSelectError,
+    Capability, ComputeBackend, DecodeBackend, DecodeStateDump, MatMul, MatMulOp, ProfileTimings,
+    QuantMatVec, StateDumpMask,
 };
 
 /// Bring every backend sub-trait into scope at once.
@@ -128,6 +135,8 @@ pub mod prelude {
         Capability, ComputeBackend, DecodeBackend, MatMul, MatMulOp, QuantMatVec,
     };
 }
+
+pub use quant_route::FormatRoute;
 
 pub use cpu::ops::linalg::{cholesky, cholesky_inverse, cholesky_solve, ridge_decomposition_solve};
 pub use cpu::ops::moe::{quantize_x_to_q8k, Q8KActivation};

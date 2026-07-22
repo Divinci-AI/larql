@@ -3,8 +3,11 @@
 > **Remediation status (2026-07-22):** Batch A (§1a–§1d, §2a first item) is
 > fixed — see [`ROADMAP.md`](../../ROADMAP.md) §"Codebase hardening" →
 > "DEC-readiness review (2026-07-22)" for the per-item summary and the
-> commit that landed it. Batches B and C (fleet/config landmines, structural
-> pre-work) remain open, tracked in the same ROADMAP section.
+> commit that landed it. Batch B item 7 (backend factory + capability
+> dispatch, §3c) landed 2026-07-22 alongside the larql-compute DEC prep
+> (large-file module splits + the `FormatRoute` quant registry). The rest
+> of Batches B and C (fleet/config landmines, structural pre-work) remain
+> open, tracked in the same ROADMAP section.
 
 Targeted review of the **DEC data-plane** (`larql-server`, `larql-router`,
 `larql-inference` remote-FFN/MoE paths, `larql-cli` bench/dec_bench, the DEC

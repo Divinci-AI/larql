@@ -301,12 +301,11 @@ fn matvec_q4k_or_q6k_q8k(
         return None;
     }
     // Pre-flight length check only (the actual matvec recomputes this stride
-    // internally). Gate on the two kernel-backed formats and take the packed
-    // row length from the format helper instead of re-spelling `(cols/256)*144`.
+    // internally). Gate on the kernel-backed formats via the `FormatRoute`
+    // registry and take the packed row length from the format helper instead
+    // of re-spelling `(cols/256)*144`.
     let bytes_per_row = match crate::QuantFormat::from_registry_tag(format) {
-        Some(f @ (crate::QuantFormat::Q4_K | crate::QuantFormat::Q6_K)) => {
-            f.packed_matrix_bytes(1, cols)?
-        }
+        Some(f) if f.route().q8k_matvec.is_some() => f.packed_matrix_bytes(1, cols)?,
         _ => return None,
     };
     if bytes.len() < rows * bytes_per_row {
@@ -333,12 +332,18 @@ fn matvec_q4k_or_q6k_q8k(
 /// matvec when this returns true and falls back to the dequant path
 /// otherwise (e.g. Q4_KF layers, padded down projections).
 fn layer_supports_direct_matvec(index: &dyn crate::KvIndex, layer: usize) -> bool {
+    // "Direct-matvec-capable" = the tag resolves to a format with a Q8K
+    // matvec kernel in the `FormatRoute` registry (Q4_K/Q6_K today).
+    let has_q8k_kernel = |tag: &str| {
+        crate::QuantFormat::from_registry_tag(tag)
+            .is_some_and(|f| f.route().q8k_matvec.is_some())
+    };
     let attn = match index.attn_kquant_layer_data(layer) {
         Some(a) => a,
         None => return false,
     };
     for (_, fmt) in attn.iter() {
-        if !matches!(*fmt, "Q4_K" | "Q6_K") {
+        if !has_q8k_kernel(fmt) {
             return false;
         }
     }
@@ -347,7 +352,7 @@ fn layer_supports_direct_matvec(index: &dyn crate::KvIndex, layer: usize) -> boo
         None => return false,
     };
     for (_, fmt) in ffn.iter() {
-        if !matches!(*fmt, "Q4_K" | "Q6_K") {
+        if !has_q8k_kernel(fmt) {
             return false;
         }
     }
@@ -896,10 +901,12 @@ fn run_ffn_decode_step_q4k_direct(
     // pad columns multiply zero activations, so the result is exact.
     // (Twin of the same handling in larql-inference's cached.rs — keep in
     // lockstep, see the consolidation hazard in q4k-direct-attention.md.)
-    let down_sb_bytes = match down_fmt {
-        "Q4_K" => 144,
-        "Q6_K" => 210,
-        _ => return None,
+    let down_sb_bytes = match crate::QuantFormat::from_registry_tag(down_fmt)
+        .filter(|f| f.route().q8k_matvec.is_some())
+        .and_then(|f| f.packed_block_layout())
+    {
+        Some((_, block_bytes)) => block_bytes,
+        None => return None,
     };
     let down_bytes_per_row = down_bytes.len() / hidden;
     if down_bytes_per_row == 0 || !down_bytes_per_row.is_multiple_of(down_sb_bytes) {

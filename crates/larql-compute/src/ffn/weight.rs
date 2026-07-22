@@ -21,12 +21,9 @@ pub(crate) fn quant_matmul(
     cols: usize,
     seq: usize,
 ) -> Option<Array2<f32>> {
+    let kernel = crate::QuantFormat::from_registry_tag(fmt).and_then(|f| f.route().quant_matmul)?;
     let mut out = vec![0.0f32; seq * rows];
-    match fmt {
-        "Q4_K" => crate::cpu::ops::q4_common::q4k_matmul_into(&mut out, x, bytes, rows, cols, seq),
-        "Q6_K" => crate::cpu::ops::q4_common::q6k_matmul_into(&mut out, x, bytes, rows, cols, seq),
-        _ => return None,
-    }
+    kernel(&mut out, x, bytes, rows, cols, seq);
     Some(Array2::from_shape_vec((seq, rows), out).expect("quant_matmul output shape [seq, rows]"))
 }
 
@@ -154,14 +151,15 @@ pub struct Q4kMatmulFfn<'a> {
 }
 
 impl Q4kMatmulFfn<'_> {
-    /// Bytes per 256-element super-block for a quant format.
+    /// Bytes per 256-element super-block for a quant format with a
+    /// direct matmul kernel (the formats [`quant_matmul`] serves).
     #[inline]
     fn block_bytes(fmt: &str) -> usize {
-        match fmt {
-            "Q4_K" => 144,
-            "Q6_K" => 210,
-            other => panic!("Q4kMatmulFfn: unsupported FFN quant format {other}"),
-        }
+        crate::QuantFormat::from_registry_tag(fmt)
+            .filter(|f| f.route().quant_matmul.is_some())
+            .and_then(|f| f.packed_block_layout())
+            .map(|(_, block_bytes)| block_bytes)
+            .unwrap_or_else(|| panic!("Q4kMatmulFfn: unsupported FFN quant format {fmt}"))
     }
 
     /// gate/up projection: `x[seq, in_dim] -> [seq, out_rows]`, where `in_dim`

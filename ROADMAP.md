@@ -614,14 +614,24 @@ f32/f16/i8 serving path is well-built; only the Q8K path — the wire DEC prefer
 6. **`127.0.0.1` announce on `--join`** (P1, breaks multi-host grid) — refuse a
    wildcard host without `--public-url`, or detect the outbound IP
    (`bootstrap.rs:1222`). [larql-server]
-7. **Backend factory + capability dispatch** (P1, unblocks x86 + pre-work for
-   G-ladder) — replace the 7-site `if metal` cfg copy-paste with one
-   `backend_from_spec` factory and switch dispatch branches to `Capability`
-   probes (`run_cmd.rs:649,924`, `bench/remote_ffn_runtime.rs:77`,
-   `bench/local_runtime.rs:58`, `dec_bench/capture_runtime.rs:43`,
-   `shannon_cmd.rs:971`, `walk_cmd.rs:462`). Make the CPU/x86 capture story
-   explicit (pool is host-portable — capture on Metal, replay anywhere); do NOT
-   rush full CPU fused decode. [larql-cli, larql-compute]
+7. ✅ **Backend factory + capability dispatch** (P1, unblocks x86 + pre-work for
+   G-ladder) — DONE 2026-07-22 (except the capture-portability doc note, folded
+   into #8's script work). `larql_compute::backend::factory` adds
+   `BackendKind` (+`FromStr` for a future `--backend`/`DEC0_BACKEND` string) and
+   `backend_from_spec(kind, registry)` with injected constructors (ADR-019: the
+   trait crate names no backend crate); `larql-cli/src/backend_select.rs` builds
+   the registry once, and all 7 `if metal` cfg copy-paste sites collapse onto it
+   (`run_cmd.rs` ×2, `bench/remote_ffn_runtime.rs`, `bench/local_runtime.rs`,
+   `dec_bench/capture_runtime.rs`, `shannon_cmd.rs`, `walk_cmd.rs`). Semantics
+   tightened: an explicit `--metal` with no usable device now errors loudly
+   instead of silently benching on CPU. Dispatch de-`bool`ed: the remote-MoE
+   fork probes `supports(Capability::DecodeMoe)` on the constructed instance,
+   and run_cmd's experts module fixes TWO latent bugs — `metal_ready_for_q4`
+   probed `default_backend()` (always CPU post-ADR-019, so the check was
+   vacuous) and `Strategy::MetalQ4K` then ran `layer_graph::generate` on a
+   fresh `default_backend()` (CPU) — the constructed backend is now stored in
+   `Runtime` and probed via the canonical `PrefillQ4 && DecodeToken` pair.
+   [larql-cli, larql-compute]
 8. **`--metal` / `--backends metal` hardcoded for x86** (P1) — `DEC0_BACKEND`
    env in `scripts/dec0-loopback.sh:80,97`, platform-conditional `--backends`
    default (`bench/args.rs:26`). Couples to #7. [larql-cli]

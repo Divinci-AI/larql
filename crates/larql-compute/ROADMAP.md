@@ -1222,16 +1222,27 @@ in `decode/mod.rs` ×2 and `decode_hybrid.rs` ×1) collapses to a single
 method call. Adding a future Q4_K-style format updates one classifier,
 not 3+ OR-chains. Pinned by `quant_format_classifiers` test.
 
-**Full `FormatRoute` enum DEFERRED.** The roadmap intent
-(`F32Input { fused_down: Option<&KernelHandle> }` / `Q8Input { norm_q8,
-qkv_q8 }` / etc., with the `match QuantFormat::*` confined to one
-constructor in `metal/stages/quant_matvec.rs`) is a 49-file refactor —
-every dispatch site that currently matches on `QuantFormat` would need
-to switch to consuming a `FormatRoute`. Doing it concurrently with the
-in-flight MoE struct refactor risks heavy merge conflicts. Defer until
-MoE settles AND there's a concrete near-term need (e.g. an FP4 / FP8
-format being added). The classifier helpers above absorb the immediate
-duplication cost in the meantime.
+**CPU-side `FormatRoute` registry SHIPPED (2026-07-22, DEC prep).**
+`src/quant_route.rs`: a per-format dispatch record (`dequant_padded` /
+`q8k_matvec` / `quant_matmul` fn pointers) resolved by
+`QuantFormat::route()` — one match arm per format. The string-keyed CPU
+dispatch sites (`kquant_forward::dequant::dequantize_matrix`,
+`q4k_q8k_matvec_parallel`, `ffn::weight::{quant_matmul, block_bytes}`,
+`kquant_forward::cached`'s direct-matvec gates and down-stride lookup)
+now resolve `tag → QuantFormat → FormatRoute` instead of each holding a
+local `"Q4_K" | "Q6_K"` match. Unknown-format contract documented on the
+module and enforced: seam parsers error loudly, capability probes return
+`None`/`false` and fall back, kernel entry points panic instead of
+silently zero-filling (`q4k_q8k_matvec_parallel`'s `_ => return` bug —
+dec-readiness §1 class — is fixed, with `should_panic` regressions).
+Adding MXFP4 (DEC-6a) = one variant + one route arm + kernels; formats
+with side metadata follow the `ternary_matvec` parallel-path template.
+
+**Metal-side route DEFERRED.** The original intent (`F32Input { … }` /
+`Q8Input { … }` with the `match QuantFormat::*` confined to one
+constructor in `metal/stages/quant_matvec.rs`) remains open — the Metal
+crate keeps its own enum dispatch (`pick_qkv_route` already anticipates
+an FP4 family). Revisit when a new format actually lands a shader.
 
 ### #8 — `Pipelines` struct asymmetry (DONE)
 

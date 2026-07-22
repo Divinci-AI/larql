@@ -454,22 +454,11 @@ fn run_with_vindex_weights(
 }
 
 /// Build the Metal compute backend for `--metal`, or a clear error when the
-/// crate was built without the `gpu` feature (or off macOS). Split by `cfg`
-/// so the gpu-off build rejects through a normal `Result` — a diverging
-/// `let backend = { … return Err … }` binding would otherwise mark all
-/// downstream code unreachable and its locals unused in the gpu-off compile.
-#[cfg(all(feature = "gpu", target_os = "macos"))]
+/// binary lacks the backend or the host lacks a device. Delegates to the
+/// shared registry-backed factory in `backend_select`.
 fn metal_backend_box() -> Result<Box<dyn larql_compute::ComputeBackend>, Box<dyn std::error::Error>>
 {
-    let b = larql_compute_metal::MetalBackend::new()
-        .ok_or("Metal backend unavailable — rebuild with `--features gpu` on an M-series Mac.")?;
-    Ok(Box::new(b))
-}
-
-#[cfg(not(all(feature = "gpu", target_os = "macos")))]
-fn metal_backend_box() -> Result<Box<dyn larql_compute::ComputeBackend>, Box<dyn std::error::Error>>
-{
-    Err("`--metal` requires the `gpu` feature on macOS".into())
+    crate::backend_select::backend_for_metal_flag(true)
 }
 
 /// Predict against a Q4_K / Q6_K vindex: dequantise each layer's attn + FFN

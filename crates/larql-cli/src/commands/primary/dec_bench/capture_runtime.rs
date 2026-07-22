@@ -40,20 +40,11 @@ pub(super) fn run_capture(args: &CaptureArgs) -> Result<(), Box<dyn std::error::
         .into());
     }
 
-    let backend: Box<dyn larql_compute::ComputeBackend> = if args.metal {
-        #[cfg(all(feature = "gpu", target_os = "macos"))]
-        {
-            larql_compute_metal::metal_backend()
-                .map(|m| Box::new(m) as Box<dyn larql_compute::ComputeBackend>)
-                .unwrap_or_else(larql_compute::cpu_backend)
-        }
-        #[cfg(not(all(feature = "gpu", target_os = "macos")))]
-        {
-            return Err("`--metal` requires the `gpu` feature on macOS".into());
-        }
-    } else {
-        larql_compute::default_backend()
-    };
+    // An explicit `--metal` with no usable device is a loud error, not a CPU
+    // fallback — a DEC capture pool must not silently come off the wrong
+    // substrate (see `backend_select`).
+    let backend: Box<dyn larql_compute::ComputeBackend> =
+        crate::backend_select::backend_for_metal_flag(args.metal)?;
 
     let mut cb = larql_vindex::SilentLoadCallbacks;
     let weights = larql_vindex::load_model_weights_kquant(&vindex_path, &mut cb)

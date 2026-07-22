@@ -19,6 +19,7 @@
 use clap::{Parser, Subcommand};
 
 mod anyres_tiler;
+mod backend_select;
 mod commands;
 mod formatting;
 mod image_input;
