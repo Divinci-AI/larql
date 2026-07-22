@@ -61,6 +61,45 @@ fn q8k_shape_ok(out_len: usize, rows: usize, q8k_qs_len: usize, cols: usize) -> 
     out_len == rows && q8k_qs_len == cols && cols % ELEMS_PER_BLOCK == 0
 }
 
+/// One-line summary of which SIMD kernel class each Q4_K/Q6_K×Q8_K matvec
+/// kernel selects **on this machine, right now** — not what the doc
+/// comments claim.
+///
+/// The three kernels on the serving path don't all have the same SIMD
+/// coverage: [`q4k_q8k_matvec_into`] has a runtime-detected AVX2 branch on
+/// x86_64, but [`q4k_q8k_gate_up_into`] (the dense `/v1/walk-ffn-q8k` gate+up
+/// kernel) and `q6k_q8k_matvec_into` (every Q6_K projection — attention V,
+/// lm_head on typical Q4K vindexes) do not; both silently fall back to the
+/// ~12–16× slower scalar reference on x86_64. A DEC run must never record a
+/// number produced by an unlogged scalar fallback — call this once at
+/// server startup. See docs/audits/dec-readiness-review-2026-07-22.md §1b.
+pub fn kernel_class_summary() -> String {
+    #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+    {
+        let variant = if use_asm_kernel() { "neon-asm" } else { "neon" };
+        format!("q4k_matvec={variant} q6k_matvec={variant} q4k_gate_up={variant}")
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        let q4k_matvec = if is_x86_feature_detected!("avx2") {
+            "avx2"
+        } else {
+            "scalar"
+        };
+        // q6k_q8k_matvec_into and q4k_q8k_gate_up_into have no AVX2 branch
+        // yet (2026-07-22 review) — always scalar on x86_64 regardless of
+        // AVX2 availability.
+        format!("q4k_matvec={q4k_matvec} q6k_matvec=scalar q4k_gate_up=scalar")
+    }
+    #[cfg(not(any(
+        all(target_arch = "aarch64", target_feature = "neon"),
+        target_arch = "x86_64"
+    )))]
+    {
+        "q4k_matvec=scalar q6k_matvec=scalar q4k_gate_up=scalar".to_string()
+    }
+}
+
 /// Quantised activation in Q8_K layout, one entry per super-block of `x`.
 ///
 /// `qs` packs all super-blocks contiguously: `qs[sb * 256 .. (sb+1) * 256]`
@@ -1353,6 +1392,12 @@ unsafe fn hsum_i32x8(v: std::arch::x86_64::__m256i) -> i32 {
 ///
 /// Caller layouts: `gate_w.len() == up_w.len() == rows * (cols / 256) * 144`,
 /// `gate_out.len() == up_out.len() == rows`.
+///
+/// **x86_64 has no AVX2 branch here** (unlike [`q4k_q8k_matvec_into`], which
+/// does) — this always falls through to the scalar reference on x86_64,
+/// ~12–16× slower than AVX2/NEON. This is the dense `/v1/walk-ffn-q8k`
+/// serving kernel; see `kernel_class_summary` (logged once at server
+/// startup) and docs/audits/dec-readiness-review-2026-07-22.md §1b.
 pub fn q4k_q8k_gate_up_into(
     gate_out: &mut [f32],
     up_out: &mut [f32],
@@ -2135,6 +2180,18 @@ pub fn q6k_q8k_matvec_into(
 mod tests {
     use super::*;
     use crate::cpu::ops::q4_common::{q4k_matvec_into, quantize_q4_k, quantize_q6_k};
+
+    /// Regression for docs/audits/dec-readiness-review-2026-07-22.md §1b:
+    /// the DEC serving path must be able to log which kernel class it
+    /// selected. Pins the format (three `key=value` fields) rather than
+    /// specific values, since those are host-dependent.
+    #[test]
+    fn kernel_class_summary_reports_all_three_kernels() {
+        let summary = kernel_class_summary();
+        assert!(summary.contains("q4k_matvec="), "{summary}");
+        assert!(summary.contains("q6k_matvec="), "{summary}");
+        assert!(summary.contains("q4k_gate_up="), "{summary}");
+    }
 
     /// Q8_K round-trip should reconstruct within 0.5% of absmax (1 LSB on
     /// the 127-step scale).  Sums must equal the literal i32 sums of the

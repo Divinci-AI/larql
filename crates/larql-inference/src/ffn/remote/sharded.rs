@@ -111,6 +111,14 @@ impl LayerShardedBackend {
     /// Returns one FFN output vector per layer, in layer order.
     ///
     /// Uses `std::thread::scope` so shards can be borrowed without `Arc`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a layer has no owning shard, or if a shard's request fails
+    /// (mirrors `RemoteWalkBackend::forward`'s own panic-on-transport-error
+    /// convention). A silent zero-fill here would let decode continue on a
+    /// corrupted hidden state — see
+    /// docs/audits/dec-readiness-review-2026-07-22.md §1c.
     pub fn forward_predispatch_all(&self, h_per_layer: &[Vec<f32>]) -> Vec<Vec<f32>> {
         let hidden = self.hidden_size();
         let num_layers = h_per_layer.len();
@@ -126,14 +134,20 @@ impl LayerShardedBackend {
                             .expect("h_per_layer shape must match hidden");
                         match self.shard_for(layer) {
                             Some(shard) => shard.forward(layer, &x).row(0).to_vec(),
-                            None => vec![0.0f32; hidden],
+                            None => panic!(
+                                "forward_predispatch_all: layer {layer} has no owning shard \
+                                 (check --ffn shard-map coverage)"
+                            ),
                         }
                     })
                 })
                 .collect();
 
             for (result, handle) in results.iter_mut().zip(handles) {
-                *result = handle.join().unwrap_or_else(|_| vec![0.0f32; hidden]);
+                *result = match handle.join() {
+                    Ok(v) => v,
+                    Err(e) => std::panic::resume_unwind(e),
+                };
             }
         });
 
