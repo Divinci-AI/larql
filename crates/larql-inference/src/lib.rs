@@ -183,9 +183,11 @@ pub use chat::{wrap_chat_prompt, wrap_prompt_raw, wrap_with_vindex_template, Cha
 pub use error::InferenceError;
 pub use ffn::graph_backend::{GateIndex, IndexBuildCallbacks, SilentIndexCallbacks};
 pub use ffn::{
-    BackendFfn, FfnBackend, LayerFfnRouter, LayerShardedBackend, MoeRouterWeights, RemoteFfnConfig,
-    RemoteFfnError, RemoteLatencyStats, RemoteMoeBackend, RemoteMoeError, RemoteWalkBackend,
-    ShardConfig, SparseFfn, WeightFfn, WirePreference,
+    decode_q8k_batch_response_entries, decode_single_response, encode_binary_request,
+    encode_q8k_batch_request, BackendFfn, FfnBackend, LayerFfnRouter, LayerShardedBackend,
+    MoeRouterWeights, RemoteFfnConfig, RemoteFfnError, RemoteLatencyStats, RemoteMoeBackend,
+    RemoteMoeError, RemoteWalkBackend, ShardConfig, SparseFfn, WeightFfn, WirePreference,
+    BINARY_CT, F16_CT, I8_CT, Q8K_BATCH_CT,
 };
 pub use kv_dispatch::{
     CompressionCodec, EngineBackend, KvDispatch, KvHandle, KvHandleInner, PerLayerDecodeState,
@@ -229,8 +231,9 @@ pub use layer_graph::{
     generate_with_sampling,
     // Expert grid generation
     grid::{
-        generate_with_remote_ffn, generate_with_remote_ffn_batch, generate_with_remote_moe,
-        generate_with_remote_moe_batch,
+        generate_with_remote_ffn, generate_with_remote_ffn_batch,
+        generate_with_remote_ffn_batch_captured, generate_with_remote_moe,
+        generate_with_remote_moe_batch, ResidualCaptureSink,
     },
     hybrid::predict_hybrid,
     predict_honest,

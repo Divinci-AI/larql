@@ -5,7 +5,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-pub(super) const BINARY_CT: &str = "application/x-larql-ffn";
+/// f32 content-type constant.
+pub const BINARY_CT: &str = "application/x-larql-ffn";
 pub(super) const BATCH_MARKER: u32 = 0xFFFF_FFFF;
 
 fn checked_mul(a: usize, b: usize, what: &str) -> Result<usize, String> {
@@ -192,7 +193,7 @@ pub fn decode_binary_batch(body: &[u8]) -> Result<HashMap<usize, Vec<f32>>, Stri
 }
 
 /// f16 content-type constant (ADR-0009).
-pub(crate) const F16_CT: &str = "application/x-larql-ffn-f16";
+pub const F16_CT: &str = "application/x-larql-ffn-f16";
 
 /// Decode a binary single-layer f16 response into f32 output.
 pub fn decode_binary_single_f16(body: &[u8]) -> Result<(usize, Vec<f32>), String> {
@@ -256,7 +257,7 @@ pub fn decode_binary_batch_f16(body: &[u8]) -> Result<HashMap<usize, Vec<f32>>, 
 }
 
 /// i8 content-type constant (ADR-0009).
-pub(crate) const I8_CT: &str = "application/x-larql-ffn-i8";
+pub const I8_CT: &str = "application/x-larql-ffn-i8";
 
 /// Decode one position from an i8 per-position block.
 /// Format: `[scale f32 LE][zero_point f32 LE (ignored)][data i8[hidden_size]]`
@@ -348,6 +349,26 @@ pub(crate) fn decode_binary_batch_i8(
         out.insert(layer, all_floats);
     }
     Ok(out)
+}
+
+/// Decode any single-layer binary walk-ffn response by content type.
+///
+/// Dispatches to the f32/f16/i8 decoder based on `content_type` and also
+/// extracts the server-side `latency_ms` embedded at bytes 8-11.
+/// Returns `(layer, server_latency_ms, output_f32)`.
+pub fn decode_single_response(
+    content_type: &str,
+    body: &[u8],
+    hidden_size: usize,
+) -> Result<(usize, f64, Vec<f32>), String> {
+    let server_ms = extract_response_latency_ms(body);
+    let (layer, floats) = match content_type {
+        I8_CT => decode_binary_single_i8(body, hidden_size)?,
+        F16_CT => decode_binary_single_f16(body)?,
+        BINARY_CT => decode_binary_single(body)?,
+        other => return Err(format!("unsupported walk-ffn response content-type: {other}")),
+    };
+    Ok((layer, server_ms, floats))
 }
 
 /// Extract the `latency_ms` f32 embedded at bytes 8-11 of a binary response.
@@ -856,6 +877,73 @@ mod tests {
         assert_eq!(F16_CT, "application/x-larql-ffn-f16");
         assert_eq!(I8_CT, "application/x-larql-ffn-i8");
         assert_eq!(BATCH_MARKER, 0xFFFF_FFFFu32);
+    }
+
+    // ── decode_single_response (content-type dispatch) ─────────────────
+
+    #[test]
+    fn decode_single_response_dispatches_f32() {
+        let output = vec![1.0f32, -2.0, 3.5, 0.25];
+        let body = make_single_response(3, 2, 4.5, &output);
+        let (layer, server_ms, floats) = decode_single_response(BINARY_CT, &body, 2).unwrap();
+        assert_eq!(layer, 3);
+        assert!((server_ms - 4.5).abs() < 1e-6);
+        assert_eq!(floats, output);
+    }
+
+    #[test]
+    fn decode_single_response_dispatches_f16() {
+        let body = make_single_response_f16(7, 2, 2.25, &[0.5, -0.25, 1.5, -2.5]);
+        let (layer, server_ms, floats) = decode_single_response(F16_CT, &body, 2).unwrap();
+        assert_eq!(layer, 7);
+        assert!((server_ms - 2.25).abs() < 1e-6);
+        assert_eq!(floats, vec![0.5, -0.25, 1.5, -2.5]);
+    }
+
+    #[test]
+    fn decode_single_response_dispatches_i8_multi_row() {
+        // seq_len = 3 rows of hidden = 2: the B>1 replay shape.
+        let body = make_single_response_i8(
+            0,
+            3,
+            1.5,
+            &[(1.0, &[10i8, 20]), (0.25, &[-4i8, 8]), (2.0, &[1i8, -1])],
+        );
+        let (layer, server_ms, floats) = decode_single_response(I8_CT, &body, 2).unwrap();
+        assert_eq!(layer, 0);
+        assert!((server_ms - 1.5).abs() < 1e-6);
+        assert_eq!(floats, vec![10.0, 20.0, -1.0, 2.0, 2.0, -2.0]);
+    }
+
+    #[test]
+    fn decode_single_response_rejects_unknown_content_type() {
+        let body = make_single_response(0, 1, 0.0, &[1.0]);
+        assert!(decode_single_response("application/json", &body, 1).is_err());
+    }
+
+    #[test]
+    fn encode_binary_request_top_k_zero_pins_l2_cache_bypass() {
+        // The server's FfnL2Cache only engages when seq_len==1 && top_k>0.
+        // Replay frames encode top_k=0 so repeated B=1 requests measure
+        // real FFN compute, not cache hits. Pin the byte position.
+        let residual = vec![0.5f32; 4];
+        let body = encode_binary_request(Some(3), None, &residual, 1, true, 0);
+        let top_k = u32::from_le_bytes(body[12..16].try_into().unwrap());
+        assert_eq!(top_k, 0);
+        let seq_len = u32::from_le_bytes(body[4..8].try_into().unwrap());
+        assert_eq!(seq_len, 1);
+    }
+
+    #[test]
+    fn encode_binary_request_multi_row_seq_len() {
+        // B-row replay frame: residual = B × hidden floats, seq_len = B.
+        let hidden = 4;
+        let batch = 8;
+        let rows: Vec<f32> = (0..batch * hidden).map(|i| i as f32 * 0.1).collect();
+        let body = encode_binary_request(Some(0), None, &rows, batch, true, 0);
+        let seq_len = u32::from_le_bytes(body[4..8].try_into().unwrap());
+        assert_eq!(seq_len as usize, batch);
+        assert_eq!(body.len(), 16 + batch * hidden * 4);
     }
 
     #[test]

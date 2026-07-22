@@ -56,3 +56,10 @@ experiments/
 vindexes/
 .pids/
 docs/replay/
+
+# DEC-0 loadgen outputs (bench/dec0/prompts.txt stays tracked)
+bench/dec0/residuals-*/
+bench/dec0/*.log
+bench/dec0/*.jsonl
+bench/dec0/anchor_*.json
+bench/dec0/dec0_*.json

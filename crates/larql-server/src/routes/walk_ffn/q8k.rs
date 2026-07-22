@@ -72,6 +72,34 @@ pub async fn handle_walk_ffn_q8k(
         let entries =
             decode_q8k_batch_request(&body).map_err(crate::error::ServerError::BadRequest)?;
 
+        // Shape validation before any kernel touches the activations: Q8K
+        // activations quantise in 256-element super-blocks, so the model's
+        // hidden size must be block-aligned (production clients only pick
+        // the Q8K wire when it is) and every entry must carry exactly
+        // hidden/256 blocks. Without this gate a shape-mismatched frame
+        // panics inside the FFN kernels (slice out of range) → 500.
+        {
+            let hidden = model.config.hidden_size;
+            let block = larql_inference::ffn::Q4K_Q8K_SUPERBLOCK_ELEMS;
+            if hidden % block != 0 {
+                return Err(crate::error::ServerError::BadRequest(format!(
+                    "hidden_size {hidden} is not a multiple of {block} — \
+                     Q8K wire not supported for this model; use /v1/walk-ffn"
+                )));
+            }
+            let expected_blocks = hidden / block;
+            for (i, entry) in entries.iter().enumerate() {
+                let n_blocks = entry.q8k.d.len();
+                if n_blocks != expected_blocks {
+                    return Err(crate::error::ServerError::BadRequest(format!(
+                        "entry {i} (layer {}): {n_blocks} Q8K blocks, expected \
+                         {expected_blocks} for hidden_size {hidden}",
+                        entry.layer_idx
+                    )));
+                }
+            }
+        }
+
         let patched = model.patched.blocking_read();
         let start = std::time::Instant::now();
 

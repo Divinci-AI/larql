@@ -34,8 +34,9 @@ pub use moe_remote::{
     MoeRouterWeights, RemoteMoeBackend, RemoteMoeError, RemoteMoeFfn, ShardConfig,
 };
 pub use remote::{
-    LayerShardedBackend, RemoteFfnConfig, RemoteFfnError, RemoteLatencyStats, RemoteWalkBackend,
-    WirePreference,
+    decode_q8k_batch_response_entries, decode_single_response, encode_binary_request,
+    encode_q8k_batch_request, LayerShardedBackend, RemoteFfnConfig, RemoteFfnError,
+    RemoteLatencyStats, RemoteWalkBackend, WirePreference, BINARY_CT, F16_CT, I8_CT, Q8K_BATCH_CT,
 };
 pub use sparse::SparseFfn;
 pub use sparse_compute::{

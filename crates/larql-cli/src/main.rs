@@ -92,6 +92,11 @@ enum Commands {
     /// Benchmark decode throughput on a real vindex (Metal / CPU / Ollama).
     Bench(bench::BenchArgs),
 
+    /// DEC residual-replay loadgen — capture real per-layer residuals, then
+    /// replay batch × wire × dispatch sweeps against an expert server
+    /// (docs/dec-funnel.md).
+    DecBench(dec_bench::DecBenchArgs),
+
     /// Split-axis accuracy suite — parametric vs in-context vs conflict,
     /// scored with top-1 match and Shannon bits-per-token.
     Accuracy(accuracy_cmd::AccuracyArgs),
@@ -547,6 +552,7 @@ fn real_main() -> i32 {
         Commands::Run(args) => run_cmd::run(args),
         Commands::Chat(args) => run_cmd::run(args.into()),
         Commands::Bench(args) => bench::run(args),
+        Commands::DecBench(args) => dec_bench::run(args),
         Commands::Accuracy(args) => accuracy_cmd::run(args),
         Commands::Shannon(cmd) => shannon_cmd::run(cmd),
         Commands::Pull(args) => pull_cmd::run(args),
