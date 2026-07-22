@@ -808,6 +808,12 @@ pub async fn serve(cli: Cli) -> Result<(), BoxError> {
         "  Q4K/Q6K×Q8K kernel class: {}",
         larql_compute::cpu::ops::q4k_q8k_dot::kernel_class_summary()
     );
+    // Same discipline for flag state: every env toggle that changes a
+    // number is logged before any request is served.
+    info!(
+        "  decode options: {}",
+        larql_compute::options::decode_options_summary()
+    );
 
     let mut models: Vec<Arc<LoadedModel>> = Vec::new();
 

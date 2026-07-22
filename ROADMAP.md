@@ -635,10 +635,19 @@ f32/f16/i8 serving path is well-built; only the Q8K path — the wire DEC prefer
 8. **`--metal` / `--backends metal` hardcoded for x86** (P1) — `DEC0_BACKEND`
    env in `scripts/dec0-loopback.sh:80,97`, platform-conditional `--backends`
    default (`bench/args.rs:26`). Couples to #7. [larql-cli]
-9. **`SKIP_MOE` vs `LARQL_SKIP_MOE` name split** (P1, corrupts the anchor's
-   ceiling arm) — one prefixed canonical name, alias the unprefixed one loudly;
-   fix the README/dec-funnel disagreement. Same for `SKIP_OUTER_NORM`,
-   `DECODE_DEBUG`. [larql-inference, larql-compute, docs]
+9. ✅ **`SKIP_MOE` vs `LARQL_SKIP_MOE` name split** (P1, corrupts the anchor's
+   ceiling arm) — DONE 2026-07-22. One canonical prefixed name for all three
+   unprefixed vars (`LARQL_SKIP_MOE`, `LARQL_SKIP_OUTER_NORM`,
+   `LARQL_DECODE_DEBUG`), read through shared accessors in
+   `larql_compute::options` (`skip_moe_enabled` / `skip_outer_norm_enabled` /
+   `decode_debug_enabled`) that honour the historical unprefixed names as
+   deprecated aliases with a one-time stderr warning. The grid path's
+   `GridRuntimeConfig` now reads the same accessor as the local path, so the
+   DEC-0 ceiling arm measures one thing regardless of which name the operator
+   types; dec-funnel.md DEC-0 anchor note updated to the canonical name
+   (README already used it). Alias behaviour pinned by
+   `unprefixed_legacy_aliases_still_enable_their_flags`.
+   [larql-inference, larql-compute, larql-compute-metal, docs]
 10. **DEC deployment auth posture** (P1, security) — the data plane is open
     unless `--api-key` is set (`/v1/shard` streams the whole vindex as a tar);
     router admin RPCs (`drain_server`/`assign_range`) and the grid port are
