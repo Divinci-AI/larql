@@ -382,10 +382,8 @@ pub fn fused_prefill(
     }
     let (q4_ffn_mmap, ffn_is_q4k) = if let Some(m) = index.interleaved_kquant_mmap_ref() {
         (m, true)
-    } else if let Some(m) = index.interleaved_q4_mmap_ref() {
-        (m, false)
     } else {
-        return None;
+        (index.interleaved_q4_mmap_ref()?, false)
     };
     index.attn_kquant_layer_data(0)?;
 
@@ -501,10 +499,8 @@ fn fused_decode_step_inner(
 ) -> Option<Array2<f32>> {
     let (q4_ffn_mmap, ffn_is_q4k) = if let Some(m) = index.interleaved_kquant_mmap_ref() {
         (m, true)
-    } else if let Some(m) = index.interleaved_q4_mmap_ref() {
-        (m, false)
     } else {
-        return None;
+        (index.interleaved_q4_mmap_ref()?, false)
     };
 
     let hidden = weights.hidden_size;
