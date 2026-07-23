@@ -393,25 +393,25 @@ impl PyVindex {
         })
     }
 
-    /// Run a closure with a reference to the lazily-loaded walk FFN state.
+    /// Run a closure with a mutable reference to the lazily-loaded walk FFN state.
     /// Loads on first call; subsequent calls reuse the mmap'd weights.
     fn with_walk_model<F, R>(&self, f: F) -> PyResult<R>
     where
-        F: FnOnce(&crate::walk::InferState) -> PyResult<R>,
+        F: FnOnce(&mut crate::walk::InferState) -> PyResult<R>,
     {
         {
             let mut state = self.walk_model.borrow_mut();
             if state.is_none() {
                 let dir = std::path::Path::new(&self.path);
-                *state = Some(crate::walk::InferState::load(dir).map_err(|e| {
+                *state = Some(crate::walk::InferState::load(dir, &self.config).map_err(|e| {
                     pyo3::exceptions::PyRuntimeError::new_err(format!(
                         "Failed to load model weights: {e}"
                     ))
                 })?);
             }
         }
-        let state = self.walk_model.borrow();
-        f(state.as_ref().unwrap())
+        let mut state = self.walk_model.borrow_mut();
+        f(state.as_mut().unwrap())
     }
 
     /// Compute scaled embedding for entity text. Multi-token entities are averaged.
@@ -1059,6 +1059,13 @@ impl PyVindex {
         Ok(())
     }
 
+    /// Low-level: set a custom up vector override for a feature.
+    /// During inference, this vector is used instead of the model's up weight row.
+    fn set_up_vector(&mut self, layer: usize, feature: usize, vector: Vec<f32>) -> PyResult<()> {
+        self.index.set_up_vector(layer, feature, vector);
+        Ok(())
+    }
+
     /// Low-level: set feature metadata directly.
     #[pyo3(signature = (layer, feature, top_token, c_score=0.9))]
     fn set_feature_meta(
@@ -1201,8 +1208,7 @@ impl PyVindex {
                 .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
             let token_ids: Vec<u32> = encoding.get_ids().to_vec();
 
-            let result = larql_inference::infer_patched(
-                &infer_state.weights,
+            let result = infer_state.inference.infer_patched(
                 &self.tokenizer,
                 &self.index,
                 self.knn_store.as_ref(),
@@ -1304,7 +1310,7 @@ impl PyVindex {
                 normalise: false,
             };
             let result = larql_inference::forward::target_delta::optimise_target_delta(
-                &infer_state.weights,
+                infer_state.inference.as_weights(),
                 &prompt_ids,
                 target_id,
                 install_layer,
@@ -1352,8 +1358,7 @@ impl PyVindex {
                 .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
             let token_ids: Vec<u32> = encoding.get_ids().to_vec();
 
-            let result = larql_inference::infer_patched(
-                &infer_state.weights,
+            let result = infer_state.inference.infer_patched(
                 &self.tokenizer,
                 &self.index,
                 self.knn_store.as_ref(),
@@ -1387,7 +1392,7 @@ impl PyVindex {
         top_k: usize,
     ) -> PyResult<Vec<(usize, usize, f32, String)>> {
         self.with_walk_model(|infer_state| {
-            let weights = &infer_state.weights;
+            let weights = infer_state.inference.as_weights();
 
             let encoding = self
                 .tokenizer
