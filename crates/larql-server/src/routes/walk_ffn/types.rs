@@ -45,10 +45,10 @@ pub(crate) fn track_model_request(state: &crate::state::AppState) -> Option<RifG
 }
 
 // Wire constants are single-sourced in the shared codec (ROADMAP
-// hardening item 16); `BINARY_CT` is re-exported here so the handler
-// keeps its historical `super::types::BINARY_CT` path. `BATCH_MARKER`
-// lives at `larql_inference::ffn::remote::BATCH_MARKER`.
-pub(crate) use larql_inference::ffn::remote::BINARY_CT;
+// hardening item 16). The handler now detects the inbound format via
+// `crate::wire::request_wire_format` (f32/f16/i8 Content-Type dispatch),
+// so no CT constant is re-exported here; `BATCH_MARKER` lives at
+// `larql_inference::ffn::remote::BATCH_MARKER`.
 
 #[derive(Deserialize)]
 pub struct WalkFfnRequest {

@@ -14,8 +14,8 @@ use ndarray::Array2;
 use super::codec::{
     decode_binary_batch, decode_binary_batch_f16, decode_binary_batch_i8, decode_binary_single,
     decode_binary_single_f16, decode_binary_single_i8, encode_binary_request,
-    extract_response_latency_ms, RemoteLatencyStats, WalkFfnSingleResponse, BINARY_CT, F16_CT,
-    I8_CT,
+    encode_binary_request_as, extract_response_latency_ms, RemoteLatencyStats,
+    WalkFfnSingleResponse, WireFormat, BINARY_CT, F16_CT, I8_CT,
 };
 use super::q8k_wire::{decode_q8k_batch_response, encode_q8k_batch_request, Q8K_BATCH_CT};
 use crate::ffn::FfnBackend;
@@ -90,8 +90,14 @@ pub struct RemoteFfnConfig {
     pub base_url: String,
     /// Per-request timeout. Applied to both connect and read.
     pub timeout: Duration,
-    /// Wire format preference. Controls the `Accept` header.
+    /// RETURN-direction wire preference. Controls the `Accept` header.
     pub wire: WirePreference,
+    /// INBOUND-direction wire format: how the request residual is encoded
+    /// and what request `Content-Type` is sent. Independent of `wire`
+    /// (asymmetric direction codecs, DEC funnel v0.5 §3 DEC-1A). Defaults
+    /// to f32 — the historical request wire, so existing callers are
+    /// byte-unchanged.
+    pub wire_in: WireFormat,
 }
 
 impl RemoteFfnConfig {
@@ -100,6 +106,7 @@ impl RemoteFfnConfig {
             base_url: base_url.into().trim_end_matches('/').to_string(),
             timeout: Duration::from_secs(60),
             wire: WirePreference::BestAvailable,
+            wire_in: WireFormat::F32,
         }
     }
 
@@ -108,8 +115,20 @@ impl RemoteFfnConfig {
         self
     }
 
-    pub fn with_wire(mut self, wire: WirePreference) -> Self {
-        self.wire = wire;
+    /// Set the RETURN-direction preference only (`Accept`). The inbound
+    /// request wire stays f32 — the existing single-axis API, kept as a
+    /// thin wrapper over [`Self::with_wire_formats`] so no existing caller
+    /// changes behaviour.
+    pub fn with_wire(self, wire: WirePreference) -> Self {
+        self.with_wire_formats(WireFormat::F32, wire)
+    }
+
+    /// Set both directions independently: `wire_in` is the request
+    /// residual encoding (+ request `Content-Type`), `wire_out` the
+    /// `Accept`-negotiated response preference.
+    pub fn with_wire_formats(mut self, wire_in: WireFormat, wire_out: WirePreference) -> Self {
+        self.wire_in = wire_in;
+        self.wire = wire_out;
         self
     }
 }
@@ -204,7 +223,15 @@ impl RemoteWalkBackend {
         seq_len: usize,
     ) -> Result<Vec<f32>, RemoteFfnError> {
         let url = format!("{}{WALK_FFN_PATH}", self.config.base_url);
-        let body = encode_binary_request(Some(layer), None, residual_flat, seq_len, true, 8092);
+        let body = encode_binary_request_as(
+            self.config.wire_in,
+            Some(layer),
+            None,
+            residual_flat,
+            seq_len,
+            true,
+            8092,
+        );
         self.wire_bytes_sent
             .fetch_add(body.len() as u64, Ordering::Relaxed);
 
@@ -212,7 +239,10 @@ impl RemoteWalkBackend {
         let resp = self
             .client
             .post(&url)
-            .header(reqwest::header::CONTENT_TYPE, BINARY_CT)
+            .header(
+                reqwest::header::CONTENT_TYPE,
+                self.config.wire_in.content_type(),
+            )
             .header(reqwest::header::ACCEPT, accept)
             .body(body)
             .send()
@@ -282,7 +312,15 @@ impl RemoteWalkBackend {
         seq_len: usize,
     ) -> Result<HashMap<usize, Vec<f32>>, RemoteFfnError> {
         let url = format!("{}{WALK_FFN_PATH}", self.config.base_url);
-        let body = encode_binary_request(None, Some(layers), residual_flat, seq_len, true, 8092);
+        let body = encode_binary_request_as(
+            self.config.wire_in,
+            None,
+            Some(layers),
+            residual_flat,
+            seq_len,
+            true,
+            8092,
+        );
         self.wire_bytes_sent
             .fetch_add(body.len() as u64, Ordering::Relaxed);
 
@@ -290,7 +328,10 @@ impl RemoteWalkBackend {
         let resp = self
             .client
             .post(&url)
-            .header(reqwest::header::CONTENT_TYPE, BINARY_CT)
+            .header(
+                reqwest::header::CONTENT_TYPE,
+                self.config.wire_in.content_type(),
+            )
             .header(reqwest::header::ACCEPT, accept)
             .body(body)
             .send()
@@ -645,6 +686,36 @@ mod tests {
     fn config_with_timeout_overrides_default() {
         let c = RemoteFfnConfig::new("http://x").with_timeout(Duration::from_secs(5));
         assert_eq!(c.timeout.as_secs(), 5);
+    }
+
+    #[test]
+    fn config_default_inbound_wire_is_f32() {
+        // The historical request wire: existing callers stay byte-unchanged.
+        let c = RemoteFfnConfig::new("http://x");
+        assert_eq!(c.wire_in, WireFormat::F32);
+        assert_eq!(c.wire, WirePreference::BestAvailable);
+    }
+
+    #[test]
+    fn config_with_wire_is_return_direction_only() {
+        // The single-axis API is a thin wrapper: Accept changes, the
+        // inbound request wire stays f32.
+        let c = RemoteFfnConfig::new("http://x").with_wire(WirePreference::I8);
+        assert_eq!(c.wire, WirePreference::I8);
+        assert_eq!(c.wire_in, WireFormat::F32);
+    }
+
+    #[test]
+    fn config_with_wire_formats_sets_directions_independently() {
+        let c =
+            RemoteFfnConfig::new("http://x").with_wire_formats(WireFormat::F16, WirePreference::I8);
+        assert_eq!(c.wire_in, WireFormat::F16);
+        assert_eq!(c.wire, WirePreference::I8);
+
+        let c =
+            RemoteFfnConfig::new("http://x").with_wire_formats(WireFormat::I8, WirePreference::F16);
+        assert_eq!(c.wire_in, WireFormat::I8);
+        assert_eq!(c.wire, WirePreference::F16);
     }
 
     // ── Error display ─────────────────────────────────────────────────────────

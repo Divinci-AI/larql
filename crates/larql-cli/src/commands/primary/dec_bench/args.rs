@@ -91,7 +91,13 @@ pub struct ReplayArgs {
     #[arg(long, default_value = "1,8,16,32,64")]
     pub batch: String,
 
-    /// Comma-separated wire arms: f32, f16, i8, q8k.
+    /// Comma-separated wire arms: f32, f16, i8, q8k (symmetric — unchanged
+    /// behaviour: f32 request frames, Accept per arm), or asymmetric
+    /// in/return pairs like `f16/i8`, `i8/f16` (request Content-Type and
+    /// Accept set independently; walk-ffn endpoint only — q8k is its own
+    /// endpoint and cannot pair). i8 returns need LARQL_I8_WIRE=1 on the
+    /// server or the return direction falls back (recorded in
+    /// served_wire_out).
     #[arg(long, default_value = "f32,f16,i8,q8k")]
     pub wire: String,
 

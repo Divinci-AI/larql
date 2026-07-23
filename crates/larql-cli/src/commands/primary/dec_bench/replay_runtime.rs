@@ -24,7 +24,7 @@ use super::replay::{
     moe_weight_stats, parse_batch_list, parse_layer_range, routed_denominators_for_point,
     routed_layer_subset, summarize, weight_bytes_per_token, wire_label_for_content_type,
     DispatchMode, Endpoint, EndpointKind, FrameInputs, MoeWeightStats, RequestSample,
-    RoutedDenominators, ServeLatencySource, SweepPoint, SweepPointStats, WireArm,
+    RoutedDenominators, ServeLatencySource, SweepPoint, SweepPointStats, WireSpec,
 };
 
 use larql_inference::ffn::remote::STATS_PATH;
@@ -44,10 +44,11 @@ pub(super) fn run_replay(args: &ReplayArgs) -> Result<(), Box<dyn std::error::Er
             .into());
         }
     }
-    let wires = WireArm::parse_list(&args.wire)?;
+    let wires = WireSpec::parse_list(&args.wire)?;
     let dispatches = DispatchMode::parse_list(&args.dispatch)?;
-    // Resolves each wire arm onto the endpoint family — f16/i8 with
-    // `--endpoint experts` fails loudly here, before any request is sent.
+    // Resolves each wire arm onto the endpoint family — f16/i8 or an
+    // asymmetric in/return pair with `--endpoint experts` fails loudly
+    // here, before any request is sent.
     let sweep = expand_sweep(&batches, &wires, &dispatches, endpoint_kind)?;
 
     if endpoint_kind == EndpointKind::Experts {
@@ -59,7 +60,7 @@ pub(super) fn run_replay(args: &ReplayArgs) -> Result<(), Box<dyn std::error::Er
             )
             .into());
         }
-        if wires.contains(&WireArm::Q8k)
+        if wires.iter().any(|w| w.is_q8k())
             && pool.manifest.hidden_size % Q4K_Q8K_SUPERBLOCK_ELEMS != 0
         {
             return Err(format!(
@@ -190,15 +191,17 @@ pub(super) fn run_replay(args: &ReplayArgs) -> Result<(), Box<dyn std::error::Er
             dense_weight_bytes_tok,
             routed_denoms.as_ref(),
         );
-        // Accept negotiation exists only on the f32 walk-ffn endpoint; the
-        // other endpoints serve a fixed CT.
+        // Accept negotiation exists only on the walk-ffn endpoint; the
+        // other endpoints serve a fixed CT. Only the RETURN direction can
+        // fall back — the inbound direction is client-authored.
         if point.endpoint == Endpoint::WalkFfn
-            && summary.served_wire != vec![summary.wire_format.clone()]
+            && summary.served_wire_out != vec![summary.wire_out.clone()]
         {
             eprintln!(
-                "[dec-bench] NOTE: {} arm was served as {:?} (Accept fallback) — \
+                "[dec-bench] NOTE: {} arm's return direction was served as {:?} (Accept \
+                 fallback — is LARQL_I8_WIRE set on the server for i8 returns?) — \
                  bandwidth numbers belong to the served format",
-                summary.wire_format, summary.served_wire
+                summary.wire_format, summary.served_wire_out
             );
         }
         eprintln!(
@@ -417,16 +420,19 @@ fn send_one(
     let layer = inputs.layer;
 
     let t_enc = std::time::Instant::now();
-    let body = build_frame(endpoint, inputs, batch, hidden)?;
+    let body = build_frame(endpoint, point.wire, inputs, batch, hidden)?;
     let encode_us = t_enc.elapsed().as_secs_f64() * 1e6;
     let bytes_sent = body.len() as u64;
 
+    // Inbound direction: the request Content-Type declares how the frame
+    // is encoded; the echo of its label is the run record's served_wire_in
+    // (the client is authoritative for this direction).
+    let request_ct = endpoint.request_content_type(point.wire);
+    let served_wire_in = wire_label_for_content_type(request_ct);
+
     let mut req = client
         .post(format!("{base_url}{}", endpoint.path()))
-        .header(
-            reqwest::header::CONTENT_TYPE,
-            endpoint.request_content_type(),
-        )
+        .header(reqwest::header::CONTENT_TYPE, request_ct)
         .header(TIMING_HEADER, TIMING_HEADER_VALUE)
         .body(body);
     if let Some(accept) = endpoint.accept(point.wire) {
@@ -460,7 +466,7 @@ fn send_one(
         ServeLatencySource::EmbeddedMs => (&resp_body[..], None),
     };
 
-    let (server_ms, serve_us, served_wire, any_nonzero) = match endpoint {
+    let (server_ms, serve_us, served_wire_out, any_nonzero) = match endpoint {
         Endpoint::WalkFfn => {
             let resp_ct = resp_ct.unwrap_or_else(|| larql_inference::BINARY_CT.to_string());
             let (resp_layer, server_ms, floats) =
@@ -526,7 +532,8 @@ fn send_one(
         transmit_clamped,
         bytes_sent,
         bytes_recv: resp_body.len() as u64,
-        served_wire,
+        served_wire_in,
+        served_wire_out,
         any_nonzero,
     })
 }

@@ -26,6 +26,11 @@ pub fn pulse_line(
     obj.insert("dec/endpoint_code".into(), s.endpoint_code.into());
     obj.insert("dec/wire_format".into(), s.wire_format.clone().into());
     obj.insert("dec/wire_format_code".into(), s.wire_format_code.into());
+    // Direction split (asymmetric pairs, DEC funnel v0.5 §3 DEC-1A):
+    // `dec/wire_format` stays the combined label for continuity; the
+    // per-direction requested dtypes ride alongside.
+    obj.insert("dec/wire_in".into(), s.wire_in.clone().into());
+    obj.insert("dec/wire_out".into(), s.wire_out.clone().into());
     obj.insert("dec/dispatch_mode".into(), s.dispatch_mode.clone().into());
     obj.insert("dec/dispatch_mode_code".into(), s.dispatch_mode_code.into());
     obj.insert("dec/step_ms_mean".into(), num(s.step_ms_mean));
@@ -33,6 +38,14 @@ pub fn pulse_line(
     obj.insert("dec/step_ms_p99".into(), num(s.step_ms_p99));
     obj.insert("dec/tok_s".into(), num(s.tok_s));
     obj.insert("dec/payload_bytes_tok".into(), num(s.payload_bytes_tok));
+    obj.insert(
+        "dec/payload_bytes_tok_in".into(),
+        num(s.payload_bytes_tok_in),
+    );
+    obj.insert(
+        "dec/payload_bytes_tok_out".into(),
+        num(s.payload_bytes_tok_out),
+    );
     if let Some(w) = s.weight_bytes_tok {
         obj.insert("dec/weight_bytes_tok".into(), num(w));
     }
@@ -117,7 +130,10 @@ mod tests {
             endpoint_code: 0,
             wire_format: "f16".into(),
             wire_format_code: 1,
-            served_wire: vec!["f16".into()],
+            wire_in: "f32".into(),
+            wire_out: "f16".into(),
+            served_wire_in: vec!["f32".into()],
+            served_wire_out: vec!["f16".into()],
             dispatch_mode: "batch".into(),
             dispatch_mode_code: 1,
             steps: 16,
@@ -126,6 +142,8 @@ mod tests {
             step_ms_p99: 20.0,
             tok_s: 640.0,
             payload_bytes_tok: 21504.0,
+            payload_bytes_tok_in: 21000.0,
+            payload_bytes_tok_out: 504.0,
             weight_bytes_tok: Some(2.0e9),
             weight_bytes_tok_naive: None,
             weight_bytes_tok_union: None,
@@ -158,11 +176,17 @@ mod tests {
         assert_eq!(line["dec/endpoint_code"], 0);
         assert_eq!(line["dec/wire_format"], "f16");
         assert_eq!(line["dec/wire_format_code"], 1);
+        // Direction split: plain arms record their real request direction
+        // (f32 — the historical request wire) next to the negotiated return.
+        assert_eq!(line["dec/wire_in"], "f32");
+        assert_eq!(line["dec/wire_out"], "f16");
         assert_eq!(line["dec/dispatch_mode_code"], 1);
         assert!(line["dec/step_ms_p50"].is_number());
         assert!(line["dec/step_ms_p99"].is_number());
         assert!(line["dec/tok_s"].is_number());
         assert!(line["dec/payload_bytes_tok"].is_number());
+        assert_eq!(line["dec/payload_bytes_tok_in"], 21000.0);
+        assert_eq!(line["dec/payload_bytes_tok_out"], 504.0);
         assert!(line["dec/weight_bytes_tok"].is_number());
         assert!(line["dec/movement_ratio"].is_number());
         assert!(line["dec/server_ms_p50"].is_number());
@@ -222,6 +246,26 @@ mod tests {
         assert!(line["dec/movement_ratio"].is_number());
         assert_eq!(line["dec/experts_union_frac"], 0.25);
         assert!(line.get("dec/server_ms_p50").is_none());
+    }
+
+    #[test]
+    fn pulse_line_pair_point_emits_combined_label_and_direction_keys() {
+        // Asymmetric pair arm: dec/wire_format keeps the combined label
+        // for continuity; dec/wire_in and dec/wire_out carry the split.
+        let mut s = summary();
+        s.wire_format = "f16/i8".into();
+        s.wire_format_code = 112;
+        s.wire_in = "f16".into();
+        s.wire_out = "i8".into();
+        s.served_wire_in = vec!["f16".into()];
+        s.served_wire_out = vec!["i8".into()];
+        let line = pulse_line(4, &s, None, None, false);
+        assert_eq!(line["dec/wire_format"], "f16/i8");
+        assert_eq!(line["dec/wire_format_code"], 112);
+        assert_eq!(line["dec/wire_in"], "f16");
+        assert_eq!(line["dec/wire_out"], "i8");
+        assert!(line["dec/payload_bytes_tok_in"].is_number());
+        assert!(line["dec/payload_bytes_tok_out"].is_number());
     }
 
     #[test]
