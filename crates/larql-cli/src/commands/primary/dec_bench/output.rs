@@ -10,8 +10,10 @@ use super::replay::DecPointSummary;
 pub struct DecBenchJsonResult {
     /// Unix seconds, as a string (matches ADR-0012 bench JSON).
     pub timestamp: String,
-    /// Which server endpoint the sweep measured. `walk-ffn` exercises the
-    /// dense/shared-expert FFN path; routed experts are a separate arm.
+    /// Which endpoint family the sweep measured (`--endpoint`): `walk-ffn`
+    /// exercises the dense/shared-expert FFN path, `experts` the routed
+    /// multi-layer path. Each point additionally records its concrete
+    /// endpoint (e.g. `walk-ffn-q8k`) and code.
     pub endpoint: String,
     pub ffn_url: String,
     pub capture: CaptureSummary,
@@ -20,18 +22,25 @@ pub struct DecBenchJsonResult {
     /// `/v1/stats` echo taken after the sweep (includes the server's own
     /// `layer_latency` EMA/p99 accumulated over the run).
     pub stats_after: serde_json::Value,
-    /// Layers replayed.
+    /// Layers replayed. For `experts` runs this is the MoE subset of the
+    /// requested range — non-MoE layers are excluded from the routed sweep
+    /// and its denominator.
     pub layers: Vec<usize>,
+    /// `layers.len()`, recorded explicitly so routed-run records surface
+    /// how many layers survived the non-MoE exclusion.
+    pub replayed_layer_count: usize,
     pub steps: usize,
     pub repeats: usize,
     pub warmup_passes: usize,
-    /// Dense FFN weight bytes per token over `layers` (movement-ratio
-    /// denominator for the measured endpoint); `None` when the server
-    /// doesn't expose `ffn_weights`.
-    pub weight_bytes_tok: Option<f64>,
+    // NOTE: `weight_bytes_tok` moved into each point's summary — the routed
+    // union denominator is batch-dependent, so denominators are per-point
+    // (the dense value is simply constant across points).
     /// Layers whose dense byte count was unavailable in `/v1/stats` — a
-    /// non-zero value flags a partial denominator.
+    /// non-zero value flags a partial denominator (dense endpoints only).
     pub weight_bytes_missing_layers: usize,
+    /// Client-side rayon pool width at replay time (measurement-protocol
+    /// context: q8k quantisation and any rayon-using codepaths share it).
+    pub client_rayon_threads: usize,
     pub net_rtt_ms: Option<f64>,
     pub net_gbps: Option<f64>,
     pub points: Vec<DecPointSummary>,
@@ -89,6 +98,7 @@ mod tests {
                 },
             ],
             created_unix: 42,
+            routing: None,
         };
         let s = CaptureSummary::from(&m);
         assert_eq!(s.num_prompts, 2);
@@ -113,6 +123,7 @@ mod tests {
                 steps_captured: 1,
             }],
             created_unix: 0,
+            routing: None,
         };
         let r = DecBenchJsonResult {
             timestamp: "123".into(),
@@ -122,11 +133,12 @@ mod tests {
             stats_before: serde_json::json!({"layers": 2}),
             stats_after: serde_json::json!({"layers": 2}),
             layers: vec![0, 1],
+            replayed_layer_count: 2,
             steps: 1,
             repeats: 3,
             warmup_passes: 1,
-            weight_bytes_tok: Some(1000.0),
             weight_bytes_missing_layers: 0,
+            client_rayon_threads: 8,
             net_rtt_ms: None,
             net_gbps: None,
             points: vec![],
@@ -134,7 +146,11 @@ mod tests {
         let v = serde_json::to_value(&r).unwrap();
         assert_eq!(v["endpoint"], "walk-ffn");
         assert_eq!(v["capture"]["num_prompts"], 1);
-        assert_eq!(v["weight_bytes_tok"], 1000.0);
+        // weight_bytes_tok moved to the per-point summaries (batch-dependent
+        // under the routed union denominator).
+        assert!(v.get("weight_bytes_tok").is_none());
+        assert_eq!(v["replayed_layer_count"], 2);
+        assert_eq!(v["client_rayon_threads"], 8);
         assert!(v["points"].as_array().unwrap().is_empty());
     }
 }

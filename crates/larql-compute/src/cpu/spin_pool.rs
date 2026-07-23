@@ -649,12 +649,12 @@ mod tests {
 
     /// One simulated decode step's worth of dispatches against `par_chunks_mut`
     /// - the actual public entry point production uses, with the REAL
-    /// gemma-3-4b-it row counts (q_dim=2048, kv_dim=1024, hidden=2560,
-    /// intermediate=10240 - all exact multiples of their chunk sizes, same as
-    /// production, so this can't exercise the underflow this file already
-    /// hardened against; it's targeting a different bug). `caller` tags every
-    /// value so concurrent callers (simulating overlapping requests) can tell
-    /// their own data apart from a caller they got mixed up with.
+    ///   gemma-3-4b-it row counts (q_dim=2048, kv_dim=1024, hidden=2560,
+    ///   intermediate=10240 - all exact multiples of their chunk sizes, same as
+    ///   production, so this can't exercise the underflow this file already
+    ///   hardened against; it's targeting a different bug). `caller` tags every
+    ///   value so concurrent callers (simulating overlapping requests) can tell
+    ///   their own data apart from a caller they got mixed up with.
     fn rd_run(caller: u64, rounds: u64, layers: u64) {
         let mut q = vec![0.0f32; RD_Q_DIM];
         let mut k = vec![0.0f32; RD_KV_DIM];

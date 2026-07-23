@@ -17,7 +17,9 @@
 use super::handles::cpu_q4k_cache_mut;
 use super::*;
 use crate::attention::decode::q4k_direct_attn_enabled;
-use crate::kv_dispatch::{KvDispatch, KvHandle, KvHandleInner, ResidualHandle, ResidualHandleInner};
+use crate::kv_dispatch::{
+    KvDispatch, KvHandle, KvHandleInner, ResidualHandle, ResidualHandleInner,
+};
 use crate::CpuBackend;
 use ndarray::Array2;
 
@@ -373,8 +375,7 @@ fn attention_step_q4k_direct_branch_fires_when_env_enabled() {
 
     // Thread-local override (NOT `set_var`, which races concurrent `getenv`
     // → SIGSEGV); cleared on drop, so it can't leak to a sibling test.
-    let _guard =
-        crate::options::FastPathGuard::set(&[(crate::options::ENV_Q4K_DIRECT_ATTN, true)]);
+    let _guard = crate::options::FastPathGuard::set(&[(crate::options::ENV_Q4K_DIRECT_ATTN, true)]);
     assert!(q4k_direct_attn_enabled());
 
     let b = backend();
@@ -424,8 +425,7 @@ fn attention_step_q4k_direct_falls_back_to_f32_on_empty_index() {
     use larql_models::test_fixtures::make_test_q4k_weights;
 
     // Enable the q4k-direct gate on this thread (override, not `set_var`).
-    let _guard =
-        crate::options::FastPathGuard::set(&[(crate::options::ENV_Q4K_DIRECT_ATTN, true)]);
+    let _guard = crate::options::FastPathGuard::set(&[(crate::options::ENV_Q4K_DIRECT_ATTN, true)]);
 
     struct EmptyIdx;
     impl crate::KvIndex for EmptyIdx {}

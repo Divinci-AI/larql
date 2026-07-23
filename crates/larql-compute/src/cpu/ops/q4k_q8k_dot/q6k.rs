@@ -43,7 +43,7 @@ pub fn q6k_q8k_matvec_scalar(
     }
     if rows == 0
         || cols == 0
-        || cols % ELEMS_PER_BLOCK != 0
+        || !cols.is_multiple_of(ELEMS_PER_BLOCK)
         || out.len() != rows
         || q8k_x.qs.len() != cols
         || w.len() < rows * row_bytes
@@ -115,7 +115,7 @@ pub fn q6k_q8k_matvec_neon(
     }
     if rows == 0
         || cols == 0
-        || cols % ELEMS_PER_BLOCK != 0
+        || !cols.is_multiple_of(ELEMS_PER_BLOCK)
         || out.len() != rows
         || q8k_x.qs.len() != cols
         || w.len() < rows * row_bytes
@@ -341,7 +341,7 @@ pub fn q6k_q8k_matvec_asm(
     }
     if rows == 0
         || cols == 0
-        || cols % ELEMS_PER_BLOCK != 0
+        || !cols.is_multiple_of(ELEMS_PER_BLOCK)
         || out.len() != rows
         || q8k_x.qs.len() != cols
         || w.len() < rows * row_bytes

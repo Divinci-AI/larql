@@ -2,8 +2,9 @@
 //!
 //! Collapses 30 per-layer HTTP requests into one per shard, eliminating the
 //! per-request HTTPS overhead (~20 ms × 30 = 600 ms in the predispatch path).
-//! The server processes tasks sequentially so rayon runs at full utilisation
-//! (no oversubscription); the client parallelises across shards only.
+//! The server runs tasks in parallel (rayon `par_iter` over tasks, nested
+//! with per-expert parallelism, all on the one global rayon pool); the
+//! client additionally parallelises across shards.
 //!
 //! Request layout (little-endian):
 //!   u32  num_tasks
@@ -86,15 +87,9 @@ pub fn encode_multi_layer_request(tasks: &[MultiLayerTask]) -> Vec<u8> {
         push_u32(&mut buf, t.layer as u32);
         push_u32(&mut buf, t.residual.len() as u32);
         push_u32(&mut buf, t.expert_ids.len() as u32);
-        for &v in &t.residual {
-            buf.extend_from_slice(&v.to_le_bytes());
-        }
-        for &e in &t.expert_ids {
-            push_u32(&mut buf, e);
-        }
-        for &w in &t.weights {
-            buf.extend_from_slice(&w.to_le_bytes());
-        }
+        push_f32_slice(&mut buf, &t.residual);
+        push_u32_slice(&mut buf, &t.expert_ids);
+        push_f32_slice(&mut buf, &t.weights);
     }
     buf
 }
@@ -144,9 +139,7 @@ pub fn encode_multi_layer_response(results: &[MultiLayerResult]) -> Vec<u8> {
     for r in results {
         push_u32(&mut buf, r.layer as u32);
         push_u32(&mut buf, r.h2.len() as u32);
-        for &v in &r.h2 {
-            buf.extend_from_slice(&v.to_le_bytes());
-        }
+        push_f32_slice(&mut buf, &r.h2);
     }
     buf
 }
@@ -196,15 +189,9 @@ pub fn encode_multi_layer_request_q8k(tasks: &[MultiLayerTaskQ8K]) -> Vec<u8> {
         push_u32(&mut buf, t.hidden as u32);
         push_u32(&mut buf, t.expert_ids.len() as u32);
         // Q8K activation
-        for &q in &t.qs {
-            buf.push(q as u8);
-        }
-        for &v in &t.d {
-            buf.extend_from_slice(&v.to_le_bytes());
-        }
-        for &s in &t.sums {
-            buf.extend_from_slice(&s.to_le_bytes());
-        }
+        push_i8_slice(&mut buf, &t.qs);
+        push_f32_slice(&mut buf, &t.d);
+        push_i16_slice(&mut buf, &t.sums);
         debug_assert_eq!(t.qs.len(), t.hidden, "qs length mismatch");
         debug_assert_eq!(t.d.len(), nb, "d length mismatch");
         debug_assert_eq!(
@@ -213,12 +200,8 @@ pub fn encode_multi_layer_request_q8k(tasks: &[MultiLayerTaskQ8K]) -> Vec<u8> {
             "sums length mismatch"
         );
         // Expert routing
-        for &e in &t.expert_ids {
-            push_u32(&mut buf, e);
-        }
-        for &w in &t.weights {
-            buf.extend_from_slice(&w.to_le_bytes());
-        }
+        push_u32_slice(&mut buf, &t.expert_ids);
+        push_f32_slice(&mut buf, &t.weights);
     }
     buf
 }
@@ -236,6 +219,13 @@ pub fn decode_multi_layer_request_q8k(bytes: &[u8]) -> Option<Vec<MultiLayerTask
         let layer = read_u32(bytes, &mut pos)? as usize;
         let hidden = read_u32(bytes, &mut pos)? as usize;
         let ne = read_u32(bytes, &mut pos)? as usize;
+        // Q8K activations quantise in 256-element super-blocks; a `hidden`
+        // that is not block-aligned would silently floor to `nb` blocks and
+        // desync every subsequent field offset (corrupt decode, not an
+        // error). Reject it here so the handler surfaces a 400.
+        if !hidden.is_multiple_of(ELEMS_PER_Q8K_BLOCK) {
+            return None;
+        }
         let nb = hidden / ELEMS_PER_Q8K_BLOCK;
         // Q8K activation
         let qs = read_i8_slice(bytes, &mut pos, hidden)?;
@@ -271,7 +261,12 @@ fn read_i8_slice(bytes: &[u8], pos: &mut usize, n: usize) -> Option<Vec<i8>> {
     if end > bytes.len() {
         return None;
     }
-    let v: Vec<i8> = bytes[*pos..end].iter().map(|&b| b as i8).collect();
+    // i8 and u8 share size, alignment (1) and have no invalid bit patterns,
+    // so reinterpreting the byte slab is sound on every target — one bulk
+    // memcpy instead of a per-element loop.
+    let src: &[i8] =
+        unsafe { std::slice::from_raw_parts(bytes[*pos..end].as_ptr().cast::<i8>(), n) };
+    let v = src.to_vec();
     *pos = end;
     Some(v)
 }
@@ -279,24 +274,81 @@ fn read_i8_slice(bytes: &[u8], pos: &mut usize, n: usize) -> Option<Vec<i8>> {
 fn read_i16_slice(bytes: &[u8], pos: &mut usize, n: usize) -> Option<Vec<i16>> {
     // `n` (e.g. `nb * SUMS_PER_Q8K_BLOCK`, derived from a wire `hidden`)
     // must not reach `Vec::with_capacity` unbounded — see PR 104 CI.
+    // Single length check up front, then a bulk endian-correct copy.
     if n > bytes.len().saturating_sub(*pos) / 2 {
         return None;
     }
+    let end = *pos + n * 2;
     let mut v = Vec::with_capacity(n);
-    for _ in 0..n {
-        let end = pos.checked_add(2)?;
-        if end > bytes.len() {
-            return None;
-        }
-        let val = i16::from_le_bytes(bytes[*pos..end].try_into().unwrap());
-        *pos = end;
-        v.push(val);
-    }
+    v.extend(
+        bytes[*pos..end]
+            .chunks_exact(2)
+            .map(|c| i16::from_le_bytes([c[0], c[1]])),
+    );
+    *pos = end;
     Some(v)
 }
 
 fn push_u32(buf: &mut Vec<u8>, v: u32) {
     buf.extend_from_slice(&v.to_le_bytes());
+}
+
+/// Bulk little-endian append of a `f32` slice. On little-endian targets the
+/// in-memory representation already IS the wire representation, so the whole
+/// slice is appended with one memcpy (reinterpreting `&[f32]` as `&[u8]` is
+/// sound: u8 has alignment 1 and no invalid bit patterns). Big-endian targets
+/// fall back to the per-element byte-swapping loop. Wire bytes are identical
+/// either way.
+fn push_f32_slice(buf: &mut Vec<u8>, vals: &[f32]) {
+    #[cfg(target_endian = "little")]
+    {
+        let bytes: &[u8] = unsafe {
+            std::slice::from_raw_parts(vals.as_ptr().cast::<u8>(), std::mem::size_of_val(vals))
+        };
+        buf.extend_from_slice(bytes);
+    }
+    #[cfg(not(target_endian = "little"))]
+    for &v in vals {
+        buf.extend_from_slice(&v.to_le_bytes());
+    }
+}
+
+/// Bulk little-endian append of a `u32` slice (see `push_f32_slice`).
+fn push_u32_slice(buf: &mut Vec<u8>, vals: &[u32]) {
+    #[cfg(target_endian = "little")]
+    {
+        let bytes: &[u8] = unsafe {
+            std::slice::from_raw_parts(vals.as_ptr().cast::<u8>(), std::mem::size_of_val(vals))
+        };
+        buf.extend_from_slice(bytes);
+    }
+    #[cfg(not(target_endian = "little"))]
+    for &v in vals {
+        buf.extend_from_slice(&v.to_le_bytes());
+    }
+}
+
+/// Bulk little-endian append of an `i16` slice (see `push_f32_slice`).
+fn push_i16_slice(buf: &mut Vec<u8>, vals: &[i16]) {
+    #[cfg(target_endian = "little")]
+    {
+        let bytes: &[u8] = unsafe {
+            std::slice::from_raw_parts(vals.as_ptr().cast::<u8>(), std::mem::size_of_val(vals))
+        };
+        buf.extend_from_slice(bytes);
+    }
+    #[cfg(not(target_endian = "little"))]
+    for &v in vals {
+        buf.extend_from_slice(&v.to_le_bytes());
+    }
+}
+
+/// Bulk append of an `i8` slice — endian-independent (single bytes);
+/// reinterpreting `&[i8]` as `&[u8]` is sound on every target.
+fn push_i8_slice(buf: &mut Vec<u8>, vals: &[i8]) {
+    let bytes: &[u8] =
+        unsafe { std::slice::from_raw_parts(vals.as_ptr().cast::<u8>(), vals.len()) };
+    buf.extend_from_slice(bytes);
 }
 
 fn read_u32(bytes: &[u8], pos: &mut usize) -> Option<u32> {
@@ -327,10 +379,16 @@ fn read_f32_slice(bytes: &[u8], pos: &mut usize, n: usize) -> Option<Vec<f32>> {
     if n > bytes.len().saturating_sub(*pos) / 4 {
         return None;
     }
+    // Length was validated once above — bulk endian-correct copy, no
+    // per-element bounds checks.
+    let end = *pos + n * 4;
     let mut v = Vec::with_capacity(n);
-    for _ in 0..n {
-        v.push(read_f32(bytes, pos)?);
-    }
+    v.extend(
+        bytes[*pos..end]
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])),
+    );
+    *pos = end;
     Some(v)
 }
 
@@ -593,6 +651,20 @@ mod tests {
     }
 
     #[test]
+    fn decode_multi_layer_request_q8k_rejects_non_block_aligned_hidden() {
+        // hidden=300 is not a multiple of 256: the pre-fix decoder floored
+        // nb = 300/256 = 1 and then read qs/d/sums at desynced offsets —
+        // a silently corrupt decode. Must be rejected outright.
+        let mut body = Vec::new();
+        body.extend_from_slice(&1u32.to_le_bytes()); // num_tasks
+        body.extend_from_slice(&0u32.to_le_bytes()); // layer
+        body.extend_from_slice(&300u32.to_le_bytes()); // hidden (misaligned)
+        body.extend_from_slice(&0u32.to_le_bytes()); // num_experts
+        body.extend_from_slice(&vec![0u8; 300 + 4 + 16]); // qs + d + sums payload
+        assert!(decode_multi_layer_request_q8k(&body).is_none());
+    }
+
+    #[test]
     fn q8k_request_with_zero_experts_round_trips() {
         let tasks = vec![make_q8k_task(2, ELEMS_PER_Q8K_BLOCK, 0)];
         let encoded = encode_multi_layer_request_q8k(&tasks);
@@ -621,6 +693,52 @@ mod tests {
                 "Q8K decode succeeded on prefix len={cut}, expected None"
             );
         }
+    }
+
+    #[test]
+    fn multi_task_encode_decode_reencode_is_byte_identical() {
+        // Pins the bulk-copy encoders/decoders to the exact wire layout:
+        // encode → decode → re-encode must reproduce the original bytes
+        // for every frame kind, on a multi-task frame.
+        let tasks = vec![
+            MultiLayerTask {
+                layer: 2,
+                residual: vec![1.5, -2.25, 0.0, f32::MIN_POSITIVE],
+                expert_ids: vec![3, 900, 41],
+                weights: vec![0.25, 0.5, 0.25],
+            },
+            MultiLayerTask {
+                layer: 29,
+                residual: vec![-0.0, 7.0],
+                expert_ids: vec![],
+                weights: vec![],
+            },
+        ];
+        let encoded = encode_multi_layer_request(&tasks);
+        let decoded = decode_multi_layer_request(&encoded).unwrap();
+        assert_eq!(encode_multi_layer_request(&decoded), encoded);
+
+        let q8k_tasks = vec![
+            make_q8k_task(0, ELEMS_PER_Q8K_BLOCK, 2),
+            make_q8k_task(11, ELEMS_PER_Q8K_BLOCK * 2, 5),
+        ];
+        let encoded = encode_multi_layer_request_q8k(&q8k_tasks);
+        let decoded = decode_multi_layer_request_q8k(&encoded).unwrap();
+        assert_eq!(encode_multi_layer_request_q8k(&decoded), encoded);
+
+        let results = vec![
+            MultiLayerResult {
+                layer: 4,
+                h2: vec![0.125, -3.5, 1e-20],
+            },
+            MultiLayerResult {
+                layer: 17,
+                h2: vec![f32::MAX],
+            },
+        ];
+        let encoded = encode_multi_layer_response(&results);
+        let decoded = decode_multi_layer_response(&encoded).unwrap();
+        assert_eq!(encode_multi_layer_response(&decoded), encoded);
     }
 
     #[test]

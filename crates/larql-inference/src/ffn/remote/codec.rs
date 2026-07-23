@@ -366,7 +366,11 @@ pub fn decode_single_response(
         I8_CT => decode_binary_single_i8(body, hidden_size)?,
         F16_CT => decode_binary_single_f16(body)?,
         BINARY_CT => decode_binary_single(body)?,
-        other => return Err(format!("unsupported walk-ffn response content-type: {other}")),
+        other => {
+            return Err(format!(
+                "unsupported walk-ffn response content-type: {other}"
+            ))
+        }
     };
     Ok((layer, server_ms, floats))
 }

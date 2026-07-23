@@ -5,25 +5,35 @@
 //! Dispatch parity: `streaming` = sequential per-layer POSTs (step time =
 //! Σ layer RTTs, mirroring `generate_with_remote_ffn`'s per-layer round
 //! trips); `batch` = all layers fired in parallel via `std::thread::scope`
-//! (mirroring `LayerShardedBackend::forward_predispatch_all`). The
-//! multi-layer wire frame is deliberately NOT used — the production client
-//! never sends per-layer-distinct residuals through it.
+//! (mirroring `LayerShardedBackend::forward_predispatch_all`).
+//!
+//! Endpoint seam: each sweep point resolves to an [`Endpoint`]
+//! (walk-ffn[-q8k] dense arms, experts multi-layer[-q8k] routed arms) that
+//! owns path, content types, frame build, and response decode — all through
+//! the production codecs. The routed arms replay the pool's captured
+//! per-row `(expert_id, weight)` routing; the multi-layer wire IS the
+//! production decode path for MoE (`backend.rs` fast path), unlike the
+//! dense arms where per-layer-distinct residuals never share a frame.
 
 use super::args::ReplayArgs;
 use super::capture_format::CapturePool;
 use super::output::{CaptureSummary, DecBenchJsonResult};
 use super::pulse;
 use super::replay::{
-    build_q8k_frame, build_walk_ffn_frame, expand_sweep, movement_ratio, parse_batch_list,
-    parse_layer_range, summarize, DispatchMode, RequestSample, SweepPoint, SweepPointStats,
-    WireArm, weight_bytes_per_token,
+    build_frame, check_experts_response, expand_sweep, gather_frame_inputs, moe_weight_stats,
+    parse_batch_list, parse_layer_range, routed_denominators_for_point, routed_layer_subset,
+    summarize, weight_bytes_per_token, wire_label_for_content_type, DispatchMode, Endpoint,
+    EndpointKind, FrameInputs, MoeWeightStats, RequestSample, RoutedDenominators, SweepPoint,
+    SweepPointStats, WireArm,
 };
 
-use larql_inference::ffn::remote::{STATS_PATH, WALK_FFN_PATH, WALK_FFN_Q8K_PATH};
+use larql_inference::ffn::remote::STATS_PATH;
+use larql_inference::ffn::Q4K_Q8K_SUPERBLOCK_ELEMS;
 
 pub(super) fn run_replay(args: &ReplayArgs) -> Result<(), Box<dyn std::error::Error>> {
     let pool = CapturePool::open(&args.capture)?;
 
+    let endpoint_kind = EndpointKind::parse(&args.endpoint)?;
     let batches = parse_batch_list(&args.batch)?;
     if let Some(&max_b) = batches.iter().max() {
         if max_b > pool.num_prompts() {
@@ -36,6 +46,32 @@ pub(super) fn run_replay(args: &ReplayArgs) -> Result<(), Box<dyn std::error::Er
     }
     let wires = WireArm::parse_list(&args.wire)?;
     let dispatches = DispatchMode::parse_list(&args.dispatch)?;
+    // Resolves each wire arm onto the endpoint family — f16/i8 with
+    // `--endpoint experts` fails loudly here, before any request is sent.
+    let sweep = expand_sweep(&batches, &wires, &dispatches, endpoint_kind)?;
+
+    if endpoint_kind == EndpointKind::Experts {
+        if !pool.has_routing() {
+            return Err(format!(
+                "capture pool {} has no routing sidecars — the experts endpoints replay \
+                 captured per-row routing; recapture with `larql dec-bench capture --routing`",
+                args.capture.display()
+            )
+            .into());
+        }
+        if wires.contains(&WireArm::Q8k)
+            && pool.manifest.hidden_size % Q4K_Q8K_SUPERBLOCK_ELEMS != 0
+        {
+            return Err(format!(
+                "pool hidden {} is not a multiple of {Q4K_Q8K_SUPERBLOCK_ELEMS} — the \
+                 multi-layer q8k wire quantises in {Q4K_Q8K_SUPERBLOCK_ELEMS}-element \
+                 super-blocks (drop the q8k arm)",
+                pool.manifest.hidden_size
+            )
+            .into());
+        }
+    }
+
     let steps = match args.steps {
         Some(s) => {
             if s == 0 || s > pool.manifest.steps {
@@ -67,9 +103,32 @@ pub(super) fn run_replay(args: &ReplayArgs) -> Result<(), Box<dyn std::error::Er
             pool.manifest.num_layers
         );
     }
-    let layers = parse_layer_range(args.layers.as_deref(), pool.manifest.num_layers)?;
+    let mut layers = parse_layer_range(args.layers.as_deref(), pool.manifest.num_layers)?;
+    if endpoint_kind == EndpointKind::Experts {
+        let moe_layers = routed_layer_subset(&pool, &layers)?;
+        let excluded = layers.len() - moe_layers.len();
+        if moe_layers.is_empty() {
+            return Err(
+                "no MoE layer in the requested range carries captured routing — nothing to \
+                 replay on the experts endpoints"
+                    .into(),
+            );
+        }
+        if excluded > 0 {
+            eprintln!(
+                "[dec-bench] excluding {excluded} non-MoE layer(s) from the routed sweep \
+                 (and its denominator); {} layers remain",
+                moe_layers.len()
+            );
+        }
+        layers = moe_layers;
+    }
 
-    let (weight_bytes_tok, weight_missing) =
+    // Movement-ratio denominators. Dense endpoints: per_layer_dense_bytes
+    // summed over the replayed layers (constant per point). Routed
+    // endpoints: per_expert_bytes × captured routing, batch-dependent →
+    // computed per point below; a null per_expert_bytes is a loud error.
+    let (dense_weight_bytes_tok, weight_missing) = if endpoint_kind == EndpointKind::WalkFfn {
         match weight_bytes_per_token(&stats_before, &layers) {
             Some((bytes, missing)) => (Some(bytes), missing),
             None => {
@@ -79,13 +138,30 @@ pub(super) fn run_replay(args: &ReplayArgs) -> Result<(), Box<dyn std::error::Er
                 );
                 (None, 0)
             }
-        };
+        }
+    } else {
+        (None, 0)
+    };
+    let moe_stats: Option<MoeWeightStats> = if endpoint_kind == EndpointKind::Experts {
+        let ms = moe_weight_stats(&stats_before)?;
+        if let (Some(server_tk), Some(pool_tk)) = (ms.top_k, pool.routing_top_k()) {
+            if server_tk as usize != pool_tk {
+                eprintln!(
+                    "[dec-bench] WARNING: server top_k {server_tk} != pool routing top_k \
+                     {pool_tk} — pool captured from a different arch?"
+                );
+            }
+        }
+        Some(ms)
+    } else {
+        None
+    };
 
-    let sweep = expand_sweep(&batches, &wires, &dispatches);
     eprintln!(
-        "[dec-bench] replaying {} points: batch {:?} × wire {:?} × dispatch {:?}, \
+        "[dec-bench] replaying {} points on {}: batch {:?} × wire {:?} × dispatch {:?}, \
          {} layers × {} steps × {} repeats",
         sweep.len(),
+        endpoint_kind.label(),
         batches,
         wires.iter().map(|w| w.label()).collect::<Vec<_>>(),
         dispatches.iter().map(|d| d.label()).collect::<Vec<_>>(),
@@ -97,22 +173,40 @@ pub(super) fn run_replay(args: &ReplayArgs) -> Result<(), Box<dyn std::error::Er
     let mut points = Vec::with_capacity(sweep.len());
     let mut pulse_lines = Vec::with_capacity(sweep.len());
     for (idx, point) in sweep.iter().enumerate() {
+        let routed_denoms: Option<RoutedDenominators> = match &moe_stats {
+            Some(ms) => Some(routed_denominators_for_point(
+                &pool,
+                &layers,
+                steps,
+                point.batch,
+                ms.per_expert_bytes,
+            )?),
+            None => None,
+        };
         let stats = run_point(&client, &base_url, &pool, point, &layers, steps, args)?;
-        let summary = summarize(point, &stats);
-        if summary.served_wire != vec![summary.wire_format.clone()] {
+        let summary = summarize(
+            point,
+            &stats,
+            dense_weight_bytes_tok,
+            routed_denoms.as_ref(),
+        );
+        // Accept negotiation exists only on the f32 walk-ffn endpoint; the
+        // other endpoints serve a fixed CT.
+        if point.endpoint == Endpoint::WalkFfn
+            && summary.served_wire != vec![summary.wire_format.clone()]
+        {
             eprintln!(
                 "[dec-bench] NOTE: {} arm was served as {:?} (Accept fallback) — \
                  bandwidth numbers belong to the served format",
                 summary.wire_format, summary.served_wire
             );
         }
-        let ratio = weight_bytes_tok
-            .and_then(|w| movement_ratio(summary.payload_bytes_tok, w));
         eprintln!(
-            "[dec-bench] point {}/{}: batch={} wire={} dispatch={} → \
+            "[dec-bench] point {}/{}: endpoint={} batch={} wire={} dispatch={} → \
              step p50 {:.2} ms, p99 {:.2} ms, {:.1} tok/s, {:.0} B/tok{}",
             idx + 1,
             sweep.len(),
+            summary.endpoint,
             summary.batch,
             summary.wire_format,
             summary.dispatch_mode,
@@ -120,15 +214,14 @@ pub(super) fn run_replay(args: &ReplayArgs) -> Result<(), Box<dyn std::error::Er
             summary.step_ms_p99,
             summary.tok_s,
             summary.payload_bytes_tok,
-            ratio
+            summary
+                .movement_ratio
                 .map(|r| format!(", movement {r:.2e}"))
                 .unwrap_or_default(),
         );
         pulse_lines.push(pulse::pulse_line(
             idx,
             &summary,
-            weight_bytes_tok,
-            ratio,
             args.net_rtt_ms,
             args.net_gbps,
             args.pulse_per_layer,
@@ -152,17 +245,18 @@ pub(super) fn run_replay(args: &ReplayArgs) -> Result<(), Box<dyn std::error::Er
                 .unwrap_or(0);
             format!("{secs}")
         },
-        endpoint: "walk-ffn".into(),
+        endpoint: endpoint_kind.label().into(),
         ffn_url: base_url.clone(),
         capture: CaptureSummary::from(&pool.manifest),
         stats_before,
         stats_after,
+        replayed_layer_count: layers.len(),
         layers,
         steps,
         repeats: args.repeats,
         warmup_passes: args.warmup_passes,
-        weight_bytes_tok,
         weight_bytes_missing_layers: weight_missing,
+        client_rayon_threads: rayon::current_num_threads(),
         net_rtt_ms: args.net_rtt_ms,
         net_gbps: args.net_gbps,
         points,
@@ -205,12 +299,33 @@ fn run_point(
     // warming matters — the server's FFN weights are mmap-backed, and a
     // cold layer's first touch pays page-fault cost that would otherwise
     // land in the first measured step's p99 (observed: 4s p99 on an
-    // otherwise ~120ms point).
-    for _ in 0..args.warmup_passes {
+    // otherwise ~120ms point). Routed points always get ≥1 pass: the
+    // post-warmup corruption guard below needs at least one response.
+    let warmup_passes = if point.endpoint.requires_routing() {
+        args.warmup_passes.max(1)
+    } else {
+        args.warmup_passes
+    };
+    let mut warm_any_nonzero = false;
+    for _ in 0..warmup_passes {
         for &layer in layers {
-            let rows = pool.rows(point.batch, 0, layer)?;
-            let _ = send_one(client, base_url, point, layer, &rows, pool)?;
+            let inputs = gather_frame_inputs(pool, point.endpoint, layer, 0, point.batch)?;
+            let s = send_one(client, base_url, point, &inputs, pool)?;
+            warm_any_nonzero |= s.any_nonzero;
         }
+    }
+    // A routed replay whose responses are ALL zero is corrupt, not slow —
+    // the batch-handler failure class where unresolvable/wrong experts
+    // produce partial or empty sums (audit §1a). Refuse to measure it.
+    if point.endpoint.requires_routing() && !warm_any_nonzero {
+        return Err(format!(
+            "routed warmup on {} returned all-zero responses across {} layers — replay is \
+             corrupt (wrong expert ids, shard ownership mismatch, or unresolvable experts); \
+             refusing to record timings",
+            point.endpoint.label(),
+            layers.len()
+        )
+        .into());
     }
 
     let mut stats = SweepPointStats::default();
@@ -220,49 +335,56 @@ fn run_point(
                 DispatchMode::Streaming => {
                     let mut step_ms = 0.0f64;
                     for &layer in layers {
-                        let rows = pool.rows(point.batch, step, layer)?;
-                        let s = send_one(client, base_url, point, layer, &rows, pool)?;
+                        let inputs =
+                            gather_frame_inputs(pool, point.endpoint, layer, step, point.batch)?;
+                        let s = send_one(client, base_url, point, &inputs, pool)?;
                         step_ms += s.client_ms;
                         stats.samples.push(s);
                     }
                     stats.step_ms.push(step_ms);
                 }
                 DispatchMode::Batch => {
-                    // Pre-build all frames outside the timed window so the
-                    // fan-out wall time measures transport + server, not
-                    // frame encoding (mirrors predispatch, which reuses
-                    // already-materialised residuals).
-                    let mut frames = Vec::with_capacity(layers.len());
+                    // Pre-fetch each layer's pool inputs (rows + routing)
+                    // outside the timed window. Frame ENCODE stays
+                    // deliberately INSIDE it (send_one encodes before
+                    // posting): the fan-out wall time includes per-request
+                    // encode as client-side cost, exactly as production
+                    // clients pay it — predispatch also encodes each shard
+                    // frame per request from already-materialised residuals.
+                    let mut frames: Vec<FrameInputs> = Vec::with_capacity(layers.len());
                     for &layer in layers {
-                        let rows = pool.rows(point.batch, step, layer)?;
-                        frames.push((layer, rows));
+                        frames.push(gather_frame_inputs(
+                            pool,
+                            point.endpoint,
+                            layer,
+                            step,
+                            point.batch,
+                        )?);
                     }
                     let t0 = std::time::Instant::now();
-                    let results: Vec<Result<RequestSample, String>> =
-                        std::thread::scope(|scope| {
-                            let handles: Vec<_> = frames
-                                .iter()
-                                .map(|(layer, rows)| {
-                                    scope.spawn(move || {
-                                        send_one(client, base_url, point, *layer, rows, pool)
-                                            .map_err(|e| e.to_string())
-                                    })
+                    let results: Vec<Result<RequestSample, String>> = std::thread::scope(|scope| {
+                        let handles: Vec<_> = frames
+                            .iter()
+                            .map(|inputs| {
+                                scope.spawn(move || {
+                                    send_one(client, base_url, point, inputs, pool)
+                                        .map_err(|e| e.to_string())
                                 })
-                                .collect();
-                            handles
-                                .into_iter()
-                                .map(|h| {
-                                    h.join().unwrap_or_else(|_| {
-                                        Err("replay worker panicked".into())
-                                    })
-                                })
-                                .collect()
-                        });
+                            })
+                            .collect();
+                        handles
+                            .into_iter()
+                            .map(|h| {
+                                h.join()
+                                    .unwrap_or_else(|_| Err("replay worker panicked".into()))
+                            })
+                            .collect()
+                    });
                     let wall_ms = t0.elapsed().as_secs_f64() * 1000.0;
                     for r in results {
-                        stats.samples.push(r.map_err(|e| -> Box<dyn std::error::Error> {
-                            e.into()
-                        })?);
+                        stats
+                            .samples
+                            .push(r.map_err(|e| -> Box<dyn std::error::Error> { e.into() })?);
                     }
                     stats.step_ms.push(wall_ms);
                 }
@@ -272,42 +394,85 @@ fn run_point(
     Ok(stats)
 }
 
-/// Send one B-row request for one layer; validate the decoded shape through
-/// the same codecs the production client uses.
+/// Send one B-row request for one (step, layer); validate the decoded shape
+/// through the same codecs the production client uses. Frame encode happens
+/// before the timer starts (streaming's `client_ms` = transport + server,
+/// matching the pre-seam behaviour); response decode happens after it stops.
 fn send_one(
     client: &reqwest::blocking::Client,
     base_url: &str,
     point: &SweepPoint,
-    layer: usize,
-    rows: &[f32],
+    inputs: &FrameInputs,
     pool: &CapturePool,
 ) -> Result<RequestSample, Box<dyn std::error::Error>> {
     let hidden = pool.manifest.hidden_size;
     let batch = point.batch;
+    let endpoint = point.endpoint;
+    let layer = inputs.layer;
 
-    match point.wire {
-        WireArm::Q8k => {
-            let body = build_q8k_frame(layer, rows, batch, hidden);
-            let bytes_sent = body.len() as u64;
-            let t0 = std::time::Instant::now();
-            let resp = client
-                .post(format!("{base_url}{WALK_FFN_Q8K_PATH}"))
-                .header(reqwest::header::CONTENT_TYPE, larql_inference::Q8K_BATCH_CT)
-                .body(body)
-                .send()?;
-            let status = resp.status();
-            let resp_body = resp.bytes()?;
-            let client_ms = t0.elapsed().as_secs_f64() * 1000.0;
-            if !status.is_success() {
+    let body = build_frame(endpoint, inputs, batch, hidden)?;
+    let bytes_sent = body.len() as u64;
+
+    let mut req = client
+        .post(format!("{base_url}{}", endpoint.path()))
+        .header(
+            reqwest::header::CONTENT_TYPE,
+            endpoint.request_content_type(),
+        )
+        .body(body);
+    if let Some(accept) = endpoint.accept(point.wire) {
+        req = req.header(reqwest::header::ACCEPT, accept);
+    }
+    let t0 = std::time::Instant::now();
+    let resp = req.send()?;
+    let status = resp.status();
+    let resp_ct = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let resp_body = resp.bytes()?;
+    let client_ms = t0.elapsed().as_secs_f64() * 1000.0;
+    if !status.is_success() {
+        return Err(format!(
+            "{} replay layer {layer} batch {batch}: server returned {status}",
+            endpoint.label()
+        )
+        .into());
+    }
+
+    match endpoint {
+        Endpoint::WalkFfn => {
+            let resp_ct = resp_ct.unwrap_or_else(|| larql_inference::BINARY_CT.to_string());
+            let (resp_layer, server_ms, floats) =
+                larql_inference::decode_single_response(&resp_ct, &resp_body, hidden)?;
+            if resp_layer != layer || floats.len() != batch * hidden {
                 return Err(format!(
-                    "q8k replay layer {layer} batch {batch}: server returned {status}"
+                    "walk-ffn replay layer {layer}: expected {batch}×{hidden} floats for \
+                     layer {layer}, got {} floats for layer {resp_layer}",
+                    floats.len()
                 )
                 .into());
             }
-            let entries =
-                larql_inference::decode_q8k_batch_response_entries(&resp_body)?;
+            // The Endpoint owns whether a server-side latency figure exists
+            // (audit §2: only the f32 walk-ffn response carries one).
+            debug_assert!(endpoint.has_server_ms());
+            Ok(RequestSample {
+                layer,
+                client_ms,
+                server_ms: endpoint.has_server_ms().then_some(server_ms),
+                bytes_sent,
+                bytes_recv: resp_body.len() as u64,
+                served_wire: wire_label_for_content_type(&resp_ct),
+                any_nonzero: floats.iter().any(|&v| v != 0.0),
+            })
+        }
+        Endpoint::WalkFfnQ8k => {
+            let entries = larql_inference::decode_q8k_batch_response_entries(&resp_body)?;
             if entries.len() != batch
-                || entries.iter().any(|(l, v)| *l != layer || v.len() != hidden)
+                || entries
+                    .iter()
+                    .any(|(l, v)| *l != layer || v.len() != hidden)
             {
                 return Err(format!(
                     "q8k replay layer {layer}: expected {batch} entries × hidden {hidden}, \
@@ -323,51 +488,22 @@ fn send_one(
                 bytes_sent,
                 bytes_recv: resp_body.len() as u64,
                 served_wire: "q8k".into(),
+                any_nonzero: entries.iter().any(|(_, v)| v.iter().any(|&x| x != 0.0)),
             })
         }
-        arm => {
-            let body = build_walk_ffn_frame(layer, rows, batch);
-            let bytes_sent = body.len() as u64;
-            let accept = arm.accept().expect("non-q8k arm has an accept CT");
-            let t0 = std::time::Instant::now();
-            let resp = client
-                .post(format!("{base_url}{WALK_FFN_PATH}"))
-                .header(reqwest::header::CONTENT_TYPE, larql_inference::BINARY_CT)
-                .header(reqwest::header::ACCEPT, accept)
-                .body(body)
-                .send()?;
-            let status = resp.status();
-            let resp_ct = resp
-                .headers()
-                .get(reqwest::header::CONTENT_TYPE)
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or(larql_inference::BINARY_CT)
-                .to_string();
-            let resp_body = resp.bytes()?;
-            let client_ms = t0.elapsed().as_secs_f64() * 1000.0;
-            if !status.is_success() {
-                return Err(format!(
-                    "walk-ffn replay layer {layer} batch {batch}: server returned {status}"
-                )
-                .into());
-            }
-            let (resp_layer, server_ms, floats) =
-                larql_inference::decode_single_response(&resp_ct, &resp_body, hidden)?;
-            if resp_layer != layer || floats.len() != batch * hidden {
-                return Err(format!(
-                    "walk-ffn replay layer {layer}: expected {batch}×{hidden} floats for \
-                     layer {layer}, got {} floats for layer {resp_layer}",
-                    floats.len()
-                )
-                .into());
-            }
+        Endpoint::ExpertsMultiLayer | Endpoint::ExpertsMultiLayerQ8k => {
+            let any_nonzero = check_experts_response(&resp_body, layer, batch, hidden)?;
+            let served_ct = resp_ct.unwrap_or_else(|| {
+                larql_inference::ffn::moe_remote::MULTI_LAYER_BATCH_CONTENT_TYPE.to_string()
+            });
             Ok(RequestSample {
                 layer,
                 client_ms,
-                server_ms: Some(server_ms),
+                server_ms: None,
                 bytes_sent,
                 bytes_recv: resp_body.len() as u64,
-                served_wire: super::replay::wire_label_for_content_type(&resp_ct),
+                served_wire: wire_label_for_content_type(&served_ct),
+                any_nonzero,
             })
         }
     }

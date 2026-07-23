@@ -1,7 +1,7 @@
 use crate::ffn::moe_remote::runtime::{ENV_MOE_NO_SPLIT, ENV_MOE_TIMING, ENV_MOE_TOP_K};
+use crate::layer_graph::generate::policy::TokenSelectionPolicy;
 #[cfg(test)]
 use larql_compute::options::ENV_SKIP_MOE;
-use crate::layer_graph::generate::policy::TokenSelectionPolicy;
 
 #[derive(Clone, Debug)]
 pub(super) struct GridRuntimeConfig {

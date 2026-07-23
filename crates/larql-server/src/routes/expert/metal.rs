@@ -159,7 +159,7 @@ pub fn run_experts_metal_batch(
     // (every layer × every token does both paths), so opt-in only.
     if env_flags::metal_vs_cpu_debug() {
         match run_experts_cpu_batch(state, layer, h_post_attn, expert_ids, expert_weights) {
-            Ok(cpu_out) => {
+            Ok((cpu_out, _n_run)) => {
                 let max_abs_diff = result
                     .iter()
                     .zip(cpu_out.iter())

@@ -87,9 +87,8 @@ pub fn q4k_q8k_matvec_parallel(
     // dec-readiness review's §1 failure class; every production caller
     // already gates on `layer_supports_direct_matvec`-style probes, so
     // these panics are unreachable outside genuine corruption.
-    let fmt = crate::QuantFormat::from_registry_tag(format).unwrap_or_else(|| {
-        panic!("q4k_q8k_matvec_parallel: unknown quant format tag {format:?}")
-    });
+    let fmt = crate::QuantFormat::from_registry_tag(format)
+        .unwrap_or_else(|| panic!("q4k_q8k_matvec_parallel: unknown quant format tag {format:?}"));
     let kernel = fmt.route().q8k_matvec.unwrap_or_else(|| {
         panic!("q4k_q8k_matvec_parallel: no Q8K matvec kernel for {format} (Q4_K/Q6_K only)")
     });

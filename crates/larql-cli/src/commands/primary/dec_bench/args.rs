@@ -49,9 +49,18 @@ pub struct CaptureArgs {
     #[arg(long)]
     pub metal: bool,
 
-    /// Output pool directory (`manifest.json` + `residuals.bin`).
+    /// Output pool directory (`manifest.json` + `residuals.bin`, plus
+    /// `raw.bin`/`normed.bin`/`routing.bin` with `--routing`).
     #[arg(long)]
     pub out: std::path::PathBuf,
+
+    /// Also capture the routed-experts sidecars (raw + pre-experts-normed
+    /// residual planes and per-layer top-k expert routing) for the DEC
+    /// routed replay arm. `top_k` comes from the model arch; errors if the
+    /// model has no MoE. Without this flag the capture is byte-identical to
+    /// the walk-ffn-only pool format.
+    #[arg(long)]
+    pub routing: bool,
 
     /// Per-request timeout for the expert server.
     #[arg(long, default_value = "60")]
@@ -70,6 +79,13 @@ pub struct ReplayArgs {
     /// Capture pool directory (from `dec-bench capture`).
     #[arg(long)]
     pub capture: std::path::PathBuf,
+
+    /// Server endpoint family: `walk-ffn` (dense/shared-expert FFN path) or
+    /// `experts` (routed multi-layer expert path — needs a pool captured
+    /// with `--routing`; wire axis limited to f32/q8k, mapping to
+    /// /v1/experts/multi-layer-batch[-q8k]).
+    #[arg(long, default_value = "walk-ffn")]
+    pub endpoint: String,
 
     /// Comma-separated batch sizes (rows per request).
     #[arg(long, default_value = "1,8,16,32,64")]

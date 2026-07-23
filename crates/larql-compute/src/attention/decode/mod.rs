@@ -25,7 +25,8 @@ pub use dispatch::{
 };
 pub use gqa_step::{gqa_attention_decode_step, run_attention_block_decode_step};
 pub use inplace::{
-    run_attention_block_decode_step_auto_inplace, run_attention_block_decode_step_q4k_direct_inplace,
+    run_attention_block_decode_step_auto_inplace,
+    run_attention_block_decode_step_q4k_direct_inplace,
 };
 pub use q4k_direct::{
     decode_step_attend_q4k_direct, decode_step_project_q4k_direct,

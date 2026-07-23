@@ -78,8 +78,7 @@ fn q8k_direct_proj_matches_f32_activation_within_quant_tolerance() {
 
     let backend = crate::CpuBackend;
     let x_arr = Array2::from_shape_vec((1, in_dim), x).unwrap();
-    let f32_out =
-        q4k_direct_proj(&backend, &qw, &x_arr, num_rows, in_dim).expect("f32-act proj");
+    let f32_out = q4k_direct_proj(&backend, &qw, &x_arr, num_rows, in_dim).expect("f32-act proj");
 
     // Scale-relative bound: Q8_K activation quant is ~1/255 per block
     // value; accumulated over 512 terms the practical error is well
@@ -191,16 +190,9 @@ fn q4k_direct_decode_step_grows_kv_with_prior() {
         run_attention_block_decode_step_q4k_direct(&weights, &h, 0, None, 0, &backend, &idx)
             .unwrap();
     assert_eq!(kv1.0.shape()[0], 1);
-    let (h2, kv2) = run_attention_block_decode_step_q4k_direct(
-        &weights,
-        &h,
-        0,
-        Some(&kv1),
-        1,
-        &backend,
-        &idx,
-    )
-    .expect("second q4k-direct step succeeds");
+    let (h2, kv2) =
+        run_attention_block_decode_step_q4k_direct(&weights, &h, 0, Some(&kv1), 1, &backend, &idx)
+            .expect("second q4k-direct step succeeds");
     assert_eq!(kv2.0.shape()[0], 2, "K grows by 1 per step");
     assert_eq!(kv2.1.shape()[0], 2, "V grows by 1 per step");
     assert!(h2.iter().all(|x| x.is_finite()));
@@ -348,9 +340,8 @@ fn q4k_direct_decode_step_falls_back_to_none_without_q4k_attn_bytes() {
     let weights = make_test_q4k_weights();
     let backend = crate::CpuBackend;
     let h = Array2::from_elem((1, weights.hidden_size), 0.1f32);
-    let result = run_attention_block_decode_step_q4k_direct(
-        &weights, &h, 0, None, 0, &backend, &EmptyIdx,
-    );
+    let result =
+        run_attention_block_decode_step_q4k_direct(&weights, &h, 0, None, 0, &backend, &EmptyIdx);
     assert!(result.is_none(), "no Q4K attn bytes → None");
 }
 
@@ -361,8 +352,7 @@ fn q4k_direct_decode_step_matches_dequant_path_within_tolerance() {
     // carries a looser (~2% scale-relative) bound by design, so disable it
     // here. Thread-local override (NOT `set_var`, which races concurrent
     // `getenv` on the decode path → SIGSEGV); cleared on drop.
-    let _guard =
-        crate::options::FastPathGuard::set(&[(crate::options::ENV_Q4K_ATTN_INT8, false)]);
+    let _guard = crate::options::FastPathGuard::set(&[(crate::options::ENV_Q4K_ATTN_INT8, false)]);
 
     // Parity contract (roadmap #16, "<1e-3"): the Q4K-direct decode
     // step should track the f32-BLAS path that runs on the SAME bytes
@@ -382,9 +372,8 @@ fn q4k_direct_decode_step_matches_dequant_path_within_tolerance() {
 
     // Dequant the index's layer-0 attn/ffn bytes into weights.tensors,
     // then run the f32 path against those same (dequantised) weights.
-    let inserted =
-        crate::kquant_forward::insert_q4k_layer_tensors(&mut scratch, &weights, &idx, 0)
-            .expect("dequant layer 0 tensors");
+    let inserted = crate::kquant_forward::insert_q4k_layer_tensors(&mut scratch, &weights, &idx, 0)
+        .expect("dequant layer 0 tensors");
     // The dequantised attn tensors live in `scratch` (not `weights.tensors`);
     // resolve them via `with_scratch` so the f32 path reads the SAME bytes
     // the Q4K-direct path read from the index.
@@ -419,8 +408,7 @@ fn q4k_direct_decode_step_matches_dequant_path_within_tolerance() {
 
 #[test]
 fn auto_decode_step_takes_q4k_direct_when_flag_enabled() {
-    let _guard =
-        crate::options::FastPathGuard::set(&[(crate::options::ENV_Q4K_DIRECT_ATTN, true)]);
+    let _guard = crate::options::FastPathGuard::set(&[(crate::options::ENV_Q4K_DIRECT_ATTN, true)]);
     let weights = make_test_q4k_weights();
     let idx = make_q4k_fixture_index(&weights);
     let backend = crate::CpuBackend;
@@ -470,8 +458,7 @@ fn auto_decode_step_falls_back_to_f32_when_flag_disabled() {
 
 #[test]
 fn auto_inplace_decode_step_takes_q4k_direct_when_flag_enabled() {
-    let _guard =
-        crate::options::FastPathGuard::set(&[(crate::options::ENV_Q4K_DIRECT_ATTN, true)]);
+    let _guard = crate::options::FastPathGuard::set(&[(crate::options::ENV_Q4K_DIRECT_ATTN, true)]);
     let weights = make_test_q4k_weights();
     let idx = make_q4k_fixture_index(&weights);
     let backend = crate::CpuBackend;

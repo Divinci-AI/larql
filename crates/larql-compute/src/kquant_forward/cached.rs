@@ -335,8 +335,7 @@ fn layer_supports_direct_matvec(index: &dyn crate::KvIndex, layer: usize) -> boo
     // "Direct-matvec-capable" = the tag resolves to a format with a Q8K
     // matvec kernel in the `FormatRoute` registry (Q4_K/Q6_K today).
     let has_q8k_kernel = |tag: &str| {
-        crate::QuantFormat::from_registry_tag(tag)
-            .is_some_and(|f| f.route().q8k_matvec.is_some())
+        crate::QuantFormat::from_registry_tag(tag).is_some_and(|f| f.route().q8k_matvec.is_some())
     };
     let attn = match index.attn_kquant_layer_data(layer) {
         Some(a) => a,

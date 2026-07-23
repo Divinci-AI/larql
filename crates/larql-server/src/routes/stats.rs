@@ -103,9 +103,13 @@ fn ffn_weights_json(
             if !arch.is_moe() {
                 return None;
             }
+            // Probe the first OWNED expert entry per layer, not entry 0: a
+            // shard started with `--experts 64-127` has no entry 0, and the
+            // pre-fix probe reported `per_expert_bytes: null` on a healthy
+            // shard (silently missing fact, not an error).
             let per_expert_bytes: Option<u64> = if w.has_per_layer_ffn() {
                 (0..config.num_layers).find_map(|l| {
-                    w.get_layer_entry_bytes(l, 0)
+                    w.first_layer_entry_bytes(l)
                         .map(|(gu, dn)| (gu.len() + dn.len()) as u64)
                 })
             } else {

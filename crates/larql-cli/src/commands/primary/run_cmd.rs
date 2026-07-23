@@ -709,8 +709,9 @@ fn run_with_moe_shards(
     // forward instead: per-token `predict_kquant_hidden(Some(remote))` →
     // `run_moe_layer_cpu` → `forward_moe_seq`, which dispatches each MoE
     // layer's experts to the shards over HTTP.
-    let (tokens, decode_ms): (Vec<String>, Vec<f64>) =
-        if backend.supports(larql_compute::Capability::DecodeMoe) {
+    let (tokens, decode_ms): (Vec<String>, Vec<f64>) = if backend
+        .supports(larql_compute::Capability::DecodeMoe)
+    {
         let eos =
             larql_inference::layer_graph::generate::eos::EosConfig::from_vindex_dir(vindex_path);
         let result = if dispatch == "batch" {

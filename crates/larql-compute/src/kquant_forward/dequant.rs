@@ -28,8 +28,7 @@ pub(crate) fn dequantize_matrix(
     let dequant = crate::QuantFormat::from_registry_tag(format)
         .and_then(|f| f.route().dequant_padded)
         .unwrap_or_else(|| panic!("unsupported quant format in vindex: {format}"));
-    let floats =
-        dequant(bytes, padded).unwrap_or_else(|e| panic!("{format} dequant failed: {e}"));
+    let floats = dequant(bytes, padded).unwrap_or_else(|e| panic!("{format} dequant failed: {e}"));
     let truncated = if floats.len() > n {
         floats[..n].to_vec()
     } else {

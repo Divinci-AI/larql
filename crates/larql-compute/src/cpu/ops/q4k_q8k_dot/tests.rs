@@ -1,10 +1,10 @@
-use super::*;
 #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
 use super::common::BLOCK_BYTES;
 #[cfg(target_arch = "x86_64")]
 use super::q4k_avx2::q4k_q8k_matvec_avx2;
 #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
 use super::q6k::Q6K_BLOCK_BYTES;
+use super::*;
 use crate::cpu::ops::q4_common::{q4k_matvec_into, quantize_q4_k, quantize_q6_k};
 
 /// Regression for docs/audits/dec-readiness-review-2026-07-22.md §1b:

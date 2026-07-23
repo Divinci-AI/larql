@@ -355,14 +355,8 @@ fn default_coarse_decode_step_with_state_delegates() {
         dim: weights.hidden_size,
     });
     let mut state = PerLayerDecodeState::with_capacity(weights.num_layers);
-    let result = backend.coarse_decode_step_with_state(
-        &weights,
-        0,
-        None,
-        &mut handle,
-        0,
-        Some(&mut state),
-    );
+    let result =
+        backend.coarse_decode_step_with_state(&weights, 0, None, &mut handle, 0, Some(&mut state));
     assert!(result.is_none());
 }
 

@@ -551,8 +551,7 @@ fn run_single_expert_q4k_q8k_into_zero_inter_returns_zeroed() {
     let mut scratch = ExpertScratch::new(hidden, 0, 0);
     let h: Vec<f32> = (0..hidden).map(|i| (i as f32) * 0.001).collect();
     let h_q8k = quantize_x_to_q8k(&h);
-    let out =
-        run_single_expert_q4k_q8k_into(&mut scratch, &h_q8k, &[], &[], 0, Activation::Silu);
+    let out = run_single_expert_q4k_q8k_into(&mut scratch, &h_q8k, &[], &[], 0, Activation::Silu);
     assert_eq!(out, &[0.0f32; 256]);
 }
 

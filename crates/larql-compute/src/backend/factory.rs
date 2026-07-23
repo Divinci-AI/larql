@@ -245,8 +245,7 @@ mod tests {
 
     #[test]
     fn named_kind_with_no_device_is_a_loud_error_not_a_cpu_fallback() {
-        let registry: &[(BackendKind, BackendCtor)] =
-            &[(BackendKind::Metal, no_device_ctor)];
+        let registry: &[(BackendKind, BackendCtor)] = &[(BackendKind::Metal, no_device_ctor)];
         let err = match backend_from_spec(BackendKind::Metal, registry) {
             Err(e) => e,
             Ok(_) => panic!("expected NoDevice from a deviceless constructor"),
@@ -256,8 +255,7 @@ mod tests {
 
     #[test]
     fn named_kind_with_device_constructs_it() {
-        let registry: &[(BackendKind, BackendCtor)] =
-            &[(BackendKind::Metal, some_cpu_ctor)];
+        let registry: &[(BackendKind, BackendCtor)] = &[(BackendKind::Metal, some_cpu_ctor)];
         let backend = backend_from_spec(BackendKind::Metal, registry).unwrap();
         assert!(backend.name().starts_with("cpu")); // stub ctor hands back CPU
     }

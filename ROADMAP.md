@@ -668,14 +668,34 @@ f32/f16/i8 serving path is well-built; only the Q8K path — the wire DEC prefer
     look like tier saturation but are oversubscription. Semaphore sized to
     physical cores + `OPENBLAS_NUM_THREADS=1` for the serving build.
     [larql-server]
-13. **q8k endpoint drain/heartbeat/latency blindness** (P1, breaks C7 router
-    demo) — add `RifGuard` + `requests_total` + per-layer `record` to the q8k
-    handler (`q8k.rs:41`). [larql-server]
-14. **dec_bench `Endpoint` seam + routing capture** (P1, gates the
-    routed-experts arm that gates the C1-on-MoE verdict) — introduce an
-    `Endpoint` enum (path + frame-builder + decoder + denominator source) and
-    capture per-layer `(expert_ids, weights)`; `/v1/stats` already serves the
-    MoE denominator. [larql-cli, larql-inference]
+13. ✅ **q8k endpoint drain/heartbeat/latency blindness** (P1, breaks C7 router
+    demo) — DONE 2026-07-23, extended to the whole expert surface per the
+    expert-serving review (§1d): shared `track_model_request` helper
+    (`RifGuard` + `requests_total`) on the q8k walk-ffn handler AND all
+    expert endpoints (single/legacy-batch/layer-batch×2/multi-layer×2), with
+    `layer_latency_tracker.record` on q8k walk-ffn and the expert batch
+    handlers. See `docs/audits/expert-serving-review-2026-07-23.md`.
+    [larql-server]
+14. ✅ **dec_bench `Endpoint` seam + routing capture** (P1, gates the
+    routed-experts arm that gates the C1-on-MoE verdict) — DONE 2026-07-23,
+    preceded by a three-reader expert-serving review
+    (`docs/audits/expert-serving-review-2026-07-23.md`) whose Phase-A server
+    hardening + pre-measurement perf batch landed first (batch handlers 400
+    on unresolvable experts; q8k shape validation; owned-entry
+    `per_expert_bytes` probe; bulk LE codecs off the reactor thread; stale
+    parallelism docs corrected). Built: `Endpoint` enum (walk-ffn ×2 +
+    experts-multi-layer ×2 — path/frame/decoder/`server_ms`/denominator per
+    variant); capture `--routing` flag with additive pool sidecars
+    (`raw.bin`/`normed.bin`/`routing.bin`, manifest stays v1, the shipped
+    330M pool still replays the dense arms); routing computed at the capture
+    sink via the now-`pub` `build_moe_router_weights` + client router,
+    gated by a router twin-parity test (inference `route()` ≡ compute
+    policy pipeline, 4 shapes); per-point batch-aware denominators
+    (`weight_bytes_tok_naive` primary — server streams per-row, no
+    cross-row sharing — + `_union` as the DEC-3 bound) and
+    `dec/endpoint(_code)`/`dec/experts_union_frac`/`client_rayon_threads`
+    in the pulse/run record; warmup non-zero-response guard (§1a class).
+    [larql-cli, larql-inference, larql-server]
 15. **Server expert dispatcher** (P2, before G4 cuda-experts) — extract one
     `run_experts(state, backend, …)` from the per-handler Metal/CPU branches
     (`q8k.rs:107`, `grpc_expert.rs:178`, `expert/{layer,multi_layer}_batch.rs`).

@@ -9,12 +9,12 @@
 use super::replay::DecPointSummary;
 
 /// Build one pulse line for a sweep point. `step` is the sweep-point index.
-#[allow(clippy::too_many_arguments)]
+/// Denominators (`dec/weight_bytes_tok[_naive|_union]`, `dec/movement_ratio`,
+/// `dec/experts_union_frac`) come from the summary itself — per-point since
+/// the routed union denominator is batch-dependent.
 pub fn pulse_line(
     step: usize,
     s: &DecPointSummary,
-    weight_bytes_tok: Option<f64>,
-    movement_ratio: Option<f64>,
     net_rtt_ms: Option<f64>,
     net_gbps: Option<f64>,
     per_layer: bool,
@@ -22,23 +22,31 @@ pub fn pulse_line(
     let mut obj = serde_json::Map::new();
     obj.insert("step".into(), step.into());
     obj.insert("dec/batch".into(), s.batch.into());
+    obj.insert("dec/endpoint".into(), s.endpoint.clone().into());
+    obj.insert("dec/endpoint_code".into(), s.endpoint_code.into());
     obj.insert("dec/wire_format".into(), s.wire_format.clone().into());
     obj.insert("dec/wire_format_code".into(), s.wire_format_code.into());
     obj.insert("dec/dispatch_mode".into(), s.dispatch_mode.clone().into());
-    obj.insert(
-        "dec/dispatch_mode_code".into(),
-        s.dispatch_mode_code.into(),
-    );
+    obj.insert("dec/dispatch_mode_code".into(), s.dispatch_mode_code.into());
     obj.insert("dec/step_ms_mean".into(), num(s.step_ms_mean));
     obj.insert("dec/step_ms_p50".into(), num(s.step_ms_p50));
     obj.insert("dec/step_ms_p99".into(), num(s.step_ms_p99));
     obj.insert("dec/tok_s".into(), num(s.tok_s));
     obj.insert("dec/payload_bytes_tok".into(), num(s.payload_bytes_tok));
-    if let Some(w) = weight_bytes_tok {
+    if let Some(w) = s.weight_bytes_tok {
         obj.insert("dec/weight_bytes_tok".into(), num(w));
     }
-    if let Some(r) = movement_ratio {
+    if let Some(w) = s.weight_bytes_tok_naive {
+        obj.insert("dec/weight_bytes_tok_naive".into(), num(w));
+    }
+    if let Some(w) = s.weight_bytes_tok_union {
+        obj.insert("dec/weight_bytes_tok_union".into(), num(w));
+    }
+    if let Some(r) = s.movement_ratio {
         obj.insert("dec/movement_ratio".into(), num(r));
+    }
+    if let Some(f) = s.experts_union_frac {
+        obj.insert("dec/experts_union_frac".into(), num(f));
     }
     if let Some(p50) = s.server_ms_p50 {
         obj.insert("dec/server_ms_p50".into(), num(p50));
@@ -54,14 +62,8 @@ pub fn pulse_line(
     }
     if per_layer {
         for l in &s.per_layer {
-            obj.insert(
-                format!("dec/layer{}_ms_p50", l.layer),
-                num(l.client_ms_p50),
-            );
-            obj.insert(
-                format!("dec/layer{}_ms_p99", l.layer),
-                num(l.client_ms_p99),
-            );
+            obj.insert(format!("dec/layer{}_ms_p50", l.layer), num(l.client_ms_p50));
+            obj.insert(format!("dec/layer{}_ms_p99", l.layer), num(l.client_ms_p99));
         }
     }
     serde_json::Value::Object(obj)
@@ -92,6 +94,8 @@ mod tests {
     fn summary() -> DecPointSummary {
         DecPointSummary {
             batch: 8,
+            endpoint: "walk-ffn".into(),
+            endpoint_code: 0,
             wire_format: "f16".into(),
             wire_format_code: 1,
             served_wire: vec!["f16".into()],
@@ -103,6 +107,11 @@ mod tests {
             step_ms_p99: 20.0,
             tok_s: 640.0,
             payload_bytes_tok: 21504.0,
+            weight_bytes_tok: Some(2.0e9),
+            weight_bytes_tok_naive: None,
+            weight_bytes_tok_union: None,
+            movement_ratio: Some(1.1e-5),
+            experts_union_frac: None,
             server_ms_p50: Some(9.0),
             server_ms_p99: Some(15.0),
             per_layer: vec![LayerSummary {
@@ -115,17 +124,11 @@ mod tests {
 
     #[test]
     fn pulse_line_has_numeric_step_and_schema_keys() {
-        let line = pulse_line(
-            7,
-            &summary(),
-            Some(2.0e9),
-            Some(1.1e-5),
-            Some(0.05),
-            Some(10.0),
-            false,
-        );
+        let line = pulse_line(7, &summary(), Some(0.05), Some(10.0), false);
         assert_eq!(line["step"], 7);
         assert_eq!(line["dec/batch"], 8);
+        assert_eq!(line["dec/endpoint"], "walk-ffn");
+        assert_eq!(line["dec/endpoint_code"], 0);
         assert_eq!(line["dec/wire_format"], "f16");
         assert_eq!(line["dec/wire_format_code"], 1);
         assert_eq!(line["dec/dispatch_mode_code"], 1);
@@ -138,8 +141,35 @@ mod tests {
         assert!(line["dec/server_ms_p50"].is_number());
         assert!(line["net/rtt_ms"].is_number());
         assert!(line["net/gbps"].is_number());
+        // Routed-only keys absent on a dense point.
+        assert!(line.get("dec/weight_bytes_tok_naive").is_none());
+        assert!(line.get("dec/weight_bytes_tok_union").is_none());
+        assert!(line.get("dec/experts_union_frac").is_none());
         // Per-layer keys only under the flag.
         assert!(line.get("dec/layer3_ms_p50").is_none());
+    }
+
+    #[test]
+    fn pulse_line_routed_point_emits_naive_union_and_frac() {
+        let mut s = summary();
+        s.endpoint = "experts-ml-q8k".into();
+        s.endpoint_code = 3;
+        s.weight_bytes_tok = None;
+        s.weight_bytes_tok_naive = Some(1.6e9);
+        s.weight_bytes_tok_union = Some(4.0e8);
+        s.movement_ratio = Some(2.2e-5);
+        s.experts_union_frac = Some(0.25);
+        s.server_ms_p50 = None;
+        s.server_ms_p99 = None;
+        let line = pulse_line(2, &s, None, None, false);
+        assert_eq!(line["dec/endpoint"], "experts-ml-q8k");
+        assert_eq!(line["dec/endpoint_code"], 3);
+        assert!(line.get("dec/weight_bytes_tok").is_none());
+        assert!(line["dec/weight_bytes_tok_naive"].is_number());
+        assert!(line["dec/weight_bytes_tok_union"].is_number());
+        assert!(line["dec/movement_ratio"].is_number());
+        assert_eq!(line["dec/experts_union_frac"], 0.25);
+        assert!(line.get("dec/server_ms_p50").is_none());
     }
 
     #[test]
@@ -147,7 +177,9 @@ mod tests {
         let mut s = summary();
         s.server_ms_p50 = None;
         s.server_ms_p99 = None;
-        let line = pulse_line(0, &s, None, None, None, None, true);
+        s.weight_bytes_tok = None;
+        s.movement_ratio = None;
+        let line = pulse_line(0, &s, None, None, true);
         assert!(line.get("dec/weight_bytes_tok").is_none());
         assert!(line.get("dec/movement_ratio").is_none());
         assert!(line.get("dec/server_ms_p50").is_none());
@@ -159,8 +191,8 @@ mod tests {
     #[test]
     fn to_jsonl_one_compact_line_each() {
         let lines = vec![
-            pulse_line(0, &summary(), None, None, None, None, false),
-            pulse_line(1, &summary(), None, None, None, None, false),
+            pulse_line(0, &summary(), None, None, false),
+            pulse_line(1, &summary(), None, None, false),
         ];
         let jsonl = to_jsonl(&lines);
         let rows: Vec<&str> = jsonl.trim_end().split('\n').collect();

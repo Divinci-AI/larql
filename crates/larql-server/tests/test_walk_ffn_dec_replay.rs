@@ -32,14 +32,7 @@ fn residual_rows(batch: usize) -> Vec<f32> {
 /// Production replay frame: single layer, `seq_len = batch`, full_output,
 /// `top_k = 0` — built through the same encoder `larql dec-bench` uses.
 fn replay_frame(layer: usize, batch: usize) -> Vec<u8> {
-    larql_inference::encode_binary_request(
-        Some(layer),
-        None,
-        &residual_rows(batch),
-        batch,
-        true,
-        0,
-    )
+    larql_inference::encode_binary_request(Some(layer), None, &residual_rows(batch), batch, true, 0)
 }
 
 async fn post_walk_ffn_binary(

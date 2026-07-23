@@ -158,6 +158,7 @@ pub async fn handle_expert(
     Json(req): Json<SingleExpertRequest>,
 ) -> Result<Json<SingleExpertResponse>, ServerError> {
     state.bump_requests();
+    let _rif_guard = crate::routes::walk_ffn::types::track_model_request(&state);
     let start = std::time::Instant::now();
 
     let output =

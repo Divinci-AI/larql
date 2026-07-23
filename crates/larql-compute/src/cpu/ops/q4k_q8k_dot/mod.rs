@@ -62,7 +62,7 @@ pub use q4k_asm::{q4k_q8k_matvec_asm, q4k_q8k_matvec_asm_v2, q4k_q8k_matvec_asm_
 pub use q4k_neon::{q4k_q8k_matvec_neon, q4k_q8k_matvec_neon_2row};
 pub use q4k_scalar::q4k_q8k_matvec_scalar;
 pub use q6k::q6k_q8k_matvec_into;
+pub use q6k::q6k_q8k_matvec_scalar;
 #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
 pub use q6k::{q6k_q8k_matvec_asm, q6k_q8k_matvec_neon};
-pub use q6k::q6k_q8k_matvec_scalar;
 pub use q8k_activation::{quantize_x_to_q8k, quantize_x_to_q8k_into, Q8KActivation};

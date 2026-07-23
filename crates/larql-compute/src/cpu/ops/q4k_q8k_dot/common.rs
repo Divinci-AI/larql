@@ -27,7 +27,7 @@ pub(super) const SUBBLOCK_SIZE: usize = 32;
 /// these kernels.
 #[inline]
 pub(super) fn q8k_shape_ok(out_len: usize, rows: usize, q8k_qs_len: usize, cols: usize) -> bool {
-    out_len == rows && q8k_qs_len == cols && cols % ELEMS_PER_BLOCK == 0
+    out_len == rows && q8k_qs_len == cols && cols.is_multiple_of(ELEMS_PER_BLOCK)
 }
 
 /// One-line summary of which SIMD kernel class each Q4_K/Q6_K×Q8_K matvec

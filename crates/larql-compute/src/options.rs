@@ -347,13 +347,17 @@ pub fn decode_options_summary() -> String {
     let opts = decode_options();
     let on_off = |b: bool| if b { "on" } else { "off" };
     let mut s = format!(
-        "q4k_direct_attn={} q4k_attn_int8={} q4k_lm_head={} q4k_direct_ffn={} q4k_asm={} spin_pool={}",
+        "q4k_direct_attn={} q4k_attn_int8={} q4k_lm_head={} q4k_direct_ffn={} q4k_asm={} spin_pool={} moe_q4k_direct={}",
         on_off(opts.q4k_direct_attn),
         on_off(opts.q4k_attn_int8),
         on_off(opts.q4k_lm_head),
         on_off(opts.q4k_direct_ffn),
         on_off(opts.q4k_asm),
         on_off(opts.spin_pool),
+        // MoE expert dispatch kernel path: direct Q4K×Q8K matvec (default)
+        // vs BLAS on cached f32 dequant — a silently different
+        // byte-movement regime if left unlogged (dec-readiness review).
+        on_off(!env_flag(ENV_DISABLE_Q4K_DIRECT)),
     );
     if skip_moe_enabled() {
         s.push_str(" SKIP_MOE=ON");
@@ -576,7 +580,10 @@ mod tests {
             assert!(skip_moe_enabled(), "legacy SKIP_MOE alias must work");
         });
         with_env(ENV_DECODE_DEBUG_LEGACY, Some("1"), || {
-            assert!(decode_debug_enabled(), "legacy DECODE_DEBUG alias must work");
+            assert!(
+                decode_debug_enabled(),
+                "legacy DECODE_DEBUG alias must work"
+            );
         });
         with_env(ENV_SKIP_OUTER_NORM_LEGACY, Some("1"), || {
             assert!(
@@ -626,6 +633,7 @@ mod tests {
             "q4k_direct_ffn=",
             "q4k_asm=",
             "spin_pool=",
+            "moe_q4k_direct=",
         ] {
             assert!(s.contains(key), "{s}");
         }
@@ -633,6 +641,21 @@ mod tests {
         with_env(ENV_SKIP_MOE, Some("1"), || {
             assert!(decode_options_summary().contains("SKIP_MOE=ON"));
         });
+        // MoE kernel-path toggle: default (unset) is the direct Q4K path;
+        // LARQL_DISABLE_Q4K_DIRECT flips the summary to off.
+        with_env(ENV_DISABLE_Q4K_DIRECT, None, || {
+            assert!(
+                decode_options_summary().contains("moe_q4k_direct=on"),
+                "{}",
+                decode_options_summary()
+            );
+        });
+        with_env(ENV_DISABLE_Q4K_DIRECT, Some("1"), || {
+            assert!(
+                decode_options_summary().contains("moe_q4k_direct=off"),
+                "{}",
+                decode_options_summary()
+            );
+        });
     }
-
 }
