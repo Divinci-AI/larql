@@ -20,12 +20,15 @@
 use axum::http::header;
 use axum::http::HeaderMap;
 
+// Content-type strings are single-sourced in the shared codec
+// (`larql_inference::ffn::remote::codec`, ROADMAP hardening item 16);
+// the historical `FFN_*` names are kept as re-exports.
 /// f32 binary content-type (existing).
-pub const FFN_CT: &str = "application/x-larql-ffn";
+pub use larql_inference::ffn::remote::BINARY_CT as FFN_CT;
 /// f16 binary content-type (ADR-0009).
-pub const FFN_F16_CT: &str = "application/x-larql-ffn-f16";
+pub use larql_inference::ffn::remote::F16_CT as FFN_F16_CT;
 /// i8 symmetric binary content-type (ADR-0009).
-pub const FFN_I8_CT: &str = "application/x-larql-ffn-i8";
+pub use larql_inference::ffn::remote::I8_CT as FFN_I8_CT;
 
 /// Select the best response content-type given the client's `Accept` header.
 ///

@@ -1,5 +1,16 @@
-//! Binary wire codec for the LARQL FFN remote protocol.
+//! Binary wire codec for the LARQL FFN remote protocol — the SINGLE
+//! source of truth for the dense walk-ffn binary frame.
 //!
+//! Both halves of the wire live here (ROADMAP hardening item 16):
+//! - client side: [`encode_binary_request`] + the response decoders
+//!   ([`decode_binary_single`], [`decode_binary_batch`], f16/i8 variants,
+//!   [`decode_single_response`]);
+//! - server side: [`decode_binary_request`] + the response encoders
+//!   ([`encode_binary_output`], [`encode_binary_output_f16`],
+//!   [`encode_binary_output_i8`], [`encode_json_full_output`]).
+//!
+//! `larql-server` (`routes/walk_ffn/binary.rs`) and `larql-router` import
+//! these functions/constants instead of maintaining their own copies.
 //! See the `super` module doc for the full binary frame layout.
 
 use serde::{Deserialize, Serialize};
@@ -7,7 +18,21 @@ use std::collections::HashMap;
 
 /// f32 content-type constant.
 pub const BINARY_CT: &str = "application/x-larql-ffn";
-pub(super) const BATCH_MARKER: u32 = 0xFFFF_FFFF;
+
+/// First u32 of a binary request/response body. When equal to this marker
+/// the frame is a batch (`marker + count + …`); otherwise the first u32 is
+/// the layer index of a single-layer frame.
+pub const BATCH_MARKER: u32 = 0xFFFF_FFFF;
+
+/// Fixed response-header size in bytes: `layer|marker (4) + seq_len|count
+/// (4) + latency_ms (4)`. Shared by the single and batch response frames
+/// in every dtype arm.
+pub const RESPONSE_HEADER_LEN: usize = 12;
+
+/// Fixed single-layer request-header size in bytes: `layer (4) + seq_len
+/// (4) + flags (4) + top_k (4)`. Batch requests carry `marker (4) +
+/// num_layers (4) + layers (4×K)` before the trailing 12 fixed bytes.
+pub const REQUEST_HEADER_LEN: usize = 16;
 
 fn checked_mul(a: usize, b: usize, what: &str) -> Result<usize, String> {
     a.checked_mul(b)
@@ -129,7 +154,7 @@ pub fn encode_binary_request(
 /// Decode a binary single-layer full_output response.
 /// Returns `(layer, output_floats)`.
 pub fn decode_binary_single(body: &[u8]) -> Result<(usize, Vec<f32>), String> {
-    if body.len() < 12 {
+    if body.len() < RESPONSE_HEADER_LEN {
         return Err(format!("binary response too short: {} bytes", body.len()));
     }
     let marker = u32::from_le_bytes(body[0..4].try_into().unwrap());
@@ -152,7 +177,7 @@ pub fn decode_binary_single(body: &[u8]) -> Result<(usize, Vec<f32>), String> {
 /// Decode a binary batch full_output response.
 /// Returns a map from layer → output floats.
 pub fn decode_binary_batch(body: &[u8]) -> Result<HashMap<usize, Vec<f32>>, String> {
-    if body.len() < 12 {
+    if body.len() < RESPONSE_HEADER_LEN {
         return Err(format!(
             "binary batch response too short: {} bytes",
             body.len()
@@ -198,7 +223,7 @@ pub const F16_CT: &str = "application/x-larql-ffn-f16";
 /// Decode a binary single-layer f16 response into f32 output.
 pub fn decode_binary_single_f16(body: &[u8]) -> Result<(usize, Vec<f32>), String> {
     use half::f16;
-    if body.len() < 12 {
+    if body.len() < RESPONSE_HEADER_LEN {
         return Err(format!(
             "f16 binary response too short: {} bytes",
             body.len()
@@ -222,7 +247,7 @@ pub fn decode_binary_single_f16(body: &[u8]) -> Result<(usize, Vec<f32>), String
 /// Decode a binary batch f16 response into f32 outputs.
 pub fn decode_binary_batch_f16(body: &[u8]) -> Result<HashMap<usize, Vec<f32>>, String> {
     use half::f16;
-    if body.len() < 12 {
+    if body.len() < RESPONSE_HEADER_LEN {
         return Err(format!(
             "f16 batch response too short: {} bytes",
             body.len()
@@ -284,7 +309,7 @@ pub(crate) fn decode_binary_single_i8(
     body: &[u8],
     hidden_size: usize,
 ) -> Result<(usize, Vec<f32>), String> {
-    if body.len() < 12 {
+    if body.len() < RESPONSE_HEADER_LEN {
         return Err(format!(
             "i8 binary response too short: {} bytes",
             body.len()
@@ -313,7 +338,7 @@ pub(crate) fn decode_binary_batch_i8(
     body: &[u8],
     hidden_size: usize,
 ) -> Result<HashMap<usize, Vec<f32>>, String> {
-    if body.len() < 12 {
+    if body.len() < RESPONSE_HEADER_LEN {
         return Err(format!("i8 batch response too short: {} bytes", body.len()));
     }
     let marker = u32::from_le_bytes(body[0..4].try_into().unwrap());
@@ -378,7 +403,7 @@ pub fn decode_single_response(
 /// Extract the `latency_ms` f32 embedded at bytes 8-11 of a binary response.
 /// Returns 0.0 if the body is too short or the value is non-finite.
 pub(super) fn extract_response_latency_ms(body: &[u8]) -> f64 {
-    if body.len() < 12 {
+    if body.len() < RESPONSE_HEADER_LEN {
         return 0.0;
     }
     // Both single-layer and batch responses have latency_ms at offset 8.
@@ -387,6 +412,247 @@ pub(super) fn extract_response_latency_ms(body: &[u8]) -> f64 {
         v as f64
     } else {
         0.0
+    }
+}
+
+// ── Server-side half: request decode + response encode ───────────────────────
+//
+// Moved here from `larql-server/src/routes/walk_ffn/binary.rs` (ROADMAP
+// hardening item 16) so the encoder and decoder of each wire direction
+// live in one module. The server wraps these in its own error/request
+// types; the byte layout and every length guard are pinned by the
+// round-trip + rejection tests below.
+
+/// A decoded binary walk-ffn request — the server-side inverse of
+/// [`encode_binary_request`]. Pure wire data; the server layers its
+/// JSON-request semantics (e.g. `moe_layer`, serde defaults) on top.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DecodedFfnRequest {
+    /// Single-layer mode. Mutually exclusive with `layers`.
+    pub layer: Option<usize>,
+    /// Batch mode — multiple layers in one request.
+    pub layers: Option<Vec<usize>>,
+    /// Row-major flat residual, `seq_len × hidden` floats.
+    pub residual: Vec<f32>,
+    pub seq_len: usize,
+    pub top_k: usize,
+    pub full_output: bool,
+}
+
+/// Decode a binary-format request body (inverse of [`encode_binary_request`]).
+pub fn decode_binary_request(body: &[u8]) -> Result<DecodedFfnRequest, String> {
+    if body.len() < REQUEST_HEADER_LEN {
+        return Err("binary: body too short (need ≥ 16 bytes)".into());
+    }
+
+    let first = u32::from_le_bytes(body[0..4].try_into().unwrap());
+
+    let (layer, layers, header_end) = if first == BATCH_MARKER {
+        let n = u32::from_le_bytes(body[4..8].try_into().unwrap()) as usize;
+        let layers_end = checked_mul(n, 4, "binary batch layer indices")?
+            .checked_add(8)
+            .ok_or_else(|| "binary batch layer indices: byte range overflow".to_string())?;
+        if body.len() < layers_end {
+            return Err(format!(
+                "binary batch: body too short for {n} layer indices"
+            ));
+        }
+        let layers: Vec<usize> = (0..n)
+            .map(|i| u32::from_le_bytes(body[8 + i * 4..12 + i * 4].try_into().unwrap()) as usize)
+            .collect();
+        (None, Some(layers), layers_end)
+    } else {
+        (Some(first as usize), None, 4)
+    };
+
+    if body.len() < header_end + 12 {
+        return Err("binary: truncated fixed header (seq_len/flags/top_k)".into());
+    }
+    let seq_len = u32::from_le_bytes(body[header_end..header_end + 4].try_into().unwrap()) as usize;
+    let flags = u32::from_le_bytes(body[header_end + 4..header_end + 8].try_into().unwrap());
+    let top_k =
+        u32::from_le_bytes(body[header_end + 8..header_end + 12].try_into().unwrap()) as usize;
+    let full_output = (flags & 1) != 0;
+
+    let residual_bytes = &body[header_end + 12..];
+    if !residual_bytes.len().is_multiple_of(4) {
+        return Err("binary: residual byte length is not a multiple of 4".into());
+    }
+    let residual: Vec<f32> = residual_bytes
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+        .collect();
+
+    Ok(DecodedFfnRequest {
+        layer,
+        layers,
+        residual,
+        seq_len,
+        top_k,
+        full_output,
+    })
+}
+
+/// One layer's FFN output (server-side response payload).
+#[derive(Debug, Clone, PartialEq)]
+pub struct FfnEntry {
+    pub layer: usize,
+    pub output: Vec<f32>,
+}
+
+/// Typed server response consumed by all four response encoders
+/// (f32/f16/i8 binary + JSON).
+#[derive(Debug, Clone, PartialEq)]
+pub struct FfnOutput {
+    pub entries: Vec<FfnEntry>,
+    pub seq_len: usize,
+    pub latency_ms: f64,
+}
+
+/// Encode an [`FfnOutput`] as the binary response format.
+pub fn encode_binary_output(out: &FfnOutput) -> Vec<u8> {
+    if out.entries.len() == 1 {
+        let entry = &out.entries[0];
+        let mut buf = Vec::with_capacity(RESPONSE_HEADER_LEN + entry.output.len() * 4);
+        buf.extend_from_slice(&(entry.layer as u32).to_le_bytes());
+        buf.extend_from_slice(&(out.seq_len as u32).to_le_bytes());
+        buf.extend_from_slice(&(out.latency_ms as f32).to_le_bytes());
+        for &v in &entry.output {
+            buf.extend_from_slice(&v.to_le_bytes());
+        }
+        buf
+    } else {
+        let num = out.entries.len();
+        let mut buf = Vec::with_capacity(RESPONSE_HEADER_LEN + num * 12);
+        buf.extend_from_slice(&BATCH_MARKER.to_le_bytes());
+        buf.extend_from_slice(&(num as u32).to_le_bytes());
+        buf.extend_from_slice(&(out.latency_ms as f32).to_le_bytes());
+        for entry in &out.entries {
+            buf.extend_from_slice(&(entry.layer as u32).to_le_bytes());
+            buf.extend_from_slice(&(out.seq_len as u32).to_le_bytes());
+            buf.extend_from_slice(&(entry.output.len() as u32).to_le_bytes());
+            for &v in &entry.output {
+                buf.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        buf
+    }
+}
+
+/// Encode an [`FfnOutput`] using f16 values for the residual/output arrays.
+///
+/// Wire layout: identical to the f32 format except every float in the output
+/// arrays is a `u16` LE (IEEE 754 half-precision). Header fields (layer,
+/// seq_len, latency_ms) remain f32/u32 LE. See ADR-0009.
+pub fn encode_binary_output_f16(out: &FfnOutput) -> Vec<u8> {
+    use half::f16;
+    if out.entries.len() == 1 {
+        let entry = &out.entries[0];
+        let mut buf = Vec::with_capacity(RESPONSE_HEADER_LEN + entry.output.len() * 2);
+        buf.extend_from_slice(&(entry.layer as u32).to_le_bytes());
+        buf.extend_from_slice(&(out.seq_len as u32).to_le_bytes());
+        buf.extend_from_slice(&(out.latency_ms as f32).to_le_bytes());
+        for &v in &entry.output {
+            buf.extend_from_slice(&f16::from_f32(v).to_le_bytes());
+        }
+        buf
+    } else {
+        let num = out.entries.len();
+        let total_floats: usize = out.entries.iter().map(|e| e.output.len()).sum();
+        let mut buf = Vec::with_capacity(RESPONSE_HEADER_LEN + num * 12 + total_floats * 2);
+        buf.extend_from_slice(&BATCH_MARKER.to_le_bytes());
+        buf.extend_from_slice(&(num as u32).to_le_bytes());
+        buf.extend_from_slice(&(out.latency_ms as f32).to_le_bytes());
+        for entry in &out.entries {
+            buf.extend_from_slice(&(entry.layer as u32).to_le_bytes());
+            buf.extend_from_slice(&(out.seq_len as u32).to_le_bytes());
+            buf.extend_from_slice(&(entry.output.len() as u32).to_le_bytes());
+            for &v in &entry.output {
+                buf.extend_from_slice(&f16::from_f32(v).to_le_bytes());
+            }
+        }
+        buf
+    }
+}
+
+/// Encode an [`FfnOutput`] using i8 symmetric quantisation (ADR-0009).
+///
+/// Per position: `[scale f32 LE][zero_point f32 LE][data i8[hidden_size]]`.
+/// `scale = max(|x|) / 127.0`, `zero_point = 0.0` (symmetric).
+/// Header fields (layer, seq_len, latency_ms) remain f32/u32 LE.
+pub fn encode_binary_output_i8(out: &FfnOutput) -> Vec<u8> {
+    fn quantise_position(vals: &[f32], buf: &mut Vec<u8>) {
+        let max_abs = vals.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
+        let scale = if max_abs > 0.0 { max_abs / 127.0 } else { 1.0 };
+        buf.extend_from_slice(&scale.to_le_bytes());
+        buf.extend_from_slice(&0.0f32.to_le_bytes()); // zero_point = 0
+        for &v in vals {
+            let q = (v / scale).clamp(-127.0, 127.0).round() as i8;
+            buf.push(q as u8);
+        }
+    }
+
+    if out.entries.len() == 1 {
+        let entry = &out.entries[0];
+        let seq = out.seq_len.max(1);
+        let hidden = entry.output.len() / seq;
+        let mut buf = Vec::with_capacity(RESPONSE_HEADER_LEN + seq * (8 + hidden));
+        buf.extend_from_slice(&(entry.layer as u32).to_le_bytes());
+        buf.extend_from_slice(&(out.seq_len as u32).to_le_bytes());
+        buf.extend_from_slice(&(out.latency_ms as f32).to_le_bytes());
+        for pos in 0..seq {
+            quantise_position(&entry.output[pos * hidden..(pos + 1) * hidden], &mut buf);
+        }
+        buf
+    } else {
+        let num = out.entries.len();
+        let mut buf = Vec::with_capacity(RESPONSE_HEADER_LEN + num * 16);
+        buf.extend_from_slice(&BATCH_MARKER.to_le_bytes());
+        buf.extend_from_slice(&(num as u32).to_le_bytes());
+        buf.extend_from_slice(&(out.latency_ms as f32).to_le_bytes());
+        for entry in &out.entries {
+            let seq = out.seq_len.max(1);
+            let hidden = entry.output.len() / seq;
+            buf.extend_from_slice(&(entry.layer as u32).to_le_bytes());
+            buf.extend_from_slice(&(out.seq_len as u32).to_le_bytes());
+            buf.extend_from_slice(&(entry.output.len() as u32).to_le_bytes());
+            for pos in 0..seq {
+                quantise_position(&entry.output[pos * hidden..(pos + 1) * hidden], &mut buf);
+            }
+        }
+        buf
+    }
+}
+
+/// Encode an [`FfnOutput`] as the existing JSON response format (unchanged
+/// wire contract for JSON clients).
+pub fn encode_json_full_output(out: &FfnOutput) -> serde_json::Value {
+    let latency_rounded = (out.latency_ms * 10.0).round() / 10.0;
+    if out.entries.len() == 1 {
+        let e = &out.entries[0];
+        serde_json::json!({
+            "layer": e.layer,
+            "output": e.output,
+            "seq_len": out.seq_len,
+            "latency_ms": latency_rounded,
+        })
+    } else {
+        let results: Vec<serde_json::Value> = out
+            .entries
+            .iter()
+            .map(|e| {
+                serde_json::json!({
+                    "layer": e.layer,
+                    "output": e.output,
+                    "seq_len": out.seq_len,
+                })
+            })
+            .collect();
+        serde_json::json!({
+            "results": results,
+            "seq_len": out.seq_len,
+            "latency_ms": latency_rounded,
+        })
     }
 }
 
@@ -965,5 +1231,308 @@ mod tests {
         let (resp_layer, floats) = decode_binary_single(&resp).unwrap();
         assert_eq!(resp_layer as u32, layer);
         assert_eq!(floats, output);
+    }
+
+    // ── decode_binary_request (server-side half) ───────────────────────
+
+    #[test]
+    fn decode_request_single_layer() {
+        let body = encode_binary_request(Some(5), None, &[1.0, 2.0, 3.0, 4.0], 1, true, 8);
+        let req = decode_binary_request(&body).unwrap();
+        assert_eq!(req.layer, Some(5));
+        assert!(req.layers.is_none());
+        assert_eq!(req.seq_len, 1);
+        assert_eq!(req.top_k, 8);
+        assert!(req.full_output);
+        assert_eq!(req.residual, vec![1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn decode_request_batch() {
+        let body = encode_binary_request(None, Some(&[0, 1, 2]), &[1.0; 4], 1, true, 16);
+        let req = decode_binary_request(&body).unwrap();
+        assert!(req.layer.is_none());
+        assert_eq!(req.layers, Some(vec![0, 1, 2]));
+        assert_eq!(req.top_k, 16);
+    }
+
+    #[test]
+    fn decode_request_features_only_flag() {
+        let body = encode_binary_request(Some(0), None, &[1.0; 4], 1, false, 8);
+        let req = decode_binary_request(&body).unwrap();
+        assert!(!req.full_output);
+    }
+
+    #[test]
+    fn decode_request_truncated_body_errors() {
+        assert!(decode_binary_request(&[0u8; 8]).is_err());
+        assert!(decode_binary_request(&[]).is_err());
+    }
+
+    #[test]
+    fn decode_request_batch_truncated_layers_errors() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&BATCH_MARKER.to_le_bytes());
+        buf.extend_from_slice(&4u32.to_le_bytes()); // claim 4 layers
+        buf.extend_from_slice(&0u32.to_le_bytes()); // only 1
+        buf.extend_from_slice(&[0u8; 4]);
+        assert!(decode_binary_request(&buf).is_err());
+    }
+
+    #[test]
+    fn decode_request_batch_impossible_layer_count_errors() {
+        // num_layers = u32::MAX must be rejected by a length guard before
+        // any layer-index allocation (alloc-bomb bound, PR 104 lineage).
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&BATCH_MARKER.to_le_bytes());
+        buf.extend_from_slice(&u32::MAX.to_le_bytes());
+        buf.extend_from_slice(&[0u8; 12]);
+        assert!(decode_binary_request(&buf).is_err());
+    }
+
+    #[test]
+    fn decode_request_odd_residual_length_errors() {
+        let mut buf = encode_binary_request(Some(0), None, &[1.0], 1, true, 8);
+        buf.push(0u8); // 1 stray byte — residual not a multiple of 4
+        assert!(decode_binary_request(&buf).is_err());
+    }
+
+    // ── Byte-identical wire pins (encode → decode → re-encode) ─────────
+    //
+    // Mirrors `moe_remote::multi_layer_wire`'s
+    // `multi_task_encode_decode_reencode_is_byte_identical`: the shared
+    // codec must reproduce the exact original bytes for every frame kind,
+    // pinning the consolidated implementation to the pre-consolidation
+    // wire (single + batch × f32/f16/i8 responses, single + batch
+    // requests).
+
+    fn reencode_request(req: &DecodedFfnRequest) -> Vec<u8> {
+        encode_binary_request(
+            req.layer,
+            req.layers.as_deref(),
+            &req.residual,
+            req.seq_len,
+            req.full_output,
+            req.top_k,
+        )
+    }
+
+    #[test]
+    fn request_encode_decode_reencode_is_byte_identical() {
+        // Single-layer frame.
+        let encoded = encode_binary_request(
+            Some(7),
+            None,
+            &[1.5, -2.25, 0.0, f32::MIN_POSITIVE],
+            2,
+            true,
+            8092,
+        );
+        let decoded = decode_binary_request(&encoded).unwrap();
+        assert_eq!(reencode_request(&decoded), encoded);
+
+        // Batch frame.
+        let encoded =
+            encode_binary_request(None, Some(&[3, 900, 41]), &[0.125, -3.5, 1e-20], 1, true, 0);
+        let decoded = decode_binary_request(&encoded).unwrap();
+        assert_eq!(reencode_request(&decoded), encoded);
+    }
+
+    /// Rebuild an `FfnOutput` from a decoded layer→floats map, preserving
+    /// the original entry order (the decoders return `HashMap`s).
+    fn rebuild_output(
+        map: &HashMap<usize, Vec<f32>>,
+        layer_order: &[usize],
+        seq_len: usize,
+        latency_ms: f64,
+    ) -> FfnOutput {
+        FfnOutput {
+            entries: layer_order
+                .iter()
+                .map(|&l| FfnEntry {
+                    layer: l,
+                    output: map[&l].clone(),
+                })
+                .collect(),
+            seq_len,
+            latency_ms,
+        }
+    }
+
+    #[test]
+    fn response_f32_encode_decode_reencode_is_byte_identical() {
+        // Single-layer frame.
+        let out = FfnOutput {
+            entries: vec![FfnEntry {
+                layer: 5,
+                output: vec![0.12345, -9.87654, 1e-7, f32::MAX / 2.0],
+            }],
+            seq_len: 2,
+            latency_ms: 7.5,
+        };
+        let encoded = encode_binary_output(&out);
+        let (layer, floats) = decode_binary_single(&encoded).unwrap();
+        let latency = extract_response_latency_ms(&encoded);
+        let rebuilt = FfnOutput {
+            entries: vec![FfnEntry {
+                layer,
+                output: floats,
+            }],
+            seq_len: 2,
+            latency_ms: latency,
+        };
+        assert_eq!(encode_binary_output(&rebuilt), encoded);
+
+        // Batch frame.
+        let out = FfnOutput {
+            entries: vec![
+                FfnEntry {
+                    layer: 3,
+                    output: vec![1.5, -2.25],
+                },
+                FfnEntry {
+                    layer: 29,
+                    output: vec![-0.0, 7.0],
+                },
+            ],
+            seq_len: 1,
+            latency_ms: 15.0,
+        };
+        let encoded = encode_binary_output(&out);
+        let map = decode_binary_batch(&encoded).unwrap();
+        let rebuilt = rebuild_output(&map, &[3, 29], 1, extract_response_latency_ms(&encoded));
+        assert_eq!(encode_binary_output(&rebuilt), encoded);
+    }
+
+    #[test]
+    fn response_f16_encode_decode_reencode_is_byte_identical() {
+        // Values chosen to be exactly f16-representable so decode → f32 →
+        // re-encode reproduces identical half bits.
+        let out = FfnOutput {
+            entries: vec![FfnEntry {
+                layer: 7,
+                output: vec![0.5, -0.25, 1.5, -2.5],
+            }],
+            seq_len: 1,
+            latency_ms: 2.25,
+        };
+        let encoded = encode_binary_output_f16(&out);
+        let (layer, floats) = decode_binary_single_f16(&encoded).unwrap();
+        let rebuilt = FfnOutput {
+            entries: vec![FfnEntry {
+                layer,
+                output: floats,
+            }],
+            seq_len: 1,
+            latency_ms: extract_response_latency_ms(&encoded),
+        };
+        assert_eq!(encode_binary_output_f16(&rebuilt), encoded);
+
+        // Batch frame.
+        let out = FfnOutput {
+            entries: vec![
+                FfnEntry {
+                    layer: 3,
+                    output: vec![1.0, 2.0],
+                },
+                FfnEntry {
+                    layer: 11,
+                    output: vec![-1.0, 0.5],
+                },
+            ],
+            seq_len: 1,
+            latency_ms: 8.0,
+        };
+        let encoded = encode_binary_output_f16(&out);
+        let map = decode_binary_batch_f16(&encoded).unwrap();
+        let rebuilt = rebuild_output(&map, &[3, 11], 1, extract_response_latency_ms(&encoded));
+        assert_eq!(encode_binary_output_f16(&rebuilt), encoded);
+    }
+
+    #[test]
+    fn response_i8_encode_decode_reencode_is_byte_identical() {
+        // Fixed-point construction: per position, max|v| = 127 × scale with
+        // scale a power of two, so quantise(dequantise(q)) == q and the
+        // recomputed scale bit-matches. hidden = 4.
+        let out = FfnOutput {
+            entries: vec![FfnEntry {
+                layer: 5,
+                // scale = 63.5 / 127 = 0.5 exactly; q = [127, -64, 1, -127]
+                output: vec![63.5, -32.0, 0.5, -63.5],
+            }],
+            seq_len: 1,
+            latency_ms: 3.5,
+        };
+        let encoded = encode_binary_output_i8(&out);
+        let (layer, floats) = decode_binary_single_i8(&encoded, 4).unwrap();
+        let rebuilt = FfnOutput {
+            entries: vec![FfnEntry {
+                layer,
+                output: floats,
+            }],
+            seq_len: 1,
+            latency_ms: extract_response_latency_ms(&encoded),
+        };
+        assert_eq!(encode_binary_output_i8(&rebuilt), encoded);
+
+        // Batch frame, two layers, seq_len 2 (two quantised positions each).
+        let out = FfnOutput {
+            entries: vec![
+                FfnEntry {
+                    layer: 10,
+                    // pos0 scale 0.25, pos1 scale 1.0
+                    output: vec![31.75, -16.0, 0.25, 8.0, 127.0, -64.0, 1.0, -127.0],
+                },
+                FfnEntry {
+                    layer: 20,
+                    // pos0 scale 2.0, pos1 scale 0.5
+                    output: vec![254.0, -2.0, 128.0, 4.0, 63.5, -0.5, 32.0, -63.5],
+                },
+            ],
+            seq_len: 2,
+            latency_ms: 1.0,
+        };
+        let encoded = encode_binary_output_i8(&out);
+        let map = decode_binary_batch_i8(&encoded, 4).unwrap();
+        let rebuilt = rebuild_output(&map, &[10, 20], 2, extract_response_latency_ms(&encoded));
+        assert_eq!(encode_binary_output_i8(&rebuilt), encoded);
+    }
+
+    // ── encode_json_full_output ────────────────────────────────────────
+
+    #[test]
+    fn json_full_output_single_and_batch_shapes() {
+        let single = FfnOutput {
+            entries: vec![FfnEntry {
+                layer: 7,
+                output: vec![1.0, 2.0, 3.0],
+            }],
+            seq_len: 1,
+            latency_ms: 4.24,
+        };
+        let v = encode_json_full_output(&single);
+        assert_eq!(v["layer"].as_u64(), Some(7));
+        assert!(v.get("results").is_none());
+        assert_eq!(v["latency_ms"].as_f64(), Some(4.2)); // rounded to 0.1
+
+        let batch = FfnOutput {
+            entries: vec![
+                FfnEntry {
+                    layer: 0,
+                    output: vec![1.0],
+                },
+                FfnEntry {
+                    layer: 1,
+                    output: vec![2.0],
+                },
+            ],
+            seq_len: 2,
+            latency_ms: 20.0,
+        };
+        let v = encode_json_full_output(&batch);
+        let results = v["results"].as_array().unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[1]["layer"].as_u64(), Some(1));
+        assert_eq!(results[1]["seq_len"].as_u64(), Some(2));
     }
 }

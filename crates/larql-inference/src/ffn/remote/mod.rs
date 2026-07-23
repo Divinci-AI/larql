@@ -61,7 +61,9 @@ pub mod q8k_wire;
 pub mod sharded;
 
 pub use codec::{
-    decode_single_response, encode_binary_request, RemoteLatencyStats, BINARY_CT, F16_CT, I8_CT,
+    decode_binary_request, decode_single_response, encode_binary_output, encode_binary_output_f16,
+    encode_binary_output_i8, encode_binary_request, encode_json_full_output, DecodedFfnRequest,
+    FfnEntry, FfnOutput, RemoteLatencyStats, BATCH_MARKER, BINARY_CT, F16_CT, I8_CT,
 };
 pub use http::{
     RemoteFfnConfig, RemoteFfnError, RemoteWalkBackend, WirePreference, STATS_PATH, WALK_FFN_PATH,

@@ -367,6 +367,11 @@ impl RemoteWalkBackend {
     ) -> Result<HashMap<usize, Vec<f32>>, RemoteFfnError> {
         let url = format!("{}{WALK_FFN_Q8K_PATH}", self.config.base_url);
         let body = encode_q8k_batch_request(layers);
+        // Same wire accounting as the f32 paths — the default Q8K
+        // predispatch path must show up in `bench --ffn` wire_bytes_per_tok
+        // (DEC-readiness review 2026-07-22 §4a).
+        self.wire_bytes_sent
+            .fetch_add(body.len() as u64, Ordering::Relaxed);
 
         let first_layer = layers.first().map(|(l, _)| *l).unwrap_or(0);
         let resp = self
@@ -396,6 +401,8 @@ impl RemoteWalkBackend {
         let resp_bytes = resp
             .bytes()
             .map_err(|e| RemoteFfnError::BadResponse(e.to_string()))?;
+        self.wire_bytes_recv
+            .fetch_add(resp_bytes.len() as u64, Ordering::Relaxed);
 
         decode_q8k_batch_response(&resp_bytes).map_err(RemoteFfnError::BadResponse)
     }

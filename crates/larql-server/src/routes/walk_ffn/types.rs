@@ -44,8 +44,11 @@ pub(crate) fn track_model_request(state: &crate::state::AppState) -> Option<RifG
     })
 }
 
-pub(crate) const BINARY_CT: &str = "application/x-larql-ffn";
-pub(crate) const BATCH_MARKER: u32 = 0xFFFF_FFFF;
+// Wire constants are single-sourced in the shared codec (ROADMAP
+// hardening item 16); `BINARY_CT` is re-exported here so the handler
+// keeps its historical `super::types::BINARY_CT` path. `BATCH_MARKER`
+// lives at `larql_inference::ffn::remote::BATCH_MARKER`.
+pub(crate) use larql_inference::ffn::remote::BINARY_CT;
 
 #[derive(Deserialize)]
 pub struct WalkFfnRequest {
@@ -87,14 +90,8 @@ fn default_top_k() -> usize {
 }
 
 // ── Typed output structs (shared by JSON + binary encoders) ──────────────────
-
-pub(crate) struct FfnEntry {
-    pub(crate) layer: usize,
-    pub(crate) output: Vec<f32>,
-}
-
-pub(crate) struct FfnOutput {
-    pub(crate) entries: Vec<FfnEntry>,
-    pub(crate) seq_len: usize,
-    pub(crate) latency_ms: f64,
-}
+//
+// `FfnEntry`/`FfnOutput` moved into the shared codec alongside the
+// encoders that consume them; re-exported to preserve the
+// `super::types::{FfnEntry, FfnOutput}` paths used by `core`/`binary`.
+pub(crate) use larql_inference::ffn::remote::{FfnEntry, FfnOutput};
