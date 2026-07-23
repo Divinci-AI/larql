@@ -106,6 +106,22 @@ impl EndpointKind {
     }
 }
 
+/// Where an endpoint's server-side serve latency comes from (two-scoreboard
+/// schema, dec-funnel §3 DEC-1A). Successor of the boolean `has_server_ms`:
+/// every endpoint now has a serve-latency source — the f32 walk-ffn response
+/// embeds `latency_ms` in its fixed header; the other three carry the opt-in
+/// timing trailer (`x-larql-timing: 1` request header → 8-byte magic +
+/// serve_us f32 trailer, absent on pre-extension servers).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServeLatencySource {
+    /// `latency_ms` f32 embedded at bytes 8–11 of the response header
+    /// (always present — no opt-in needed).
+    EmbeddedMs,
+    /// Header-gated timing trailer appended after the payload; `None` at
+    /// decode time when the server predates the extension.
+    TimingTrailer,
+}
+
 /// Which movement-ratio denominator an endpoint's byte accounting uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DenominatorSource {
@@ -199,11 +215,17 @@ impl Endpoint {
         }
     }
 
-    /// Whether the response embeds a server compute-latency field. Only the
-    /// f32 walk-ffn response carries one; the q8k walk-ffn and both
-    /// multi-layer responses have no latency field (audit §2).
-    pub fn has_server_ms(self) -> bool {
-        matches!(self, Self::WalkFfn)
+    /// How this endpoint's response reports server compute latency. The f32
+    /// walk-ffn response embeds `latency_ms` in its header; the q8k
+    /// walk-ffn and both multi-layer responses carry the opt-in timing
+    /// trailer instead (audit §2 closed by the DEC-1A timing extension).
+    pub fn serve_latency_source(self) -> ServeLatencySource {
+        match self {
+            Self::WalkFfn => ServeLatencySource::EmbeddedMs,
+            Self::WalkFfnQ8k | Self::ExpertsMultiLayer | Self::ExpertsMultiLayerQ8k => {
+                ServeLatencySource::TimingTrailer
+            }
+        }
     }
 
     /// Movement-ratio denominator family.
@@ -510,10 +532,30 @@ pub fn wire_label_for_content_type(ct: &str) -> String {
 #[derive(Debug, Clone)]
 pub struct RequestSample {
     pub layer: usize,
+    /// Wall time of the send→receive window ONLY: frame encode happens
+    /// before this timer starts and response decode after it stops, so
+    /// `client_ms = transmit + serve` exactly (see [`derive_transmit_us`]).
     pub client_ms: f64,
-    /// Server compute ms from the embedded response header; `None` on the
-    /// Q8K endpoint (its response carries no latency field).
+    /// Legacy field: server compute ms from the f32 walk-ffn embedded
+    /// response header; `None` on the other endpoints. Kept so the
+    /// pre-two-scoreboard `server_ms_p50/p99` summary keys are unchanged;
+    /// `serve_us` is the unified successor covering all four endpoints.
     pub server_ms: Option<f64>,
+    /// Server-side serve time in µs, from the endpoint's
+    /// [`ServeLatencySource`]: embedded header (walk-ffn) or the opt-in
+    /// timing trailer (the other three). `None` when the server predates
+    /// the timing extension.
+    pub serve_us: Option<f64>,
+    /// Client frame-build time in µs (request encode, outside `client_ms`).
+    pub encode_us: f64,
+    /// Client response-decode time in µs (outside `client_ms`).
+    pub client_decode_us: f64,
+    /// `client_ms×1000 − serve_us` when serve is known (see
+    /// [`derive_transmit_us`]); clamped at 0, never negative.
+    pub transmit_us: Option<f64>,
+    /// True when the transmit derivation went negative and was clamped —
+    /// summaries count these so a clock anomaly is visible, not silent.
+    pub transmit_clamped: bool,
     pub bytes_sent: u64,
     pub bytes_recv: u64,
     /// Wire format the server actually served (from the response
@@ -524,6 +566,31 @@ pub struct RequestSample {
     /// post-warmup corruption guard on routed points (audit §1a class);
     /// computed at decode time, outside the timed window.
     pub any_nonzero: bool,
+}
+
+/// Derive one request's transmit time (µs) from its send→receive window
+/// and the server-reported serve time.
+///
+/// `client_ms` covers send→receive only (encode runs before the timer,
+/// decode after), so the two-scoreboard identity
+/// `total = encode + transmit + serve + client_decode` collapses to
+/// `transmit_us = client_ms×1000 − serve_us` — `encode_us` and
+/// `client_decode_us` are measured outside the window and must NOT be
+/// subtracted again. Unknown serve → `(None, false)`. A negative result
+/// (clock granularity, or a serve clock that starts before the last
+/// request byte lands) clamps to 0 with the flag set — never negative.
+pub fn derive_transmit_us(client_ms: f64, serve_us: Option<f64>) -> (Option<f64>, bool) {
+    match serve_us {
+        None => (None, false),
+        Some(s) => {
+            let t = client_ms * 1000.0 - s;
+            if t < 0.0 {
+                (Some(0.0), true)
+            } else {
+                (Some(t), false)
+            }
+        }
+    }
 }
 
 /// Accumulated raw measurements for one sweep point.
@@ -590,6 +657,33 @@ pub struct DecPointSummary {
     pub experts_union_frac: Option<f64>,
     pub server_ms_p50: Option<f64>,
     pub server_ms_p99: Option<f64>,
+    // ── Two-scoreboard timing decomposition (dec-funnel §3 DEC-1A) ───────
+    /// Driver-side queueing delay before send. Recorded as a schema field
+    /// now; always 0.0 at the replay driver's concurrency of 1 (each
+    /// worker has exactly one request in flight, so nothing ever waits in
+    /// a client-side queue). Becomes meaningful on DEC-2's client-count
+    /// axis — the field exists so the schema is stable before that axis.
+    pub queue_ms: f64,
+    /// p50 of per-request frame-build time (µs, outside `client_ms`).
+    pub encode_us_p50: f64,
+    /// p50 of per-request response-decode time (µs, outside `client_ms`).
+    pub client_decode_us_p50: f64,
+    /// p50/p99 of server serve time (µs) from the endpoint's
+    /// [`ServeLatencySource`]; absent when the server never reported one
+    /// (pre-extension server on a trailer endpoint).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub serve_us_p50: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub serve_us_p99: Option<f64>,
+    /// p50/p99 of derived transmit time (µs) — `client_ms×1000 − serve_us`
+    /// per request; absent whenever serve is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transmit_us_p50: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transmit_us_p99: Option<f64>,
+    /// Number of samples whose transmit derivation clamped at 0 (serve ≥
+    /// measured window — clock anomaly, counted rather than hidden).
+    pub transmit_us_clamped: usize,
     pub per_layer: Vec<LayerSummary>,
 }
 
@@ -627,6 +721,32 @@ pub fn summarize(
     } else {
         let (_, p50, p99) = compute_percentiles(&server_samples);
         (Some(p50), Some(p99))
+    };
+
+    // Two-scoreboard decomposition: percentile pair for an optional per-
+    // sample series (present only when at least one sample carried it).
+    let optional_percentiles = |vals: Vec<f64>| -> (Option<f64>, Option<f64>) {
+        if vals.is_empty() {
+            (None, None)
+        } else {
+            let (_, p50, p99) = compute_percentiles(&vals);
+            (Some(p50), Some(p99))
+        }
+    };
+    let (serve_us_p50, serve_us_p99) =
+        optional_percentiles(stats.samples.iter().filter_map(|s| s.serve_us).collect());
+    let (transmit_us_p50, transmit_us_p99) =
+        optional_percentiles(stats.samples.iter().filter_map(|s| s.transmit_us).collect());
+    let transmit_us_clamped = stats.samples.iter().filter(|s| s.transmit_clamped).count();
+    let encode_us_p50 = {
+        let vals: Vec<f64> = stats.samples.iter().map(|s| s.encode_us).collect();
+        let (_, p50, _) = compute_percentiles(&vals);
+        p50
+    };
+    let client_decode_us_p50 = {
+        let vals: Vec<f64> = stats.samples.iter().map(|s| s.client_decode_us).collect();
+        let (_, p50, _) = compute_percentiles(&vals);
+        p50
     };
 
     let mut served_wire: Vec<String> = stats
@@ -699,6 +819,16 @@ pub fn summarize(
         experts_union_frac,
         server_ms_p50,
         server_ms_p99,
+        // Two-scoreboard fields. queue_ms is structurally 0 at the replay
+        // driver's concurrency of 1 (see the field doc) — DEC-2's axis.
+        queue_ms: 0.0,
+        encode_us_p50,
+        client_decode_us_p50,
+        serve_us_p50,
+        serve_us_p99,
+        transmit_us_p50,
+        transmit_us_p99,
+        transmit_us_clamped,
         per_layer,
     }
 }
@@ -1033,10 +1163,19 @@ mod tests {
     // ── summaries ──────────────────────────────────────────────────────
 
     fn sample(layer: usize, client_ms: f64, server_ms: Option<f64>) -> RequestSample {
+        // serve_us mirrors what send_one does: embedded server_ms × 1000
+        // when present; transmit derived through derive_transmit_us.
+        let serve_us = server_ms.map(|ms| ms * 1000.0);
+        let (transmit_us, transmit_clamped) = derive_transmit_us(client_ms, serve_us);
         RequestSample {
             layer,
             client_ms,
             server_ms,
+            serve_us,
+            encode_us: 40.0,
+            client_decode_us: 25.0,
+            transmit_us,
+            transmit_clamped,
             bytes_sent: 100,
             bytes_recv: 60,
             served_wire: "f16".into(),
@@ -1098,6 +1237,115 @@ mod tests {
         };
         let s = summarize(&point, &stats, None, None);
         assert!(s.server_ms_p50.is_none(), "q8k has no embedded latency");
+    }
+
+    // ── two-scoreboard timing decomposition (dec-funnel §3 DEC-1A) ─────
+
+    #[test]
+    fn derive_transmit_us_subtracts_serve_from_client_window() {
+        // client_ms covers send→receive only, so transmit = client − serve.
+        let (t, clamped) = derive_transmit_us(5.0, Some(3200.0));
+        assert_eq!(t, Some(5000.0 - 3200.0));
+        assert!(!clamped);
+    }
+
+    #[test]
+    fn derive_transmit_us_none_without_serve() {
+        assert_eq!(derive_transmit_us(5.0, None), (None, false));
+    }
+
+    #[test]
+    fn derive_transmit_us_clamps_negative_to_zero_and_flags() {
+        // serve ≥ measured window (clock anomaly): clamp at 0, flag it.
+        let (t, clamped) = derive_transmit_us(1.0, Some(1500.0));
+        assert_eq!(t, Some(0.0));
+        assert!(clamped);
+        // Exactly equal is 0 but NOT an anomaly.
+        let (t, clamped) = derive_transmit_us(1.0, Some(1000.0));
+        assert_eq!(t, Some(0.0));
+        assert!(!clamped);
+    }
+
+    #[test]
+    fn summarize_two_scoreboard_fields_from_samples() {
+        let point = SweepPoint {
+            batch: 2,
+            wire: WireArm::F32,
+            dispatch: DispatchMode::Streaming,
+            endpoint: Endpoint::WalkFfn,
+        };
+        let stats = SweepPointStats {
+            step_ms: vec![10.0, 20.0],
+            samples: vec![
+                sample(0, 4.0, Some(3.0)),  // serve 3000us, transmit 1000us
+                sample(1, 6.0, Some(5.0)),  // serve 5000us, transmit 1000us
+                sample(0, 8.0, Some(6.0)),  // serve 6000us, transmit 2000us
+                sample(1, 12.0, Some(9.0)), // serve 9000us, transmit 3000us
+            ],
+        };
+        let s = summarize(&point, &stats, None, None);
+        // queue_ms structurally 0 at driver concurrency 1.
+        assert_eq!(s.queue_ms, 0.0);
+        assert_eq!(s.encode_us_p50, 40.0);
+        assert_eq!(s.client_decode_us_p50, 25.0);
+        // Nearest-rank percentiles over serve [3000, 5000, 6000, 9000]us:
+        // p50 idx 2 → 6000, p99 idx 3 → 9000.
+        assert_eq!(s.serve_us_p50, Some(6000.0));
+        assert_eq!(s.serve_us_p99, Some(9000.0));
+        // transmit [1000, 1000, 2000, 3000]us: p50 idx 2 → 2000.
+        assert_eq!(s.transmit_us_p50, Some(2000.0));
+        assert_eq!(s.transmit_us_p99, Some(3000.0));
+        assert_eq!(s.transmit_us_clamped, 0);
+        // serve_us is the µs twin of the legacy server_ms scoreboard.
+        assert_eq!(s.server_ms_p50, Some(6.0));
+    }
+
+    #[test]
+    fn summarize_counts_clamped_transmit_samples() {
+        let point = SweepPoint {
+            batch: 1,
+            wire: WireArm::F32,
+            dispatch: DispatchMode::Streaming,
+            endpoint: Endpoint::WalkFfn,
+        };
+        let stats = SweepPointStats {
+            step_ms: vec![1.0],
+            // serve (2500us) exceeds the 1ms client window → clamped.
+            samples: vec![sample(0, 1.0, Some(2.5)), sample(0, 4.0, Some(2.0))],
+        };
+        let s = summarize(&point, &stats, None, None);
+        assert_eq!(s.transmit_us_clamped, 1);
+        // Clamped sample contributes 0 (not a negative) to the transmit
+        // series [0, 2000]us — nearest-rank p50/p99 both land on idx 1.
+        assert_eq!(s.transmit_us_p50, Some(2000.0));
+        assert_eq!(s.transmit_us_p99, Some(2000.0));
+    }
+
+    #[test]
+    fn summarize_omits_serve_and_transmit_without_timing_data() {
+        // Pre-extension server on a trailer endpoint: serve_us all None →
+        // serve/transmit keys absent from the serialised summary, while
+        // encode/decode/queue (client-measured) are always present.
+        let point = SweepPoint {
+            batch: 1,
+            wire: WireArm::Q8k,
+            dispatch: DispatchMode::Streaming,
+            endpoint: Endpoint::WalkFfnQ8k,
+        };
+        let stats = SweepPointStats {
+            step_ms: vec![5.0],
+            samples: vec![sample(0, 5.0, None)],
+        };
+        let s = summarize(&point, &stats, None, None);
+        assert_eq!(s.serve_us_p50, None);
+        assert_eq!(s.transmit_us_p50, None);
+        assert_eq!(s.transmit_us_clamped, 0);
+        let json = serde_json::to_value(&s).unwrap();
+        assert!(json.get("serve_us_p50").is_none(), "omitted when None");
+        assert!(json.get("transmit_us_p50").is_none());
+        assert!(json.get("queue_ms").is_some());
+        assert!(json.get("encode_us_p50").is_some());
+        assert!(json.get("client_decode_us_p50").is_some());
     }
 
     // ── movement ratio + weight bytes ──────────────────────────────────
@@ -1272,11 +1520,15 @@ mod tests {
             ExpertsMultiLayerQ8k.accept(WireArm::Q8k),
             Some(MULTI_LAYER_BATCH_CONTENT_TYPE)
         );
-        // server_ms: only the f32 walk-ffn response embeds latency.
-        assert!(WalkFfn.has_server_ms());
-        assert!(!WalkFfnQ8k.has_server_ms());
-        assert!(!ExpertsMultiLayer.has_server_ms());
-        assert!(!ExpertsMultiLayerQ8k.has_server_ms());
+        // Serve-latency source: only the f32 walk-ffn response embeds
+        // latency in its header; the other three use the opt-in trailer.
+        assert_eq!(
+            WalkFfn.serve_latency_source(),
+            ServeLatencySource::EmbeddedMs
+        );
+        for e in [WalkFfnQ8k, ExpertsMultiLayer, ExpertsMultiLayerQ8k] {
+            assert_eq!(e.serve_latency_source(), ServeLatencySource::TimingTrailer);
+        }
         // Denominator source + routing requirement.
         assert_eq!(WalkFfn.denominator(), DenominatorSource::Dense);
         assert_eq!(WalkFfnQ8k.denominator(), DenominatorSource::Dense);

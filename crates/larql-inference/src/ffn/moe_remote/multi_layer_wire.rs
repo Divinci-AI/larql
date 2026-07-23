@@ -741,6 +741,102 @@ mod tests {
         assert_eq!(encode_multi_layer_response(&decoded), encoded);
     }
 
+    // ── Timing-trailer extension (DEC-1A two-scoreboard schema) ──────────
+
+    use crate::ffn::remote::timing::{append_timing_trailer, split_timing_trailer};
+
+    #[test]
+    fn extended_response_splits_then_decodes_identically() {
+        let results = vec![
+            MultiLayerResult {
+                layer: 3,
+                h2: vec![0.1, 0.2, 0.3],
+            },
+            MultiLayerResult {
+                layer: 15,
+                h2: vec![-1.0, 0.0, 1.0],
+            },
+        ];
+        let plain = encode_multi_layer_response(&results);
+        let mut extended = plain.clone();
+        append_timing_trailer(&mut extended, 777.0);
+        assert_eq!(extended.len(), plain.len() + 8);
+
+        let (payload, serve_us) = split_timing_trailer(&extended);
+        assert_eq!(payload, plain.as_slice());
+        assert_eq!(serve_us, Some(777.0));
+        let decoded = decode_multi_layer_response(payload).unwrap();
+        assert_eq!(decoded.len(), 2);
+        assert_eq!(decoded[0].layer, 3);
+        assert_eq!(decoded[1].h2, vec![-1.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn non_timing_decoder_tolerates_extended_response() {
+        // A non-timing-aware decoder fed the extended frame must still
+        // work: it reads exactly `num_results` results and ignores
+        // trailing bytes by design.
+        let results = vec![MultiLayerResult {
+            layer: 1,
+            h2: vec![2.0, -2.0],
+        }];
+        let mut extended = encode_multi_layer_response(&results);
+        append_timing_trailer(&mut extended, 3.5);
+        let decoded = decode_multi_layer_response(&extended).unwrap();
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].layer, 1);
+        assert_eq!(decoded[0].h2, vec![2.0, -2.0]);
+    }
+
+    #[test]
+    fn plain_response_split_returns_none_and_full_payload() {
+        // Old-server path: an all-zero h2 tail must not look like a
+        // trailer (magic can't be zero).
+        let results = vec![MultiLayerResult {
+            layer: 0,
+            h2: vec![0.0; 4],
+        }];
+        let plain = encode_multi_layer_response(&results);
+        let (payload, serve_us) = split_timing_trailer(&plain);
+        assert_eq!(payload, plain.as_slice());
+        assert_eq!(serve_us, None);
+    }
+
+    #[test]
+    fn result_count_guard_still_rejects_with_trailer_present() {
+        // Guard preservation: the response alloc-bomb bound must keep
+        // rejecting garbage counts with the 8-byte trailer appended.
+        let mut body = Vec::new();
+        body.extend_from_slice(&u32::MAX.to_le_bytes()); // num_results
+        append_timing_trailer(&mut body, 1.0);
+        assert!(decode_multi_layer_response(&body).is_none());
+        let (payload, _) = split_timing_trailer(&body);
+        assert!(decode_multi_layer_response(payload).is_none());
+    }
+
+    #[test]
+    fn extended_response_split_reencode_reappend_is_byte_identical() {
+        // Byte-identity pin for the extended multi-layer frame.
+        let results = vec![
+            MultiLayerResult {
+                layer: 4,
+                h2: vec![0.125, -3.5, 1e-20],
+            },
+            MultiLayerResult {
+                layer: 17,
+                h2: vec![f32::MAX],
+            },
+        ];
+        let mut extended = encode_multi_layer_response(&results);
+        append_timing_trailer(&mut extended, 12.5);
+
+        let (payload, serve_us) = split_timing_trailer(&extended);
+        let decoded = decode_multi_layer_response(payload).unwrap();
+        let mut rebuilt = encode_multi_layer_response(&decoded);
+        append_timing_trailer(&mut rebuilt, serve_us.unwrap() as f32);
+        assert_eq!(rebuilt, extended);
+    }
+
     #[test]
     fn read_i8_slice_handles_signed_bytes() {
         // i8 round-trip via u8 byte storage: 0xff (255) must surface as -1.

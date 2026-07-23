@@ -59,6 +59,7 @@ pub mod codec;
 mod http;
 pub mod q8k_wire;
 pub mod sharded;
+pub mod timing;
 
 pub use codec::{
     decode_binary_request, decode_single_response, encode_binary_output, encode_binary_output_f16,
@@ -74,3 +75,7 @@ pub use q8k_wire::{
     encode_q8k_batch_request, encode_q8k_batch_response, Q8KRequestEntry, Q8K_BATCH_CT,
 };
 pub use sharded::LayerShardedBackend;
+pub use timing::{
+    append_timing_trailer, split_timing_trailer, timing_requested, TIMING_HEADER,
+    TIMING_HEADER_VALUE, TIMING_TRAILER_LEN, TIMING_TRAILER_MAGIC,
+};

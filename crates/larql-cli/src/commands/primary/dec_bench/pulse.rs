@@ -54,6 +54,25 @@ pub fn pulse_line(
     if let Some(p99) = s.server_ms_p99 {
         obj.insert("dec/server_ms_p99".into(), num(p99));
     }
+    // Two-scoreboard timing decomposition (dec-funnel §3 DEC-1A).
+    // queue/encode/client_decode are client-measured and always exist
+    // (queue_ms is structurally 0 at driver concurrency 1 — DEC-2's axis);
+    // serve/transmit exist only when the server reported serve latency.
+    obj.insert("dec/queue_ms".into(), num(s.queue_ms));
+    obj.insert("dec/encode_us_p50".into(), num(s.encode_us_p50));
+    obj.insert(
+        "dec/client_decode_us_p50".into(),
+        num(s.client_decode_us_p50),
+    );
+    if let Some(p50) = s.serve_us_p50 {
+        obj.insert("dec/serve_us_p50".into(), num(p50));
+    }
+    if let Some(p99) = s.serve_us_p99 {
+        obj.insert("dec/serve_us_p99".into(), num(p99));
+    }
+    if let Some(p50) = s.transmit_us_p50 {
+        obj.insert("dec/transmit_us_p50".into(), num(p50));
+    }
     if let Some(rtt) = net_rtt_ms {
         obj.insert("net/rtt_ms".into(), num(rtt));
     }
@@ -114,6 +133,14 @@ mod tests {
             experts_union_frac: None,
             server_ms_p50: Some(9.0),
             server_ms_p99: Some(15.0),
+            queue_ms: 0.0,
+            encode_us_p50: 120.0,
+            client_decode_us_p50: 80.0,
+            serve_us_p50: Some(9000.0),
+            serve_us_p99: Some(15000.0),
+            transmit_us_p50: Some(3000.0),
+            transmit_us_p99: Some(5000.0),
+            transmit_us_clamped: 0,
             per_layer: vec![LayerSummary {
                 layer: 3,
                 client_ms_p50: 0.4,
@@ -147,6 +174,31 @@ mod tests {
         assert!(line.get("dec/experts_union_frac").is_none());
         // Per-layer keys only under the flag.
         assert!(line.get("dec/layer3_ms_p50").is_none());
+        // Two-scoreboard keys (dec-funnel §3 DEC-1A).
+        assert_eq!(line["dec/queue_ms"], 0.0);
+        assert_eq!(line["dec/encode_us_p50"], 120.0);
+        assert_eq!(line["dec/client_decode_us_p50"], 80.0);
+        assert_eq!(line["dec/serve_us_p50"], 9000.0);
+        assert_eq!(line["dec/serve_us_p99"], 15000.0);
+        assert_eq!(line["dec/transmit_us_p50"], 3000.0);
+    }
+
+    #[test]
+    fn pulse_line_omits_serve_and_transmit_without_timing_data() {
+        // Pre-extension server on a trailer endpoint: serve/transmit keys
+        // absent; the client-measured decomposition keys stay.
+        let mut s = summary();
+        s.serve_us_p50 = None;
+        s.serve_us_p99 = None;
+        s.transmit_us_p50 = None;
+        s.transmit_us_p99 = None;
+        let line = pulse_line(0, &s, None, None, false);
+        assert!(line.get("dec/serve_us_p50").is_none());
+        assert!(line.get("dec/serve_us_p99").is_none());
+        assert!(line.get("dec/transmit_us_p50").is_none());
+        assert!(line["dec/queue_ms"].is_number());
+        assert!(line["dec/encode_us_p50"].is_number());
+        assert!(line["dec/client_decode_us_p50"].is_number());
     }
 
     #[test]

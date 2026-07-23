@@ -65,12 +65,29 @@ pub async fn handle_walk_ffn_q8k(
     // drain and req_per_sec before).
     let _rif_guard = super::types::track_model_request(&state);
 
+    // Opt-in timing extension (DEC-1A two-scoreboard schema): when the
+    // client sends `x-larql-timing: 1`, append the 8-byte serve_us trailer
+    // to the response. Without the header the response bytes are
+    // byte-identical to the pre-extension wire.
+    let timing = larql_inference::ffn::remote::timing_requested(
+        request
+            .headers()
+            .get(larql_inference::ffn::remote::TIMING_HEADER)
+            .and_then(|v| v.to_str().ok()),
+    );
+
     let body = axum::body::to_bytes(request.into_body(), 64 * 1024 * 1024)
         .await
         .map_err(|e| crate::error::ServerError::BadRequest(format!("read body: {e}")))?;
 
+    // serve_us clock: starts once the request body is fully received —
+    // upload time belongs to the client's transmit term, not serve.
+    let t_serve = std::time::Instant::now();
+
     let result = tokio::task::spawn_blocking(move || {
-        use larql_inference::ffn::remote::{decode_q8k_batch_request, encode_q8k_batch_response};
+        use larql_inference::ffn::remote::{
+            append_timing_trailer, decode_q8k_batch_request, encode_q8k_batch_response,
+        };
         use larql_inference::vindex::{kquant_ffn_forward_layer, kquant_ffn_forward_layer_q8k};
 
         let model = state
@@ -195,7 +212,13 @@ pub async fn handle_walk_ffn_q8k(
                         .iter()
                         .map(|(l, v)| (*l, v.as_slice()))
                         .collect();
-                    let resp_bytes = encode_q8k_batch_response(&ref_entries);
+                    let mut resp_bytes = encode_q8k_batch_response(&ref_entries);
+                    if timing {
+                        append_timing_trailer(
+                            &mut resp_bytes,
+                            t_serve.elapsed().as_secs_f32() * 1e6,
+                        );
+                    }
                     if model.release_mmap_after_request {
                         patched.base().release_mmap_pages();
                     }
@@ -305,7 +328,10 @@ pub async fn handle_walk_ffn_q8k(
             .iter()
             .map(|(l, v)| (*l, v.as_slice()))
             .collect();
-        let resp_bytes = encode_q8k_batch_response(&ref_entries);
+        let mut resp_bytes = encode_q8k_batch_response(&ref_entries);
+        if timing {
+            append_timing_trailer(&mut resp_bytes, t_serve.elapsed().as_secs_f32() * 1e6);
+        }
 
         if model.release_mmap_after_request {
             patched.base().release_mmap_pages();
