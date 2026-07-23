@@ -28,6 +28,7 @@ use larql_inference::ffn::moe_remote::{
     decode_multi_layer_request, decode_multi_layer_request_q8k, encode_multi_layer_response,
     MultiLayerResult, MultiLayerTaskQ8K, MULTI_LAYER_BATCH_CONTENT_TYPE,
 };
+use larql_inference::ffn::remote::{append_timing_trailer, timing_requested, TIMING_HEADER};
 
 use crate::env_flags;
 use crate::error::ServerError;
@@ -54,11 +55,19 @@ use super::cpu::{
 )]
 pub async fn handle_experts_multi_layer_batch(
     State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
     body: Bytes,
 ) -> Result<Response, ServerError> {
     state.bump_requests();
     let _rif_guard = crate::routes::walk_ffn::types::track_model_request(&state);
     let timing = env_flags::http_timing_enabled();
+    // Opt-in timing extension (DEC-1A two-scoreboard schema): with
+    // `x-larql-timing: 1` the response gains the 8-byte serve_us trailer;
+    // without it the bytes are byte-identical to the pre-extension wire.
+    // The `Bytes` extractor has already drained the request body, so this
+    // clock starts post-receive — upload time stays in the client's
+    // transmit term.
+    let timing_trailer = timing_requested(headers.get(TIMING_HEADER).and_then(|v| v.to_str().ok()));
     let t_start = std::time::Instant::now();
 
     // Decode, validation, compute AND response encode all run inside
@@ -125,7 +134,11 @@ pub async fn handle_experts_multi_layer_batch(
                 })
                 .collect::<Result<Vec<_>, ServerError>>()?;
 
-            Ok((encode_multi_layer_response(&results), n_tasks))
+            let mut encoded = encode_multi_layer_response(&results);
+            if timing_trailer {
+                append_timing_trailer(&mut encoded, t_start.elapsed().as_secs_f32() * 1e6);
+            }
+            Ok((encoded, n_tasks))
         })
         .await
         .map_err(|e| ServerError::Internal(e.to_string()))??;
@@ -162,11 +175,14 @@ pub async fn handle_experts_multi_layer_batch(
 )]
 pub async fn handle_experts_multi_layer_batch_q8k(
     State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
     body: Bytes,
 ) -> Result<Response, ServerError> {
     state.bump_requests();
     let _rif_guard = crate::routes::walk_ffn::types::track_model_request(&state);
     let timing = env_flags::http_timing_enabled();
+    // Same opt-in serve_us trailer as `handle_experts_multi_layer_batch`.
+    let timing_trailer = timing_requested(headers.get(TIMING_HEADER).and_then(|v| v.to_str().ok()));
     let t_start = std::time::Instant::now();
 
     // Decode, validation, compute AND response encode all run inside
@@ -233,7 +249,11 @@ pub async fn handle_experts_multi_layer_batch_q8k(
                 })
                 .collect::<Result<Vec<_>, ServerError>>()?;
 
-            Ok((encode_multi_layer_response(&results), n_tasks))
+            let mut encoded = encode_multi_layer_response(&results);
+            if timing_trailer {
+                append_timing_trailer(&mut encoded, t_start.elapsed().as_secs_f32() * 1e6);
+            }
+            Ok((encoded, n_tasks))
         })
         .await
         .map_err(|e| ServerError::Internal(e.to_string()))??;

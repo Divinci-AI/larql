@@ -20,11 +20,11 @@ use super::capture_format::CapturePool;
 use super::output::{CaptureSummary, DecBenchJsonResult};
 use super::pulse;
 use super::replay::{
-    build_frame, check_experts_response, expand_sweep, gather_frame_inputs, moe_weight_stats,
-    parse_batch_list, parse_layer_range, routed_denominators_for_point, routed_layer_subset,
-    summarize, weight_bytes_per_token, wire_label_for_content_type, DispatchMode, Endpoint,
-    EndpointKind, FrameInputs, MoeWeightStats, RequestSample, RoutedDenominators, SweepPoint,
-    SweepPointStats, WireArm,
+    build_frame, check_experts_response, derive_transmit_us, expand_sweep, gather_frame_inputs,
+    moe_weight_stats, parse_batch_list, parse_layer_range, routed_denominators_for_point,
+    routed_layer_subset, summarize, weight_bytes_per_token, wire_label_for_content_type,
+    DispatchMode, Endpoint, EndpointKind, FrameInputs, MoeWeightStats, RequestSample,
+    RoutedDenominators, ServeLatencySource, SweepPoint, SweepPointStats, WireArm,
 };
 
 use larql_inference::ffn::remote::STATS_PATH;
@@ -398,6 +398,10 @@ fn run_point(
 /// through the same codecs the production client uses. Frame encode happens
 /// before the timer starts (streaming's `client_ms` = transport + server,
 /// matching the pre-seam behaviour); response decode happens after it stops.
+/// Encode and decode are timed separately (`encode_us`/`client_decode_us`),
+/// and every request opts into the serve_us timing extension via the
+/// `x-larql-timing: 1` header — the replay driver IS the new client
+/// (dec-funnel §3 DEC-1A two-scoreboard schema).
 fn send_one(
     client: &reqwest::blocking::Client,
     base_url: &str,
@@ -405,12 +409,16 @@ fn send_one(
     inputs: &FrameInputs,
     pool: &CapturePool,
 ) -> Result<RequestSample, Box<dyn std::error::Error>> {
+    use larql_inference::ffn::remote::{split_timing_trailer, TIMING_HEADER, TIMING_HEADER_VALUE};
+
     let hidden = pool.manifest.hidden_size;
     let batch = point.batch;
     let endpoint = point.endpoint;
     let layer = inputs.layer;
 
+    let t_enc = std::time::Instant::now();
     let body = build_frame(endpoint, inputs, batch, hidden)?;
+    let encode_us = t_enc.elapsed().as_secs_f64() * 1e6;
     let bytes_sent = body.len() as u64;
 
     let mut req = client
@@ -419,6 +427,7 @@ fn send_one(
             reqwest::header::CONTENT_TYPE,
             endpoint.request_content_type(),
         )
+        .header(TIMING_HEADER, TIMING_HEADER_VALUE)
         .body(body);
     if let Some(accept) = endpoint.accept(point.wire) {
         req = req.header(reqwest::header::ACCEPT, accept);
@@ -441,11 +450,21 @@ fn send_one(
         .into());
     }
 
-    match endpoint {
+    // Response decode — outside the timed send→receive window. Trailer
+    // endpoints strip the opt-in serve_us trailer BEFORE the production
+    // decoder runs, so its exact length checks see the pre-extension
+    // payload; a pre-extension server yields `trailer_us = None`.
+    let t_dec = std::time::Instant::now();
+    let (payload, trailer_us) = match endpoint.serve_latency_source() {
+        ServeLatencySource::TimingTrailer => split_timing_trailer(&resp_body),
+        ServeLatencySource::EmbeddedMs => (&resp_body[..], None),
+    };
+
+    let (server_ms, serve_us, served_wire, any_nonzero) = match endpoint {
         Endpoint::WalkFfn => {
             let resp_ct = resp_ct.unwrap_or_else(|| larql_inference::BINARY_CT.to_string());
             let (resp_layer, server_ms, floats) =
-                larql_inference::decode_single_response(&resp_ct, &resp_body, hidden)?;
+                larql_inference::decode_single_response(&resp_ct, payload, hidden)?;
             if resp_layer != layer || floats.len() != batch * hidden {
                 return Err(format!(
                     "walk-ffn replay layer {layer}: expected {batch}×{hidden} floats for \
@@ -454,21 +473,17 @@ fn send_one(
                 )
                 .into());
             }
-            // The Endpoint owns whether a server-side latency figure exists
-            // (audit §2: only the f32 walk-ffn response carries one).
-            debug_assert!(endpoint.has_server_ms());
-            Ok(RequestSample {
-                layer,
-                client_ms,
-                server_ms: endpoint.has_server_ms().then_some(server_ms),
-                bytes_sent,
-                bytes_recv: resp_body.len() as u64,
-                served_wire: wire_label_for_content_type(&resp_ct),
-                any_nonzero: floats.iter().any(|&v| v != 0.0),
-            })
+            // The f32 walk-ffn response embeds its latency in the header
+            // (audit §2); serve_us is its µs twin.
+            (
+                Some(server_ms),
+                Some(server_ms * 1000.0),
+                wire_label_for_content_type(&resp_ct),
+                floats.iter().any(|&v| v != 0.0),
+            )
         }
         Endpoint::WalkFfnQ8k => {
-            let entries = larql_inference::decode_q8k_batch_response_entries(&resp_body)?;
+            let entries = larql_inference::decode_q8k_batch_response_entries(payload)?;
             if entries.len() != batch
                 || entries
                     .iter()
@@ -481,30 +496,37 @@ fn send_one(
                 )
                 .into());
             }
-            Ok(RequestSample {
-                layer,
-                client_ms,
-                server_ms: None,
-                bytes_sent,
-                bytes_recv: resp_body.len() as u64,
-                served_wire: "q8k".into(),
-                any_nonzero: entries.iter().any(|(_, v)| v.iter().any(|&x| x != 0.0)),
-            })
+            let any_nonzero = entries.iter().any(|(_, v)| v.iter().any(|&x| x != 0.0));
+            (None, trailer_us, "q8k".into(), any_nonzero)
         }
         Endpoint::ExpertsMultiLayer | Endpoint::ExpertsMultiLayerQ8k => {
-            let any_nonzero = check_experts_response(&resp_body, layer, batch, hidden)?;
+            let any_nonzero = check_experts_response(payload, layer, batch, hidden)?;
             let served_ct = resp_ct.unwrap_or_else(|| {
                 larql_inference::ffn::moe_remote::MULTI_LAYER_BATCH_CONTENT_TYPE.to_string()
             });
-            Ok(RequestSample {
-                layer,
-                client_ms,
-                server_ms: None,
-                bytes_sent,
-                bytes_recv: resp_body.len() as u64,
-                served_wire: wire_label_for_content_type(&served_ct),
+            (
+                None,
+                trailer_us,
+                wire_label_for_content_type(&served_ct),
                 any_nonzero,
-            })
+            )
         }
-    }
+    };
+    let client_decode_us = t_dec.elapsed().as_secs_f64() * 1e6;
+    let (transmit_us, transmit_clamped) = derive_transmit_us(client_ms, serve_us);
+
+    Ok(RequestSample {
+        layer,
+        client_ms,
+        server_ms,
+        serve_us,
+        encode_us,
+        client_decode_us,
+        transmit_us,
+        transmit_clamped,
+        bytes_sent,
+        bytes_recv: resp_body.len() as u64,
+        served_wire,
+        any_nonzero,
+    })
 }

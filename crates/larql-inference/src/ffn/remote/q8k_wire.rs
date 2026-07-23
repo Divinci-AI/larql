@@ -338,6 +338,86 @@ mod tests {
         assert!(result.is_err());
     }
 
+    // ── Timing-trailer extension (DEC-1A two-scoreboard schema) ──────────
+
+    use crate::ffn::remote::timing::{append_timing_trailer, split_timing_trailer};
+
+    #[test]
+    fn extended_response_splits_then_decodes_identically() {
+        let out0 = vec![1.0f32, 2.0, -3.5];
+        let out1 = vec![-0.5f32, 0.0, 7.0];
+        let entries: Vec<(usize, &[f32])> = vec![(5usize, &out0), (7usize, &out1)];
+        let plain = encode_q8k_batch_response(&entries);
+
+        let mut extended = plain.clone();
+        append_timing_trailer(&mut extended, 321.5);
+        assert_eq!(extended.len(), plain.len() + 8);
+
+        // New-client path: strip the trailer, then the normal decoder sees
+        // exactly the pre-extension payload.
+        let (payload, serve_us) = split_timing_trailer(&extended);
+        assert_eq!(payload, plain.as_slice());
+        assert!((serve_us.unwrap() - 321.5).abs() < 1e-6);
+        let decoded = decode_q8k_batch_response_entries(payload).unwrap();
+        assert_eq!(decoded, vec![(5, out0.clone()), (7, out1.clone())]);
+    }
+
+    #[test]
+    fn non_timing_decoder_tolerates_extended_response() {
+        // A non-timing-aware decoder fed the extended frame must still
+        // work: the decoder reads exactly `num_entries` entries and
+        // ignores trailing bytes by design.
+        let out = vec![4.0f32, -4.0];
+        let entries: Vec<(usize, &[f32])> = vec![(3usize, &out)];
+        let mut extended = encode_q8k_batch_response(&entries);
+        append_timing_trailer(&mut extended, 10.0);
+        let decoded = decode_q8k_batch_response_entries(&extended).unwrap();
+        assert_eq!(decoded, vec![(3, out)]);
+    }
+
+    #[test]
+    fn plain_response_split_returns_none_and_full_payload() {
+        // Old-server path: no trailer appended; the new client's split is
+        // a no-op (zero-float tails don't match the magic).
+        let out = vec![0.0f32, 0.0];
+        let entries: Vec<(usize, &[f32])> = vec![(0usize, &out)];
+        let plain = encode_q8k_batch_response(&entries);
+        let (payload, serve_us) = split_timing_trailer(&plain);
+        assert_eq!(payload, plain.as_slice());
+        assert_eq!(serve_us, None);
+    }
+
+    #[test]
+    fn entry_count_guard_still_rejects_with_trailer_present() {
+        // Guard preservation: the alloc-bomb bound (num_entries vs body
+        // capacity) must keep rejecting garbage even when a trailer
+        // lengthens the body by exactly TIMING_TRAILER_LEN.
+        let mut body = Vec::new();
+        body.extend_from_slice(&u32::MAX.to_le_bytes());
+        append_timing_trailer(&mut body, 5.0);
+        assert!(decode_q8k_batch_response_entries(&body).is_err());
+        // And after the new-client strip, identical rejection.
+        let (payload, _) = split_timing_trailer(&body);
+        assert!(decode_q8k_batch_response_entries(payload).is_err());
+    }
+
+    #[test]
+    fn extended_response_split_reencode_reappend_is_byte_identical() {
+        // Byte-identity pin for the extended q8k frame.
+        let out = vec![1.5f32, -2.25, 1e-20];
+        let entries: Vec<(usize, &[f32])> = vec![(9usize, &out)];
+        let mut extended = encode_q8k_batch_response(&entries);
+        append_timing_trailer(&mut extended, 42.75);
+
+        let (payload, serve_us) = split_timing_trailer(&extended);
+        let decoded = decode_q8k_batch_response_entries(payload).unwrap();
+        let ref_entries: Vec<(usize, &[f32])> =
+            decoded.iter().map(|(l, v)| (*l, v.as_slice())).collect();
+        let mut rebuilt = encode_q8k_batch_response(&ref_entries);
+        append_timing_trailer(&mut rebuilt, serve_us.unwrap() as f32);
+        assert_eq!(rebuilt, extended);
+    }
+
     #[test]
     fn empty_batch_roundtrip() {
         let body = encode_q8k_batch_request(&[]);
