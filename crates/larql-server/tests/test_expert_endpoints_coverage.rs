@@ -178,3 +178,225 @@ async fn expert_multi_layer_batch_dense_model_returns_400() {
         resp.status()
     );
 }
+
+// ══════════════════════════════════════════════════════════════
+// Phase A expert-serving hardening (dec-readiness review):
+// unresolvable experts must be a loud 400, never a 200 with a
+// silently partial weighted sum; wrong-shaped tasks must be a 400
+// before any kernel runs.
+// ══════════════════════════════════════════════════════════════
+
+use larql_inference::ffn::moe_remote::{
+    encode_layer_batch_request, encode_multi_layer_request, encode_multi_layer_request_q8k,
+    MultiLayerTask, MultiLayerTaskQ8K, LAYER_BATCH_CONTENT_TYPE, MULTI_LAYER_BATCH_CONTENT_TYPE,
+    MULTI_LAYER_BATCH_Q8K_CONTENT_TYPE,
+};
+
+async fn post_binary(
+    state: std::sync::Arc<larql_server::state::AppState>,
+    uri: &str,
+    content_type: &str,
+    body: Vec<u8>,
+) -> axum::http::Response<Body> {
+    let app = larql_server::routes::single_model_router(state);
+    app.oneshot(
+        Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header(header::CONTENT_TYPE, content_type)
+            .body(Body::from(body))
+            .unwrap(),
+    )
+    .await
+    .unwrap()
+}
+
+async fn body_string(resp: axum::http::Response<Body>) -> String {
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// The synthetic fixture is a dense Llama — no expert weights are resolvable
+/// at any (layer, expert_id). Pre-fix, `/v1/experts/layer-batch` returned
+/// 200 with an all-zero "weighted sum" (silently partial); now the run-count
+/// check turns it into a 400 naming the layer and the missing count.
+#[tokio::test]
+async fn layer_batch_unresolvable_expert_returns_400_not_partial_sum() {
+    let (model, _fixture) = common::model_with_q4k_weights("synthetic");
+    let hidden = model.config.hidden_size;
+    let state = common::state(vec![model]);
+    let body = encode_layer_batch_request(0, &vec![0.5_f32; hidden], &[3], &[1.0]);
+    let resp = post_binary(
+        state,
+        "/v1/experts/layer-batch",
+        LAYER_BATCH_CONTENT_TYPE,
+        body,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let text = body_string(resp).await;
+    assert!(
+        text.contains("could not be resolved") && text.contains("layer 0"),
+        "expected loud unresolvable-expert error; got {text}"
+    );
+}
+
+/// Zero-weight pairs are a legitimate skip (filtered before byte
+/// resolution) — they must NOT count as unresolvable, so an all-zero-weight
+/// request still succeeds even though no expert bytes exist.
+#[tokio::test]
+async fn layer_batch_zero_weight_experts_still_200() {
+    let (model, _fixture) = common::model_with_q4k_weights("synthetic");
+    let hidden = model.config.hidden_size;
+    let state = common::state(vec![model]);
+    let body = encode_layer_batch_request(0, &vec![0.5_f32; hidden], &[3, 7], &[0.0, 0.0]);
+    let resp = post_binary(
+        state,
+        "/v1/experts/layer-batch",
+        LAYER_BATCH_CONTENT_TYPE,
+        body,
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "zero-weight experts are a legitimate skip, not an error: {}",
+        body_string(resp).await
+    );
+}
+
+/// Drain/heartbeat visibility (ROADMAP hardening item 13): a layer-batch
+/// request must register in `requests_in_flight` while running and return
+/// the counter to 0 when the handler completes, and bump `requests_total`.
+#[tokio::test]
+async fn layer_batch_requests_in_flight_returns_to_zero() {
+    let (model, _fixture) = common::model_with_q4k_weights("synthetic");
+    let hidden = model.config.hidden_size;
+    let rif = model.requests_in_flight.clone();
+    let total = model.requests_total.clone();
+    let state = common::state(vec![model]);
+    let body = encode_layer_batch_request(0, &vec![0.5_f32; hidden], &[3], &[0.0]);
+    let resp = post_binary(
+        state,
+        "/v1/experts/layer-batch",
+        LAYER_BATCH_CONTENT_TYPE,
+        body,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    use std::sync::atomic::Ordering;
+    assert_eq!(rif.load(Ordering::SeqCst), 0, "in-flight must drain to 0");
+    assert_eq!(total.load(Ordering::SeqCst), 1, "requests_total must bump");
+}
+
+/// FIX 2: every multi-layer f32 task's residual must match the model's
+/// hidden_size — a wrong-shaped activation is a 400 before any kernel runs.
+#[tokio::test]
+async fn multi_layer_batch_wrong_hidden_returns_400() {
+    let (model, _fixture) = common::model_with_q4k_weights("synthetic");
+    let state = common::state(vec![model]);
+    let tasks = vec![MultiLayerTask {
+        layer: 0,
+        residual: vec![0.5_f32; 300], // model hidden_size is 8
+        expert_ids: vec![0],
+        weights: vec![1.0],
+    }];
+    let resp = post_binary(
+        state,
+        "/v1/experts/multi-layer-batch",
+        MULTI_LAYER_BATCH_CONTENT_TYPE,
+        encode_multi_layer_request(&tasks),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let text = body_string(resp).await;
+    assert!(
+        text.contains("hidden_size"),
+        "expected hidden_size mismatch error; got {text}"
+    );
+}
+
+/// Same loud-error contract on the multi-layer endpoint: an unresolvable
+/// expert in any task is a 400 naming the layer, never a partial sum.
+#[tokio::test]
+async fn multi_layer_batch_unresolvable_expert_returns_400() {
+    let (model, _fixture) = common::model_with_q4k_weights("synthetic");
+    let hidden = model.config.hidden_size;
+    let state = common::state(vec![model]);
+    let tasks = vec![MultiLayerTask {
+        layer: 1,
+        residual: vec![0.5_f32; hidden],
+        expert_ids: vec![9],
+        weights: vec![1.0],
+    }];
+    let resp = post_binary(
+        state,
+        "/v1/experts/multi-layer-batch",
+        MULTI_LAYER_BATCH_CONTENT_TYPE,
+        encode_multi_layer_request(&tasks),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let text = body_string(resp).await;
+    assert!(
+        text.contains("could not be resolved") && text.contains("layer 1"),
+        "expected loud unresolvable-expert error; got {text}"
+    );
+}
+
+/// FIX 2 (wire level): a q8k task whose `hidden` is not a multiple of 256
+/// desyncs every subsequent field offset — the decoder must reject it and
+/// the handler must answer 400, not decode garbage.
+#[tokio::test]
+async fn multi_layer_batch_q8k_misaligned_hidden_returns_400() {
+    let (model, _fixture) = common::model_with_q4k_weights("synthetic");
+    let state = common::state(vec![model]);
+    // Hand-build the frame: encode_multi_layer_request_q8k debug-asserts on
+    // consistent shapes, so write the misaligned hidden=300 header directly.
+    let mut body = Vec::new();
+    body.extend_from_slice(&1u32.to_le_bytes()); // num_tasks
+    body.extend_from_slice(&0u32.to_le_bytes()); // layer
+    body.extend_from_slice(&300u32.to_le_bytes()); // hidden — NOT ×256
+    body.extend_from_slice(&0u32.to_le_bytes()); // num_experts
+    body.extend_from_slice(&vec![0u8; 300 + 4 + 16]); // qs + d + sums
+    let resp = post_binary(
+        state,
+        "/v1/experts/multi-layer-batch-q8k",
+        MULTI_LAYER_BATCH_Q8K_CONTENT_TYPE,
+        body,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+/// FIX 2 (handler level): a well-formed q8k task (hidden = 256) whose hidden
+/// doesn't match the model's hidden_size is a 400 before any kernel runs.
+#[tokio::test]
+async fn multi_layer_batch_q8k_wrong_hidden_returns_400() {
+    let (model, _fixture) = common::model_with_q4k_weights("synthetic");
+    let state = common::state(vec![model]);
+    let tasks = vec![MultiLayerTaskQ8K {
+        layer: 0,
+        hidden: 256, // decodes fine; model hidden_size is 8
+        qs: vec![0i8; 256],
+        d: vec![1.0f32],
+        sums: vec![0i16; 8],
+        expert_ids: vec![0],
+        weights: vec![1.0],
+    }];
+    let resp = post_binary(
+        state,
+        "/v1/experts/multi-layer-batch-q8k",
+        MULTI_LAYER_BATCH_Q8K_CONTENT_TYPE,
+        encode_multi_layer_request_q8k(&tasks),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let text = body_string(resp).await;
+    assert!(
+        text.contains("hidden_size"),
+        "expected hidden_size mismatch error; got {text}"
+    );
+}

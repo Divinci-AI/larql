@@ -5,7 +5,7 @@
 //! all validation and formatting logic lives in `capture_format.rs`.
 
 use super::args::CaptureArgs;
-use super::capture_format::CapturePool;
+use super::capture_format::{CapturePool, RoutingCapture};
 
 pub(super) fn run_capture(args: &CaptureArgs) -> Result<(), Box<dyn std::error::Error>> {
     use larql_inference::{
@@ -40,20 +40,11 @@ pub(super) fn run_capture(args: &CaptureArgs) -> Result<(), Box<dyn std::error::
         .into());
     }
 
-    let backend: Box<dyn larql_compute::ComputeBackend> = if args.metal {
-        #[cfg(all(feature = "gpu", target_os = "macos"))]
-        {
-            larql_compute_metal::metal_backend()
-                .map(|m| Box::new(m) as Box<dyn larql_compute::ComputeBackend>)
-                .unwrap_or_else(larql_compute::cpu_backend)
-        }
-        #[cfg(not(all(feature = "gpu", target_os = "macos")))]
-        {
-            return Err("`--metal` requires the `gpu` feature on macOS".into());
-        }
-    } else {
-        larql_compute::default_backend()
-    };
+    // An explicit `--metal` with no usable device is a loud error, not a CPU
+    // fallback — a DEC capture pool must not silently come off the wrong
+    // substrate (see `backend_select`).
+    let backend: Box<dyn larql_compute::ComputeBackend> =
+        crate::backend_select::backend_for_metal_flag(args.metal)?;
 
     let mut cb = larql_vindex::SilentLoadCallbacks;
     let weights = larql_vindex::load_model_weights_kquant(&vindex_path, &mut cb)
@@ -73,6 +64,33 @@ pub(super) fn run_capture(args: &CaptureArgs) -> Result<(), Box<dyn std::error::
     eprintln!("  Attention:  {} (local)", backend.name());
     eprintln!("  FFN:        remote  ({})", args.ffn);
 
+    // `--routing` needs a routable MoE model: `top_k` records come from the
+    // arch and the capture computes `MoeRouterWeights::route` per layer.
+    // Loud error, not a silent walk-ffn-only pool (a DEC routed arm fed a
+    // routing-less pool would be a corrupted run with no signal).
+    let routing_top_k = if args.routing {
+        let arch = &*weights.arch;
+        if !arch.is_hybrid_moe() && !arch.is_moe() {
+            return Err(format!(
+                "--routing requires an MoE model, but {} ({}) has no experts",
+                args.model,
+                arch.family()
+            )
+            .into());
+        }
+        let top_k = arch.num_experts_per_token();
+        if top_k == 0 {
+            return Err(format!(
+                "--routing: model {} reports num_experts_per_token == 0",
+                args.model
+            )
+            .into());
+        }
+        Some(top_k)
+    } else {
+        None
+    };
+
     let eos = larql_inference::layer_graph::generate::eos::EosConfig::from_vindex_dir(&vindex_path);
     // The sink records one entry per decode-loop step; the first generated
     // token comes straight from prefill logits (no captured step), so ask
@@ -81,6 +99,12 @@ pub(super) fn run_capture(args: &CaptureArgs) -> Result<(), Box<dyn std::error::
     let max_tokens = args.steps + 1;
 
     let mut sinks: Vec<Vec<Vec<Vec<f32>>>> = Vec::with_capacity(prompts.len());
+    let mut routing_capture = routing_top_k.map(|top_k| RoutingCapture {
+        top_k,
+        raw: Vec::with_capacity(prompts.len()),
+        normed: Vec::with_capacity(prompts.len()),
+        routing: Vec::with_capacity(prompts.len()),
+    });
     for (i, prompt) in prompts.iter().enumerate() {
         let wrapped =
             larql_inference::chat::render_user_prompt(&vindex_path, weights.arch.family(), prompt)
@@ -88,7 +112,11 @@ pub(super) fn run_capture(args: &CaptureArgs) -> Result<(), Box<dyn std::error::
         let prompt_ids = larql_inference::encode_prompt(&tokenizer, &*weights.arch, &wrapped)
             .map_err(|e| format!("tokenise prompt {i}: {e}"))?;
 
-        let mut sink = ResidualCaptureSink::default();
+        let mut sink = if args.routing {
+            ResidualCaptureSink::with_routing()
+        } else {
+            ResidualCaptureSink::default()
+        };
         generate_with_remote_ffn_batch_captured(
             &weights,
             &tokenizer,
@@ -118,6 +146,11 @@ pub(super) fn run_capture(args: &CaptureArgs) -> Result<(), Box<dyn std::error::
             )
             .into());
         }
+        if let Some(rc) = routing_capture.as_mut() {
+            rc.raw.push(sink.raw_steps);
+            rc.normed.push(sink.normed_steps);
+            rc.routing.push(sink.routing_steps);
+        }
         sinks.push(sink.steps);
     }
 
@@ -127,24 +160,29 @@ pub(super) fn run_capture(args: &CaptureArgs) -> Result<(), Box<dyn std::error::
         .unwrap_or(0);
     let hidden = weights.hidden_size;
     let num_layers = weights.num_layers;
-    let manifest = CapturePool::write(
+    let manifest = CapturePool::write_with_routing(
         &args.out,
         &args.model,
         hidden,
         num_layers,
         &prompts,
         &sinks,
+        routing_capture.as_ref(),
         created_unix,
     )?;
 
     eprintln!(
-        "Captured pool: {} prompts × {} steps × {} layers × hidden {} → {} ({} MB)",
+        "Captured pool: {} prompts × {} steps × {} layers × hidden {} → {} ({} MB){}",
         manifest.prompts.len(),
         manifest.steps,
         manifest.num_layers,
         manifest.hidden_size,
         args.out.display(),
         manifest.expected_bytes() / (1024 * 1024),
+        match &manifest.routing {
+            Some(r) => format!(" + routed sidecars (top_k {})", r.top_k),
+            None => String::new(),
+        },
     );
     Ok(())
 }

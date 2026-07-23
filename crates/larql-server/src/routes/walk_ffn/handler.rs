@@ -19,7 +19,7 @@ use super::binary::{
 };
 use super::core::run_full_output_core;
 use super::dispatch::run_walk_ffn;
-use super::types::{RifGuard, WalkFfnRequest, BINARY_CT};
+use super::types::{track_model_request, WalkFfnRequest, BINARY_CT};
 use super::validate::{collect_scan_layers, validate_owned, validate_residual};
 
 #[utoipa::path(
@@ -50,12 +50,7 @@ pub async fn handle_walk_ffn(
     // Track active requests for GT6 drain, and bump the per-shard
     // cumulative counter that the grid announce loop diffs to emit
     // HeartbeatMsg.req_per_sec.
-    let _rif_guard = state.models.first().map(|m| {
-        use std::sync::atomic::Ordering;
-        m.requests_in_flight.fetch_add(1, Ordering::Relaxed);
-        m.requests_total.fetch_add(1, Ordering::Relaxed);
-        RifGuard(m.requests_in_flight.clone())
-    });
+    let _rif_guard = track_model_request(&state);
 
     let headers = request.headers();
     let is_binary = crate::wire::has_content_type(headers, BINARY_CT);

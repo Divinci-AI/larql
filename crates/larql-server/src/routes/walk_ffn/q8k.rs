@@ -60,6 +60,10 @@ pub async fn handle_walk_ffn_q8k(
     request: axum::extract::Request,
 ) -> Result<Response, crate::error::ServerError> {
     state.bump_requests();
+    // Drain/heartbeat visibility — same guard as `handle_walk_ffn`
+    // (ROADMAP hardening item 13: this endpoint was invisible to GT6
+    // drain and req_per_sec before).
+    let _rif_guard = super::types::track_model_request(&state);
 
     let body = axum::body::to_bytes(request.into_body(), 64 * 1024 * 1024)
         .await
@@ -170,6 +174,7 @@ pub async fn handle_walk_ffn_q8k(
                         let bufs = &layer_bufs[layer];
                         let h_norm = q8k_activation_to_f32(&entry.q8k, hidden);
 
+                        let t_layer = std::time::Instant::now();
                         let out = backend.run_dense_ffn_q4k(
                             &h_norm,
                             &bufs[0], // gate
@@ -179,6 +184,9 @@ pub async fn handle_walk_ffn_q8k(
                             inter,
                             inter_padded,
                         );
+                        model
+                            .layer_latency_tracker
+                            .record(layer as u32, t_layer.elapsed().as_secs_f32() * 1000.0);
                         response_entries.push((layer, out));
                     }
 
@@ -247,21 +255,31 @@ pub async fn handle_walk_ffn_q8k(
         let group_results: Vec<(Vec<usize>, Vec<Vec<f32>>)> = by_layer
             .into_par_iter()
             .map(|(layer, idxs)| {
-                if idxs.len() == 1 {
-                    let out =
-                        kquant_ffn_forward_layer_q8k(arch, patched.base(), layer, &entries[idxs[0]].q8k);
+                let t_layer = std::time::Instant::now();
+                let result = if idxs.len() == 1 {
+                    let out = kquant_ffn_forward_layer_q8k(
+                        arch,
+                        patched.base(),
+                        layer,
+                        &entries[idxs[0]].q8k,
+                    );
                     (idxs, vec![out.into_raw_vec_and_offset().0])
                 } else {
                     let mut flat = Vec::with_capacity(idxs.len() * hidden);
                     for &i in &idxs {
                         flat.extend_from_slice(&q8k_activation_to_f32(&entries[i].q8k, hidden));
                     }
-                    let x = larql_vindex::ndarray::Array2::from_shape_vec((idxs.len(), hidden), flat)
-                        .expect("q8k batch shape");
+                    let x =
+                        larql_vindex::ndarray::Array2::from_shape_vec((idxs.len(), hidden), flat)
+                            .expect("q8k batch shape");
                     let out = kquant_ffn_forward_layer(arch, patched.base(), layer, &x);
                     let rows = out.rows().into_iter().map(|r| r.to_vec()).collect();
                     (idxs, rows)
-                }
+                };
+                model
+                    .layer_latency_tracker
+                    .record(layer as u32, t_layer.elapsed().as_secs_f32() * 1000.0);
+                result
             })
             .collect();
         for (idxs, rows) in group_results {

@@ -91,7 +91,14 @@ pub fn predict_kquant_hidden(
 }
 
 /// Build `MoeRouterWeights` for a single layer from the model's vector store.
-fn build_moe_router_weights<'a>(
+///
+/// `pub` since the DEC routed-experts capture extension (ROADMAP hardening
+/// item 17, first bullet): the capture path
+/// (`layer_graph::grid::remote_ffn`) constructs router weights from
+/// `ModelWeights` exactly the way the server-facing MoE dispatch does, so
+/// captured routing bit-matches production routing. Returns `None` when the
+/// arch has no MoE router for `layer`.
+pub fn build_moe_router_weights<'a>(
     weights: &'a larql_models::ModelWeights,
     arch: &dyn larql_models::ModelArchitecture,
     layer: usize,

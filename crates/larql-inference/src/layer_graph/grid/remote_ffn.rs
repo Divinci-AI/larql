@@ -285,9 +285,86 @@ fn dispatch_ffn_with_q8k_fallback(
 /// FFN dispatch of that decode step sent it over the wire. Pre-normed capture
 /// makes replay model-free — a replay driver needs no weights or norms to
 /// reproduce the bytes the server saw.
+///
+/// With [`Self::with_routing`] the sink additionally records, per decode
+/// step and layer, what the DEC **routed** replay arm needs:
+///   * `raw_steps` — the raw post-attention residual (the routed f32
+///     endpoints carry this; the server applies pre_experts_norm),
+///   * `normed_steps` — the pre-experts-normed residual (input to the
+///     routed q8k frame quantisation); `route()`'s `h_norm` output on MoE
+///     layers, the raw row passed through on layers with no router (inert:
+///     replay never sends expert frames for those layers),
+///   * `routing_steps` — `(expert_id, weight)` pairs from
+///     [`crate::ffn::MoeRouterWeights::route`] on the raw residual — final
+///     post-renorm post-scale weights, bit-matching what production decode
+///     puts on the wire (the server never re-routes). Empty for layers with
+///     no MoE router.
+///
+/// The default (non-routing) sink leaves the capture path byte-identical to
+/// the pre-routing behavior.
 #[derive(Debug, Default)]
 pub struct ResidualCaptureSink {
     pub steps: Vec<Vec<Vec<f32>>>,
+    /// Enables the routed capture planes below.
+    pub capture_routing: bool,
+    /// `[step][layer][hidden]` raw post-attention residuals.
+    pub raw_steps: Vec<Vec<Vec<f32>>>,
+    /// `[step][layer][hidden]` pre-experts-normed residuals.
+    pub normed_steps: Vec<Vec<Vec<f32>>>,
+    /// `[step][layer]` → routed `(expert_id, weight)` pairs.
+    pub routing_steps: Vec<Vec<Vec<(u32, f32)>>>,
+}
+
+impl ResidualCaptureSink {
+    /// A sink that also captures raw/normed residual planes and per-layer
+    /// expert routing (the DEC routed replay arm's capture shape).
+    pub fn with_routing() -> Self {
+        Self {
+            capture_routing: true,
+            ..Self::default()
+        }
+    }
+
+    /// Record the routed planes for one decode step. No-op unless
+    /// `capture_routing` — keeping the walk-ffn-only capture path
+    /// byte-identical.
+    fn push_routing_step(&mut self, weights: &ModelWeights, h_capture: &[Vec<f32>]) {
+        if !self.capture_routing {
+            return;
+        }
+        let arch = &*weights.arch;
+        let norm_offset = arch.norm_weight_offset();
+        let eps = arch.norm_eps();
+        let mut raw = Vec::with_capacity(h_capture.len());
+        let mut normed = Vec::with_capacity(h_capture.len());
+        let mut routing = Vec::with_capacity(h_capture.len());
+        for (layer, h) in h_capture.iter().enumerate() {
+            raw.push(h.clone());
+            match crate::vindex::build_moe_router_weights(weights, arch, layer) {
+                Some(router) => {
+                    // `route` returns the pre-experts-normed row (`h_norm`)
+                    // it computes internally — the same helper the remote
+                    // MoE dispatch uses, not a re-implementation.
+                    let (h_norm, indices, route_weights) = router.route(h, norm_offset, eps);
+                    normed.push(h_norm);
+                    routing.push(
+                        indices
+                            .iter()
+                            .zip(route_weights.iter())
+                            .map(|(&e, &w)| (e as u32, w))
+                            .collect(),
+                    );
+                }
+                None => {
+                    normed.push(h.clone());
+                    routing.push(Vec::new());
+                }
+            }
+        }
+        self.raw_steps.push(raw);
+        self.normed_steps.push(normed);
+        self.routing_steps.push(routing);
+    }
 }
 
 /// Batch pre-dispatch variant of [`generate_with_remote_ffn`].
@@ -465,6 +542,7 @@ pub fn generate_with_remote_ffn_batch_captured(
             if is_final {
                 if let Some(s) = sink.as_deref_mut() {
                     s.steps.push(prenorm_layers(weights, &h_capture));
+                    s.push_routing_step(weights, &h_capture);
                 }
             }
             let t_ffn = std::time::Instant::now();
@@ -540,8 +618,77 @@ pub fn generate_with_remote_ffn_batch_captured(
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_norm_for_ffn, apply_post_ffn_norm};
+    use super::{apply_norm_for_ffn, apply_post_ffn_norm, ResidualCaptureSink};
     use larql_models::test_fixtures::{make_gemma3_test_weights, make_test_weights};
+
+    // ── ResidualCaptureSink routed capture ──────────────────────────
+
+    #[test]
+    fn sink_push_routing_step_is_noop_without_capture_routing() {
+        // The default sink must leave the routed planes empty — the
+        // walk-ffn-only capture path stays byte-identical.
+        let w = make_gemma3_test_weights();
+        let h_capture: Vec<Vec<f32>> = (0..w.num_layers)
+            .map(|l| (0..w.hidden_size).map(|i| (l + i) as f32 * 0.1).collect())
+            .collect();
+        let mut sink = ResidualCaptureSink::default();
+        sink.push_routing_step(&w, &h_capture);
+        assert!(sink.raw_steps.is_empty());
+        assert!(sink.normed_steps.is_empty());
+        assert!(sink.routing_steps.is_empty());
+    }
+
+    #[test]
+    fn sink_with_routing_captures_raw_normed_and_routing_on_moe_fixture() {
+        use crate::test_utils::{
+            make_test_gemma4_moe_weights, GEMMA4_MOE_NUM_EXPERTS, GEMMA4_MOE_TOP_K,
+        };
+        let w = make_test_gemma4_moe_weights();
+        let arch = &*w.arch;
+        let h_capture: Vec<Vec<f32>> = (0..w.num_layers)
+            .map(|l| {
+                (0..w.hidden_size)
+                    .map(|i| ((l * 31 + i * 7) % 13) as f32 * 0.2 - 1.0)
+                    .collect()
+            })
+            .collect();
+
+        let mut sink = ResidualCaptureSink::with_routing();
+        sink.push_routing_step(&w, &h_capture);
+        assert_eq!(sink.raw_steps.len(), 1);
+        assert_eq!(sink.normed_steps.len(), 1);
+        assert_eq!(sink.routing_steps.len(), 1);
+
+        // Raw plane is the untouched post-attention residual.
+        assert_eq!(sink.raw_steps[0], h_capture);
+
+        let norm_offset = arch.norm_weight_offset();
+        let eps = arch.norm_eps();
+        for (layer, h_row) in h_capture.iter().enumerate() {
+            let normed = &sink.normed_steps[0][layer];
+            let pairs = &sink.routing_steps[0][layer];
+            assert_eq!(normed.len(), w.hidden_size);
+            match crate::vindex::build_moe_router_weights(&w, arch, layer) {
+                Some(router) => {
+                    // Normed row must be exactly route()'s h_norm — same
+                    // helper, no second norm implementation.
+                    let (h_norm, indices, weights) = router.route(h_row, norm_offset, eps);
+                    assert_eq!(normed, &h_norm, "layer {layer} normed row");
+                    assert_eq!(pairs.len(), GEMMA4_MOE_TOP_K, "layer {layer} pair count");
+                    for (i, &(e, wt)) in pairs.iter().enumerate() {
+                        assert_eq!(e as usize, indices[i]);
+                        assert_eq!(wt, weights[i]);
+                        assert!((e as usize) < GEMMA4_MOE_NUM_EXPERTS);
+                        assert!(wt.is_finite());
+                    }
+                }
+                None => {
+                    assert_eq!(normed, h_row, "non-MoE layer passes raw through");
+                    assert!(pairs.is_empty(), "non-MoE layer records no pairs");
+                }
+            }
+        }
+    }
 
     fn approx_eq(a: &[f32], b: &[f32], tol: f32) -> bool {
         a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| (x - y).abs() <= tol)

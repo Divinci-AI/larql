@@ -643,12 +643,37 @@ Walk is **faster than dense** (517ms vs 535ms). GPU Q4K decode is **23× faster*
 
 | Topology | tok/s | Notes |
 |---|---|---|
-| **Local Metal MoE** | **18.9** | Measured 2026-05-04; MoE experts on CPU NEON. |
-| 1-shard CPU/grid (loopback) | 18.3 | NEON Q4_K matvec on shard server, gRPC fan-in |
+| **Local Metal MoE** | **18.9** → **23.6** | 2026-05-04 → re-baselined 2026-07-23 (KV append-in-place + spin-pool landings) |
+| Remote-FFN loopback (streaming) | 27.8–28.6 | Re-baselined 2026-07-23 (DEC-0 arm M); f32/f16/i8 wire, ~34% of step in FFN round-trips |
+| 1-shard CPU/grid (loopback) | 18.3 | 2026-05-04; NEON Q4_K matvec on shard server, gRPC fan-in |
 | 2-shard CPU/grid (loopback) | 17.3 | Parallel collect + parallel fire (`std::thread::scope` + `rayon::par_iter`) |
 | `LARQL_SKIP_MOE=1` ceiling | 56.8 | Attention + dense FFN only; theoretical max |
 
+**DEC-0 arm M (2026-07-23, `docs/dec-funnel.md` §3)**: the loopback batch curve is measured — expert-tier step time is sub-linear through batch 32 (×1.6–1.8 on batch dispatch), aggregate tier throughput ~1,050 tok/s at B64 (~25× single-stream), movement ratio 1.2–1.9 × 10⁻³. Run records under `bench/dec0/`; system of record is the `dec0-loopback-mac` experiment in the registry.
+
 **Wire format (2026-05-07)**: grid traffic uses f16 by default (50% bandwidth). Set `LARQL_I8_WIRE=1` for i8 symmetric quantisation (75% bandwidth, opt-in). Both are architecture-agnostic — `hidden_size` is read from vindex config at runtime. Per-layer latency is tracked via `HeartbeatMsg.layer_stats` (EMA + p99); the router uses it to route replicated layers to the lowest-latency server. Use `make bench-wire` to measure codec throughput and `make bench-routing` for routing hot-path.
+
+### Load-bearing environment flags (serving & measurement)
+
+Every env var is `LARQL_`-prefixed (canonical since 2026-07-22 — the historical
+unprefixed `SKIP_MOE` / `SKIP_OUTER_NORM` / `DECODE_DEBUG` still work as loud
+deprecated aliases). `larql-server` logs the kernel class **and** the decode
+flag state at startup, so no benchmark number is recorded against unlogged
+flag state. The ones that change what a measured number means:
+
+| Flag | Default | Effect |
+|---|---|---|
+| `LARQL_SKIP_MOE=1` | off | Bypass MoE entirely (the ceiling-arm flag above) — local AND grid paths |
+| `LARQL_Q4K_DIRECT_ATTN` / `_ATTN_INT8` / `_LM_HEAD` / `_DIRECT_FFN` / `_Q4K_ASM` / `_SPIN_POOL` | **on** (`=0` opts out) | CPU decode fast-path stages; A/B against the f32 path |
+| `LARQL_COMPUTE_CONCURRENCY=N` | auto (physical cores) | Expert-server batch compute parallelism (`layer_batch`) — load-bearing for tier throughput |
+| `LARQL_DISABLE_Q8K_WIRE=1` | off | Fall back from the Q8K predispatch wire to f32/f16 |
+| `LARQL_I8_WIRE=1` | off | i8 wire arm (also required server-side for dec-bench's i8 sweep arm) |
+| `LARQL_MOE_TOP_K=N` | arch value | Override MoE top-k on the grid — changes routing, not just speed |
+| `LARQL_SKIP_OUTER_NORM=1` | off | Debug-only outer-norm bypass — corrupts output; never in a recorded run |
+
+Diagnostics (`LARQL_*_TIMING`, `LARQL_MOE_DEBUG`, `LARQL_DECODE_DEBUG`, …) print
+to stderr and do not change results. The full inventory lives in
+`docs/audits/dec-readiness-review-2026-07-22.md` §5.
 
 ### Dense remote-FFN (Gemma 4 31B Q4K, M3 Max, localhost)
 

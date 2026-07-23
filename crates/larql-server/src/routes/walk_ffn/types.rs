@@ -26,6 +26,24 @@ impl Drop for RifGuard {
     }
 }
 
+/// Register a compute request against the first loaded model for GT6 drain
+/// and heartbeat visibility: bumps `requests_in_flight` (decremented when
+/// the returned guard drops) and the cumulative `requests_total` that the
+/// grid announce loop diffs into `HeartbeatMsg.req_per_sec`.
+///
+/// Every model-compute handler (walk-ffn, walk-ffn-q8k, all expert
+/// endpoints) must hold one of these for its full duration — a handler
+/// that skips it is invisible to drain and can be reassigned mid-request
+/// (ROADMAP hardening item 13).
+pub(crate) fn track_model_request(state: &crate::state::AppState) -> Option<RifGuard> {
+    state.models.first().map(|m| {
+        use std::sync::atomic::Ordering;
+        m.requests_in_flight.fetch_add(1, Ordering::Relaxed);
+        m.requests_total.fetch_add(1, Ordering::Relaxed);
+        RifGuard(m.requests_in_flight.clone())
+    })
+}
+
 pub(crate) const BINARY_CT: &str = "application/x-larql-ffn";
 pub(crate) const BATCH_MARKER: u32 = 0xFFFF_FFFF;
 

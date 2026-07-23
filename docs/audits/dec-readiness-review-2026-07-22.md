@@ -3,8 +3,12 @@
 > **Remediation status (2026-07-22):** Batch A (§1a–§1d, §2a first item) is
 > fixed — see [`ROADMAP.md`](../../ROADMAP.md) §"Codebase hardening" →
 > "DEC-readiness review (2026-07-22)" for the per-item summary and the
-> commit that landed it. Batches B and C (fleet/config landmines, structural
-> pre-work) remain open, tracked in the same ROADMAP section.
+> commit that landed it. Batch B items 7 (backend factory + capability
+> dispatch, §3c) and 9 (`SKIP_MOE` name split, §3e) landed 2026-07-22
+> alongside the larql-compute DEC prep (large-file module splits + the
+> `FormatRoute` quant registry). The rest of Batches B and C (fleet/config
+> landmines, structural pre-work) remain open, tracked in the same ROADMAP
+> section.
 
 Targeted review of the **DEC data-plane** (`larql-server`, `larql-router`,
 `larql-inference` remote-FFN/MoE paths, `larql-cli` bench/dec_bench, the DEC
@@ -243,7 +247,7 @@ arms; `dec-bench capture` hard-errors without the gpu feature on macOS
 without editing. Fix: a `DEC0_BACKEND` env defaulting per-platform (couples to
 3c).
 
-### 3e. `SKIP_MOE` vs `LARQL_SKIP_MOE` — two names, docs disagree [hardcoding, HIGH]
+### 3e. `SKIP_MOE` vs `LARQL_SKIP_MOE` — two names, docs disagree [hardcoding, HIGH] — ✅ FIXED
 
 Grid path reads unprefixed `SKIP_MOE` (`moe_remote/runtime.rs:64` →
 `grid/config.rs:25`); local compute path reads `LARQL_SKIP_MOE`

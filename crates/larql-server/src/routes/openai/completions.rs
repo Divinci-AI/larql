@@ -275,7 +275,9 @@ pub async fn handle_completions(
     });
     let timeout = state.infer_timeout;
     let (choices, prompt_tokens, completion_tokens) = if timeout.is_zero() {
-        handle.await.map_err(|e| ServerError::Internal(e.to_string()))??
+        handle
+            .await
+            .map_err(|e| ServerError::Internal(e.to_string()))??
     } else {
         match tokio::time::timeout(timeout, handle).await {
             Ok(join_result) => join_result.map_err(|e| ServerError::Internal(e.to_string()))??,
