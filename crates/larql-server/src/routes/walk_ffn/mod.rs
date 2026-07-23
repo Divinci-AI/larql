@@ -95,9 +95,10 @@
 //! are documentation of that shared implementation.
 //!
 //! - [`types`] — `WalkFfnRequest`, `RifGuard`; re-exports `FfnEntry`,
-//!   `FfnOutput`, `BINARY_CT` from the shared codec.
-//! - [`binary`] — shim over the shared codec: `decode_binary_request`
-//!   (wraps into `WalkFfnRequest`/`ServerError`), re-exports
+//!   `FfnOutput` from the shared codec.
+//! - [`binary`] — shim over the shared codec: `decode_request` (inbound
+//!   Content-Type dispatch over f32/f16/i8, wraps into
+//!   `WalkFfnRequest`/`ServerError`), re-exports
 //!   `encode_binary_output(_f16|_i8)` + `encode_json_full_output`;
 //!   carries the server-side regression tests for the shared guards.
 //! - [`validate`] — `collect_scan_layers`, `validate_residual`,

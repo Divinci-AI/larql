@@ -12,8 +12,8 @@ use larql_inference::ffn::moe_remote::{
     MultiLayerTask, MultiLayerTaskQ8K, MULTI_LAYER_BATCH_CONTENT_TYPE,
     MULTI_LAYER_BATCH_Q8K_CONTENT_TYPE,
 };
-use larql_inference::ffn::remote::{WALK_FFN_PATH, WALK_FFN_Q8K_PATH};
-use larql_inference::{encode_binary_request, encode_q8k_batch_request};
+use larql_inference::ffn::remote::{WireFormat, WALK_FFN_PATH, WALK_FFN_Q8K_PATH};
+use larql_inference::{encode_binary_request_as, encode_q8k_batch_request};
 
 use super::super::bench::row::compute_percentiles;
 use super::capture_format::CapturePool;
@@ -30,18 +30,24 @@ pub enum WireArm {
 }
 
 impl WireArm {
+    pub fn parse(s: &str) -> Result<WireArm, String> {
+        match s.trim() {
+            "f32" => Ok(WireArm::F32),
+            "f16" => Ok(WireArm::F16),
+            "i8" => Ok(WireArm::I8),
+            "q8k" => Ok(WireArm::Q8k),
+            other => Err(format!(
+                "unknown wire format {other:?} (expected f32, f16, i8, q8k, or an \
+                 in/return pair like f16/i8)"
+            )),
+        }
+    }
+
+    /// Arm-only list parsing — superseded by [`WireSpec::parse_list`] (which
+    /// adds pair tokens) as the `--wire` entry point; kept for its tests.
+    #[cfg(test)]
     pub fn parse_list(s: &str) -> Result<Vec<WireArm>, String> {
-        s.split(',')
-            .map(|w| match w.trim() {
-                "f32" => Ok(WireArm::F32),
-                "f16" => Ok(WireArm::F16),
-                "i8" => Ok(WireArm::I8),
-                "q8k" => Ok(WireArm::Q8k),
-                other => Err(format!(
-                    "unknown wire format {other:?} (expected f32, f16, i8, q8k)"
-                )),
-            })
-            .collect()
+        s.split(',').map(WireArm::parse).collect()
     }
 
     pub fn label(self) -> &'static str {
@@ -72,6 +78,125 @@ impl WireArm {
             WireArm::I8 => Some(larql_inference::I8_CT),
             WireArm::Q8k => None,
         }
+    }
+}
+
+/// One `--wire` token: either a plain arm (unchanged behaviour — f32
+/// request frames with Accept per arm, or the q8k endpoint) or an explicit
+/// asymmetric `in/return` pair on the dense walk-ffn wire (DEC funnel v0.5
+/// §3 DEC-1A: request Content-Type and Accept negotiated independently).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WireSpec {
+    /// `"f32"`, `"f16"`, `"i8"`, `"q8k"` — the pre-pair wire axis,
+    /// byte-identical behaviour (requests stay f32; Accept per arm).
+    Plain(WireArm),
+    /// `"in/out"` such as `"f16/i8"`: the request residual is encoded in
+    /// `input` (request Content-Type) and the response requested in
+    /// `output` (strict Accept). Walk-ffn endpoint only; q8k cannot pair
+    /// (own endpoint, not a negotiated CT).
+    Pair {
+        input: WireFormat,
+        output: WireFormat,
+    },
+}
+
+/// Numeric twin of a [`WireFormat`] for pair codes (f32=0, f16=1, i8=2).
+fn wire_format_code(f: WireFormat) -> u32 {
+    match f {
+        WireFormat::F32 => 0,
+        WireFormat::F16 => 1,
+        WireFormat::I8 => 2,
+    }
+}
+
+impl WireSpec {
+    pub fn parse(tok: &str) -> Result<WireSpec, String> {
+        let tok = tok.trim();
+        if let Some((i, o)) = tok.split_once('/') {
+            let side = |s: &str, which: &str| {
+                WireFormat::parse(s).ok_or_else(|| {
+                    format!(
+                        "invalid wire pair {tok:?}: {which} arm {s:?} must be one of \
+                         f32, f16, i8 (q8k is its own endpoint and cannot pair)"
+                    )
+                })
+            };
+            Ok(WireSpec::Pair {
+                input: side(i, "inbound")?,
+                output: side(o, "return")?,
+            })
+        } else {
+            WireArm::parse(tok).map(WireSpec::Plain)
+        }
+    }
+
+    pub fn parse_list(s: &str) -> Result<Vec<WireSpec>, String> {
+        s.split(',').map(WireSpec::parse).collect()
+    }
+
+    /// Combined arm label: plain arms keep their historical label; pairs
+    /// are `"in/out"` (e.g. `"f16/i8"`). This is `dec/wire_format` — kept
+    /// as the one-string axis for run-record continuity.
+    pub fn label(self) -> String {
+        match self {
+            Self::Plain(a) => a.label().into(),
+            Self::Pair { input, output } => format!("{}/{}", input.label(), output.label()),
+        }
+    }
+
+    /// Numeric twin of [`Self::label`]. Plain arms keep their historical
+    /// codes (0–3); pairs are `100 + 10×in + out` with f32=0, f16=1, i8=2
+    /// (e.g. `f16/i8` → 112, `i8/f16` → 121) — disjoint from the plain
+    /// range so numeric-only ingesters can split the axes.
+    pub fn code(self) -> u32 {
+        match self {
+            Self::Plain(a) => a.code(),
+            Self::Pair { input, output } => {
+                100 + 10 * wire_format_code(input) + wire_format_code(output)
+            }
+        }
+    }
+
+    /// Request-direction dtype label this arm actually puts on the wire:
+    /// plain walk-ffn arms send f32 request frames (historical wire), the
+    /// q8k arm its own frame format; pairs send their `input` format.
+    pub fn in_label(self) -> &'static str {
+        match self {
+            Self::Plain(WireArm::Q8k) => "q8k",
+            Self::Plain(_) => "f32",
+            Self::Pair { input, .. } => input.label(),
+        }
+    }
+
+    /// Return-direction dtype label requested by this arm.
+    pub fn out_label(self) -> &'static str {
+        match self {
+            Self::Plain(a) => a.label(),
+            Self::Pair { output, .. } => output.label(),
+        }
+    }
+
+    /// `Accept` header (strict, no fallback formats offered). Pairs ask
+    /// for exactly the return arm.
+    pub fn accept(self) -> Option<&'static str> {
+        match self {
+            Self::Plain(a) => a.accept(),
+            Self::Pair { output, .. } => Some(output.content_type()),
+        }
+    }
+
+    /// Request-frame dtype on the dense walk-ffn endpoint. Plain arms keep
+    /// the historical f32 request wire; pairs encode in their `input` arm.
+    pub fn request_format(self) -> WireFormat {
+        match self {
+            Self::Pair { input, .. } => input,
+            Self::Plain(_) => WireFormat::F32,
+        }
+    }
+
+    /// Whether this arm rides the q8k endpoints (own wire, no negotiation).
+    pub fn is_q8k(self) -> bool {
+        matches!(self, Self::Plain(WireArm::Q8k))
     }
 }
 
@@ -146,15 +271,24 @@ pub enum Endpoint {
 
 impl Endpoint {
     /// Map (endpoint family, wire arm) to a concrete endpoint. The
-    /// multi-layer expert wire has no f16/i8 variant — those combinations
-    /// are a loud arg-validation error, not a silent fallback.
-    pub fn resolve(kind: EndpointKind, wire: WireArm) -> Result<Self, String> {
+    /// multi-layer expert wire has no f16/i8 variant and no asymmetric
+    /// pairs — those combinations are a loud arg-validation error, not a
+    /// silent fallback.
+    pub fn resolve(kind: EndpointKind, wire: WireSpec) -> Result<Self, String> {
         match (kind, wire) {
-            (EndpointKind::WalkFfn, WireArm::Q8k) => Ok(Self::WalkFfnQ8k),
+            (EndpointKind::WalkFfn, WireSpec::Plain(WireArm::Q8k)) => Ok(Self::WalkFfnQ8k),
             (EndpointKind::WalkFfn, _) => Ok(Self::WalkFfn),
-            (EndpointKind::Experts, WireArm::F32) => Ok(Self::ExpertsMultiLayer),
-            (EndpointKind::Experts, WireArm::Q8k) => Ok(Self::ExpertsMultiLayerQ8k),
-            (EndpointKind::Experts, w) => Err(format!(
+            (EndpointKind::Experts, WireSpec::Pair { .. }) => Err(format!(
+                "--endpoint experts has no {} arm — asymmetric in/return pairs exist only \
+                 on the dense walk-ffn wire (the multi-layer expert wire carries f32 or \
+                 q8k frames only)",
+                wire.label()
+            )),
+            (EndpointKind::Experts, WireSpec::Plain(WireArm::F32)) => Ok(Self::ExpertsMultiLayer),
+            (EndpointKind::Experts, WireSpec::Plain(WireArm::Q8k)) => {
+                Ok(Self::ExpertsMultiLayerQ8k)
+            }
+            (EndpointKind::Experts, WireSpec::Plain(w)) => Err(format!(
                 "--endpoint experts has no {} arm — the multi-layer expert wire carries \
                  f32 or q8k frames only (use --wire f32,q8k)",
                 w.label()
@@ -191,21 +325,24 @@ impl Endpoint {
         }
     }
 
-    /// Request `Content-Type`.
-    pub fn request_content_type(self) -> &'static str {
+    /// Request `Content-Type`. On the dense walk-ffn endpoint this is the
+    /// arm's INBOUND direction (f32 for plain arms — the historical wire;
+    /// the `input` format for pairs); the other endpoints have fixed CTs.
+    pub fn request_content_type(self, wire: WireSpec) -> &'static str {
         match self {
-            Self::WalkFfn => larql_inference::BINARY_CT,
+            Self::WalkFfn => wire.request_format().content_type(),
             Self::WalkFfnQ8k => larql_inference::Q8K_BATCH_CT,
             Self::ExpertsMultiLayer => MULTI_LAYER_BATCH_CONTENT_TYPE,
             Self::ExpertsMultiLayerQ8k => MULTI_LAYER_BATCH_Q8K_CONTENT_TYPE,
         }
     }
 
-    /// `Accept` header. Only the f32 walk-ffn endpoint negotiates response
-    /// formats (per wire arm); q8k walk-ffn is its own endpoint with a fixed
-    /// response, and both multi-layer endpoints always answer with the f32
-    /// multi-layer CT (mirrors the production shard client's Accept).
-    pub fn accept(self, wire: WireArm) -> Option<&'static str> {
+    /// `Accept` header. Only the walk-ffn endpoint negotiates response
+    /// formats (per wire arm / pair return arm); q8k walk-ffn is its own
+    /// endpoint with a fixed response, and both multi-layer endpoints
+    /// always answer with the f32 multi-layer CT (mirrors the production
+    /// shard client's Accept).
+    pub fn accept(self, wire: WireSpec) -> Option<&'static str> {
         match self {
             Self::WalkFfn => wire.accept(),
             Self::WalkFfnQ8k => None,
@@ -287,7 +424,7 @@ impl DispatchMode {
 #[derive(Debug, Clone, Copy)]
 pub struct SweepPoint {
     pub batch: usize,
-    pub wire: WireArm,
+    pub wire: WireSpec,
     pub dispatch: DispatchMode,
     pub endpoint: Endpoint,
 }
@@ -311,11 +448,11 @@ pub fn parse_batch_list(s: &str) -> Result<Vec<usize>, String> {
 
 /// Full cross product, ordered batch-major so all wire/dispatch arms of one
 /// batch size run adjacently (comparable thermal window). Errs on wire arms
-/// the endpoint family cannot serve (f16/i8 on `experts` — arg-validation
-/// time, before any request is sent).
+/// the endpoint family cannot serve (f16/i8 and in/return pairs on
+/// `experts` — arg-validation time, before any request is sent).
 pub fn expand_sweep(
     batches: &[usize],
-    wires: &[WireArm],
+    wires: &[WireSpec],
     dispatches: &[DispatchMode],
     kind: EndpointKind,
 ) -> Result<Vec<SweepPoint>, String> {
@@ -341,13 +478,27 @@ pub fn expand_sweep(
 
 // ── Frame construction ────────────────────────────────────────────────────────
 
-/// Build a B-row `/v1/walk-ffn` request frame for one layer.
+/// Build a B-row `/v1/walk-ffn` request frame for one layer, with the
+/// residual payload in `format` (the arm's inbound direction).
 ///
 /// `rows` is `batch × hidden` contiguous f32s. `top_k` is hard-wired to 0:
 /// the server's L2 FFN cache engages when `seq_len == 1 && top_k > 0`, which
 /// would falsify repeated B=1 measurements with cache hits.
+pub fn build_walk_ffn_frame_as(
+    format: WireFormat,
+    layer: usize,
+    rows: &[f32],
+    batch: usize,
+) -> Vec<u8> {
+    encode_binary_request_as(format, Some(layer), None, rows, batch, true, 0)
+}
+
+/// f32 twin of [`build_walk_ffn_frame_as`] — the historical (plain-arm)
+/// frame shape, kept as the byte-pin reference for the tests below
+/// (production goes through [`build_frame`] → `build_walk_ffn_frame_as`).
+#[cfg(test)]
 pub fn build_walk_ffn_frame(layer: usize, rows: &[f32], batch: usize) -> Vec<u8> {
-    encode_binary_request(Some(layer), None, rows, batch, true, 0)
+    build_walk_ffn_frame_as(WireFormat::F32, layer, rows, batch)
 }
 
 /// Build a B-row `/v1/walk-ffn-q8k` request frame for one layer: B entries
@@ -487,9 +638,12 @@ pub fn gather_frame_inputs(
 }
 
 /// Build the endpoint's wire frame from gathered inputs, through the same
-/// codec functions the production client uses.
+/// codec functions the production client uses. `wire` selects the inbound
+/// residual encoding on the dense walk-ffn endpoint (plain arms stay f32;
+/// pairs encode their `input` format); the other endpoints ignore it.
 pub fn build_frame(
     endpoint: Endpoint,
+    wire: WireSpec,
     inputs: &FrameInputs,
     batch: usize,
     hidden: usize,
@@ -501,7 +655,9 @@ pub fn build_frame(
             .ok_or_else(|| "experts frame build: inputs carry no routing".to_string())
     };
     Ok(match endpoint {
-        Endpoint::WalkFfn => build_walk_ffn_frame(inputs.layer, &inputs.rows, batch),
+        Endpoint::WalkFfn => {
+            build_walk_ffn_frame_as(wire.request_format(), inputs.layer, &inputs.rows, batch)
+        }
         Endpoint::WalkFfnQ8k => build_q8k_frame(inputs.layer, &inputs.rows, batch, hidden),
         Endpoint::ExpertsMultiLayer => {
             build_experts_ml_frame(inputs.layer, &inputs.rows, routing()?, batch, hidden)
@@ -558,10 +714,14 @@ pub struct RequestSample {
     pub transmit_clamped: bool,
     pub bytes_sent: u64,
     pub bytes_recv: u64,
-    /// Wire format the server actually served (from the response
+    /// Inbound wire format actually sent (echo of the request
+    /// Content-Type label put on the wire — the client is authoritative
+    /// for this direction).
+    pub served_wire_in: String,
+    /// Return wire format the server actually served (from the response
     /// content-type). Accept negotiation may fall back — e.g. an i8 arm
     /// served as f32 — and the run record must say so.
-    pub served_wire: String,
+    pub served_wire_out: String,
     /// Whether any decoded response value was non-zero. Consumed by the
     /// post-warmup corruption guard on routed points (audit §1a class);
     /// computed at decode time, outside the timed window.
@@ -617,12 +777,22 @@ pub struct DecPointSummary {
     pub endpoint: String,
     /// Numeric twin of `endpoint` (0/1/2/3) for numeric-only ingesters.
     pub endpoint_code: u32,
+    /// Combined wire-arm label (`dec/wire_format`): plain arms keep their
+    /// historical label; asymmetric pairs are `"in/out"` (e.g. `"f16/i8"`).
     pub wire_format: String,
     pub wire_format_code: u32,
-    /// Wire format(s) the server actually served this point (sorted,
-    /// deduped). Differs from `wire_format` when Accept negotiation fell
-    /// back — the arm's bandwidth number then belongs to the served format.
-    pub served_wire: Vec<String>,
+    /// Requested INBOUND dtype (request Content-Type direction).
+    pub wire_in: String,
+    /// Requested RETURN dtype (Accept direction).
+    pub wire_out: String,
+    /// Inbound wire format(s) actually sent this point (sorted, deduped —
+    /// echo of the request Content-Type labels).
+    pub served_wire_in: Vec<String>,
+    /// Return wire format(s) the server actually served this point
+    /// (sorted, deduped). Differs from `wire_out` when Accept negotiation
+    /// fell back — the arm's bandwidth number then belongs to the served
+    /// format.
+    pub served_wire_out: Vec<String>,
     pub dispatch_mode: String,
     pub dispatch_mode_code: u32,
     pub steps: usize,
@@ -633,6 +803,12 @@ pub struct DecPointSummary {
     pub tok_s: f64,
     /// (bytes sent + received) ÷ (steps × batch) — wire cost per token row.
     pub payload_bytes_tok: f64,
+    /// bytes sent ÷ (steps × batch) — the inbound (request) direction's
+    /// share of `payload_bytes_tok`.
+    pub payload_bytes_tok_in: f64,
+    /// bytes received ÷ (steps × batch) — the return (response)
+    /// direction's share of `payload_bytes_tok`.
+    pub payload_bytes_tok_out: f64,
     /// Dense-endpoint denominator: FFN weight bytes the endpoint touches
     /// per token over the replayed layers. Constant across a run's points
     /// (kept per-point so every summary is self-contained); `None` on
@@ -703,17 +879,19 @@ pub fn summarize(
     } else {
         0.0
     };
-    let total_bytes: u64 = stats
-        .samples
-        .iter()
-        .map(|s| s.bytes_sent + s.bytes_recv)
-        .sum();
+    let sent_bytes: u64 = stats.samples.iter().map(|s| s.bytes_sent).sum();
+    let recv_bytes: u64 = stats.samples.iter().map(|s| s.bytes_recv).sum();
     let token_rows = (stats.step_ms.len() * point.batch) as f64;
-    let payload_bytes_tok = if token_rows > 0.0 {
-        total_bytes as f64 / token_rows
-    } else {
-        0.0
+    let per_tok = |bytes: u64| {
+        if token_rows > 0.0 {
+            bytes as f64 / token_rows
+        } else {
+            0.0
+        }
     };
+    let payload_bytes_tok_in = per_tok(sent_bytes);
+    let payload_bytes_tok_out = per_tok(recv_bytes);
+    let payload_bytes_tok = per_tok(sent_bytes + recv_bytes);
 
     let server_samples: Vec<f64> = stats.samples.iter().filter_map(|s| s.server_ms).collect();
     let (server_ms_p50, server_ms_p99) = if server_samples.is_empty() {
@@ -749,13 +927,25 @@ pub fn summarize(
         p50
     };
 
-    let mut served_wire: Vec<String> = stats
-        .samples
-        .iter()
-        .map(|s| s.served_wire.clone())
-        .collect();
-    served_wire.sort();
-    served_wire.dedup();
+    let sorted_dedup = |mut v: Vec<String>| {
+        v.sort();
+        v.dedup();
+        v
+    };
+    let served_wire_in = sorted_dedup(
+        stats
+            .samples
+            .iter()
+            .map(|s| s.served_wire_in.clone())
+            .collect(),
+    );
+    let served_wire_out = sorted_dedup(
+        stats
+            .samples
+            .iter()
+            .map(|s| s.served_wire_out.clone())
+            .collect(),
+    );
 
     let mut layers: Vec<usize> = stats.samples.iter().map(|s| s.layer).collect();
     layers.sort_unstable();
@@ -801,9 +991,12 @@ pub fn summarize(
         batch: point.batch,
         endpoint: point.endpoint.label().into(),
         endpoint_code: point.endpoint.code(),
-        wire_format: point.wire.label().into(),
+        wire_format: point.wire.label(),
         wire_format_code: point.wire.code(),
-        served_wire,
+        wire_in: point.wire.in_label().into(),
+        wire_out: point.wire.out_label().into(),
+        served_wire_in,
+        served_wire_out,
         dispatch_mode: point.dispatch.label().into(),
         dispatch_mode_code: point.dispatch.code(),
         steps: stats.step_ms.len(),
@@ -812,6 +1005,8 @@ pub fn summarize(
         step_ms_p99: p99,
         tok_s,
         payload_bytes_tok,
+        payload_bytes_tok_in,
+        payload_bytes_tok_out,
         weight_bytes_tok,
         weight_bytes_tok_naive,
         weight_bytes_tok_union,
@@ -1047,6 +1242,97 @@ mod tests {
     }
 
     #[test]
+    fn parse_wire_spec_plain_arms_and_pairs() {
+        let specs = WireSpec::parse_list("f32, f16/i8 ,i8/f16,q8k").unwrap();
+        assert_eq!(
+            specs,
+            vec![
+                WireSpec::Plain(WireArm::F32),
+                WireSpec::Pair {
+                    input: WireFormat::F16,
+                    output: WireFormat::I8
+                },
+                WireSpec::Pair {
+                    input: WireFormat::I8,
+                    output: WireFormat::F16
+                },
+                WireSpec::Plain(WireArm::Q8k),
+            ]
+        );
+        // All four asymmetric combos parse.
+        for pair in ["f16/i8", "i8/f16", "f32/i8", "f16/f32"] {
+            assert!(matches!(
+                WireSpec::parse(pair).unwrap(),
+                WireSpec::Pair { .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn parse_wire_spec_rejects_malformed_pairs() {
+        // Missing arms, extra segments, q8k in a pair, unknown dtypes.
+        for bad in [
+            "f16/", "/i8", "f16/i8/x", "q8k/f32", "f32/q8k", "f16//i8", "f64/i8", "/",
+        ] {
+            let err = WireSpec::parse(bad).unwrap_err();
+            assert!(
+                err.contains("invalid wire pair") || err.contains("unknown wire format"),
+                "{bad:?} → {err}"
+            );
+        }
+        // Malformed plain arm keeps the arm-level error.
+        assert!(WireSpec::parse("f64").is_err());
+    }
+
+    #[test]
+    fn wire_spec_labels_codes_and_direction_labels() {
+        let f16_i8 = WireSpec::Pair {
+            input: WireFormat::F16,
+            output: WireFormat::I8,
+        };
+        let i8_f16 = WireSpec::Pair {
+            input: WireFormat::I8,
+            output: WireFormat::F16,
+        };
+        assert_eq!(f16_i8.label(), "f16/i8");
+        assert_eq!(i8_f16.label(), "i8/f16");
+        // Pair codes: 100 + 10×in + out (f32=0, f16=1, i8=2).
+        assert_eq!(f16_i8.code(), 112);
+        assert_eq!(i8_f16.code(), 121);
+        // Plain arms keep the historical labels and codes.
+        assert_eq!(WireSpec::Plain(WireArm::F16).label(), "f16");
+        assert_eq!(WireSpec::Plain(WireArm::Q8k).code(), 3);
+        // Direction labels: plain arms actually send f32 request frames
+        // (the historical wire), q8k rides its own endpoint both ways.
+        assert_eq!(WireSpec::Plain(WireArm::F16).in_label(), "f32");
+        assert_eq!(WireSpec::Plain(WireArm::F16).out_label(), "f16");
+        assert_eq!(WireSpec::Plain(WireArm::F32).in_label(), "f32");
+        assert_eq!(WireSpec::Plain(WireArm::Q8k).in_label(), "q8k");
+        assert_eq!(WireSpec::Plain(WireArm::Q8k).out_label(), "q8k");
+        assert_eq!(f16_i8.in_label(), "f16");
+        assert_eq!(f16_i8.out_label(), "i8");
+    }
+
+    #[test]
+    fn wire_spec_accept_and_request_format() {
+        // Plain arms: unchanged Accept, f32 request frames.
+        assert_eq!(WireSpec::Plain(WireArm::I8).accept(), WireArm::I8.accept());
+        assert_eq!(
+            WireSpec::Plain(WireArm::I8).request_format(),
+            WireFormat::F32
+        );
+        assert!(WireSpec::Plain(WireArm::Q8k).is_q8k());
+        // Pairs: strict Accept = return arm only; request frame = input arm.
+        let pair = WireSpec::Pair {
+            input: WireFormat::I8,
+            output: WireFormat::F16,
+        };
+        assert_eq!(pair.accept(), Some(larql_inference::F16_CT));
+        assert_eq!(pair.request_format(), WireFormat::I8);
+        assert!(!pair.is_q8k());
+    }
+
+    #[test]
     fn wire_arm_labels_codes_accepts() {
         assert_eq!(WireArm::F32.label(), "f32");
         assert_eq!(WireArm::Q8k.code(), 3);
@@ -1071,7 +1357,7 @@ mod tests {
     fn expand_sweep_is_batch_major_cross_product() {
         let points = expand_sweep(
             &[1, 8],
-            &[WireArm::F32, WireArm::F16],
+            &[WireSpec::Plain(WireArm::F32), WireSpec::Plain(WireArm::F16)],
             &[DispatchMode::Streaming],
             EndpointKind::WalkFfn,
         )
@@ -1080,7 +1366,7 @@ mod tests {
         assert_eq!(points[0].batch, 1);
         assert_eq!(points[1].batch, 1);
         assert_eq!(points[2].batch, 8);
-        assert_eq!(points[1].wire, WireArm::F16);
+        assert_eq!(points[1].wire, WireSpec::Plain(WireArm::F16));
         assert!(points.iter().all(|p| p.endpoint == Endpoint::WalkFfn));
     }
 
@@ -1088,7 +1374,7 @@ mod tests {
     fn expand_sweep_resolves_endpoints_and_rejects_unservable_wires() {
         let points = expand_sweep(
             &[1],
-            &[WireArm::F32, WireArm::Q8k],
+            &[WireSpec::Plain(WireArm::F32), WireSpec::Plain(WireArm::Q8k)],
             &[DispatchMode::Streaming],
             EndpointKind::Experts,
         )
@@ -1098,7 +1384,7 @@ mod tests {
 
         let q8k_points = expand_sweep(
             &[1],
-            &[WireArm::Q8k],
+            &[WireSpec::Plain(WireArm::Q8k)],
             &[DispatchMode::Streaming],
             EndpointKind::WalkFfn,
         )
@@ -1109,13 +1395,43 @@ mod tests {
         for wire in [WireArm::F16, WireArm::I8] {
             let err = expand_sweep(
                 &[1],
-                &[WireArm::F32, wire],
+                &[WireSpec::Plain(WireArm::F32), WireSpec::Plain(wire)],
                 &[DispatchMode::Streaming],
                 EndpointKind::Experts,
             )
             .unwrap_err();
             assert!(err.contains(wire.label()), "error names the bad arm: {err}");
         }
+    }
+
+    #[test]
+    fn expand_sweep_pairs_resolve_on_walk_ffn_and_reject_on_experts() {
+        let pair = WireSpec::Pair {
+            input: WireFormat::F16,
+            output: WireFormat::I8,
+        };
+        // Pairs ride the dense walk-ffn endpoint.
+        let points = expand_sweep(
+            &[1],
+            &[pair],
+            &[DispatchMode::Streaming],
+            EndpointKind::WalkFfn,
+        )
+        .unwrap();
+        assert_eq!(points[0].endpoint, Endpoint::WalkFfn);
+        assert_eq!(points[0].wire, pair);
+
+        // Pairs on experts fail at expansion (arg-validation) time, before
+        // any request is sent — same discipline as f16/i8 plain arms.
+        let err = expand_sweep(
+            &[1],
+            &[pair],
+            &[DispatchMode::Streaming],
+            EndpointKind::Experts,
+        )
+        .unwrap_err();
+        assert!(err.contains("f16/i8"), "error names the pair: {err}");
+        assert!(err.contains("walk-ffn"), "error points at the fix: {err}");
     }
 
     // ── frames ─────────────────────────────────────────────────────────
@@ -1178,7 +1494,8 @@ mod tests {
             transmit_clamped,
             bytes_sent: 100,
             bytes_recv: 60,
-            served_wire: "f16".into(),
+            served_wire_in: "f32".into(),
+            served_wire_out: "f16".into(),
             any_nonzero: true,
         }
     }
@@ -1187,7 +1504,7 @@ mod tests {
     fn summarize_computes_throughput_payload_and_per_layer() {
         let point = SweepPoint {
             batch: 8,
-            wire: WireArm::F16,
+            wire: WireSpec::Plain(WireArm::F16),
             dispatch: DispatchMode::Batch,
             endpoint: Endpoint::WalkFfn,
         };
@@ -1222,7 +1539,7 @@ mod tests {
     fn summarize_handles_empty_and_no_server_ms() {
         let point = SweepPoint {
             batch: 1,
-            wire: WireArm::Q8k,
+            wire: WireSpec::Plain(WireArm::Q8k),
             dispatch: DispatchMode::Streaming,
             endpoint: Endpoint::WalkFfnQ8k,
         };
@@ -1270,7 +1587,7 @@ mod tests {
     fn summarize_two_scoreboard_fields_from_samples() {
         let point = SweepPoint {
             batch: 2,
-            wire: WireArm::F32,
+            wire: WireSpec::Plain(WireArm::F32),
             dispatch: DispatchMode::Streaming,
             endpoint: Endpoint::WalkFfn,
         };
@@ -1304,7 +1621,7 @@ mod tests {
     fn summarize_counts_clamped_transmit_samples() {
         let point = SweepPoint {
             batch: 1,
-            wire: WireArm::F32,
+            wire: WireSpec::Plain(WireArm::F32),
             dispatch: DispatchMode::Streaming,
             endpoint: Endpoint::WalkFfn,
         };
@@ -1328,7 +1645,7 @@ mod tests {
         // encode/decode/queue (client-measured) are always present.
         let point = SweepPoint {
             batch: 1,
-            wire: WireArm::Q8k,
+            wire: WireSpec::Plain(WireArm::Q8k),
             dispatch: DispatchMode::Streaming,
             endpoint: Endpoint::WalkFfnQ8k,
         };
@@ -1356,21 +1673,70 @@ mod tests {
         // the bandwidth number belongs to what was actually on the wire.
         let point = SweepPoint {
             batch: 1,
-            wire: WireArm::I8,
+            wire: WireSpec::Plain(WireArm::I8),
             dispatch: DispatchMode::Streaming,
             endpoint: Endpoint::WalkFfn,
         };
         let mut s0 = sample(0, 1.0, Some(0.5));
-        s0.served_wire = "f32".into();
+        s0.served_wire_out = "f32".into();
         let mut s1 = sample(1, 1.0, Some(0.5));
-        s1.served_wire = "f32".into();
+        s1.served_wire_out = "f32".into();
         let stats = SweepPointStats {
             step_ms: vec![2.0],
             samples: vec![s0, s1],
         };
         let s = summarize(&point, &stats, None, None);
         assert_eq!(s.wire_format, "i8");
-        assert_eq!(s.served_wire, vec!["f32".to_string()]);
+        assert_eq!(s.wire_in, "f32");
+        assert_eq!(s.wire_out, "i8");
+        assert_eq!(s.served_wire_in, vec!["f32".to_string()]);
+        assert_eq!(s.served_wire_out, vec!["f32".to_string()]);
+    }
+
+    #[test]
+    fn summarize_pair_point_records_directions_and_split_bytes() {
+        let point = SweepPoint {
+            batch: 2,
+            wire: WireSpec::Pair {
+                input: WireFormat::F16,
+                output: WireFormat::I8,
+            },
+            dispatch: DispatchMode::Streaming,
+            endpoint: Endpoint::WalkFfn,
+        };
+        let mut s0 = sample(0, 1.0, Some(0.5));
+        s0.served_wire_in = "f16".into();
+        s0.served_wire_out = "i8".into();
+        s0.bytes_sent = 300;
+        s0.bytes_recv = 100;
+        let mut s1 = s0.clone();
+        s1.bytes_sent = 100;
+        s1.bytes_recv = 60;
+        let stats = SweepPointStats {
+            step_ms: vec![2.0, 2.0],
+            samples: vec![s0, s1],
+        };
+        let s = summarize(&point, &stats, None, None);
+        assert_eq!(s.wire_format, "f16/i8");
+        assert_eq!(s.wire_format_code, 112);
+        assert_eq!(s.wire_in, "f16");
+        assert_eq!(s.wire_out, "i8");
+        assert_eq!(s.served_wire_in, vec!["f16".to_string()]);
+        assert_eq!(s.served_wire_out, vec!["i8".to_string()]);
+        // Per-direction byte accounting: 4 token rows (2 steps × batch 2).
+        assert_eq!(s.payload_bytes_tok_in, 400.0 / 4.0);
+        assert_eq!(s.payload_bytes_tok_out, 160.0 / 4.0);
+        assert_eq!(
+            s.payload_bytes_tok,
+            s.payload_bytes_tok_in + s.payload_bytes_tok_out
+        );
+        // The run record carries the split fields.
+        let json = serde_json::to_value(&s).unwrap();
+        assert_eq!(json["wire_in"], "f16");
+        assert_eq!(json["wire_out"], "i8");
+        assert!(json["payload_bytes_tok_in"].is_number());
+        assert!(json["payload_bytes_tok_out"].is_number());
+        assert_eq!(json["served_wire_out"][0], "i8");
     }
 
     #[test]
@@ -1448,33 +1814,44 @@ mod tests {
     #[test]
     fn endpoint_resolution_maps_wire_axis() {
         use Endpoint::*;
+        let plain = WireSpec::Plain;
         assert_eq!(
-            Endpoint::resolve(EndpointKind::WalkFfn, WireArm::F32).unwrap(),
+            Endpoint::resolve(EndpointKind::WalkFfn, plain(WireArm::F32)).unwrap(),
             WalkFfn
         );
         assert_eq!(
-            Endpoint::resolve(EndpointKind::WalkFfn, WireArm::F16).unwrap(),
+            Endpoint::resolve(EndpointKind::WalkFfn, plain(WireArm::F16)).unwrap(),
             WalkFfn,
             "f16/i8 are Accept negotiation on the same endpoint"
         );
         assert_eq!(
-            Endpoint::resolve(EndpointKind::WalkFfn, WireArm::I8).unwrap(),
+            Endpoint::resolve(EndpointKind::WalkFfn, plain(WireArm::I8)).unwrap(),
             WalkFfn
         );
         assert_eq!(
-            Endpoint::resolve(EndpointKind::WalkFfn, WireArm::Q8k).unwrap(),
+            Endpoint::resolve(EndpointKind::WalkFfn, plain(WireArm::Q8k)).unwrap(),
             WalkFfnQ8k
         );
         assert_eq!(
-            Endpoint::resolve(EndpointKind::Experts, WireArm::F32).unwrap(),
+            Endpoint::resolve(EndpointKind::Experts, plain(WireArm::F32)).unwrap(),
             ExpertsMultiLayer
         );
         assert_eq!(
-            Endpoint::resolve(EndpointKind::Experts, WireArm::Q8k).unwrap(),
+            Endpoint::resolve(EndpointKind::Experts, plain(WireArm::Q8k)).unwrap(),
             ExpertsMultiLayerQ8k
         );
-        assert!(Endpoint::resolve(EndpointKind::Experts, WireArm::F16).is_err());
-        assert!(Endpoint::resolve(EndpointKind::Experts, WireArm::I8).is_err());
+        assert!(Endpoint::resolve(EndpointKind::Experts, plain(WireArm::F16)).is_err());
+        assert!(Endpoint::resolve(EndpointKind::Experts, plain(WireArm::I8)).is_err());
+        // Asymmetric pairs: dense walk-ffn only.
+        let pair = WireSpec::Pair {
+            input: WireFormat::I8,
+            output: WireFormat::F16,
+        };
+        assert_eq!(
+            Endpoint::resolve(EndpointKind::WalkFfn, pair).unwrap(),
+            WalkFfn
+        );
+        assert!(Endpoint::resolve(EndpointKind::Experts, pair).is_err());
     }
 
     #[test]
@@ -1494,30 +1871,42 @@ mod tests {
         assert_eq!(WalkFfnQ8k.path(), WALK_FFN_Q8K_PATH);
         assert_eq!(ExpertsMultiLayer.path(), MULTI_LAYER_BATCH_PATH);
         assert_eq!(ExpertsMultiLayerQ8k.path(), MULTI_LAYER_BATCH_Q8K_PATH);
-        // Content types.
-        assert_eq!(WalkFfn.request_content_type(), larql_inference::BINARY_CT);
+        // Content types: plain arms keep the historical f32 request CT on
+        // walk-ffn; pairs put their inbound arm on the request CT.
+        let plain_f16 = WireSpec::Plain(WireArm::F16);
+        let pair = WireSpec::Pair {
+            input: WireFormat::F16,
+            output: WireFormat::I8,
+        };
         assert_eq!(
-            WalkFfnQ8k.request_content_type(),
+            WalkFfn.request_content_type(plain_f16),
+            larql_inference::BINARY_CT
+        );
+        assert_eq!(WalkFfn.request_content_type(pair), larql_inference::F16_CT);
+        assert_eq!(
+            WalkFfnQ8k.request_content_type(WireSpec::Plain(WireArm::Q8k)),
             larql_inference::Q8K_BATCH_CT
         );
         assert_eq!(
-            ExpertsMultiLayer.request_content_type(),
+            ExpertsMultiLayer.request_content_type(WireSpec::Plain(WireArm::F32)),
             MULTI_LAYER_BATCH_CONTENT_TYPE
         );
         assert_eq!(
-            ExpertsMultiLayerQ8k.request_content_type(),
+            ExpertsMultiLayerQ8k.request_content_type(WireSpec::Plain(WireArm::Q8k)),
             MULTI_LAYER_BATCH_Q8K_CONTENT_TYPE
         );
-        // Accept: walk-ffn negotiates per wire arm; q8k walk-ffn none; both
-        // multi-layer endpoints ask for the fixed f32 multi-layer CT.
-        assert_eq!(WalkFfn.accept(WireArm::F16), WireArm::F16.accept());
-        assert_eq!(WalkFfnQ8k.accept(WireArm::Q8k), None);
+        // Accept: walk-ffn negotiates per wire arm (pairs: strict return
+        // arm); q8k walk-ffn none; both multi-layer endpoints ask for the
+        // fixed f32 multi-layer CT.
+        assert_eq!(WalkFfn.accept(plain_f16), WireArm::F16.accept());
+        assert_eq!(WalkFfn.accept(pair), Some(larql_inference::I8_CT));
+        assert_eq!(WalkFfnQ8k.accept(WireSpec::Plain(WireArm::Q8k)), None);
         assert_eq!(
-            ExpertsMultiLayer.accept(WireArm::F32),
+            ExpertsMultiLayer.accept(WireSpec::Plain(WireArm::F32)),
             Some(MULTI_LAYER_BATCH_CONTENT_TYPE)
         );
         assert_eq!(
-            ExpertsMultiLayerQ8k.accept(WireArm::Q8k),
+            ExpertsMultiLayerQ8k.accept(WireSpec::Plain(WireArm::Q8k)),
             Some(MULTI_LAYER_BATCH_CONTENT_TYPE)
         );
         // Serve-latency source: only the f32 walk-ffn response embeds
@@ -1783,23 +2172,70 @@ mod tests {
         let pool = Pool::open(dir.path()).unwrap();
 
         // Walk-ffn: byte-identical to the direct builder (pinned behaviour).
+        let f32_arm = WireSpec::Plain(WireArm::F32);
         let dense = gather_frame_inputs(&pool, Endpoint::WalkFfn, 0, 0, 2).unwrap();
         assert_eq!(
-            build_frame(Endpoint::WalkFfn, &dense, 2, HIDDEN).unwrap(),
+            build_frame(Endpoint::WalkFfn, f32_arm, &dense, 2, HIDDEN).unwrap(),
             build_walk_ffn_frame(0, &dense.rows, 2)
         );
+        // Plain f16/i8 arms keep the historical f32 request frame — the
+        // symmetric arms' bytes are unchanged by the pair axis.
+        for arm in [WireArm::F16, WireArm::I8] {
+            assert_eq!(
+                build_frame(Endpoint::WalkFfn, WireSpec::Plain(arm), &dense, 2, HIDDEN).unwrap(),
+                build_walk_ffn_frame(0, &dense.rows, 2)
+            );
+        }
         assert_eq!(
-            build_frame(Endpoint::WalkFfnQ8k, &dense, 2, HIDDEN).unwrap(),
+            build_frame(
+                Endpoint::WalkFfnQ8k,
+                WireSpec::Plain(WireArm::Q8k),
+                &dense,
+                2,
+                HIDDEN
+            )
+            .unwrap(),
             build_q8k_frame(0, &dense.rows, 2, HIDDEN)
         );
 
+        // Pair arms encode the request in their inbound format; the frame
+        // round-trips through the production request decoder.
+        let pair = WireSpec::Pair {
+            input: WireFormat::F16,
+            output: WireFormat::I8,
+        };
+        let frame = build_frame(Endpoint::WalkFfn, pair, &dense, 2, HIDDEN).unwrap();
+        assert_eq!(
+            frame,
+            build_walk_ffn_frame_as(WireFormat::F16, 0, &dense.rows, 2)
+        );
+        let decoded =
+            larql_inference::ffn::remote::decode_binary_request_as(WireFormat::F16, &frame)
+                .unwrap();
+        assert_eq!(decoded.layer, Some(0));
+        assert_eq!(decoded.seq_len, 2);
+        assert_eq!(decoded.top_k, 0, "replay frames pin top_k=0 in every arm");
+        assert_eq!(decoded.residual.len(), 2 * HIDDEN);
+
+        // i8-inbound pair round-trips through the production decoder too.
+        let i8_pair = WireSpec::Pair {
+            input: WireFormat::I8,
+            output: WireFormat::F16,
+        };
+        let frame = build_frame(Endpoint::WalkFfn, i8_pair, &dense, 2, HIDDEN).unwrap();
+        let decoded =
+            larql_inference::ffn::remote::decode_binary_request_as(WireFormat::I8, &frame).unwrap();
+        assert_eq!(decoded.residual.len(), 2 * HIDDEN);
+
         // Experts: frame carries per-row routing; missing routing is an error.
+        let experts_arm = WireSpec::Plain(WireArm::F32);
         let inputs = gather_frame_inputs(&pool, Endpoint::ExpertsMultiLayer, 0, 0, 2).unwrap();
-        let frame = build_frame(Endpoint::ExpertsMultiLayer, &inputs, 2, HIDDEN).unwrap();
+        let frame =
+            build_frame(Endpoint::ExpertsMultiLayer, experts_arm, &inputs, 2, HIDDEN).unwrap();
         let tasks = larql_inference::ffn::moe_remote::decode_multi_layer_request(&frame).unwrap();
         assert_eq!(tasks.len(), 2);
         assert_eq!(tasks[1].expert_ids, vec![1, 3]); // prompt 1 step 0 → (0+1)%3
-        assert!(build_frame(Endpoint::ExpertsMultiLayer, &dense, 2, HIDDEN).is_err());
+        assert!(build_frame(Endpoint::ExpertsMultiLayer, experts_arm, &dense, 2, HIDDEN).is_err());
     }
 
     // ── routed denominators ────────────────────────────────────────────
@@ -1905,7 +2341,7 @@ mod tests {
         // Routed point: naive is the primary movement denominator.
         let point = SweepPoint {
             batch: 1,
-            wire: WireArm::F32,
+            wire: WireSpec::Plain(WireArm::F32),
             dispatch: DispatchMode::Streaming,
             endpoint: Endpoint::ExpertsMultiLayer,
         };
@@ -1926,7 +2362,7 @@ mod tests {
         // Dense point: weight_bytes_tok carried per-point, routed fields absent.
         let point = SweepPoint {
             batch: 1,
-            wire: WireArm::F32,
+            wire: WireSpec::Plain(WireArm::F32),
             dispatch: DispatchMode::Streaming,
             endpoint: Endpoint::WalkFfn,
         };

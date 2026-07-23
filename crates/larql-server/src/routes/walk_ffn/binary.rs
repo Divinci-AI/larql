@@ -22,14 +22,19 @@ pub(crate) use larql_inference::ffn::remote::{
     encode_json_full_output,
 };
 
-/// Decode a binary-format request body into a [`WalkFfnRequest`].
+/// Decode a binary-format request body whose residual payload is in
+/// `format` (inbound `Content-Type` dispatch — the request and response
+/// directions are negotiated independently, DEC funnel §3 DEC-1A).
 ///
 /// Thin wrapper over the shared
-/// [`larql_inference::ffn::remote::decode_binary_request`]: maps the codec's
-/// string error into [`ServerError::BadRequest`] and fills the JSON-only
-/// `moe_layer` field (the binary wire has no MoE-layer flag).
-pub(crate) fn decode_binary_request(body: &[u8]) -> Result<WalkFfnRequest, ServerError> {
-    let d = larql_inference::ffn::remote::decode_binary_request(body)
+/// [`larql_inference::ffn::remote::decode_binary_request_as`]: maps the
+/// codec's string error into [`ServerError::BadRequest`] and fills the
+/// JSON-only `moe_layer` field (the binary wire has no MoE-layer flag).
+pub(crate) fn decode_request(
+    format: larql_inference::ffn::remote::WireFormat,
+    body: &[u8],
+) -> Result<WalkFfnRequest, ServerError> {
+    let d = larql_inference::ffn::remote::decode_binary_request_as(format, body)
         .map_err(ServerError::BadRequest)?;
     Ok(WalkFfnRequest {
         layer: d.layer,
@@ -40,6 +45,14 @@ pub(crate) fn decode_binary_request(body: &[u8]) -> Result<WalkFfnRequest, Serve
         full_output: d.full_output,
         moe_layer: false,
     })
+}
+
+/// f32-only twin of [`decode_request`] — the pre-asymmetric call shape,
+/// kept for the regression suite below (production dispatches by
+/// Content-Type through [`decode_request`]).
+#[cfg(test)]
+pub(crate) fn decode_binary_request(body: &[u8]) -> Result<WalkFfnRequest, ServerError> {
+    decode_request(larql_inference::ffn::remote::WireFormat::F32, body)
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -155,6 +168,28 @@ mod tests {
         buf.extend_from_slice(&u32::MAX.to_le_bytes());
         buf.extend_from_slice(&[0u8; 12]);
         assert!(decode_binary_request(&buf).is_err());
+    }
+
+    #[test]
+    fn decode_request_dispatches_f16_and_i8_inbound_bodies() {
+        use larql_inference::ffn::remote::{encode_binary_request_as, WireFormat};
+        // Values exactly representable in both compressed formats (f16-exact
+        // fractions; i8 fixed-point with scale 0.5) so equality is exact.
+        let residual = vec![63.5f32, -32.0, 0.5, -63.5];
+        for fmt in [WireFormat::F16, WireFormat::I8] {
+            let body = encode_binary_request_as(fmt, Some(3), None, &residual, 1, true, 0);
+            let req = decode_request(fmt, &body).unwrap();
+            assert_eq!(req.layer, Some(3));
+            assert_eq!(req.seq_len, 1);
+            assert!(req.full_output);
+            assert!(!req.moe_layer);
+            assert_eq!(req.residual, residual, "{fmt:?}");
+        }
+        // Truncated compressed bodies reject through the same shim path.
+        let mut body =
+            encode_binary_request_as(WireFormat::F16, Some(3), None, &residual, 1, true, 0);
+        body.push(0u8); // odd f16 payload
+        assert!(decode_request(WireFormat::F16, &body).is_err());
     }
 
     #[test]
