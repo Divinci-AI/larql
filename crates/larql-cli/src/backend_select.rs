@@ -61,7 +61,11 @@ mod tests {
     #[cfg(not(all(feature = "gpu", target_os = "macos")))]
     #[test]
     fn metal_flag_errors_loudly_when_not_compiled_in() {
-        let err = backend_for_metal_flag(true).unwrap_err();
+        // `unwrap_err` needs `Ok: Debug`, which `Box<dyn ComputeBackend>` isn't.
+        let err = match backend_for_metal_flag(true) {
+            Err(e) => e,
+            Ok(_) => panic!("expected NotCompiledIn without the gpu feature"),
+        };
         assert!(err.to_string().contains("metal"));
     }
 }
