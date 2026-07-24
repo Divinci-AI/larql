@@ -122,7 +122,7 @@ impl VectorIndex {
                 "gate_vectors (absent — client-only slice)",
                 &dir.display().to_string(),
             );
-            let empty = memmap2::MmapMut::map_anon(0)?.make_read_only()?;
+            let empty = crate::mmap_util::map_anon_min_one(0)?.make_read_only()?;
             let gate_slices: Vec<crate::index::core::GateLayerSlice> = vec![
                 crate::index::core::GateLayerSlice { float_offset: 0, num_features: 0 };
                 num_layers
@@ -299,7 +299,10 @@ fn synthesize_gate_from_q4k(
     }
     let total_bytes = byte_offset as usize;
 
-    let mut anon = memmap2::MmapMut::map_anon(total_bytes)
+    // `map_anon_min_one`, not `map_anon`: a layer range that owns no features
+    // leaves `total_bytes` at 0, and the `make_read_only()` below then fails
+    // on Windows only (os error 87). Same class as the client-slice buffer.
+    let mut anon = crate::mmap_util::map_anon_min_one(total_bytes)
         .map_err(|e| VindexError::Parse(format!("anon mmap: {e}")))?;
 
     for info in &config.layers {
