@@ -103,7 +103,7 @@ larql convert gguf-to-vindex model.gguf -o model.vindex
 larql serve gemma3-4b.vindex --port 8080
 ```
 
-Grid traffic uses **f16 wire format** by default (50% bandwidth vs f32). Opt out with `LARQL_F16_WIRE_DISABLE=1`. Enable i8 symmetric quantised residuals (75% bandwidth, opt-in) with `LARQL_I8_WIRE=1`. Wire format is negotiated per-request via `Accept`/`Content-Type` headers — non-grid clients receive f32 unchanged.
+Grid traffic uses **f16 wire format** by default (50% bandwidth vs f32). Opt out with `LARQL_F16_WIRE_DISABLE=1`. Enable i8 symmetric quantised residuals (75% bandwidth, opt-in) with `LARQL_I8_WIRE=1`. Wire format is negotiated per-request via `Accept`/`Content-Type` headers — and the two directions are independent as of 2026-07-24 (ADR-0025): `Content-Type` declares the inbound residual format (f32/f16/i8 request encodings), `Accept` the return format, so asymmetric pairs like f16-in/i8-return are first-class. Responses can carry an opt-in server-latency trailer (`x-larql-timing: 1`), and `larql dec-bench drift` scores any wire config's bits/char fidelity against an in-run f32 baseline (0.5% gate). Non-grid clients receive f32 unchanged.
 
 **WebSocket streaming** on `WS /v1/stream`:
 ```json
