@@ -23,6 +23,8 @@ a local directory path — see [Model resolution](#model-resolution) below.
 | `publish <source>` | Publish a vindex to HuggingFace — full + slice siblings + collections. |
 | `rm <model>` | Evict a cached vindex. |
 | `bench <model>` | Benchmark decode throughput on a real vindex (Metal / CPU / Ollama). |
+| `accuracy <model>` | Split-axis accuracy suite for KV engines — parametric vs in-context vs conflict, scored by top-1 match and Shannon bits/token. |
+| `dec-bench <subcmd>` | DEC residual-replay loadgen — `capture` a residual pool, `replay` batch × wire × dispatch sweeps, `drift` the C6 wire-fidelity gate. |
 | `shannon <subcmd>` | Next-token bit scoring, slot probes, repetition probes, layer lens, demo arithmetic coding. |
 | `serve <model>` | Serve a vindex over HTTP + gRPC. |
 
@@ -177,6 +179,153 @@ larql bench gemma3-4b-it-vindex --backends metal,cpu
 larql bench gemma3-4b-it-vindex --ollama gemma3:4b
 larql bench gemma4-26b-a4b.vindex --moe-shards "0-63=http://a:8081,64-127=http://b:8082"
 ```
+
+### `larql accuracy`
+
+Split-axis accuracy suite for KV engines. Runs each selected engine through
+three corpora and reports them **separately**, because a single aggregate score
+hides the thing that discriminates engines:
+
+- **Parametric** — short factual completions; the answer is in the weights, so
+  any K/V strategy should score near 100%. A low score here means something is
+  broken, not compressed.
+- **In-context** — needle-in-haystack at scaling context lengths. The answer is
+  planted in the prompt, so compressed engines (sliding window, residual
+  replacement, quantised K/V) may lose it as context grows.
+- **Conflict** — the in-context premise contradicts pretraining; scored as
+  `followed_context` vs `parametric_fallback`. The most engine-discriminating
+  axis of the three.
+
+Each cell reports both top-1 match rate and Shannon bits-per-token
+(`-log2 P(expected_first_token | prompt)`, lower = more confident).
+
+```
+larql accuracy <MODEL> [OPTIONS]
+```
+
+| Flag | Description | Default |
+|---|---|---|
+| `<MODEL>` | Vindex dir, `hf://owner/name`, or cache shorthand | — |
+| `--engines <LIST>` | Comma-separated KV engine specs (same syntax as `larql bench --engine`) | `standard,markov-rs,unlimited-context,turbo-quant,apollo` |
+| `--quick` | 5-prompt parametric, 2 shortest needles, 5-prompt conflict | false (full: 101 parametric + 7 needles + 20 conflict) |
+| `--parametric-n <N>` | Override parametric corpus size; ignored under `--quick` | — |
+| `--needle-max-tokens <N>` | Max needle context length; `32768` for the full sweep | 8192 |
+| `--no-conflict` | Skip the conflict corpus | false |
+| `--ffn <SPEC>` | FFN dispatch policy, e.g. `dense`, `walk:k=100`, `'{walk:k=100}@layers=14-27;{dense}@otherwise'` | uniform `dense` |
+| `--output-file <PATH>` | Write a JSON report; the split table still prints to stdout | — |
+
+Apollo is in the default engine set deliberately: without a constellation store
+loaded it shows a 0% served rate on every corpus, surfacing as
+`SkippedRetrievalMiss` outcomes with a visible `served_rate < 1.0`. That row is
+honest about being unable to serve rather than silently dropped or
+mis-attributed.
+
+```bash
+larql accuracy gemma3-4b-it-vindex --quick
+larql accuracy gemma3-4b-it-vindex --engines standard,turbo-quant --needle-max-tokens 32768
+```
+
+### `larql dec-bench`
+
+The DEC funnel's residual-replay loadgen ([`docs/dec-funnel.md`](dec-funnel.md)).
+larql's decode loop is single-sequence — `--ffn-dispatch batch` batches *layer
+dispatches* within one token step, not sequences — so the batch axis cannot be
+measured with `larql bench`. `dec-bench` captures real per-layer residuals from
+single-stream decode, then replays them as B-row requests against an expert
+server. Replay is model-free, so a pool captured on a Mac runs unchanged on the
+x86/Linux arms.
+
+```
+larql dec-bench <capture|replay|drift> [OPTIONS]
+```
+
+#### `larql dec-bench capture`
+
+Runs single-stream decode over a fixed prompt set against a live expert server,
+recording each step's pre-normed per-layer residuals into a portable pool
+(`manifest.json` + `residuals.bin`).
+
+| Flag | Description | Default |
+|---|---|---|
+| `<MODEL>` | Vindex dir, `hf://owner/name`, or cache shorthand | — |
+| `--ffn <URL>` | Expert-server URL (loopback for DEC-0 arm M) | — |
+| `--prompts-file <PATH>` | Prompts file, one per line (fixed set, checked in) | — |
+| `--num-prompts <N>` | Prompts to capture — this is the **max replay batch size** | 64 |
+| `--steps <N>` | Decode steps captured per prompt | 16 |
+| `--routing` | Also capture routed-experts sidecars (`raw.bin`/`normed.bin`/`routing.bin`) for the routed replay arm. `top_k` comes from the model arch; errors if the model has no MoE. Without it the pool is byte-identical to the walk-ffn-only format | false |
+| `--metal` | Use the Metal GPU attention backend (required on macOS for remote-FFN decode) | false |
+| `--out <PATH>` | Output pool directory | — |
+| `--ffn-timeout-secs <N>` | Per-request timeout | 60 |
+
+#### `larql dec-bench replay`
+
+Sweeps batch × wire × dispatch against the server using B-row frames built from
+the pool, emitting the `dec/*` metric schema. Distinct prompts per row keep MoE
+routing realistic.
+
+| Flag | Description | Default |
+|---|---|---|
+| `--ffn <URL>` | Expert-server URL | — |
+| `--capture <PATH>` | Capture pool directory | — |
+| `--endpoint <walk-ffn\|experts>` | `walk-ffn` = dense/shared-expert path; `experts` = routed multi-layer path (needs a `--routing` pool; wire limited to f32/q8k) | walk-ffn |
+| `--batch <LIST>` | Comma-separated rows per request | 1,8,16,32,64 |
+| `--wire <LIST>` | `f32`/`f16`/`i8`/`q8k`, or asymmetric in/return pairs like `f16/i8` (walk-ffn only — q8k is its own endpoint and cannot pair) | f32,f16,i8,q8k |
+| `--dispatch <LIST>` | `streaming` (sequential per-layer), `batch` (all layers in parallel) | streaming,batch |
+| `--layers <A-B>` | Inclusive layer range to replay | all |
+| `--steps <N>` | Steps replayed per repeat | all captured |
+| `--repeats <N>` | Repeats per sweep point | 3 |
+| `--warmup-passes <N>` | Discarded full passes per point — mmap-backed weights pay first-touch faults per layer | 1 |
+| `--timeout-secs <N>` | Per-request timeout (note: `capture` and `drift` spell this `--ffn-timeout-secs`) | 60 |
+| `--output-file <PATH>` | Full JSON run record | — |
+| `--pulse-file <PATH>` | `dec/*` pulse JSONL (rig `$CHUK_METRICS` format) | — |
+| `--pulse-per-layer` | Include per-layer p50/p99 in pulse lines (always in the JSON record) | false |
+| `--net-rtt-ms <F>` / `--net-gbps <F>` | Record measured link characteristics (spec §6 gate) | — |
+
+i8 **return** frames need `LARQL_I8_WIRE=1` server-side or the direction falls
+back — the fallback is recorded in `served_wire_out`, never silently.
+
+#### `larql dec-bench drift`
+
+The C6 wire-fidelity gate. Scores a pinned corpus **teacher-forced** (NLL of
+fixed text, not generation) through the production remote-FFN decode path once
+per wire arm plus once at f32/f32 as the in-run baseline, then gates each arm's
+bits/char drift. The metric is exact math given weights + wire — no sampling, no
+timing — so unlike `replay` and `larql bench` it is **battery- and thermal-safe**.
+
+| Flag | Description | Default |
+|---|---|---|
+| `<MODEL>` | Client-side attention weights — must match the expert server's model | — |
+| `--ffn <URL>` | Expert-server URL, or an `A-B=URL,...` shard map | — |
+| `--corpus <PATH>` | UTF-8 corpus to score | the shannon-verify CI corpus |
+| `--bytes <N>` | Limit to first N bytes (UTF-8 boundary) | whole corpus |
+| `--wire <LIST>` | Arms to score; the f32/f32 baseline always runs first regardless | f32,f16,i8,q8k |
+| `--gate-pct <F>` | Max \|bits/char drift\| vs baseline, percent (pre-registered C6 gate) | 0.5 |
+| `--metal` | Metal GPU attention backend (required on macOS) | false |
+| `--output-file <PATH>` / `--pulse-file <PATH>` | JSON run record / `dec/*` pulse JSONL | — |
+
+Examples:
+
+```bash
+# capture a 64-prompt pool, routed sidecars included (DEC-0 arm M)
+larql dec-bench capture gemma4-26b-a4b.vindex --ffn http://127.0.0.1:8081 \
+  --prompts-file bench/dec0/prompts.txt --routing --metal \
+  --out bench/dec0/residuals-gemma4-26b-a4b-q4k
+
+# dense batch curve
+larql dec-bench replay --ffn http://127.0.0.1:8081 \
+  --capture bench/dec0/residuals-gemma4-26b-a4b-q4k --pulse-file dec0.jsonl
+
+# routed-experts arm (needs the --routing pool)
+larql dec-bench replay --ffn http://127.0.0.1:8081 --endpoint experts \
+  --capture bench/dec0/residuals-gemma4-26b-a4b-q4k --wire f32,q8k
+
+# C6 fidelity gate, including asymmetric pairs
+larql dec-bench drift gemma4-26b-a4b.vindex --ffn http://127.0.0.1:8081 \
+  --wire f16,i8,q8k,f16/i8 --metal
+```
+
+Drivers wrapping these for whole DEC stages live in `scripts/dec0-loopback.sh`
+(arm M), `scripts/dec0-arm-l.sh` (arm L / Linux) and `scripts/dec0p5-x86.sh`.
 
 ### `larql model`
 
@@ -1368,6 +1517,37 @@ larql merge <INPUT>... --output <OUTPUT> [OPTIONS]
 ```bash
 larql merge weights.larql.json attention.larql.json -o combined.larql.json
 larql merge weights.larql.json bfs.larql.json -o combined.larql.json --strategy max_confidence
+```
+
+### `larql filter`
+
+Filter graph edges by confidence, layer, selectivity, relation, or source, and
+write the surviving subgraph to a new file. Predicates combine with AND; the
+repeatable flags accumulate.
+
+```
+larql filter <GRAPH> --output <OUTPUT> [OPTIONS]
+```
+
+| Flag | Description |
+|---|---|
+| `<GRAPH>` | Input graph file (`.larql.json` or `.larql.bin`) |
+| `-o, --output <OUTPUT>` | Output graph file |
+| `--min-confidence <F>` / `--max-confidence <F>` | Confidence band (0.0–1.0) |
+| `--min-layer <N>` / `--max-layer <N>` | Layer band, inclusive, from edge metadata |
+| `--min-selectivity <F>` | Minimum selectivity, from edge metadata |
+| `--min-c-in <F>` / `--min-c-out <F>` | Minimum `c_in` / `c_out` magnitude, from edge metadata |
+| `--relation <REL>` | Include only these relations (repeatable) |
+| `--exclude-relation <REL>` | Exclude these relations (repeatable) |
+| `--source <SRC>` | Include only these source types — `parametric`, `document`, … (repeatable) |
+| `--subject-contains <TEXT>` | Subject must contain this substring |
+| `--object-contains <TEXT>` | Object must contain this substring |
+
+**Examples:**
+
+```bash
+larql filter knowledge.larql.json -o high-conf.larql.json --min-confidence 0.8
+larql filter knowledge.larql.json -o late-layers.larql.json --min-layer 20 --relation capital-of
 ```
 
 ## Templates format
