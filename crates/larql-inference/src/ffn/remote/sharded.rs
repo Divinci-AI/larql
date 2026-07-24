@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use ndarray::Array2;
 
+use super::codec::WireFormat;
 use super::http::{RemoteFfnConfig, RemoteFfnError, RemoteWalkBackend, WirePreference};
 use crate::ffn::FfnBackend;
 use larql_compute::cpu::ops::q4k_q8k_dot::Q8KActivation;
@@ -42,12 +43,26 @@ impl LayerShardedBackend {
         timeout: Duration,
         wire: WirePreference,
     ) -> Result<Self, RemoteFfnError> {
+        Self::connect_with_wire_formats(spec, timeout, WireFormat::F32, wire)
+    }
+
+    /// Build from a spec string with both wire directions set explicitly:
+    /// `wire_in` is the request residual encoding (request `Content-Type`),
+    /// `wire_out` the `Accept`-negotiated response preference. The asymmetric
+    /// twin of [`Self::connect_with_wire`] (DEC funnel v0.5 §3 DEC-1A) —
+    /// every shard connection gets the same direction pair.
+    pub fn connect_with_wire_formats(
+        spec: &str,
+        timeout: Duration,
+        wire_in: WireFormat,
+        wire_out: WirePreference,
+    ) -> Result<Self, RemoteFfnError> {
         let shards = if spec.contains('=') {
-            parse_shard_map_with_wire(spec, timeout, wire)?
+            parse_shard_map_with_wire(spec, timeout, wire_in, wire_out)?
         } else {
             let config = RemoteFfnConfig::new(spec)
                 .with_timeout(timeout)
-                .with_wire(wire);
+                .with_wire_formats(wire_in, wire_out);
             let backend = RemoteWalkBackend::connect(config)?;
             vec![LayerShard {
                 start: 0,
@@ -293,7 +308,8 @@ impl FfnBackend for LayerShardedBackend {
 fn parse_shard_map_with_wire(
     spec: &str,
     timeout: Duration,
-    wire: WirePreference,
+    wire_in: WireFormat,
+    wire_out: WirePreference,
 ) -> Result<Vec<LayerShard>, RemoteFfnError> {
     let mut shards = Vec::new();
     for segment in spec.split(',') {
@@ -313,7 +329,7 @@ fn parse_shard_map_with_wire(
         })?;
         let config = RemoteFfnConfig::new(url)
             .with_timeout(timeout)
-            .with_wire(wire);
+            .with_wire_formats(wire_in, wire_out);
         let backend = RemoteWalkBackend::connect(config)?;
         shards.push(LayerShard {
             start,

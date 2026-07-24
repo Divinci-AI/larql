@@ -16,6 +16,7 @@
     "crates/larql-cli/src/commands/primary/dec_bench/mod.rs",
     "crates/larql-cli/src/commands/primary/dec_bench/args.rs",
     "crates/larql-cli/src/commands/primary/dec_bench/capture_runtime.rs",
+    "crates/larql-cli/src/commands/primary/dec_bench/drift_runtime.rs",
     "crates/larql-cli/src/commands/primary/dec_bench/replay_runtime.rs"
   ],
   "default_line_min_percent": 90.0,

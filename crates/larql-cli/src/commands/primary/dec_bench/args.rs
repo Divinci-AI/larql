@@ -21,6 +21,9 @@ pub enum DecBenchCmd {
     Capture(CaptureArgs),
     /// Replay the pool as B-row requests, sweeping batch × wire × dispatch.
     Replay(ReplayArgs),
+    /// C6 wire-fidelity gate: teacher-forced bits/char per wire arm vs the
+    /// in-run f32/f32 baseline, pass/fail at a pre-set drift gate.
+    Drift(DriftArgs),
 }
 
 #[derive(Args, Clone)]
@@ -65,6 +68,70 @@ pub struct CaptureArgs {
     /// Per-request timeout for the expert server.
     #[arg(long, default_value = "60")]
     pub ffn_timeout_secs: u64,
+
+    #[arg(short, long)]
+    pub verbose: bool,
+}
+
+/// `larql dec-bench drift` — the C6 wire-fidelity drift instrument
+/// (docs/dec-funnel.md §3 DEC-1A). Scores a pinned corpus teacher-forced
+/// (NLL of fixed text — NOT generation) through the production remote-FFN
+/// decode path once per wire arm, plus once at f32/f32 as the in-run
+/// baseline, and gates each arm's bits/char drift.
+///
+/// The metric is exact math given weights + wire: no sampling, no timing.
+/// Thermal state / battery / load cannot move it, so this instrument is
+/// battery-safe — unlike `dec-bench replay` and `larql bench`.
+#[derive(Args, Clone)]
+pub struct DriftArgs {
+    /// Vindex directory, `hf://owner/name`, or cache shorthand (client-side
+    /// attention weights — must match the expert server's model).
+    pub model: String,
+
+    /// Expert-server URL (or `A-B=URL,...` shard map).
+    #[arg(long)]
+    pub ffn: String,
+
+    /// UTF-8 corpus to score. Defaults to the corpus the shannon-verify CI
+    /// gate pins.
+    #[arg(long, default_value = "tests/fixtures/shannon_frankenstein_2k.txt")]
+    pub corpus: std::path::PathBuf,
+
+    /// Limit the corpus to the first N bytes (UTF-8 boundary), like
+    /// `larql shannon score --bytes`.
+    #[arg(long)]
+    pub bytes: Option<usize>,
+
+    /// Comma-separated wire arms: plain (`f32`, `f16`, `i8`, `q8k` — f32
+    /// request frames, Accept per arm; q8k = its own endpoint) and/or
+    /// asymmetric in/return pairs (`f16/i8`, `i8/f16`, ...). The f32/f32
+    /// baseline always runs first regardless of this list.
+    #[arg(long, default_value = "f32,f16,i8,q8k")]
+    pub wire: String,
+
+    /// Max |bits/char drift| vs the in-run f32 baseline, in percent
+    /// (pre-registered C6 gate: 0.5).
+    #[arg(long, default_value_t = super::drift::DEFAULT_DRIFT_GATE_PCT)]
+    pub gate_pct: f64,
+
+    /// Use the Metal GPU attention backend (required on macOS — the
+    /// remote-FFN decode path needs the fused GPU decode).
+    #[arg(long)]
+    pub metal: bool,
+
+    /// Per-request timeout for the expert server.
+    #[arg(long, default_value = "60")]
+    pub ffn_timeout_secs: u64,
+
+    /// Write the full JSON run record here.
+    #[arg(long)]
+    pub output_file: Option<std::path::PathBuf>,
+
+    /// Write `dec/*` pulse JSONL here (rig `$CHUK_METRICS` format): one line
+    /// per arm with dec/bits_per_char, dec/drift_pct, dec/drift_gate,
+    /// dec/wire_in, dec/wire_out.
+    #[arg(long)]
+    pub pulse_file: Option<std::path::PathBuf>,
 
     #[arg(short, long)]
     pub verbose: bool,

@@ -233,7 +233,7 @@ pub use layer_graph::{
     grid::{
         generate_with_remote_ffn, generate_with_remote_ffn_batch,
         generate_with_remote_ffn_batch_captured, generate_with_remote_moe,
-        generate_with_remote_moe_batch, ResidualCaptureSink,
+        generate_with_remote_moe_batch, score_forced_with_remote_ffn, ResidualCaptureSink,
     },
     hybrid::predict_hybrid,
     predict_honest,
