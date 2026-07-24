@@ -173,7 +173,11 @@ pub fn generate_with_remote_ffn(
     })
 }
 
-fn apply_norm_for_ffn(weights: &ModelWeights, h_post_attn: &[f32], layer: usize) -> Vec<f32> {
+pub(super) fn apply_norm_for_ffn(
+    weights: &ModelWeights,
+    h_post_attn: &[f32],
+    layer: usize,
+) -> Vec<f32> {
     let arch = &*weights.arch;
     let norm_offset = arch.norm_weight_offset();
 
@@ -209,7 +213,11 @@ fn apply_norm_for_ffn(weights: &ModelWeights, h_post_attn: &[f32], layer: usize)
 ///     layer → apply that named norm.
 ///   * arch has post-norms but no per-layer key → identity-weight
 ///     RMS norm.
-fn apply_post_ffn_norm(weights: &ModelWeights, ffn_out: &[f32], layer: usize) -> Vec<f32> {
+pub(super) fn apply_post_ffn_norm(
+    weights: &ModelWeights,
+    ffn_out: &[f32],
+    layer: usize,
+) -> Vec<f32> {
     let arch = &*weights.arch;
     if !arch.has_post_norms() {
         return ffn_out.to_vec();
