@@ -71,3 +71,11 @@ debug = false
 [profile.release]
 debug = "line-tables-only"
 split-debuginfo = "packed"
+
+# Distribution builds only (ADR-0026 release binaries) — full strip, no
+# line tables. Kept separate from [profile.release] so local profiling
+# builds are unaffected; CI's release.yml is the only user.
+[profile.release-dist]
+inherits = "release"
+debug = false
+strip = true
