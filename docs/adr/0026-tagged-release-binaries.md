@@ -37,6 +37,23 @@ DEC-0.5, DEC-1A's netem host, DEC-2's N clients + server, DEC-2.5's router +
 hosts. Most of that fleet is architecturally identical (Linux x86_64, CPU
 serving) and would be well served by one prebuilt binary, not N rebuilds.
 
+Worse than the wall-clock cost: several of these hosts (Colab T4s in
+particular) are GPU allocations, and the build itself is pure CPU
+compilation — the GPU sits idle for the entire 20-40 minutes, burning
+through a scarce/quota-limited session on work that needed no GPU at all.
+A prebuilt binary turns that into near-zero idle GPU time before the
+actual (also GPU-idle, since arm L is CPU-attention pre-G-ladder) serving
+workload starts.
+
+**Hard policy, not just an optimisation: GPU-provisioned hosts never
+build from source.** Any DEC-stage dispatch to a GPU box (Colab, Vast GPU
+tiers) must fetch a prebuilt release artifact and skip `cargo build`
+entirely — if no release artifact exists yet for the commit/platform in
+question, that is a blocker on the dispatch, not something to work around
+by building on the box anyway. CPU-only boxes (metrology, extraction,
+router hosts with no GPU line item) are unaffected and may still build
+from source if no release exists.
+
 ## Decision
 
 Add a `release.yml` GitHub Actions workflow, triggered on `v*` tags, that
