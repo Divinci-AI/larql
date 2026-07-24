@@ -3,9 +3,9 @@
 **Status:** Accepted 2026-07-24 — implemented same day
 (`.github/workflows/release.yml`, `[profile.release-dist]` in the
 workspace `Cargo.toml`). Crate *names* were separately claimed on
-crates.io the same day as empty placeholders (see addendum below) —
-that is a distinct, narrower action from the publishing this ADR still
-declines.
+crates.io as empty placeholders — 12 on 2026-07-24, the remaining 6
+after the rate-limit window reopened (see addendum below) — that is a
+distinct, narrower action from the publishing this ADR still declines.
 **Affects:** `.github/workflows/release.yml` (new), `crates/larql-cli`,
 `crates/larql-server`, workspace `Cargo.toml` (`[profile.release-dist]`).
 **Related:** DEC funnel v0.5 (`docs/dec-funnel.md`), which is the concrete
@@ -149,25 +149,44 @@ First real run will surface whatever the matrix sketch got wrong.
 
 ## Addendum: crate-name claiming (2026-07-24, same day)
 
-Separately from the binaries decision above: all 17 workspace crate names
+Separately from the binaries decision above: the 17 workspace crate names
 (`larql`, `larql-models`, `larql-compute`, `larql-compute-metal`,
 `larql-core`, `larql-vindex`, `larql-vindex-spec`, `larql-inference`,
 `larql-kv`, `larql-lql`, `larql-cli`, `larql-server`, `larql-router`,
 `larql-router-protocol`, `larql-python`, `larql-boundary`,
-`model-compute`) were confirmed available on crates.io and claimed as
-**empty placeholder crates** — `version = "0.0.0"`, a description pointing
-back to this repo, no functional code. This is squatting-prevention, not
-the crates.io publishing this ADR declines: the placeholders carry no API
-surface, so there is nothing to hold semver-stable, and swapping a
-placeholder for a real `0.1.0` release later is an ordinary version bump.
+`model-compute`) plus `larql-experts` (the nested expert workspace at
+`crates/larql-experts/`, excluded from the root `[workspace] members` and
+so missed by the first sweep — 18 names total) were confirmed available on
+crates.io and claimed as **empty placeholder crates** — `version = "0.0.0"`,
+a description pointing back to this repo, no functional code. This is
+squatting-prevention, not the crates.io publishing this ADR declines: the
+placeholders carry no API surface, so there is nothing to hold
+semver-stable, and swapping a placeholder for a real `0.1.0` release later
+is an ordinary version bump.
+
+Scope note: only the top-level `larql-experts` name is held. The ~17
+*sub*-crate names inside that workspace (`expert-interface`,
+`arithmetic`, `date`, `unit`, …) are generic, are not namespaced to this
+project, and were deliberately left unclaimed — holding them would be a
+much wider land-grab than squatting-prevention warrants.
 
 Mechanically: minimal `Cargo.toml` + `README.md` + doc-comment-only
 `src/lib.rs` per name, `cargo publish --allow-dirty` from a scratch
 directory (outside the workspace, so `--allow-dirty` just means "no git
 repo here" rather than "ignoring real changes"). crates.io's new-crate
-burst rate limit was hit after 5 publishes in quick succession (resets
-on a rolling window, not a daily cap) — the remaining names went through
-after a short wait.
+rate limit is a **burst of 5, refilling ~1 per 10 minutes** (a rolling
+window, not a daily cap), and it shaped the rollout: the first session
+landed 12 names and stopped mid-sweep at the burst wall, leaving
+`larql-router`, `larql-router-protocol`, `larql-python`, `larql-boundary`
+and `model-compute` unclaimed until a follow-up session — a gap this
+addendum originally, and wrongly, recorded as complete. Verify the real
+state against the registry (`GET https://crates.io/api/v1/crates/<name>`,
+404 = unclaimed) rather than against this document.
+
+Retry-parsing gotcha for anyone automating this: the 429 body gives its
+retry time as an **HTTP-date** (`Fri, 24 Jul 2026 22:52:09 GMT`), not
+RFC3339 — a scraper matching only `\d{4}-\d{2}-\d{2}T…Z` silently
+misclassifies a plain rate-limit as a hard failure.
 
 Irreversibility note for future reference: crates.io publishes can be
 *yanked* (hidden from new dependents) but never deleted — the name stays
