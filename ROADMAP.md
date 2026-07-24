@@ -700,11 +700,18 @@ f32/f16/i8 serving path is well-built; only the Q8K path — the wire DEC prefer
     `run_experts(state, backend, …)` from the per-handler Metal/CPU branches
     (`q8k.rs:107`, `grpc_expert.rs:178`, `expert/{layer,multi_layer}_batch.rs`).
     [larql-server]
-16. **Wire consolidation** (P2, at the first new format — DEC-6a MXFP4) — single
-    shared wire module for the dense binary frame (5× CT-string + 2×
-    `BATCH_MARKER` + independent encoder/decoder); fold the dense stack toward
-    the single-sourced MoE/q8k discipline; fix the `call_q8k_layers` byte-counter
-    gap (`remote/http.rs:364`). [larql-inference, larql-server, larql-router]
+16. ✅ **Wire consolidation** (P2) — DONE 2026-07-24, the trigger having arrived
+    early (DEC-1A's asymmetric codecs + timing field, not DEC-6a). The dense
+    binary frame is single-sourced in `larql-inference` `ffn/remote/codec.rs`
+    (encoder+decoder+constants; server `binary.rs` is a shim; router imports);
+    every CT string and `BATCH_MARKER` declared once; byte-identical wire
+    pinned by encode-decode-reencode tests; all allocation-bomb guards moved
+    verbatim; `call_q8k_layers` byte-counter gap fixed. Three extensions then
+    landed on the consolidated seam same-night (ADR-0025): the header-gated
+    `serve_us` timing trailer, independent inbound/return wire formats
+    (f16/i8 REQUEST encodings — previously f32-only — with `Content-Type`=in
+    / `Accept`=out decoupled), and the `dec-bench drift` C6 fidelity
+    instrument. [larql-inference, larql-server, larql-router, larql-cli]
 17. **MoE parity seams + hot-path cleanups** (P2) — make `build_moe_router_weights`
     `pub` and share the combine math before the DEC-6b KDA/LatentMoE port
     (`hidden.rs:93` vs `core.rs:111`); `model.patched` arc-swap so compute

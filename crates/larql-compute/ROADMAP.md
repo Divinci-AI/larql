@@ -1590,10 +1590,16 @@ Similar to Linux plus:
 Expected result: `cargo build -p larql-cli` works on Windows 11
 x86_64 (MSVC toolchain) with CPU-only decode.
 
-### CUDA backend (re-land from earlier PR)
+### CUDA backend (G-ladder; see ADR-0024)
 **Effort**: Large  
-**Status**: Trait ready, implementation was in an earlier PR — needs
-        cherry-pick + rebase onto current `ComputeBackend` trait.
+**Status**: G0 decided 2026-07-24 (ADR-0024): sibling crate
+        `larql-compute-cuda`, cudarc + NVRTC runtime-compiled kernels,
+        phase-1 ports the Metal f32-FMA reference semantics (~24 shader
+        files), dp4a int8 as opt-in phase 2. NOTE the earlier framing here
+        ("re-land from earlier PR") was investigated and corrected: PR #53
+        contained cuBLAS-SGEMV-over-CPU-dequant only — no custom kernels,
+        stub DecodeBackend. Nothing to cherry-pick; its no-SDK dynamic-
+        loading property is inherited via cudarc instead.
 
 An earlier PR implemented CUDA kernels but was not merged. Current
 `ComputeBackend` trait supports the interface; the Metal decode loop
