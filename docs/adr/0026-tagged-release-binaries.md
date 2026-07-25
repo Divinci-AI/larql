@@ -75,10 +75,30 @@ succeeds.
 Each release gets one archive per platform containing `larql` +
 `larql-server`. A DEC driver script (`dec0-loopback.sh`'s siblings) can
 then do `curl -fsSL .../larql-x86_64-unknown-linux-gnu.tar.gz | tar xz`
-instead of a full `cargo build`, with the `DEC0L_SKIP_BUILD=1`-style env
-already in place (`scripts/dec0-arm-l.sh`) to skip the build step once a
-binary is present — not yet wired to auto-fetch a release archive; that's
-the natural follow-up once the first tag exists to fetch from.
+instead of a full `cargo build`.
+
+**Wired 2026-07-25, once `v0.1.0` existed to fetch from.**
+`scripts/dec0-arm-l.sh` now resolves binaries in four ordered steps:
+operator-supplied (`DEC0L_LARQL_BIN`/`DEC0L_SERVER_BIN`) → reuse an
+already-populated `DEC0L_BIN_DIR` → fetch the release archive for the
+detected platform (`DEC0L_LARQL_VERSION`, default `v0.1.0`) → fall back to
+`cargo build`. That last step is **gated on the policy above**: if
+`nvidia-smi` is present the script refuses and exits non-zero rather than
+compiling on a GPU allocation, and says what to do instead (publish a
+release for the platform, pass the binaries explicitly, or move to a
+CPU-only host). `DEC0L_ALLOW_SOURCE_BUILD=1` overrides for the operator who
+knowingly accepts the cost, and the log line then says the policy was
+*overridden* rather than claiming it was satisfied. The old
+`DEC0L_SKIP_BUILD` knob is gone — "already present" is now detected rather
+than asserted.
+
+The logic lives in `scripts/lib/larql-binaries.sh` and is shared, since every
+remaining DEC stage provisions a fresh host. `scripts/dec0p5-x86.sh` uses it
+too, with one deliberate exemption: DEC-0.5 still compiles the criterion
+kernel bench (`cargo bench -p larql-compute`), because a bench target is not
+a shipped binary and that kernel is precisely what the stage exists to
+measure. Fetching the CLI and server still removes the bulk of the build from
+the lease.
 
 ### `release-dist` cargo profile
 

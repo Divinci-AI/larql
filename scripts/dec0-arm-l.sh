@@ -41,9 +41,21 @@
 #   DEC0L_RUN_ANCHOR=1     — also run the e2e single-stream anchor arm
 #   DEC0L_ANCHOR_VINDEX    — full vindex for the anchor arm (required if
 #                           DEC0L_RUN_ANCHOR=1)
-#   DEC0L_SKIP_BUILD=1     — skip `cargo build` (reuse an existing binary)
+#
+# Binaries (ADR-0026 — GPU hosts never build from source):
+#   DEC0L_LARQL_VERSION    — release tag to fetch (default: v0.1.0)
+#   DEC0L_BIN_DIR          — where fetched binaries land
+#                           (default: $DEC0L_OUT_DIR/bin; reused if present)
+#   DEC0L_LARQL_BIN        — skip acquisition, use this `larql` binary
+#   DEC0L_SERVER_BIN       — skip acquisition, use this `larql-server` binary
+#   DEC0L_ALLOW_SOURCE_BUILD=1
+#                         — permit `cargo build` even on a GPU host. Only if
+#                           you accept burning the GPU allocation on ~20-40
+#                           minutes of CPU-only compilation.
 
 set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 PORT="${DEC0L_PORT:-8080}"
 OUT_DIR="${DEC0L_OUT_DIR:-bench/dec0}"
@@ -87,17 +99,21 @@ fetch_pool() {
 fetch_pool "${DENSE_POOL}" POOL_DENSE_URL
 fetch_pool "${ROUTED_POOL}" POOL_ROUTED_URL
 
-if [ "${DEC0L_SKIP_BUILD:-0}" != "1" ]; then
-    echo "[dec0-arm-l] building release binaries…"
-    # --no-default-features mirrors larql-cli.yml's Linux CI job: default
-    # features enable Metal (macOS-only) plus a wider dependency graph
-    # (aws-lc-sys among others) this CPU-only expert-server path doesn't need.
-    cargo build --release -p larql-cli -p larql-server --no-default-features
-fi
+# ── Binary acquisition (ADR-0026) — shared with the other DEC drivers ───────
+LARQL_RELEASE_VERSION="${DEC0L_LARQL_VERSION:-v0.1.0}"
+LARQL_BIN_DIR="${DEC0L_BIN_DIR:-${OUT_DIR}/bin}"
+LARQL_BIN="${DEC0L_LARQL_BIN:-}"
+LARQL_SERVER_BIN="${DEC0L_SERVER_BIN:-}"
+LARQL_ALLOW_SOURCE_BUILD="${DEC0L_ALLOW_SOURCE_BUILD:-0}"
+LARQL_LOG_PREFIX="dec0-arm-l"
+# shellcheck source=lib/larql-binaries.sh
+. "${SCRIPT_DIR}/lib/larql-binaries.sh"
+larql_acquire_binaries
+SERVER_BIN="${LARQL_SERVER_BIN}"
 
 echo "[dec0-arm-l] launching expert server (${URL}, --ffn-only, vindex=${VINDEX})…"
 echo "[dec0-arm-l] first launch downloads the vindex from HuggingFace if not cached — allow a few minutes."
-./target/release/larql-server "${VINDEX}" --ffn-only --port "${PORT}" \
+"${SERVER_BIN}" "${VINDEX}" --ffn-only --port "${PORT}" \
     >"${OUT_DIR}/server-arml-${STAMP}.log" 2>&1 &
 SERVER_PID=$!
 trap 'kill "${SERVER_PID}" 2>/dev/null || true' EXIT
@@ -121,7 +137,7 @@ if [ "${DEC0L_RUN_ANCHOR:-0}" = "1" ]; then
     ANCHOR_VINDEX="${DEC0L_ANCHOR_VINDEX:?set DEC0L_ANCHOR_VINDEX for the anchor arm}"
     for dispatch in streaming batch; do
         echo "[dec0-arm-l] anchor arm: --ffn-dispatch ${dispatch}…"
-        ./target/release/larql bench "${ANCHOR_VINDEX}" \
+        "${LARQL_BIN}" bench "${ANCHOR_VINDEX}" \
             --ffn "${URL}" \
             --ffn-dispatch "${dispatch}" \
             --wire f32,f16,i8 \
@@ -136,7 +152,7 @@ fi
 DENSE_PULSE="${OUT_DIR}/dec0_arml_dense_pulse_${STAMP}.jsonl"
 DENSE_RECORD="${OUT_DIR}/dec0_arml_dense_replay_${STAMP}.json"
 echo "[dec0-arm-l] dense replay sweep: batch {${BATCHES}} × wire {${DENSE_WIRES}} × dispatch {streaming,batch}…"
-./target/release/larql dec-bench replay \
+"${LARQL_BIN}" dec-bench replay \
     --ffn "${URL}" \
     --capture "${DENSE_POOL}" \
     --endpoint walk-ffn \
@@ -154,7 +170,7 @@ echo "[dec0-arm-l] dense replay sweep: batch {${BATCHES}} × wire {${DENSE_WIRES
 ROUTED_PULSE="${OUT_DIR}/dec0_arml_routed_pulse_${STAMP}.jsonl"
 ROUTED_RECORD="${OUT_DIR}/dec0_arml_routed_replay_${STAMP}.json"
 echo "[dec0-arm-l] routed replay sweep: batch {${BATCHES}} × wire {${ROUTED_WIRES}} × dispatch {streaming,batch}…"
-./target/release/larql dec-bench replay \
+"${LARQL_BIN}" dec-bench replay \
     --ffn "${URL}" \
     --capture "${ROUTED_POOL}" \
     --endpoint experts \
