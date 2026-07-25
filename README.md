@@ -29,7 +29,9 @@ larql> INFER "The capital of France is" TOP 3;
 ## Quick Start
 
 ```bash
-# Build
+# Get the binaries — prebuilt release (see "Install" below for other platforms)
+curl -fsSL https://github.com/chrishayuk/larql/releases/latest/download/larql-x86_64-unknown-linux-gnu.tar.gz | tar xz
+# …or build from source
 cargo build --release
 
 # Pull a pre-built vindex from HuggingFace
@@ -841,6 +843,34 @@ The full surface is documented in `crates/larql-inference/ROADMAP.md` §
 | Windows arm64 / x86_64 | ✓ | — (CPU fallback) | OpenBLAS |
 
 macOS gets Metal GPU acceleration. Linux and Windows run the same CPU path (BLAS-fused attention + mmap walk FFN). All platforms require OpenBLAS on Linux/Windows — install via your system package manager (`apt install libopenblas-dev`, `vcpkg install openblas`).
+
+## Install
+
+Tagged releases carry prebuilt `larql` + `larql-server` binaries for the three
+platforms CI validates ([ADR-0026](docs/adr/0026-tagged-release-binaries.md)).
+Each archive holds both binaries under a triple-named directory.
+
+| Platform | Asset |
+|---|---|
+| macOS arm64 | `larql-aarch64-apple-darwin.tar.gz` |
+| Linux x86_64 | `larql-x86_64-unknown-linux-gnu.tar.gz` |
+| Windows x86_64 | `larql-x86_64-pc-windows-msvc.zip` |
+
+```bash
+V=v0.1.0   # or use /releases/latest/download/… to track the newest
+curl -fsSL "https://github.com/chrishayuk/larql/releases/download/$V/larql-aarch64-apple-darwin.tar.gz" | tar xz
+./larql-aarch64-apple-darwin/larql --version
+```
+
+These are build artifacts versioned by tag — **not** a crates.io release and no
+API-stability commitment. The crates.io entries under the `larql*` names are
+`0.0.0` placeholders held to prevent squatting; `cargo install larql` will not
+give you a working binary.
+
+Prefer these over a source build on any rented or ephemeral host: a cold
+`cargo build --release` costs 20–40 minutes, and on a GPU-provisioned box that
+is pure CPU work with the GPU idle. The DEC stage drivers enforce this via
+`scripts/lib/larql-binaries.sh`.
 
 ## Building & Testing
 
