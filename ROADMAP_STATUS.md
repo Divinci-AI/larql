@@ -72,7 +72,7 @@ after C3; C4 independent; C5 gated on C1+C2 **and** G3; C8 gated on C5.
 | Order | Stage | Status | Exit criterion |
 |---:|---|---|---|
 | 1 | DEC-0 arm M (loopback batch curve, Mac) | **✅ CLOSED 2026-07-23 — C1 holds, both paths** | Step time sub-linear through batch 32. Dense ×1.6–1.8 at B32; routed ×23.6. Registry `dec0-loopback-mac` completed. |
-| 2 | DEC-0 arm L (Colab/Linux) | **blocked** — `scripts/dec0-arm-l.sh` written, but needs a `v*` release artifact; building on a GPU box violates ADR-0026 policy | Same batch *shape* on x86/Linux. Pools are host-portable, so this replays the arm-M capture unchanged. |
+| 2 | DEC-0 arm L (Colab/Linux) | **ready to run** — `v0.1.0` published 2026-07-25 and `scripts/dec0-arm-l.sh` now fetches the Linux archive instead of building (refuses to compile on a GPU host per ADR-0026). Needs only the pool URLs. | Same batch *shape* on x86/Linux. Pools are host-portable, so this replays the arm-M capture unchanged. |
 | 3 | DEC-0.5 x86 kernel gate (~$1) | queued — `scripts/dec0p5-x86.sh` written | x86 within 2× of Apple Silicon per-core → proceed, note the factor in every projection. Worse than 3× → C-ladder blocks the fleet claim (never the demo). |
 | 4 | DEC-1A transport decomposition (~$2–3) | **tooled, not run** — all four instruments landed 2026-07-24 | C2 + C6. Deliverable is the fitted T_codec/T_network model, not just the map. Must reproduce two known field points (~25 tok/s LAN, 2–3 tok/s Fly.io London) or the instrument is wrong, not the field data. |
 | 5 | DEC-1B compiled transport policy (~$2) | gated on 1A flat-codec results | Per-layer sensitivity compiled to a minimum-bytes schedule shipped **in the vindex manifest** — transport policy as a versioned artifact. |
@@ -86,8 +86,11 @@ after C3; C4 independent; C5 gated on C1+C2 **and** G3; C8 gated on C5.
 | G1–G3 | CUDA attention client | not started — the long pole, runs in parallel from week 1 | G3: `larql shannon verify` on the CUDA path ≤0.5% bits/char. **Only DEC-5's headline is gated on this**; every other DEC curve is claim-bearing on CPU attention. |
 | M1 | Model-agnostic verify loop (on Gemma) | queued — any time, pre-weights | `dec/accept_rate`, `dec/tokens_per_step`. Reported per *accepted* token so a low-acceptance draft can't inflate a headline. |
 
-**Immediate next:** cut `v0.1.0` so arm L and DEC-0.5 can run from prebuilt
-binaries in one session, then DEC-1A — the central experiment of the programme.
+**Immediate next:** run arm L + DEC-0.5 in one session — both now fetch the
+`v0.1.0` binaries through the shared `scripts/lib/larql-binaries.sh` helper
+rather than building — then DEC-1A, the central experiment of the programme.
+DEC-0.5 still compiles the criterion kernel bench, which is deliberate: that
+bench is the measurement object, not a shipped artifact.
 At the K3 weight drop (promised 2026-07-27), harvest both models' configs and
 K3's routing statistics immediately: DEC-3 pass 2 costs pennies and converts the
 boundary chart from estimate to prediction while DEC-6 waits.
