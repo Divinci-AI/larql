@@ -104,5 +104,25 @@ larql_acquire_binaries() {
         fi
     fi
 
-    _larql_log "larql: $("${LARQL_BIN}" --version 2>&1 | head -1)"
+    # Gate on the binary actually EXECUTING, not just existing. A fetched
+    # archive can be intact and still unloadable on this host — a
+    # `GLIBC_2.38 not found` on Colab was logged as if it were a version
+    # string, and the driver went on to launch a server that could never
+    # start, costing a full session to diagnose. No measurement may be taken
+    # on a path whose binary was never proven to run.
+    # NB: capture the binary's own status, NOT a pipeline's — `… | head -1`
+    # would report head's success and silently defeat this gate.
+    local version_out version_rc=0
+    version_out="$("${LARQL_BIN}" --version 2>&1)" || version_rc=$?
+    version_out="$(printf '%s\n' "${version_out}" | head -1)"
+    if [ "${version_rc}" -ne 0 ]; then
+        _larql_log "larql: FATAL — fetched binary will not execute on this host:" >&2
+        _larql_log "  ${version_out}" >&2
+        _larql_log "  binary: ${LARQL_BIN}" >&2
+        _larql_log "  If this is a glibc mismatch, the release was built against a" >&2
+        _larql_log "  newer glibc than this host provides — rebuild the release on an" >&2
+        _larql_log "  older runner rather than working around it here (ADR-0026)." >&2
+        exit 1
+    fi
+    _larql_log "larql: ${version_out}"
 }

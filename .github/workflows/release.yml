@@ -30,7 +30,12 @@ jobs:
           - os: macos-14
             target: aarch64-apple-darwin
             features: ""
-          - os: ubuntu-latest
+          # Pinned to 22.04, NOT ubuntu-latest: the runner's glibc sets the
+          # binary's minimum. 24.04 (glibc 2.39) emitted a GLIBC_2.38
+          # requirement, which will not load on Colab or any 22.04-class rented
+          # box — i.e. exactly the hosts ADR-0026 exists to serve. Raise this
+          # only when every DEC target host has moved past it.
+          - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             features: "--no-default-features"
           - os: windows-latest
