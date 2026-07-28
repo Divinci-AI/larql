@@ -42,6 +42,18 @@ a local directory path — see [Model resolution](#model-resolution) below.
 | `diag` | Engine diagnostic — print which kernel paths fire for a vindex, validate Q4_K/Q6_K strides, optional `--probe` runs a real forward pass. |
 | `parity` | Cross-backend numerical diff (`reference` / `cpu` / `metal`) at well-known checkpoints. |
 
+## Factory
+
+Vindex Factory tooling ([docs/vindex-factory.md](vindex-factory.md)) —
+recipe validation, `build_id`, capability reporting, card generation.
+
+| Command | Description |
+|---|---|
+| `recipe validate <FILE>` | Structurally validate a recipe file; prints every problem found. |
+| `recipe build-id <FILE>` | Print a recipe's `build_id` (content hash over source+extractor+outputs). |
+| `capabilities` | Print this release's capability manifest — recognised architectures and what each supports. |
+| `card render` | Render a Hub model card from a recipe, manifest, and verification report. |
+
 ## LQL
 
 | Command | Description |
@@ -1440,6 +1452,113 @@ larql parity gemma3-4b-q4k.vindex --component lm-head
 
 # Per-layer residual diff between CPU and Metal across a real prompt
 larql parity gemma4-31b.vindex --component layer --prompt "The capital of France is"
+```
+
+## Factory commands
+
+Vindex Factory tooling — [docs/vindex-factory.md](vindex-factory.md) is
+the full spec; [crates/larql-factory/README.md](../crates/larql-factory/README.md)
+is the crate reference. Everything here runs locally, no network I/O —
+the recipe repo's PR checks that need the HuggingFace API (upstream
+existence, licence allowlist, cost estimate) aren't built yet.
+
+### `larql recipe validate`
+
+Structurally validate a recipe file: schema shape, required fields,
+value ranges. Prints every problem found in one pass — not just the
+first — and exits non-zero if any exist.
+
+```
+larql recipe validate <FILE>
+```
+
+**Example:**
+
+```bash
+larql recipe validate gemma-3-4b-it.yaml
+# ✓ gemma-3-4b-it.yaml is structurally valid (gemma-3-4b-it)
+
+larql recipe validate broken-recipe.yaml
+# ✗ broken-recipe.yaml — 3 problem(s):
+#   - spec.source.revision 'main' must be a full 40-character commit SHA, not a branch or short SHA
+#   - spec.outputs[2].preset 'bogus-preset' is not a known preset (full, client, attn, ...)
+#   - spec.budget.max_usd (0) must be greater than 0
+```
+
+### `larql recipe build-id`
+
+Print a recipe's `build_id` — the content hash of the fields that
+determine its produced bytes (`source`, `extractor`, `outputs`).
+Changing `verify`/`publish`/`budget`/`metadata` doesn't change it.
+
+```
+larql recipe build-id <FILE>
+```
+
+**Example:**
+
+```bash
+larql recipe build-id gemma-3-4b-it.yaml
+# 398f1b8e29adecf2ef3838748558ae6b82b292b96ed8ab412725886e4194e30a
+```
+
+### `larql capabilities`
+
+Print this release's capability manifest as JSON: every architecture
+`larql` recognises, its attention mechanism, and its supported quant
+formats. Built from `larql-models`' real architecture registry, not a
+hand-typed list — see [`larql capabilities`'s module
+docs](../crates/larql-factory/src/capabilities/mod.rs) for why that
+matters.
+
+```
+larql capabilities
+```
+
+**Example:**
+
+```bash
+larql capabilities
+# {
+#   "larql_version": "0.1.0",
+#   "architectures": [
+#     { "model_type": "gemma3", "attention_kind": "standard", "quant_formats": ["none", "q4k"] },
+#     { "model_type": "deepseek", "attention_kind": "mla", "quant_formats": ["none"] },
+#     ...
+#   ]
+# }
+```
+
+### `larql card render`
+
+Render a Hub model card from a recipe, its manifest, and a verification
+report: YAML frontmatter, model dims, slice table, `USE "hf://..."`
+snippet with a computed revision tag, verification summary, and the
+inlined recipe for reproduction.
+
+```
+larql card render --recipe <FILE> --manifest <FILE> --verification <FILE> [--slices <FILE>]
+```
+
+| Flag | Description | Default |
+|---|---|---|
+| `--recipe <PATH>` | Recipe YAML file | — |
+| `--manifest <PATH>` | vindex-v1 manifest (`index.json`) | — |
+| `--verification <PATH>` | Verification report JSON (§8's VERIFY-A/B output) | — |
+| `--slices <PATH>` | Slice-summary JSON — array of `{"preset": ..., "size_bytes": ...}` | none (no slice table) |
+
+`build_id` is never passed in — it's derived from the recipe the same
+way `larql recipe build-id` does, so it can't drift from what the
+recipe actually hashes to.
+
+**Example:**
+
+```bash
+larql card render \
+  --recipe gemma-3-4b-it.yaml \
+  --manifest index.json \
+  --verification verification.json \
+  --slices slices.json
 ```
 
 ## Graph-file commands
