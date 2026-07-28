@@ -64,7 +64,8 @@ pub fn run_experts_metal_batch(
     let arch = &*weights.arch;
     let t_state = t_start.elapsed();
 
-    if !arch.is_hybrid_moe() || !weights.has_per_layer_ffn() {
+    // Pure MoE as well as hybrid — same per-layer expert store.
+    if !(arch.is_moe() || arch.is_hybrid_moe()) || !weights.has_per_layer_ffn() {
         return Ok(None);
     }
 

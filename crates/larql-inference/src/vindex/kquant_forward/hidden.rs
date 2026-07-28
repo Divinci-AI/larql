@@ -42,7 +42,10 @@ pub fn predict_kquant_hidden(
             .arch
             .kv_shared_source_layer(layer)
             .and_then(|src| kv_cache.get(&src));
-        let is_moe_layer = weights.arch.is_hybrid_moe();
+        // Pure MoE (GraniteMoE, OLMoE) as well as hybrid (Gemma 4). Gating on
+        // `is_hybrid_moe()` alone sent pure-MoE models down the dense branch,
+        // which then panicked on FFN slices the checkpoint never had.
+        let is_moe_layer = weights.arch.is_moe() || weights.arch.is_hybrid_moe();
         let view = larql_models::WeightsView::with_scratch(weights, &scratch);
         let ffn_backend = crate::ffn::ViewFfn { view };
         if is_moe_layer {
@@ -226,23 +229,35 @@ pub fn moe_ffn_block_cpu_with_index(
         let _ = std::fs::write(&path, &bytes);
     }
 
+    // Hybrid MoE (Gemma 4 26B A4B) runs a dense slab *alongside* the experts
+    // and sums both deltas. Pure MoE (GraniteMoE, OLMoE, Mixtral) has no
+    // dense slab at all — its FFN *is* the expert block — so the dense leg is
+    // skipped and `h1` is identically zero. Calling `run_ffn` there would
+    // look up gate/up/down tensors that do not exist in the checkpoint.
+    let is_hybrid = arch.is_hybrid_moe();
+
     let _t_dense = std::time::Instant::now();
     // Dense slab: quantised-direct on the decode step when enabled, with a
     // per-layer fallback to the f32 path (`ffn_decode_step_native` returns
     // `None` on unsupported formats/shapes).
-    let h_post_ffn_dense = index
-        .filter(|_| q4k_direct_ffn_enabled() && h_post_attn.nrows() == 1)
-        .and_then(|idx| {
-            super::cached::ffn_decode_step_native(
-                weights,
-                idx,
-                &larql_compute::CpuBackend,
-                h_post_attn,
-                layer,
-            )
-        })
-        .unwrap_or_else(|| crate::forward::run_ffn(weights, h_post_attn, layer, ffn, false).0);
+    let h_post_ffn_dense = if is_hybrid {
+        index
+            .filter(|_| q4k_direct_ffn_enabled() && h_post_attn.nrows() == 1)
+            .and_then(|idx| {
+                super::cached::ffn_decode_step_native(
+                    weights,
+                    idx,
+                    &larql_compute::CpuBackend,
+                    h_post_attn,
+                    layer,
+                )
+            })
+            .unwrap_or_else(|| crate::forward::run_ffn(weights, h_post_attn, layer, ffn, false).0)
+    } else {
+        h_post_attn.clone()
+    };
     crate::decode_stages::record_dense(_t_dense.elapsed().as_nanos());
+    // Zero for pure MoE by construction (`h_post_ffn_dense == h_post_attn`).
     let h1 = &h_post_ffn_dense - h_post_attn;
 
     let seq_len = h_post_attn.nrows();
@@ -280,12 +295,21 @@ pub fn moe_ffn_block_cpu_with_index(
                 }
             }
             crate::decode_stages::record_expert(_t_expert.elapsed().as_nanos());
-        } else {
+        } else if is_hybrid {
             let out = h_post_ffn_dense;
             let mut h_ple =
                 crate::forward::ple::apply_per_layer_embedding(weights, &out, layer, ple_input);
             crate::forward::layer::apply_layer_scalar(weights, &mut h_ple, layer);
             return h_ple;
+        } else {
+            // Pure MoE with no expert weights would otherwise fall through to
+            // `h_post_ffn_dense`, which here *is* `h_post_attn` — an identity
+            // FFN silently returning plausible-looking activations for a layer
+            // that computed nothing. Fail loudly instead.
+            panic!(
+                "pure-MoE layer {layer} has no expert weights: the vindex is \
+                 missing its per-layer expert store (layers/layer_{layer:02}.weights)"
+            );
         }
     }
 

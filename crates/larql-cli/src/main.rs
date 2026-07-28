@@ -157,6 +157,21 @@ enum Commands {
     /// Cross-backend numerical parity diff (CPU vs Metal vs reference).
     Parity(parity::ParityArgs),
 
+    // ── Factory (docs/vindex-factory.md) ─────────────────────────────
+    #[command(next_help_heading = "Factory", subcommand)]
+    /// Vindex Factory recipe tooling — validate a recipe, compute its
+    /// build_id (docs/vindex-factory.md).
+    Recipe(recipe_cmd::RecipeCommand),
+
+    #[command(next_help_heading = "Factory")]
+    /// Print this release's capability manifest as JSON — which
+    /// architectures it recognises and what each one supports.
+    Capabilities,
+
+    #[command(next_help_heading = "Factory", subcommand)]
+    /// Render a Hub model card for a build (docs/vindex-factory.md §9).
+    Card(card_cmd::CardCommand),
+
     // ── Query (legacy, pre-LQL graph-file surface) ──────────────────
     #[command(next_help_heading = "Query")]
     /// Query a graph file for facts.
@@ -598,6 +613,11 @@ fn real_main() -> i32 {
             }
             Err(e) => Err(e),
         },
+
+        // ── Factory ──
+        Commands::Recipe(cmd) => recipe_cmd::run(cmd),
+        Commands::Capabilities => capabilities_cmd::run(),
+        Commands::Card(cmd) => card_cmd::run(cmd),
 
         // ── Serve (exec into larql-server) ──
         Commands::Serve(args) => run_serve(args),

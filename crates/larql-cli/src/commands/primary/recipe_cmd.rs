@@ -1,0 +1,190 @@
+//! `larql recipe` — Vindex Factory recipe tooling (docs/vindex-factory.md
+//! §3.1). This is the single implementation of recipe parsing,
+//! structural validation, and `build_id` canonicalisation; the
+//! `chuk-vindex-recipes` GitHub Action and the rig worker both call this
+//! binary rather than reimplementing either, so they can't drift apart.
+
+use std::path::PathBuf;
+
+use clap::{Args, Subcommand};
+
+#[derive(Subcommand)]
+pub enum RecipeCommand {
+    /// Structurally validate a recipe file (schema shape, required
+    /// fields, value ranges). Does not check upstream existence, the
+    /// licence allowlist, or Hub name collisions — those need network
+    /// access / the recipes repo's `policy/` and run as later
+    /// `validate.yml` steps.
+    Validate(RecipeArgs),
+
+    /// Compute a recipe's `build_id` — the content hash of the fields
+    /// that determine its produced bytes (`source`, `extractor`,
+    /// `outputs`). Prints the 64-char hex digest to stdout.
+    BuildId(RecipeArgs),
+}
+
+#[derive(Args)]
+pub struct RecipeArgs {
+    /// Path to the recipe YAML file.
+    pub recipe: PathBuf,
+}
+
+pub fn run(cmd: RecipeCommand) -> Result<(), Box<dyn std::error::Error>> {
+    match cmd {
+        RecipeCommand::Validate(args) => run_validate(args),
+        RecipeCommand::BuildId(args) => run_build_id(args),
+    }
+}
+
+fn load_recipe(path: &PathBuf) -> Result<larql_factory::Recipe, Box<dyn std::error::Error>> {
+    let src =
+        std::fs::read_to_string(path).map_err(|e| format!("reading {}: {e}", path.display()))?;
+    let recipe = larql_factory::Recipe::from_yaml(&src)
+        .map_err(|e| format!("parsing {}: {e}", path.display()))?;
+    Ok(recipe)
+}
+
+fn run_validate(args: RecipeArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let recipe = load_recipe(&args.recipe)?;
+    let errors = larql_factory::validate(&recipe);
+
+    if errors.is_empty() {
+        println!(
+            "✓ {} is structurally valid ({})",
+            args.recipe.display(),
+            recipe.metadata.name
+        );
+        return Ok(());
+    }
+
+    println!("✗ {} — {} problem(s):", args.recipe.display(), errors.len());
+    for err in &errors {
+        println!("  - {err}");
+    }
+    std::process::exit(1);
+}
+
+fn run_build_id(args: RecipeArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let recipe = load_recipe(&args.recipe)?;
+    println!("{}", larql_factory::build_id(&recipe));
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+
+    use tempfile::NamedTempFile;
+
+    use super::*;
+
+    // Only the two non-exiting paths are testable in-process:
+    // `run_validate`'s failure branch calls `std::process::exit(1)`,
+    // which would kill the test runner rather than return a `Result`.
+    const VALID_RECIPE: &str = r#"
+apiVersion: vindex.chukai.io/v1
+kind: VindexBuild
+metadata:
+  name: tiny-model
+spec:
+  source:
+    hf_repo: chrishayuk/tiny-model
+    revision: 9b5b1a2f7c3e0d1a4b8f2c6e9d0a3b5c7e1f4a82
+    licence: mit
+  extractor:
+    tool: larql
+    version: "0.14.2"
+    level: inference
+    dtype: f16
+  outputs:
+    - preset: full
+  verify:
+    reconstruction:
+      layers_sampled: 1
+      seed: 1
+      max_abs_diff: 0.0
+      min_cosine: 1.0
+    logit_match:
+      prompt_set: verify/tiny-smoke.jsonl
+      top1_agreement_min: 0.99
+      bits_per_char_drift_max: 0.005
+    from_hub: true
+  publish:
+    hub:
+      owner: chrishayuk
+      repo_template: "{model_slug}-vindex{slice_suffix}"
+      repo_type: dataset
+      visibility: private-until-verified
+  budget:
+    executor: auto
+    max_wall_minutes: 30
+    max_usd: 1
+    requires:
+      disk_gib: 8
+      ram_gib: 8
+      net_down_mbps: 100
+"#;
+
+    fn write_temp_recipe(contents: &str) -> NamedTempFile {
+        let mut file = NamedTempFile::new().expect("create temp recipe file");
+        file.write_all(contents.as_bytes())
+            .expect("write temp recipe file");
+        file
+    }
+
+    #[test]
+    fn load_recipe_parses_a_valid_file() {
+        let file = write_temp_recipe(VALID_RECIPE);
+        let recipe = load_recipe(&file.path().to_path_buf()).unwrap();
+        assert_eq!(recipe.metadata.name, "tiny-model");
+    }
+
+    #[test]
+    fn load_recipe_errors_on_missing_file() {
+        let err = load_recipe(&PathBuf::from("/nonexistent/recipe.yaml")).unwrap_err();
+        assert!(err.to_string().contains("reading"));
+    }
+
+    #[test]
+    fn load_recipe_errors_on_malformed_yaml() {
+        let file = write_temp_recipe("not: [valid, yaml: shape");
+        let err = load_recipe(&file.path().to_path_buf()).unwrap_err();
+        assert!(err.to_string().contains("parsing"));
+    }
+
+    #[test]
+    fn run_validate_succeeds_on_a_valid_recipe() {
+        let file = write_temp_recipe(VALID_RECIPE);
+        let args = RecipeArgs {
+            recipe: file.path().to_path_buf(),
+        };
+        assert!(run_validate(args).is_ok());
+    }
+
+    #[test]
+    fn run_build_id_prints_and_succeeds() {
+        let file = write_temp_recipe(VALID_RECIPE);
+        let args = RecipeArgs {
+            recipe: file.path().to_path_buf(),
+        };
+        assert!(run_build_id(args).is_ok());
+    }
+
+    #[test]
+    fn run_dispatches_build_id_variant() {
+        let file = write_temp_recipe(VALID_RECIPE);
+        let args = RecipeArgs {
+            recipe: file.path().to_path_buf(),
+        };
+        assert!(run(RecipeCommand::BuildId(args)).is_ok());
+    }
+
+    #[test]
+    fn run_dispatches_validate_variant() {
+        let file = write_temp_recipe(VALID_RECIPE);
+        let args = RecipeArgs {
+            recipe: file.path().to_path_buf(),
+        };
+        assert!(run(RecipeCommand::Validate(args)).is_ok());
+    }
+}
