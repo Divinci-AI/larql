@@ -104,6 +104,10 @@ fn read_stream(buf: &[f32]) -> f32 {
 /// the self-check matters even more on this path.
 #[cfg(not(target_arch = "aarch64"))]
 fn read_stream(buf: &[f32]) -> f32 {
+    // Same invariant as the NEON path — and load-bearing here, because
+    // `chunks_exact` silently drops a remainder, which would undercount the
+    // bytes this arm claims to have streamed.
+    debug_assert!((buf.len() * 4).is_multiple_of(BYTES_PER_ITER));
     let mut a = [0.0f32; 8];
     for chunk in buf.chunks_exact(8) {
         for (acc, v) in a.iter_mut().zip(chunk) {
