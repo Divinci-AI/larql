@@ -63,3 +63,7 @@ bench/dec0/*.log
 bench/dec0/*.jsonl
 bench/dec0/anchor_*.json
 bench/dec0/dec0_*.json
+
+# quant-obs calibration captures — regenerable via `larql dec-bench capture`
+bench/quant-obs/residuals-*/
+bench/quant-obs/*.log
