@@ -13,9 +13,11 @@
 //! [`park`](std::thread::park_timeout) after a long idle gap, so a
 //! `for_each_chunk` dispatched microseconds after the previous one finds them
 //! already spinning — ready in ~ns, no condvar round-trip. The dispatcher
-//! participates as the n-th worker; chunks are owned by static strided
-//! assignment (participant `p` runs `p, p+n, p+2n, …`), which keeps the
-//! `completed == num_chunks` barrier sound across back-to-back dispatches.
+//! participates as the n-th worker; chunks are owned by static contiguous-block
+//! assignment (participant `p` runs one unbroken run of `num/n` chunks), which
+//! keeps the `completed == num_chunks` barrier sound across back-to-back
+//! dispatches *and* keeps each owner's reads sequential — see `run_chunks` for
+//! why the block/stride choice is worth 1.87× at lm_head-class shapes.
 //! When a worker has to wait it backs off spin → yield → park, so it stays
 //! cooperative under contention. Modeled on llama.cpp's persistent thread
 //! pool + `ggml_barrier`.
@@ -66,7 +68,7 @@ struct Shared {
     /// Bumped once per `for_each_chunk`; workers wake when it changes.
     epoch: AtomicU64,
     /// Chunks finished this dispatch; the barrier waits for `== num_chunks`.
-    /// With static strided ownership each chunk is run exactly once, so this
+    /// With static block ownership each chunk is run exactly once, so this
     /// reaching `num_chunks` proves every trampoline call has returned — no
     /// worker can still touch the (about-to-drop) closure.
     completed: AtomicUsize,
@@ -145,12 +147,32 @@ fn worker_loop(shared: Arc<Shared>, worker_id: usize, n_participants: usize) {
     }
 }
 
-/// Run this participant's statically-assigned chunks (strided:
-/// `participant_id, participant_id + n, …`). Static ownership — rather than a
-/// shared resettable cursor — is what makes `completed == num_chunks` a sound
-/// barrier across back-to-back dispatches: no participant can re-claim a chunk
-/// the next dispatch reset, so once the count is reached every trampoline call
-/// has returned and the closure is safe to drop.
+/// Run this participant's statically-assigned chunks, as one **contiguous
+/// block** of the chunk index space.
+///
+/// Static ownership — rather than a shared resettable cursor — is what makes
+/// `completed == num_chunks` a sound barrier across back-to-back dispatches: no
+/// participant can re-claim a chunk the next dispatch reset, so once the count
+/// is reached every trampoline call has returned and the closure is safe to
+/// drop. *Contiguous* blocks are as static as the round-robin stride this
+/// previously used (`c += n_participants`) — each chunk still has exactly one
+/// owner — so that argument is untouched by the change from stride to block.
+///
+/// **Why contiguous rather than strided.** Chunks map to contiguous byte ranges
+/// of the weight slab, so a strided owner walks the *whole* slab at a stride of
+/// `n_participants × chunk_bytes` and the hardware sequential prefetcher never
+/// engages. Measured on `benches/q4k_q8k_matvec.rs::bench_mt_production`
+/// (M3 Max, AC, 2026-07-28): at the lm_head-class shape 65536×2816 (415 MB,
+/// 2048 chunks × 50 KB, 811 KB stride) the strided pool ran **58.5 GiB/s vs
+/// rayon's 109.6** — a 1.87× loss on a default-on path — while every
+/// per-layer shape *won* by 45–113%, because those slabs (3–33 MB) are
+/// SLC-resident and striding costs nothing there. Blocking keeps the
+/// small-shape win (dispatch overhead is what that one is about) and gives each
+/// owner one sequential run at large sizes.
+///
+/// Chunk cost is uniform for every current caller (equal row counts per chunk),
+/// so the load-balancing advantage strided ownership would have under uneven
+/// chunk cost does not apply; llama.cpp's pool partitions rows the same way.
 fn run_chunks(shared: &Shared, participant_id: usize, n_participants: usize) {
     let num = shared.num_chunks.load(Ordering::Relaxed);
     let tramp_addr = shared.tramp.load(Ordering::Relaxed);
@@ -161,8 +183,17 @@ fn run_chunks(shared: &Shared, participant_id: usize, n_participants: usize) {
     // SAFETY: `tramp_addr` is a `fn(*const (), usize)` stored by the dispatcher
     // before the epoch release; recovered here after the epoch acquire.
     let tramp: fn(*const (), usize) = unsafe { std::mem::transmute(tramp_addr) };
-    let mut c = participant_id;
-    while c < num {
+    // Contiguous block for this participant. The first `num % n` participants
+    // take one extra chunk, so the assignment covers `0..num` exactly once with
+    // a size spread of at most 1 — the property `completed == num_chunks`
+    // relies on.
+    let base = num / n_participants;
+    let rem = num % n_participants;
+    let start = participant_id * base + participant_id.min(rem);
+    let end = start + base + usize::from(participant_id < rem);
+
+    let mut c = start;
+    while c < end {
         // `IN_BODY` makes a reentrant `for_each_chunk` (a body that dispatches)
         // fall back to serial instead of deadlocking. run_chunks is only
         // entered at top level, so the prior value is always false.
@@ -182,7 +213,7 @@ fn run_chunks(shared: &Shared, participant_id: usize, n_participants: usize) {
             }
         }
         shared.completed.fetch_add(1, Ordering::Release);
-        c += n_participants;
+        c += 1;
     }
 }
 
@@ -262,7 +293,7 @@ impl SpinPool {
         shared.epoch.fetch_add(1, Ordering::Release);
 
         // Wake any worker that parked during an idle gap so the barrier never
-        // stalls ~park_timeout waiting on its strided share. Unparking a
+        // stalls ~park_timeout waiting on its assigned block. Unparking a
         // still-spinning worker just sets its token (harmless). During tight
         // back-to-back decode dispatches workers stay spinning and this is a
         // no-op fast path.
@@ -274,7 +305,7 @@ impl SpinPool {
         run_chunks(shared, 0, self.n_threads);
 
         // Completion barrier: spin until every chunk has finished. With static
-        // strided ownership, `completed == num_chunks` means every trampoline
+        // block ownership, `completed == num_chunks` means every trampoline
         // call has returned (panics still count, see run_chunks), so it is safe
         // to let `body` drop as this returns.
         while shared.completed.load(Ordering::Acquire) < num_chunks {
@@ -310,11 +341,91 @@ impl Drop for SpinPool {
     }
 }
 
-/// Process-wide pool, lazily sized to the active rayon thread count (which the
-/// bench/CLI configures from `--threads`). Built on first use.
+/// Number of performance ("P") cores, when the OS exposes a heterogeneous
+/// topology. `None` on homogeneous machines and anywhere the query is
+/// unavailable — callers then fall back to the plain thread count.
+///
+/// Apple silicon reports `hw.nperflevels > 1` with level 0 = performance and
+/// level 1 = efficiency (M3 Max: 12 P + 4 E).
+#[cfg(target_os = "macos")]
+fn performance_cores() -> Option<usize> {
+    fn sysctl_usize(name: &std::ffi::CStr) -> Option<usize> {
+        let mut out: i32 = 0;
+        let mut len = std::mem::size_of::<i32>();
+        // SAFETY: `name` is a NUL-terminated C string; `out`/`len` are a
+        // correctly sized i32 destination and its length, as sysctlbyname
+        // requires. It writes at most `len` bytes and updates `len`.
+        let rc = unsafe {
+            libc::sysctlbyname(
+                name.as_ptr(),
+                (&mut out as *mut i32).cast(),
+                &mut len,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        (rc == 0 && out > 0).then_some(out as usize)
+    }
+
+    // Only meaningful when there really are multiple performance levels.
+    if sysctl_usize(c"hw.nperflevels")? < 2 {
+        return None;
+    }
+    sysctl_usize(c"hw.perflevel0.logicalcpu")
+}
+
+#[cfg(not(target_os = "macos"))]
+fn performance_cores() -> Option<usize> {
+    None
+}
+
+/// Process-wide pool, built on first use.
+///
+/// Sized to the active rayon thread count, **capped at the performance-core
+/// count on heterogeneous CPUs**.
+///
+/// The cap is load-bearing, not a tuning preference. This pool partitions
+/// chunks *statically*, so an efficiency core is handed the same share as a
+/// performance core and the completion barrier waits on the slowest
+/// participant; rayon's work-stealing rebalances instead, which is why the
+/// pathology is specific to this pool. Measured on M3 Max (12 P + 4 E), AC
+/// power, `benches/q4k_q8k_matvec.rs::bench_mt_production` at 65536×2816 with
+/// `--measurement-time 20`:
+///
+/// | participants | GiB/s |
+/// |---|---|
+/// | 16 (12 P + 4 E) | 33.0 |
+/// | 12 | 124.0 |
+/// | 8 | 126.7 |
+///
+/// End-to-end on `gemma4-26b-a4b-q4k` (`--cpu -n 50`): **10.6 tok/s at 16
+/// participants vs 37.3 at 8** — a 3.5× collapse. Straggler cost scales with
+/// the work per dispatch, so small per-layer matvecs still won (+45–113% vs
+/// rayon) and only the lm_head-class shape fell over; that is why this hid.
+///
+/// It hid for a second reason worth recording: `configure_rayon_threads` is
+/// called **only** from the CLI's bench path, where it picks 8 on Apple
+/// silicon. `larql run` / `larql serve` configure nothing and inherit rayon's
+/// default (`available_parallelism()` = 16). So the benchmark harness was
+/// structurally unable to observe a bug that every non-bench path hit, and the
+/// historical spin-pool numbers (+28%, ~35 tok/s) were all taken at 8.
+///
+/// Capping here rather than in the CLI fixes it for every consumer —
+/// larql-server, embedders, tests — not just the one binary that happened to
+/// set a thread count. Bandwidth-bound decode loses nothing: attainable read
+/// bandwidth saturates at **two** threads (`examples/membw_probe.rs`), so the
+/// E-cores were contributing ~nothing even before they became stragglers.
+///
+/// See `docs/diagnoses/memory-bandwidth-roofline.md`.
 pub fn global() -> &'static SpinPool {
     static POOL: OnceLock<SpinPool> = OnceLock::new();
-    POOL.get_or_init(|| SpinPool::new(rayon::current_num_threads().max(1)))
+    POOL.get_or_init(|| {
+        let rayon_threads = rayon::current_num_threads().max(1);
+        // An explicit smaller thread count still wins — this only removes the
+        // E-cores from an otherwise-unconstrained pool.
+        let n = performance_cores().map_or(rayon_threads, |p| rayon_threads.min(p.max(1)));
+        SpinPool::new(n)
+    })
 }
 
 /// Whether the decode hot path routes parallel sections through the spin pool
@@ -425,6 +536,82 @@ mod tests {
         for (i, h) in hits.iter().enumerate() {
             assert_eq!(h.load(Ordering::Relaxed), 1, "chunk {i} ran != once");
         }
+    }
+
+    /// Each participant must get ONE unbroken run of chunk indices.
+    ///
+    /// `runs_every_chunk_exactly_once` pins the correctness invariant the
+    /// barrier needs, and it passes under round-robin striding too — so it
+    /// cannot catch a revert to `c += n_participants`. Contiguity is the
+    /// *performance* invariant: chunks map to contiguous byte ranges of the
+    /// weight slab, and a strided owner defeats the sequential prefetcher
+    /// (measured 1.87× slower at the 415 MB lm_head-class shape). This test is
+    /// what makes that regression loud instead of silent.
+    ///
+    /// Uneven counts are included deliberately: the `rem` participants take one
+    /// extra chunk, which is where an off-by-one would overlap or gap two
+    /// participants' ranges.
+    #[test]
+    fn each_participant_runs_a_contiguous_block() {
+        for (n_threads, num_chunks) in [(4usize, 1000usize), (4, 1001), (4, 3), (8, 8), (3, 100)] {
+            let pool = SpinPool::new(n_threads);
+            let seen: std::sync::Mutex<Vec<(std::thread::ThreadId, usize)>> =
+                std::sync::Mutex::new(Vec::new());
+            pool.for_each_chunk(num_chunks, |c| {
+                seen.lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push((std::thread::current().id(), c));
+            });
+
+            let mut by_thread: std::collections::HashMap<std::thread::ThreadId, Vec<usize>> =
+                std::collections::HashMap::new();
+            for (tid, c) in seen.into_inner().unwrap_or_else(|e| e.into_inner()) {
+                by_thread.entry(tid).or_default().push(c);
+            }
+
+            let mut covered = 0usize;
+            for (tid, mut chunks) in by_thread {
+                chunks.sort_unstable();
+                let (first, last) = (chunks[0], chunks[chunks.len() - 1]);
+                assert_eq!(
+                    last - first + 1,
+                    chunks.len(),
+                    "participant {tid:?} got a non-contiguous block {chunks:?} \
+                     (n_threads={n_threads}, num_chunks={num_chunks}) — this is the \
+                     strided-ownership regression; see run_chunks"
+                );
+                covered += chunks.len();
+            }
+            assert_eq!(
+                covered, num_chunks,
+                "blocks must cover 0..{num_chunks} exactly (n_threads={n_threads})"
+            );
+        }
+    }
+
+    /// The global pool must never include efficiency cores.
+    ///
+    /// Static partitioning makes the barrier wait on the slowest participant,
+    /// so one E-core in the pool cost 3.5× end-to-end on the 26B. This asserts
+    /// the cap rather than the mechanism, because the mechanism only shows up
+    /// under a large-shape benchmark on a heterogeneous box — the exact
+    /// combination that let the regression ship unnoticed.
+    #[test]
+    fn global_pool_excludes_efficiency_cores() {
+        let n = global().num_threads();
+        assert!(n >= 1, "pool must have at least one participant");
+        if let Some(p) = performance_cores() {
+            assert!(
+                n <= p,
+                "global pool has {n} participants but only {p} performance cores — \
+                 an efficiency core in a statically-partitioned pool stalls the barrier \
+                 (see global() docs)"
+            );
+        }
+        assert!(
+            n <= rayon::current_num_threads().max(1),
+            "pool must never exceed an explicitly configured thread count"
+        );
     }
 
     #[test]
