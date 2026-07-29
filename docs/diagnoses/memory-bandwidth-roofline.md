@@ -173,6 +173,54 @@ case), quiet machine on AC:
 126.7 GiB/s), not a residual defect. Suites green: 775 larql-compute (+1) /
 1309 larql-inference / 766 larql-kv.
 
+## KV cache priced — and the bytes hypothesis refuted
+
+The last unpriced bandwidth surface. `CpuKvHandle` holds `k_buf`/`v_buf` as
+`Vec<f32>` where llama.cpp's default KV is f16, and C10 recorded larql decaying
+with context (27.9 → 24.8 tok/s) while llama.cpp's `tg512` stays flat —
+attributed at the time to GQA compute, never tested against the competing
+explanation that it is simply twice the bytes.
+
+Real geometry (`config.json` + `attn_weights_q4k_manifest.json`, not assumed):
+30 layers, `num_key_value_heads` 8 × `head_dim` 256 ⇒ **kv_dim 2048**,
+`sliding_window` **1024**, and an explicit `layer_types` array giving
+**5 global / 25 sliding** layers. So 16 KB per layer per context-token at f32.
+
+Expressed against the **measured** per-token budget (35 tok/s × 127 GB/s
+attainable = 3.63 GB/token). Using measured time rather than a summed weight
+estimate deliberately sidesteps an unresolved question about whether the tied
+`lm_head` is read at f16 or q4, which would move a weight-based denominator by
+about a gigabyte:
+
+| ctx | KV MB/step | % of token budget | KV ms | f16 would save |
+|---:|---:|---:|---:|---:|
+| 512 | 252 | 6.9% | 1.98 | 0.99 ms |
+| 2048 | 587 | 16.2% | 4.62 | 2.31 ms |
+| 8192 | 1091 | 30.0% | 8.59 | 4.29 ms |
+| 16384 | 1762 | 48.5% | 13.87 | 6.94 ms |
+
+**The sliding window is doing the work.** Past ctx 1024 only 5 of 30 layers keep
+growing, so the slope collapses six-fold:
+
+- ctx < 1024: 480 KB per context-token → **3.87 µs/ctx-token**
+- ctx > 1024: 80 KB per context-token → **0.65 µs/ctx-token**
+
+**Verdict: don't build f16 KV as a long-context fix.** Two reasons pointing the
+same way. It is too small where it matters — 3–8% of a token at chat-typical
+context. And it cannot be the cause of the decay it was proposed to explain: the
+recorded decay implies roughly 12 µs per context-token against a byte slope of
+0.65 beyond the window, and since bytes are a hard *lower* bound on time, at most
+about a third of the sub-window decay and a small fraction of the beyond-window
+decay is KV traffic. **The original attribution to GQA compute was substantially
+right**; the bytes hypothesis is largely falsified, which is the useful outcome —
+dead for a couple of hours of arithmetic rather than a KV-quantisation build.
+
+**Where it does retain value is DEC-2 capacity, not decode speed.** f32 costs
+480 KB per context-token *per client* — roughly 1 GB of cache per client at
+ctx 2048. That is what caps clients-per-box independently of throughput, so
+halving it roughly doubles client density. f16 KV should be priced on the
+shared-tier ledger, not this one.
+
 ## What this means for the programme
 
 1. **CPU bandwidth work is essentially finished.** At 50–91% of a measured
@@ -206,13 +254,14 @@ case), quiet machine on AC:
 - **The CLI's non-bench paths still leave rayon itself at 16.** Harmless now
   that the pool is capped (rayon work-steals), but `larql run` and `larql serve`
   configuring no thread count at all is the condition that let this ship.
-- **KV-cache bytes are still unpriced.** `CpuKvHandle` holds `k_buf`/`v_buf` as
-  `Vec<f32>` (`kv_dispatch/cpu/handles.rs`); llama.cpp's default KV is f16.
-  C10 recorded larql decaying with context (27.9 → 24.8 tok/s) while llama.cpp
-  `tg512` stays flat, and attributed it to GQA compute — never tested against
-  the bytes hypothesis, which is at minimum 2× the traffic and grows linearly in
-  context. `TurboQuantEngine` exists in larql-kv but is not on the production
-  handle.
+- **KV bytes are priced and closed** (see above) — but the *compute* side of the
+  long-context decay is now the live question, since it inherits most of the
+  effect the bytes hypothesis failed to explain. `TurboQuantEngine` exists in
+  larql-kv and is not on the production handle; it stays unbuilt on this ledger
+  and moves to DEC-2 as a client-density item.
+- **The registry is the system of record** for this measurement: experiment
+  `c0-bandwidth-roofline` in programme `dec`, run
+  `RUN-20260729-221048-00532`.
 - **A quiet-machine re-run of `membw_probe`** would be worth having. The numbers
   above were taken at load 1.5–1.9 with <3% spreads, but a later re-run during a
   concurrent `llvm-cov` job (load average 98) produced physically impossible
