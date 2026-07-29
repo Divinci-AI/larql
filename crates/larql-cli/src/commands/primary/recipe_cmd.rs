@@ -21,6 +21,13 @@ pub enum RecipeCommand {
     /// that determine its produced bytes (`source`, `extractor`,
     /// `outputs`). Prints the 64-char hex digest to stdout.
     BuildId(RecipeArgs),
+
+    /// Estimate upstream download size, per-output size, executor
+    /// class, and cost band (§6.1 step 4), so a recipe PR's approval is
+    /// informed. Fetches the upstream repo's file listing and
+    /// `config.json` over the network — the first `larql recipe`
+    /// subcommand that does.
+    Estimate(RecipeArgs),
 }
 
 #[derive(Args)]
@@ -33,6 +40,7 @@ pub fn run(cmd: RecipeCommand) -> Result<(), Box<dyn std::error::Error>> {
     match cmd {
         RecipeCommand::Validate(args) => run_validate(args),
         RecipeCommand::BuildId(args) => run_build_id(args),
+        RecipeCommand::Estimate(args) => run_estimate(args),
     }
 }
 
@@ -67,6 +75,13 @@ fn run_validate(args: RecipeArgs) -> Result<(), Box<dyn std::error::Error>> {
 fn run_build_id(args: RecipeArgs) -> Result<(), Box<dyn std::error::Error>> {
     let recipe = load_recipe(&args.recipe)?;
     println!("{}", larql_factory::build_id(&recipe));
+    Ok(())
+}
+
+fn run_estimate(args: RecipeArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let recipe = load_recipe(&args.recipe)?;
+    let estimate = larql_factory::estimate_size(&recipe)?;
+    println!("{}", serde_json::to_string_pretty(&estimate)?);
     Ok(())
 }
 
@@ -186,5 +201,25 @@ spec:
             recipe: file.path().to_path_buf(),
         };
         assert!(run(RecipeCommand::Validate(args)).is_ok());
+    }
+
+    #[test]
+    #[ignore = "hits the real HuggingFace API — network-dependent, not for CI; run with --ignored to smoke-test the live path"]
+    fn run_estimate_against_a_real_public_repo() {
+        // sshleifer/tiny-gpt2 — a small, stable, unauthenticated public
+        // test fixture repo. VALID_RECIPE's chrishayuk/tiny-model
+        // target doesn't exist on the real Hub, so this test points at
+        // a real one instead.
+        let recipe_yaml = VALID_RECIPE
+            .replace("chrishayuk/tiny-model", "sshleifer/tiny-gpt2")
+            .replace(
+                "9b5b1a2f7c3e0d1a4b8f2c6e9d0a3b5c7e1f4a82",
+                "5f91d94bd9cd7190a9f3216ff93cd1dd95f2c7be",
+            );
+        let file = write_temp_recipe(&recipe_yaml);
+        let args = RecipeArgs {
+            recipe: file.path().to_path_buf(),
+        };
+        assert!(run_estimate(args).is_ok());
     }
 }

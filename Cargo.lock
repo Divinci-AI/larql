@@ -2222,6 +2222,7 @@ version = "0.1.0"
 dependencies = [
  "larql-models",
  "larql-vindex-spec",
+ "reqwest",
  "serde",
  "serde_json",
  "serde_yaml",

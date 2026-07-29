@@ -15,6 +15,7 @@ mod build_id;
 mod capabilities;
 mod card;
 mod constants;
+mod estimate;
 mod hex;
 mod recipe;
 mod validate;
@@ -26,6 +27,10 @@ pub use capabilities::{
 pub use card::{
     render as render_card, revision_tag, CardInputs, LogitMatchResult, ReconstructionResult,
     SliceSummary, VerificationReport,
+};
+pub use estimate::{
+    estimate as estimate_size, ExecutorClass, HttpError as EstimateError, ModelDims,
+    OutputEstimate, SizeEstimate,
 };
 pub use recipe::{
     Budget, BudgetRequires, Extractor, HubPublish, LogitMatch, Metadata, MirrorPublish, OutputSpec,
