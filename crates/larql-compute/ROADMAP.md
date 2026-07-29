@@ -161,7 +161,13 @@ Bench (Gemma 4 31B Q4K, M3 Max, single-machine localhost):
 
 Bottleneck at 6.5 tok/s: attention at 92ms/token (60%). Two-pass batch structure
 (capture pass + apply pass) doubles the local Metal attention cost. FFN at 60ms
-is at the 400 GB/s GPU bandwidth ceiling for 11.7 GB/token of Q4K weight reads.
+is near the GPU bandwidth ceiling for 11.7 GB/token of Q4K weight reads.
+
+> **Corrected 2026-07-29:** this originally read "at the 400 GB/s GPU bandwidth
+> ceiling". 400 GB/s is the SoC **spec sheet**; measured GPU-attainable read on
+> this box is **367 GB/s** (`f32_gemv` streaming 2.68 GB), and the production
+> FFN kernels run at 273–314 GB/s — 74–85% of attainable, near but not at it.
+> See [`docs/diagnoses/memory-bandwidth-roofline.md`](../../docs/diagnoses/memory-bandwidth-roofline.md).
 
 **Build separation required**: `--features metal-experts` must NOT be used for
 `larql-cli` (causes 10.7 vs 18.9 tok/s regression on Gemma 4 26B-A4B due to Metal
