@@ -213,7 +213,11 @@ case), quiet machine on AC:
   the bytes hypothesis, which is at minimum 2× the traffic and grows linearly in
   context. `TurboQuantEngine` exists in larql-kv but is not on the production
   handle.
-- **End-to-end confirmation of the lm_head fix** on the 26B has not been run.
+- **A quiet-machine re-run of `membw_probe`** would be worth having. The numbers
+  above were taken at load 1.5–1.9 with <3% spreads, but a later re-run during a
+  concurrent `llvm-cov` job (load average 98) produced physically impossible
+  figures — a reminder that this probe has no contention guard beyond the spread
+  column, and that the spread column is the thing to read before the GB/s one.
 
 ## Reproducing
 
