@@ -304,12 +304,44 @@ impl SpinPool {
         // The dispatcher participates as participant 0.
         run_chunks(shared, 0, self.n_threads);
 
-        // Completion barrier: spin until every chunk has finished. With static
+        // Completion barrier: wait until every chunk has finished. With static
         // block ownership, `completed == num_chunks` means every trampoline
         // call has returned (panics still count, see run_chunks), so it is safe
         // to let `body` drop as this returns.
+        //
+        // This backs off spin → yield, for the same reason `worker_loop` does.
+        // It used to be an unbounded `spin_loop()`, which **livelocks under
+        // oversubscription**: a dispatcher burns a whole core spinning on
+        // `completed` while the worker that owes the last chunk cannot get
+        // scheduled. With more runnable threads than cores — several concurrent
+        // dispatchers, this pool's persistent workers, and a `cargo test`
+        // harness running other tests alongside — every spinner holds its core
+        // for a full quantum and forward progress stalls for *seconds*. That is
+        // the `stress_concurrent_realistic_decode_shape_no_corruption` hang
+        // (reproduced 1-in-12 at `--test-threads=8`, worse in a full workspace
+        // run, worst under coverage instrumentation, and invisible standalone
+        // because a quiet machine has cores to spare).
+        //
+        // The backoff `worker_loop` received when the pool went default-on was
+        // only ever applied there; this barrier was left as a pure spin.
+        //
+        // It escalates to `yield_now` and **stays** there — it must never park.
+        // Nothing unparks a dispatcher: workers signal completion through the
+        // `completed` counter alone, so a parked dispatcher would sleep until
+        // its own timeout with no one to wake it. Yielding is what cedes the
+        // core to the worker we are waiting on.
+        //
+        // The fast path is unchanged: chunks complete in microseconds, so a
+        // decode-shaped dispatch never leaves the spin phase, and the measured
+        // +28% is preserved by construction.
+        let mut spins = 0u32;
         while shared.completed.load(Ordering::Acquire) < num_chunks {
-            std::hint::spin_loop();
+            spins += 1;
+            if spins < SPIN_HOT {
+                std::hint::spin_loop();
+            } else {
+                std::thread::yield_now();
+            }
         }
 
         // Re-raise the first chunk panic on this (the dispatching) thread, so a
