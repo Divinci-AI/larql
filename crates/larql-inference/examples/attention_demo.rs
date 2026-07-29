@@ -148,9 +148,10 @@ fn main() {
     let v = synth_matrix(seq, hd, 32);
     let scale = 1.0 / (hd as f64).sqrt();
 
-    let (out_no_cap, _) = gqa_attention_with_weights(&q, &k, &v, 1, hd, 1, scale, seq, false, None);
+    let (out_no_cap, _) =
+        gqa_attention_with_weights(&q, &k, &v, 1, hd, 1, scale, seq, false, None, None);
     let (out_cap, _) =
-        gqa_attention_with_weights(&q, &k, &v, 1, hd, 1, scale, seq, false, Some(50.0));
+        gqa_attention_with_weights(&q, &k, &v, 1, hd, 1, scale, seq, false, Some(50.0), None);
 
     let diff = max_diff(&out_no_cap, &out_cap);
     println!(
@@ -175,7 +176,7 @@ fn main() {
     let scale = 1.0 / (hd as f64).sqrt();
 
     let (_, weights) =
-        gqa_attention_with_weights(&q, &k, &v, num_heads, hd, 1, scale, seq, true, None);
+        gqa_attention_with_weights(&q, &k, &v, num_heads, hd, 1, scale, seq, true, None, None);
     let weights = weights.unwrap();
     println!("  {num_heads} heads, seq={seq}, capturing last token's attention");
     for (h, w) in weights.heads.iter().enumerate() {

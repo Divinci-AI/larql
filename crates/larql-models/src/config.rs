@@ -267,6 +267,18 @@ pub trait ModelArchitecture: Send + Sync {
         None
     }
 
+    /// Attention-sink key (None if the architecture has no sinks).
+    ///
+    /// A sink is a learned per-head logit concatenated to the attention
+    /// logits, included in the softmax, then dropped — so the weights
+    /// over real keys deliberately sum to less than one. Architectures
+    /// that use them (GPT-OSS) must both return this key *and* have the
+    /// attention kernel apply it; returning the key alone changes
+    /// nothing but the extracted bytes.
+    fn attn_sinks_key(&self, _layer: usize) -> Option<String> {
+        None
+    }
+
     /// FFN bias keys (None if model doesn't use FFN bias).
     fn ffn_up_bias_key(&self, _layer: usize) -> Option<String> {
         None

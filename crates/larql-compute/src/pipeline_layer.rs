@@ -70,7 +70,13 @@ pub fn build_arch_params<'a>(
         .and_then(|v| v.first().copied())
         .unwrap_or(0.0);
 
+    let attn_sinks = arch
+        .attn_sinks_key(layer)
+        .and_then(|k| weights.vectors.get(&k))
+        .map(|v| v.as_slice());
+
     FullPipelineLayer {
+        attn_sinks,
         wq,
         wk,
         wv,

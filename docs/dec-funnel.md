@@ -101,6 +101,7 @@ Per-layer sensitivity derived **empirically**, not hand-labelled from the zone m
 - **Pass:** ≥80% linear at N=4 with tier headroom. **Kill:** saturation at N≤2.
 - **Deliverable:** Chart 3 becomes the **N-at-SLO table** — clients served per tier at p99 inter-token SLO with **multiple SLO columns (25 / 50 / 100ms)** so a codec that merely rides a steep queueing curve is distinguishable from one that genuinely adds capacity — per wire policy (f32, f16, i8, asymmetric, and DEC-1B's compiled schedule), with quality delta and tier utilisation alongside, linearity curve as supporting evidence. This is the enterprise-legible unit: clients per box.
 - **Capacity-number precondition (measured at DEC-0):** the routed tier currently streams expert weights per-row — unique-expert bytes are only 13.9% of naive traffic at B64 (~7.2× headroom). **Build the expert-grouped scheduler (group same-layer tasks by unique expert; skinny-GEMM per expert) before quoting tier-capacity numbers here**, or the table underestimates a grouped tier by most of an order of magnitude.
+- **Client-side KV footprint is a capacity axis, not a speed one (priced at C0).** The client KV cache is `f32`, costing **480 KB per context-token per client** — ~1 GB per client at ctx 2048 on the 26B (30 layers × `kv_dim` 2048; the `sliding_window` 1024 caps 25 of 30 layers, so growth beyond the window is only the 5 global layers). Client *memory*, not tier bandwidth, may be what binds the N-at-SLO table first, so **record client KV bytes alongside tok/s at every N** — the same instrumentation K3 already wants (§3 DEC-6 compensating factor). Halving to f16 roughly doubles client density and buys 3–8% of a token in speed; C0 priced it as a **capacity** lever and explicitly *not* a long-context speed fix. See [`docs/diagnoses/memory-bandwidth-roofline.md`](diagnoses/memory-bandwidth-roofline.md).
 
 ### DEC-2.5 — Router arbitrage under degradation (~$2)
 
@@ -140,6 +141,8 @@ A deliberately **small** set of adverse joint points — shaped link × many cli
 
 ### DEC-6 — K3 extraction + KDA client port (gate: DEC-5 passed; weights published)
 
+> **Model-side work is now specified separately.** [`k3-funnel.md`](k3-funnel.md) restructures everything below into a three-rung adapter ladder — R1 GPT-OSS-20B (expert/format pipeline), R2 Kimi Linear 48B-A3B (the KDA stack, against a *local* reference implementation), R3 K3 as a delta — with its own phases, gates, and registry programme `k3`. DEC-6's claims, gates, infra line and kill condition are unchanged; only the execution order is. Read that document for what gets built; this section for what DEC requires of it.
+
 The serving topology transfers wholesale from Inkling; what's new is model-side:
 
 - **6a — expert path (moderate, partly solved):** MXFP4 expert extraction reuses the GPT-OSS-120B lineage (128-expert MXFP4 already in the support table); 896 experts is a bigger bank for existing range-sharding. New: MXFP4 dequant-or-native decision on the x86 tier (AMX speaks INT8/BF16 — dequant pass in the streaming loop vs a native FP4 gather kernel; benchmark both, pick per DEC-0.5 methodology). Compute-side, MXFP4 lands as one `QuantFormat` variant + one `FormatRoute` arm (the side-metadata/E8M0 template is `ternary_matvec` — see `larql-compute/src/quant_route.rs`).
@@ -170,6 +173,8 @@ larql's GPU path is Metal-only today; on Linux the attention client falls back t
 ## 5. C-ladder — x86 CPU kernels (conditional)
 
 Triggered by DEC-0.5: AVX-512/AMX Q4K inner dot for the x86 expert tier, acceptance = closing to ≤2× Apple Silicon per-core on the expert-server bench. Blocker for fleet-cost projections if DEC-0.5 shows >3×; never a blocker for the demo.
+
+**C0 — bandwidth roofline (measured 2026-07-29, registry `c0-bandwidth-roofline`).** Run before spending on kernels, and it revises the premise of this ladder. On Apple Silicon the **CPU core complex attains 127 GB/s read against the GPU's 367** (SoC spec 400) — 31% vs 92% of the chip, a **2.9× structural gap that is fabric ports, not software**. Against that denominator the production CPU matvec already achieves **50–91%**, so aarch64 CPU byte-movement is essentially finished; the long-quoted "~47 GB/s effective" came from a bench arm that hand-rolls its own parallelism and stopped describing the shipping path when the spin pool became default. Two consequences for this funnel: (1) **the G-ladder's case is now quantitative** — byte-limited decode belongs on the GPU because of a measured 2.9×, not because of "CUDA parity"; (2) **C-ladder acceptance should be judged against x86's own attainable ceiling**, measured with the same probe (`cargo run --release -p larql-compute --example membw_probe`), rather than against Apple Silicon per-core — a ≤2× per-core gap means something different if the two chips' attainable ceilings differ. Measure the x86 ceiling as part of DEC-0.5 while that box is up; it is a two-minute probe. Full writeup [`docs/diagnoses/memory-bandwidth-roofline.md`](diagnoses/memory-bandwidth-roofline.md).
 
 ## 5b. M-ladder — MTP / speculative decode
 

@@ -35,6 +35,17 @@ pub(super) fn write_norms_and_router(
             arch.post_feedforward_layernorm_key(layer),
             arch.attn_q_norm_key(layer),
             arch.attn_k_norm_key(layer),
+            // Attention projection biases and sinks. Added 2026-07-29 —
+            // previously unrequested here, so architectures that declare
+            // biases (qwen, gpt2, starcoder2) lost them at extraction
+            // while the attention kernels kept asking for them, and
+            // GPT-OSS lost biases *and* sinks. See `docs/k3-funnel.md`
+            // §4.6.1.
+            arch.attn_q_bias_key(layer),
+            arch.attn_k_bias_key(layer),
+            arch.attn_v_bias_key(layer),
+            arch.attn_o_bias_key(layer),
+            arch.attn_sinks_key(layer),
             // Gemma 4 per-layer scalar multiplier. Stored as a 0-D scalar
             // in safetensors, surfaced through WeightSource as a 1-element
             // vector. The forward path multiplies h by this value after

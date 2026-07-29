@@ -273,7 +273,20 @@ pub fn decode_step_attend_q4k_direct(
 
     let softcap = arch.attn_logit_softcapping();
     let attn_out = gqa_attention_decode_step(
-        q_rope, &k_all, &v_all, num_q, head_dim, reps, scale, softcap,
+        q_rope,
+        &k_all,
+        &v_all,
+        num_q,
+        head_dim,
+        reps,
+        scale,
+        softcap,
+        crate::attention::sinks::resolve(
+            arch.attn_sinks_key(layer),
+            &weights.vectors,
+            num_q,
+            layer,
+        ),
     );
 
     let mut attn_out_q8k: Option<crate::cpu::ops::q4k_q8k_dot::Q8KActivation> = None;

@@ -19,8 +19,9 @@ pub fn gqa_attention(
     scale: f64,
     seq_len: usize,
 ) -> Array2<f32> {
-    let (out, _) =
-        gqa_attention_with_weights(q, k, v, num_q, head_dim, reps, scale, seq_len, false, None);
+    let (out, _) = gqa_attention_with_weights(
+        q, k, v, num_q, head_dim, reps, scale, seq_len, false, None, None,
+    );
     out
 }
 
@@ -38,9 +39,10 @@ pub fn gqa_attention_with_weights(
     seq_len: usize,
     capture: bool,
     softcap: Option<f32>,
+    sinks: Option<&[f32]>,
 ) -> (Array2<f32>, Option<AttentionWeights>) {
     let (out, last, _) = gqa_attention_capture(
-        q, k, v, num_q, head_dim, reps, scale, seq_len, capture, false, softcap,
+        q, k, v, num_q, head_dim, reps, scale, seq_len, capture, false, softcap, sinks,
     );
     (out, last)
 }
@@ -60,9 +62,10 @@ pub fn gqa_attention_with_all_weights(
     scale: f64,
     seq_len: usize,
     softcap: Option<f32>,
+    sinks: Option<&[f32]>,
 ) -> (Array2<f32>, AttentionAllWeights) {
     let (out, _, all) = gqa_attention_capture(
-        q, k, v, num_q, head_dim, reps, scale, seq_len, false, true, softcap,
+        q, k, v, num_q, head_dim, reps, scale, seq_len, false, true, softcap, sinks,
     );
     (
         out,
@@ -83,6 +86,7 @@ pub fn gqa_reduced_qk_all_weights(
     scale: f64,
     seq_len: usize,
     softcap: Option<f32>,
+    sinks: Option<&[f32]>,
     qk_rank: usize,
 ) -> AttentionAllWeights {
     let rank = qk_rank.clamp(1, head_dim);
@@ -91,6 +95,8 @@ pub fn gqa_reduced_qk_all_weights(
     let mut scores_buf = vec![0.0f32; seq_len];
 
     for h in 0..num_q {
+        // Per-head learned sink logit; `None` for architectures without them.
+        let sink = sinks.map(|s| s[h]);
         let mut captured_positions: Vec<Vec<f32>> = Vec::with_capacity(seq_len);
         let kv_h = h / reps;
         let q_off = h * head_dim;
@@ -110,20 +116,7 @@ pub fn gqa_reduced_qk_all_weights(
                 scores_buf[i] = s;
             }
 
-            let max_val = scores_buf[..causal_len]
-                .iter()
-                .copied()
-                .fold(f32::NEG_INFINITY, f32::max);
-            let mut sum = 0.0f64;
-            for score in scores_buf.iter_mut().take(causal_len) {
-                let e = ((*score - max_val) as f64).exp();
-                *score = e as f32;
-                sum += e;
-            }
-            let inv_sum = (1.0 / sum) as f32;
-            for score in scores_buf.iter_mut().take(causal_len) {
-                *score *= inv_sum;
-            }
+            super::softmax::softmax_in_place(&mut scores_buf[..causal_len], sink);
 
             let mut captured = vec![0.0f32; seq_len];
             captured[..causal_len].copy_from_slice(&scores_buf[..causal_len]);
@@ -150,6 +143,7 @@ fn gqa_attention_capture(
     capture_last: bool,
     capture_all: bool,
     softcap: Option<f32>,
+    sinks: Option<&[f32]>,
 ) -> (
     Array2<f32>,
     Option<AttentionWeights>,
@@ -172,6 +166,8 @@ fn gqa_attention_capture(
     let mut scores_buf = vec![0.0f32; seq_len];
 
     for h in 0..num_q {
+        // Per-head learned sink logit; `None` for architectures without them.
+        let sink = sinks.map(|s| s[h]);
         let mut captured_positions: Vec<Vec<f32>> = if capture_all {
             Vec::with_capacity(seq_len)
         } else {
@@ -196,20 +192,7 @@ fn gqa_attention_capture(
                 scores_buf[i] = s;
             }
 
-            let max_val = scores_buf[..causal_len]
-                .iter()
-                .copied()
-                .fold(f32::NEG_INFINITY, f32::max);
-            let mut sum = 0.0f64;
-            for score in scores_buf.iter_mut().take(causal_len) {
-                let e = ((*score - max_val) as f64).exp();
-                *score = e as f32;
-                sum += e;
-            }
-            let inv_sum = (1.0 / sum) as f32;
-            for score in scores_buf.iter_mut().take(causal_len) {
-                *score *= inv_sum;
-            }
+            super::softmax::softmax_in_place(&mut scores_buf[..causal_len], sink);
 
             if capture_last && qi == last_pos {
                 let mut captured = vec![0.0f32; seq_len];
@@ -272,12 +255,15 @@ pub fn gqa_attention_asym(
     reps: usize,
     scale: f64,
     seq_len: usize,
+    sinks: Option<&[f32]>,
 ) -> Array2<f32> {
     let mut out = Array2::<f32>::zeros((seq_len, num_q * v_head_dim));
     let scale_f32 = scale as f32;
     let mut scores_buf = vec![0.0f32; seq_len];
 
     for h in 0..num_q {
+        // Per-head learned sink logit; `None` for architectures without them.
+        let sink = sinks.map(|s| s[h]);
         let kv_h = h / reps;
         let q_off = h * qk_head_dim;
         let kv_qk_off = kv_h * qk_head_dim;
@@ -296,20 +282,7 @@ pub fn gqa_attention_asym(
             for i in 0..causal_len {
                 scores_buf[i] = raw_scores[i] * scale_f32;
             }
-            let max_val = scores_buf[..causal_len]
-                .iter()
-                .copied()
-                .fold(f32::NEG_INFINITY, f32::max);
-            let mut sum = 0.0f64;
-            for score in scores_buf.iter_mut().take(causal_len) {
-                let e = ((*score - max_val) as f64).exp();
-                *score = e as f32;
-                sum += e;
-            }
-            let inv_sum = (1.0 / sum) as f32;
-            for score in scores_buf.iter_mut().take(causal_len) {
-                *score *= inv_sum;
-            }
+            super::softmax::softmax_in_place(&mut scores_buf[..causal_len], sink);
 
             let v_block = v.slice(ndarray::s![0..causal_len, kv_v_off..kv_v_off + v_head_dim]);
             for d in 0..v_head_dim {
@@ -417,6 +390,7 @@ mod tests {
             seq,
             true,
             None,
+            None,
         );
         assert!(out.iter().all(|v| v.is_finite()));
         let w = weights.expect("weights should be captured");
@@ -495,6 +469,7 @@ mod tests {
             seq,
             true,
             Some(cap),
+            None,
         );
         assert!(out.iter().all(|v| v.is_finite()));
         let w = weights.unwrap();
@@ -519,7 +494,7 @@ mod tests {
         let scale = 1.0 / (hd as f64).sqrt();
         let out_nocap = gqa_attention(&q, &k, &v, 1, hd, 1, scale, seq);
         let (out_cap, _) =
-            gqa_attention_with_weights(&q, &k, &v, 1, hd, 1, scale, seq, false, Some(0.5));
+            gqa_attention_with_weights(&q, &k, &v, 1, hd, 1, scale, seq, false, Some(0.5), None);
         let mut max_diff = 0.0f32;
         for (a, b) in out_nocap.iter().zip(out_cap.iter()) {
             max_diff = max_diff.max((a - b).abs());
@@ -549,6 +524,7 @@ mod tests {
             num_q, // reps so 1 KV head
             1.0 / (hd as f64).sqrt(),
             seq,
+            None,
             None,
         );
         assert_eq!(out.shape(), &[seq, num_q * hd]);
@@ -588,6 +564,7 @@ mod tests {
             1.0 / (hd as f64).sqrt(),
             seq,
             Some(0.5),
+            None,
         );
         for head in &all.heads {
             for (qi, dist) in head.iter().enumerate() {
@@ -615,6 +592,7 @@ mod tests {
             1.0 / (hd as f64).sqrt(),
             seq,
             None,
+            None,
             4, // qk_rank — half of head_dim
         );
         assert_eq!(all.heads.len(), num_q);
@@ -639,8 +617,9 @@ mod tests {
         let q = small(seq, hd, 0.1);
         let k = small(seq, hd, 0.1);
         let scale = 1.0 / (hd as f64).sqrt();
-        let all_full = gqa_reduced_qk_all_weights(&q, &k, 1, hd, 1, scale, seq, None, hd);
-        let all_clamped = gqa_reduced_qk_all_weights(&q, &k, 1, hd, 1, scale, seq, None, hd * 4);
+        let all_full = gqa_reduced_qk_all_weights(&q, &k, 1, hd, 1, scale, seq, None, None, hd);
+        let all_clamped =
+            gqa_reduced_qk_all_weights(&q, &k, 1, hd, 1, scale, seq, None, None, hd * 4);
         for (a, b) in all_full.heads[0].iter().zip(all_clamped.heads[0].iter()) {
             for (x, y) in a.iter().zip(b.iter()) {
                 assert!(
@@ -659,8 +638,18 @@ mod tests {
         let hd = 4usize;
         let q = small(seq, hd, 0.1);
         let k = small(seq, hd, 0.1);
-        let all =
-            gqa_reduced_qk_all_weights(&q, &k, 1, hd, 1, 1.0 / (hd as f64).sqrt(), seq, None, 0);
+        let all = gqa_reduced_qk_all_weights(
+            &q,
+            &k,
+            1,
+            hd,
+            1,
+            1.0 / (hd as f64).sqrt(),
+            seq,
+            None,
+            None,
+            0,
+        );
         for (qi, dist) in all.heads[0].iter().enumerate() {
             let causal_sum: f32 = dist[..=qi].iter().sum();
             assert!(
@@ -686,6 +675,7 @@ mod tests {
             1.0 / (hd as f64).sqrt(),
             seq,
             Some(0.5),
+            None,
             hd,
         );
         for (qi, dist) in all.heads[0].iter().enumerate() {
@@ -751,6 +741,7 @@ mod tests {
             reps,
             1.0 / (qk_hd as f64).sqrt(),
             seq,
+            None,
         );
         assert_eq!(
             out.shape(),
@@ -780,6 +771,7 @@ mod tests {
             reps,
             1.0 / (qk_hd as f64).sqrt(),
             seq,
+            None,
         );
         assert!(
             out.iter().all(|x| x.is_finite()),
@@ -800,7 +792,7 @@ mod tests {
         let v = small(seq, num_kv * hd, 0.05);
         let scale = 1.0 / (hd as f64).sqrt();
         let sym = gqa_attention(&q, &k, &v, num_q, hd, reps, scale, seq);
-        let asym = gqa_attention_asym(&q, &k, &v, num_q, hd, hd, reps, scale, seq);
+        let asym = gqa_attention_asym(&q, &k, &v, num_q, hd, hd, reps, scale, seq, None);
         for (a, b) in sym.iter().zip(asym.iter()) {
             assert!(
                 (a - b).abs() < 1e-5,
@@ -828,6 +820,7 @@ mod tests {
             1,
             1.0 / (qk_hd as f64).sqrt(),
             seq,
+            None,
         );
         // Output must equal V exactly (weight=1 on single token).
         let v_row: Vec<f32> = v.row(0).to_vec();
@@ -837,6 +830,152 @@ mod tests {
                 (vv - ov).abs() < 1e-5,
                 "seq=1 output must equal V: {vv} vs {ov}"
             );
+        }
+    }
+
+    // ── Attention sinks threaded through the kernel ─────────────────────
+    // The maths is pinned in `attention::softmax`; these assert the
+    // per-head plumbing, i.e. that a sink supplied here actually reaches
+    // the softmax and is indexed by head.
+
+    #[test]
+    fn sinks_change_the_attention_output() {
+        let (seq, hd) = (4usize, 4usize);
+        let (q, k, v) = (
+            small(seq, hd, 0.3),
+            small(seq, hd, 0.3),
+            small(seq, hd, 0.3),
+        );
+        let scale = 1.0 / (hd as f64).sqrt();
+        let base = gqa_attention(&q, &k, &v, 1, hd, 1, scale, seq);
+        let (with_sink, _) = gqa_attention_with_weights(
+            &q,
+            &k,
+            &v,
+            1,
+            hd,
+            1,
+            scale,
+            seq,
+            false,
+            None,
+            Some(&[2.45]),
+        );
+        let max_diff = base
+            .iter()
+            .zip(with_sink.iter())
+            .fold(0.0f32, |m, (a, b)| m.max((a - b).abs()));
+        assert!(max_diff > 1e-4, "sink had no effect on the output");
+    }
+
+    #[test]
+    fn sink_weights_sum_below_one_per_position() {
+        // 0.01 scale, matching the `run()` fixture: at 0.3 the dot
+        // products reach ~45, which dwarfs a 2.45 sink so its share
+        // underflows and the remaining weights round to exactly 1.0 —
+        // physically correct, but it tests nothing.
+        let (seq, hd) = (4usize, 4usize);
+        let (q, k, v) = (
+            small(seq, hd, 0.01),
+            small(seq, hd, 0.01),
+            small(seq, hd, 0.01),
+        );
+        let scale = 1.0 / (hd as f64).sqrt();
+        let (_, all) =
+            gqa_attention_with_all_weights(&q, &k, &v, 1, hd, 1, scale, seq, None, Some(&[2.45]));
+        for (qi, dist) in all.heads[0].iter().enumerate() {
+            let s: f32 = dist[..=qi].iter().sum();
+            assert!(s < 1.0, "position {qi}: sink must divert mass, got {s}");
+            assert!(s > 0.0);
+        }
+    }
+
+    #[test]
+    fn each_head_uses_its_own_sink() {
+        // Head 0 gets a negligible sink, head 1 a dominant one. Only
+        // head 1's output should collapse toward zero — this fails if the
+        // kernel indexes the sink slice wrongly (or ignores the head).
+        let (seq, hd, num_q) = (3usize, 4usize, 2usize);
+        let q = small(seq, num_q * hd, 0.01);
+        let k = small(seq, hd, 0.01);
+        let v = small(seq, hd, 0.01);
+        let scale = 1.0 / (hd as f64).sqrt();
+        let (out, _) = gqa_attention_with_weights(
+            &q,
+            &k,
+            &v,
+            num_q,
+            hd,
+            num_q,
+            scale,
+            seq,
+            false,
+            None,
+            Some(&[-40.0, 40.0]),
+        );
+        let head0: f32 = out
+            .slice(ndarray::s![.., 0..hd])
+            .iter()
+            .map(|x| x.abs())
+            .sum();
+        let head1: f32 = out
+            .slice(ndarray::s![.., hd..2 * hd])
+            .iter()
+            .map(|x| x.abs())
+            .sum();
+        assert!(head0 > 1e-3, "head 0 should be unaffected, got {head0}");
+        assert!(
+            head1 < 1e-3,
+            "head 1's dominant sink should zero it, got {head1}"
+        );
+    }
+
+    /// Differential check against the reference implementation.
+    ///
+    /// Expected values computed independently in NumPy following
+    /// `transformers/models/gpt_oss/modeling_gpt_oss.py`'s
+    /// `eager_attention_forward`: concatenate the per-head sink to the
+    /// causal logits, subtract the joint max, softmax, drop the sink
+    /// column, then weight V. Fixture mirrors `small(seq, hd, 0.01)`.
+    #[test]
+    fn full_attention_with_sink_matches_reference_implementation() {
+        let (seq, hd) = (4usize, 4usize);
+        let (q, k, v) = (
+            small(seq, hd, 0.01),
+            small(seq, hd, 0.01),
+            small(seq, hd, 0.01),
+        );
+        let scale = 1.0 / (hd as f64).sqrt();
+        let (out, _) = gqa_attention_with_weights(
+            &q,
+            &k,
+            &v,
+            1,
+            hd,
+            1,
+            scale,
+            seq,
+            false,
+            None,
+            Some(&[2.45]),
+        );
+
+        #[rustfmt::skip]
+        let expected: [[f32; 4]; 4] = [
+            [0.000795483, 0.001590966, 0.002386449, 0.003181932],
+            [0.004446274, 0.005925801, 0.007405328, 0.008884855],
+            [0.010442944, 0.012522218, 0.014601491, 0.016680765],
+            [0.018449376, 0.021063344, 0.023677311, 0.026291278],
+        ];
+
+        for (qi, row) in expected.iter().enumerate() {
+            for (d, &want) in row.iter().enumerate() {
+                let got = out[[qi, d]];
+                assert!(
+                    (got - want).abs() < 1e-7,
+                    "position {qi} dim {d}: got {got}, reference {want}"
+                );
+            }
         }
     }
 }

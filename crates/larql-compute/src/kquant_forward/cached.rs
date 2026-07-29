@@ -737,7 +737,20 @@ pub fn attention_decode_step_native(
 
     let softcap = arch.attn_logit_softcapping();
     let attn_out = gqa_attention_decode_step(
-        &q_rope, &k_concat, &v_concat, num_q, head_dim, reps, scale, softcap,
+        &q_rope,
+        &k_concat,
+        &v_concat,
+        num_q,
+        head_dim,
+        reps,
+        scale,
+        softcap,
+        crate::attention::sinks::resolve(
+            arch.attn_sinks_key(layer),
+            &weights.vectors,
+            num_q,
+            layer,
+        ),
     );
     let attn_out_row: &[f32] = attn_out.row(0).to_slice().or_else(|| attn_out.as_slice())?;
 

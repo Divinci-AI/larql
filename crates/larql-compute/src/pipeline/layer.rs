@@ -31,6 +31,11 @@ pub struct FullPipelineLayer<'a> {
     pub pre_ffn_norm: Option<&'a [f32]>,
     pub post_ffn_norm: Option<&'a [f32]>,
     /// Norm bias (only for LayerNorm). None for RMSNorm.
+    /// Per-query-head attention sinks (GPT-OSS): learned logits that
+    /// compete in the attention softmax and are then discarded, so the
+    /// emitted weights sum to less than one. `None` for every other
+    /// architecture. See `docs/k3-funnel.md` §4.6.
+    pub attn_sinks: Option<&'a [f32]>,
     pub input_norm_bias: Option<&'a [f32]>,
     pub post_attn_norm_bias: Option<&'a [f32]>,
 
@@ -244,6 +249,7 @@ impl Default for FullPipelineLayer<'_> {
     fn default() -> Self {
         let qw = QuantWeight::default();
         Self {
+            attn_sinks: None,
             wq: qw,
             wk: qw,
             wv: qw,

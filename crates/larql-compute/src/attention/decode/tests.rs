@@ -143,7 +143,7 @@ fn gqa_decode_step_applies_softcap() {
     let q = Array2::from_elem((1, 4), 0.5f32); // num_q=1, head_dim=4
     let k = Array2::from_elem((1, 4), 0.25f32);
     let v = Array2::from_shape_vec((1, 4), vec![1.0, 2.0, 3.0, 4.0]).unwrap();
-    let out = gqa_attention_decode_step(&q, &k, &v, 1, 4, 1, 1.0, Some(30.0));
+    let out = gqa_attention_decode_step(&q, &k, &v, 1, 4, 1, 1.0, Some(30.0), None);
     assert_eq!(out.shape(), &[1, 4]);
     // Single key → softmax weight 1.0 → output is exactly the V row.
     for d in 0..4 {

@@ -222,6 +222,15 @@ impl MetalBackend {
                 &layer_rope_base as *const f32 as *const std::ffi::c_void,
             );
             enc.set_bytes(17, 4, &rdim as *const u32 as *const std::ffi::c_void);
+            // Attention sinks (GPT-OSS) — see stages::attention::sink_binding.
+            let (sink_vals, has_sinks) =
+                crate::stages::attention::sink_binding(layer.attn_sinks, layer_num_q_heads);
+            enc.set_bytes(
+                18,
+                std::mem::size_of_val(sink_vals) as u64,
+                sink_vals.as_ptr() as *const std::ffi::c_void,
+            );
+            enc.set_bytes(19, 4, &has_sinks as *const u32 as *const std::ffi::c_void);
             enc.dispatch_thread_groups(
                 MTLSize::new(layer_num_q_heads as u64, 1, 1),
                 MTLSize::new(tg_w, 1, 1),
@@ -362,6 +371,15 @@ impl MetalBackend {
             enc.set_bytes(9, 4, &window_size as *const u32 as *const std::ffi::c_void);
             enc.set_buffer(10, Some(bufs.k_out), 0);
             enc.set_buffer(11, Some(bufs.v_out), 0);
+            // Attention sinks (GPT-OSS) — see stages::attention::sink_binding.
+            let (sink_vals, has_sinks) =
+                crate::stages::attention::sink_binding(layer.attn_sinks, layer_num_q_heads);
+            enc.set_bytes(
+                12,
+                std::mem::size_of_val(sink_vals) as u64,
+                sink_vals.as_ptr() as *const std::ffi::c_void,
+            );
+            enc.set_bytes(13, 4, &has_sinks as *const u32 as *const std::ffi::c_void);
             enc.dispatch_thread_groups(
                 MTLSize::new(layer_num_q_heads as u64, 1, 1),
                 MTLSize::new(

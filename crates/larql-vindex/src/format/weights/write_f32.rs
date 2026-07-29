@@ -456,10 +456,27 @@ pub fn write_model_weights_with_opts(
                 }
             }
 
-            // QK norms (1D vectors, stored alongside attention)
-            for key in [arch.attn_q_norm_key(layer), arch.attn_k_norm_key(layer)]
-                .iter()
-                .flatten()
+            // 1-D attention vectors stored alongside the projections:
+            // QK norms, projection biases, and attention sinks. Each is
+            // optional per architecture — a `None` key means the model
+            // does not have that tensor, not that it may be skipped.
+            //
+            // Biases and sinks were added 2026-07-29: nothing had ever
+            // asked for `attn_*_bias_key` here, so even architectures
+            // that declared biases (qwen, gpt2, starcoder2) had them
+            // dropped at extraction while the attention kernels went on
+            // requesting them. See `docs/k3-funnel.md` §4.6.1.
+            for key in [
+                arch.attn_q_norm_key(layer),
+                arch.attn_k_norm_key(layer),
+                arch.attn_q_bias_key(layer),
+                arch.attn_k_bias_key(layer),
+                arch.attn_v_bias_key(layer),
+                arch.attn_o_bias_key(layer),
+                arch.attn_sinks_key(layer),
+            ]
+            .iter()
+            .flatten()
             {
                 if let Some(data) = source.get_vector(key) {
                     let bytes = crate::config::dtype::encode_floats(&data, dtype);

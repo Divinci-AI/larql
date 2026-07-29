@@ -403,11 +403,13 @@ impl PyVindex {
             let mut state = self.walk_model.borrow_mut();
             if state.is_none() {
                 let dir = std::path::Path::new(&self.path);
-                *state = Some(crate::walk::InferState::load(dir, &self.config).map_err(|e| {
-                    pyo3::exceptions::PyRuntimeError::new_err(format!(
-                        "Failed to load model weights: {e}"
-                    ))
-                })?);
+                *state = Some(
+                    crate::walk::InferState::load(dir, &self.config).map_err(|e| {
+                        pyo3::exceptions::PyRuntimeError::new_err(format!(
+                            "Failed to load model weights: {e}"
+                        ))
+                    })?,
+                );
             }
         }
         let mut state = self.walk_model.borrow_mut();

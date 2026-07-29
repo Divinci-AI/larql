@@ -11,6 +11,8 @@ pub mod decode;
 pub mod gpu;
 pub mod gqa;
 pub mod rope;
+pub mod sinks;
+pub mod softmax;
 
 use ndarray::Array2;
 

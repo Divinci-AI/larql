@@ -1063,6 +1063,16 @@ fn fused_attention_single_token() {
         4,
         &rotary_dim_val as *const u32 as *const std::ffi::c_void,
     );
+    // Buffers 14/15: attention sinks. Bound even when unused — Metal has
+    // no null buffer, and an unbound `has_sinks` would be read as garbage.
+    let no_sinks = [0.0f32];
+    enc.set_bytes(14, 4, no_sinks.as_ptr() as *const std::ffi::c_void);
+    let has_sinks_val = 0u32;
+    enc.set_bytes(
+        15,
+        4,
+        &has_sinks_val as *const u32 as *const std::ffi::c_void,
+    );
     enc.dispatch_thread_groups(
         metal::MTLSize::new(num_q as u64, seq_len as u64, 1),
         metal::MTLSize::new(256, 1, 1),
@@ -1370,6 +1380,7 @@ fn full_pipeline_seq1_produces_nonzero() {
     let x: Vec<f32> = (0..hidden).map(|i| (i as f32 * 0.01).sin()).collect();
 
     let layer = larql_compute::FullPipelineLayer {
+        attn_sinks: None,
         wq: larql_compute::QuantWeight {
             data: &wq_data,
             scales: Some(&q8_s_q),
