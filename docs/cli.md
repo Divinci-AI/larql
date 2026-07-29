@@ -51,6 +51,7 @@ recipe validation, `build_id`, capability reporting, card generation.
 |---|---|
 | `recipe validate <FILE>` | Structurally validate a recipe file; prints every problem found. |
 | `recipe build-id <FILE>` | Print a recipe's `build_id` (content hash over source+extractor+outputs). |
+| `recipe estimate <FILE>` | Upstream size, per-output size, executor recommendation, and a cost band. The only `recipe` subcommand that touches the network. |
 | `capabilities` | Print this release's capability manifest — recognised architectures and what each supports. |
 | `card render` | Render a Hub model card from a recipe, manifest, and verification report. |
 
@@ -1458,9 +1459,11 @@ larql parity gemma4-31b.vindex --component layer --prompt "The capital of France
 
 Vindex Factory tooling — [docs/vindex-factory.md](vindex-factory.md) is
 the full spec; [crates/larql-factory/README.md](../crates/larql-factory/README.md)
-is the crate reference. Everything here runs locally, no network I/O —
-the recipe repo's PR checks that need the HuggingFace API (upstream
-existence, licence allowlist, cost estimate) aren't built yet.
+is the crate reference. Everything here runs locally with one exception
+(`recipe estimate`, which fetches the upstream repo's file listing and
+`config.json` over HTTP) — the recipe repo's remaining PR checks
+(upstream existence, licence allowlist, Hub name collision) aren't
+built yet.
 
 ### `larql recipe validate`
 
@@ -1500,6 +1503,46 @@ larql recipe build-id <FILE>
 ```bash
 larql recipe build-id gemma-3-4b-it.yaml
 # 398f1b8e29adecf2ef3838748558ae6b82b292b96ed8ab412725886e4194e30a
+```
+
+### `larql recipe estimate`
+
+Upstream download size, per-output size, an executor recommendation,
+and a cost band (§6.1 step 4) — so a recipe PR's approval is informed.
+The only `recipe` subcommand that touches the network: it fetches the
+upstream repo's file listing and `config.json` from HuggingFace.
+
+```
+larql recipe estimate <FILE>
+```
+
+Model dimensions come from the same architecture-detection path the
+real extractor uses. Per-output byte estimates are a coarse
+order-of-magnitude model, not manifest-exact. The cost band prices the
+recipe's own declared `budget.max_wall_minutes` against
+[docs/dec-funnel-v0.2.md](dec-funnel-v0.2.md) §7's rate basis — it does
+not predict a duration from bytes, since there's no real throughput
+measurement in this codebase to ground that in.
+
+**Example:**
+
+```bash
+larql recipe estimate gemma-3-4b-it.yaml
+# {
+#   "upstream_bytes": 8500000000,
+#   "outputs": [
+#     { "preset": "full", "estimated_bytes": 6200000000 },
+#     { "preset": "client", "estimated_bytes": 1100000000 },
+#     ...
+#   ],
+#   "total_estimated_output_bytes": 10900000000,
+#   "recommended_executor": "leased",
+#   "executor_threshold_gib": 40.0,
+#   "declared_executor": "auto",
+#   "cost_estimate_usd": { "low_usd": 1.31, "high_usd": 2.60 },
+#   "declared_max_usd": 12.0,
+#   "budget_warning": null
+# }
 ```
 
 ### `larql capabilities`

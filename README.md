@@ -275,9 +275,9 @@ Flags: `--no-full`, `--slices client,server`, `--collections model,family`,
 reviewable pipeline: a recipe file merged to `main` is a promise that a
 specific vindex exists on the Hub, built from a pinned upstream by a
 pinned `larql`, verified before it went public. Recipe schema,
-`build_id`, structural validation, capability manifest, and card
-generation are built (`crates/larql-factory`); the build-stage driver
-that actually runs a recipe is not.
+`build_id`, structural validation, capability manifest, card generation,
+and the size/cost estimate are built (`crates/larql-factory`); the
+build-stage driver that actually runs a recipe is not.
 
 ```bash
 # Structural validation — schema shape, thresholds, no network I/O
@@ -285,6 +285,9 @@ larql recipe validate my-recipe.yaml
 
 # The content hash that decides no-op / verify-only / rebuild
 larql recipe build-id my-recipe.yaml
+
+# Upstream size, per-output size, executor recommendation, cost band
+larql recipe estimate my-recipe.yaml
 
 # Which architectures this larql release recognises, and what each supports
 larql capabilities
