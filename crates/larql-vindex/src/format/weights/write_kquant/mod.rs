@@ -287,7 +287,12 @@ fn update_index_json(
 
     config.has_model_weights = true;
     config.quant = crate::QuantFormat::Q4K;
-    if arch.is_hybrid_moe() {
+    // Any MoE model whose experts landed in the per-layer store must declare
+    // the layout, pure or hybrid — the loader only registers
+    // `layers/{L}/{e}/…` byte ranges when it sees this flag. Writing the
+    // layer files without setting it produced a vindex that looked complete
+    // on disk and loaded zero experts.
+    if arch.is_moe() || arch.is_hybrid_moe() {
         config.ffn_layout = Some(FfnLayout::PerLayer);
     }
     config.model_config = Some(VindexModelConfig::from_arch(arch));

@@ -70,7 +70,13 @@ pub(super) fn write_norms_and_router(
         // MoE router + norms (hybrid MoE, e.g. Gemma 4 26B A4B).
         // router.proj.weight is 2D [num_experts, hidden] — flatten and store as "vector".
         // All other MoE keys are 1D vectors.
-        if arch.is_hybrid_moe() {
+        // Pure MoE (GraniteMoE, OLMoE) needs its router in the vector store
+        // too — the forward resolves it via `weights.vectors.get(router_key)`.
+        // Gating on hybrid alone wrote router_weights.bin (which only DESCRIBE
+        // reads) while leaving the forward's lookup empty, so the expert block
+        // silently found no weights. The 1D keys below are Gemma-4-specific
+        // and simply resolve to None elsewhere.
+        if arch.is_moe() || arch.is_hybrid_moe() {
             // 2D router projection — flatten
             if let Some(key) = arch.moe_router_key(layer) {
                 if let Some((data, _, _)) = source.get_tensor(&key) {

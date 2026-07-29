@@ -46,9 +46,13 @@ pub fn run_expert(
 
     let arch = &*weights.arch;
 
-    if !arch.is_hybrid_moe() {
+    // Pure MoE (GraniteMoE, OLMoE) serves experts exactly like hybrid MoE —
+    // the packed per-layer expert store is the same shape either way. Only
+    // the presence of a parallel dense slab differs, which the expert
+    // endpoints never touch.
+    if !(arch.is_moe() || arch.is_hybrid_moe()) {
         return Err(ServerError::BadRequest(
-            "model is not a hybrid MoE — no expert endpoints available".into(),
+            "model is not a MoE — no expert endpoints available".into(),
         ));
     }
 

@@ -19,6 +19,8 @@ larql-kv = { path = "../larql-kv" }
 larql-models = { path = "../larql-models" }
 larql-lql = { path = "../larql-lql" }
 larql-vindex = { path = "../larql-vindex" }
+larql-vindex-spec = { path = "../larql-vindex-spec" }
+larql-factory = { path = "../larql-factory" }
 clap = { version = "4", features = ["derive", "env"] }
 indicatif = "0.17"
 reqwest = { version = "0.12", features = ["blocking", "json"] }
@@ -53,3 +55,7 @@ tempfile = "3"
 # used by run_cmd_image tests to borrow a real ModelConfig without
 # enumerating every field by hand. Production builds don't compile it.
 larql-models = { path = "../larql-models", features = ["test-utils"] }
+# `test-utils` exposes `larql_vindex_spec::test_fixtures::sample_manifest`,
+# used by card_cmd tests to build a real VindexManifest without
+# enumerating every field by hand.
+larql-vindex-spec = { path = "../larql-vindex-spec", features = ["test-utils"] }

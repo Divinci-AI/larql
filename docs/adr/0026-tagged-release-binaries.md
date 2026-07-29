@@ -213,3 +213,11 @@ Irreversibility note for future reference: crates.io publishes can be
 permanently associated with the publishing account's history either way.
 That was accepted knowingly here given the placeholder content is
 inherently disposable (nothing links to it, nothing depends on it).
+
+**Update 2026-07-29:** `larql-factory` (the Vindex Factory driver crate,
+born after this addendum was written) claimed identically — same
+`0.0.0` placeholder shape, same scratch-directory mechanics, name
+verified unclaimed first via the crates.io API (404, with a descriptive
+`User-Agent` — the API's anti-scraping policy 403s a bare `curl`).
+**19 names now held.** `larql-vindex-spec` was already among the
+original 18; no second claim was needed there.

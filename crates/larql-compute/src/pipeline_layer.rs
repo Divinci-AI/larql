@@ -191,7 +191,10 @@ pub fn build_moe_weights<'a>(
     arch: &dyn larql_models::ModelArchitecture,
     layer: usize,
 ) -> Option<MoeLayerWeights<'a>> {
-    if !arch.is_hybrid_moe() {
+    // Pure MoE (GraniteMoE, OLMoE) builds identically to hybrid — the expert
+    // store, router and per-expert byte tables are the same. Hybrid differs
+    // only in having a parallel dense slab, which lives outside this struct.
+    if !(arch.is_moe() || arch.is_hybrid_moe()) {
         return None;
     }
     let router_key = arch.moe_router_key(layer)?;
