@@ -723,6 +723,170 @@ f32/f16/i8 serving path is well-built; only the Q8K path — the wire DEC prefer
     `binary.rs:88`); gate `--release-mmap-after-request` on `requests_in_flight`;
     persistent client fan-out pool. [larql-inference, larql-server]
 
+### Vindex + WalkFFN review (2026-07-30)
+
+Subsystem review of `larql-vindex` (~51K LOC) and the walk-FFN engine
+(`larql-inference/src/vindex/walk_ffn/`), merged with an external strategic
+review of the architecture and a kernel deep-dive. Full record:
+[`docs/audits/vindex-walkffn-review-2026-07-30.md`](docs/audits/vindex-walkffn-review-2026-07-30.md).
+Verdict: both subsystems structurally healthy (the storage layer and spec
+crate are defensive engineering done right; the trait-dispatch refactor
+paid off — FP4 cost zero kernel code), but four high-severity runtime bugs,
+a silent-wrong-numerics cluster in the quantized walk paths (same
+"produces a number, the number is a lie" theme as the DEC review), and
+**no walk-vs-dense numerical parity test anywhere in the tree**.
+
+Sequencing is interaction-driven: Tier 0's padded-stride fix **gates**
+Tier 2's base+delta (the delta path leans on the same row-dot/sidecar
+machinery, and GPT-OSS-20B hidden=2880 is K3 rung 1); the
+`forward`/`forward_observed` split *is* the fix for the zero-activation
+bugs (don't patch them twice); the planner enum subsumes the
+wrong-capability-gate class but the live panic gets its two-line fix now.
+
+**Tier 0 — correctness (small independent diffs, before any Q4K walk
+claim on a non-256-aligned model):**
+
+1. ✅ **Q4K cache padded-stride fix + non-aligned fixture** (DONE 2026-07-30) (P0, silent
+   garbage) — `kquant_cache.rs:138-161` decodes assuming unpadded
+   `[rows, cols]`; the writer pads each row's cols to 256
+   (`write_kquant/ffn.rs:70`). Wrong FFN outputs, no diagnostic, on
+   hidden%256≠0 models (GPT-OSS-20B 2880, Gemma3-1B 1152). The fix already
+   exists in one of three copies (`kquant_forward/walk_ffn.rs:63-70`).
+   Add a hidden=320 fixture — every current Q4K fixture is 256-aligned so
+   the suite structurally cannot catch this class. Victims: parallel-down
+   path, per-feature down accumulate, selector row norms. [larql-vindex,
+   larql-inference]
+2. ✅ **Q4_0 ladder gates on the wrong format → CPU panic** (DONE 2026-07-30) (P0) —
+   `walk_ffn/mod.rs:405` admits Q4_0 data on `supports_quant(Q4_K)`;
+   `CpuBackend` says yes but leaves `q4_matvec_pair_batch` defaulted to
+   `None`, and `interleaved_q4.rs:58-62` unwraps it. Gate on Q4_0 / actual
+   batch-kernel availability; unwraps → fallthrough. `interleaved_q4.rs`
+   has zero tests. [larql-inference]
+3. ✅ **Overlay gate cache poisoned by zero-width gate vectors** (DONE 2026-07-30) (P0,
+   nondeterministic panic/wrong-scores) — `patch/overlay.rs:176-191`
+   mixed-width guard misses `len==0`; `vindexfile/mod.rs:125` inserts
+   `vec![]` gates on every INSERT, so the trigger is in-tree. Guard the
+   zero-width case AND stop inserting empty gate vectors. [larql-vindex]
+4. ✅ **Loader panics on malformed `index.json`** (DONE 2026-07-30) (P0) — `format/load.rs:81`
+   and `:293` index `gate_slices[info.layer]` unchecked from parsed JSON;
+   return `VindexError::Parse` per the crate's own stated standard.
+   [larql-vindex]
+5. ✅ **Override fallthrough** (DONE 2026-07-30 — routes to the extracted override-aware `weights_fallback` instead of erroring; step 10 honours overrides, so availability is preserved) (P1, stopgap until base+delta) —
+   `mod.rs:333-339`: sparse returning `None` on an overridden layer falls
+   through to override-blind whole-layer paths — the exact failure the
+   module doc warns about. [larql-inference]
+6. ✅ **Unaligned f32 transmutes (UB) + patch decode swallowing** (DONE 2026-07-30 — new `format/le_floats.rs`; `try_apply_patch` is the error-surfacing entry, `apply_patch` kept as an infallible wrapper that drops corrupt patches wholesale; migrating larql-server/larql-lql callers to `try_apply_patch` is a follow-up) (P1) —
+   `patch/format.rs:202`, `quant/convert.rs:565`, `config/dtype.rs:60` →
+   `from_le_bytes`/bytemuck (also fixes the native-endian `.vlp`
+   portability gap); `overlay_apply.rs:86,122` must surface
+   `decode_gate_vector` failures instead of applying meta-only half-state;
+   the hand-rolled base64 decoder silently truncates trailing chars.
+   [larql-vindex]
+
+**Tier 1 — kernel-semantics campaign (one PR neighbourhood: make explicit
+what's exact, approximate, observed, reconstructed):**
+
+7. ✅ **Wire `activation_floor`** (DONE 2026-07-30 — `effective_activation_floor()` = max(user floor, named `ACTIVATION_NOISE_FLOOR`), applied on all three sparse accumulate loops, behavioral test) — documented, settable from
+   `predict_cmd.rs:241`, read by nothing; the real threshold is a
+   hardcoded `1e-10` ×3 (`sparse.rs:338,411,549`). [larql-inference]
+8. ✅ **Name the 80% full-K threshold, align doc/code** (DONE 2026-07-30 — `walk_ffn/thresholds.rs` FULL_K_DENSITY 4/5 + PARALLEL_DOWN_MIN_HITS + GATHER_MIN_FEATURES; helper doc now states the [80%,100%) band is dense) —
+   `helpers.rs:24` fires the dense gemm at `k >= intermediate*8/10` while
+   docs say "K ≥ feature count"; fidelity-vs-K points above 0.8 density
+   are secretly dense unless `force_walk`. Named const in config; consider
+   true `k >= intermediate`. [larql-inference]
+9. ✅ **`selector:fallback` trace suffix** (DONE 2026-07-30 — dispatch-trace entry + `selector_fallback_count()`) — `joint_gate_knn` silently
+   degrades to GateOnly when norms/batched scores are missing; A/B sweeps
+   can't currently be trusted. [larql-inference]
+10. ✅ **Resolve the gather caveat** (DONE 2026-07-30 — STALE: the phrase dates from task #24's transposed-down striding; task #25's hard sidecar requirement (`down_features_q4k_layer_data(layer)?` + decline-without-sidecar pin) resolved it, validated vs dense at |err|/‖ref‖≈6e-3. Caveat deleted, history documented in `sparse_gather.rs`. Remaining issue on this path is the documented 0.15× full-forward perf collapse, not correctness) — `sparse.rs:450` says "experimental —
+    not yet correct for production down" on a kernel production routing
+    reaches (route-pool + sidecar). Stale comment (predates the
+    feature-major sidecar?) → delete; live → opt-in flag. [larql-inference]
+11. ✅ **Unify the NaN contract** (DONE 2026-07-30 — shared `selection_weight_cmp_desc` panics on NaN matching `top_k_by_abs`; 4 sites unified, `#[should_panic]` pins incl. a NaN-gate-scores mock through `joint_gate_knn`) — `top_k_by_abs` panics;
+    `selector.rs:267,320` `unwrap_or(Equal)` scrambles silently. Pick one
+    (also see the 2026-05-28 item 5 shared helper). [larql-inference]
+12. ✅ **Delete the orphaned `larql-vindex/src/walk/` module** (DONE 2026-07-30) — no
+    `mod walk;` anywhere, never compiles, stale `WalkFfnConfig` duplicate
+    (left by `3944359b`). [larql-vindex]
+13. **Decide the HNSW hot-path question** — verified: `gate_walk` is tried
+    first (`sparse.rs:231,268`) and HNSW lives only inside the `gate_knn`
+    fallback, so `enable_hnsw()` changes nothing whenever `gate_walk`
+    succeeds. Intentional (brute gemv wins at these N) → document at
+    `enable_hnsw()`; otherwise wire it. [larql-vindex, larql-inference]
+14. ✅ **Tombstone semantics for Delete→Update + pinning test** (DONE 2026-07-30 — Update resurrects, matching Insert; pinned-None meta cleared when Update carries no replacement; oversampling named `BASE_KNN_OVERSAMPLE_FACTOR`=2 with 2×→4×→all-features escalation only on layers with tombstones; 7 regression tests) —
+    Update never clears `deleted` (`overlay_apply.rs:102-138`);
+    `feature_meta()` and `gate_knn()` disagree about the same feature.
+    Also the 2× deletion-oversampling under-fill (`overlay.rs:426`).
+    [larql-vindex]
+
+**Tier 2 — capability (the strategic-review core, in this order):**
+
+15. **`forward` / `forward_observed(observer)` split** — activations
+    become opt-in; sparse paths emit `(FeatureId, f32)` pairs instead of a
+    dense `seq_len × intermediate` zero-fill. Subsumes (by construction)
+    the parallel-path zero activations (`sparse.rs:283-371`) and the L1
+    cache's fabricated-zeros hit (`mod.rs:367`), and removes the dense
+    allocation from ordinary generation. [larql-inference, larql-server]
+16. **Base-plus-delta patched FFN execution** (after item 1) —
+    `y_patched = y_base + Σ_{i∈P}(contribᵢ_new − contribᵢ_old)` is exact
+    and O(|P|) on top of the fast dense path; retires the
+    override-forces-sparse cliff and makes editing production-viable.
+    Exactness conditions: old-term subtraction through the SAME quantised
+    row_dot bytes as the dense base (not f32-recomputed), old-down rows
+    from the feature-major sidecar. Lands as a routing-ladder branch, not
+    a rewrite. [larql-inference, larql-vindex]
+17. **Runtime trace emission** — replace `take_trace`'s post-hoc
+    `gate_knn` re-run (`mod.rs:281-306`, which ignores selector/pools/
+    cell-router and records scores, not contributions) with emission from
+    the executed path: gate, up, activation, ‖down‖, residual-delta,
+    logit contribution, rank, path. Align with the chuk-introspect schema
+    — no second trace format. [larql-inference]
+18. **Execution planner** — `VindexFfnPlan` enum + structured reason
+    (plan/reason/layer/features/overrides), config-surfaced thresholds
+    replacing the magic ratios; only freeze once base+delta exists as a
+    plan variant. The ladder's trace_path names + routing tests are the
+    seed; add the reason field. [larql-inference]
+19. **Two-stage selection: shortlist top-M by gate, exact rerank** — the
+    rerank criterion already exists as
+    `FeatureSelector::ActXUpScoreXDownNorm`; add the shortlist structure
+    so it stops paying full projections. Production-cost shape of the
+    existing experiment harness. [larql-inference]
+
+**Tier 3 — productization:**
+
+20. **Walk-vs-dense parity suite** — the four tests that would have caught
+    the four worst bugs: non-aligned Q4K fixture through cache + serial
+    walk vs dequant baseline; CpuBackend + Q4_0 forward; serial-vs-parallel
+    parity at hits ≥ 512 asserting output AND activation; dispatch-trace
+    assertions against the REAL ladder (routing_tests.rs currently tests a
+    hand-copied replica that can drift without failing). No test anywhere
+    compares walk output against dense ground truth on a served vindex.
+    [larql-inference, larql-server]
+21. **KnnStore unification** — still exported and live in
+    `patch/knn_store_io.rs`/`overlay.rs`/`overlay_apply.rs`; the
+    unification spec still describes it. Until removed, "FFN = KNN index =
+    vindex" is partly aspiration. [larql-vindex]
+22. **Vindex v1 conformance contract** — mostly assembling what exists
+    (spec crate, per-shard digests, provenance); missing: corruption-test
+    suite + cross-platform round trips + benchmark protocol. Also the
+    legacy `down_meta::read_binary` allocation-bomb path and the
+    Vindexfile parser's bare-comma/`unwrap_or(0)` items. [larql-vindex,
+    larql-vindex-spec]
+23. **Doc drift** — README `0.008 ms/layer` headline needs the
+    HNSW-vs-brute/which-N qualifier vs the 2.65 ms full-projection figure;
+    README extract-level default contradiction; walk.md "Lossless at
+    K=8092" (typo) + "production" framing. The external review being
+    misled by these is the argument for fixing them. [docs]
+24. **Hygiene** — file splits (`walk_ffn/mod.rs` 926 → timings/ladder/
+    builders; `sparse.rs` 842 → gemv/route/parallel/gather;
+    `overlay.rs` 959; `huggingface/download/mod.rs` 1329;
+    `quant/convert.rs` 655 — 88/186 vindex files exceed the 250-line
+    rule); dedupe the 8-site GeluTanh/SiLU activation dispatch (new
+    activations silently land in the SiLU arm); English word lists +
+    Wikidata categories out of `clustering/` into data files (+ fix
+    cwd-relative probing); colocated tests for `hnsw.rs` (455L, zero
+    tests), `index/mutate/mod.rs`, `write_f32.rs` (777L); bare `0/1/2`
+    component indices → `FFN_DOWN` et al. [larql-vindex, larql-inference]
+
 ---
 
 ## Cleanup / consolidation track (added 2026-06-12)
