@@ -163,8 +163,12 @@ impl<'a> WalkFfn<'a> {
 
 #[cfg(test)]
 mod tests {
-    use crate::test_utils::{make_test_q4k_vindex, make_test_q4k_weights};
-    use crate::vindex::{WalkFfn, WalkFfnConfig};
+    use std::sync::Arc;
+
+    use crate::test_utils::{
+        attach_down_features_q4k_to_test_vindex, make_test_q4k_vindex, make_test_q4k_weights,
+    };
+    use crate::vindex::{CellRouter, WalkFfn, WalkFfnConfig};
     use ndarray::Array2;
 
     fn x(seq: usize, hidden: usize) -> Array2<f32> {
@@ -195,6 +199,183 @@ mod tests {
             ffn.gather_q4k_accumulate(0, &[0, 1, 2, 3], &x_slice, false, hidden)
                 .is_none(),
             "gather must decline without the feature-major down sidecar"
+        );
+    }
+
+    /// Precomputed-pool walk over `pool` with K = pool.len() — same
+    /// shape as the parallel-parity tests: the pool pins the exact
+    /// feature set and keeps the full-K gemv rewrite off.
+    fn walk_pool<'a>(
+        weights: &'a larql_models::ModelWeights,
+        index: &'a larql_vindex::VectorIndex,
+        pool: Vec<usize>,
+    ) -> WalkFfn<'a> {
+        let k = pool.len();
+        let cfg = WalkFfnConfig::sparse(weights.num_layers, k)
+            .with_pool_per_layer(Arc::new(vec![pool; weights.num_layers]))
+            .with_precomputed_routing(true);
+        WalkFfn::from_config(weights, index, cfg).with_dispatch_trace()
+    }
+
+    fn rel_l2(a: &Array2<f32>, b: &Array2<f32>) -> f32 {
+        let num: f32 = a
+            .iter()
+            .zip(b.iter())
+            .map(|(x, y)| (x - y) * (x - y))
+            .sum::<f32>()
+            .sqrt();
+        let den: f32 = b.iter().map(|v| v * v).sum::<f32>().sqrt();
+        num / den.max(f32::MIN_POSITIVE)
+    }
+
+    /// The gather-vs-serial parity test the 2026-07-30 review flagged as
+    /// missing (roadmap item 20): on the SAME precomputed route, the
+    /// gather-contiguous kernel (down from the feature-major Q4K
+    /// sidecar) must reproduce the serial scalar walk (down via the
+    /// dequantised interleaved cache).
+    ///
+    /// Gate and up are read from the same interleaved Q4K bytes on both
+    /// paths, so activations agree tightly. The output differs by the
+    /// down matrix being quantised **twice independently** (interleaved
+    /// `[hidden, inter]` blocks vs sidecar transposed `[inter, hidden]`
+    /// blocks — exactly what the production writer does, see
+    /// `feature_major_down.rs::append_layer`). On this random-uniform
+    /// fixture that measures ≈ 8e-2 rel L2 (a real model measured 6e-3,
+    /// `walk_ffn_gather_gemm.rs` — correlated weights quantise far
+    /// tighter than uniform noise). The bound 1.5e-1 keeps ~17× margin
+    /// to a layout bug, which decorrelates the rows and shows up as
+    /// O(1) (≈ √2) error.
+    #[test]
+    fn gather_q4k_matches_serial_walk_on_same_route() {
+        let weights = make_test_q4k_weights();
+        let mut with_sidecar = make_test_q4k_vindex(&weights);
+        attach_down_features_q4k_to_test_vindex(&weights, &mut with_sidecar);
+        assert!(with_sidecar.has_down_features_kquant());
+        let without_sidecar = make_test_q4k_vindex(&weights);
+
+        let hidden = weights.hidden_size;
+        let input = x(1, hidden);
+        // Route = every feature; intermediate (256) equals
+        // GATHER_MIN_FEATURES so the whole layer is the smallest
+        // gather-eligible route on this fixture.
+        let pool: Vec<usize> = (0..weights.intermediate_size).collect();
+
+        let gather_ffn = walk_pool(&weights, &with_sidecar, pool.clone());
+        let (out_g, act_g) = gather_ffn
+            .walk_ffn_sparse(0, &input)
+            .expect("gather-eligible walk runs");
+        assert!(
+            gather_ffn
+                .take_dispatch_trace()
+                .iter()
+                .any(|e| e.path == "sparse:gather_q4k"),
+            "sidecar + precomputed route of >= GATHER_MIN_FEATURES must gather"
+        );
+
+        let serial_ffn = walk_pool(&weights, &without_sidecar, pool);
+        let (out_s, act_s) = serial_ffn
+            .walk_ffn_sparse(0, &input)
+            .expect("serial walk runs");
+        assert!(
+            serial_ffn
+                .take_dispatch_trace()
+                .iter()
+                .all(|e| e.path != "sparse:gather_q4k"),
+            "no sidecar → the same route must run the scalar paths"
+        );
+
+        let act_err = rel_l2(&act_g, &act_s);
+        assert!(
+            act_err < 1e-3,
+            "gate/up come from the same Q4K bytes on both paths — \
+             activation rel L2 = {act_err} (expected < 1e-3)"
+        );
+        let out_err = rel_l2(&out_g, &out_s);
+        assert!(
+            out_err < 1.5e-1,
+            "gather vs serial output rel L2 = {out_err} (expected < 1.5e-1: \
+             independent Q4K quantisation of down in two orientations, \
+             ≈ 8e-2 on this fixture; a layout bug is O(1))"
+        );
+        assert!(
+            out_s.iter().any(|v| v.abs() > 0.0),
+            "serial reference must be non-zero for the parity to mean anything"
+        );
+    }
+
+    /// `gather_route_feats` route selection: a cell router's pool is
+    /// used verbatim (never truncated — the cell IS the route), a
+    /// precomputed per-layer pool is truncated to top-K, and with
+    /// neither configured there is no gate-free route.
+    #[test]
+    fn gather_route_feats_picks_router_then_pool_then_none() {
+        let weights = make_test_q4k_weights();
+        let index = make_test_q4k_vindex(&weights);
+        let hidden = weights.hidden_size;
+        let nl = weights.num_layers;
+        let x_slice = vec![0.01_f32; hidden];
+
+        // Cell router: pool comes back verbatim even though top_k = 2.
+        let router = CellRouter {
+            centroids: vec![vec![0.0f32; hidden]; nl], // 1 cell/layer at origin
+            n_cells: vec![1; nl],
+            pools: vec![vec![vec![4usize, 5, 6, 7]]; nl],
+            hidden,
+        };
+        let cfg = WalkFfnConfig::sparse(nl, 2).with_cell_router(Arc::new(router));
+        let ffn = WalkFfn::from_config(&weights, &index, cfg);
+        assert_eq!(
+            ffn.gather_route_feats(0, &x_slice, 2),
+            Some(vec![4, 5, 6, 7]),
+            "router pool is the route — top_k must not truncate it"
+        );
+
+        // Precomputed pool: truncated to top-K, in pool order.
+        let cfg = WalkFfnConfig::sparse(nl, 2)
+            .with_pool_per_layer(Arc::new(vec![vec![9usize, 8, 7, 6]; nl]))
+            .with_precomputed_routing(true);
+        let ffn = WalkFfn::from_config(&weights, &index, cfg);
+        assert_eq!(ffn.gather_route_feats(0, &x_slice, 2), Some(vec![9, 8]));
+
+        // Pool set but precomputed_routing off → scored path, no
+        // gate-free route.
+        let cfg = WalkFfnConfig::sparse(nl, 2)
+            .with_pool_per_layer(Arc::new(vec![vec![1usize, 2]; nl]));
+        let ffn = WalkFfn::from_config(&weights, &index, cfg);
+        assert_eq!(ffn.gather_route_feats(0, &x_slice, 2), None);
+
+        // Neither router nor pool → None.
+        let cfg = WalkFfnConfig::sparse(nl, 2);
+        let ffn = WalkFfn::from_config(&weights, &index, cfg);
+        assert_eq!(ffn.gather_route_feats(0, &x_slice, 2), None);
+    }
+
+    /// Safety rails of `gather_q4k_accumulate` WITH the sidecar loaded:
+    /// an out-of-range feature index bails to `None` (the caller falls
+    /// back to the scalar paths, which bounds-check per feature), and an
+    /// empty route declines outright.
+    #[test]
+    fn gather_q4k_accumulate_bails_on_bad_route_with_sidecar() {
+        let weights = make_test_q4k_weights();
+        let mut index = make_test_q4k_vindex(&weights);
+        attach_down_features_q4k_to_test_vindex(&weights, &mut index);
+        let hidden = weights.hidden_size;
+        let cfg = WalkFfnConfig::sparse(weights.num_layers, 4);
+        let ffn = WalkFfn::from_config(&weights, &index, cfg);
+        let x1 = x(1, hidden);
+        let x_slice = x1.row(0).to_vec();
+
+        // A feature past the layer's rows overruns every gathered slab.
+        let out_of_range = weights.intermediate_size * 10;
+        assert!(
+            ffn.gather_q4k_accumulate(0, &[0, out_of_range], &x_slice, false, hidden)
+                .is_none(),
+            "out-of-range feature must bail to the safe path"
+        );
+        assert!(
+            ffn.gather_q4k_accumulate(0, &[], &x_slice, false, hidden)
+                .is_none(),
+            "empty route must decline"
         );
     }
 }

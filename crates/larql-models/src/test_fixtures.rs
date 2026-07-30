@@ -627,6 +627,12 @@ pub const Q4K_TEST_INTER: usize = 256;
 pub const Q4K_TEST_VOCAB: usize = 256;
 /// Layer count for the Q4_K test fixture.
 pub const Q4K_TEST_NUM_LAYERS: usize = 2;
+/// Wide FFN width for the Q4_K fixture: threshold tests that route the
+/// walk's parallel Q4K-down branch need `hits ≥ 512` while staying
+/// below the full-K gemv rewrite at 80% density — so
+/// `intermediate > 512 / 0.8 = 640`; 768 is the next 256-multiple
+/// (Q4_K super-block constraint).
+pub const Q4K_TEST_INTER_WIDE: usize = 768;
 
 /// Build a synthetic `ModelWeights` sized to satisfy Q4_K's 256-element
 /// super-block constraint. Uses Gemma 3 architecture so the
@@ -658,7 +664,33 @@ pub fn make_test_q4k_weights_layers(num_layers: usize) -> ModelWeights {
         "hidden_activation": "gelu_pytorch_tanh",
         "rope_theta": 10000.0,
     });
-    q4k_test_weights_from_json(arch_json, num_layers)
+    q4k_test_weights_from_json(arch_json, num_layers, Q4K_TEST_INTER)
+}
+
+/// Wide-FFN sibling of [`make_test_q4k_weights`]: same Gemma 3 arch and
+/// hidden size, but `intermediate_size = Q4K_TEST_INTER_WIDE` (768) and a
+/// single layer (the wide FFN triples quantisation cost per layer). Built
+/// for walk-engine threshold tests that need a route of ≥ 512 features
+/// without triggering the 80%-density full-K gemv rewrite.
+pub fn make_test_q4k_weights_wide() -> ModelWeights {
+    let num_q = 4usize;
+    let num_kv = 2usize;
+    let head_dim = Q4K_TEST_HIDDEN / num_q;
+    let num_layers = 1usize;
+
+    let arch_json = serde_json::json!({
+        "model_type": "gemma3_text",
+        "hidden_size": Q4K_TEST_HIDDEN,
+        "num_hidden_layers": num_layers,
+        "intermediate_size": Q4K_TEST_INTER_WIDE,
+        "head_dim": head_dim,
+        "num_attention_heads": num_q,
+        "num_key_value_heads": num_kv,
+        "vocab_size": Q4K_TEST_VOCAB,
+        "hidden_activation": "gelu_pytorch_tanh",
+        "rope_theta": 10000.0,
+    });
+    q4k_test_weights_from_json(arch_json, num_layers, Q4K_TEST_INTER_WIDE)
 }
 
 /// Rope-scaled sibling of [`make_test_q4k_weights`]: Gemma-3 arch at the
@@ -689,10 +721,14 @@ pub fn make_test_q4k_weights_rope_scaled() -> ModelWeights {
         "sliding_window": 512,
         "rope_scaling": {"rope_type": "linear", "factor": 8.0},
     });
-    q4k_test_weights_from_json(arch_json, num_layers)
+    q4k_test_weights_from_json(arch_json, num_layers, Q4K_TEST_INTER)
 }
 
-fn q4k_test_weights_from_json(arch_json: serde_json::Value, num_layers: usize) -> ModelWeights {
+fn q4k_test_weights_from_json(
+    arch_json: serde_json::Value,
+    num_layers: usize,
+    intermediate: usize,
+) -> ModelWeights {
     let num_q = 4usize;
     let num_kv = 2usize;
     let head_dim = Q4K_TEST_HIDDEN / num_q;
@@ -740,15 +776,15 @@ fn q4k_test_weights_from_json(arch_json: serde_json::Value, num_layers: usize) -
         );
         tensors.insert(
             arch.ffn_gate_key(layer),
-            rand_mat_seeded(Q4K_TEST_INTER, Q4K_TEST_HIDDEN, 0.05, next_seed()),
+            rand_mat_seeded(intermediate, Q4K_TEST_HIDDEN, 0.05, next_seed()),
         );
         tensors.insert(
             arch.ffn_up_key(layer),
-            rand_mat_seeded(Q4K_TEST_INTER, Q4K_TEST_HIDDEN, 0.05, next_seed()),
+            rand_mat_seeded(intermediate, Q4K_TEST_HIDDEN, 0.05, next_seed()),
         );
         tensors.insert(
             arch.ffn_down_key(layer),
-            rand_mat_seeded(Q4K_TEST_HIDDEN, Q4K_TEST_INTER, 0.05, next_seed()),
+            rand_mat_seeded(Q4K_TEST_HIDDEN, intermediate, 0.05, next_seed()),
         );
 
         vectors.insert(arch.input_layernorm_key(layer), vec![0.5; Q4K_TEST_HIDDEN]);
@@ -777,7 +813,7 @@ fn q4k_test_weights_from_json(arch_json: serde_json::Value, num_layers: usize) -
         arch,
         num_layers,
         hidden_size: Q4K_TEST_HIDDEN,
-        intermediate_size: Q4K_TEST_INTER,
+        intermediate_size: intermediate,
         vocab_size: Q4K_TEST_VOCAB,
         head_dim,
         num_q_heads: num_q,

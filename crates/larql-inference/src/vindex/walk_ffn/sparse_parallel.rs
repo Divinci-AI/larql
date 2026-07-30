@@ -133,3 +133,185 @@ impl<'a> WalkFfn<'a> {
         true
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! Serial-vs-parallel parity (2026-07-30 review, roadmap item 20,
+    //! test 3): the parallel Q4K-down branch shares the serial loop's
+    //! math — same gate scores, same up row-dots, same dequantised down
+    //! cache — so its output must match a serial walk over the same
+    //! feature set. The serial baseline is obtained by *splitting the
+    //! route in half*: per-feature FFN contributions are independent, so
+    //! `out(P)` = `out(P1) + out(P2)` for disjoint `P1 ∪ P2 = P`, and
+    //! each half stays below `PARALLEL_DOWN_MIN_HITS` → serial loop.
+
+    use std::sync::Arc;
+
+    use ndarray::Array2;
+
+    use super::super::thresholds::PARALLEL_DOWN_MIN_HITS;
+    use crate::test_utils::{
+        attach_up_features_f32_only_to_test_vindex, make_test_q4k_vindex,
+        make_test_q4k_weights_wide, Q4K_TEST_INTER_WIDE,
+    };
+    use crate::vindex::{WalkFfn, WalkFfnConfig};
+
+    fn x(seq: usize, hidden: usize) -> Array2<f32> {
+        Array2::from_shape_vec(
+            (seq, hidden),
+            (0..seq * hidden).map(|i| (i as f32 + 1.0) * 0.02).collect(),
+        )
+        .unwrap()
+    }
+
+    /// Precomputed-pool walk over `pool` with K = pool.len(). The pool
+    /// keeps the gemv rewrite off (`pool_per_layer` forces the walk) and
+    /// pins the exact feature set, so runs over different pools are
+    /// comparable feature-by-feature.
+    fn walk_pool<'a>(
+        weights: &'a larql_models::ModelWeights,
+        index: &'a larql_vindex::VectorIndex,
+        pool: Vec<usize>,
+    ) -> WalkFfn<'a> {
+        let k = pool.len();
+        let cfg = WalkFfnConfig::sparse(weights.num_layers, k)
+            .with_pool_per_layer(Arc::new(vec![pool; weights.num_layers]))
+            .with_precomputed_routing(true);
+        WalkFfn::from_config(weights, index, cfg).with_dispatch_trace()
+    }
+
+    fn rel_l2(a: &Array2<f32>, b: &Array2<f32>) -> f32 {
+        let num: f32 = a
+            .iter()
+            .zip(b.iter())
+            .map(|(x, y)| (x - y) * (x - y))
+            .sum::<f32>()
+            .sqrt();
+        let den: f32 = b.iter().map(|v| v * v).sum::<f32>().sqrt();
+        num / den.max(f32::MIN_POSITIVE)
+    }
+
+    /// Route of `PARALLEL_DOWN_MIN_HITS` features on the wide Q4K-only
+    /// fixture fires `sparse:parallel_q4k_down`; the output must equal
+    /// the sum of two serial half-route walks (per-feature linearity).
+    /// Also pins the M2 known limitation: the parallel branch does not
+    /// write `full_activation` (all-zero) while the serial halves do —
+    /// this assertion flips when the Tier-2 forward/forward_observed
+    /// split fixes M2.
+    #[test]
+    fn parallel_q4k_down_matches_serial_half_route_sum() {
+        let weights = make_test_q4k_weights_wide();
+        let index = make_test_q4k_vindex(&weights);
+        assert_eq!(
+            index.num_features(0),
+            Q4K_TEST_INTER_WIDE,
+            "wide fixture must expose the full 768-feature layer"
+        );
+        let hidden = weights.hidden_size;
+        let input = x(1, hidden);
+
+        let full: Vec<usize> = (0..PARALLEL_DOWN_MIN_HITS).collect();
+        let (first, second) = full.split_at(PARALLEL_DOWN_MIN_HITS / 2);
+
+        let timings = Arc::new(super::super::timings::PhaseTimingsHandle::default());
+        let par_ffn = walk_pool(&weights, &index, full.clone())
+            .with_phase_timings(Arc::clone(&timings));
+        let (out_par, act_par) = par_ffn
+            .walk_ffn_sparse(0, &input)
+            .expect("wide Q4K fixture supports the sparse walk");
+        let par_trace = par_ffn.take_dispatch_trace();
+        assert!(
+            par_trace
+                .iter()
+                .any(|e| e.path == "sparse:parallel_q4k_down"),
+            "route of {PARALLEL_DOWN_MIN_HITS} hits on a Q4K-only vindex \
+             must fire the parallel down branch, got {par_trace:?}"
+        );
+        assert_eq!(
+            timings.calls.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "one position → one parallel_q4k_down call recorded"
+        );
+
+        let serial = |pool: &[usize]| {
+            let ffn = walk_pool(&weights, &index, pool.to_vec());
+            let r = ffn
+                .walk_ffn_sparse(0, &input)
+                .expect("serial half-route runs");
+            let trace = ffn.take_dispatch_trace();
+            assert!(
+                trace.iter().all(|e| e.path != "sparse:parallel_q4k_down"),
+                "half routes stay below PARALLEL_DOWN_MIN_HITS → serial"
+            );
+            r
+        };
+        let (out_a, act_a) = serial(first);
+        let (out_b, act_b) = serial(second);
+
+        let serial_sum = &out_a + &out_b;
+        let err = rel_l2(&out_par, &serial_sum);
+        // Same per-feature math and the same dequant cache; only the
+        // floating-point accumulation order differs (rayon partials vs
+        // serial scaled-adds), so parity is tight.
+        assert!(
+            err < 1e-4,
+            "parallel vs serial-half-sum rel L2 = {err} (expected < 1e-4)"
+        );
+
+        // M2 pin (module doc "Known limitation"): parallel writes no
+        // activations; the serial halves observed real ones.
+        assert!(
+            act_par.iter().all(|v| *v == 0.0),
+            "M2: the parallel branch is documented to leave full_activation zero"
+        );
+        assert!(
+            act_a.iter().any(|v| v.abs() > 0.0) && act_b.iter().any(|v| v.abs() > 0.0),
+            "serial halves must record non-zero activations for the parity to mean anything"
+        );
+    }
+
+    /// Same parity with feature-major f32 **up** attached: the parallel
+    /// scan's `up_native` arm (BLAS row dot) instead of the Q4K row-dot
+    /// arm. Down still comes from the Q4K dequant cache on both sides.
+    #[test]
+    fn parallel_q4k_down_native_up_arm_matches_serial_half_route_sum() {
+        let weights = make_test_q4k_weights_wide();
+        let mut index = make_test_q4k_vindex(&weights);
+        attach_up_features_f32_only_to_test_vindex(&weights, &mut index);
+        assert!(index.up_layer_matrix(0).is_some(), "native up attached");
+        assert!(
+            index.down_layer_matrix(0).is_none(),
+            "down must stay Q4K-only or the parallel branch won't fire"
+        );
+        let hidden = weights.hidden_size;
+        let input = x(1, hidden);
+
+        let full: Vec<usize> = (0..PARALLEL_DOWN_MIN_HITS).collect();
+        let (first, second) = full.split_at(PARALLEL_DOWN_MIN_HITS / 2);
+
+        let par_ffn = walk_pool(&weights, &index, full.clone());
+        let (out_par, _act) = par_ffn
+            .walk_ffn_sparse(0, &input)
+            .expect("wide Q4K fixture with native up supports the sparse walk");
+        assert!(
+            par_ffn
+                .take_dispatch_trace()
+                .iter()
+                .any(|e| e.path == "sparse:parallel_q4k_down"),
+            "native-up variant must still take the parallel down branch"
+        );
+
+        let serial = |pool: &[usize]| {
+            walk_pool(&weights, &index, pool.to_vec())
+                .walk_ffn_sparse(0, &input)
+                .expect("serial half-route runs")
+                .0
+        };
+        let serial_sum = &serial(first) + &serial(second);
+        let err = rel_l2(&out_par, &serial_sum);
+        assert!(
+            err < 1e-4,
+            "native-up parallel vs serial-half-sum rel L2 = {err} (expected < 1e-4)"
+        );
+    }
+}

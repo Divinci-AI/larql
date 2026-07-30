@@ -227,6 +227,27 @@ fn walk_ffn_with_trace_emits_residuals() {
     assert_eq!(residuals[0].0, 0);
 }
 
+/// `peek_residuals` is the NON-draining view (the early-exit path
+/// inspects mid-forward): peeking must return the captured residuals
+/// and leave them in place for a later `take_residuals`.
+#[test]
+fn walk_ffn_peek_residuals_does_not_drain() {
+    let weights = shared_weights();
+    let idx = mock_index(weights);
+    let ffn = WalkFfn::new_unlimited_with_trace(weights, &idx);
+    let x = input(1, weights.hidden_size);
+    ffn.forward(0, &x);
+
+    let peeked = ffn.peek_residuals();
+    assert_eq!(peeked.len(), 1);
+    assert_eq!(peeked[0].0, 0);
+    assert_eq!(peeked[0].1.len(), weights.hidden_size);
+    // Still there: take() must return the same entry afterwards.
+    let taken = ffn.take_residuals();
+    assert_eq!(taken, peeked, "peek must not consume the trace");
+    assert!(ffn.take_residuals().is_empty());
+}
+
 #[test]
 fn walk_ffn_new_unlimited_with_trace_records() {
     let weights = shared_weights();

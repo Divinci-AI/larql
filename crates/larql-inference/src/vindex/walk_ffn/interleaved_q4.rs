@@ -148,6 +148,7 @@ mod tests {
     use larql_compute::cpu::ops::q4_common::quantize_q4_0;
     use larql_compute::CpuBackend;
     use larql_models::test_fixtures::arc_mmap_from_bytes;
+    use larql_vindex::QuantizedFfnAccess;
     use ndarray::Array2;
 
     use crate::ffn::FfnBackend;
@@ -234,6 +235,246 @@ mod tests {
 
         assert_eq!(with_backend.0, backendless.0);
         assert_eq!(with_backend.1, backendless.1);
+    }
+
+    /// Minimal backend that implements `q4_matvec_pair_batch` (and,
+    /// when `vecmat` is set, `q4_vecmat`) by running the SAME CPU Q4_0
+    /// kernels the C-kernel branch uses — so the batch ("Metal") branch
+    /// must reproduce the CPU branch's output exactly, and the test can
+    /// assert equality rather than shape.
+    struct BatchQ4Backend {
+        inner: CpuBackend,
+        vecmat: bool,
+    }
+
+    impl larql_compute::MatMul for BatchQ4Backend {
+        fn matmul(
+            &self,
+            a: ndarray::ArrayView2<f32>,
+            b: ndarray::ArrayView2<f32>,
+        ) -> ndarray::Array2<f32> {
+            self.inner.matmul(a, b)
+        }
+        fn matmul_transb(
+            &self,
+            a: ndarray::ArrayView2<f32>,
+            b: ndarray::ArrayView2<f32>,
+        ) -> ndarray::Array2<f32> {
+            self.inner.matmul_transb(a, b)
+        }
+    }
+
+    impl larql_compute::QuantMatVec for BatchQ4Backend {
+        fn supports_quant(&self, format: larql_compute::QuantFormat) -> bool {
+            self.inner.supports_quant(format)
+        }
+        fn q4_matvec_pair_batch(
+            &self,
+            gate_q4: &[u8],
+            up_q4: &[u8],
+            x_matrix: &[f32],
+            seq_len: usize,
+            num_rows: usize,
+            hidden: usize,
+        ) -> Option<(Vec<Vec<f32>>, Vec<Vec<f32>>)> {
+            use larql_compute::cpu::ops::q4_matvec;
+            let mut gates = Vec::with_capacity(seq_len);
+            let mut ups = Vec::with_capacity(seq_len);
+            for s in 0..seq_len {
+                let xs = &x_matrix[s * hidden..(s + 1) * hidden];
+                gates.push(q4_matvec::dispatch(gate_q4, xs, num_rows, hidden));
+                ups.push(q4_matvec::dispatch(up_q4, xs, num_rows, hidden));
+            }
+            Some((gates, ups))
+        }
+        fn q4_vecmat(
+            &self,
+            activation: &[f32],
+            q4_data: &[u8],
+            intermediate: usize,
+            hidden: usize,
+        ) -> Option<Vec<f32>> {
+            use larql_compute::cpu::ops::q4_vecmat;
+            self.vecmat
+                .then(|| q4_vecmat::dispatch(activation, q4_data, intermediate, hidden))
+        }
+    }
+
+    impl larql_compute::DecodeBackend for BatchQ4Backend {}
+
+    impl larql_compute::ComputeBackend for BatchQ4Backend {
+        fn name(&self) -> &str {
+            "batch-q4-mock"
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    /// The batch ("Metal") branch — gate/up in one submission, down via
+    /// the backend's `q4_vecmat` — must equal the backendless C-kernel
+    /// run bit-for-bit: the mock delegates to the same kernels.
+    #[test]
+    fn batch_backend_branch_equals_c_kernel_branch() {
+        let f = Q4KTestFixtures::build();
+        let hidden = f.weights.hidden_size;
+        let index = q4_0_index(hidden);
+        let backend = BatchQ4Backend {
+            inner: CpuBackend,
+            vecmat: true,
+        };
+        // Two positions so the per-position batch loops iterate.
+        let x = Array2::from_shape_vec(
+            (2, hidden),
+            (0..2 * hidden).map(|i| (i as f32 + 1.0) * 0.001).collect(),
+        )
+        .unwrap();
+
+        let walk = WalkFfn::new_unlimited_with_backend(&f.weights, &index, &backend)
+            .with_dispatch_trace();
+        let batch = walk
+            .walk_ffn_q4_interleaved(0, &x)
+            .expect("batch branch runs");
+        let trace = walk.take_dispatch_trace();
+        assert_eq!(trace.len(), 1);
+        assert_eq!(
+            trace[0].path, "interleaved_q4:metal",
+            "a backend answering the batch probe must take the batch branch"
+        );
+
+        let cpu = WalkFfn::new_unlimited(&f.weights, &index)
+            .walk_ffn_q4_interleaved(0, &x)
+            .expect("C-kernel branch runs");
+        assert_eq!(batch.0, cpu.0, "output must be identical");
+        assert_eq!(batch.1, cpu.1, "activation must be identical");
+    }
+
+    /// The mock is itself under this file's coverage — pin its
+    /// delegation surface: math delegates to `CpuBackend`, and the
+    /// `ComputeBackend` identity methods behave.
+    #[test]
+    fn batch_q4_mock_delegates_math_to_cpu_backend() {
+        use larql_compute::{ComputeBackend, MatMul, QuantMatVec};
+        let backend = BatchQ4Backend {
+            inner: CpuBackend,
+            vecmat: true,
+        };
+        assert_eq!(backend.name(), "batch-q4-mock");
+        assert!(backend.as_any().is::<BatchQ4Backend>());
+        assert_eq!(
+            backend.supports_quant(larql_compute::QuantFormat::Q4_0),
+            CpuBackend.supports_quant(larql_compute::QuantFormat::Q4_0)
+        );
+        let a = ndarray::arr2(&[[1.0f32, 2.0], [3.0, 4.0]]);
+        let b = ndarray::arr2(&[[5.0f32, 6.0], [7.0, 8.0]]);
+        assert_eq!(
+            backend.matmul(a.view(), b.view()),
+            CpuBackend.matmul(a.view(), b.view())
+        );
+        assert_eq!(
+            backend.matmul_transb(a.view(), b.view()),
+            CpuBackend.matmul_transb(a.view(), b.view())
+        );
+    }
+
+    /// SiLU-arch coverage of BOTH branches: the tinymodel Q4K weights
+    /// (`make_test_q4k_weights_silu`) select the `g·σ(g)·u` arm. The
+    /// activation must equal the hand-computed SiLU of the C-kernel
+    /// gate/up scores, and the batch branch must equal the CPU branch.
+    #[test]
+    fn silu_arch_activation_matches_hand_computed_in_both_branches() {
+        use larql_compute::cpu::ops::q4_matvec;
+        use larql_models::test_fixtures::make_test_q4k_weights_silu;
+        let weights = make_test_q4k_weights_silu();
+        assert!(
+            matches!(weights.arch.activation(), larql_models::Activation::Silu),
+            "fixture must select the SiLU arm"
+        );
+        let hidden = weights.hidden_size;
+        let index = q4_0_index(hidden);
+        let x = input(hidden);
+
+        // CPU branch.
+        let cpu_walk = WalkFfn::new_unlimited(&weights, &index);
+        let (out_cpu, act_cpu) = cpu_walk
+            .walk_ffn_q4_interleaved(0, &x)
+            .expect("C-kernel branch runs");
+
+        // Hand-computed reference from the same Q4_0 kernels.
+        let q4_bytes = larql_compute::QuantFormat::Q4_0
+            .packed_matrix_bytes(INTERMEDIATE, hidden)
+            .expect("geometry");
+        let mmap = index.interleaved_q4_mmap_ref().expect("q4 slab");
+        let gate_q4 = &mmap[..q4_bytes];
+        let up_q4 = &mmap[q4_bytes..2 * q4_bytes];
+        let x_slice = x.row(0).to_vec();
+        let g = q4_matvec::dispatch(gate_q4, &x_slice, INTERMEDIATE, hidden);
+        let u = q4_matvec::dispatch(up_q4, &x_slice, INTERMEDIATE, hidden);
+        for i in 0..INTERMEDIATE {
+            let expected = g[i] * crate::ffn::sigmoid(g[i]) * u[i];
+            assert_eq!(
+                act_cpu[[0, i]],
+                expected,
+                "feature {i}: SiLU activation must be bit-exact vs the same kernels"
+            );
+        }
+
+        // Batch branch on the same weights — silu arm of the batch loop.
+        let backend = BatchQ4Backend {
+            inner: CpuBackend,
+            vecmat: true,
+        };
+        let batch = WalkFfn::new_unlimited_with_backend(&weights, &index, &backend)
+            .walk_ffn_q4_interleaved(0, &x)
+            .expect("batch branch runs");
+        assert_eq!(batch.0, out_cpu);
+        assert_eq!(batch.1, act_cpu);
+    }
+
+    /// A layer reporting zero features must decline (early guard) so the
+    /// ladder can fall through instead of building 0-width matrices.
+    #[test]
+    fn declines_when_layer_has_zero_features() {
+        let f = Q4KTestFixtures::build();
+        let hidden = f.weights.hidden_size;
+        // Zero-row gate matrix → num_features(0) == 0, but a Q4_0 slab
+        // is present so the mmap probe succeeds first.
+        let gate_vectors = vec![Some(Array2::<f32>::zeros((0, hidden)))];
+        let mut index = larql_vindex::VectorIndex::new(gate_vectors, vec![None], 1, hidden);
+        let payload = quantize_q4_0(&vec![0.0f32; hidden]);
+        std::sync::Arc::make_mut(&mut index.storage)
+            .set_interleaved_q4(arc_mmap_from_bytes(&payload));
+        assert_eq!(index.num_features(0), 0);
+        let walk = WalkFfn::new_unlimited(&f.weights, &index);
+        assert!(walk.walk_ffn_q4_interleaved(0, &input(hidden)).is_none());
+    }
+
+    /// A backend that batches gate/up but declines `q4_vecmat` must
+    /// finish the down leg on the C kernel — same exact output, no
+    /// panic (the pre-fix code unwrapped here).
+    #[test]
+    fn batch_backend_without_vecmat_finishes_down_on_c_kernel() {
+        let f = Q4KTestFixtures::build();
+        let hidden = f.weights.hidden_size;
+        let index = q4_0_index(hidden);
+        let backend = BatchQ4Backend {
+            inner: CpuBackend,
+            vecmat: false,
+        };
+        let x = input(hidden);
+
+        let walk = WalkFfn::new_unlimited_with_backend(&f.weights, &index, &backend)
+            .with_dispatch_trace();
+        let batch = walk
+            .walk_ffn_q4_interleaved(0, &x)
+            .expect("batch branch with declined vecmat still completes");
+        assert_eq!(walk.take_dispatch_trace()[0].path, "interleaved_q4:metal");
+
+        let cpu = WalkFfn::new_unlimited(&f.weights, &index)
+            .walk_ffn_q4_interleaved(0, &x)
+            .expect("C-kernel branch runs");
+        assert_eq!(batch.0, cpu.0);
+        assert_eq!(batch.1, cpu.1);
     }
 
     #[test]

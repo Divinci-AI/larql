@@ -383,4 +383,377 @@ mod tests {
         assert_eq!(out.0.shape(), &[1, weights.hidden_size]);
         assert!(out.0.iter().all(|v| v.is_finite()));
     }
+
+    // ── FP4 unified-dispatch stub ───────────────────────────────────────
+
+    use larql_vindex::{
+        FeatureMeta, Fp4FfnAccess, GateLookup, NativeFfnAccess, PatchOverrides, QuantizedFfnAccess,
+    };
+
+    /// The constant up-score every `fp4_ffn_row_dot` call returns —
+    /// makes the serial loop's expected output hand-computable.
+    const FP4_STUB_UP_DOT: f32 = 0.5;
+
+    /// FP4-storage stub: gate hits with known scores, a constant up dot,
+    /// and a scaled-add that writes `out[feat] += alpha` — so the serial
+    /// loop's output is exactly `out[feat] = act(feat)`. The two `fail_*`
+    /// flags turn each row op off to drive the walk's abort paths.
+    struct Fp4StubIndex {
+        n_features: usize,
+        fail_dot: bool,
+        fail_scaled_add: bool,
+    }
+
+    impl Fp4StubIndex {
+        fn ok(n_features: usize) -> Self {
+            Self {
+                n_features,
+                fail_dot: false,
+                fail_scaled_add: false,
+            }
+        }
+        /// Gate score for feature `i` — must match `gate_knn` below.
+        fn gate_score(i: usize) -> f32 {
+            (i as f32 + 1.0) * 0.1
+        }
+    }
+
+    impl GateLookup for Fp4StubIndex {
+        fn gate_knn(
+            &self,
+            _layer: usize,
+            _residual: &ndarray::Array1<f32>,
+            top_k: usize,
+        ) -> Vec<(usize, f32)> {
+            (0..top_k.min(self.n_features))
+                .map(|i| (i, Self::gate_score(i)))
+                .collect()
+        }
+        fn feature_meta(&self, _layer: usize, _feature: usize) -> Option<FeatureMeta> {
+            None
+        }
+        fn num_features(&self, _layer: usize) -> usize {
+            self.n_features
+        }
+    }
+    impl PatchOverrides for Fp4StubIndex {}
+    impl NativeFfnAccess for Fp4StubIndex {}
+    impl QuantizedFfnAccess for Fp4StubIndex {}
+    impl Fp4FfnAccess for Fp4StubIndex {
+        fn has_fp4_storage(&self) -> bool {
+            true
+        }
+        fn fp4_ffn_row_dot(
+            &self,
+            _layer: usize,
+            component: usize,
+            _feat: usize,
+            _x: &[f32],
+        ) -> Option<f32> {
+            if self.fail_dot || component != 1 {
+                None
+            } else {
+                Some(FP4_STUB_UP_DOT)
+            }
+        }
+        fn fp4_ffn_row_scaled_add(
+            &self,
+            _layer: usize,
+            component: usize,
+            feat: usize,
+            alpha: f32,
+            out: &mut [f32],
+        ) -> bool {
+            if self.fail_scaled_add || component != 2 || feat >= out.len() {
+                return false;
+            }
+            out[feat] += alpha;
+            true
+        }
+    }
+
+    /// FP4 storage routes through ladder step 3 into the serial sparse
+    /// walk (the point of the trait refactor: zero FP4-specific kernel
+    /// code), and the output is EXACTLY the hand-computed serial math:
+    /// `out[feat] = silu(gate) * up_dot` under the stub's unit down row.
+    #[test]
+    fn fp4_storage_routes_through_serial_sparse_with_exact_math() {
+        use crate::ffn::FfnBackend;
+        let weights = make_test_weights(); // tinymodel → SiLU, gated
+        // Fewer features than hidden so the stub's `out[feat] += alpha`
+        // down-write stays in range.
+        let n_features = 8;
+        assert!(n_features <= weights.hidden_size);
+        let index = Fp4StubIndex::ok(n_features);
+        let ffn = WalkFfn::new_unlimited(&weights, &index).with_dispatch_trace();
+
+        let input = x(1, weights.hidden_size);
+        let (out, act) = ffn.forward_with_activation(0, &input);
+
+        let trace = ffn.take_dispatch_trace();
+        assert_eq!(trace.len(), 1);
+        assert_eq!(
+            trace[0].path, "sparse:serial",
+            "FP4 must be served by the format-blind serial walk"
+        );
+
+        assert_eq!(act.shape(), &[1, n_features]);
+        for feat in 0..n_features {
+            let g = Fp4StubIndex::gate_score(feat);
+            // Same expression the serial loop evaluates (SiLU arm).
+            let expected = (g * crate::ffn::sigmoid(g)) * FP4_STUB_UP_DOT;
+            assert_eq!(act[[0, feat]], expected, "activation for feature {feat}");
+            assert_eq!(
+                out[[0, feat]],
+                expected,
+                "stub down adds act at out[feat] — must be bit-exact"
+            );
+        }
+        for h in n_features..weights.hidden_size {
+            assert_eq!(out[[0, h]], 0.0, "untouched hidden dim {h}");
+        }
+    }
+
+    /// M7-adjacent contract: when the down accumulate fails mid-walk
+    /// (`ffn_row_scaled_add` → false), the sparse walk must ABORT with
+    /// `None` — and the ladder must then land on the safetensors
+    /// fallback, never a half-accumulated sparse result.
+    #[test]
+    fn sparse_aborts_to_weights_fallback_when_scaled_add_fails() {
+        use crate::ffn::FfnBackend;
+        let weights = make_test_weights();
+        let index = Fp4StubIndex {
+            n_features: 8,
+            fail_dot: false,
+            fail_scaled_add: true,
+        };
+        let ffn = WalkFfn::new_unlimited(&weights, &index).with_dispatch_trace();
+
+        // Direct: the walk itself must decline.
+        assert!(ffn
+            .walk_ffn_sparse(0, &x(1, weights.hidden_size))
+            .is_none());
+
+        // Ladder: FP4 step fails → fall through to weights_fallback.
+        let out = ffn.forward(0, &x(1, weights.hidden_size));
+        assert_eq!(out.shape(), &[1, weights.hidden_size]);
+        let trace = ffn.take_dispatch_trace();
+        assert_eq!(
+            trace.last().map(|e| e.path),
+            Some("weights_fallback:sparse"),
+            "failed sparse walk must fall through to the safetensors path"
+        );
+    }
+
+    /// Same abort contract for the up dot: `ffn_row_dot` returning
+    /// `None` for a hit aborts the walk (`?` in the serial loop).
+    #[test]
+    fn sparse_aborts_when_row_dot_fails() {
+        let weights = make_test_weights();
+        let index = Fp4StubIndex {
+            n_features: 8,
+            fail_dot: true,
+            fail_scaled_add: false,
+        };
+        let ffn = WalkFfn::new_unlimited(&weights, &index);
+        assert!(ffn
+            .walk_ffn_sparse(0, &x(1, weights.hidden_size))
+            .is_none());
+    }
+
+    // ── Override arms of the serial loop ────────────────────────────────
+
+    /// Q4K fixture wrapper with per-feature up/down overrides installed.
+    /// Delegates all storage access to the inner `VectorIndex`.
+    struct OverrideQ4kIndex<'a> {
+        inner: &'a larql_vindex::VectorIndex,
+        up_zero_feat: usize,
+        down_zero_feat: usize,
+        zeros: Vec<f32>,
+    }
+
+    impl GateLookup for OverrideQ4kIndex<'_> {
+        fn gate_knn(
+            &self,
+            layer: usize,
+            residual: &ndarray::Array1<f32>,
+            top_k: usize,
+        ) -> Vec<(usize, f32)> {
+            self.inner.gate_knn(layer, residual, top_k)
+        }
+        fn feature_meta(&self, layer: usize, feature: usize) -> Option<FeatureMeta> {
+            self.inner.feature_meta(layer, feature)
+        }
+        fn num_features(&self, layer: usize) -> usize {
+            self.inner.num_features(layer)
+        }
+    }
+    impl PatchOverrides for OverrideQ4kIndex<'_> {
+        fn has_overrides_at(&self, _layer: usize) -> bool {
+            true
+        }
+        fn up_override(&self, _layer: usize, feature: usize) -> Option<&[f32]> {
+            (feature == self.up_zero_feat).then_some(self.zeros.as_slice())
+        }
+        fn down_override(&self, _layer: usize, feature: usize) -> Option<&[f32]> {
+            (feature == self.down_zero_feat).then_some(self.zeros.as_slice())
+        }
+    }
+    impl NativeFfnAccess for OverrideQ4kIndex<'_> {}
+    impl QuantizedFfnAccess for OverrideQ4kIndex<'_> {
+        fn has_interleaved_kquant(&self) -> bool {
+            self.inner.has_interleaved_kquant()
+        }
+        fn interleaved_kquant_layer_data(&self, layer: usize) -> Option<[(&[u8], &str); 3]> {
+            self.inner.interleaved_kquant_layer_data(layer)
+        }
+        fn kquant_ffn_layer(
+            &self,
+            layer: usize,
+            component: usize,
+        ) -> Option<std::sync::Arc<Vec<f32>>> {
+            self.inner.kquant_ffn_layer(layer, component)
+        }
+        fn kquant_ffn_row_dot(
+            &self,
+            layer: usize,
+            component: usize,
+            feat: usize,
+            x: &[f32],
+        ) -> Option<f32> {
+            self.inner.kquant_ffn_row_dot(layer, component, feat, x)
+        }
+        fn kquant_ffn_row_scaled_add_via_cache(
+            &self,
+            layer: usize,
+            component: usize,
+            feat: usize,
+            alpha: f32,
+            out: &mut [f32],
+        ) -> bool {
+            self.inner
+                .kquant_ffn_row_scaled_add_via_cache(layer, component, feat, alpha, out)
+        }
+    }
+    impl Fp4FfnAccess for OverrideQ4kIndex<'_> {}
+
+    /// Override arms of the serial loop, asserted against the
+    /// no-override baseline on the same route:
+    /// - a zero **up** override kills exactly that feature's activation
+    ///   (and hence its down contribution), all others bit-equal;
+    /// - a zero **down** override removes exactly `act · down_row` from
+    ///   the output (down_row read from the same dequant cache the
+    ///   un-overridden accumulate uses).
+    #[test]
+    fn walk_ffn_sparse_override_arms_match_baseline_minus_contributions() {
+        use larql_vindex::FfnRowAccess as _;
+        use std::sync::Arc;
+        let weights = make_test_q4k_weights();
+        let inner = make_test_q4k_vindex(&weights);
+        let hidden = weights.hidden_size;
+        let up_zero_feat = 1usize;
+        let down_zero_feat = 2usize;
+        let pool: Vec<usize> = vec![0, 1, 2, 3];
+        let cfg = || {
+            WalkFfnConfig::sparse(weights.num_layers, pool.len())
+                .with_pool_per_layer(Arc::new(vec![pool.clone(); weights.num_layers]))
+                .with_precomputed_routing(true)
+        };
+        let input = x(1, hidden);
+
+        let (out_base, act_base) = WalkFfn::from_config(&weights, &inner, cfg())
+            .walk_ffn_sparse(0, &input)
+            .expect("baseline walk runs");
+
+        let overridden = OverrideQ4kIndex {
+            inner: &inner,
+            up_zero_feat,
+            down_zero_feat,
+            zeros: vec![0.0; hidden],
+        };
+        let (out_ov, act_ov) = WalkFfn::from_config(&weights, &overridden, cfg())
+            .walk_ffn_sparse(0, &input)
+            .expect("override walk runs");
+
+        // Up override → that feature's activation is exactly 0.
+        assert!(
+            act_base[[0, up_zero_feat]].abs() > 0.0,
+            "baseline must activate the up-overridden feature"
+        );
+        assert_eq!(act_ov[[0, up_zero_feat]], 0.0);
+        for &f in &pool {
+            if f != up_zero_feat {
+                assert_eq!(act_ov[[0, f]], act_base[[0, f]], "feature {f} activation");
+            }
+        }
+
+        // Output: baseline minus the two features' down contributions.
+        let down_cache = inner.kquant_ffn_layer(0, 2).expect("down dequant cache");
+        let mut expected = out_base.clone();
+        for (feat, act) in [
+            (up_zero_feat, act_base[[0, up_zero_feat]]),
+            (down_zero_feat, act_base[[0, down_zero_feat]]),
+        ] {
+            let row = &down_cache[feat * hidden..(feat + 1) * hidden];
+            for h in 0..hidden {
+                expected[[0, h]] -= act * row[h];
+            }
+        }
+        // Sanity: the unified dispatch would have used the same cache row.
+        assert!(inner
+            .ffn_row_dot(0, 1, up_zero_feat, input.row(0).as_slice().unwrap())
+            .is_some());
+        for h in 0..hidden {
+            assert!(
+                (out_ov[[0, h]] - expected[[0, h]]).abs() <= 1e-5,
+                "hidden {h}: override output {} vs baseline-minus-contribs {}",
+                out_ov[[0, h]],
+                expected[[0, h]]
+            );
+        }
+    }
+
+    /// A non-contiguous input (column-major storage) must produce the
+    /// same output as the same values in standard layout — pins the
+    /// owned-slice fallbacks in the per-position preamble.
+    #[test]
+    fn walk_ffn_sparse_non_contiguous_input_matches_contiguous() {
+        use std::sync::Arc;
+        let weights = make_test_q4k_weights();
+        let index = make_test_q4k_vindex(&weights);
+        let hidden = weights.hidden_size;
+        let seq = 2usize;
+        let pool: Vec<usize> = (0..8).collect();
+        let cfg = || {
+            WalkFfnConfig::sparse(weights.num_layers, pool.len())
+                .with_pool_per_layer(Arc::new(vec![pool.clone(); weights.num_layers]))
+                .with_precomputed_routing(true)
+        };
+
+        let x_std = x(seq, hidden);
+        // Same values, column-major: rows are strided, `as_slice` is None.
+        let mut transposed_data = Vec::with_capacity(seq * hidden);
+        for h in 0..hidden {
+            for s in 0..seq {
+                transposed_data.push(x_std[[s, h]]);
+            }
+        }
+        let x_cm = Array2::from_shape_vec((hidden, seq), transposed_data)
+            .unwrap()
+            .reversed_axes();
+        assert_eq!(x_cm, x_std);
+        assert!(
+            x_cm.row(0).as_slice().is_none(),
+            "fixture must actually be non-contiguous or the test is vacuous"
+        );
+
+        let (out_std, act_std) = WalkFfn::from_config(&weights, &index, cfg())
+            .walk_ffn_sparse(0, &x_std)
+            .expect("contiguous walk runs");
+        let (out_cm, act_cm) = WalkFfn::from_config(&weights, &index, cfg())
+            .walk_ffn_sparse(0, &x_cm)
+            .expect("column-major walk runs");
+        assert_eq!(out_cm, out_std);
+        assert_eq!(act_cm, act_std);
+    }
 }
