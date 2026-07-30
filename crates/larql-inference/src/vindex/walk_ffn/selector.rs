@@ -20,6 +20,7 @@ use std::sync::Arc;
 
 use ndarray::{Array1, Array2};
 
+use super::helpers::selection_weight_cmp_desc;
 use super::WalkFfn;
 use crate::vindex::walk_config::FeatureSelector;
 
@@ -143,7 +144,10 @@ impl<'a> WalkFfn<'a> {
     ///
     /// Falls back to the production `gate_walk` path if the joint norms
     /// can't be computed (e.g. no Q4K cache yet), so the walk still
-    /// produces output rather than panicking.
+    /// produces output. A **NaN** weighted score, by contrast, panics
+    /// (`selection_weight_cmp_desc`) — the same contract as
+    /// `top_k_by_abs` on the production gate-KNN path; it must never
+    /// silently scramble the selection.
     pub(super) fn joint_gate_knn(
         &self,
         layer: usize,
@@ -262,10 +266,12 @@ impl<'a> WalkFfn<'a> {
 
         // Partial sort: top-K by weighted score. For top_k ≥ num_features,
         // sort the full list (rare; falls into the dense-equivalent path).
+        // NaN weights panic (`selection_weight_cmp_desc`) — same contract
+        // as `top_k_by_abs` on the production gate-KNN path.
         let take = top_k.min(num_features);
         let mut weighted = weighted;
         weighted.select_nth_unstable_by(take.saturating_sub(1).min(num_features - 1), |a, b| {
-            b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal)
+            selection_weight_cmp_desc(a.2, b.2)
         });
         weighted.truncate(take);
         weighted.into_iter().map(|(i, g, _)| (i, g)).collect()
@@ -315,11 +321,10 @@ impl<'a> WalkFfn<'a> {
         if weighted.is_empty() {
             return Vec::new();
         }
+        // NaN weights panic — same contract as `top_k_by_abs`.
         let take = top_k.min(weighted.len());
         let nth = take.saturating_sub(1).min(weighted.len() - 1);
-        weighted.select_nth_unstable_by(nth, |a, b| {
-            b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal)
-        });
+        weighted.select_nth_unstable_by(nth, |a, b| selection_weight_cmp_desc(a.2, b.2));
         weighted.truncate(take);
         weighted.into_iter().map(|(i, g, _)| (i, g)).collect()
     }
@@ -379,8 +384,17 @@ impl<'a> WalkFfn<'a> {
         layer: usize,
         residual: &Array1<f32>,
         top_k: usize,
-        _kind: FeatureSelector,
+        kind: FeatureSelector,
     ) -> Vec<(usize, f32)> {
+        if !matches!(kind, FeatureSelector::GateOnly) {
+            // A joint selector (or Random null hypothesis) silently
+            // degrading to production GateOnly invalidates the A/B —
+            // the results carry the wrong label. Make every such call
+            // observable (2026-07-30 review, M10).
+            self.trace_path(layer, "selector:fallback");
+            self.selector_fallbacks
+                .set(self.selector_fallbacks.get() + 1);
+        }
         self.index
             .gate_walk(layer, residual, top_k)
             .or_else(|| {
@@ -388,5 +402,61 @@ impl<'a> WalkFfn<'a> {
                     .and_then(|be| self.index.gate_knn_q4(layer, residual, top_k, be))
             })
             .unwrap_or_else(|| self.index.gate_knn(layer, residual, top_k))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils::make_test_weights;
+    use larql_vindex::{
+        FeatureMeta, Fp4FfnAccess, GateLookup, NativeFfnAccess, PatchOverrides, QuantizedFfnAccess,
+    };
+
+    /// Index whose batched gate scores contain a NaN — models a
+    /// corrupted / overflowed gate projection.
+    struct NanGateScoresIndex {
+        n_features: usize,
+    }
+
+    impl GateLookup for NanGateScoresIndex {
+        fn gate_knn(
+            &self,
+            _layer: usize,
+            _residual: &Array1<f32>,
+            top_k: usize,
+        ) -> Vec<(usize, f32)> {
+            (0..top_k.min(self.n_features)).map(|i| (i, 1.0)).collect()
+        }
+        fn feature_meta(&self, _layer: usize, _feature: usize) -> Option<FeatureMeta> {
+            None
+        }
+        fn num_features(&self, _layer: usize) -> usize {
+            self.n_features
+        }
+        fn gate_scores_batch(&self, _layer: usize, _x: &Array2<f32>) -> Option<Array2<f32>> {
+            let mut scores = vec![1.0f32; self.n_features];
+            scores[1] = f32::NAN;
+            Array2::from_shape_vec((1, self.n_features), scores).ok()
+        }
+    }
+    impl PatchOverrides for NanGateScoresIndex {}
+    impl NativeFfnAccess for NanGateScoresIndex {}
+    impl QuantizedFfnAccess for NanGateScoresIndex {}
+    impl Fp4FfnAccess for NanGateScoresIndex {}
+
+    /// The NaN contract (2026-07-30 review, low tier): a NaN gate score
+    /// reaching the selector's top-K must PANIC — the previous
+    /// `partial_cmp(..).unwrap_or(Equal)` silently scrambled the
+    /// selection, splitting the contract from `top_k_by_abs` (which
+    /// deliberately panics) on the production gate-KNN path.
+    #[test]
+    #[should_panic(expected = "NaN in selector weight")]
+    fn joint_gate_knn_panics_on_nan_gate_score() {
+        let weights = make_test_weights();
+        let index = NanGateScoresIndex { n_features: 4 };
+        let walk = crate::vindex::WalkFfn::new(&weights, &index, 2);
+        let residual = Array1::from_vec(vec![0.02_f32; weights.hidden_size]);
+        walk.joint_gate_knn(0, &residual, 2, FeatureSelector::GateOnly);
     }
 }
