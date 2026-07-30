@@ -581,6 +581,8 @@ bits/char:           0.708
 
 **GPT-OSS — the reference is the suspect, and all three engines failed.** This is the more consequential finding:
 
+> **⚠️ WITHDRAWN 2026-07-31 — see §4.7.7.** The `larql f32` row below was measured on `--bytes 384`, which on this corpus is Project Gutenberg licence boilerplate rather than prose. At matched text larql gives 8.338 bits/token against HF bf16's 8.028 — the engines agree to 4%. The verdict in this subsection compared two different texts and does not stand.
+
 | engine | result |
 |---|---|
 | larql f32 | 0.708 bits/char, **3.221 bits/token** |
@@ -588,7 +590,7 @@ bits/char:           0.708
 | HF bf16 | runs, gives **8.028 bits/token** — implausibly poor for a 20B on the opening of *Frankenstein*, so this run is not usable as ground truth either |
 | MLX | **crashes** — `ValueError: [gather_qmm] The weight matrix should be uint32 but received float32` |
 
-larql's 3.221 bits/token is the only figure in that table that is even plausible for a 20B model, which is suggestive but is *not* verification — a self-consistent number with no referee. **The GPT-OSS end-to-end comparison remains owed, and it is now blocked on the reference side rather than ours.**
+larql's 3.221 bits/token is the only figure in that table that is even plausible for a 20B model, which is suggestive but is *not* verification — a self-consistent number with no referee. **The GPT-OSS end-to-end comparison remains owed, and it is now blocked on the reference side rather than ours.** *(Withdrawn — §4.7.7. The comparison was not blocked on the reference side; it was never made on the same text.)*
 
 **That is a hole in the ladder's premise, and it should be pre-registered as such.** §4 defines GB at R1/R2 as "a layer-by-layer f32 diff against the local reference implementation", and §1 justifies the whole detour on the grounds that the ancestor "fits on the Mac". *Fitting* turns out to be two claims, and only the first was checked: the weights fit in RAM (86 GB, they do), **and the reference implementation actually executes on this machine** (for `openai/gpt-oss-20b`, it does not). A reference you cannot run is not a reference.
 
@@ -598,7 +600,52 @@ What survives is the reference as a **transcription** rather than an executable 
 
 > The instrument now exists and immediately found a defect in the first two models it was pointed at, plus a defect in itself. That is what a gate is supposed to do. GB is unblocked; it is not green.
 
-#### 4.7.7 Consequences to carry
+#### 4.7.7 Correction — §4.7.6's GPT-OSS verdict was measured on the wrong text (2026-07-31)
+
+§4.7.6 concluded that larql's 3.221 bits/token was "the only figure in that table that is even plausible" and that therefore "the reference is the suspect". **Both halves are withdrawn.** The comparison was between two different texts.
+
+`--bytes 384` on `data/gutenberg/frankenstein.txt` does not reach the novel. The first 384 bytes are the Project Gutenberg licence header — *"This eBook is for the use of anyone anywhere in the United States and most other parts of the world at no cost and with almost no restrictions whatsoever…"* — which every engine in that table has memorised. **3.221 is a boilerplate score, not a prose score.**
+
+| corpus slice | larql GPT-OSS-20B |
+|---|---|
+| first 384 B — licence boilerplate | 3.221 bits/token (reproduced exactly, so the engine is deterministic) |
+| first 2048 B — boilerplate + prose | **8.338 bits/token** |
+
+§4.7.6 records HF bf16 at **8.028** and dismisses it as implausibly poor. larql on prose gives **8.338** — a 4 % gap, not a 2.5× one. The two engines agree. The spec compared larql-on-boilerplate against HF-on-prose and read the difference as an engine disagreement.
+
+**The control §4.7.6 never had.** Same corpus, same 2048 bytes, same `ExpertWeightFfn` reference tier:
+
+| model | bits/token |
+|---|---|
+| Qwen3-30B-A3B | **1.400** |
+| GPT-OSS-20B | 8.338 |
+| OLMoE-1B-7B | 8.297 |
+
+A healthy figure comes out of the same code path, so **the scorer is exonerated**: the two outliers are properties of those models or their forwards, not of the harness. That control is what makes the rest of this subsection load-bearing rather than speculative.
+
+**What changes.**
+
+- **OLMoE's verdict stands, and is strengthened.** larql scores 1.929 bits/char on the *same* 384-byte boilerplate where the HF reference gives 0.390. That gap is not a corpus artifact, so §4.7.6's QK-norm / MHA hunt is pointed at something real.
+- **GPT-OSS's verdict is withdrawn.** There is now no evidence that larql's GPT-OSS forward is correct, and none that HF bf16 is wrong. Two readings stay live and need different follow-ups: GPT-OSS may genuinely model raw prose poorly (plausible for a heavily post-trained reasoning model scored without its harmony template), or both implementations share a defect. Scoring it on text matching its post-training discriminates.
+- **GPT-OSS is demoted to a secondary rung for any measurement whose output metric is a forward-pass quantity.** Per-layer KL, bits/token, or divergence taken against a GPT-OSS forward is uninterpretable until this closes. **Qwen3-30B-A3B is the working R1-class reference rung** — validated forward, 1.400 bits/token, `qwen3_moe` served by `QwenArch`, and at 6.25 % activation it is closer to K3's 1.8 % than GPT-OSS's 12.5 %.
+
+**Method note, because this is the third measurement-shaped error in §4.7.** §4.7.3's lesson was that a fixture too small to distinguish the candidate behaviours is not a weak test but an absent one. A corpus slice is a fixture: `--bytes 384` on a Gutenberg file cannot distinguish "the model is good" from "the text is boilerplate". **Any bits/char figure entering this document must state its byte range, and both sides of a comparison must use the same one.**
+
+#### 4.7.8 Finding 5, third recurrence — and why the trait default was the mechanism (2026-07-31)
+
+Finding 5 (§4.7.1) was the router's normalise/select order. §4.7.4 recorded the fix as "a typed `ExpertRoutingPolicy` on the architecture, defaulting to `SoftmaxThenSelect`, read from `norm_topk_prob` for OLMoE". §4.7.6 then recorded the *same* bug recurring an hour later in `select_and_normalise`.
+
+It recurred a third time, and the shape is the point: the config read lived on `OlmoeArch` **alone**, while `ModelArchitecture::expert_routing_policy` returned a hardcoded `SoftmaxThenSelect`. Every other MoE architecture silently inherited it. `QwenArch` never read `norm_topk_prob`; Qwen3-30B-A3B ships `true`. Gemma 4 MoE inherited it too.
+
+**Three recurrences is a structural problem, not three bugs.** The mechanism is: a behaviour that is a config fact, read on one architecture, with a trait default that silently answers for everyone else. Patching the affected architecture leaves the mechanism intact.
+
+The read now lives in the trait default (`larql-models/src/config.rs`), which already had `config()` in scope, and `OlmoeArch`'s override is deleted rather than duplicated. GPT-OSS keeps an explicit override because its order is fixed by the architecture rather than by config — that is the legitimate use of an override.
+
+**The test fixture was the second half of the failure.** `test_detect_qwen3_moe_30b` omitted `norm_topk_prob` entirely, so it could not distinguish the two routing orders and passed under both. Same failure as §4.5's timestamp assertions and §4.7.3's `out_features = 2` — **now three instances in unrelated subsystems.** The fixture is corrected to the real config's `true`, with the policy asserted, plus a table test over `{true, false, absent}` and one pinning GPT-OSS's override against a contradicting config.
+
+**Carried, not done.** The remaining mechanism fix is to make silent inheritance impossible — no behavioural default at all, so a new MoE architecture fails to compile until it declares a policy — paired with a lint rejecting test configs that omit fields the policy branches on. That is a breaking change across every architecture and is deliberately not bundled with this correction.
+
+#### 4.7.9 Consequences to carry
 
 - **Every GPT-OSS vindex extracted before 2026-07-30 has mixed gate/up rows in its gate sketch** and needs re-extracting. Nothing was served from those rows (see below), but any KNN/walk routing analysis over them is void.
 - **GPT-OSS was never servable from a vindex anyway.** `write_per_layer_moe_kquant` gates on `ExpertFormat::PackedBF16`, so a packed-MXFP4 model writes **no per-layer expert store at all** — extraction reports success and the expert weights simply aren't there. That bounds the blast radius of finding 1 to the gate sketch, and it is a prerequisite for item 14 nobody had noticed was missing.
