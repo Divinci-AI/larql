@@ -853,7 +853,7 @@ what's exact, approximate, observed, reconstructed):**
 
 **Tier 3 — productization:**
 
-20. **Walk-vs-dense parity suite** — the four tests that would have caught
+20. ✅ **Walk-vs-dense parity suite** (DONE 2026-07-30 — landed with the per-file 90% coverage pass: serial-vs-parallel, gather-vs-serial on a real sidecar, walk-vs-dense WeightFfn parity for gemv + exact/full_mmap/interleaved, dispatch-trace assertions against the REAL ladder in the moved dispatch_tests.rs; every walk_ffn file >= 90% line coverage) — the four tests that would have caught
     the four worst bugs: non-aligned Q4K fixture through cache + serial
     walk vs dequant baseline; CpuBackend + Q4_0 forward; serial-vs-parallel
     parity at hits ≥ 512 asserting output AND activation; dispatch-trace
