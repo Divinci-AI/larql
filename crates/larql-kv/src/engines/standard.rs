@@ -164,12 +164,17 @@ impl StandardEngine {
         initial_hidden: &Array2<f32>,
     ) -> Option<Array2<f32>> {
         let view = larql_inference::WeightsView::with_scratch(weights, &self.dequant_scratch);
+        // `token_ids: None` — MM hidden rows (vision/audio) have no 1:1
+        // token identities, so PLE inputs cannot be derived here. PLE
+        // architectures (Gemma 4 E-series) must prefill via the token
+        // entry point (`prefill`), which threads `Some(token_ids)`.
         let (hidden, handles) = match &self.backend {
             BackendSlot::Sync(b) => kv_prefill_from_hidden_via_dispatch(
                 b.as_ref(),
                 view,
                 ffn,
                 initial_hidden,
+                None,
                 self.window_size,
                 None,
             )?,
@@ -178,6 +183,7 @@ impl StandardEngine {
                 view,
                 ffn,
                 initial_hidden,
+                None,
                 self.window_size,
                 None,
             )?,
@@ -745,6 +751,69 @@ mod tests {
             engine, legacy,
             "engine dispatch must produce identical tokens at short-prompt long-window edge case"
         );
+    }
+
+    /// Gemma-4 PLE + layer_scalar parity (issue #98 regression, engine
+    /// level): StandardEngine's dispatch path must apply the same
+    /// per-layer PLE + `layer_scalar` sequence as the legacy
+    /// `kv_prefill_run` / `kv_decode_step_run` reference. The synthetic
+    /// E2B-like fixture carries non-zero PLE tensors and a non-identity
+    /// `layer_scalar`, so dropping either step diverges bit-visibly.
+    /// Several decode steps deep because #98's signature was "first
+    /// token fine, later tokens garbage".
+    #[cfg(not(windows))]
+    #[test]
+    fn standard_engine_matches_legacy_on_ple_arch() {
+        use crate::generation::{kv_decode_step_run, kv_prefill_run};
+        use larql_inference::forward::NoopHook;
+        use larql_inference::test_utils::make_synthetic_e2b_like_weights;
+
+        const DECODE_STEPS: usize = 4;
+
+        let weights = make_synthetic_e2b_like_weights();
+        let ffn = WeightFfn { weights: &weights };
+        let prompt = [0u32, 1, 2];
+
+        let mut engine = StandardEngine::new(None);
+        let h_engine = engine
+            .prefill(&weights, &ffn, &prompt)
+            .expect("engine PLE prefill");
+        let (h_legacy, mut cache) = kv_prefill_run(
+            larql_inference::WeightsView::dense(&weights),
+            &ffn,
+            &prompt,
+            None,
+            Some(&larql_compute::CpuBackend),
+            &mut NoopHook,
+        )
+        .expect("legacy PLE prefill");
+        let bits = |h: &Array2<f32>| h.iter().map(|v| v.to_bits()).collect::<Vec<u32>>();
+        assert_eq!(
+            bits(&h_engine),
+            bits(&h_legacy),
+            "PLE prefill hidden must match legacy bit-for-bit"
+        );
+
+        for step in 0..DECODE_STEPS {
+            let token = (3 + step) as u32;
+            let h_engine = engine
+                .decode_step(&weights, &ffn, token)
+                .expect("engine PLE decode");
+            let h_legacy = kv_decode_step_run(
+                &weights,
+                &ffn,
+                &mut cache,
+                token,
+                Some(&larql_compute::CpuBackend),
+                &mut NoopHook,
+            )
+            .expect("legacy PLE decode");
+            assert_eq!(
+                bits(&h_engine),
+                bits(&h_legacy),
+                "PLE decode step {step} hidden must match legacy bit-for-bit"
+            );
+        }
     }
 
     // ── A5 parity gate ──────────────────────────────────────────────
