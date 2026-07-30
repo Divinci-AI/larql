@@ -23,7 +23,7 @@
 //! pool + `ggml_barrier`.
 //!
 //! [`enabled`] gates whether callers route through here or stay on rayon. It is
-//! **on by default** (the yield backoff makes it safe on shared machines);
+//! **on by default** (idle workers park, so a quiet pool costs ~0 CPU);
 //! `LARQL_SPIN_POOL=0` forces the rayon path. Either way the arithmetic is
 //! identical — only *which threads run which chunks* differs.
 
@@ -47,19 +47,25 @@ thread_local! {
 ///   same pure-spin window that produced the measured decode win, so *active
 ///   decode behaviour is unchanged* — every inter-section gap within a token
 ///   stays in the spin phase, giving a ~ns wake.
-/// - **yield** (`< YIELD_UNTIL`): `yield_now()` — cooperative bridge once a wait
-///   outlives a whole token's worth of spinning (i.e. the loop went genuinely
-///   idle, or another process is starving this core). Hands the core to other
-///   runnable threads instead of burning it.
-/// - **park** (otherwise): deep idle between requests / runs, ~0 CPU. The
-///   dispatcher unparks all workers on every dispatch, so a parked worker wakes
-///   immediately on the next section — parking is cheap to enter; the timeout
-///   is only a shutdown-check backstop.
+/// - **yield** (`< YIELD_UNTIL`): a *brief* `yield_now()` bridge — one last
+///   chance for an about-to-arrive dispatch before paying a park/unpark. This
+///   used to be 128k iterations, which is not a bridge but a busy loop with a
+///   syscall in it: `yield_now` returns immediately on an idle core, so the
+///   phase burned as much CPU as spinning *plus* 128k `sched_yield` calls per
+///   idle transition per worker.
+/// - **park** (otherwise): deep idle between requests / runs. The dispatcher
+///   unparks all workers on every dispatch (and `Drop` unparks for shutdown),
+///   so the timeout is a pure liveness backstop and can be long. It used to be
+///   **50µs**, which meant a "parked" worker woke 20k times/sec — measured
+///   3.40 CPU-seconds per 5s of idle (68% of a core, ~856k involuntary context
+///   switches, 11 workers, M3 Max) burned by an idle pool, forever, because
+///   `global()` is process-lifetime.
 ///
-/// Net: spin = the win during active decode; yield+park = don't peg cores when
-/// the decode loop is idle — which is what makes on-by-default safe.
+/// Net: spin = the win during active decode; park = actually-zero CPU when the
+/// decode loop is idle — which is what makes on-by-default safe.
 const SPIN_HOT: u32 = 256_000;
-const YIELD_UNTIL: u32 = 384_000;
+const YIELD_UNTIL: u32 = SPIN_HOT + 64;
+const PARK_BACKSTOP: Duration = Duration::from_secs(1);
 
 /// Cross-thread dispatch state. Published to workers by the `epoch` release
 /// store; workers read the task fields only after the matching acquire load,
@@ -136,7 +142,7 @@ fn worker_loop(shared: Arc<Shared>, worker_id: usize, n_participants: usize) {
             } else if spins < YIELD_UNTIL {
                 std::thread::yield_now();
             } else {
-                thread::park_timeout(Duration::from_micros(50));
+                thread::park_timeout(PARK_BACKSTOP);
             }
         };
         seen_epoch = epoch;
@@ -365,8 +371,15 @@ impl SpinPool {
 impl Drop for SpinPool {
     fn drop(&mut self) {
         self.shared.shutdown.store(true, Ordering::Relaxed);
-        // Bump epoch so any spinning worker breaks out and re-checks shutdown.
+        // Bump epoch so any spinning worker breaks out and re-checks shutdown,
+        // and unpark so a parked worker doesn't sleep out its PARK_BACKSTOP
+        // before noticing. The store/bump-then-unpark order matters: a worker
+        // that checked the epoch just before the bump has its park token set
+        // and returns immediately.
         self.shared.epoch.fetch_add(1, Ordering::Release);
+        for w in &self.workers {
+            w.thread().unpark();
+        }
         for w in self.workers.drain(..) {
             let _ = w.join();
         }
@@ -557,6 +570,90 @@ where
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicU32;
+
+    // ── Wrapper scheduling parity ───────────────────────────────────────
+    //
+    // `par_chunks_mut`/`par_chunks_mut2` each branch on `enabled()`, so a CI
+    // run with one ambient setting leaves the other arm dead — and CI sets
+    // `LARQL_SPIN_POOL=0` (see .github/workflows/larql-compute.yml) because
+    // a spin barrier has no free core to spin on there. These drive both
+    // arms explicitly, so coverage and the equivalence claim both hold
+    // regardless of the ambient flag.
+    //
+    // The override is thread-local rather than `std::env::set_var`, which
+    // segfaults under parallel `getenv` (see `options::ENV_OVERRIDES`).
+
+    /// Run `f` with the spin pool forced on, then forced off, returning
+    /// both results for comparison.
+    fn both_arms<T, F: Fn() -> T>(f: F) -> (T, T) {
+        use crate::options::{clear_fast_path_overrides, set_fast_path_override, ENV_SPIN_POOL};
+        set_fast_path_override(ENV_SPIN_POOL, true);
+        let spin = f();
+        set_fast_path_override(ENV_SPIN_POOL, false);
+        let rayon = f();
+        clear_fast_path_overrides();
+        (spin, rayon)
+    }
+
+    #[test]
+    fn par_chunks_mut_agrees_across_both_schedulers() {
+        let run = || {
+            let mut out = vec![0u64; 1000];
+            par_chunks_mut(&mut out, 7, |ci, c| {
+                for (i, slot) in c.iter_mut().enumerate() {
+                    *slot = (ci as u64) * 1000 + i as u64;
+                }
+            });
+            out
+        };
+        let (spin, rayon) = both_arms(run);
+        assert_eq!(spin, rayon, "scheduler changed the result");
+        // Ragged tail: 1000 is not a multiple of 7, so the last chunk is
+        // short — the place an off-by-one would differ between arms.
+        assert_eq!(spin.len(), 1000);
+    }
+
+    #[test]
+    fn par_chunks_mut2_agrees_across_both_schedulers() {
+        let run = || {
+            let (mut a, mut b) = (vec![0u64; 517], vec![0u64; 517]);
+            par_chunks_mut2(&mut a, &mut b, 32, |ci, ca, cb| {
+                for (i, (x, y)) in ca.iter_mut().zip(cb.iter_mut()).enumerate() {
+                    *x = (ci as u64) << 20 | i as u64;
+                    *y = !*x;
+                }
+            });
+            (a, b)
+        };
+        let (spin, rayon) = both_arms(run);
+        assert_eq!(spin, rayon, "scheduler changed the result");
+        // The two outputs must stay index-aligned, which is the whole
+        // reason this wrapper exists.
+        assert!(spin.0.iter().zip(&spin.1).all(|(x, y)| *y == !*x));
+    }
+
+    #[test]
+    fn both_wrappers_no_op_on_empty_input_either_way() {
+        let (spin, rayon) = both_arms(|| {
+            let mut out: Vec<u64> = Vec::new();
+            par_chunks_mut(&mut out, 8, |_, _| unreachable!("no chunks to run"));
+            let (mut a, mut b): (Vec<u64>, Vec<u64>) = (Vec::new(), Vec::new());
+            par_chunks_mut2(&mut a, &mut b, 8, |_, _, _| unreachable!("no chunks"));
+            (out, a, b)
+        });
+        assert_eq!(spin, rayon);
+    }
+
+    #[test]
+    fn a_zero_chunk_size_is_a_no_op_either_way() {
+        let (spin, rayon) = both_arms(|| {
+            let mut out = vec![9u64; 4];
+            par_chunks_mut(&mut out, 0, |_, _| unreachable!("chunk==0 must not run"));
+            out
+        });
+        assert_eq!(spin, rayon);
+        assert_eq!(spin, vec![9u64; 4], "input must be untouched");
+    }
 
     #[test]
     fn runs_every_chunk_exactly_once() {
@@ -821,119 +918,136 @@ mod tests {
     // ── SIGSEGV reproduction attempt (three crash reports, all localizing
     // inside `par_chunks_mut`/`run_chunks`, fault addresses matching real
     // model dimensions or `0x1`) ────────────────────────────────────────────
+    //
+    // Gated on `heavy_tests`: these run a production-scale decode simulation
+    // (34 layers × hundreds of tokens, deliberately oversubscribed) and take
+    // minutes under coverage instrumentation on a 2-core CI runner — a spin
+    // barrier has no spare core to spin on there, so CI pays the worst case
+    // of exactly the contention these tests exist to provoke. Run locally via
+    // `make larql-compute-test-integration`.
+    #[cfg(feature = "heavy_tests")]
+    mod stress_decode_shape {
+        use super::*;
 
-    const RD_HIDDEN: usize = 2560;
-    const RD_INTER: usize = 10240;
-    const RD_Q_DIM: usize = 2048;
-    const RD_KV_DIM: usize = 1024;
-    const RD_ROWS_CHUNK: usize = 32;
-    const RD_ELEM_CHUNK: usize = 256;
+        const RD_HIDDEN: usize = 2560;
+        const RD_INTER: usize = 10240;
+        const RD_Q_DIM: usize = 2048;
+        const RD_KV_DIM: usize = 1024;
+        const RD_ROWS_CHUNK: usize = 32;
+        const RD_ELEM_CHUNK: usize = 256;
 
-    fn rd_f32_encode(caller: u64, round: u64, tag: u64, idx: usize) -> f32 {
-        // Cheap, collision-resistant-enough encoding of (caller, round, tag,
-        // idx) into an f32 so a read of the wrong slot/epoch/caller's data is
-        // caught as a mismatch rather than silently looking plausible.
-        ((caller.wrapping_mul(998_244_353)
-            ^ round.wrapping_mul(1_000_003)
-            ^ tag.wrapping_mul(97)
-            ^ idx as u64)
-            % 1_000_000) as f32
-    }
-    fn rd_fill_chunk(chunk: &mut [f32], global_start: usize, caller: u64, round: u64, tag: u64) {
-        for (local_i, v) in chunk.iter_mut().enumerate() {
-            // Cheap but non-trivial busy-work per element (~tens of ns) so a
-            // chunk's dispatched duration is closer to the real matvec
-            // kernel's (many SDOTs per row) than a near-instant synthetic
-            // write - in case the bug is timing/duration-dependent (spin ->
-            // yield -> park transitions calibrated around real chunk cost).
-            let mut acc = 0.0f32;
-            for j in 0..64u32 {
-                acc = acc * 1.0000001 + (j as f32).sin();
-            }
-            *v = rd_f32_encode(caller, round, tag, global_start + local_i) + acc * 0.0;
+        fn rd_f32_encode(caller: u64, round: u64, tag: u64, idx: usize) -> f32 {
+            // Cheap, collision-resistant-enough encoding of (caller, round, tag,
+            // idx) into an f32 so a read of the wrong slot/epoch/caller's data is
+            // caught as a mismatch rather than silently looking plausible.
+            ((caller.wrapping_mul(998_244_353)
+                ^ round.wrapping_mul(1_000_003)
+                ^ tag.wrapping_mul(97)
+                ^ idx as u64)
+                % 1_000_000) as f32
         }
-    }
-    fn rd_check(buf: &[f32], caller: u64, round: u64, tag: u64) {
-        for (i, &v) in buf.iter().enumerate() {
-            let want = rd_f32_encode(caller, round, tag, i);
-            assert_eq!(
-                v.to_bits(),
-                want.to_bits(),
-                "caller {caller} round {round} tag {tag} idx {i}: corrupted \
-                 (got {v}, want {want}) - buffer len {}",
-                buf.len()
-            );
-        }
-    }
-
-    /// One simulated decode step's worth of dispatches against `par_chunks_mut`
-    /// - the actual public entry point production uses, with the REAL
-    ///   gemma-3-4b-it row counts (q_dim=2048, kv_dim=1024, hidden=2560,
-    ///   intermediate=10240 - all exact multiples of their chunk sizes, same as
-    ///   production, so this can't exercise the underflow this file already
-    ///   hardened against; it's targeting a different bug). `caller` tags every
-    ///   value so concurrent callers (simulating overlapping requests) can tell
-    ///   their own data apart from a caller they got mixed up with.
-    fn rd_run(caller: u64, rounds: u64, layers: u64) {
-        let mut q = vec![0.0f32; RD_Q_DIM];
-        let mut k = vec![0.0f32; RD_KV_DIM];
-        let mut v = vec![0.0f32; RD_KV_DIM];
-        let mut o = vec![0.0f32; RD_HIDDEN];
-        let mut gate = vec![0.0f32; RD_INTER];
-        let mut up = vec![0.0f32; RD_INTER];
-        let mut activated = vec![0.0f32; RD_INTER];
-        let mut down = vec![0.0f32; RD_HIDDEN];
-
-        for round in 0..rounds {
-            for layer in 0..layers {
-                let tag = round * layers + layer;
-                for (buf, sub) in [
-                    (&mut q, 0u64),
-                    (&mut k, 1),
-                    (&mut v, 2),
-                    (&mut o, 3),
-                    (&mut gate, 4),
-                    (&mut up, 5),
-                    (&mut down, 7),
-                ] {
-                    let t = tag.wrapping_mul(8) + sub;
-                    par_chunks_mut(buf, RD_ROWS_CHUNK, |ci, chunk| {
-                        rd_fill_chunk(chunk, ci * RD_ROWS_CHUNK, caller, round, t)
-                    });
-                    rd_check(buf, caller, round, t);
+        fn rd_fill_chunk(
+            chunk: &mut [f32],
+            global_start: usize,
+            caller: u64,
+            round: u64,
+            tag: u64,
+        ) {
+            for (local_i, v) in chunk.iter_mut().enumerate() {
+                // Cheap but non-trivial busy-work per element (~tens of ns) so a
+                // chunk's dispatched duration is closer to the real matvec
+                // kernel's (many SDOTs per row) than a near-instant synthetic
+                // write - in case the bug is timing/duration-dependent (spin ->
+                // yield -> park transitions calibrated around real chunk cost).
+                let mut acc = 0.0f32;
+                for j in 0..64u32 {
+                    acc = acc * 1.0000001 + (j as f32).sin();
                 }
-                // Elementwise activation: 256-chunked, INTER-sized - the
-                // production shape at kquant_forward/cached.rs:869.
-                let t = tag.wrapping_mul(8) + 6;
-                par_chunks_mut(&mut activated, RD_ELEM_CHUNK, |ci, chunk| {
-                    rd_fill_chunk(chunk, ci * RD_ELEM_CHUNK, caller, round, t)
-                });
-                rd_check(&activated, caller, round, t);
+                *v = rd_f32_encode(caller, round, tag, global_start + local_i) + acc * 0.0;
             }
         }
-    }
-
-    /// Single sequential caller, at production scale (34 layers x 400
-    /// simulated tokens). `--test-threads` contention from other tests
-    /// sharing `global()` is part of the reproduction attempt - do not run
-    /// this test in isolation only.
-    #[test]
-    fn stress_realistic_decode_shape_no_corruption() {
-        rd_run(0, 40, 34);
-    }
-
-    /// Genuinely concurrent callers (unlike `concurrent_dispatchers_stay_
-    /// consistent` above, which uses one FIXED dispatch size for every
-    /// thread) - each thread runs its own independent `rd_run`-shaped decode
-    /// loop against the SAME shared `global()` pool at the SAME time, so
-    /// `dispatch_lock` has to actually serialize dispatchers with DIFFERENT
-    /// `(total, chunk)` shapes mid-flight, not just identical ones.
-    #[test]
-    fn stress_concurrent_realistic_decode_shape_no_corruption() {
-        std::thread::scope(|s| {
-            for caller in 0..6u64 {
-                s.spawn(move || rd_run(caller, 8, 34));
+        fn rd_check(buf: &[f32], caller: u64, round: u64, tag: u64) {
+            for (i, &v) in buf.iter().enumerate() {
+                let want = rd_f32_encode(caller, round, tag, i);
+                assert_eq!(
+                    v.to_bits(),
+                    want.to_bits(),
+                    "caller {caller} round {round} tag {tag} idx {i}: corrupted \
+                 (got {v}, want {want}) - buffer len {}",
+                    buf.len()
+                );
             }
-        });
+        }
+
+        /// One simulated decode step's worth of dispatches against `par_chunks_mut`
+        /// - the actual public entry point production uses, with the REAL
+        ///   gemma-3-4b-it row counts (q_dim=2048, kv_dim=1024, hidden=2560,
+        ///   intermediate=10240 - all exact multiples of their chunk sizes, same as
+        ///   production, so this can't exercise the underflow this file already
+        ///   hardened against; it's targeting a different bug). `caller` tags every
+        ///   value so concurrent callers (simulating overlapping requests) can tell
+        ///   their own data apart from a caller they got mixed up with.
+        fn rd_run(caller: u64, rounds: u64, layers: u64) {
+            let mut q = vec![0.0f32; RD_Q_DIM];
+            let mut k = vec![0.0f32; RD_KV_DIM];
+            let mut v = vec![0.0f32; RD_KV_DIM];
+            let mut o = vec![0.0f32; RD_HIDDEN];
+            let mut gate = vec![0.0f32; RD_INTER];
+            let mut up = vec![0.0f32; RD_INTER];
+            let mut activated = vec![0.0f32; RD_INTER];
+            let mut down = vec![0.0f32; RD_HIDDEN];
+
+            for round in 0..rounds {
+                for layer in 0..layers {
+                    let tag = round * layers + layer;
+                    for (buf, sub) in [
+                        (&mut q, 0u64),
+                        (&mut k, 1),
+                        (&mut v, 2),
+                        (&mut o, 3),
+                        (&mut gate, 4),
+                        (&mut up, 5),
+                        (&mut down, 7),
+                    ] {
+                        let t = tag.wrapping_mul(8) + sub;
+                        par_chunks_mut(buf, RD_ROWS_CHUNK, |ci, chunk| {
+                            rd_fill_chunk(chunk, ci * RD_ROWS_CHUNK, caller, round, t)
+                        });
+                        rd_check(buf, caller, round, t);
+                    }
+                    // Elementwise activation: 256-chunked, INTER-sized - the
+                    // production shape at kquant_forward/cached.rs:869.
+                    let t = tag.wrapping_mul(8) + 6;
+                    par_chunks_mut(&mut activated, RD_ELEM_CHUNK, |ci, chunk| {
+                        rd_fill_chunk(chunk, ci * RD_ELEM_CHUNK, caller, round, t)
+                    });
+                    rd_check(&activated, caller, round, t);
+                }
+            }
+        }
+
+        /// Single sequential caller, at production scale (34 layers x 400
+        /// simulated tokens). `--test-threads` contention from other tests
+        /// sharing `global()` is part of the reproduction attempt - do not run
+        /// this test in isolation only.
+        #[test]
+        fn stress_realistic_decode_shape_no_corruption() {
+            rd_run(0, 40, 34);
+        }
+
+        /// Genuinely concurrent callers (unlike `concurrent_dispatchers_stay_
+        /// consistent` above, which uses one FIXED dispatch size for every
+        /// thread) - each thread runs its own independent `rd_run`-shaped decode
+        /// loop against the SAME shared `global()` pool at the SAME time, so
+        /// `dispatch_lock` has to actually serialize dispatchers with DIFFERENT
+        /// `(total, chunk)` shapes mid-flight, not just identical ones.
+        #[test]
+        fn stress_concurrent_realistic_decode_shape_no_corruption() {
+            std::thread::scope(|s| {
+                for caller in 0..6u64 {
+                    s.spawn(move || rd_run(caller, 8, 34));
+                }
+            });
+        }
     }
 }
