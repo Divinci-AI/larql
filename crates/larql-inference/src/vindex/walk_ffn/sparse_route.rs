@@ -21,13 +21,22 @@
 //! `VectorIndex::enable_hnsw()` does not affect this decision tree.
 //! `gate_walk` (exact batched gemv) is deliberately tried before
 //! `gate_knn` — the only HNSW-aware call reachable here — and succeeds
-//! for any f32/warmed vindex, so the approximate graph is consulted
-//! only when a layer has no gate data (where `gate_knn` has nothing to
-//! search either). Exact top-K is load-bearing for the walk's
+//! for any dense-resolvable (f32/f16/heap/warmed) gate, so the
+//! approximate graph is consulted only where exact selection is
+//! impossible anyway (Q4K-interleaved-only gates, patched overlay
+//! layers). Exact top-K is load-bearing for the walk's
 //! selection-quality and parity work; HNSW's wins live on the KNN
 //! serving paths (`gate_knn`, `gate_knn_expert`). See `enable_hnsw()`'s
 //! doc in larql-vindex for the full path map; pinned below by
 //! `walk_ffn_sparse_hot_path_ignores_enable_hnsw`.
+//!
+//! History: this ordering was *intended* from day one (2026-04-04) but
+//! only became real on 2026-07-30 — `impl GateLookup for VectorIndex`
+//! never overrode `gate_walk`, so through `&dyn GateIndex` the trait's
+//! `None` default sent every selection to `gate_knn`, where
+//! `enable_hnsw()` silently made walk selection approximate. The
+//! delegation shim in larql-vindex `index/core/gate_lookup.rs` closed
+//! that hole.
 
 use super::helpers::selection_weight_cmp_desc;
 use super::WalkFfn;
@@ -267,8 +276,10 @@ mod tests {
         /// Documented default beam width (mirrors the server's
         /// `DEFAULT_HNSW_EF_SEARCH`); the pin holds for any legal value.
         const EF_SEARCH: usize = 200;
+        use crate::test_utils::attach_feature_major_f32_to_test_vindex;
         let weights = make_test_weights();
-        let index = make_test_vindex(&weights);
+        let mut index = make_test_vindex(&weights);
+        attach_feature_major_f32_to_test_vindex(&weights, &mut index);
         let cfg = WalkFfnConfig::sparse(weights.num_layers, 4);
         let ffn = WalkFfn::from_config(&weights, &index, cfg);
         let input = x(1, weights.hidden_size);

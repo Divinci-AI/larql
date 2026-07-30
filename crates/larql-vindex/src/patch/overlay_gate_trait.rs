@@ -47,6 +47,27 @@ impl GateLookup for PatchedVindex {
         self.base.gate_scores_batch_backend(layer, x, backend)
     }
 
+    fn gate_walk(
+        &self,
+        layer: usize,
+        residual: &Array1<f32>,
+        top_k: usize,
+    ) -> Option<Vec<(usize, f32)>> {
+        // Exact batched-gemv selection reads only the base gate matrix,
+        // so it is valid exactly when neither a gate override nor a
+        // tombstone could change the ranking at this layer — the same
+        // short-circuit guard `PatchedVindex::gate_knn` uses. On a
+        // patched layer, decline so the caller falls through to
+        // `gate_knn`, which this type overrides with the overlay-aware
+        // merge (2026-07-30 review, item #13).
+        let layer_is_patched = self.overrides_gate.keys().any(|&(l, _)| l == layer)
+            || self.deleted.iter().any(|&(l, _)| l == layer);
+        if layer_is_patched {
+            return None;
+        }
+        self.base.gate_walk(layer, residual, top_k)
+    }
+
     fn gate_knn_batch(&self, layer: usize, x: &ndarray::Array2<f32>, top_k: usize) -> Vec<usize> {
         // The base impl runs a BLAS gemm against the disk-side gate
         // matrix and ignores the patch overlay — so any feature with
@@ -264,5 +285,79 @@ impl Fp4FfnAccess for PatchedVindex {
         out: &mut [f32],
     ) -> bool {
         self.base.fp4_ffn_row_into(layer, component, feat, out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Pins for the `gate_walk` trait override (2026-07-30 review,
+    //! item #13): exact selection may only serve layers the patch
+    //! overlay cannot have changed; patched layers must decline so
+    //! callers fall through to the overlay-aware `gate_knn`.
+    use super::*;
+    use crate::index::core::VectorIndex;
+    use larql_models::TopKEntry;
+    use ndarray::Array2;
+
+    /// 2-layer × 3-feature × 4-hidden base where feature `f` on each
+    /// layer has gate `[3 - f, 0, 0, 0]` — a query along e0 ranks
+    /// feature 0 highest, so `gate_walk` has real hits to return.
+    fn make_scored_patched() -> PatchedVindex {
+        let mut gate = Array2::<f32>::zeros((3, 4));
+        for f in 0..3 {
+            gate[[f, 0]] = (3 - f) as f32;
+        }
+        let down_meta = vec![Some(vec![None, None, None]); 2];
+        let index = VectorIndex::new(vec![Some(gate.clone()), Some(gate)], down_meta, 2, 4);
+        PatchedVindex::new(index)
+    }
+
+    fn make_meta(token: &str) -> crate::index::FeatureMeta {
+        crate::index::FeatureMeta {
+            top_token: token.into(),
+            top_token_id: 0,
+            c_score: 0.9,
+            top_k: vec![TopKEntry {
+                token: token.into(),
+                token_id: 0,
+                logit: 0.9,
+            }],
+        }
+    }
+
+    #[test]
+    fn gate_walk_delegates_to_base_on_unpatched_layer() {
+        let p = make_scored_patched();
+        let q = Array1::from_vec(vec![1.0_f32, 0.0, 0.0, 0.0]);
+        let via_trait = <PatchedVindex as GateLookup>::gate_walk(&p, 0, &q, 2)
+            .expect("unpatched layer must reach the base exact path");
+        let via_base = p.base.gate_walk(0, &q, 2).expect("base has gate data");
+        assert_eq!(via_trait, via_base);
+        assert_eq!(via_trait[0].0, 0, "feature 0 has the largest gate dot");
+    }
+
+    #[test]
+    fn gate_walk_declines_on_gate_overridden_layer() {
+        let mut p = make_scored_patched();
+        p.insert_feature(0, 1, vec![0.0, 9.0, 0.0, 0.0], make_meta("ins"));
+        let q = Array1::from_vec(vec![1.0_f32, 0.0, 0.0, 0.0]);
+        assert!(
+            <PatchedVindex as GateLookup>::gate_walk(&p, 0, &q, 2).is_none(),
+            "layer with a gate override must decline exact selection"
+        );
+        // The untouched layer still serves the exact path.
+        assert!(<PatchedVindex as GateLookup>::gate_walk(&p, 1, &q, 2).is_some());
+    }
+
+    #[test]
+    fn gate_walk_declines_on_tombstoned_layer() {
+        let mut p = make_scored_patched();
+        p.insert_feature(0, 1, vec![0.0, 9.0, 0.0, 0.0], make_meta("tmp"));
+        p.delete_feature(0, 1);
+        let q = Array1::from_vec(vec![1.0_f32, 0.0, 0.0, 0.0]);
+        assert!(
+            <PatchedVindex as GateLookup>::gate_walk(&p, 0, &q, 2).is_none(),
+            "layer with a tombstone must decline exact selection"
+        );
     }
 }
