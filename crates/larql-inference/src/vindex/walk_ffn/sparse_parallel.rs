@@ -214,8 +214,8 @@ mod tests {
         let (first, second) = full.split_at(PARALLEL_DOWN_MIN_HITS / 2);
 
         let timings = Arc::new(super::super::timings::PhaseTimingsHandle::default());
-        let par_ffn = walk_pool(&weights, &index, full.clone())
-            .with_phase_timings(Arc::clone(&timings));
+        let par_ffn =
+            walk_pool(&weights, &index, full.clone()).with_phase_timings(Arc::clone(&timings));
         let (out_par, act_par) = par_ffn
             .walk_ffn_sparse(0, &input)
             .expect("wide Q4K fixture supports the sparse walk");

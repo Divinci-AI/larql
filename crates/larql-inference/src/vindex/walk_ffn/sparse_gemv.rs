@@ -40,9 +40,9 @@ impl<'a> WalkFfn<'a> {
 
         let up_scores: Option<ndarray::Array2<f32>> = if let Some(v) = up_native {
             Some(larql_compute::dot_proj_gpu(x, &v, self.backend))
-        } else if let Some(y) = self
-            .index
-            .kquant_matmul_transb(layer, 1, x_flat, seq_len, self.backend)
+        } else if let Some(y) =
+            self.index
+                .kquant_matmul_transb(layer, 1, x_flat, seq_len, self.backend)
         {
             ndarray::Array2::from_shape_vec((seq_len, intermediate), y).ok()
         } else {

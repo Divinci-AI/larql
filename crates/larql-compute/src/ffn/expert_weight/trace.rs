@@ -88,23 +88,32 @@ impl<W: Write> TraceWriter<W> {
     }
 }
 
+/// Open the JSONL sink named by `path`; `None` (with an explanation on
+/// stderr) when the file cannot be created, so a bad path degrades to
+/// tracing-off rather than a failed run.
+///
+/// Split from [`sink`] so both open arms are testable: the `OnceLock` there
+/// resolves once per process, pinned to whatever environment the test binary
+/// started with.
+fn open_sink(path: Option<String>) -> Option<Mutex<TraceWriter<BufWriter<File>>>> {
+    let path = path?;
+    match File::create(&path) {
+        Ok(file) => Some(Mutex::new(TraceWriter::new(BufWriter::new(file)))),
+        Err(err) => {
+            eprintln!(
+                "[{}] cannot open {path}: {err} — routing trace disabled",
+                options::ENV_MOE_ROUTE_TRACE
+            );
+            None
+        }
+    }
+}
+
 /// Process-wide sink, resolved once from the environment on first use.
 fn sink() -> Option<&'static Mutex<TraceWriter<BufWriter<File>>>> {
     static SINK: OnceLock<Option<Mutex<TraceWriter<BufWriter<File>>>>> = OnceLock::new();
-    SINK.get_or_init(|| {
-        let path = options::env_nonempty_value(options::ENV_MOE_ROUTE_TRACE)?;
-        match File::create(&path) {
-            Ok(file) => Some(Mutex::new(TraceWriter::new(BufWriter::new(file)))),
-            Err(err) => {
-                eprintln!(
-                    "[{}] cannot open {path}: {err} — routing trace disabled",
-                    options::ENV_MOE_ROUTE_TRACE
-                );
-                None
-            }
-        }
-    })
-    .as_ref()
+    SINK.get_or_init(|| open_sink(options::env_nonempty_value(options::ENV_MOE_ROUTE_TRACE)))
+        .as_ref()
 }
 
 /// A routing buffer sized for `tokens`, or `None` when tracing is off.
@@ -123,9 +132,15 @@ pub fn record(layer: usize, experts: Option<BlockRouting>) {
     let (Some(experts), Some(sink)) = (experts, sink()) else {
         return;
     };
+    record_into(sink, layer, &experts);
+}
+
+/// Split from [`record`] for the same reason as [`open_sink`]: the global
+/// sink cannot be configured in-process, and the failure arms deserve tests.
+fn record_into<W: Write>(sink: &Mutex<TraceWriter<W>>, layer: usize, experts: &BlockRouting) {
     match sink.lock() {
         Ok(mut writer) => {
-            if let Err(err) = writer.record(layer, &experts) {
+            if let Err(err) = writer.record(layer, experts) {
                 eprintln!(
                     "[{}] write failed at layer {layer}: {err}",
                     options::ENV_MOE_ROUTE_TRACE
@@ -219,5 +234,63 @@ mod tests {
     fn buffer_is_none_when_unconfigured() {
         assert!(super::buffer(8).is_none());
         super::record(0, None);
+    }
+
+    #[test]
+    fn open_sink_absent_path_is_off() {
+        assert!(open_sink(None).is_none());
+    }
+
+    #[test]
+    fn open_sink_unwritable_path_degrades_to_off() {
+        // A path under a file (not a directory) cannot be created anywhere.
+        let bad = format!(
+            "{}/not-a-dir/trace.jsonl",
+            std::env::temp_dir()
+                .join(format!("larql-trace-test-{}", std::process::id()))
+                .join("plain-file")
+                .display()
+        );
+        assert!(open_sink(Some(bad)).is_none());
+    }
+
+    #[test]
+    fn open_sink_writable_path_round_trips_a_record() {
+        let path =
+            std::env::temp_dir().join(format!("larql-trace-test-{}.jsonl", std::process::id()));
+        let sink = open_sink(Some(path.display().to_string())).expect("temp file is creatable");
+
+        record_into(&sink, 5, &vec![vec![7, 2]]);
+        drop(sink.into_inner().expect("unpoisoned")); // flush the BufWriter
+
+        let raw = std::fs::read(&path).expect("trace file exists");
+        let out = lines(&raw);
+        assert_eq!(out[0]["layer"], 5);
+        assert_eq!(out[0]["experts"], serde_json::json!([[7, 2]]));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A diagnostic must not take down a scoring run: both failure arms
+    /// (writer error, poisoned lock) report and return.
+    #[test]
+    fn record_into_swallows_writer_errors_and_poison() {
+        struct Failing;
+        impl Write for Failing {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("no space"))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let failing = Mutex::new(TraceWriter::new(Failing));
+        record_into(&failing, 0, &vec![vec![1]]);
+
+        let poisoned = Mutex::new(TraceWriter::new(Vec::new()));
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = poisoned.lock().unwrap();
+            panic!("poison the lock");
+        }));
+        record_into(&poisoned, 1, &vec![vec![2]]);
     }
 }

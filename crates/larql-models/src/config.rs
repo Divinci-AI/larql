@@ -1049,3 +1049,281 @@ pub struct Llama3RopeScaling {
     pub high_freq_factor: f64,
     pub original_max_position_embeddings: f64,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An architecture that overrides nothing, so every call below exercises
+    /// the trait default itself. The per-architecture files test their
+    /// overrides; nothing else pins the defaults an architecture inherits by
+    /// *not* overriding — and a changed default silently rewrites the
+    /// behaviour of every architecture that relied on it.
+    struct DefaultsArch(ModelConfig);
+
+    impl ModelArchitecture for DefaultsArch {
+        fn family(&self) -> &str {
+            "defaults-test"
+        }
+        fn config(&self) -> &ModelConfig {
+            &self.0
+        }
+    }
+
+    /// A minimal parsed config; tests mutate the returned fields directly
+    /// rather than guessing config.json spellings (parsing is
+    /// `detect::parser`'s test surface, not this one's).
+    fn base_config() -> ModelConfig {
+        crate::detect_from_json(&serde_json::json!({
+            "model_type": "llama",
+            "hidden_size": 64,
+            "intermediate_size": 128,
+            "num_hidden_layers": 2,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 2,
+            "head_dim": 16,
+            "vocab_size": 32,
+        }))
+        .config()
+        .clone()
+    }
+
+    #[test]
+    fn optional_weight_keys_default_to_absent() {
+        let a = DefaultsArch(base_config());
+        assert_eq!(a.position_embed_key(), None);
+        assert_eq!(a.fused_qkv_key(0), None);
+        assert_eq!(a.fused_qkv_bias_key(0), None);
+        assert_eq!(a.attn_sinks_key(0), None);
+        assert_eq!(a.ffn_up_bias_key(0), None);
+        assert_eq!(a.ffn_down_bias_key(0), None);
+        assert_eq!(a.layer_scalar_key(0), None);
+        assert_eq!(a.kv_shared_source_layer(0), None);
+    }
+
+    #[test]
+    fn moe_defaults_describe_a_dense_model() {
+        let a = DefaultsArch(base_config());
+        assert!(!a.is_moe());
+        assert!(!a.is_hybrid_moe());
+        assert_eq!(a.num_experts(), 0);
+        assert_eq!(a.num_experts_per_token(), 0);
+        assert_eq!(a.num_shared_experts(), 0);
+        assert_eq!(a.moe_intermediate_size(), 0);
+        assert_eq!(a.moe_router_type(), "top_k_softmax");
+        assert_eq!(a.expert_format(), ExpertFormat::PerExpert);
+        assert_eq!(a.expert_gate_policy(), ExpertGatePolicy::Gated);
+        assert_eq!(a.moe_router_key(0), None);
+        assert_eq!(a.moe_router_bias_key(0), None);
+        assert_eq!(a.moe_router_scale_key(0), None);
+        assert_eq!(a.moe_router_per_expert_scale_key(0), None);
+        assert_eq!(a.moe_router_norm_key(0), None);
+        assert!(!a.moe_router_norm_parameter_free());
+        assert_eq!(a.moe_router_input_scalar(), None);
+        assert_eq!(a.expert_ffn_gate_key(0, 0), None);
+        assert_eq!(a.expert_ffn_up_key(0, 0), None);
+        assert_eq!(a.expert_ffn_down_key(0, 0), None);
+        assert_eq!(a.shared_expert_gate_key(0), None);
+        assert_eq!(a.shared_expert_up_key(0), None);
+        assert_eq!(a.shared_expert_down_key(0), None);
+        assert_eq!(a.packed_gate_up_blocks_key(0), None);
+        assert_eq!(a.packed_gate_up_scales_key(0), None);
+        assert_eq!(a.packed_gate_up_bias_key(0), None);
+        assert_eq!(a.packed_down_blocks_key(0), None);
+        assert_eq!(a.packed_down_scales_key(0), None);
+        assert_eq!(a.packed_down_bias_key(0), None);
+        assert_eq!(a.packed_experts_gate_up_key(0), None);
+        assert_eq!(a.packed_experts_down_key(0), None);
+        assert_eq!(a.moe_post_outer_norm_key(0), None);
+        assert_eq!(a.moe_post_ffn1_norm_key(0), None);
+        assert_eq!(a.moe_pre_experts_norm_key(0), None);
+        assert_eq!(a.moe_post_experts_norm_key(0), None);
+        assert!(!a.moe_has_combined_output_norm());
+    }
+
+    /// The routing default reads `norm_topk_prob` from the config on purpose
+    /// (see the method's doc for the two times a baked-in order went wrong):
+    /// a new MoE architecture must be correct on arrival.
+    #[test]
+    fn expert_routing_policy_reads_norm_topk_prob() {
+        let mut cfg = base_config();
+        cfg.norm_topk_prob = None;
+        assert_eq!(
+            DefaultsArch(cfg.clone()).expert_routing_policy(),
+            ExpertRoutingPolicy::SoftmaxThenSelect
+        );
+        cfg.norm_topk_prob = Some(false);
+        assert_eq!(
+            DefaultsArch(cfg.clone()).expert_routing_policy(),
+            ExpertRoutingPolicy::SoftmaxThenSelect
+        );
+        cfg.norm_topk_prob = Some(true);
+        assert_eq!(
+            DefaultsArch(cfg).expert_routing_policy(),
+            ExpertRoutingPolicy::NormalisedOverSelected
+        );
+    }
+
+    #[test]
+    fn mla_defaults_describe_standard_gqa() {
+        let a = DefaultsArch(base_config());
+        assert!(!a.uses_mla());
+        assert_eq!(a.kv_lora_rank(), 0);
+        assert_eq!(a.q_lora_rank(), 0);
+        assert_eq!(a.mla_kv_a_key(0), None);
+        assert_eq!(a.mla_kv_b_key(0), None);
+        assert_eq!(a.mla_q_a_key(0), None);
+        assert_eq!(a.mla_q_b_key(0), None);
+        assert_eq!(a.mla_qk_nope_head_dim(), None);
+        assert_eq!(a.mla_qk_rope_head_dim(), None);
+        assert_eq!(a.mla_v_head_dim(), None);
+    }
+
+    #[test]
+    fn scaling_multipliers_default_to_identity() {
+        let mut cfg = base_config();
+        cfg.residual_multiplier = None;
+        cfg.attention_multiplier = None;
+        cfg.logits_scaling = None;
+        let a = DefaultsArch(cfg.clone());
+        assert_eq!(a.residual_multiplier(), 1.0);
+        assert_eq!(a.attention_multiplier(), 1.0);
+        assert_eq!(a.logits_scaling(), 1.0);
+
+        cfg.residual_multiplier = Some(0.5);
+        cfg.attention_multiplier = Some(0.25);
+        cfg.logits_scaling = Some(8.0);
+        let a = DefaultsArch(cfg);
+        assert_eq!(a.residual_multiplier(), 0.5);
+        assert_eq!(a.attention_multiplier(), 0.25);
+        assert_eq!(a.logits_scaling(), 8.0);
+    }
+
+    #[test]
+    fn attention_scale_prefers_query_pre_attn_scalar_over_head_dim() {
+        let mut cfg = base_config();
+        cfg.query_pre_attn_scalar = None;
+        let a = DefaultsArch(cfg.clone());
+        let by_head_dim = (cfg.head_dim as f64).powf(-0.5);
+        assert_eq!(a.attention_scale(), by_head_dim);
+        assert_eq!(a.attention_scale_for_layer(0), by_head_dim);
+
+        cfg.query_pre_attn_scalar = Some(256.0);
+        let a = DefaultsArch(cfg);
+        assert_eq!(a.attention_scale(), 256.0f64.powf(-0.5));
+        assert_eq!(a.attention_scale_for_layer(1), 256.0f64.powf(-0.5));
+    }
+
+    /// PLE keys are all-or-nothing on `per_layer_embed_dim`: a partial key
+    /// set would load half a mechanism.
+    #[test]
+    fn ple_keys_are_all_present_or_all_absent() {
+        let mut cfg = base_config();
+        cfg.per_layer_embed_dim = None;
+        let off = DefaultsArch(cfg.clone());
+        assert!(!off.has_per_layer_embeddings());
+        assert_eq!(off.per_layer_embed_dim(), 0);
+        assert_eq!(off.per_layer_embed_key(), None);
+        assert_eq!(off.per_layer_model_projection_key(), None);
+        assert_eq!(off.per_layer_projection_norm_key(), None);
+        assert_eq!(off.per_layer_input_gate_key(0), None);
+        assert_eq!(off.per_layer_projection_key(0), None);
+        assert_eq!(off.post_per_layer_input_norm_key(0), None);
+
+        cfg.per_layer_embed_dim = Some(8);
+        let on = DefaultsArch(cfg);
+        assert!(on.has_per_layer_embeddings());
+        assert_eq!(on.per_layer_embed_dim(), 8);
+        assert_eq!(
+            on.per_layer_embed_key().as_deref(),
+            Some("embed_tokens_per_layer.weight")
+        );
+        assert_eq!(
+            on.per_layer_model_projection_key().as_deref(),
+            Some("per_layer_model_projection.weight")
+        );
+        assert_eq!(
+            on.per_layer_projection_norm_key().as_deref(),
+            Some("per_layer_projection_norm.weight")
+        );
+        let prefix = on.layer_prefix(1);
+        assert_eq!(
+            on.per_layer_input_gate_key(1),
+            Some(format!("{prefix}per_layer_input_gate.weight"))
+        );
+        assert_eq!(
+            on.per_layer_projection_key(1),
+            Some(format!("{prefix}per_layer_projection.weight"))
+        );
+        assert_eq!(
+            on.post_per_layer_input_norm_key(1),
+            Some(format!("{prefix}post_per_layer_input_norm.weight"))
+        );
+    }
+
+    #[test]
+    fn softcapping_reads_config_and_defaults_off() {
+        let mut cfg = base_config();
+        cfg.attn_logit_softcapping = None;
+        cfg.final_logit_softcapping = None;
+        let a = DefaultsArch(cfg.clone());
+        assert_eq!(a.attn_logit_softcapping(), None);
+        assert_eq!(a.final_logit_softcapping(), None);
+
+        cfg.attn_logit_softcapping = Some(50.0);
+        cfg.final_logit_softcapping = Some(30.0);
+        let a = DefaultsArch(cfg);
+        assert_eq!(a.attn_logit_softcapping(), Some(50.0));
+        assert_eq!(a.final_logit_softcapping(), Some(30.0));
+    }
+
+    #[test]
+    fn rope_scaling_defaults_and_config_read() {
+        let mut cfg = base_config();
+        cfg.rope_scaling = None;
+        let a = DefaultsArch(cfg.clone());
+        assert_eq!(a.rope_scaling_type(), None);
+        assert_eq!(a.rope_scaling_factor(), 1.0);
+        assert_eq!(a.rope_position_divisor_for_layer(0), 1.0);
+        assert!(a.llama3_rope_scaling().is_none());
+
+        cfg.rope_scaling = Some(RopeScaling {
+            scaling_type: "linear".to_string(),
+            factor: 8.0,
+            llama3_low_freq_factor: None,
+            llama3_high_freq_factor: None,
+            llama3_original_max_position_embeddings: None,
+            gemma3_global_only: false,
+        });
+        let a = DefaultsArch(cfg);
+        assert_eq!(a.rope_scaling_type(), Some("linear"));
+        assert_eq!(a.rope_scaling_factor(), 8.0);
+    }
+
+    #[test]
+    fn norm_eps_reads_config_with_crate_fallback() {
+        let mut cfg = base_config();
+        cfg.norm_eps = Some(1e-5);
+        assert_eq!(DefaultsArch(cfg.clone()).norm_eps(), 1e-5);
+        cfg.norm_eps = None;
+        assert_eq!(
+            DefaultsArch(cfg).norm_eps(),
+            crate::defaults::DEFAULT_NORM_EPS
+        );
+    }
+
+    #[test]
+    fn misc_defaults() {
+        let a = DefaultsArch(base_config());
+        assert!(a.multimodal().is_none());
+        assert_eq!(a.sliding_window_size(), None);
+        assert!(!a.is_sliding_window_layer(0));
+    }
+
+    /// The markov-residual precondition: stateless norm, no learned position
+    /// table, no MLA — all true of the default architecture surface.
+    #[test]
+    fn kv_recomputable_from_residuals_by_default() {
+        assert!(DefaultsArch(base_config()).kv_recomputable_from_residuals());
+    }
+}

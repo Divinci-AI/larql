@@ -22,7 +22,10 @@
 
 mod gate;
 mod router;
-mod trace;
+// Public for the `tests/test_moe_route_trace_*.rs` end-to-end exercises:
+// the env-resolved sink is process-global (`OnceLock`), so each scenario
+// needs its own test binary, and those binaries can only reach a `pub` path.
+pub mod trace;
 
 use larql_models::{ModelArchitecture, ModelWeights};
 use ndarray::{s, Array2, Axis};

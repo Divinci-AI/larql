@@ -11,8 +11,6 @@ categories = ["science"]
 [dependencies]
 # Matrix types — blas feature added per-platform below where a backend exists
 ndarray = "0.16"
-# JSONL expert-weight trace lines (ffn/expert_weight/trace.rs).
-serde_json = "1"
 # MoE expert parallelism: top-k experts run independently per token.
 rayon = "1.10"
 # Wire-format constants (Q4_K_BLOCK_ELEMS, etc.) for padding decisions.

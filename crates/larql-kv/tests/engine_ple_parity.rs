@@ -57,9 +57,7 @@ fn assert_bits_eq(a: &Array2<f32>, b: &Array2<f32>, ctx: &str) {
 
 /// Legacy reference forward on the E2B fixture: prefill hidden plus
 /// `PLE_PARITY_DECODE_STEPS` decode-step hiddens.
-fn legacy_reference(
-    weights: &larql_inference::ModelWeights,
-) -> (Array2<f32>, Vec<Array2<f32>>) {
+fn legacy_reference(weights: &larql_inference::ModelWeights) -> (Array2<f32>, Vec<Array2<f32>>) {
     let ffn = BackendFfn {
         weights,
         backend: &CpuBackend,

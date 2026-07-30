@@ -197,8 +197,8 @@ mod tests {
         let index = q4_0_index(hidden);
         let cpu = CpuBackend;
 
-        let walk = WalkFfn::new_unlimited_with_backend(&f.weights, &index, &cpu)
-            .with_dispatch_trace();
+        let walk =
+            WalkFfn::new_unlimited_with_backend(&f.weights, &index, &cpu).with_dispatch_trace();
         let (out, activation) = walk
             .walk_ffn_q4_interleaved(0, &input(hidden))
             .expect("Q4_0 path must succeed with a CPU backend");
@@ -330,8 +330,8 @@ mod tests {
         )
         .unwrap();
 
-        let walk = WalkFfn::new_unlimited_with_backend(&f.weights, &index, &backend)
-            .with_dispatch_trace();
+        let walk =
+            WalkFfn::new_unlimited_with_backend(&f.weights, &index, &backend).with_dispatch_trace();
         let batch = walk
             .walk_ffn_q4_interleaved(0, &x)
             .expect("batch branch runs");
@@ -463,8 +463,8 @@ mod tests {
         };
         let x = input(hidden);
 
-        let walk = WalkFfn::new_unlimited_with_backend(&f.weights, &index, &backend)
-            .with_dispatch_trace();
+        let walk =
+            WalkFfn::new_unlimited_with_backend(&f.weights, &index, &backend).with_dispatch_trace();
         let batch = walk
             .walk_ffn_q4_interleaved(0, &x)
             .expect("batch branch with declined vecmat still completes");
@@ -487,8 +487,8 @@ mod tests {
         let index = q4_0_index(hidden);
         let cpu = CpuBackend;
 
-        let walk = WalkFfn::new_unlimited_with_backend(&f.weights, &index, &cpu)
-            .with_dispatch_trace();
+        let walk =
+            WalkFfn::new_unlimited_with_backend(&f.weights, &index, &cpu).with_dispatch_trace();
         let out = walk.forward(0, &input(hidden));
         assert!(out.iter().all(|v| v.is_finite()));
 

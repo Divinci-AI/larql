@@ -541,7 +541,11 @@ mod tests {
         let n = index.num_features(0);
 
         for (component, norms, again) in [
-            (2usize, walk.down_row_norms_pub(0), walk.down_row_norms_pub(0)),
+            (
+                2usize,
+                walk.down_row_norms_pub(0),
+                walk.down_row_norms_pub(0),
+            ),
             (1usize, walk.up_row_norms_pub(0), walk.up_row_norms_pub(0)),
         ] {
             let norms = norms.expect("Q4K fixture must yield row norms");
@@ -738,7 +742,9 @@ mod tests {
         let residual = residual_ramp(weights.hidden_size);
         let raw = raw_gate_scores(&index, &residual);
 
-        assert!(walk.pool_restricted_gate_knn(0, &residual, 2, &[]).is_empty());
+        assert!(walk
+            .pool_restricted_gate_knn(0, &residual, 2, &[])
+            .is_empty());
 
         let pool = [3usize, 250, 17, 99, usize::MAX]; // MAX must be filtered
         let k = 2;
@@ -754,7 +760,10 @@ mod tests {
         });
         let expected: std::collections::HashSet<usize> = valid[..k].iter().copied().collect();
         let got: std::collections::HashSet<usize> = hits.iter().map(|(f, _)| *f).collect();
-        assert_eq!(got, expected, "must be the top-{k} by |gate| within the pool");
+        assert_eq!(
+            got, expected,
+            "must be the top-{k} by |gate| within the pool"
+        );
         for &(f, g) in &hits {
             assert!(pool.contains(&f), "hit {f} escaped the pool");
             assert_eq!(g, raw[f]);

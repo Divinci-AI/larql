@@ -339,8 +339,8 @@ mod tests {
 
         // Pool set but precomputed_routing off → scored path, no
         // gate-free route.
-        let cfg = WalkFfnConfig::sparse(nl, 2)
-            .with_pool_per_layer(Arc::new(vec![vec![1usize, 2]; nl]));
+        let cfg =
+            WalkFfnConfig::sparse(nl, 2).with_pool_per_layer(Arc::new(vec![vec![1usize, 2]; nl]));
         let ffn = WalkFfn::from_config(&weights, &index, cfg);
         assert_eq!(ffn.gather_route_feats(0, &x_slice, 2), None);
 

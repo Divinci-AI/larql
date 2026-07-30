@@ -1152,7 +1152,10 @@ mod gate_override_tests {
         p.insert_feature(0, 1, vec![1.0, 0.0, 0.0, 0.0], make_meta("a"));
         p.delete_feature(0, 1);
 
-        assert!(p.feature_meta(0, 1).is_none(), "meta path must report deleted");
+        assert!(
+            p.feature_meta(0, 1).is_none(),
+            "meta path must report deleted"
+        );
         let q = Array1::from_vec(vec![1.0_f32, 0.0, 0.0, 0.0]);
         let hits = p.gate_knn(0, &q, 3);
         assert!(
@@ -1198,7 +1201,11 @@ mod gate_override_tests {
             "must fill top_k from live features, got {hits:?}"
         );
         let feats: Vec<usize> = hits.iter().map(|&(f, _)| f).collect();
-        assert_eq!(feats, vec![4, 5, 6], "next-best live features in rank order");
+        assert_eq!(
+            feats,
+            vec![4, 5, 6],
+            "next-best live features in rank order"
+        );
     }
 
     /// The escalation ladder's last rung: enough tombstones that even

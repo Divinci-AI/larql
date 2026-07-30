@@ -141,7 +141,10 @@ mod tests {
             .arch
             .ffn_down_bias_key(0)
             .expect("starcoder2 has a down bias")];
-        assert!(bias.iter().any(|b| *b != 0.0), "fixture bias must be non-zero");
+        assert!(
+            bias.iter().any(|b| *b != 0.0),
+            "fixture bias must be non-zero"
+        );
         let expected = activation.dot(&down.t());
         for h in 0..weights.hidden_size {
             let e = expected[[0, h]] + bias[h];

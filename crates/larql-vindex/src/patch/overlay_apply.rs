@@ -664,7 +664,10 @@ mod tests {
             }),
         }]));
 
-        assert!(!pv.deleted.contains(&(0, 1)), "Update must clear the tombstone");
+        assert!(
+            !pv.deleted.contains(&(0, 1)),
+            "Update must clear the tombstone"
+        );
         // Both query paths agree the feature exists again.
         assert_eq!(pv.feature_meta(0, 1).unwrap().top_token, "revived");
         let q = ndarray::Array1::from_vec(vec![1.0_f32, 0.0]);

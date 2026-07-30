@@ -480,8 +480,8 @@ mod tests {
     fn fp4_storage_routes_through_serial_sparse_with_exact_math() {
         use crate::ffn::FfnBackend;
         let weights = make_test_weights(); // tinymodel → SiLU, gated
-        // Fewer features than hidden so the stub's `out[feat] += alpha`
-        // down-write stays in range.
+                                           // Fewer features than hidden so the stub's `out[feat] += alpha`
+                                           // down-write stays in range.
         let n_features = 8;
         assert!(n_features <= weights.hidden_size);
         let index = Fp4StubIndex::ok(n_features);
@@ -530,9 +530,7 @@ mod tests {
         let ffn = WalkFfn::new_unlimited(&weights, &index).with_dispatch_trace();
 
         // Direct: the walk itself must decline.
-        assert!(ffn
-            .walk_ffn_sparse(0, &x(1, weights.hidden_size))
-            .is_none());
+        assert!(ffn.walk_ffn_sparse(0, &x(1, weights.hidden_size)).is_none());
 
         // Ladder: FP4 step fails → fall through to weights_fallback.
         let out = ffn.forward(0, &x(1, weights.hidden_size));
@@ -556,9 +554,7 @@ mod tests {
             fail_scaled_add: false,
         };
         let ffn = WalkFfn::new_unlimited(&weights, &index);
-        assert!(ffn
-            .walk_ffn_sparse(0, &x(1, weights.hidden_size))
-            .is_none());
+        assert!(ffn.walk_ffn_sparse(0, &x(1, weights.hidden_size)).is_none());
     }
 
     // ── Override arms of the serial loop ────────────────────────────────

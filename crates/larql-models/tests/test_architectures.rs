@@ -128,7 +128,10 @@ fn gpt_oss_still_reports_packed_checkpoint_keys() {
         arch.packed_gate_up_blocks_key(0).as_deref(),
         Some("layers.0.mlp.experts.gate_up_proj_blocks")
     );
-    assert_eq!(arch.expert_format(), larql_models::ExpertFormat::PackedMxfp4);
+    assert_eq!(
+        arch.expert_format(),
+        larql_models::ExpertFormat::PackedMxfp4
+    );
 }
 
 #[test]
@@ -1714,4 +1717,189 @@ fn get_packed_bytes_mmap_range_missing_file_falls_through_to_raw() {
     // mmap file absent → fallback to raw_bytes
     let bytes = w.get_packed_bytes("tensor.key").unwrap();
     assert_eq!(bytes, &[9u8, 8]);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Trait-default + OLMoE sweeps, duplicated from the in-crate unit
+// tests on purpose.
+//
+// `cargo llvm-cov --package larql-models` (the CI coverage gate) merges
+// this binary's instantiation of the crate with the lib-test binary's.
+// A default method exercised only by the unit tests still reports
+// uncovered lines from THIS binary's copy, and the per-file floor is
+// computed on the merged union — so the public-API surface below has to
+// walk the same paths, or `config.rs`/`olmoe.rs` sit under their floors
+// with green tests.
+// ═══════════════════════════════════════════════════════════════
+
+/// OLMoE-1B-7B's real routing shape (64 experts, 8 per token, expert
+/// width in plain `intermediate_size`).
+fn olmoe() -> Box<dyn ModelArchitecture> {
+    detect_from_json(&serde_json::json!({
+        "model_type": "olmoe",
+        "hidden_size": 2048,
+        "intermediate_size": 1024,
+        "num_hidden_layers": 16,
+        "num_attention_heads": 16,
+        "num_key_value_heads": 16,
+        "num_experts": 64,
+        "num_experts_per_tok": 8,
+        "norm_topk_prob": false,
+    }))
+}
+
+#[test]
+fn olmoe_moe_shape_and_keys() {
+    let a = olmoe();
+    assert_eq!(a.family(), "olmoe");
+    assert!(a.is_moe());
+    assert_eq!(a.num_experts(), 64);
+    assert_eq!(a.num_experts_per_token(), 8);
+    // No `moe_intermediate_size` field: expert width comes from
+    // `intermediate_size`, not an `unwrap_or(0)`.
+    assert_eq!(a.moe_intermediate_size(), 1024);
+    // `norm_topk_prob: false` keeps raw softmax probabilities.
+    assert_eq!(
+        a.expert_routing_policy(),
+        larql_models::ExpertRoutingPolicy::SoftmaxThenSelect
+    );
+    let p = a.layer_prefix(2);
+    assert_eq!(a.moe_router_key(2), Some(format!("{p}mlp.gate.weight")));
+    assert_eq!(
+        a.expert_ffn_gate_key(2, 5),
+        Some(format!("{p}mlp.experts.5.gate_proj.weight"))
+    );
+    assert_eq!(
+        a.expert_ffn_up_key(2, 5),
+        Some(format!("{p}mlp.experts.5.up_proj.weight"))
+    );
+    assert_eq!(
+        a.expert_ffn_down_key(2, 5),
+        Some(format!("{p}mlp.experts.5.down_proj.weight"))
+    );
+    assert_eq!(
+        a.attn_q_norm_key(2),
+        Some(format!("{p}self_attn.q_norm.weight"))
+    );
+    assert_eq!(
+        a.attn_k_norm_key(2),
+        Some(format!("{p}self_attn.k_norm.weight"))
+    );
+}
+
+#[test]
+fn olmoe_without_experts_is_dense() {
+    let a = detect_from_json(&serde_json::json!({
+        "model_type": "olmoe",
+        "hidden_size": 64,
+        "intermediate_size": 128,
+        "num_hidden_layers": 1,
+        "num_attention_heads": 4,
+    }));
+    assert!(!a.is_moe());
+    assert_eq!(a.num_experts_per_token(), 0);
+    assert_eq!(a.moe_router_key(0), None);
+    assert_eq!(a.expert_ffn_gate_key(0, 0), None);
+    assert_eq!(a.expert_ffn_up_key(0, 0), None);
+    assert_eq!(a.expert_ffn_down_key(0, 0), None);
+}
+
+/// Walk the `ModelArchitecture` defaults through a family that overrides
+/// almost nothing, so this binary's instantiation of the default bodies
+/// executes. Assertions mirror `config::tests` — see the header comment.
+#[test]
+fn trait_defaults_via_public_api() {
+    let a = detect_from_json(&serde_json::json!({
+        "model_type": "llama",
+        "hidden_size": 64,
+        "intermediate_size": 128,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "head_dim": 16,
+        "vocab_size": 32,
+    }));
+    // Dense-model MoE surface.
+    assert!(!a.is_moe());
+    assert!(!a.is_hybrid_moe());
+    assert_eq!(a.num_experts(), 0);
+    assert_eq!(a.num_shared_experts(), 0);
+    assert_eq!(a.moe_intermediate_size(), 0);
+    assert_eq!(a.moe_router_type(), "top_k_softmax");
+    assert_eq!(a.expert_format(), ExpertFormat::PerExpert);
+    assert_eq!(
+        a.expert_gate_policy(),
+        larql_models::ExpertGatePolicy::Gated
+    );
+    assert_eq!(
+        a.expert_routing_policy(),
+        larql_models::ExpertRoutingPolicy::SoftmaxThenSelect
+    );
+    for k in [
+        a.moe_router_bias_key(0),
+        a.moe_router_scale_key(0),
+        a.moe_router_per_expert_scale_key(0),
+        a.moe_router_norm_key(0),
+        a.shared_expert_gate_key(0),
+        a.shared_expert_up_key(0),
+        a.shared_expert_down_key(0),
+        a.packed_gate_up_blocks_key(0),
+        a.packed_gate_up_scales_key(0),
+        a.packed_gate_up_bias_key(0),
+        a.packed_down_blocks_key(0),
+        a.packed_down_scales_key(0),
+        a.packed_down_bias_key(0),
+        a.packed_experts_gate_up_key(0),
+        a.packed_experts_down_key(0),
+        a.moe_post_outer_norm_key(0),
+        a.moe_post_ffn1_norm_key(0),
+        a.moe_pre_experts_norm_key(0),
+        a.moe_post_experts_norm_key(0),
+        a.attn_sinks_key(0),
+        a.fused_qkv_key(0),
+        a.fused_qkv_bias_key(0),
+        a.ffn_up_bias_key(0),
+        a.ffn_down_bias_key(0),
+        a.layer_scalar_key(0),
+        a.mla_kv_a_key(0),
+        a.mla_kv_b_key(0),
+        a.mla_q_a_key(0),
+        a.mla_q_b_key(0),
+    ] {
+        assert_eq!(k, None);
+    }
+    assert!(!a.moe_router_norm_parameter_free());
+    assert_eq!(a.moe_router_input_scalar(), None);
+    assert!(!a.moe_has_combined_output_norm());
+    // MLA off means standard GQA.
+    assert!(!a.uses_mla());
+    assert_eq!(a.kv_lora_rank(), 0);
+    assert_eq!(a.q_lora_rank(), 0);
+    assert_eq!(a.mla_qk_nope_head_dim(), None);
+    assert_eq!(a.mla_qk_rope_head_dim(), None);
+    assert_eq!(a.mla_v_head_dim(), None);
+    // Identity multipliers, no softcapping, no PLE, no rope scaling.
+    assert_eq!(a.residual_multiplier(), 1.0);
+    assert_eq!(a.attention_multiplier(), 1.0);
+    assert_eq!(a.logits_scaling(), 1.0);
+    assert_eq!(a.attn_logit_softcapping(), None);
+    assert_eq!(a.final_logit_softcapping(), None);
+    assert!(!a.has_per_layer_embeddings());
+    assert_eq!(a.per_layer_embed_dim(), 0);
+    assert_eq!(a.per_layer_embed_key(), None);
+    assert_eq!(a.per_layer_model_projection_key(), None);
+    assert_eq!(a.per_layer_projection_norm_key(), None);
+    assert_eq!(a.per_layer_input_gate_key(0), None);
+    assert_eq!(a.per_layer_projection_key(0), None);
+    assert_eq!(a.post_per_layer_input_norm_key(0), None);
+    assert_eq!(a.rope_position_divisor_for_layer(0), 1.0);
+    // llama overrides llama3_rope_scaling, so only walk it — the default's
+    // None is asserted by `config::tests` on an override-free arch.
+    let _ = a.llama3_rope_scaling();
+    assert!(a.multimodal().is_none());
+    assert_eq!(a.kv_shared_source_layer(0), None);
+    // Scale falls back to head_dim^-0.5 without query_pre_attn_scalar.
+    assert_eq!(a.attention_scale_for_layer(0), (16.0f64).powf(-0.5));
+    // The markov-residual precondition holds for the default surface.
+    assert!(a.kv_recomputable_from_residuals());
 }

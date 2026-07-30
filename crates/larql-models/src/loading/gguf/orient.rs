@@ -498,7 +498,7 @@ mod tests {
             top_k_experts: None,
             moe_intermediate_size: None,
             swiglu_limit: None,
-        norm_topk_prob: None,
+            norm_topk_prob: None,
             kv_lora_rank: None,
             q_lora_rank: None,
             qk_nope_head_dim: None,

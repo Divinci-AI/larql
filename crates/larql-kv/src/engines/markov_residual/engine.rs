@@ -455,8 +455,11 @@ impl KvEngine for MarkovResidualEngine {
         let mut h_new = embed_tokens_pub(weights, &[token_id]);
         // PLE inputs are per-token — recompute for this single-token decode
         // step, matching the legacy `kv_decode_step_run` recipe exactly.
-        let ple_inputs =
-            larql_inference::forward::ple::precompute_per_layer_inputs(weights, &h_new, &[token_id]);
+        let ple_inputs = larql_inference::forward::ple::precompute_per_layer_inputs(
+            weights,
+            &h_new,
+            &[token_id],
+        );
         let mut new_stored: Vec<Array2<f32>> = Vec::with_capacity(num_layers);
 
         for layer in 0..num_layers {
