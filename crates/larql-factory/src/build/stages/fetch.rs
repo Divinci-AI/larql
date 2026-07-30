@@ -12,6 +12,7 @@
 //! ambiguity impossible: there's only ever one revision in it.
 
 use crate::build::runner::{CommandOutput, CommandRunner, Invocation};
+use crate::build::stages::exec::run_checked;
 use crate::Recipe;
 
 const HF_HUB_CACHE_ENV: &str = "HF_HUB_CACHE";
@@ -36,12 +37,11 @@ pub fn run(
     recipe: &Recipe,
     hf_cache_dir: &std::path::Path,
 ) -> Result<CommandOutput, String> {
-    let inv = invocation(recipe, hf_cache_dir);
-    let out = runner.run(&inv)?;
-    if !out.success() {
-        return Err(format!("larql model pull failed: {}", out.stderr));
-    }
-    Ok(out)
+    run_checked(
+        runner,
+        &invocation(recipe, hf_cache_dir),
+        "larql model pull",
+    )
 }
 
 #[cfg(test)]
@@ -50,10 +50,7 @@ mod tests {
 
     use super::*;
     use crate::build::runner::MockRunner;
-
-    fn sample_recipe() -> Recipe {
-        Recipe::from_yaml(include_str!("../../../testdata/gemma-3-4b-it.yaml")).unwrap()
-    }
+    use crate::test_support::sample_recipe;
 
     #[test]
     fn invocation_pins_repo_and_revision() {

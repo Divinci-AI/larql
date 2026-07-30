@@ -74,6 +74,10 @@ pub const ENV_SKIP_MOE: &str = "LARQL_SKIP_MOE";
 pub const ENV_SKIP_MOE_LEGACY: &str = "SKIP_MOE";
 /// MoE route/debug output toggle.
 pub const ENV_MOE_DEBUG: &str = "LARQL_MOE_DEBUG";
+/// Path for the per-token expert-routing trace written by the reference MoE
+/// backend. Value-carrying and opt-in: unset or empty means no trace.
+/// See `larql-compute/src/ffn/expert_weight/trace.rs`.
+pub const ENV_MOE_ROUTE_TRACE: &str = "LARQL_MOE_ROUTE_TRACE";
 /// Enable Metal MoE dispatch timing.
 pub const ENV_METAL_MOE_TIMING: &str = "LARQL_MOE_TIMING";
 /// Select the 8-simdgroup Q4_K matvec kernel; set to a false value to opt out.

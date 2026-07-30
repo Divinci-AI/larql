@@ -157,6 +157,12 @@ enum Commands {
     /// Cross-backend numerical parity diff (CPU vs Metal vs reference).
     Parity(parity::ParityArgs),
 
+    #[command(next_help_heading = "Build")]
+    /// Expert-selection locality over a routing trace: does speculative
+    /// decoding amortise the expert bank, and can a hot cache work?
+    /// Collect the trace with `LARQL_MOE_ROUTE_TRACE=<path> larql shannon score`.
+    MoeLocality(moe_locality::MoeLocalityArgs),
+
     // ── Factory (docs/vindex-factory.md) ─────────────────────────────
     #[command(next_help_heading = "Factory", subcommand)]
     /// Vindex Factory recipe tooling — validate a recipe, compute its
@@ -590,6 +596,7 @@ fn real_main() -> i32 {
         Commands::Verify(args) => verify_cmd::run(args),
         Commands::Diag(args) => diag_cmd::run(args),
         Commands::Parity(args) => parity::run(args),
+        Commands::MoeLocality(args) => moe_locality::run(args),
 
         // ── Query (legacy graph-file surface) ──
         Commands::Query(args) => query_cmd::run(args),

@@ -13,6 +13,7 @@
 use std::path::Path;
 
 use crate::build::runner::{CommandRunner, Invocation};
+use crate::build::stages::exec::run_checked;
 use crate::card::naming::{hub_repo_name, slice_suffix};
 use crate::{Metadata, OutputSpec, Publish};
 
@@ -46,14 +47,11 @@ pub fn run(
     output: &OutputSpec,
 ) -> Result<String, String> {
     let repo = repo_name(metadata, publish, output);
-    let inv = invocation(dir, &repo, &publish.hub.repo_type);
-    let out = runner.run(&inv)?;
-    if !out.success() {
-        return Err(format!(
-            "larql hf publish failed for {}: {}",
-            repo, out.stderr
-        ));
-    }
+    run_checked(
+        runner,
+        &invocation(dir, &repo, &publish.hub.repo_type),
+        &format!("larql hf publish for {repo}"),
+    )?;
     Ok(repo)
 }
 
@@ -61,11 +59,7 @@ pub fn run(
 mod tests {
     use super::*;
     use crate::build::runner::{CommandOutput, MockRunner};
-    use crate::Recipe;
-
-    fn sample_recipe() -> Recipe {
-        Recipe::from_yaml(include_str!("../../../testdata/gemma-3-4b-it.yaml")).unwrap()
-    }
+    use crate::test_support::sample_recipe;
 
     #[test]
     fn repo_name_matches_the_card_generators_naming() {

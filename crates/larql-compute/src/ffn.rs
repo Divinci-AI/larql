@@ -7,8 +7,10 @@
 //! `larql-inference` because they reference session state, gRPC
 //! clients, and shard discovery.
 
+pub mod expert_weight;
 pub mod weight;
 
+pub use expert_weight::ExpertWeightFfn;
 pub use weight::{
     dense_ffn_forward, dense_ffn_forward_backend, BackendFfn, NullFfn, Q4kMatmulFfn, ViewFfn,
     WeightFfn,

@@ -28,6 +28,55 @@ pub enum Activation {
     Relu,
 }
 
+/// How an expert's fused gate/up projection becomes the down projection's
+/// input.
+///
+/// Most MoE models are a plain gated FFN. GPT-OSS is not, and the difference
+/// is not cosmetic: it clamps both halves, scales the sigmoid argument, and
+/// adds one to the up branch. Modelling that as "SiLU with extra steps" is how
+/// a forward pass ends up plausibly wrong — hence an explicit policy rather
+/// than an [`Activation`] variant.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ExpertGatePolicy {
+    /// `activation(gate) * up` — Mixtral, Gemma 4, OLMoE, GraniteMoE.
+    Gated,
+    /// GPT-OSS's clamped GLU, from `GptOssExperts._apply_gate`:
+    ///
+    /// ```text
+    /// g   = gate.clamp(max = limit)          // upper bound only
+    /// u   = up.clamp(-limit, limit)          // symmetric
+    /// glu = g * sigmoid(alpha * g)
+    /// out = (u + 1) * glu
+    /// ```
+    ClampedGlu {
+        /// Clamp bound (`swiglu_limit`, 7.0 on the released checkpoints).
+        limit: f32,
+        /// Multiplier on the sigmoid argument (1.702 in the reference).
+        alpha: f32,
+    },
+}
+
+/// How a router's top-k weights are normalised.
+///
+/// There are only two observable behaviours, and the difference is whether the
+/// selected weights sum to 1. Getting it wrong rescales the entire expert
+/// branch, which is a large error that still produces coherent-looking output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExpertRoutingPolicy {
+    /// Softmax over **all** experts, then keep the top-k probabilities as they
+    /// are. They sum to *less* than 1 — by whatever mass the unselected
+    /// experts hold. Mixtral and OLMoE with `norm_topk_prob: false`.
+    SoftmaxThenSelect,
+    /// The selected weights are normalised to sum to 1.
+    ///
+    /// Two routes arrive here and they are algebraically identical, which is
+    /// why one variant covers both: renormalising the top-k probabilities
+    /// (`norm_topk_prob: true`, Gemma 4), or softmaxing over just the selected
+    /// logits (GPT-OSS) —
+    /// `softmax(l)_i / Σ_{j∈topk} softmax(l)_j = exp(l_i) / Σ_{j∈topk} exp(l_j)`.
+    NormalisedOverSelected,
+}
+
 /// Whether the FFN uses a gated architecture.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum FfnType {
@@ -114,6 +163,15 @@ pub struct ModelConfig {
     pub top_k_experts: Option<usize>,
     /// Gemma 4 A4B: intermediate (hidden) dimension of each expert's FFN.
     pub moe_intermediate_size: Option<usize>,
+    /// GPT-OSS: clamp bound applied to both halves of the fused gate/up
+    /// projection before the GLU (`swiglu_limit` in `config.json`, 7.0 on
+    /// the released checkpoints). `None` for architectures that don't clamp.
+    pub swiglu_limit: Option<f64>,
+    /// Whether the router renormalises its top-k probabilities to sum to 1
+    /// (`norm_topk_prob` in `config.json`). `None` means the field was absent;
+    /// architectures that read it treat that as `false`, matching HF's own
+    /// default for the OLMoE/Mixtral family.
+    pub norm_topk_prob: Option<bool>,
     // MLA fields
     pub kv_lora_rank: Option<usize>,
     pub q_lora_rank: Option<usize>,
@@ -657,6 +715,66 @@ pub trait ModelArchitecture: Send + Sync {
     /// Packed down projection scales key.
     fn packed_down_scales_key(&self, _layer: usize) -> Option<String> {
         None
+    }
+
+    // ── MoE biases and gating (declared 2026-07-30) ──
+    //
+    // These three tensors exist per layer in the GPT-OSS checkpoint and were
+    // silently dropped for the same reason the attention biases were: nothing
+    // named them, so extraction never asked and the forward pass never
+    // applied them. A key returned here is only half the obligation — the
+    // backend has to consume it. See `docs/k3-funnel.md` §4.7.
+
+    /// Router bias key, added to the router logits before top-k selection.
+    /// `None` for routers without a bias term.
+    fn moe_router_bias_key(&self, _layer: usize) -> Option<String> {
+        None
+    }
+
+    /// Per-expert bias on the fused gate+up projection.
+    /// Shape `[num_experts, 2 * moe_intermediate_size]`, interleaved on the
+    /// last axis exactly as the weight rows are.
+    fn packed_gate_up_bias_key(&self, _layer: usize) -> Option<String> {
+        None
+    }
+
+    /// Per-expert bias on the expert down projection.
+    /// Shape `[num_experts, hidden_size]`.
+    fn packed_down_bias_key(&self, _layer: usize) -> Option<String> {
+        None
+    }
+
+    /// How an expert's gate/up projection is combined into the down
+    /// projection's input. Defaults to the plain gated FFN every other
+    /// MoE architecture in the support table uses.
+    fn expert_gate_policy(&self) -> ExpertGatePolicy {
+        ExpertGatePolicy::Gated
+    }
+
+    /// How the router's top-k weights are normalised.
+    ///
+    /// Read from `norm_topk_prob`, which is exactly what that field means:
+    /// `true` renormalises the selected weights to sum to 1; `false` or absent
+    /// keeps the raw softmax probabilities, which sum to less by however much
+    /// mass the unselected experts hold.
+    ///
+    /// **This default reads the config on purpose.** Baking one routing order
+    /// into code that serves both architectures is a rescale of the entire
+    /// expert branch, and it has now been got wrong twice — `docs/k3-funnel.md`
+    /// §4.7 finding 5, then again in `select_and_normalise` an hour after that
+    /// finding was written up. A config-reading default makes a new MoE
+    /// architecture correct on arrival instead of correct only if someone
+    /// remembers to override; `QwenArch` shipped `norm_topk_prob: true` models
+    /// and inherited the wrong order for exactly that reason.
+    ///
+    /// Override only where the order is fixed by the architecture rather than
+    /// by config, as GPT-OSS's is.
+    fn expert_routing_policy(&self) -> ExpertRoutingPolicy {
+        if self.config().norm_topk_prob.unwrap_or(false) {
+            ExpertRoutingPolicy::NormalisedOverSelected
+        } else {
+            ExpertRoutingPolicy::SoftmaxThenSelect
+        }
     }
 
     /// Shared expert FFN gate weight key.

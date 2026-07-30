@@ -12,6 +12,7 @@
 //! contract) and has a real CLI command behind it.
 
 use crate::build::runner::{CommandOutput, CommandRunner, Invocation};
+use crate::build::stages::exec::run_checked;
 
 /// Build the `larql hf visibility <repo> --public [--repo-type T]` invocation.
 pub fn invocation(repo: &str, repo_type: &str) -> Invocation {
@@ -32,15 +33,11 @@ pub fn run(
     repo: &str,
     repo_type: &str,
 ) -> Result<CommandOutput, String> {
-    let inv = invocation(repo, repo_type);
-    let out = runner.run(&inv)?;
-    if !out.success() {
-        return Err(format!(
-            "larql hf visibility --public failed for {repo}: {}",
-            out.stderr
-        ));
-    }
-    Ok(out)
+    run_checked(
+        runner,
+        &invocation(repo, repo_type),
+        &format!("larql hf visibility --public for {repo}"),
+    )
 }
 
 #[cfg(test)]

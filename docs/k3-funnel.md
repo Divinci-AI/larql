@@ -453,6 +453,158 @@ panicked at larql-compute/src/ffn/weight.rs:333:
 
 **GB is the gate the ladder exists to strengthen.** At R1 and R2 it is a local diff. At R3 it degrades to an API oracle — which is exactly why R3's remaining surface is deliberately the *smallest and simplest* three components (§7).
 
+### 4.7 Unblocking GB found six defects in the forward pass it was going to measure (2026-07-30)
+
+§4.6.8 recorded GB as blocked on a missing instrument. Building the instrument turned out to be the smaller half of the job: **larql's GPT-OSS MoE forward pass diverged from the reference in six independent ways**, every one of which GB would have been reporting as a bits/char number without saying why.
+
+This is the sinks finding (§4.6) repeated one subsystem over, and it lands the same way: found on a 13 GB model that runs locally, against a reference implementation that runs on the same machine. That is the entire argument for the ladder, twice in three days.
+
+#### 4.7.1 The findings
+
+Verified against `transformers` 5.5.0 (`models/gpt_oss/modeling_gpt_oss.py`, `integrations/mxfp4.py`), and for the first one against the real `openai/gpt-oss-20b` snapshot.
+
+**Finding 1 — the fused gate/up split was inverted. This is the load-bearing one.**
+
+The reference chain is unambiguous:
+
+```text
+gate_up_proj_blocks (E, 2I, G, 16)
+  -> dequant                (E, 2I, H)     row = on-disk output row
+  -> .transpose(1, 2)       (E, H, 2I)     on-disk row becomes the LAST axis
+  -> _apply_gate:  gate = x[..., 0::2],  up = x[..., 1::2]
+```
+
+so **gate is the even on-disk rows and up the odd ones — interleaved.** larql took the leading half as gate (`quant/mxfp4.rs`, and the extractor's `gate_vectors/packed_mxfp4.rs`), which makes each "half" a 50/50 mixture of the two projections.
+
+Measured on layer 0, expert 0 of the real checkpoint:
+
+| split | gate std | gate absmax | up std | up absmax |
+|---|---|---|---|---|
+| reference (even/odd) | 0.0287 | **0.250** | 0.0449 | 0.500 |
+| larql (contiguous halves) | 0.0376 | 0.500 | 0.0377 | 0.500 |
+
+**90.29 % of elements differ**, and the statistical signature is diagnostic rather than suggestive: the correct split separates two genuinely different distributions, while the wrong one yields two halves with matching statistics — because both are the same mixture. The true gate never exceeds 0.25 in magnitude; larql's "gate" reached 0.50 because it contained up rows.
+
+The **bias is an independent witness**, and a cleaner one. Reference gate/up bias means separate at **−0.464 / −0.898**; larql's two halves both sat at the pooled mean, **−0.679 / −0.684**, with the standard deviation inflated from ~0.13 to 0.26 — textbook two-population variance inflation.
+
+`gpt_oss.rs`'s module header stated the wrong belief in prose — *"gate_up_proj_blocks (first half = gate)"* — three lines above the sinks claim that §4.6 falsified. Two false statements in one comment block, both load-bearing, neither tested.
+
+**Findings 2–4 — the expert MLP is not SwiGLU.** From `GptOssExperts._apply_gate`:
+
+```python
+g   = gate.clamp(min=None, max=limit)   # one-sided
+u   = up.clamp(-limit, limit)           # symmetric
+glu = g * sigmoid(g * alpha)            # alpha = 1.702
+out = (u + 1) * glu                     # note the +1
+```
+
+larql computed `silu(g) * u`, missing the α, the `(up + 1)`, and both clamps. `config.json` ships `swiglu_limit: 7.0` and nothing read it. The `(up + 1)` term matters most: at `up = 0` the reference passes the GLU straight through where SwiGLU annihilates it.
+
+**Finding 5 — the router's normalise/select order was inverted.** larql softmaxed over all 32 experts then took the top 4 (`cpu/ops/moe/mod.rs:123-124`, `MoeTopKWeightPolicy::RawSoftmax`); the reference takes the top 4 then softmaxes over **those**. The orders are not equivalent — select-then-normalise sums to exactly 1, normalise-then-select sums to whatever mass the top 4 of 32 happened to hold, so the whole expert branch was systematically attenuated. Worth recording that the fix is algebraically exact rather than approximate: `softmax(logits)_i / Σ_{j∈topk} softmax(logits)_j = exp(l_i) / Σ_{j∈topk} exp(l_j)`, so *renormalising* the selected weights **is** select-then-normalise.
+
+**Finding 6 — three of eight per-layer MLP tensors were silently dropped.** `mlp.router.bias`, `experts.gate_up_proj_bias`, `experts.down_proj_bias`: not declared on the architecture, not extracted, no field on `MoeLayerWeights`, and `gate_up_proj_bias` / `down_proj_bias` appeared **nowhere in the workspace**. Identical mechanism to §4.6.1's 5-of-11 attention tensors.
+
+**A seventh, found while fixing the others:** `moe_intermediate_size()` defaults to 0 and GPT-OSS never overrode it, so every expert matmul sized through that accessor would have had a zero inner dimension.
+
+#### 4.7.2 Two things checked and cleared, so the picture isn't overstated
+
+- **§4.2's MXFP4 codec PASS still stands.** It verified `dequantize_all_experts` — decoding blocks+scales to values — and that is genuinely bit-identical. The split happens *after* the codec. The GA spot-check was sound but scoped one function too narrow, which is the more useful lesson: a bit-exact codec test says nothing about what the caller does with the bytes.
+- **`down_proj` needs no transpose.** The reference transposes it too, but on-disk `[hidden, inter]` already matches larql's matmul convention (`out[h] = Σ_i act[i]·W[h][i]`). Confirmed by derivation rather than assumed, because on the 20B `hidden == inter == 2880` makes a missed transpose **shape-invisible**. This isolates the layout defect to gate_up's row selection alone.
+
+#### 4.7.3 Why the existing tests passed
+
+`split_gate_up_experts` had two unit tests. Both used `out_features = 2`.
+
+**At two rows the two conventions are indistinguishable** — row 0 is simultaneously "the first half" and "the even rows". The tests pinned the shape and the dequant scaling, and were structurally incapable of pinning the convention. Anything asserting it needs `out_features ≥ 4`.
+
+That is the same failure mode as §4.5's timestamp tests, which asserted plausibility (year ≥ 2020, month ∈ 1..12) and passed on wrong output by construction. Two instances now, in unrelated subsystems: **a fixture too small to distinguish the candidate behaviours is not a weak test, it is an absent one.** The new tests are built on a four-row fixture and the parity test carries an explicit control that fails under the old split.
+
+#### 4.7.4 What landed
+
+**Loader and extractor.** The de-interleaving convention is now owned by one named function, `mxfp4::deinterleave_fused_half`, with `FusedHalf::{Gate, Up}` and the reference chain in its doc comment. Both the model loader and the vindex gate-sketch extractor call it.
+
+**Architecture surface** (additive, default-impl'd — G0 holds): `moe_router_bias_key`, `packed_gate_up_bias_key`, `packed_down_bias_key`, and `expert_gate_policy() -> ExpertGatePolicy`, which is `Gated` for every existing architecture and `ClampedGlu { limit, alpha }` for GPT-OSS. `swiglu_limit` is now parsed from `config.json` rather than hardcoded, because a future checkpoint may pick a different bound. `GptOssArch` also overrides `moe_intermediate_size` and declares a distinct `moe_router_type` so the two routing orders can't alias.
+
+The per-expert keys the MXFP4 loader *synthesises* at dequant time are now advertised through `expert_ffn_{gate,up,down}_key` and their spelling shared via `tensor_keys::mxfp4_dequantised` — previously the loader wrote keys under a private convention that nothing could ask for.
+
+**`ExpertWeightFfn`** (`larql-compute/src/ffn/expert_weight/`) — the per-expert f32 MoE backend, sibling of `WeightFfn`. Every architecture-specific decision is read from `ModelArchitecture`, not branched on a family name, so a new MoE architecture that answers the accessors is served without touching the file. Split three ways: the driver, `router.rs` (select-then-normalise), `gate.rs` (the gate policies).
+
+**The scorer routes by architecture.** `score_ffn()` replaces the two hardcoded `WeightFfn` constructions, gated on the weights actually being present so a packed-expert model still falls through rather than half-resolving.
+
+#### 4.7.5 Verification
+
+| Check | Result |
+|---|---|
+| **MoE block vs the reference**, real formulas, 3 tokens × 16 dims | **all 48 values < 1e-5**, first run |
+| Control: the old contiguous-halves split against the same expectation | diverges > 1e-3 — the test would have caught the original bug |
+| `ClampedGlu` vs PyTorch `_apply_gate` on four branch-covering inputs | < 1e-5 |
+| Reference-vs-SwiGLU divergence on those inputs | > 30 absolute — the policies are not interchangeable |
+| `larql-models` / `larql-compute` / `larql-vindex` lib tests | 471 / 839 / 1161 pass |
+
+The parity test (`larql-compute/tests/test_moe_reference_parity.rs`) needs **no fixture file**: both sides draw weights from the same LCG in the same order, so the Python generator (`scripts/moe_reference_gpt_oss.py`) and the Rust test see bit-identical inputs. The three tokens deliberately do not all route to the same experts, so per-token routing is pinned too.
+
+**The composition point is the reason this test exists.** Every individual piece had a unit test before and after; the bug was a *composition* error — a bit-exact decode feeding a plausible split feeding a plausible activation feeding a plausible router, each defensible alone and collectively wrong. Only an end-to-end diff against the reference catches that class, which is precisely the instrument the ladder was built to have at R1.
+
+#### 4.7.6 GB runs — and the first thing it caught was my own bug
+
+**`larql shannon score` now scores a MoE model.** The blocker in §4.6.8 is closed.
+
+The first run was on OLMoE-1B-7B (a second MoE architecture, deliberately — a backend that only works on the model it was written for is not architecture-driven). It gave **2.677 bits/char** against the HF reference's **0.390** on the same corpus and the same 512/256 window. A 6.9× gap, and the cause was in the code written an hour earlier: `select_and_normalise` had **GPT-OSS's routing order baked in**, and OLMoE ships `norm_topk_prob: false` — raw softmax probabilities that sum to *less* than 1. Forcing them to sum to 1 inflated the entire expert branch.
+
+This is worth recording rather than quietly fixing, for two reasons.
+
+**First, it is finding 5 committed a second time, by me, immediately after documenting it.** Knowing that the normalise/select order is architecture-specific did not stop me hardcoding one of them. The fix is a typed `ExpertRoutingPolicy` on the architecture, defaulting to `SoftmaxThenSelect`, read from `norm_topk_prob` for OLMoE and overridden for GPT-OSS — the same shape as the gate policy, for the same reason. `olmoe.rs`'s module header had *already* flagged this exact dependency ("the dependency is recorded so a future default change can't quietly invert it"), which is a note that did its job and was still not enough. **A comment naming a hazard does not protect against it; only a type or a test does.**
+
+**Second, this is the ladder's thesis demonstrated on the smallest possible scale.** A rescale-the-expert-branch bug was introduced, and caught within one run by a local reference on a 7B model. At R3 the same class of bug reaches an API oracle as "top-k agreement is a bit low."
+
+| stage | OLMoE bits/char |
+|---|---|
+| HF reference | **0.390** |
+| larql, routing order hardcoded | 2.677 |
+| larql, routing policy read from the architecture | **1.901** |
+
+**GPT-OSS-20B, the number this was all for:**
+
+```
+$ larql shannon score <gpt-oss-20b> --corpus data/gutenberg/frankenstein.txt --bytes 384
+loaded. 24 layers, hidden_size=2880 (43.9s)
+tokens scored:          84
+bits/token:          3.221
+bits/char:           0.708
+```
+
+86 GB peak RSS, 51 s wall — the f32 reference tier is expensive but it fits on the box, which is the R1 premise.
+
+**What is closed and what is not.** GB has an instrument, it runs on both MoE architectures tried, and it produces numbers. It is **not passed**, and the two rungs fail for different reasons.
+
+**OLMoE — larql is the suspect.** 1.901 against the reference's 0.390 on an identical 512/256 window: 4.9×, far outside the 0.5 % gate. The residual is *not* in the MoE block — that is pinned to the reference at < 1e-5 (§4.7.5) and the routing order now comes from config. It is elsewhere in OLMoE's forward, which has **never had an end-to-end numerical check** because the scorer could not load it until today. QK-norm placement and the MHA path are the obvious suspects. The HF reference run here is trustworthy (1.59 bits/token for a 7B on Gutenberg is exactly where it should be).
+
+**GPT-OSS — the reference is the suspect, and all three engines failed.** This is the more consequential finding:
+
+| engine | result |
+|---|---|
+| larql f32 | 0.708 bits/char, **3.221 bits/token** |
+| HF f32 | **crashes** — `RuntimeError: expected m1 and m2 to have the same dtype, but got: float != c10::BFloat16`, inside `transformers/integrations/moe.py::_grouped_mm_fallback`. `convert_moe_packed_tensors` dequantises MXFP4 to **bf16** regardless of the requested model dtype, so f32 activations meet bf16 expert weights. |
+| HF bf16 | runs, gives **8.028 bits/token** — implausibly poor for a 20B on the opening of *Frankenstein*, so this run is not usable as ground truth either |
+| MLX | **crashes** — `ValueError: [gather_qmm] The weight matrix should be uint32 but received float32` |
+
+larql's 3.221 bits/token is the only figure in that table that is even plausible for a 20B model, which is suggestive but is *not* verification — a self-consistent number with no referee. **The GPT-OSS end-to-end comparison remains owed, and it is now blocked on the reference side rather than ours.**
+
+**That is a hole in the ladder's premise, and it should be pre-registered as such.** §4 defines GB at R1/R2 as "a layer-by-layer f32 diff against the local reference implementation", and §1 justifies the whole detour on the grounds that the ancestor "fits on the Mac". *Fitting* turns out to be two claims, and only the first was checked: the weights fit in RAM (86 GB, they do), **and the reference implementation actually executes on this machine** (for `openai/gpt-oss-20b`, it does not). A reference you cannot run is not a reference.
+
+What survives is the reference as a **transcription** rather than an executable — which is exactly what §4.7.5's differential test does, and what §4.6.5 did for sinks. That is a real instrument and it caught real bugs, but it verifies a block, not a forward pass.
+
+**Carry this to R2 as a risk, before committing weekends to it.** Kimi Linear's advertised references are FLA and vLLM kernels; both are CUDA-first, and the ladder's cost model assumes they run locally in f32. **Verify that Kimi Linear's reference implementation executes on Apple Silicon at R2/P1, as the first task of the rung, not after the adapter is written.** If it does not, R2's GB degrades to a transcription diff too — still useful, still far better than an API oracle, but not what §1 priced.
+
+> The instrument now exists and immediately found a defect in the first two models it was pointed at, plus a defect in itself. That is what a gate is supposed to do. GB is unblocked; it is not green.
+
+#### 4.7.7 Consequences to carry
+
+- **Every GPT-OSS vindex extracted before 2026-07-30 has mixed gate/up rows in its gate sketch** and needs re-extracting. Nothing was served from those rows (see below), but any KNN/walk routing analysis over them is void.
+- **GPT-OSS was never servable from a vindex anyway.** `write_per_layer_moe_kquant` gates on `ExpertFormat::PackedBF16`, so a packed-MXFP4 model writes **no per-layer expert store at all** — extraction reports success and the expert weights simply aren't there. That bounds the blast radius of finding 1 to the gate sketch, and it is a prerequisite for item 14 nobody had noticed was missing.
+- **The quantised MoE path still has findings 2–5.** `cpu_moe_forward` / `MoeLayerWeights` has no router-bias field, no expert-bias fields, and no gate policy; `RawSoftmax` is still normalise-then-select. It is untouched here deliberately — it cannot serve GPT-OSS today, and it *is* the measured, working Gemma 4 path, which uses `RenormalizedSoftmax` and is therefore correct for its own family. Bringing it up to the reference is R1/P5 work (item 14), and it now has a local f32 reference to be diffed against, which is the ordering the house rule asks for.
+- **Re-run the §4.2 edge-case scan at R3 as already pre-registered**, and add finding 1's check to it: K3's fused-tensor layout is a P1 one-liner (`does the export interleave?`) that must be *read*, not inherited.
+
 ## 5. Claims under test
 
 | ID | Claim | Falsifier |

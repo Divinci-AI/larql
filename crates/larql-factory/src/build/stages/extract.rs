@@ -14,6 +14,7 @@ use std::path::Path;
 use larql_vindex_spec::StorageDtype;
 
 use crate::build::runner::{CommandOutput, CommandRunner, Invocation};
+use crate::build::stages::exec::run_checked;
 use crate::Recipe;
 
 const HF_HUB_CACHE_ENV: &str = "HF_HUB_CACHE";
@@ -76,22 +77,18 @@ pub fn run(
     full_dir: &Path,
     hf_cache_dir: &Path,
 ) -> Result<CommandOutput, String> {
-    let inv = invocation(recipe, full_dir, hf_cache_dir);
-    let out = runner.run(&inv)?;
-    if !out.success() {
-        return Err(format!("larql extract failed: {}", out.stderr));
-    }
-    Ok(out)
+    run_checked(
+        runner,
+        &invocation(recipe, full_dir, hf_cache_dir),
+        "larql extract",
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::build::runner::MockRunner;
-
-    fn sample_recipe() -> Recipe {
-        Recipe::from_yaml(include_str!("../../../testdata/gemma-3-4b-it.yaml")).unwrap()
-    }
+    use crate::test_support::sample_recipe;
 
     fn dirs() -> (std::path::PathBuf, std::path::PathBuf) {
         (

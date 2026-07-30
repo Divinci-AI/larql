@@ -21,7 +21,10 @@ use super::summary::{expert_seed, summarise_expert_gate};
 /// two 4-bit values per byte.
 const MXFP4_GROUP_ELEMS: usize = 32;
 
-/// Parts packed into the fused gate/up tensor. The gate is the first.
+/// Parts packed into the fused gate/up tensor. They are **interleaved**
+/// along the output axis — gate on the even rows, up on the odd — not
+/// stored as two contiguous halves. The convention itself is owned by
+/// [`mxfp4::deinterleave_fused_half`](larql_models::quant::mxfp4::deinterleave_fused_half).
 const FUSED_GATE_UP_PARTS: usize = 2;
 
 /// Axis of the packed blocks tensor holding the expert index.
@@ -43,11 +46,12 @@ const MIN_BLOCKS_RANK: usize = 3;
 struct FusedGateLayout {
     /// Experts stored in this layer's tensor.
     n_experts: usize,
-    /// Output features across both fused parts (gate followed by up).
+    /// Output features across both fused parts (gate and up interleaved).
     out_features: usize,
     /// MXFP4 groups per output row.
     groups: usize,
-    /// Gate rows per expert — the leading half of the output features.
+    /// Gate rows per expert — half the output features, taken from the
+    /// even fused rows.
     gate_rows: usize,
     /// Input width per row, expanded from MXFP4 groups to elements.
     in_features: usize,
@@ -81,11 +85,6 @@ impl FusedGateLayout {
             gate_rows: out_features / FUSED_GATE_UP_PARTS,
             in_features: groups * MXFP4_GROUP_ELEMS,
         })
-    }
-
-    /// Element count of one expert's gate portion.
-    fn gate_len(&self) -> usize {
-        self.gate_rows * self.in_features
     }
 }
 
@@ -145,9 +144,15 @@ impl StreamingContext<'_> {
         let mut features_per_expert = 0usize;
 
         for (expert, expert_data) in experts.iter().enumerate() {
-            // Gate is the leading half of the fused output features.
-            let gate_data = &expert_data[..layout.gate_len()];
-            let gate = ArrayView2::from_shape((layout.gate_rows, layout.in_features), gate_data)
+            // Gate is the EVEN fused output rows, not the leading half —
+            // taking the leading half yields a 50/50 mixture of gate and up.
+            let gate_data = crate::format::quant::mxfp4::deinterleave_fused_half(
+                expert_data,
+                layout.out_features,
+                layout.in_features,
+                crate::format::quant::mxfp4::FusedHalf::Gate,
+            );
+            let gate = ArrayView2::from_shape((layout.gate_rows, layout.in_features), &gate_data)
                 .map_err(|e| VindexError::Parse(e.to_string()))?;
 
             let (data, n_feat) = summarise_expert_gate(gate, summary_k, expert_seed(layer, expert));
@@ -187,14 +192,28 @@ mod tests {
         assert_eq!(l.n_experts, 32);
         assert_eq!(l.out_features, 5760);
         assert_eq!(l.groups, 90);
-        assert_eq!(l.gate_rows, 2880, "gate is the leading half of 5760");
+        assert_eq!(l.gate_rows, 2880, "gate is half of 5760 fused rows");
         assert_eq!(l.in_features, 2880, "90 groups × 32 elements");
     }
 
+    /// The gate rows written for a layer must be the EVEN fused rows. Under
+    /// the old contiguous-halves reading each gate row was a 50/50 mixture of
+    /// real gate and up rows; this pins the selection at the layer's real
+    /// arity so a two-row fixture can't hide a regression.
+    /// See `docs/k3-funnel.md` §4.7.
     #[test]
-    fn gate_len_is_rows_times_width() {
-        let l = FusedGateLayout::from_blocks_shape(&GPT_OSS_20B_BLOCKS_SHAPE).unwrap();
-        assert_eq!(l.gate_len(), 2880 * 2880);
+    fn gate_rows_are_the_even_fused_rows() {
+        use larql_models::quant::mxfp4::{deinterleave_fused_half, FusedHalf};
+
+        // Four fused rows of width two, each row valued by its row index.
+        let in_features = 2;
+        let out_features = 4;
+        let data: Vec<f32> = (0..out_features)
+            .flat_map(|r| std::iter::repeat_n(r as f32, in_features))
+            .collect();
+
+        let gate = deinterleave_fused_half(&data, out_features, in_features, FusedHalf::Gate);
+        assert_eq!(gate, vec![0.0, 0.0, 2.0, 2.0]);
     }
 
     #[test]

@@ -37,13 +37,10 @@ pub fn render_verification(verify: &Verify, report: &VerificationReport) -> Stri
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{LogitMatchResult, Recipe, ReconstructionResult};
+    use crate::{LogitMatchResult, ReconstructionResult};
 
     fn sample_verify() -> Verify {
-        Recipe::from_yaml(include_str!("../../../testdata/gemma-3-4b-it.yaml"))
-            .unwrap()
-            .spec
-            .verify
+        crate::test_support::sample_recipe().spec.verify
     }
 
     fn passing_report() -> VerificationReport {

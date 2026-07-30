@@ -5,6 +5,7 @@
 use std::path::Path;
 
 use crate::build::runner::{CommandOutput, CommandRunner, Invocation};
+use crate::build::stages::exec::run_checked;
 use crate::OutputSpec;
 
 const FULL_PRESET: &str = "full";
@@ -36,15 +37,11 @@ pub fn run(
     dst_dir: &Path,
     output: &OutputSpec,
 ) -> Result<CommandOutput, String> {
-    let inv = invocation(full_dir, dst_dir, output);
-    let out = runner.run(&inv)?;
-    if !out.success() {
-        return Err(format!(
-            "larql slice --preset {} failed: {}",
-            output.preset, out.stderr
-        ));
-    }
-    Ok(out)
+    run_checked(
+        runner,
+        &invocation(full_dir, dst_dir, output),
+        &format!("larql slice --preset {}", output.preset),
+    )
 }
 
 #[cfg(test)]

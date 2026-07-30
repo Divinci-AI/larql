@@ -15,6 +15,7 @@
 use std::path::Path;
 
 use crate::build::runner::{CommandOutput, CommandRunner, Invocation};
+use crate::build::stages::exec::run_checked;
 
 /// Build the `larql verify <dir>` invocation.
 pub fn invocation(dir: &Path) -> Invocation {
@@ -23,16 +24,11 @@ pub fn invocation(dir: &Path) -> Invocation {
 
 /// Run checksum VERIFY for one output directory via `runner`.
 pub fn run(runner: &dyn CommandRunner, dir: &Path) -> Result<CommandOutput, String> {
-    let inv = invocation(dir);
-    let out = runner.run(&inv)?;
-    if !out.success() {
-        return Err(format!(
-            "larql verify failed for {}: {}",
-            dir.display(),
-            out.stderr
-        ));
-    }
-    Ok(out)
+    run_checked(
+        runner,
+        &invocation(dir),
+        &format!("larql verify for {}", dir.display()),
+    )
 }
 
 #[cfg(test)]

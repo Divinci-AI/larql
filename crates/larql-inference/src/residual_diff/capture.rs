@@ -371,13 +371,44 @@ impl ResidualCapture {
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
-/// Set the named env var to a fresh tempdir, run `f`, return the
-/// tempdir guard so the caller can read files before drop. Restores
-/// the previous env var value on drop (best-effort — Rust env vars
-/// are process-global, so racing `cargo test --test-threads=N` would
-/// stomp; tests in this suite run with `--test-threads=1` upstream).
+/// Serialises the env-var window in [`run_with_dump_dir`].
+///
+/// Env vars are process-global, so two concurrent captures would each
+/// point the *same* variable at their own tempdir. This is not
+/// hypothetical — it produced two distinct failures in
+/// `test_cpu_metal_parity`, which `cargo test` runs as four threads in
+/// one process:
+///
+/// - the loser's dump landed in the winner's directory, so its own
+///   directory was empty → "Metal prefill dump missing for layer 0";
+/// - or the loser read files the winner had written **for a different
+///   model**, giving a residual comparison of cos ≈ 0.005 — an
+///   apparently catastrophic kernel regression that was nothing of the
+///   sort.
+///
+/// The previous version documented the hazard ("racing `cargo test
+/// --test-threads=N` would stomp; tests in this suite run with
+/// `--test-threads=1` upstream") but nothing enforced it, and the
+/// default invocation violates it. The invariant belongs with the
+/// function that owns the global, not with each caller.
+static DUMP_DIR_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Set the named env var to a fresh tempdir, run `f`, and return the
+/// tempdir guard so the caller can read files before it drops. The
+/// previous value is restored before returning.
+///
+/// The env var is mutated under [`DUMP_DIR_ENV_LOCK`], so concurrent
+/// callers queue rather than redirect each other's dumps. Reads of the
+/// returned directory need no lock: each call gets its own tempdir, and
+/// `f` has finished writing to it by the time this returns.
 fn run_with_dump_dir(env_var: &str, f: impl FnOnce()) -> Result<tempfile::TempDir, String> {
     let dir = tempfile::tempdir().map_err(|e| format!("tempdir: {e}"))?;
+    // A panicking caller poisons the lock; the guarded state is just the
+    // env var, which is restored below either way, so recover rather
+    // than cascade one test's failure into every other test's.
+    let _guard = DUMP_DIR_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let prev = std::env::var(env_var).ok();
     std::env::set_var(env_var, dir.path());
     f();
@@ -476,6 +507,60 @@ mod tests {
         std::env::remove_var("LARQL_TEST_RESID_DUMP_DIR_NONE");
         let _ = run_with_dump_dir("LARQL_TEST_RESID_DUMP_DIR_NONE", || {}).unwrap();
         assert!(std::env::var("LARQL_TEST_RESID_DUMP_DIR_NONE").is_err());
+    }
+
+    /// Concurrent callers must each observe **their own** tempdir for the
+    /// whole of `f`, never a sibling's.
+    ///
+    /// This is the regression that mattered: `cargo test` runs the four
+    /// `test_cpu_metal_parity` cases as threads in one process, and the
+    /// unsynchronised version let one capture's dump directory be
+    /// redirected mid-run by another. The symptoms were a missing dump
+    /// ("Metal prefill dump missing for layer 0") and, worse, a *silent*
+    /// cross-model comparison reported as cos ≈ 0.005 — a parity failure
+    /// that looked exactly like a catastrophic kernel bug.
+    ///
+    /// Note that the two tests above cannot catch this: both are
+    /// single-threaded, and the hazard only exists under concurrency.
+    #[test]
+    fn concurrent_callers_never_see_each_others_dump_dir() {
+        const ENV: &str = "LARQL_TEST_RESID_DUMP_DIR_CONCURRENT";
+        const THREADS: usize = 8;
+
+        let mismatches = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        std::thread::scope(|scope| {
+            for _ in 0..THREADS {
+                let mismatches = std::sync::Arc::clone(&mismatches);
+                scope.spawn(move || {
+                    let dir = run_with_dump_dir(ENV, || {
+                        // Inside `f` the variable must name the directory
+                        // this call created — the window the dump hooks
+                        // actually read it in.
+                        let seen = std::env::var(ENV).unwrap_or_default();
+                        // Re-read after a yield so a racing setter has a
+                        // chance to land, the way a long capture would.
+                        std::thread::yield_now();
+                        let seen_again = std::env::var(ENV).unwrap_or_default();
+                        if seen != seen_again {
+                            mismatches.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        std::fs::write(std::path::Path::new(&seen).join("marker"), b"x").ok();
+                    })
+                    .expect("tempdir");
+                    // The marker this call wrote must be in its own dir.
+                    if !dir.path().join("marker").exists() {
+                        mismatches.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                });
+            }
+        });
+
+        assert_eq!(
+            mismatches.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "a concurrent caller observed another's dump directory"
+        );
+        std::env::remove_var(ENV);
     }
 
     #[test]

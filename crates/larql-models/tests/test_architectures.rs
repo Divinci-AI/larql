@@ -92,13 +92,43 @@ fn gpt_oss_attn_keys() {
     assert_eq!(arch.attn_o_key(3), "layers.3.self_attn.o_proj.weight");
 }
 
+/// GPT-OSS's per-expert keys describe **loaded** state, not the checkpoint.
+///
+/// On disk there are no per-expert tensors — everything is packed and fused,
+/// which is why this test previously asserted `is_none()`. But the safetensors
+/// loader dequantises and de-interleaves the experts at load time and stores
+/// each one separately, so a compute backend reading `ModelWeights` does see
+/// per-expert weights. Advertising them is what lets a generic per-expert FFN
+/// backend serve this model without knowing anything about MXFP4 — and until
+/// 2026-07-30 nothing could, which is why `shannon score` could not score it.
+/// Callers that read the *checkpoint* (extraction) still want `packed_*`.
+/// See `docs/k3-funnel.md` §4.7.
 #[test]
-fn gpt_oss_no_per_expert_keys() {
+fn gpt_oss_exposes_dequantised_per_expert_keys() {
     let arch = gpt_oss_arch();
-    // PackedMxfp4 doesn't have per-expert keys
-    assert!(arch.expert_ffn_gate_key(0, 0).is_none());
-    assert!(arch.expert_ffn_up_key(0, 0).is_none());
-    assert!(arch.expert_ffn_down_key(0, 0).is_none());
+    assert_eq!(
+        arch.expert_ffn_gate_key(0, 5).as_deref(),
+        Some("layers.0.block_sparse_moe.experts.5.w1.weight")
+    );
+    assert_eq!(
+        arch.expert_ffn_up_key(0, 5).as_deref(),
+        Some("layers.0.block_sparse_moe.experts.5.w3.weight")
+    );
+    assert_eq!(
+        arch.expert_ffn_down_key(0, 5).as_deref(),
+        Some("layers.0.block_sparse_moe.experts.5.w2.weight")
+    );
+}
+
+/// The packed keys remain the checkpoint's own layout, unchanged by the above.
+#[test]
+fn gpt_oss_still_reports_packed_checkpoint_keys() {
+    let arch = gpt_oss_arch();
+    assert_eq!(
+        arch.packed_gate_up_blocks_key(0).as_deref(),
+        Some("layers.0.mlp.experts.gate_up_proj_blocks")
+    );
+    assert_eq!(arch.expert_format(), larql_models::ExpertFormat::PackedMxfp4);
 }
 
 #[test]

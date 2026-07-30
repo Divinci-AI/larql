@@ -20,6 +20,8 @@ mod constants;
 mod estimate;
 mod hex;
 mod recipe;
+#[cfg(test)]
+mod test_support;
 mod validate;
 
 pub use build::{

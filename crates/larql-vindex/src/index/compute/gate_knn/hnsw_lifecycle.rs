@@ -17,6 +17,34 @@ impl VectorIndex {
     /// Enable HNSW search. Indexes are built lazily on first query per layer.
     ///
     /// `ef_search`: beam width for search (50-200). Higher = better recall, slower.
+    ///
+    /// # Which paths consult HNSW
+    ///
+    /// Only the KNN **serving** entry points route through the graph:
+    /// [`VectorIndex::gate_knn`] (LQL `NEAREST`, shard/gRPC/stream KNN
+    /// routes) and [`VectorIndex::gate_knn_expert`] (per-expert MoE
+    /// lookups, where the per-unit graph wins ~230 → 60 ms/layer on
+    /// 64-expert banks).
+    ///
+    /// The sparse-walk hot path **never** consults HNSW. WalkFfn selects
+    /// features via `gate_walk` (exact batched gemv) first and reaches
+    /// the `gate_knn` fallback only when a layer has no gate data at
+    /// all — so this toggle changes neither walk selection nor its
+    /// numerics. That ordering is deliberate, twice over:
+    ///
+    /// 1. **Recall** — HNSW is approximate (recall 80–95% depending on
+    ///    `ef_search`) while the walk's selection-quality and parity
+    ///    gates assume exact top-K; an unrelated serving flag must not
+    ///    silently change walk numerics.
+    /// 2. **Speed** — brute gemv is break-even or better at walk-scale
+    ///    feature counts (~10K/layer; see `benches/hnsw_decode.rs` and
+    ///    `docs/ffn-graph-layer.md`); the graph only pays off on the
+    ///    wide-MoE expert slices, which *are* wired via
+    ///    `gate_knn_expert`.
+    ///
+    /// Pinned by `gate_walk_ignores_hnsw_toggle` (`dispatch.rs`) and
+    /// `walk_ffn_sparse_hot_path_ignores_enable_hnsw`
+    /// (larql-inference `walk_ffn/sparse_route.rs`).
     pub fn enable_hnsw(&self, ef_search: usize) {
         self.gate
             .hnsw_enabled

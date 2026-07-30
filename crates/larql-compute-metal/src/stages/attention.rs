@@ -22,40 +22,14 @@ pub struct Flags {
     pub rotary_dim: u32,
 }
 
-/// Bytes of a single f32, for `set_bytes` scalar bindings.
-const SCALAR_BYTES: u64 = 4;
+/// First of the two consecutive `fused_attention` slots carrying
+/// attention sinks; the `has_sinks` flag follows in slot 15.
+const SINKS_BUFFER_INDEX: u64 = 14;
 
-/// Placeholder bound to the sinks slot when the architecture has none.
-///
-/// Metal has no null buffer binding, so the slot always carries a real
-/// allocation and `has_sinks` decides whether the shader reads it.
-const NO_SINKS_PLACEHOLDER: [f32; 1] = [0.0];
-
-/// Resolve the `(sinks, has_sinks)` pair every sink-aware attention
-/// kernel binds. Shared by the prefill dispatch here and both decode
-/// dispatches in `decode::encode_attn`, so the placeholder convention and
-/// the length check exist once.
-///
-/// # Panics
-///
-/// If the sink vector's length differs from the query-head count — the
-/// tensor does not describe this model, and padding it would produce a
-/// plausible-looking wrong forward pass.
-pub(crate) fn sink_binding(sinks: Option<&[f32]>, num_q_heads: usize) -> (&[f32], u32) {
-    match sinks {
-        Some(s) => {
-            assert_eq!(
-                s.len(),
-                num_q_heads,
-                "attention-sink vector has {} entries but the layer has {num_q_heads} \
-                 query heads — the extracted tensor does not match this model",
-                s.len()
-            );
-            (s, 1)
-        }
-        None => (&NO_SINKS_PLACEHOLDER, 0),
-    }
-}
+/// Threadgroup width for `fused_attention`. The kernel's threadgroup
+/// reductions size their scratch arrays against this, so it is fixed by
+/// the shader rather than tunable here.
+const THREADS_PER_THREADGROUP: u64 = 256;
 
 /// Dispatch `fused_attention` into the given encoder. Caller owns the
 /// encoder lifecycle.
@@ -99,17 +73,10 @@ pub fn encode(
     enc.set_bytes(12, 4, &skip_rope_val as *const u32 as *const c_void);
     enc.set_bytes(13, 4, &flags.rotary_dim as *const u32 as *const c_void);
     // Attention sinks (GPT-OSS): one learned logit per query head that
-    // competes in the softmax and is then discarded. `has_sinks` gates
-    // the read, since Metal cannot bind a null buffer.
-    let (sink_vals, has_sinks) = sink_binding(sinks, num_q_heads);
-    enc.set_bytes(
-        14,
-        std::mem::size_of_val(sink_vals) as u64,
-        sink_vals.as_ptr() as *const c_void,
-    );
-    enc.set_bytes(15, SCALAR_BYTES, &has_sinks as *const u32 as *const c_void);
+    // competes in the softmax and is then discarded.
+    super::sinks::bind(enc, SINKS_BUFFER_INDEX, sinks, num_q_heads);
     enc.dispatch_thread_groups(
         MTLSize::new(num_q_heads as u64, seq_len as u64, 1),
-        MTLSize::new(256, 1, 1),
+        MTLSize::new(THREADS_PER_THREADGROUP, 1, 1),
     );
 }

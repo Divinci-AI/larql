@@ -93,7 +93,7 @@ impl Recipe {
 mod tests {
     use super::*;
 
-    const SAMPLE: &str = include_str!("../../testdata/gemma-3-4b-it.yaml");
+    use crate::test_support::SAMPLE_RECIPE_YAML as SAMPLE;
 
     #[test]
     fn parses_the_sample_recipe() {

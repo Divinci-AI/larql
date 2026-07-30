@@ -24,7 +24,8 @@ mod tests;
 pub mod weight;
 
 pub use larql_compute::ffn::{
-    gelu_tanh, gelu_tanh_gate_up, sigmoid, silu_gate_up, FfnBackend, Q4K_Q8K_SUPERBLOCK_ELEMS,
+    expert_weight::resolvable as expert_weights_resolvable, gelu_tanh, gelu_tanh_gate_up, sigmoid,
+    silu_gate_up, ExpertWeightFfn, FfnBackend, Q4K_Q8K_SUPERBLOCK_ELEMS,
 };
 
 // ── Re-exports ──

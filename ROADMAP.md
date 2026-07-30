@@ -807,7 +807,7 @@ what's exact, approximate, observed, reconstructed):**
 12. ✅ **Delete the orphaned `larql-vindex/src/walk/` module** (DONE 2026-07-30) — no
     `mod walk;` anywhere, never compiles, stale `WalkFfnConfig` duplicate
     (left by `3944359b`). [larql-vindex]
-13. **Decide the HNSW hot-path question** — verified: `gate_walk` is tried
+13. ✅ **Decide the HNSW hot-path question** (DONE 2026-07-30 — DELIBERATE, documented + pinned: the gate_walk-first ordering shipped one day after HNSW (`735f570e` 2026-04-04, call-site comment "Falls back to gate_knn (HNSW or brute)"), brute gemv is break-even-or-better at walk-scale N (`docs/ffn-graph-layer.md`, `benches/hnsw_decode.rs`) and HNSW's 80–95% recall would silently break the walk's exact-top-K selection-quality/parity gates; HNSW's real wins (KNN serving, MoE expert 230→60 ms/layer) are already wired via `gate_knn`/`gate_knn_expert`. `enable_hnsw()` doc now maps exactly which paths consult HNSW; `sparse_route.rs` module doc notes the exact-first ordering; both pinned by `gate_walk_ignores_hnsw_toggle` + `walk_ffn_sparse_hot_path_ignores_enable_hnsw`. No behavior change) — verified: `gate_walk` is tried
     first (`sparse.rs:231,268`) and HNSW lives only inside the `gate_knn`
     fallback, so `enable_hnsw()` changes nothing whenever `gate_walk`
     succeeds. Intentional (brute gemv wins at these N) → document at

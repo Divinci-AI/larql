@@ -16,6 +16,18 @@
 //!
 //! The scoring/selection primitives themselves live in `selector.rs`;
 //! this file is only the decision tree the per-position loop calls.
+//!
+//! **HNSW note (2026-07-30 review, item #13).**
+//! `VectorIndex::enable_hnsw()` does not affect this decision tree.
+//! `gate_walk` (exact batched gemv) is deliberately tried before
+//! `gate_knn` — the only HNSW-aware call reachable here — and succeeds
+//! for any f32/warmed vindex, so the approximate graph is consulted
+//! only when a layer has no gate data (where `gate_knn` has nothing to
+//! search either). Exact top-K is load-bearing for the walk's
+//! selection-quality and parity work; HNSW's wins live on the KNN
+//! serving paths (`gate_knn`, `gate_knn_expert`). See `enable_hnsw()`'s
+//! doc in larql-vindex for the full path map; pinned below by
+//! `walk_ffn_sparse_hot_path_ignores_enable_hnsw`.
 
 use super::helpers::selection_weight_cmp_desc;
 use super::WalkFfn;
@@ -88,6 +100,9 @@ impl<'a> WalkFfn<'a> {
             }
         } else {
             match self.config.selector {
+                // Exact-first, deliberately: `gate_walk` (batched exact
+                // gemv) before the HNSW-aware `gate_knn` fallback — see
+                // the module doc's HNSW note.
                 FeatureSelector::GateOnly => self
                     .index
                     .gate_walk(layer, x_owned, top_k)
@@ -239,6 +254,36 @@ mod tests {
             vec![2, 0, 1]
         );
         assert!(hits.iter().all(|(_, g)| g.is_finite()));
+    }
+
+    /// Doc pin (2026-07-30 review, item #13): `enable_hnsw()` changes
+    /// nothing on the sparse-walk hot path. `gate_walk` (exact batched
+    /// gemv) is tried first and succeeds on any f32/warmed vindex, so
+    /// the approximate HNSW inside the `gate_knn` fallback is never
+    /// consulted — walk output must be bit-identical with the toggle on
+    /// and off. See the module doc's HNSW note.
+    #[test]
+    fn walk_ffn_sparse_hot_path_ignores_enable_hnsw() {
+        /// Documented default beam width (mirrors the server's
+        /// `DEFAULT_HNSW_EF_SEARCH`); the pin holds for any legal value.
+        const EF_SEARCH: usize = 200;
+        let weights = make_test_weights();
+        let index = make_test_vindex(&weights);
+        let cfg = WalkFfnConfig::sparse(weights.num_layers, 4);
+        let ffn = WalkFfn::from_config(&weights, &index, cfg);
+        let input = x(1, weights.hidden_size);
+        let (base, _) = ffn
+            .walk_ffn_sparse(0, &input)
+            .expect("walk with hnsw disabled");
+        index.enable_hnsw(EF_SEARCH);
+        assert!(index.is_hnsw_enabled());
+        let (toggled, _) = ffn
+            .walk_ffn_sparse(0, &input)
+            .expect("walk with hnsw enabled");
+        assert_eq!(
+            base, toggled,
+            "enable_hnsw must not change sparse-walk output"
+        );
     }
 
     /// When the layer exposes no interleaved Q4K gate bytes (plain f32

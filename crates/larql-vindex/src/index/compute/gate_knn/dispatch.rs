@@ -454,6 +454,24 @@ mod tests {
         assert!(v.gate_walk(0, &array![1.0, 2.0, 3.0, 4.0], 1).is_none());
     }
 
+    /// Doc pin (2026-07-30 review, item #13): `gate_walk` never consults
+    /// HNSW — `enable_hnsw` must not change its results. The sparse-walk
+    /// hot path stays exact regardless of the serving-path toggle; only
+    /// `gate_knn` / `gate_knn_expert` route through the graph.
+    #[test]
+    fn gate_walk_ignores_hnsw_toggle() {
+        /// Documented default beam width (mirrors the server's
+        /// `DEFAULT_HNSW_EF_SEARCH`); the pin holds for any legal value.
+        const EF_SEARCH: usize = 200;
+        let v = heap_idx();
+        let q = array![1.0, 2.0, 3.0, 4.0];
+        let brute = v.gate_walk(0, &q, 2).expect("heap path, hnsw off");
+        v.enable_hnsw(EF_SEARCH);
+        assert!(v.is_hnsw_enabled());
+        let toggled = v.gate_walk(0, &q, 2).expect("heap path, hnsw on");
+        assert_eq!(brute, toggled, "enable_hnsw must not affect gate_walk");
+    }
+
     /// `gate_walk` must consult `warmed_gates` before falling back to
     /// `resolve_gate`. Without this the f16-mmap path re-decodes f16→f32
     /// on every call — measured at ~7–8 ms/layer of redundant work on

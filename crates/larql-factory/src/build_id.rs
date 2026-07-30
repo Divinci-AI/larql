@@ -62,7 +62,7 @@ mod tests {
     use super::*;
     use crate::recipe::Recipe;
 
-    const SAMPLE: &str = include_str!("../testdata/gemma-3-4b-it.yaml");
+    use crate::test_support::SAMPLE_RECIPE_YAML as SAMPLE;
 
     fn sample() -> Recipe {
         Recipe::from_yaml(SAMPLE).unwrap()

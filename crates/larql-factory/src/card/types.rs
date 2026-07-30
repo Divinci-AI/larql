@@ -84,10 +84,7 @@ mod tests {
     use super::*;
 
     fn thresholds() -> Verify {
-        crate::Recipe::from_yaml(include_str!("../../testdata/gemma-3-4b-it.yaml"))
-            .unwrap()
-            .spec
-            .verify
+        crate::test_support::sample_recipe().spec.verify
     }
 
     fn passing_report() -> VerificationReport {

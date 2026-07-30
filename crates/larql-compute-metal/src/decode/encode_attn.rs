@@ -30,6 +30,14 @@ use crate::MetalBackend;
 use larql_compute::FullPipelineLayer;
 use larql_models::quant::ggml::LEGACY_BLOCK_ELEMS;
 
+/// First of the two consecutive `attn_fused` slots carrying attention
+/// sinks; the `has_sinks` flag follows in slot 19. See `stages::sinks`.
+const ATTN_FUSED_SINKS_INDEX: u64 = 18;
+
+/// First of the two consecutive `kv_append_attend_fused` slots carrying
+/// attention sinks; the `has_sinks` flag follows in slot 13.
+const KV_APPEND_ATTEND_SINKS_INDEX: u64 = 12;
+
 pub(super) struct AttnBufs<'a> {
     /// Layer-input residual (read).
     pub h_buf: &'a Buffer,
@@ -222,15 +230,13 @@ impl MetalBackend {
                 &layer_rope_base as *const f32 as *const std::ffi::c_void,
             );
             enc.set_bytes(17, 4, &rdim as *const u32 as *const std::ffi::c_void);
-            // Attention sinks (GPT-OSS) — see stages::attention::sink_binding.
-            let (sink_vals, has_sinks) =
-                crate::stages::attention::sink_binding(layer.attn_sinks, layer_num_q_heads);
-            enc.set_bytes(
-                18,
-                std::mem::size_of_val(sink_vals) as u64,
-                sink_vals.as_ptr() as *const std::ffi::c_void,
+            // Attention sinks (GPT-OSS) — see `stages::sinks`.
+            crate::stages::sinks::bind(
+                enc,
+                ATTN_FUSED_SINKS_INDEX,
+                layer.attn_sinks,
+                layer_num_q_heads,
             );
-            enc.set_bytes(19, 4, &has_sinks as *const u32 as *const std::ffi::c_void);
             enc.dispatch_thread_groups(
                 MTLSize::new(layer_num_q_heads as u64, 1, 1),
                 MTLSize::new(tg_w, 1, 1),
@@ -371,15 +377,13 @@ impl MetalBackend {
             enc.set_bytes(9, 4, &window_size as *const u32 as *const std::ffi::c_void);
             enc.set_buffer(10, Some(bufs.k_out), 0);
             enc.set_buffer(11, Some(bufs.v_out), 0);
-            // Attention sinks (GPT-OSS) — see stages::attention::sink_binding.
-            let (sink_vals, has_sinks) =
-                crate::stages::attention::sink_binding(layer.attn_sinks, layer_num_q_heads);
-            enc.set_bytes(
-                12,
-                std::mem::size_of_val(sink_vals) as u64,
-                sink_vals.as_ptr() as *const std::ffi::c_void,
+            // Attention sinks (GPT-OSS) — see `stages::sinks`.
+            crate::stages::sinks::bind(
+                enc,
+                KV_APPEND_ATTEND_SINKS_INDEX,
+                layer.attn_sinks,
+                layer_num_q_heads,
             );
-            enc.set_bytes(13, 4, &has_sinks as *const u32 as *const std::ffi::c_void);
             enc.dispatch_thread_groups(
                 MTLSize::new(layer_num_q_heads as u64, 1, 1),
                 MTLSize::new(

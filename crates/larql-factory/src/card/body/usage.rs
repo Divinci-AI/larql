@@ -13,11 +13,8 @@ pub fn render_usage(metadata: &Metadata, publish: &Publish, revision_tag: &str) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Recipe;
 
-    fn sample_recipe() -> Recipe {
-        Recipe::from_yaml(include_str!("../../../testdata/gemma-3-4b-it.yaml")).unwrap()
-    }
+    use crate::test_support::sample_recipe;
 
     #[test]
     fn snippet_points_at_the_full_vindex_repo_and_tag() {

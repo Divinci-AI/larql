@@ -50,9 +50,7 @@ fn base_model_relation(recipe: &Recipe) -> Option<&'static str> {
 mod tests {
     use super::*;
 
-    fn sample_recipe() -> Recipe {
-        Recipe::from_yaml(include_str!("../../testdata/gemma-3-4b-it.yaml")).unwrap()
-    }
+    use crate::test_support::sample_recipe;
 
     fn sample_manifest() -> VindexManifest {
         larql_vindex_spec::test_fixtures::sample_manifest()
