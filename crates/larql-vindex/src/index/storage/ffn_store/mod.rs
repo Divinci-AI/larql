@@ -53,6 +53,7 @@ mod interleaved;
 mod interleaved_kquant;
 mod interleaved_q4;
 mod kquant_cache;
+mod kquant_decode;
 mod up;
 
 // ── FfnStore composed-substore ─────────────────────────────────────────

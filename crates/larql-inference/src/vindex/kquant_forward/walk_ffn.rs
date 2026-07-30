@@ -60,14 +60,9 @@ pub fn kquant_ffn_forward_layer(
             .expect("down cache shape");
         activation.dot(&w_down_t)
     } else {
-        let inter_padded = intermediate.div_ceil(larql_models::quant::ggml::K_QUANT_BLOCK_ELEMS)
-            * larql_models::quant::ggml::K_QUANT_BLOCK_ELEMS;
-        let w_down = if inter_padded != intermediate {
-            let w = dequantize_matrix(ffn[2].0, ffn[2].1, hidden, inter_padded);
-            w.slice(ndarray::s![.., ..intermediate]).to_owned()
-        } else {
-            dequantize_matrix(ffn[2].0, ffn[2].1, hidden, intermediate)
-        };
+        // `dequantize_matrix` strips the writer's per-row super-block
+        // padding internally — logical dims only.
+        let w_down = dequantize_matrix(ffn[2].0, ffn[2].1, hidden, intermediate);
         dot_proj(&activation, &w_down)
     }
 }
@@ -154,15 +149,9 @@ pub fn kquant_ffn_forward_layer_q8k(
                 .expect("down cache shape");
             activation.dot(&w_down_t)
         } else {
-            let inter_padded = intermediate
-                .div_ceil(larql_models::quant::ggml::K_QUANT_BLOCK_ELEMS)
-                * larql_models::quant::ggml::K_QUANT_BLOCK_ELEMS;
-            let w_down = if inter_padded != intermediate {
-                let w = dequantize_matrix(ffn[2].0, ffn[2].1, hidden, inter_padded);
-                w.slice(ndarray::s![.., ..intermediate]).to_owned()
-            } else {
-                dequantize_matrix(ffn[2].0, ffn[2].1, hidden, intermediate)
-            };
+            // `dequantize_matrix` strips the writer's per-row super-block
+            // padding internally — logical dims only.
+            let w_down = dequantize_matrix(ffn[2].0, ffn[2].1, hidden, intermediate);
             dot_proj(&activation, &w_down)
         }
     }
