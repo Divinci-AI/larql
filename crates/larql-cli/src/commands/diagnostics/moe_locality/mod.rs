@@ -31,6 +31,21 @@ use trace::Trace;
 /// many rows — enough to show the shape of the curve without burying it.
 const MAX_CACHE_ROWS: usize = 6;
 
+/// Block sizes for the union curve. Doubling from the smallest meaningful
+/// block (a pair) to a draft length no speculative decoder exceeds in practice.
+const DEFAULT_BLOCKS: &str = "2,4,8,16,32";
+
+/// Block size for the per-layer breakdown — mid-range of [`DEFAULT_BLOCKS`],
+/// where the union curve has bent but not yet saturated.
+const DEFAULT_PER_LAYER_BLOCK: usize = 8;
+
+/// Seed for the skew-preserving shuffle. Fixed so a reported ratio can be
+/// re-derived from the same trace later.
+const DEFAULT_SHUFFLE_SEED: u64 = 20_260_730;
+
+/// Printed when a ratio has no informative baseline to divide by.
+const MISSING_CELL: &str = "     —";
+
 #[derive(Args, Debug)]
 pub struct MoeLocalityArgs {
     /// JSONL routing trace, as written by `LARQL_MOE_ROUTE_TRACE=<path>`.
@@ -42,15 +57,15 @@ pub struct MoeLocalityArgs {
     num_experts: Option<usize>,
 
     /// Block sizes for the union curve.
-    #[arg(long, value_delimiter = ',', default_value = "2,4,8,16,32")]
+    #[arg(long, value_delimiter = ',', default_value = DEFAULT_BLOCKS)]
     blocks: Vec<usize>,
 
     /// Block size for the per-layer breakdown.
-    #[arg(long, default_value_t = 8)]
+    #[arg(long, default_value_t = DEFAULT_PER_LAYER_BLOCK)]
     per_layer_block: usize,
 
     /// Seed for the skew-preserving shuffle control.
-    #[arg(long, default_value_t = 20_260_730)]
+    #[arg(long, default_value_t = DEFAULT_SHUFFLE_SEED)]
     seed: u64,
 }
 
@@ -85,7 +100,7 @@ fn ratio(observed: f64, baseline: f64) -> Option<f64> {
 
 /// Format an optional ratio for a table cell.
 fn cell(value: Option<f64>) -> String {
-    value.map_or_else(|| "     —".to_string(), |v| format!("{v:6.3}"))
+    value.map_or_else(|| MISSING_CELL.to_string(), |v| format!("{v:6.3}"))
 }
 
 pub fn run(args: MoeLocalityArgs) -> Result<(), Box<dyn std::error::Error>> {
@@ -308,7 +323,7 @@ mod tests {
     fn ratio_guards_a_zero_baseline() {
         assert_eq!(ratio(1.0, 2.0), Some(0.5));
         assert_eq!(ratio(1.0, 0.0), None);
-        assert_eq!(cell(None), "     —");
+        assert_eq!(cell(None), MISSING_CELL);
         assert_eq!(cell(Some(0.5)), " 0.500");
     }
 }
