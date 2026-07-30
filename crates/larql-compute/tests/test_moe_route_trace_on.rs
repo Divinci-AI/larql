@@ -17,10 +17,8 @@ use larql_compute::ffn::expert_weight::trace;
 
 #[test]
 fn trace_end_to_end_writes_jsonl() {
-    let path = std::env::temp_dir().join(format!(
-        "larql-route-trace-on-{}.jsonl",
-        std::process::id()
-    ));
+    let path =
+        std::env::temp_dir().join(format!("larql-route-trace-on-{}.jsonl", std::process::id()));
     std::env::set_var(larql_compute::options::ENV_MOE_ROUTE_TRACE, &path);
 
     let mut block = trace::buffer(2).expect("tracing is on");
