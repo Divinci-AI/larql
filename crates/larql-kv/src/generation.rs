@@ -727,6 +727,9 @@ where
     let mut cache = KvCache::with_layers(num_layers);
 
     let mut h = embed_tokens_pub(weights, prompt_ids);
+    // Per-Layer Embedding inputs for Gemma-4 archs — same per-layer
+    // sequence as `kv_prefill_run` (empty Vec / no-ops elsewhere).
+    let ple_inputs = precompute_per_layer_inputs(weights, &h, prompt_ids);
     for layer in 0..num_layers {
         let (h_post_attn, k_rope, v) = match run_attention_with_kv_backend(
             larql_inference::WeightsView::dense(weights),
@@ -739,7 +742,10 @@ where
             None => return Vec::new(),
         };
         cache.layers[layer] = Some((k_rope, v));
-        let (h_out, _) = run_ffn(weights, &h_post_attn, layer, ffn, false);
+        let (h_post_ffn, _) = run_ffn(weights, &h_post_attn, layer, ffn, false);
+        let mut h_out =
+            apply_per_layer_embedding(weights, &h_post_ffn, layer, ple_inputs.get(layer));
+        apply_layer_scalar(weights, &mut h_out, layer);
         h = h_out;
     }
     cache.next_position = prompt_ids.len();
@@ -762,6 +768,9 @@ where
     for _step in 1..max_new_tokens {
         let h_new = embed_tokens_pub(weights, &[current_id]);
         let abs_position = cache.next_position;
+        // PLE inputs are per-token — recompute for this single-token
+        // decode step, same sequence as `kv_decode_step_run`.
+        let ple_inputs = precompute_per_layer_inputs(weights, &h_new, &[current_id]);
         let mut h_step = h_new;
         for layer in 0..num_layers {
             let kv_entry = cache.layers[layer].as_ref();
@@ -777,7 +786,10 @@ where
                 None => return generated,
             };
             cache.layers[layer] = Some(new_kv);
-            let (h_out, _) = run_ffn(weights, &h_post_attn, layer, ffn, false);
+            let (h_post_ffn, _) = run_ffn(weights, &h_post_attn, layer, ffn, false);
+            let mut h_out =
+                apply_per_layer_embedding(weights, &h_post_ffn, layer, ple_inputs.get(layer));
+            apply_layer_scalar(weights, &mut h_out, layer);
             h_step = h_out;
         }
         cache.next_position += 1;
@@ -1284,9 +1296,9 @@ mod tests {
     /// `kv_prefill_run` must execute cleanly on a PLE arch — the
     /// fixture's PLE keys + projection tensors / norms / gates must be
     /// reachable from the prefill loop without dimension mismatch or
-    /// panic. With zero-valued weights the output is also zero, so the
-    /// assertion is finiteness + correct hidden-dim shape, not a
-    /// specific value.
+    /// panic. Value-level pins live in `tests/dispatch_parity.rs` (PLE
+    /// parity vs the dispatch helpers, bit-exact); this test asserts
+    /// finiteness + correct hidden-dim shape.
     #[test]
     fn kv_prefill_run_works_on_synthetic_e2b_ple_arch() {
         let weights = larql_inference::test_utils::make_synthetic_e2b_like_weights();
@@ -1340,6 +1352,52 @@ mod tests {
             );
         }
         assert_eq!(cache.next_position, prompt.len() + 3);
+    }
+
+    /// `generate_cached_constrained` carries its own inline prefill +
+    /// decode loops (it cannot reuse `kv_prefill_run` because of the
+    /// mask hook), so those loops must run the same per-layer sequence
+    /// — attention → FFN → PLE → layer_scalar. With a no-op mask the
+    /// token stream must match `generate_cached` (which drives the
+    /// oracle loops) exactly; on the E2B fixture a constrained path
+    /// that drops PLE / layer_scalar computes different logits and
+    /// diverges.
+    #[cfg(not(windows))]
+    #[test]
+    fn generate_cached_constrained_matches_generate_cached_on_ple_arch() {
+        let weights = larql_inference::test_utils::make_synthetic_e2b_like_weights();
+        let tokenizer = make_test_tokenizer(weights.vocab_size);
+        let ffn = WeightFfn { weights: &weights };
+        let prompt = [0u32, 1, 2];
+        const MAX_NEW_TOKENS: usize = 6;
+
+        let mut toks_oracle: Vec<u32> = Vec::new();
+        generate_cached(
+            &weights,
+            &tokenizer,
+            &ffn,
+            &prompt,
+            MAX_NEW_TOKENS,
+            |id, _| toks_oracle.push(id),
+        );
+        let mut toks_constrained: Vec<u32> = Vec::new();
+        generate_cached_constrained(
+            &weights,
+            &tokenizer,
+            &ffn,
+            &prompt,
+            MAX_NEW_TOKENS,
+            |_, _| {},
+            |id, _| toks_constrained.push(id),
+        );
+        assert!(
+            !toks_oracle.is_empty(),
+            "oracle generation must emit tokens"
+        );
+        assert_eq!(
+            toks_oracle, toks_constrained,
+            "no-op-mask constrained generation must match generate_cached"
+        );
     }
 
     // ─── Phase 1d.3b: generate_with_engine_from_hidden contracts ─────────

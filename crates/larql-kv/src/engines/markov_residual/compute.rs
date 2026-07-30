@@ -12,6 +12,7 @@ use crate::profiler::EngineProfiler;
 use larql_inference::attention::SharedKV;
 use larql_inference::attention::{apply_rope_partial_at, run_attention_with_kv_backend};
 use larql_inference::ffn::BackendFfn;
+use larql_inference::forward::ple::precompute_per_layer_inputs;
 use larql_inference::forward::{add_bias, apply_norm, embed_tokens_pub};
 use larql_inference::residual::{rms_norm_heads, rms_norm_heads_no_weight};
 
@@ -91,6 +92,8 @@ pub fn rs_prefill(
     let num_layers = weights.num_layers;
     let seq_len = token_ids.len();
     let mut h = embed_tokens_pub(&weights, token_ids);
+    // Empty on non-PLE archs — `ple_inputs.get(layer)` then yields `None`.
+    let ple_inputs = precompute_per_layer_inputs(&weights, &h, token_ids);
     let mut stored: Vec<Array2<f32>> = Vec::with_capacity(num_layers);
     let be = Some(backend);
 
@@ -108,6 +111,7 @@ pub fn rs_prefill(
             layer,
             &bffn,
             moe_ffn,
+            ple_inputs.get(layer),
         );
         h = h_out;
     }
@@ -205,6 +209,9 @@ fn rs_decode_step_inner(
         None
     };
     let mut h_new = embed_tokens_pub(&weights, &[new_token_id]);
+    // PLE inputs are per-token — recompute for this single-token decode
+    // step, matching the legacy `kv_decode_step_run` recipe exactly.
+    let ple_inputs = precompute_per_layer_inputs(&weights, &h_new, &[new_token_id]);
     let mut new_stored: Vec<Array2<f32>> = Vec::with_capacity(num_layers);
     let mut recompute_cold_us = 0.0f64;
     let mut recompute_hot_us = 0.0f64;
@@ -440,6 +447,7 @@ fn rs_decode_step_inner(
             layer,
             &bffn,
             moe_ffn,
+            ple_inputs.get(layer),
         );
         if let Some(t) = t_ffn {
             ffn_us += t.elapsed().as_secs_f64() * 1e6;

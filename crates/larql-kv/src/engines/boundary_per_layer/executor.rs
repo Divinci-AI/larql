@@ -39,12 +39,24 @@ pub(super) fn run_prefill(
     let num_layers = weights.num_layers;
     let seq_len = token_ids.len();
     let mut h = embed_tokens_pub(&weights, token_ids);
+    // Empty on non-PLE archs — `ple_inputs.get(layer)` then yields `None`.
+    let ple_inputs =
+        larql_inference::forward::ple::precompute_per_layer_inputs(&weights, &h, token_ids);
     let mut stored: Vec<Array2<f32>> = Vec::with_capacity(num_layers);
 
     for layer in 0..num_layers {
         stored.push(h.clone());
         let (h_out, _kv) = executor.run_prefill_layer(weights, layer, &h, ffn)?;
-        h = h_out;
+        // `LayerExecutor::run_*_layer` returns attention + bare FFN only
+        // (`LocalWalkExecutor`, the sole production impl, ends at
+        // `run_ffn`); the PLE + layer_scalar tail is the driving loop's
+        // responsibility, mirroring the legacy `kv_prefill_run` sequence.
+        h = crate::engines::apply_ple_and_layer_scalar(
+            weights.canonical(),
+            &h_out,
+            layer,
+            ple_inputs.get(layer),
+        );
     }
 
     let mut rs = RsStorePerLayer {
@@ -97,6 +109,10 @@ pub(super) fn run_decode(
     let num_layers = weights.num_layers;
     let abs_position = rs.next_position;
     let mut h_new = embed_tokens_pub(&weights, &[token_id]);
+    // PLE inputs are per-token — recompute for this single-token decode
+    // step, matching the legacy `kv_decode_step_run` recipe exactly.
+    let ple_inputs =
+        larql_inference::forward::ple::precompute_per_layer_inputs(&weights, &h_new, &[token_id]);
     let mut new_stored: Vec<Array2<f32>> = Vec::with_capacity(num_layers);
 
     for layer in 0..num_layers {
@@ -138,7 +154,14 @@ pub(super) fn run_decode(
         new_stored.push(h_new.clone());
         let (h_out, _new_kv) =
             executor.run_decode_layer(weights, layer, &h_new, &prior_kv, abs_position, ffn)?;
-        h_new = h_out;
+        // Executor returns bare post-FFN hidden; PLE + layer_scalar tail
+        // is the driving loop's responsibility (see prefill loop above).
+        h_new = crate::engines::apply_ple_and_layer_scalar(
+            weights.canonical(),
+            &h_out,
+            layer,
+            ple_inputs.get(layer),
+        );
     }
 
     for (slab, new_row) in rs.stored.iter_mut().zip(new_stored.iter()) {
@@ -294,6 +317,111 @@ mod tests {
         }
         // Still no overflow at this scale.
         assert!(rs_after.cold_encoded.is_none());
+    }
+
+    /// Executor-driven loops must run the same per-layer sequence as the
+    /// legacy `kv_prefill_run` / `kv_decode_step_run` oracle: attention →
+    /// FFN → PLE → layer_scalar. `LayerExecutor::run_*_layer` stops at the
+    /// bare FFN, so the PLE + layer_scalar tail lives in this module's
+    /// loops — the E2B fixture (non-zero PLE tensors, layer_scalar 0.75)
+    /// diverges bit-visibly if the tail is dropped. Representative for all
+    /// `LayerExecutor`-driven engine loops (markov_residual{,_codec},
+    /// turbo_quant, unlimited_context share the same pattern).
+    #[cfg(not(windows))]
+    #[test]
+    fn executor_prefill_and_decode_match_legacy_on_ple_arch() {
+        use crate::generation::{kv_decode_step_run, kv_prefill_run};
+        use larql_inference::ffn::WeightFfn;
+        use larql_inference::forward::NoopHook;
+        use larql_inference::test_utils::make_synthetic_e2b_like_weights;
+
+        const DECODE_STEPS: usize = 3;
+        const FIRST_DECODE_TOKEN: u32 = 3;
+        // Decode steps 1+ recompute the prior K/V from the stored
+        // residuals in one batched matmul, where the legacy cache carries
+        // rows projected incrementally (one single-row matmul per step) —
+        // BLAS accumulation order legitimately differs by a few ulp
+        // (observed ≤ 1e-6 relative L2). Dropping PLE / layer_scalar
+        // deviates by ≥ 0.73 relative L2, so the tolerance still pins the
+        // bug class. Prefill and decode step 0 attend against
+        // identically-produced K/V and stay bit-exact.
+        const RECOMPUTE_ACCUM_ORDER_REL_TOL: f32 = 1e-5;
+
+        let weights = make_synthetic_e2b_like_weights();
+        let backend = CpuBackend;
+        let executor = LocalWalkExecutor::new(&backend);
+        let ffn = WeightFfn { weights: &weights };
+        let policy = BoundaryLayerPolicy::bf16_uniform("test", weights.num_layers);
+        let prompt = [0u32, 1, 2];
+
+        let (h_exec, mut rs) = run_prefill(
+            larql_inference::WeightsView::dense(&weights),
+            &executor,
+            &ffn,
+            &policy,
+            None,
+            &prompt,
+        )
+        .expect("executor PLE prefill");
+        let (h_ref, mut cache) = kv_prefill_run(
+            larql_inference::WeightsView::dense(&weights),
+            &ffn,
+            &prompt,
+            None,
+            Some(&backend),
+            &mut NoopHook,
+        )
+        .expect("legacy PLE prefill");
+        let bits = |h: &Array2<f32>| h.iter().map(|v| v.to_bits()).collect::<Vec<u32>>();
+        assert_eq!(
+            bits(&h_exec),
+            bits(&h_ref),
+            "executor PLE prefill must match legacy bit-for-bit"
+        );
+
+        for step in 0..DECODE_STEPS {
+            let token = FIRST_DECODE_TOKEN + step as u32;
+            let (h_exec, rs_next) = run_decode(
+                larql_inference::WeightsView::dense(&weights),
+                &executor,
+                &ffn,
+                &policy,
+                rs,
+                token,
+            )
+            .expect("executor PLE decode");
+            rs = rs_next;
+            let h_ref = kv_decode_step_run(
+                &weights,
+                &ffn,
+                &mut cache,
+                token,
+                Some(&backend),
+                &mut NoopHook,
+            )
+            .expect("legacy PLE decode");
+            if step == 0 {
+                assert_eq!(
+                    bits(&h_exec),
+                    bits(&h_ref),
+                    "executor PLE decode step 0 must match legacy bit-for-bit"
+                );
+            } else {
+                let ref_norm = h_ref.iter().map(|v| v * v).sum::<f32>().sqrt();
+                let err_norm = h_exec
+                    .iter()
+                    .zip(h_ref.iter())
+                    .map(|(a, b)| (a - b) * (a - b))
+                    .sum::<f32>()
+                    .sqrt();
+                let rel = err_norm / ref_norm.max(f32::MIN_POSITIVE);
+                assert!(
+                    rel <= RECOMPUTE_ACCUM_ORDER_REL_TOL,
+                    "executor PLE decode step {step}: relative L2 deviation {rel} \
+                     exceeds accumulation-order tolerance"
+                );
+            }
+        }
     }
 
     #[test]

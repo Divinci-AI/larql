@@ -773,6 +773,13 @@ impl UnlimitedContextEngine {
         for (i, &token_id) in chunk.iter().enumerate() {
             let abs_position = abs_start + i;
             let mut h = embed_tokens_pub(weights, &[token_id]);
+            // PLE inputs are per-token — this loop embeds one token at a
+            // time, matching the legacy `kv_decode_step_run` recipe exactly.
+            let ple_inputs = larql_inference::forward::ple::precompute_per_layer_inputs(
+                weights,
+                &h,
+                &[token_id],
+            );
 
             for (layer, kv_slot) in kv_cache.iter_mut().enumerate() {
                 let (h_out, new_kv) = executor.run_decode_layer(
@@ -783,7 +790,17 @@ impl UnlimitedContextEngine {
                     abs_position,
                     ffn,
                 )?;
-                h = h_out;
+                // `LayerExecutor::run_decode_layer` returns attention + bare
+                // FFN only (`LocalWalkExecutor`, the sole production impl,
+                // ends at `run_ffn`); the PLE + layer_scalar tail is the
+                // driving loop's responsibility, mirroring the legacy
+                // `kv_decode_step_run` sequence.
+                h = crate::engines::apply_ple_and_layer_scalar(
+                    weights,
+                    &h_out,
+                    layer,
+                    ple_inputs.get(layer),
+                );
                 *kv_slot = new_kv;
             }
             last_hidden = Some(h);

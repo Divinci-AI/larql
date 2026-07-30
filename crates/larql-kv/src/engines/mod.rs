@@ -13,7 +13,7 @@
 //! | [`no_cache`] | Full re-forward per step | O(seq) token IDs | exact — correctness fallback |
 //! | [`markov_residual`] | Residual-stream replacement | ~171 MB | exact (KL=0.0) under contract |
 //! | [`unlimited_context`] | Per-window K/V checkpoints | ~193 MB | exact within window |
-//! | [`turbo_quant`] | WHT + Lloyd-Max 3/4-bit codec | ~12.7 GB | cos≈0.991 |
+//! | [`turbo_quant`] | WHT + Lloyd-Max 3/4-bit codec | ~12.7 GB | per-row cos≈0.9954 (4-bit, 2026-07-30) |
 //! | [`apollo`] | Boundary store + residual injection | ~11 MB | task accuracy |
 //!
 //! ## Selecting an engine
@@ -85,14 +85,38 @@ pub(crate) fn w10_enabled() -> bool {
     }
 }
 
+/// Post-FFN tail of the per-layer sequence: `apply_per_layer_embedding`
+/// then `apply_layer_scalar`, in that order — mirroring the legacy
+/// `kv_prefill_run` / `kv_decode_step_run` loops in
+/// [`crate::generation`], the oracle for every engine forward. Both
+/// steps are no-ops on archs without PLE / layer-scalar keys
+/// (everything except Gemma 4 E-series), so threading this through
+/// non-PLE paths costs one clone and changes no bits.
+pub(crate) fn apply_ple_and_layer_scalar(
+    weights: &larql_inference::ModelWeights,
+    h_post_ffn: &ndarray::Array2<f32>,
+    layer: usize,
+    ple_input: Option<&ndarray::Array2<f32>>,
+) -> ndarray::Array2<f32> {
+    let mut h_out = larql_inference::forward::ple::apply_per_layer_embedding(
+        weights, h_post_ffn, layer, ple_input,
+    );
+    larql_inference::forward::layer::apply_layer_scalar(weights, &mut h_out, layer);
+    h_out
+}
+
 /// Per-layer FFN dispatch for engine forward loops, MoE-aware.
 ///
 /// On a hybrid-MoE arch, when a `moe_ffn` hook is supplied (e.g.
 /// `RemoteMoeFfn` for `--moe-shards`), call its
 /// [`FfnBackend::forward_moe_full_layer`] — it returns the full layer output
 /// (dense `h1` + experts `h2` + combine), dispatching experts to the shards.
-/// Otherwise fall back to the engine's own dense FFN (`dense_ffn`), preserving
-/// prior behaviour for dense models and the no-hook path exactly.
+/// Otherwise fall back to the engine's own dense FFN (`dense_ffn`) followed
+/// by [`apply_ple_and_layer_scalar`], the same per-layer sequence as the
+/// legacy `kv_prefill_run` / `kv_decode_step_run` oracle.
+///
+/// `ple_input` is this layer's entry from `precompute_per_layer_inputs`
+/// (`None` on non-PLE archs, where PLE + layer_scalar are no-ops).
 ///
 /// Lets the per-layer / windowed engines (unlimited_context, markov_residual,
 /// turbo_quant, …) ride remote MoE without touching their KV state policy —
@@ -103,15 +127,26 @@ pub(crate) fn layer_ffn_or_moe(
     layer: usize,
     dense_ffn: &dyn larql_inference::ffn::FfnBackend,
     moe_ffn: Option<&dyn larql_inference::ffn::FfnBackend>,
+    ple_input: Option<&ndarray::Array2<f32>>,
 ) -> ndarray::Array2<f32> {
     if weights.arch.is_hybrid_moe() {
         if let Some(mf) = moe_ffn {
             if let Some(h_out) = mf.forward_moe_full_layer(layer, h_post_attn) {
+                // Returned as-is: `forward_moe_full_layer` is contracted to
+                // produce the FULL layer output. Every production impl routes
+                // through `moe_ffn_block_cpu(_with_index)`, which applies PLE
+                // + layer_scalar internally (`RemoteMoeFfn` / `LocalMoeFfn`
+                // directly; `LayerShardedRemote` and the ffn-policy router
+                // delegate to them; the HTTP walk backend requests
+                // `full_output` from the server). Applying either step again
+                // here would double-apply.
                 return h_out;
             }
         }
     }
-    larql_inference::forward::run_ffn(weights, h_post_attn, layer, dense_ffn, false).0
+    let (h_post_ffn, _) =
+        larql_inference::forward::run_ffn(weights, h_post_attn, layer, dense_ffn, false);
+    apply_ple_and_layer_scalar(weights, &h_post_ffn, layer, ple_input)
 }
 
 std::thread_local! {
@@ -167,7 +202,7 @@ mod layer_ffn_or_moe_tests {
         let weights = make_test_gemma4_moe_weights();
         assert!(weights.arch.is_hybrid_moe());
         let h = Array2::<f32>::zeros((2, weights.hidden_size));
-        let out = layer_ffn_or_moe(&weights, &h, 0, &SentinelFfn, Some(&SentinelFfn));
+        let out = layer_ffn_or_moe(&weights, &h, 0, &SentinelFfn, Some(&SentinelFfn), None);
         // Took the MoE hook → sentinel output, not the dense run_ffn path.
         assert!(
             out.iter().all(|&v| v == 7.0),
@@ -180,7 +215,7 @@ mod layer_ffn_or_moe_tests {
         let weights = make_test_gemma4_moe_weights();
         let h = Array2::<f32>::zeros((2, weights.hidden_size));
         // No moe_ffn → dense run_ffn even on a MoE arch (no experts dispatched).
-        let out = layer_ffn_or_moe(&weights, &h, 0, &SentinelFfn, None);
+        let out = layer_ffn_or_moe(&weights, &h, 0, &SentinelFfn, None, None);
         assert_eq!(out.shape(), &[2, weights.hidden_size]);
         assert!(
             out.iter().any(|&v| v != 7.0),
