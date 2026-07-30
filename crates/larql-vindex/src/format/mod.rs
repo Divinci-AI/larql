@@ -6,6 +6,7 @@ pub mod down_meta;
 pub mod filenames;
 pub mod fp4_codec;
 pub mod huggingface;
+pub mod le_floats;
 pub mod load;
 pub mod quant;
 pub mod spec;

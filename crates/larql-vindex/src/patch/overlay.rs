@@ -19,6 +19,22 @@ use crate::index::{FeatureMeta, VectorIndex, WalkHit, WalkTrace};
 
 use super::format::VindexPatch;
 
+/// Oversampling factor for the base KNN query when the overlay has
+/// gate overrides and/or tombstoned deletions at the queried layer.
+/// Overrides can re-score base hits and tombstones remove them, so
+/// the merge/filter/sort step needs headroom beyond `top_k` to stay
+/// correct. Kept small — the common case is a handful of overlay
+/// entries, and this factor prices every patched-layer query.
+const BASE_KNN_OVERSAMPLE_FACTOR: usize = 2;
+
+/// First escalation of [`BASE_KNN_OVERSAMPLE_FACTOR`] when tombstoned
+/// deletions hollow out the oversampled window (review 2026-07-30
+/// M11): if more than `top_k` of the top `2·top_k` base hits are
+/// deleted, re-query at 4× before falling back to an all-features
+/// query. Keeps the common few-deletions case on the cheap 2× path
+/// while guaranteeing `top_k` survivors whenever the base has them.
+const BASE_KNN_OVERSAMPLE_RETRY_FACTOR: usize = 4;
+
 /// Per-layer contiguous gate-override snapshot built lazily by
 /// `gate_knn`. Keeps the override matvec cache-friendly — same memory
 /// layout as `ShardCache` — instead of pointer-chasing through a
@@ -101,6 +117,13 @@ pub struct PatchedVindex {
     /// `gate_vectors.bin` stays clean — see layering doc above.
     pub(crate) overrides_gate: HashMap<(usize, usize), Vec<f32>>,
     /// Tombstones for deleted features.
+    ///
+    /// Contract (review 2026-07-30 M6): `Delete` adds the key;
+    /// `Insert` **and** `Update` on the same slot remove it —
+    /// mutating a feature implies it exists (resurrection). Every
+    /// query path (`feature_meta`, `gate_knn`, `bake_down`) must
+    /// agree with this set; a path that consults the tombstones
+    /// differently from the others is a bug.
     pub(crate) deleted: std::collections::HashSet<(usize, usize)>,
     /// Architecture B: per-layer retrieval-override KNN store.
     pub knn_store: super::knn_store::KnnStore,
@@ -179,6 +202,15 @@ impl PatchedVindex {
             if l != layer {
                 continue;
             }
+            if gate_vec.is_empty() {
+                // Zero-width override (legacy metadata-only INSERT or a
+                // corrupt overlay). It would land in `feature_ids` while
+                // contributing 0 floats to the flattened matrix,
+                // misaligning every subsequent row slice. Skip the cache
+                // and let the slow path handle it via the regular
+                // iterator.
+                return None;
+            }
             if d == 0 {
                 d = gate_vec.len();
             } else if gate_vec.len() != d {
@@ -214,6 +246,12 @@ impl PatchedVindex {
     }
 
     /// Insert a feature directly into the overlay (auto-patch mode).
+    ///
+    /// An empty `gate_vec` means "no gate override" (metadata-only
+    /// insert, e.g. a Vindexfile INSERT without embeddings to
+    /// synthesise a gate): the slot is claimed via `overrides_meta`
+    /// but nothing lands in `overrides_gate` — a zero-width row would
+    /// poison the flattened per-layer gate cache.
     pub fn insert_feature(
         &mut self,
         layer: usize,
@@ -223,7 +261,11 @@ impl PatchedVindex {
     ) {
         let key = (layer, feature);
         self.overrides_meta.insert(key, Some(meta));
-        self.overrides_gate.insert(key, gate_vec);
+        if gate_vec.is_empty() {
+            self.overrides_gate.remove(&key);
+        } else {
+            self.overrides_gate.insert(key, gate_vec);
+        }
         self.deleted.remove(&key);
         self.invalidate_gate_cache_layer(layer);
     }
@@ -238,9 +280,18 @@ impl PatchedVindex {
     }
 
     /// Update feature metadata via the overlay.
+    ///
+    /// Mirrors [`Self::insert_feature`]'s tombstone contract:
+    /// updating a feature implies it exists, so a prior
+    /// [`Self::delete_feature`] tombstone on the slot is cleared
+    /// (resurrection). Without this, `feature_meta()` reported the
+    /// feature while `gate_knn()` permanently filtered it out — two
+    /// query paths disagreeing about the same overlay state
+    /// (review 2026-07-30 M6).
     pub fn update_feature_meta(&mut self, layer: usize, feature: usize, meta: FeatureMeta) {
         let key = (layer, feature);
         self.overrides_meta.insert(key, Some(meta));
+        self.deleted.remove(&key);
     }
 
     /// Check if a (layer, feature) has been overridden.
@@ -349,13 +400,20 @@ impl PatchedVindex {
             return None;
         }
 
+        // A slot is overlay-claimed if it has a gate override OR a
+        // live meta override (metadata-only INSERTs carry no gate
+        // vector; a `None` meta is a tombstone, so the slot is free).
+        let taken_by_overlay = |i: usize| -> bool {
+            self.overrides_gate.contains_key(&(layer, i))
+                || matches!(self.overrides_meta.get(&(layer, i)), Some(Some(_)))
+        };
+
         // First preference: a slot with no base metadata AND no
         // overlay entry. This matches the base's "no metadata = free"
         // semantics but also respects the overlay.
         for i in 0..n {
             let taken_by_base = self.base.feature_meta(layer, i).is_some();
-            let taken_by_overlay = self.overrides_gate.contains_key(&(layer, i));
-            if !taken_by_base && !taken_by_overlay {
+            if !taken_by_base && !taken_by_overlay(i) {
                 return Some(i);
             }
         }
@@ -367,7 +425,7 @@ impl PatchedVindex {
         let mut weakest_idx: Option<usize> = None;
         let mut weakest_score = f32::MAX;
         for i in 0..n {
-            if self.overrides_gate.contains_key(&(layer, i)) {
+            if taken_by_overlay(i) {
                 continue;
             }
             if let Some(meta) = self.base.feature_meta(layer, i) {
@@ -390,6 +448,46 @@ impl PatchedVindex {
             return None;
         }
         self.base.feature_meta(layer, feature)
+    }
+
+    /// Base-index KNN at `layer` that keeps escalating the oversample
+    /// window until `top_k` non-tombstoned hits survive or the base is
+    /// exhausted (review 2026-07-30 M11).
+    ///
+    /// The cheap path oversamples by [`BASE_KNN_OVERSAMPLE_FACTOR`].
+    /// If the base returned a full (unfiltered) result set — meaning
+    /// more features exist — yet fewer than `top_k` hits survive the
+    /// tombstone filter, the query escalates to
+    /// [`BASE_KNN_OVERSAMPLE_RETRY_FACTOR`] and finally to a single
+    /// all-features query, so callers never silently under-fill while
+    /// live features remain. Returned hits are already
+    /// tombstone-filtered and stay sorted by `|score|` descending
+    /// (`retain` preserves the base's ordering).
+    fn base_knn_surviving_deletions(
+        &self,
+        layer: usize,
+        residual: &Array1<f32>,
+        top_k: usize,
+    ) -> Vec<(usize, f32)> {
+        let num_features = self.base.num_features(layer);
+        for factor in [BASE_KNN_OVERSAMPLE_FACTOR, BASE_KNN_OVERSAMPLE_RETRY_FACTOR] {
+            let requested = top_k.saturating_mul(factor);
+            let mut hits = self.base.gate_knn(layer, residual, requested);
+            // A short (non-full) return means the base has nothing
+            // more to offer — retrying with a bigger window can't help.
+            let base_exhausted =
+                requested >= num_features || hits.len() < requested.min(num_features);
+            hits.retain(|(f, _)| !self.deleted.contains(&(layer, *f)));
+            if hits.len() >= top_k || base_exhausted {
+                return hits;
+            }
+        }
+        // Final rung: score every feature once. Bounded — runs at most
+        // once per query, and only when both fixed windows were
+        // hollowed out by deletions.
+        let mut hits = self.base.gate_knn(layer, residual, num_features);
+        hits.retain(|(f, _)| !self.deleted.contains(&(layer, *f)));
+        hits
     }
 
     /// Gate KNN with patched vectors.
@@ -419,11 +517,22 @@ impl PatchedVindex {
         // `gate_knn_mmap_fast` → `resolve_gate` → returning empty.
         // That's ~3–5 µs of pure overhead per call.
         //
-        // When the base does carry features, oversample by 2× so the
-        // sort step has headroom to keep top_k correct after override
-        // merge. `saturating_mul` guards `usize::MAX` callers.
+        // When the base does carry features, oversample by
+        // `BASE_KNN_OVERSAMPLE_FACTOR` so the sort step has headroom
+        // to keep top_k correct after override merge. When tombstones
+        // exist at this layer, a fixed window can be hollowed out by
+        // deletions — go through the escalating helper instead.
+        // `saturating_mul` guards `usize::MAX` callers.
         let mut hits = if self.base.num_features(layer) > 0 {
-            self.base.gate_knn(layer, residual, top_k.saturating_mul(2))
+            if has_deletions {
+                self.base_knn_surviving_deletions(layer, residual, top_k)
+            } else {
+                self.base.gate_knn(
+                    layer,
+                    residual,
+                    top_k.saturating_mul(BASE_KNN_OVERSAMPLE_FACTOR),
+                )
+            }
         } else {
             Vec::new()
         };
@@ -947,6 +1056,58 @@ mod gate_override_tests {
         assert_eq!(p2.find_free_feature(0), Some(2));
     }
 
+    /// Regression (review 2026-07-30 H3): a zero-width gate vector
+    /// coexisting with real ones at the same layer used to poison
+    /// `layer_gate_cache` — `feature_ids` included the empty entry
+    /// while the flattened matrix skipped its 0 floats, so row slicing
+    /// read the wrong feature's data or panicked, depending on HashMap
+    /// iteration order. Empty vectors now force the safe slow path.
+    /// Rebuilt across iterations to shake out iteration orders.
+    #[test]
+    fn gate_knn_survives_zero_width_gate_vector_in_overlay() {
+        // Enough repeats that pre-fix the "empty iterated before real"
+        // panic ordering is hit with overwhelming probability.
+        const ORDER_SHAKE_ITERATIONS: usize = 32;
+        for _ in 0..ORDER_SHAKE_ITERATIONS {
+            let mut p = make_empty_base();
+            p.insert_feature(0, 1, vec![1.0, 0.0, 0.0, 0.0], make_meta("real"));
+            // Simulate a legacy/corrupt overlay carrying zero-width
+            // rows (insert_feature no longer produces them).
+            p.overrides_gate.insert((0, 0), vec![]);
+            p.overrides_gate.insert((0, 2), vec![]);
+            let q = Array1::from_vec(vec![1.0_f32, 0.0, 0.0, 0.0]);
+            // Twice: first call builds (or refuses) the cache, second
+            // exercises whatever got cached.
+            for _ in 0..2 {
+                let hits = p.gate_knn(0, &q, 3);
+                assert!(!hits.is_empty());
+                assert_eq!(hits[0].0, 1, "real override must rank first");
+                assert!(
+                    (hits[0].1 - 1.0).abs() < 1e-6,
+                    "real override must score by its own row, got {}",
+                    hits[0].1
+                );
+            }
+        }
+    }
+
+    /// An empty gate vec means "no gate override": metadata lands,
+    /// `overrides_gate` stays clean, and the slot still counts as
+    /// claimed so successive metadata-only INSERTs (Vindexfile) get
+    /// distinct slots instead of overwriting each other.
+    #[test]
+    fn insert_feature_with_empty_gate_is_metadata_only() {
+        let mut p = make_empty_base();
+        p.insert_feature(0, 0, vec![], make_meta("a"));
+        assert_eq!(p.feature_meta(0, 0).unwrap().top_token, "a");
+        assert!(p.overrides_gate_at(0, 0).is_none());
+        // Slot 0 is claimed via meta → next free slot is 1.
+        assert_eq!(p.find_free_feature(0), Some(1));
+        // Meta-only inserts must not poison KNN at the layer.
+        let q = Array1::from_vec(vec![1.0_f32, 0.0, 0.0, 0.0]);
+        let _ = p.gate_knn(0, &q, 3);
+    }
+
     /// `find_free_feature` returns `None` on a layer with zero features.
     #[test]
     fn find_free_feature_returns_none_when_layer_empty() {
@@ -955,5 +1116,119 @@ mod gate_override_tests {
         let index = VectorIndex::empty(2, 4);
         let p = PatchedVindex::new(index);
         assert!(p.find_free_feature(0).is_none());
+    }
+
+    // ── Tombstone resurrection contract (review 2026-07-30 M6) ─────────
+
+    /// Regression (M6): Delete→Update must resurrect the slot for BOTH
+    /// query paths. Before the fix, `update_feature_meta` left the
+    /// tombstone in place, so `feature_meta()` said the feature existed
+    /// while `gate_knn()` permanently filtered it out.
+    #[test]
+    fn update_after_delete_resurrects_feature_for_both_paths() {
+        let mut p = make_empty_base();
+        p.insert_feature(0, 1, vec![1.0, 0.0, 0.0, 0.0], make_meta("a"));
+        p.delete_feature(0, 1);
+        p.update_feature_meta(0, 1, make_meta("b"));
+
+        // Path 1: metadata lookup sees the feature again.
+        assert_eq!(p.feature_meta(0, 1).unwrap().top_token, "b");
+        // Path 2: KNN may return it again. The base gate rows are all
+        // zeros, so any result set that includes feature 1 proves the
+        // tombstone filter no longer applies.
+        let q = Array1::from_vec(vec![1.0_f32, 0.0, 0.0, 0.0]);
+        let hits = p.gate_knn(0, &q, 3);
+        assert!(
+            hits.iter().any(|&(f, _)| f == 1),
+            "gate_knn must agree the feature exists again, got {hits:?}"
+        );
+    }
+
+    /// Pin the other half of the M6 contract: Delete with NO
+    /// subsequent Update stays tombstoned for both paths.
+    #[test]
+    fn delete_without_update_stays_tombstoned_for_both_paths() {
+        let mut p = make_empty_base();
+        p.insert_feature(0, 1, vec![1.0, 0.0, 0.0, 0.0], make_meta("a"));
+        p.delete_feature(0, 1);
+
+        assert!(p.feature_meta(0, 1).is_none(), "meta path must report deleted");
+        let q = Array1::from_vec(vec![1.0_f32, 0.0, 0.0, 0.0]);
+        let hits = p.gate_knn(0, &q, 3);
+        assert!(
+            hits.iter().all(|&(f, _)| f != 1),
+            "KNN path must keep filtering the tombstoned slot, got {hits:?}"
+        );
+    }
+
+    // ── Deletion oversampling escalation (review 2026-07-30 M11) ───────
+
+    /// A 1-layer base whose feature `i` has gate `[n - i, 0, 0, 0]`, so
+    /// a query along e0 ranks feature 0 highest, descending from there.
+    /// Metadata is all-`None`; only the gate scores matter here.
+    fn make_scored_base(n: usize) -> PatchedVindex {
+        let mut gate = Array2::<f32>::zeros((n, 4));
+        for i in 0..n {
+            gate[[i, 0]] = (n - i) as f32;
+        }
+        let down_meta = vec![Some(vec![None; n])];
+        let index = VectorIndex::new(vec![Some(gate)], down_meta, 1, 4);
+        PatchedVindex::new(index)
+    }
+
+    /// Regression (M11): with `top_k + 1` tombstones covering the top
+    /// base hits, the fixed 2× oversample window used to be hollowed
+    /// out and the caller silently got fewer than `top_k` hits even
+    /// though live features remained. The escalation must fill `top_k`.
+    #[test]
+    fn gate_knn_fills_top_k_despite_deletions_covering_oversample_window() {
+        const N: usize = 8;
+        const TOP_K: usize = 3;
+        let mut p = make_scored_base(N);
+        // Delete the TOP_K + 1 highest-scoring features (0..=3): they
+        // occupy the top of the 2× (= 6-wide) oversample window.
+        for f in 0..=TOP_K {
+            p.delete_feature(0, f);
+        }
+        let q = Array1::from_vec(vec![1.0_f32, 0.0, 0.0, 0.0]);
+        let hits = p.gate_knn(0, &q, TOP_K);
+        assert_eq!(
+            hits.len(),
+            TOP_K,
+            "must fill top_k from live features, got {hits:?}"
+        );
+        let feats: Vec<usize> = hits.iter().map(|&(f, _)| f).collect();
+        assert_eq!(feats, vec![4, 5, 6], "next-best live features in rank order");
+    }
+
+    /// The escalation ladder's last rung: enough tombstones that even
+    /// the 4× retry window is fully deleted — the all-features query
+    /// must still surface the best surviving feature.
+    #[test]
+    fn gate_knn_escalates_to_all_features_when_retry_window_is_deleted() {
+        const N: usize = 12;
+        let mut p = make_scored_base(N);
+        // top_k = 1 → 2× window = 2 hits, 4× window = 4 hits. Delete
+        // the top 8 so both fixed windows are hollow.
+        for f in 0..8 {
+            p.delete_feature(0, f);
+        }
+        let q = Array1::from_vec(vec![1.0_f32, 0.0, 0.0, 0.0]);
+        let hits = p.gate_knn(0, &q, 1);
+        assert_eq!(hits.len(), 1, "got {hits:?}");
+        assert_eq!(hits[0].0, 8, "best surviving feature");
+    }
+
+    /// When every feature is tombstoned the escalation terminates and
+    /// returns empty rather than looping or panicking.
+    #[test]
+    fn gate_knn_returns_empty_when_all_features_deleted() {
+        const N: usize = 4;
+        let mut p = make_scored_base(N);
+        for f in 0..N {
+            p.delete_feature(0, f);
+        }
+        let q = Array1::from_vec(vec![1.0_f32, 0.0, 0.0, 0.0]);
+        assert!(p.gate_knn(0, &q, 2).is_empty());
     }
 }

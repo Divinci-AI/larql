@@ -99,7 +99,9 @@ pub fn build_from_vindexfile(
                 let resolved = resolve_vindexfile_path(path, working_dir)?;
                 let patch = VindexPatch::load(&resolved)?;
                 let op_count = patch.len();
-                patched.apply_patch(patch);
+                // Fallible apply: a corrupt embedded vector fails the
+                // build instead of silently skipping the patch.
+                patched.try_apply_patch(patch)?;
                 layers.push(BuildLayer {
                     directive: format!("PATCH {}", path),
                     features_modified: op_count,
@@ -111,9 +113,12 @@ pub fn build_from_vindexfile(
                 relation,
                 target,
             } => {
-                // Simple insert — find a free slot, set metadata
-                // Gate vector synthesis requires embeddings which we may not have locally
-                // For now, insert with metadata only (gate vector from patch if available)
+                // Simple insert — find a free slot, set metadata.
+                // Gate vector synthesis requires embeddings which we may
+                // not have locally, so this is a metadata-only insert:
+                // the empty gate vec below means "no gate override"
+                // (`insert_feature` stores nothing in `overrides_gate`;
+                // the slot is claimed via `overrides_meta`).
                 let layer = config.num_layers / 2; // knowledge band middle
                 let feature = patched.find_free_feature(layer).unwrap_or(0);
                 let meta = crate::index::FeatureMeta {
