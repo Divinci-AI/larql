@@ -9,7 +9,7 @@ use super::args::{BlockArgs, BudgetArgs, FrontierArgs, TouchArgs};
 use super::block::{self, DraftProfile, PhysicalReuse, StateTraffic};
 use super::budget::{self, LinkPremises};
 use super::frontier::{self, ServingPremises};
-use super::geometry::K3Geometry;
+use super::geometry::{BitConvention, K3Geometry};
 use super::touch::{self, SliceTier};
 
 type R = Result<(), Box<dyn std::error::Error>>;
@@ -31,8 +31,19 @@ fn header(geom: &K3Geometry) {
         geom.activated_params() as f64 / 1e9,
         geom.dense_params() as f64 / 1e9,
         geom.routed_activated_params() as f64 / 1e9,
-        if geom.vision_included { "included" } else { "EXCLUDED" },
+        if geom.vision_included {
+            "included"
+        } else {
+            "EXCLUDED"
+        },
     );
+    if geom.branches_are_equal() {
+        println!(
+            "branches w1/w2/w3 equal to the byte -> dropping one caps at {:.2}x (retention {:.3})",
+            1.0 / geom.up_fold_retention(),
+            geom.up_fold_retention(),
+        );
+    }
 }
 
 pub fn budget(geom: &K3Geometry, a: &BudgetArgs, as_json: bool) -> R {
@@ -45,14 +56,20 @@ pub fn budget(geom: &K3Geometry, a: &BudgetArgs, as_json: bool) -> R {
     let g = budget::granularity(geom, &link, a.feature_fraction, 2.0, a.locality);
 
     if as_json {
-        println!("{}", serde_json::to_string_pretty(&json!({"budget": m, "granularity": g}))?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({"budget": m, "granularity": g}))?
+        );
         return Ok(());
     }
     header(geom);
     println!();
     println!(
         "miss budget   {:.1} MB/token ({} GB/s x {} port(s) / {} tok/s)",
-        m.miss_budget_bytes / 1e6, a.link_gb_s, a.ports, a.target_tok_s
+        m.miss_budget_bytes / 1e6,
+        a.link_gb_s,
+        a.ports,
+        a.target_tok_s
     );
     println!("required      {:.2} GB/token", m.required_fetch_bytes / 1e9);
     println!("GAP           {:.1}x", m.gap);
@@ -63,15 +80,25 @@ pub fn budget(geom: &K3Geometry, a: &BudgetArgs, as_json: bool) -> R {
         100.0 * m.fraction_of_expert_allowed,
     );
     println!();
-    println!("--- read granularity at {:.1}% of features ---", 100.0 * a.feature_fraction);
-    println!("  feature row {:.0} B, {:.0} rows/visit", g.feature_row_bytes, g.features_selected);
+    println!(
+        "--- read granularity at {:.1}% of features ---",
+        100.0 * a.feature_fraction
+    );
+    println!(
+        "  feature row {:.0} B, {:.0} rows/visit",
+        g.feature_row_bytes, g.features_selected
+    );
     println!(
         "  ideal {:.0} KB/visit -> paged {:.2} MB/visit ({:.2}x amplification)",
-        g.ideal_bytes_per_visit / 1e3, g.paged_bytes_per_visit / 1e6, g.read_amplification
+        g.ideal_bytes_per_visit / 1e3,
+        g.paged_bytes_per_visit / 1e6,
+        g.read_amplification
     );
     println!(
         "  {:.2}M IOPS required vs {:.2}M bandwidth-equivalent -> {:.1}x short",
-        g.iops_required / 1e6, g.iops_bandwidth_equivalent / 1e6, g.iops_shortfall
+        g.iops_required / 1e6,
+        g.iops_bandwidth_equivalent / 1e6,
+        g.iops_shortfall
     );
     println!("  (request rate binds before bandwidth does)");
     Ok(())
@@ -82,28 +109,61 @@ pub fn touch(geom: &K3Geometry, p: &ServingPremises, a: &TouchArgs, as_json: boo
     let slices: Vec<_> = a
         .slice_gb
         .iter()
-        .map(|gb| touch::slice_composition(geom, p, &SliceTier { size_bytes: gb * 1e9 }))
+        .map(|gb| {
+            touch::slice_composition(
+                geom,
+                p,
+                &SliceTier {
+                    size_bytes: gb * 1e9,
+                },
+            )
+        })
         .collect();
 
     if as_json {
-        println!("{}", serde_json::to_string_pretty(&json!({"ledger": l, "slices": slices}))?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({"ledger": l, "slices": slices}))?
+        );
         return Ok(());
     }
     header(geom);
     println!();
-    println!("--- per-token touch at {:.2} all-in bits ---", p.dense_all_in_bits);
-    println!("  dense (irreducible) {:>7.2} GB -> {:>5.1} tok/s", l.dense_bytes / 1e9, l.tok_s_dense_only);
+    println!(
+        "--- per-token touch at {:.2} all-in bits ---",
+        p.dense_all_in_bits
+    );
+    println!(
+        "  dense (irreducible) {:>7.2} GB -> {:>5.1} tok/s",
+        l.dense_bytes / 1e9,
+        l.tok_s_dense_only
+    );
     println!("  routed experts      {:>7.2} GB", l.routed_bytes / 1e9);
-    println!("  TOTAL               {:>7.2} GB -> {:>5.1} tok/s", l.total_bytes / 1e9, l.tok_s_total);
+    println!(
+        "  TOTAL               {:>7.2} GB -> {:>5.1} tok/s",
+        l.total_bytes / 1e9,
+        l.tok_s_total
+    );
     println!();
-    println!("  dense is {:.1}% of activated params — the LARGER half", 100.0 * l.dense_share);
+    println!(
+        "  dense is {:.1}% of activated params — the LARGER half",
+        100.0 * l.dense_share
+    );
     println!(
         "  expert-side levers cap at {:.2}x; {:.2}x needed for {} tok/s",
         l.expert_side_ceiling,
         l.reduction_needed.unwrap_or(f64::NAN),
         a.target_tok_s
     );
-    println!("  >> even a perfect expert lever leaves {:.1} tok/s", l.tok_s_dense_only);
+    println!(
+        "  >> even a perfect expert lever leaves {:.1} tok/s",
+        l.tok_s_dense_only
+    );
+    println!(
+        "  at CPU-attainable {:.0} GB/s the same read gives {:.1} tok/s",
+        frontier::BW_CPU_GB_S,
+        frontier::BW_CPU_GB_S * 1e9 * p.dequant_efficiency / l.total_bytes,
+    );
     println!();
     println!("--- slice composition (down-row payloads, up folded) ---");
     for s in &slices {
@@ -150,7 +210,10 @@ pub fn frontier(geom: &K3Geometry, p: &ServingPremises, a: &FrontierArgs, as_jso
         println!("  (banked up-fold ceiling; anything lower is row sparsity, UNMEASURED)");
     }
     println!();
-    println!("{:>7} {:>12} {:>13} {:>8} {:>8}  verdict", "target", "budget", "dense budget", "payload", "all-in");
+    println!(
+        "{:>7} {:>12} {:>13} {:>8} {:>8}  verdict",
+        "target", "budget", "dense budget", "payload", "all-in"
+    );
     for r in &rows {
         println!(
             "{:>7.1} {:>11.2}G {:>12.2}G {:>8.2} {:>8.2}  {:?}",
@@ -162,11 +225,29 @@ pub fn frontier(geom: &K3Geometry, p: &ServingPremises, a: &FrontierArgs, as_jso
             r.verdict
         );
     }
-    println!("  (bits are per weight; payload excludes block scales, all-in includes them)");
+    println!(
+        "  (bits are per weight; {} excludes block scales, {} includes them)",
+        BitConvention::Payload.label(),
+        BitConvention::AllIn.label(),
+    );
+    let undecidable: Vec<_> = rows
+        .iter()
+        .filter(|r| !frontier::expert_side_can_decide(geom, &p, r.target_tok_s))
+        .map(|r| format!("{:.1}", r.target_tok_s))
+        .collect();
+    if !undecidable.is_empty() {
+        println!(
+            "  R4: no expert-side experiment can decide {} tok/s",
+            undecidable.join(", ")
+        );
+    }
     if a.zero_out_check {
         println!();
         println!("--- R4 zero-out: routed traffic deleted entirely ---");
-        println!("  dense at {:.2} bits caps decode at {:.1} tok/s", p.dense_all_in_bits, ceiling);
+        println!(
+            "  dense at {:.2} bits caps decode at {:.1} tok/s",
+            p.dense_all_in_bits, ceiling
+        );
         println!("  >> no expert-side experiment can decide any target above {ceiling:.1}");
     }
     Ok(())
@@ -178,10 +259,16 @@ pub fn block(geom: &K3Geometry, p: &ServingPremises, a: &BlockArgs, as_json: boo
         ..*p
     };
     let draft = DraftProfile::new(a.proposal_width, a.mean_accepted);
-    let state = StateTraffic {
-        bytes_per_pass: a.state_bytes_per_pass,
-        bytes_per_position: a.state_bytes_per_position,
-        measured: a.state_bytes_per_pass > 0.0 || a.state_bytes_per_position > 0.0,
+    let state = match a.state_prefix_ladder_bytes {
+        Some(w) => StateTraffic {
+            bytes_per_pass: a.state_bytes_per_pass,
+            ..StateTraffic::prefix_state_ladder(geom.n_kda_layers, w)
+        },
+        None => StateTraffic {
+            bytes_per_pass: a.state_bytes_per_pass,
+            bytes_per_position: a.state_bytes_per_position,
+            measured: a.state_bytes_per_pass > 0.0 || a.state_bytes_per_position > 0.0,
+        },
     };
 
     if draft.assumes_perfect() {
@@ -192,17 +279,25 @@ pub fn block(geom: &K3Geometry, p: &ServingPremises, a: &BlockArgs, as_json: boo
         );
     }
 
-    let rows: Vec<_> = a
-        .widths
+    let rows: Vec<_> = if a.token_loop {
+        a.widths
+            .iter()
+            .map(|&t| {
+                let reuse = PhysicalReuse::token_loop(t);
+                block::evaluate(geom, &p, &draft, t, reuse, state, a.target_tok_s)
+            })
+            .collect()
+    } else {
+        block::sweep(geom, &p, &draft, &a.widths, state, a.target_tok_s)
+    };
+
+    let refused: Vec<_> = rows
         .iter()
-        .map(|&t| {
-            let reuse = if a.token_loop {
-                PhysicalReuse::token_loop(t)
-            } else {
-                PhysicalReuse::assumed_ideal(geom.expert_union(t) / geom.top_k as f64)
-            };
-            block::evaluate(geom, &p, &draft, t, reuse, state, a.target_tok_s)
+        .filter(|r| {
+            let reuse = PhysicalReuse::assumed_ideal(r.union_equivalents);
+            block::dense_alone_refuses(geom, &p, r.accepted, r.width, reuse, state, a.target_tok_s)
         })
+        .map(|r| r.width.to_string())
         .collect();
 
     if as_json {
@@ -221,32 +316,53 @@ pub fn block(geom: &K3Geometry, p: &ServingPremises, a: &BlockArgs, as_json: boo
     println!();
     println!(
         "drafter: {} proposed / {:.2} committed, fitted alpha {:.4}",
-        a.proposal_width, a.mean_accepted, draft.fitted_alpha()
+        a.proposal_width,
+        a.mean_accepted,
+        draft.fitted_alpha()
     );
-    println!("execution: {}", if a.token_loop { "TOKEN LOOP (no grouping)" } else { "ideal grouping ASSUMED (R6, unmeasured)" });
+    println!(
+        "execution: {}",
+        if a.token_loop {
+            "TOKEN LOOP (no grouping)"
+        } else {
+            "ideal grouping ASSUMED (R6, unmeasured)"
+        }
+    );
     println!(
         "state traffic: {}",
-        if state.measured {
-            format!(
-                "{:.2} GB/pass + {:.2} GB/position",
-                state.bytes_per_pass / 1e9,
-                state.bytes_per_position / 1e9
-            )
-        } else {
-            "UNMEASURED (owner M1-B)".into()
+        match (state.bytes_per_pass, state.bytes_per_position) {
+            (0.0, 0.0) => "OMITTED — no state term in this budget (owner M1-B)".to_string(),
+            (pass, pos) => format!(
+                "{:.2} GB/pass + {:.2} GB/position [{}]",
+                pass / 1e9,
+                pos / 1e9,
+                if state.measured { "measured" } else { "DERIVED, not measured" }
+            ),
         }
     );
     println!();
-    println!("{:>3} {:>8} {:>8} {:>10} {:>9} {:>9}", "T", "A(T)", "u(T)", "GB/token", "tok/s", "G_r need");
+    println!(
+        "{:>3} {:>8} {:>8} {:>10} {:>9} {:>9}",
+        "T", "A(T)", "u(T)", "GB/token", "tok/s", "G_r need"
+    );
     for r in &rows {
-        let need = r.routed_reduction_needed.map(|v| format!("{v:>9.2}")).unwrap_or_else(|| "      inf".into());
+        let need = r
+            .routed_reduction_needed
+            .map(|v| format!("{v:>9.2}"))
+            .unwrap_or_else(|| "      inf".into());
         println!(
             "{:>3} {:>8.2} {:>8.2} {:>10.2} {:>9.2} {}",
-            r.width, r.accepted, r.union_equivalents,
-            r.bytes_per_committed_token / 1e9, r.tok_s, need
+            r.width,
+            r.accepted,
+            r.union_equivalents,
+            r.bytes_per_committed_token / 1e9,
+            r.tok_s,
+            need
         );
     }
-    if let Some(best) = rows.iter().filter(|r| r.rho_max.is_some())
+    if let Some(best) = rows
+        .iter()
+        .filter(|r| r.rho_max.is_some())
         .max_by(|x, y| x.rho_max.partial_cmp(&y.rho_max).unwrap())
     {
         println!();
@@ -256,6 +372,13 @@ pub fn block(geom: &K3Geometry, p: &ServingPremises, a: &BlockArgs, as_json: boo
             best.routed_reduction_needed.unwrap_or(f64::NAN)
         );
         println!("  >> a drafter's SHIPPED width is not its best width");
+    }
+    if !refused.is_empty() {
+        println!();
+        println!(
+            "  R4: dense traffic alone refuses width(s) {} regardless of the routed side",
+            refused.join(", ")
+        );
     }
     println!();
     println!("  PROVISIONAL: alpha fitted from one observed pair under a constant-alpha");

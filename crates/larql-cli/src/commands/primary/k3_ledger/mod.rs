@@ -32,7 +32,10 @@ pub use args::K3LedgerArgs;
 
 pub fn run(args: K3LedgerArgs) -> Result<(), Box<dyn std::error::Error>> {
     let repo = fetch::Repo::new(&args.repo)?;
-    eprintln!("reading geometry from {} (headers only, no weights)", args.repo);
+    eprintln!(
+        "reading geometry from {} (headers only, no weights)",
+        args.repo
+    );
     let geom = fetch::load_geometry(&repo, &args.kda_shard, &args.mla_shard)?;
 
     let premises = frontier::ServingPremises {

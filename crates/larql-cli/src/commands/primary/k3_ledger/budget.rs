@@ -25,7 +25,11 @@ pub struct LinkPremises {
 
 impl Default for LinkPremises {
     fn default() -> Self {
-        Self { gb_s: 3.5, target_tok_s: 20.0, ports: 1 }
+        Self {
+            gb_s: 3.5,
+            target_tok_s: 20.0,
+            ports: 1,
+        }
     }
 }
 
@@ -153,23 +157,51 @@ mod tests {
     fn striping_ports_scales_the_budget_linearly() {
         let g = k3_reference();
         let one = miss_budget(&g, &LinkPremises::default());
-        let three = miss_budget(&g, &LinkPremises { ports: 3, ..Default::default() });
+        let three = miss_budget(
+            &g,
+            &LinkPremises {
+                ports: 3,
+                ..Default::default()
+            },
+        );
         approx(one.gap / three.gap, 3.0, 1e-9);
     }
 
     #[test]
     fn sub_page_rows_cost_read_amplification() {
         let g = k3_reference();
-        let gr = granularity(&g, &LinkPremises { ports: 3, ..Default::default() }, 0.064, 2.0, 1.5);
+        let gr = granularity(
+            &g,
+            &LinkPremises {
+                ports: 3,
+                ..Default::default()
+            },
+            0.064,
+            2.0,
+            1.5,
+        );
         approx(gr.feature_row_bytes, 1904.0, 1.0);
-        assert!(gr.read_amplification > 3.0, "amplification {}", gr.read_amplification);
+        assert!(
+            gr.read_amplification > 3.0,
+            "amplification {}",
+            gr.read_amplification
+        );
     }
 
     #[test]
     fn row_fetch_is_request_rate_bound_not_bandwidth_bound() {
         // The finding that promoted the systems check ahead of the fidelity one.
         let g = k3_reference();
-        let gr = granularity(&g, &LinkPremises { ports: 3, ..Default::default() }, 0.064, 2.0, 1.5);
+        let gr = granularity(
+            &g,
+            &LinkPremises {
+                ports: 3,
+                ..Default::default()
+            },
+            0.064,
+            2.0,
+            1.5,
+        );
         assert!(
             gr.iops_shortfall > 1.0,
             "request rate should bind before bandwidth, shortfall {}",

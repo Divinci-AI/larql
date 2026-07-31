@@ -37,7 +37,10 @@ pub struct DraftProfile {
 
 impl DraftProfile {
     pub fn new(width: u32, mean_accepted: f64) -> Self {
-        Self { width, mean_accepted }
+        Self {
+            width,
+            mean_accepted,
+        }
     }
 
     /// True when the profile implies every drafted position commits.
@@ -98,12 +101,20 @@ impl PhysicalReuse {
     /// The assumption the arithmetic banks when nobody has measured: perfect
     /// grouping and one dense read per block.
     pub fn assumed_ideal(union_equivalents: f64) -> Self {
-        Self { dense: 1.0, routed: union_equivalents, measured: false }
+        Self {
+            dense: 1.0,
+            routed: union_equivalents,
+            measured: false,
+        }
     }
 
     /// The pessimal case: no grouping, no block GEMM.
     pub fn token_loop(width: u32) -> Self {
-        Self { dense: width as f64, routed: width as f64, measured: false }
+        Self {
+            dense: width as f64,
+            routed: width as f64,
+            measured: false,
+        }
     }
 }
 
@@ -295,7 +306,12 @@ mod tests {
         let (g, p, d) = (k3_reference(), ServingPremises::default(), dspark());
         let rows = sweep(&g, &p, &d, &[2, 3, 4], StateTraffic::default(), 20.0);
         for r in &rows {
-            assert!(r.tok_s < 20.0, "width {} reached {} tok/s", r.width, r.tok_s);
+            assert!(
+                r.tok_s < 20.0,
+                "width {} reached {} tok/s",
+                r.width,
+                r.tok_s
+            );
         }
     }
 
@@ -353,7 +369,10 @@ mod tests {
         };
         let free = best(StateTraffic::default());
         let priced = best(StateTraffic::prefix_state_ladder(69, 4));
-        assert!(priced <= free, "pricing state traffic must not raise the optimum");
+        assert!(
+            priced <= free,
+            "pricing state traffic must not raise the optimum"
+        );
     }
 
     #[test]

@@ -10,7 +10,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::geometry::{BitConvention, K3Geometry};
+use super::geometry::{BitConvention, K3Geometry, MXFP4_PAYLOAD_BITS};
 
 /// Measured attainable bandwidth, not spec sheet (`project_memory_bandwidth_roofline`).
 pub const BW_GPU_GB_S: f64 = 367.0;
@@ -86,7 +86,7 @@ impl DenseVerdict {
     fn classify(dense_budget: f64, payload_bits: f64) -> Self {
         if dense_budget <= 0.0 {
             Self::Impossible
-        } else if payload_bits >= 4.0 {
+        } else if payload_bits >= MXFP4_PAYLOAD_BITS {
             Self::ExistingFourBitFits
         } else if payload_bits >= 3.0 {
             Self::CredibleResearch
@@ -169,7 +169,10 @@ mod tests {
     fn r4_holds_even_with_routed_traffic_deleted() {
         // Retention zero is the strongest possible expert-side result.
         let g = k3_reference();
-        let p = ServingPremises { routed_retention: 0.0, ..Default::default() };
+        let p = ServingPremises {
+            routed_retention: 0.0,
+            ..Default::default()
+        };
         let row = frontier_row(&g, &p, 20.0);
         assert!(row.dense_budget_bytes > 0.0);
         assert!(
@@ -215,9 +218,15 @@ mod tests {
         // 10 tok/s row moves from credible-3-bit to serious-stretch-2-bit.
         let g = k3_reference();
         let ideal = ServingPremises::default();
-        let real = ServingPremises { dequant_efficiency: 0.80, ..Default::default() };
+        let real = ServingPremises {
+            dequant_efficiency: 0.80,
+            ..Default::default()
+        };
         assert!(expert_side_ceiling_tok_s(&g, &real) < expert_side_ceiling_tok_s(&g, &ideal));
-        assert_eq!(frontier_row(&g, &ideal, 10.0).verdict, DenseVerdict::SeriousStretch);
+        assert_eq!(
+            frontier_row(&g, &ideal, 10.0).verdict,
+            DenseVerdict::SeriousStretch
+        );
         assert_eq!(
             frontier_row(&g, &real, 10.0).verdict,
             DenseVerdict::RetrainOrArchitecture
@@ -228,16 +237,26 @@ mod tests {
     fn retention_defaults_to_the_banked_up_fold_not_to_one_point_eight_seven() {
         // Regression guard: 1.87 was the R4 zero-out ratio wearing the wrong hat.
         let p = ServingPremises::default();
-        approx(p.routed_retention, k3_reference().up_fold_retention(), 1e-12);
+        approx(
+            p.routed_retention,
+            k3_reference().up_fold_retention(),
+            1e-12,
+        );
         assert!((1.0 / p.routed_retention - 1.87).abs() > 0.3);
     }
 
     #[test]
     fn routed_floor_tracks_retention() {
         let g = k3_reference();
-        let full = ServingPremises { routed_retention: 1.0, ..Default::default() };
+        let full = ServingPremises {
+            routed_retention: 1.0,
+            ..Default::default()
+        };
         approx(routed_floor(&g, &full), g.routed_bytes_per_position(), 1.0);
-        let none = ServingPremises { routed_retention: 0.0, ..Default::default() };
+        let none = ServingPremises {
+            routed_retention: 0.0,
+            ..Default::default()
+        };
         approx(routed_floor(&g, &none), 0.0, 1e-9);
     }
 }

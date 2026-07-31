@@ -113,8 +113,7 @@ impl K3Geometry {
     /// True when all three GLU branches are byte-identical, which caps the
     /// "drop one branch" lever at exactly 1.5x.
     pub fn branches_are_equal(&self) -> bool {
-        self.branch_bytes[0] == self.branch_bytes[1]
-            && self.branch_bytes[1] == self.branch_bytes[2]
+        self.branch_bytes[0] == self.branch_bytes[1] && self.branch_bytes[1] == self.branch_bytes[2]
     }
 
     /// Retention ceiling from folding the up branch away, when branches are equal.
@@ -231,7 +230,11 @@ mod tests {
 
     #[test]
     fn routed_bytes_per_position_is_the_known_figure() {
-        approx(k3_reference().routed_bytes_per_position() / 1e9, 25.83, 0.01);
+        approx(
+            k3_reference().routed_bytes_per_position() / 1e9,
+            25.83,
+            0.01,
+        );
     }
 
     #[test]

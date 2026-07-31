@@ -12,13 +12,21 @@ pub struct K3LedgerArgs {
     pub repo: String,
 
     /// Shard holding a KDA (linear-attention) layer.
-    #[arg(long, global = true, default_value = "model-00050-of-000096.safetensors")]
+    #[arg(
+        long,
+        global = true,
+        default_value = "model-00050-of-000096.safetensors"
+    )]
     pub kda_shard: String,
 
     /// Shard holding a full-attention (MLA) layer. NOTE the config's layer lists
     /// are 1-indexed against 0-indexed tensor names — config layer 4 is tensor
     /// layer 3. Picking wrong yields another KDA layer; the loader rejects it.
-    #[arg(long, global = true, default_value = "model-00004-of-000096.safetensors")]
+    #[arg(
+        long,
+        global = true,
+        default_value = "model-00004-of-000096.safetensors"
+    )]
     pub mla_shard: String,
 
     /// Attainable memory bandwidth, GB/s (measured, not spec sheet).
@@ -94,7 +102,11 @@ pub struct BlockArgs {
     /// perfect acceptance is genuinely intended (R5).
     #[arg(long, default_value_t = 3.85)]
     pub mean_accepted: f64,
-    #[arg(long, value_delimiter = ',', default_value = "1,2,3,4,5,6,7,8,9,10,11,12")]
+    #[arg(
+        long,
+        value_delimiter = ',',
+        default_value = "1,2,3,4,5,6,7,8,9,10,11,12"
+    )]
     pub widths: Vec<u32>,
     #[arg(long)]
     pub routed_retention: Option<f64>,
@@ -109,6 +121,11 @@ pub struct BlockArgs {
     /// inverts the sign of state traffic's effect on the optimum.
     #[arg(long, default_value_t = 0.0)]
     pub state_bytes_per_position: f64,
+    /// Derive per-position state traffic from K3's prefix-state ladder: one
+    /// [96,128,128] KDA recurrent state per proposed position, at this dtype
+    /// width in bytes (2 = bf16, 4 = fp32). Overrides --state-bytes-per-position.
+    #[arg(long)]
+    pub state_prefix_ladder_bytes: Option<u64>,
     /// Model execution as a naive token loop instead of assuming ideal grouping.
     #[arg(long)]
     pub token_loop: bool,

@@ -47,7 +47,12 @@ impl Repo {
     }
 
     pub fn config(&self) -> Result<Value, Box<dyn std::error::Error>> {
-        let body = self.client.get(self.url("config.json")).send()?.error_for_status()?.text()?;
+        let body = self
+            .client
+            .get(self.url("config.json"))
+            .send()?
+            .error_for_status()?
+            .text()?;
         let v: Value = serde_json::from_str(&body)?;
         Ok(v.get("text_config").cloned().unwrap_or(v))
     }
@@ -56,7 +61,11 @@ impl Repo {
     pub fn shard_header(&self, shard: &str) -> Result<Value, Box<dyn std::error::Error>> {
         let prefix = self.range(shard, 0, SAFETENSORS_LEN_PREFIX - 1)?;
         let n = u64::from_le_bytes(prefix[..8].try_into()?);
-        let body = self.range(shard, SAFETENSORS_LEN_PREFIX, SAFETENSORS_LEN_PREFIX + n - 1)?;
+        let body = self.range(
+            shard,
+            SAFETENSORS_LEN_PREFIX,
+            SAFETENSORS_LEN_PREFIX + n - 1,
+        )?;
         Ok(serde_json::from_slice(&body)?)
     }
 }
@@ -117,13 +126,13 @@ fn layer_list(cfg: &Value, key: &str) -> Vec<usize> {
     cfg.get("linear_attn_config")
         .and_then(|c| c.get(key))
         .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(Value::as_u64).map(|v| v as usize).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_u64)
+                .map(|v| v as usize)
+                .collect()
+        })
         .unwrap_or_default()
-}
-
-/// Which shard holds a given 0-indexed tensor layer, under the usual 1:1 layout.
-pub fn shard_for_tensor_layer(layer: usize, total_shards: usize) -> String {
-    format!("model-{:05}-of-{:06}.safetensors", layer + 2, total_shards)
 }
 
 pub fn load_geometry(
@@ -177,14 +186,6 @@ pub fn load_geometry(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn shard_naming_follows_the_one_based_file_index() {
-        assert_eq!(
-            shard_for_tensor_layer(49, 96),
-            "model-00051-of-000096.safetensors"
-        );
-    }
 
     #[test]
     fn tensor_params_multiplies_the_shape() {

@@ -131,7 +131,11 @@ mod tests {
         // worth less than 2x on the total. This is why no expert-side result
         // could ever have decided the headline target.
         let l = ledger();
-        assert!(l.expert_side_ceiling < 2.0, "ceiling {}", l.expert_side_ceiling);
+        assert!(
+            l.expert_side_ceiling < 2.0,
+            "ceiling {}",
+            l.expert_side_ceiling
+        );
     }
 
     #[test]
@@ -144,7 +148,13 @@ mod tests {
     fn a_demo_slice_holds_only_a_few_percent_of_experts() {
         let (g, p) = (k3_reference(), ServingPremises::default());
         for gb in [55.0, 60.0, 65.0] {
-            let c = slice_composition(&g, &p, &SliceTier { size_bytes: gb * 1e9 });
+            let c = slice_composition(
+                &g,
+                &p,
+                &SliceTier {
+                    size_bytes: gb * 1e9,
+                },
+            );
             assert!(
                 (0.04..0.09).contains(&c.resident_fraction),
                 "{gb} GB slice holds {} of experts",
