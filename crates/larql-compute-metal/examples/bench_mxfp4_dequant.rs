@@ -339,6 +339,25 @@ fn main() {
         });
         report("dequant + f32 matvec (full path)", t_full, mxfp4_all_in, 1);
         println!("    codec is {:.0}% of the full path", 100.0 * t_dq / t_full);
+        println!();
+        println!("  -- traffic decomposition: MXFP4 is being used as STORAGE, not compute --");
+        println!("     per weight, the materialisation path moves:");
+        println!("       {MXFP4_ALL_IN_BYTES:.3} B packed+scale read");
+        println!("       4.000 B f32 dequant output WRITTEN");
+        println!("       4.000 B x T f32 re-read by matvec");
+        for t in BLOCK_WIDTHS {
+            let traffic = MXFP4_ALL_IN_BYTES + 4.0 + 4.0 * t as f64;
+            println!(
+                "       T={t}: {traffic:.2} B traffic for {MXFP4_ALL_IN_BYTES:.3} B stored \
+                 -> {:.1}x amplification  ({:.2} GB/token-equivalent)",
+                traffic / MXFP4_ALL_IN_BYTES,
+                traffic * weights as f64 / 1e9,
+            );
+        }
+        println!("     A fused kernel moves the {MXFP4_ALL_IN_BYTES:.3} B and nothing else.");
+        println!("     This is why MXFP4 eta is not merely hard to measure: the current");
+        println!("     implementation is not executing MXFP4 as a compressed compute");
+        println!("     format at all.");
         println!(
             "    NOTE: this arm cannot rotate a working set — dequantize_expert takes"
         );

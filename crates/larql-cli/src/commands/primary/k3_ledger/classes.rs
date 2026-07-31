@@ -81,7 +81,7 @@ impl KernelClass {
             Self::AttnProjection => "q6k_matvec, Q6K, measured at K3 KDA 12288x7168",
             Self::GateUp => "q4k_ffn_gate_up_8sg 10240x2560, Q4K, Gemma shape",
             Self::Down => "q6k_matvec, Q6K, measured at K3 latent-up 7168x3584",
-            Self::RoutedExpert => "q6k_matvec, Q6K, measured at K3 expert 3584x3072",
+            Self::RoutedExpert => "q6k_matvec ungrouped, K3 expert 3584x3072 (K3a grouped measures 0.89)",
             Self::Unquantised => "f32_gemv lm_head 262Kx2560, f32, Gemma shape",
         }
     }
