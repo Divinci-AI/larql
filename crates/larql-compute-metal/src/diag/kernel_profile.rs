@@ -1053,6 +1053,8 @@ pub fn profile_grouped_experts(
                 enc.set_buffer(3, Some(&out_group), 0);
                 enc.set_bytes(4, 4, &n_val as *const u32 as *const std::ffi::c_void);
                 enc.set_bytes(5, 4, &k_val as *const u32 as *const std::ffi::c_void);
+                let x_stride: u32 = 0; // shared-input regime for this bench
+                enc.set_bytes(6, 4, &x_stride as *const u32 as *const std::ffi::c_void);
                 enc.dispatch_thread_groups(
                     MTLSize::new(tiles_grp, top_k as u64, 1),
                     MTLSize::new(grp.threads_per_tg, 1, 1),

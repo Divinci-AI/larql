@@ -42,6 +42,22 @@
 //! The offset table is `uint` byte offsets rather than pointers so the same
 //! interface works whether experts live in one buffer or many, and so K3b can
 //! extend it to ragged position assignments without a signature change.
+//!
+//! ## Two input regimes, and why the stride is explicit
+//!
+//! Reading the engine's MoE path shows the two projections differ in a way that
+//! matters here:
+//!
+//!   - **gate/up** consumes one hidden state shared by every selected expert.
+//!     That case is *already* grouped in `moe_dispatch` via `q4k_ffn_gate_up`.
+//!   - **down** consumes each expert's OWN intermediate activation, staged at
+//!     `act_buf + slot * inter_padded`. That is the loop still running one
+//!     dispatch per expert, so it is the case this kernel has to serve.
+//!
+//! `XSTRIDE` distinguishes them: `0` shares one vector across slots, `K` gives
+//! each slot its own. It is a parameter rather than an inferred mode because
+//! getting it wrong computes a real number from the wrong expert's activation —
+//! a silent wrong answer, not a crash.
 
 /// Output rows per threadgroup — one simdgroup each, matching `q6k_matvec` so
 /// the occupancy comparison is like-for-like.
@@ -55,10 +71,15 @@ constant uint Q6KG_BLOCK_SIZE  = 210;
 kernel void q6k_grouped_experts(
     device const uchar*  W6K     [[buffer(0)]],  // all expert payloads
     device const uint*   offsets [[buffer(1)]],  // [n_sel] byte offset per slot
-    device const float*  X       [[buffer(2)]],  // [K] shared input vector
+    device const float*  X       [[buffer(2)]],  // shared [K], or [n_sel, K]
     device float*        out     [[buffer(3)]],  // [n_sel, N] per-expert outputs
     constant uint&       N       [[buffer(4)]],
     constant uint&       K       [[buffer(5)]],
+    // 0 = every slot reads the same X (gate/up: one hidden state for all
+    // experts). K = each slot reads its own X (down: each expert consumes its
+    // OWN intermediate activation). Getting this wrong silently computes the
+    // wrong expert's product, so it is an explicit parameter, not a mode flag.
+    constant uint&       XSTRIDE [[buffer(6)]],
     uint2 tg_id    [[threadgroup_position_in_grid]],
     uint  lane     [[thread_index_in_simdgroup]],
     uint  sg_id    [[simdgroup_index_in_threadgroup]])
@@ -72,6 +93,7 @@ kernel void q6k_grouped_experts(
     const uint bytes_per_row = superblocks * Q6KG_BLOCK_SIZE;
     // Offset table indirection is the whole difference from q6k_matvec.
     device const uchar* row = W6K + offsets[slot] + row_idx * bytes_per_row;
+    device const float* Xs  = X + (ulong)slot * XSTRIDE;
 
     // ---- body identical to q6k_matvec from here ----
     const uint ix  = lane & 1u;
@@ -91,14 +113,14 @@ kernel void q6k_grouped_experts(
 
         const uint xb = i * 256u + base;
         float xl[16];
-        xl[ 0] = X[xb      ]; xl[ 1] = X[xb +  1u];
-        xl[ 2] = X[xb +  2u]; xl[ 3] = X[xb +  3u];
-        xl[ 4] = X[xb + 64u]; xl[ 5] = X[xb + 65u];
-        xl[ 6] = X[xb + 66u]; xl[ 7] = X[xb + 67u];
-        xl[ 8] = X[xb +128u]; xl[ 9] = X[xb +129u];
-        xl[10] = X[xb +130u]; xl[11] = X[xb +131u];
-        xl[12] = X[xb +192u]; xl[13] = X[xb +193u];
-        xl[14] = X[xb +194u]; xl[15] = X[xb +195u];
+        xl[ 0] = Xs[xb      ]; xl[ 1] = Xs[xb +  1u];
+        xl[ 2] = Xs[xb +  2u]; xl[ 3] = Xs[xb +  3u];
+        xl[ 4] = Xs[xb + 64u]; xl[ 5] = Xs[xb + 65u];
+        xl[ 6] = Xs[xb + 66u]; xl[ 7] = Xs[xb + 67u];
+        xl[ 8] = Xs[xb +128u]; xl[ 9] = Xs[xb +129u];
+        xl[10] = Xs[xb +130u]; xl[11] = Xs[xb +131u];
+        xl[12] = Xs[xb +192u]; xl[13] = Xs[xb +193u];
+        xl[14] = Xs[xb +194u]; xl[15] = Xs[xb +195u];
 
         {
             const uint b = base;

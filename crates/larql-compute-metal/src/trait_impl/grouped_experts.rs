@@ -12,6 +12,21 @@
 
 use crate::MetalBackend;
 
+/// How the input vectors are laid out across expert slots.
+///
+/// Not a convenience flag: the engine's two expert projections genuinely differ.
+/// `gate/up` shares one hidden state across every selected expert, while `down`
+/// consumes each expert's own intermediate activation. Choosing wrong produces a
+/// plausible number from the wrong expert's input rather than an error, so the
+/// caller must state which it means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputLayout {
+    /// One `[k]` vector, read by every slot — the gate/up regime.
+    Shared,
+    /// `[n_selected, k]`, each slot reading its own row — the down regime.
+    PerSlot,
+}
+
 /// Where one selected expert's Q6_K payload begins, in bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExpertOffset(pub u32);
@@ -66,6 +81,7 @@ impl MetalBackend {
         x: &[f32],
         n: usize,
         k: usize,
+        layout: InputLayout,
     ) -> Result<Vec<f32>, GroupedError> {
         if offsets.is_empty() {
             return Err(GroupedError::NoExpertsSelected);
@@ -86,10 +102,27 @@ impl MetalBackend {
             }
         }
 
+        let x_needed = match layout {
+            InputLayout::Shared => k,
+            InputLayout::PerSlot => k * offsets.len(),
+        };
+        if x.len() < x_needed {
+            return Err(GroupedError::OffsetOutOfRange {
+                slot: 0,
+                offset: 0,
+                need: x_needed,
+                have: x.len(),
+            });
+        }
+        let x_stride: u32 = match layout {
+            InputLayout::Shared => 0,
+            InputLayout::PerSlot => k as u32,
+        };
+
         let raw: Vec<u32> = offsets.iter().map(|o| o.0).collect();
         let buf_w = self.bufs.get_bytes(weights);
         let buf_o = self.bufs.get_bytes(bytemuck_cast(&raw));
-        let buf_x = self.bufs.transient_from_f32(&x[..k]);
+        let buf_x = self.bufs.transient_from_f32(&x[..x_needed]);
         let buf_out = self.bufs.output((offsets.len() * n * 4) as u64);
         let n_u32 = n as u32;
         let k_u32 = k as u32;
@@ -106,6 +139,7 @@ impl MetalBackend {
         enc.set_buffer(3, Some(&buf_out), 0);
         enc.set_bytes(4, 4, &n_u32 as *const u32 as *const std::ffi::c_void);
         enc.set_bytes(5, 4, &k_u32 as *const u32 as *const std::ffi::c_void);
+        enc.set_bytes(6, 4, &x_stride as *const u32 as *const std::ffi::c_void);
         // 2-D grid: row tiles x expert slots. This is the whole point — the
         // y-dimension is the parallelism the model was already supplying.
         enc.dispatch_thread_groups(
@@ -174,7 +208,7 @@ mod tests {
         let (buf, offs, per) = bank();
         let x: Vec<f32> = (0..K).map(|i| ((i % 251) as f32 - 125.0) * 0.01).collect();
 
-        let grouped = be.q6k_grouped_experts(&buf, &offs, &x, N, K).expect("dispatch");
+        let grouped = be.q6k_grouped_experts(&buf, &offs, &x, N, K, InputLayout::Shared).expect("dispatch");
 
         for (slot, off) in offs.iter().enumerate() {
             let lo = off.0 as usize;
@@ -201,7 +235,7 @@ mod tests {
         let Some(be) = MetalBackend::new() else { return };
         let (buf, offs, per) = bank();
         let x: Vec<f32> = (0..K).map(|i| ((i % 97) as f32 - 48.0) * 0.02).collect();
-        let one = be.q6k_grouped_experts(&buf, &offs[..1], &x, N, K).unwrap();
+        let one = be.q6k_grouped_experts(&buf, &offs[..1], &x, N, K, InputLayout::Shared).unwrap();
         let solo = be.q6k_matvec(&buf[..per], &x, N, K).unwrap();
         assert_eq!(one, solo);
     }
@@ -214,8 +248,58 @@ mod tests {
         let (buf, offs, _) = bank();
         let x: Vec<f32> = (0..K).map(|i| ((i % 31) as f32 - 15.0) * 0.05).collect();
         let dup = vec![offs[3], offs[3], offs[7]];
-        let got = be.q6k_grouped_experts(&buf, &dup, &x, N, K).unwrap();
+        let got = be.q6k_grouped_experts(&buf, &dup, &x, N, K, InputLayout::Shared).unwrap();
         assert_eq!(&got[..N], &got[N..2 * N], "same expert must give same output");
+    }
+
+    #[test]
+    fn per_slot_inputs_match_per_expert_dispatches() {
+        // The regime the engine's DOWN projection actually needs: each expert
+        // consumes its own intermediate activation, not a shared hidden state.
+        let Some(be) = MetalBackend::new() else { return };
+        let (buf, offs, per) = bank();
+        let xs: Vec<f32> = (0..K * SELECTED)
+            .map(|i| ((i % 251) as f32 - 125.0) * 0.01)
+            .collect();
+
+        let grouped = be
+            .q6k_grouped_experts(&buf, &offs, &xs, N, K, InputLayout::PerSlot)
+            .expect("dispatch");
+
+        for (slot, off) in offs.iter().enumerate() {
+            let lo = off.0 as usize;
+            let solo = be
+                .q6k_matvec(&buf[lo..lo + per], &xs[slot * K..(slot + 1) * K], N, K)
+                .expect("reference");
+            assert_eq!(
+                &grouped[slot * N..(slot + 1) * N],
+                &solo[..],
+                "slot {slot} read the wrong input row"
+            );
+        }
+    }
+
+    #[test]
+    fn shared_and_per_slot_disagree_when_inputs_differ() {
+        // Guards the silent-wrong-answer failure: if the stride were ignored,
+        // these two would agree and the bug would be invisible.
+        let Some(be) = MetalBackend::new() else { return };
+        let (buf, offs, _) = bank();
+        let xs: Vec<f32> = (0..K * SELECTED)
+            .map(|i| ((i % 97) as f32 - 48.0) * 0.02)
+            .collect();
+        let shared = be
+            .q6k_grouped_experts(&buf, &offs, &xs, N, K, InputLayout::Shared)
+            .unwrap();
+        let per_slot = be
+            .q6k_grouped_experts(&buf, &offs, &xs, N, K, InputLayout::PerSlot)
+            .unwrap();
+        assert_eq!(&shared[..N], &per_slot[..N], "slot 0 reads x[0..K] either way");
+        assert_ne!(
+            &shared[N..2 * N],
+            &per_slot[N..2 * N],
+            "slot 1 must read a different row under PerSlot"
+        );
     }
 
     #[test]
@@ -225,15 +309,15 @@ mod tests {
         let x = vec![0.1f32; K];
         let bad = vec![ExpertOffset(buf.len() as u32 - 16)];
         assert!(matches!(
-            be.q6k_grouped_experts(&buf, &bad, &x, N, K),
+            be.q6k_grouped_experts(&buf, &bad, &x, N, K, InputLayout::Shared),
             Err(GroupedError::OffsetOutOfRange { .. })
         ));
         assert!(matches!(
-            be.q6k_grouped_experts(&buf, &offs, &x, N, K + 1),
+            be.q6k_grouped_experts(&buf, &offs, &x, N, K + 1, InputLayout::Shared),
             Err(GroupedError::KNotSuperblockAligned { .. })
         ));
         assert!(matches!(
-            be.q6k_grouped_experts(&buf, &[], &x, N, K),
+            be.q6k_grouped_experts(&buf, &[], &x, N, K, InputLayout::Shared),
             Err(GroupedError::NoExpertsSelected)
         ));
     }
