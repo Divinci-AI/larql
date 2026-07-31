@@ -30,7 +30,7 @@ pub use ffn_row::{FfnRowAccess, GateIndex};
 pub use fp4_ffn::Fp4FfnAccess;
 pub use gate_lookup::GateLookup;
 pub use native_ffn::NativeFfnAccess;
-pub use patch_overrides::PatchOverrides;
+pub use patch_overrides::{OverrideSlot, PatchOverrides};
 pub use quantized_ffn::QuantizedFfnAccess;
 
 /// Default `c_score` for a `FeatureMeta` synthesised without an explicit

@@ -113,6 +113,39 @@ impl PatchOverrides for PatchedVindex {
     fn has_overrides_at(&self, layer: usize) -> bool {
         self.overrides_gate.keys().any(|(l, _)| *l == layer) || self.base.has_overrides_at(layer)
     }
+
+    /// Union of the base's up/down override slots, the overlay's gate
+    /// override slots, and the overlay's tombstones at `layer`. A
+    /// tombstone wins over any lingering vector override on the same
+    /// slot (matching `gate_knn`, which filters deleted features out of
+    /// selection regardless of overrides).
+    fn override_slots_at(&self, layer: usize) -> Option<Vec<crate::index::OverrideSlot>> {
+        let mut slots: std::collections::BTreeMap<usize, bool> = self
+            .base
+            .override_slots_at(layer)?
+            .into_iter()
+            .map(|s| (s.feature, s.tombstoned))
+            .collect();
+        for &(l, f) in self.overrides_gate.keys() {
+            if l == layer {
+                slots.entry(f).or_insert(false);
+            }
+        }
+        for &(l, f) in &self.deleted {
+            if l == layer {
+                slots.insert(f, true);
+            }
+        }
+        Some(
+            slots
+                .into_iter()
+                .map(|(feature, tombstoned)| crate::index::OverrideSlot {
+                    feature,
+                    tombstoned,
+                })
+                .collect(),
+        )
+    }
 }
 
 impl NativeFfnAccess for PatchedVindex {
@@ -359,5 +392,39 @@ mod tests {
             <PatchedVindex as GateLookup>::gate_walk(&p, 0, &q, 2).is_none(),
             "layer with a tombstone must decline exact selection"
         );
+    }
+
+    /// `override_slots_at` merges three sources — base up/down override
+    /// maps, overlay gate overrides, overlay tombstones — sorted and
+    /// deduplicated, with a tombstone winning over a lingering vector
+    /// override on the same slot (matching `gate_knn`'s filtering).
+    #[test]
+    fn override_slots_at_merges_base_overlay_and_tombstones() {
+        use crate::index::{OverrideSlot, PatchOverrides as _};
+        let mut p = make_scored_patched();
+        // Base up/down overrides land on the inner VectorIndex.
+        p.base.set_up_vector(0, 2, vec![1.0; 4]);
+        p.base.set_down_vector(0, 2, vec![1.0; 4]);
+        // Overlay gate override (INSERT) on slot 1.
+        p.insert_feature(0, 1, vec![0.0, 9.0, 0.0, 0.0], make_meta("ins"));
+        // Tombstone slot 2 — must override the base's vector overrides.
+        p.delete_feature(0, 2);
+
+        let slots = p.override_slots_at(0).expect("overlay enumerates");
+        assert_eq!(
+            slots,
+            vec![
+                OverrideSlot {
+                    feature: 1,
+                    tombstoned: false
+                },
+                OverrideSlot {
+                    feature: 2,
+                    tombstoned: true
+                },
+            ]
+        );
+        // Unpatched layer → empty enumeration, not None.
+        assert_eq!(p.override_slots_at(1), Some(Vec::new()));
     }
 }

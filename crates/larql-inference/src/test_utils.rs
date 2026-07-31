@@ -732,6 +732,41 @@ pub fn make_test_q4k_vindex_with_model_gate(weights: &ModelWeights) -> larql_vin
     index
 }
 
+/// [`make_test_q4k_vindex`] variant whose heap gate vectors are the
+/// **dequantised Q4_K gate bytes** — the exact production shape: the
+/// loader synthesises f32 gates from the interleaved Q4K gate slab
+/// (`synthesize_gate_from_q4k`), so gate-KNN scores and the Q4K dense
+/// base compute from the *same dequantised values*. The model-gate
+/// variant above scores gates from the pre-quantisation f32 tensor
+/// instead, which diverges from the Q4K bytes by the gate's
+/// quantisation error — fine for selection tests, fatal for the
+/// base+delta exactness tests (2026-07-30 review, item 16) that
+/// compare walk gate scores against the dense Q4K base.
+pub fn make_test_q4k_vindex_with_synth_gate(weights: &ModelWeights) -> larql_vindex::VectorIndex {
+    let staging = make_test_q4k_vindex(weights);
+    let hidden = weights.hidden_size;
+    let inter = weights.intermediate_size;
+    let mut gate_vectors = Vec::with_capacity(weights.num_layers);
+    for layer in 0..weights.num_layers {
+        let cache = staging
+            .kquant_ffn_layer(layer, 0)
+            .expect("Q4K fixture must expose a dequantised gate cache");
+        assert_eq!(cache.len(), inter * hidden, "gate cache is [inter, hidden]");
+        let m = Array2::from_shape_vec((inter, hidden), cache.to_vec()).unwrap();
+        gate_vectors.push(Some(m));
+    }
+    let down_meta = vec![None; weights.num_layers];
+    let mut index = larql_vindex::VectorIndex::new(
+        gate_vectors,
+        down_meta,
+        weights.num_layers,
+        weights.hidden_size,
+    );
+    index.vocab_size = weights.vocab_size;
+    attach_q4k_model_storage_to_vindex(weights, &mut index);
+    index
+}
+
 /// Quantise the model's attention + FFN + lm_head tensors to Q4_K and
 /// install them as the vindex's `attn_kquant` / `interleaved_kquant` /
 /// `lm_head` storage. Shared by [`make_test_q4k_vindex`] and

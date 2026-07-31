@@ -5,7 +5,8 @@
 //! | # | Condition                                            | Path                         |
 //! | - | ---------------------------------------------------- | ---------------------------- |
 //! | 0 | `seq_len == 1` and L1 cache has the residual         | `l1_cache_hit`               |
-//! | 1 | `index.has_overrides_at(layer)`                      | `override:sparse`            |
+//! | 1a| `index.has_overrides_at(layer)` + delta preconditions| `override:base_delta`        |
+//! | 1b| `index.has_overrides_at(layer)`                      | `override:sparse`            |
 //! | 2 | `config.is_sparse(layer)`                            | `sparse:*`                   |
 //! | 3 | `index.has_fp4_storage()`                            | `fp4_storage:sparse`         |
 //! | 4 | `has_interleaved_kquant()` + gated FFN               | `interleaved_kquant:native`  |
@@ -17,7 +18,11 @@
 //! | 10| Fallback: sparse matmul against safetensors weights  | `weights_fallback:*`         |
 //!
 //! Priority rationale: overrides must bypass everything (whole-layer
-//! paths silently lose overridden features). FP4/FP8 is handled by the
+//! paths silently lose overridden features). Overridden layers first
+//! try the exact base+delta path (`base_delta.rs` — dense base plus
+//! O(|patch|) per-slot corrections, 2026-07-30 review item 16), which
+//! declines to the walk when its exactness preconditions don't hold.
+//! FP4/FP8 is handled by the
 //! sparse path because the format is per-feature by construction —
 //! there is no batched FP4 dense path on CPU. Q4K/Q4/f32 interleaved
 //! are perf-preference ordered. `exact` and `weights_fallback` are
@@ -25,6 +30,7 @@
 //!
 //! Each walk path lives in its own module under this directory:
 //!
+//! - `base_delta.rs`              — exact base+delta execution for patched layers
 //! - `sparse.rs`                  — per-feature walk, unified ffn_row_* dispatch
 //!   (`sparse_gemv.rs` full-K gemv, `sparse_route.rs` hit selection,
 //!   `sparse_parallel.rs` parallel Q4K down, `sparse_gather.rs` gather kernel)
@@ -53,6 +59,7 @@ use larql_compute::prelude::*;
 
 use larql_vindex::{GateIndex, WalkHit, WalkTrace};
 
+mod base_delta;
 mod builders;
 mod exact;
 mod full_mmap;
@@ -70,6 +77,8 @@ mod sparse_route;
 mod thresholds;
 mod timings;
 
+#[cfg(test)]
+mod base_delta_tests;
 #[cfg(test)]
 mod dispatch_tests;
 #[cfg(test)]
@@ -190,6 +199,81 @@ impl<'a> WalkFfn<'a> {
         WalkTrace { layers }
     }
 
+    /// Ladder steps 4–9 — the whole-layer, override-blind paths, in
+    /// priority order. Returns `None` when every step declines (caller
+    /// falls through to `weights_fallback`).
+    ///
+    /// Factored out of `forward_with_activation` so the base+delta
+    /// path (`base_delta.rs`) can produce its dense base through the
+    /// EXACT same code the unpatched ladder runs — base numerics
+    /// identical to the unpatched model by construction (2026-07-30
+    /// review, item 16 exactness condition 4). On a patched index
+    /// these paths read only base bytes, so their output is the
+    /// pre-patch dense result — which is precisely what base+delta
+    /// needs to correct, and precisely why the ordinary override arm
+    /// must never land here directly.
+    fn forward_unpatched_whole_layer(
+        &self,
+        layer: usize,
+        x: &Array2<f32>,
+    ) -> Option<(Array2<f32>, Array2<f32>)> {
+        // 4. Q4K native — direct matvec via `kquant_matmul_transb`. Same
+        //    kernel `ffn_decode_step_native` uses. Goes ahead of Q4_0 /
+        //    f32 interleaved / full_mmap / dequant because for a vindex
+        //    that has both Q4K and one of those, this is the fast path.
+        if self.index.has_interleaved_kquant() {
+            if let Some(r) = self.walk_ffn_kquant_native(layer, x) {
+                return Some(r);
+            }
+        }
+
+        // 5. Q4_0 interleaved — batched GPU submission when the
+        //    backend implements `q4_matvec_pair_batch` (probed by
+        //    calling — see `walk_ffn_q4_interleaved`), C kernel
+        //    otherwise. Gate on the format the data actually is:
+        //    the slab is Q4_0, and gating on Q4_K here used to
+        //    admit `CpuBackend` (which advertises Q4_K matvec but
+        //    not the batch API) into an unwrap-on-None panic.
+        if self.index.has_interleaved_q4()
+            && self
+                .backend
+                .is_some_and(|be| be.supports_quant(::larql_compute::QuantFormat::Q4_0))
+        {
+            if let Some(r) = self.walk_ffn_q4_interleaved(layer, x) {
+                return Some(r);
+            }
+        }
+
+        // 6. f32 interleaved.
+        if self.index.has_interleaved() {
+            if let Some(r) = self.walk_ffn_interleaved(layer, x) {
+                return Some(r);
+            }
+        }
+
+        // 7. Full mmap — gate/up/down in separate files.
+        if self.index.has_full_mmap_ffn() {
+            if let Some(r) = self.walk_ffn_full_mmap(layer, x) {
+                return Some(r);
+            }
+        }
+
+        // 8. Q4K interleaved dequant — fallback for non-gated archs and
+        //    any case where `walk_ffn_kquant_native` returns `None`.
+        if self.index.has_interleaved_kquant() {
+            if let Some(r) = self.walk_ffn_kquant_dequant(layer, x) {
+                return Some(r);
+            }
+        }
+
+        // 9. Exact — down from mmap, gate/up from safetensors.
+        if self.index.has_down_features() {
+            return Some(self.walk_ffn_exact(layer, x));
+        }
+
+        None
+    }
+
     /// Ladder step 10 — sparse matmul against safetensors weights, and
     /// the only path besides the sparse walk that honours feature
     /// overrides. Doubles as the hard fallback for overridden layers
@@ -250,10 +334,21 @@ impl<'a> FfnBackend for WalkFfn<'a> {
             self.trace_residuals.borrow_mut().push((layer, last_row));
         }
 
-        // Override-aware routing: patched layers bypass every whole-layer
-        // path because those would silently produce wrong activations
-        // for overridden features.
+        // Override-aware routing: patched layers bypass the L1 cache and
+        // every whole-layer path below, because those would silently
+        // produce wrong activations for overridden features.
         if self.index.has_overrides_at(layer) {
+            // 1a. Exact base+delta (2026-07-30 review, item 16): dense
+            //     base through the unpatched whole-layer ladder, plus
+            //     O(|patch|) per-slot corrections. Declines (None) when
+            //     its exactness preconditions don't hold — the patched
+            //     layer then takes the sparse walk as before, so the
+            //     override→forced-sparse cliff only remains where
+            //     base+delta cannot be exact.
+            if let Some(result) = self.walk_ffn_base_delta(layer, x) {
+                return result;
+            }
+            // 1b. Override-aware sparse walk.
             if let Some(result) = self.walk_ffn_sparse(layer, x) {
                 // The sparse path has already called trace_path — no
                 // need to rewrite; its name carries the specialisation.
@@ -321,58 +416,9 @@ impl<'a> FfnBackend for WalkFfn<'a> {
                 }
             }
 
-            // 4. Q4K native — direct matvec via `kquant_matmul_transb`. Same
-            //    kernel `ffn_decode_step_native` uses. Goes ahead of Q4_0 /
-            //    f32 interleaved / full_mmap / dequant because for a vindex
-            //    that has both Q4K and one of those, this is the fast path.
-            if self.index.has_interleaved_kquant() {
-                if let Some(r) = self.walk_ffn_kquant_native(layer, x) {
-                    break 'routing r;
-                }
-            }
-
-            // 5. Q4_0 interleaved — batched GPU submission when the
-            //    backend implements `q4_matvec_pair_batch` (probed by
-            //    calling — see `walk_ffn_q4_interleaved`), C kernel
-            //    otherwise. Gate on the format the data actually is:
-            //    the slab is Q4_0, and gating on Q4_K here used to
-            //    admit `CpuBackend` (which advertises Q4_K matvec but
-            //    not the batch API) into an unwrap-on-None panic.
-            if self.index.has_interleaved_q4()
-                && self
-                    .backend
-                    .is_some_and(|be| be.supports_quant(::larql_compute::QuantFormat::Q4_0))
-            {
-                if let Some(r) = self.walk_ffn_q4_interleaved(layer, x) {
-                    break 'routing r;
-                }
-            }
-
-            // 6. f32 interleaved.
-            if self.index.has_interleaved() {
-                if let Some(r) = self.walk_ffn_interleaved(layer, x) {
-                    break 'routing r;
-                }
-            }
-
-            // 7. Full mmap — gate/up/down in separate files.
-            if self.index.has_full_mmap_ffn() {
-                if let Some(r) = self.walk_ffn_full_mmap(layer, x) {
-                    break 'routing r;
-                }
-            }
-
-            // 8. Q4K interleaved dequant — fallback for non-gated archs and
-            //    any case where `walk_ffn_kquant_native` returns `None`.
-            if self.index.has_interleaved_kquant() {
-                if let Some(r) = self.walk_ffn_kquant_dequant(layer, x) {
-                    break 'routing r;
-                }
-            }
-
-            // 9. Exact — down from mmap, gate/up from safetensors.
-            if self.index.has_down_features() {
-                break 'routing self.walk_ffn_exact(layer, x);
+            // 4–9. Whole-layer paths (shared with base+delta's base).
+            if let Some(r) = self.forward_unpatched_whole_layer(layer, x) {
+                break 'routing r;
             }
 
             // 10. Last resort: sparse matmul against safetensors weights.
