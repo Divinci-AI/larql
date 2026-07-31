@@ -70,6 +70,53 @@ impl Repo {
     }
 }
 
+/// Byte range of one named tensor within a shard, from its header entry.
+pub fn tensor_range(header: &Value, name: &str) -> Option<(u64, u64)> {
+    let o = header.get(name)?.get("data_offsets")?.as_array()?;
+    Some((o.first()?.as_u64()?, o.get(1)?.as_u64()?))
+}
+
+/// Every `weight_scale` tensor in a shard, with its shape and byte range.
+pub fn scale_tensors(header: &Value) -> Vec<(String, Vec<u64>, u64, u64)> {
+    let Some(obj) = header.as_object() else { return Vec::new() };
+    let mut out: Vec<_> = obj
+        .iter()
+        .filter(|(k, _)| k.ends_with("weight_scale"))
+        .filter_map(|(k, v)| {
+            let shape: Vec<u64> = v.get("shape")?.as_array()?.iter().filter_map(Value::as_u64).collect();
+            let (lo, hi) = tensor_range(header, k)?;
+            Some((k.clone(), shape, lo, hi))
+        })
+        .collect();
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
+impl Repo {
+    /// Read a byte range out of a shard, offset by the header length.
+    pub fn tensor_bytes_at(
+        &self,
+        shard: &str,
+        header_len: u64,
+        lo: u64,
+        hi: u64,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let base = SAFETENSORS_LEN_PREFIX + header_len;
+        self.range(shard, base + lo, base + hi - 1)
+    }
+
+    /// The header plus its byte length, so tensor offsets can be resolved.
+    pub fn shard_header_with_len(
+        &self,
+        shard: &str,
+    ) -> Result<(Value, u64), Box<dyn std::error::Error>> {
+        let prefix = self.range(shard, 0, SAFETENSORS_LEN_PREFIX - 1)?;
+        let n = u64::from_le_bytes(prefix[..8].try_into()?);
+        let body = self.range(shard, SAFETENSORS_LEN_PREFIX, SAFETENSORS_LEN_PREFIX + n - 1)?;
+        Ok((serde_json::from_slice(&body)?, n))
+    }
+}
+
 fn tensor_bytes(entry: &Value) -> u64 {
     entry
         .get("data_offsets")

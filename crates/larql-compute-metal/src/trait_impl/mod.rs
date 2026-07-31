@@ -4,6 +4,7 @@
 //! `ComputeBackend` impl (`name`, `device_info`, `supports`) lives
 //! here; sub-trait impls are in their own files.
 
+pub mod mxfp4;
 mod decode;
 mod matmul;
 mod quant_matvec;

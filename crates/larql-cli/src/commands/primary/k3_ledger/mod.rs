@@ -27,6 +27,7 @@ pub mod frontier;
 pub mod geometry;
 mod report;
 pub mod touch;
+pub mod transcode;
 
 pub use args::K3LedgerArgs;
 
@@ -49,5 +50,8 @@ pub fn run(args: K3LedgerArgs) -> Result<(), Box<dyn std::error::Error>> {
         args::K3LedgerCmd::Touch(a) => report::touch(&geom, &premises, a, args.json),
         args::K3LedgerCmd::Frontier(a) => report::frontier(&geom, &premises, a, args.json),
         args::K3LedgerCmd::Block(a) => report::block(&geom, &premises, a, args.json),
+        args::K3LedgerCmd::TranscodeScan(a) => {
+            report::transcode_scan(&repo, &args.kda_shard, a, args.json)
+        }
     }
 }

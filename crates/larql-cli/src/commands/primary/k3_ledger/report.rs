@@ -8,6 +8,7 @@ use serde_json::json;
 use super::args::{BlockArgs, BudgetArgs, FrontierArgs, TouchArgs};
 use super::block::{self, DraftProfile, PhysicalReuse, StateTraffic};
 use super::budget::{self, LinkPremises};
+use super::fetch;
 use super::frontier::{self, ServingPremises};
 use super::geometry::{BitConvention, K3Geometry};
 use super::touch::{self, SliceTier};
@@ -386,5 +387,75 @@ pub fn block(geom: &K3Geometry, p: &ServingPremises, a: &BlockArgs, as_json: boo
     if rows.iter().any(|r| r.rests_on_assumptions) {
         println!("  RESTS ON ASSUMPTIONS: physical reuse and/or state traffic unmeasured.");
     }
+    Ok(())
+}
+
+pub fn transcode_scan(
+    repo: &fetch::Repo,
+    shard: &str,
+    a: &super::args::TranscodeScanArgs,
+    as_json: bool,
+) -> R {
+    use super::transcode;
+
+    let (header, header_len) = repo.shard_header_with_len(shard)?;
+    let tensors = fetch::scale_tensors(&header);
+    if tensors.is_empty() {
+        return Err("no weight_scale tensors in this shard".into());
+    }
+
+    println!("scanning e8m0 exponent spread in {shard}");
+    println!(
+        "  {} scale tensors present; sampling {}",
+        tensors.len(),
+        a.tensors.min(tensors.len())
+    );
+
+    let mut scans = Vec::new();
+    for (name, shape, lo, hi) in tensors.iter().take(a.tensors) {
+        let groups_per_row = *shape.last().unwrap_or(&1) as usize;
+        let bytes = repo.tensor_bytes_at(shard, header_len, *lo, *hi)?;
+        let s = transcode::scan_scales(&bytes, groups_per_row);
+        if scans.is_empty() {
+            println!(
+                "  e.g. {name}: shape {shape:?}, {} groups/row, {} superblocks",
+                groups_per_row, s.superblocks
+            );
+        }
+        scans.push(s);
+    }
+    let m = transcode::merge(&scans);
+
+    if as_json {
+        println!("{}", serde_json::to_string_pretty(&m)?);
+        return Ok(());
+    }
+
+    println!();
+    println!("--- exponent field ---");
+    println!("  scanned {} tensors, {} superblocks, {} scale bytes",
+        m.tensors_scanned, m.superblocks, m.groups_scanned);
+    println!("  e8m0 range {}..{}  (d exponent {}..{})",
+        m.e_min, m.e_max, m.d_exponent_min, m.d_exponent_max);
+    println!("  sentinels: {} zero, {} NaN", m.zero_scales, m.nan_scales);
+    println!();
+    println!("--- spread per 256-weight superblock ---");
+    for (spread, count) in &m.spread_histogram {
+        let pct = 100.0 * *count as f64 / m.superblocks.max(1) as f64;
+        let flag = if *spread > transcode::MAX_EXPONENT_SPREAD { "  <- EXCEEDS int8 sub-scale" } else { "" };
+        println!("  spread {spread:>2}: {count:>9} ({pct:>5.1}%){flag}");
+    }
+    println!("  max spread {} (limit {})", m.max_spread, transcode::MAX_EXPONENT_SPREAD);
+    println!();
+    println!("--- constraints ---");
+    println!("  C1 spread <= {}   : {}  ({} superblocks over)",
+        transcode::MAX_EXPONENT_SPREAD,
+        if m.c1_spread_ok { "PASS" } else { "FAIL" },
+        m.superblocks_over_spread);
+    println!("  C2 d in f16 range : {}  ({} superblocks over)",
+        if m.c2_f16_ok { "PASS" } else { "FAIL" },
+        m.superblocks_over_f16_range);
+    println!();
+    println!("VERDICT: {}", m.verdict());
     Ok(())
 }

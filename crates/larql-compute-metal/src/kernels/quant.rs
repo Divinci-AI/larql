@@ -36,6 +36,10 @@ pub struct QuantKernels {
     pub q8_quant_pipeline: ComputePipelineState,
     pub q8_matvec_pipeline: KernelHandle,
 
+    /// Direct MXFP4 matvec — consumes packed nibbles + e8m0 scales with no
+    /// f32 materialisation (K1 of the fused-MXFP4 ladder).
+    pub mxfp4_matvec_pipeline: KernelHandle,
+
     /// Production-active Q4_K matvec — picked from [`BackendOptions`]
     /// at construction (`q4k_matvec_use_4sg` flips between the two).
     pub q4k_matvec_pipeline: KernelHandle,
@@ -67,6 +71,8 @@ impl QuantKernels {
         let q8_quant_pipeline = r::<shaders::quantize_q8::Kernel>(device, library);
         let q8_matvec_pipeline = h::<shaders::q8_matvec::Kernel>(device, library);
 
+        let mxfp4_matvec_pipeline = h::<shaders::mxfp4_matvec::Kernel>(device, library);
+
         let q4k_matvec_4sg_pipeline = h::<shaders::q4k_matvec::Kernel>(device, library);
         let q4k_matvec_8sg_pipeline = h::<shaders::q4k_matvec_8sg::Kernel>(device, library);
         let q4k_matvec_stride32_pipeline =
@@ -89,6 +95,7 @@ impl QuantKernels {
         Self {
             q8_quant_pipeline,
             q8_matvec_pipeline,
+            mxfp4_matvec_pipeline,
             q4k_matvec_pipeline,
             q4k_matvec_4sg_pipeline,
             q4k_matvec_8sg_pipeline,

@@ -52,6 +52,8 @@ pub enum K3LedgerCmd {
     Frontier(FrontierArgs),
     /// DEC-9.2 — speculative block economics, work-width separate from commit.
     Block(BlockArgs),
+    /// Can MXFP4 transcode to Q6_K exactly? Scans e8m0 exponent spread.
+    TranscodeScan(TranscodeScanArgs),
 }
 
 #[derive(Debug, Args)]
@@ -129,4 +131,11 @@ pub struct BlockArgs {
     /// Model execution as a naive token loop instead of assuming ideal grouping.
     #[arg(long)]
     pub token_loop: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct TranscodeScanArgs {
+    /// How many expert `weight_scale` tensors to sample from the shard.
+    #[arg(long, default_value_t = 24)]
+    pub tensors: usize,
 }
