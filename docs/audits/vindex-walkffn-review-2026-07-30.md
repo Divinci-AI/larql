@@ -1,6 +1,6 @@
 # Vindex + WalkFFN review — 2026-07-30
 
-> **Remediation status (2026-07-31): 22 of 24 items closed.** Tiers 0
+> **Remediation status (2026-08-01): 23 of 24 items closed.** Tiers 0
 > and 1 landed in full on 2026-07-30 (commits `6907a209`, `e55b3edf`,
 > `6b5067f6`, `e21475f2`), including all four high-severity findings.
 > Item 13 resolved 2026-07-31 with the finding INVERTED (`c9ec5e1f`):
@@ -32,8 +32,16 @@
 > API + `.vlp`/`knn_store.bin` formats unchanged; full arch-B
 > retirement is explicitly gated in the rewritten
 > `FFN_VINDEX_UNIFICATION_SPEC.md` (FR1/FR2 routers ship on the
-> post-logits override; α calibration unvalidated). Open:
-> v1 conformance contract (22), doc drift
+> post-logits override; α calibration unvalidated). The v1
+> conformance contract (22) closed 2026-08-01:
+> `crates/larql-vindex/docs/conformance-v1.md` + the
+> `tests/conformance_v1_*.rs` suite (38 tests) pin
+> error-not-panic-not-garbage per artifact × corruption class, with
+> byte-level LE golden vectors as the cross-platform guard; the two
+> §3 LOW conformance violations (the legacy `down_meta::read_binary`
+> allocation bomb, the Vindexfile bare-comma/`unwrap_or(0)` items)
+> are fixed with regression tests; the perf benchmark protocol is a
+> documented follow-up in that doc (§4). Open: doc drift
 > (23), hygiene (24), plus tracked follow-ups (server/lql
 > `try_apply_patch` migration, remote http/sharded transport coverage,
 > logit-contribution trace field, walk-FFN thresholds surfaced into

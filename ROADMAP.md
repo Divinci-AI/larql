@@ -736,7 +736,7 @@ a silent-wrong-numerics cluster in the quantized walk paths (same
 "produces a number, the number is a lie" theme as the DEC review), and
 **no walk-vs-dense numerical parity test anywhere in the tree**.
 
-**Status 2026-07-31: 22 of 24 closed.** Tiers 0–1 in full (2026-07-30,
+**Status 2026-08-01: 23 of 24 closed.** Tiers 0–1 in full (2026-07-30,
 incl. all four HIGHs); item 13 resolved with the finding inverted (the
 exact-first gate chain is now actually wired — `enable_hnsw()` had been
 leaking approximate selection into walk numerics); Tier 2 complete:
@@ -744,8 +744,11 @@ base+delta (16), forward/forward_observed split (15), runtime trace
 emission (17), execution planner (18), two-stage selection (19) all
 shipped; parity suite (20) landed with the per-file ≥90% coverage
 pass; KnnStore unified at the retrieval-kernel level (21 — full arch-B
-retirement explicitly gated in the spec, see the item). Open: 22 (v1
-conformance), 23 (doc drift), 24 (hygiene) + tracked follow-ups
+retirement explicitly gated in the spec, see the item); v1 conformance
+contract (22) shipped 2026-08-01 (corruption suite + LE golden
+vectors + `docs/conformance-v1.md`; perf benchmark protocol is a
+documented follow-up in that doc). Open: 23 (doc
+drift), 24 (hygiene) + tracked follow-ups
 (server/lql `try_apply_patch` migration, remote transport coverage
 harness, logit-contribution trace field, walk-FFN thresholds surfaced
 into `WalkFfnConfig`).
@@ -1026,11 +1029,35 @@ what's exact, approximate, observed, reconstructed):**
     `patch/knn_store_io.rs`/`overlay.rs`/`overlay_apply.rs`; the
     unification spec still describes it. Until removed, "FFN = KNN index =
     vindex" is partly aspiration. [larql-vindex]
-22. **Vindex v1 conformance contract** — mostly assembling what exists
-    (spec crate, per-shard digests, provenance); missing: corruption-test
-    suite + cross-platform round trips + benchmark protocol. Also the
-    legacy `down_meta::read_binary` allocation-bomb path and the
-    Vindexfile parser's bare-comma/`unwrap_or(0)` items. [larql-vindex,
+22. ✅ **Vindex v1 conformance contract** (DONE 2026-08-01 —
+    `crates/larql-vindex/docs/conformance-v1.md` + the pinning suite
+    `tests/conformance_v1_{index,kquant,patches,down_meta,golden_le}.rs`
+    (38 tests over the shared `tests/common/` fixture): every v1
+    artifact × corruption class asserts error-not-panic-not-garbage —
+    index.json (malformed/missing/wrong-typed fields, unknown
+    dtype/quant tags, the H4 out-of-range-layer fix pinned as
+    contract), interleaved_kquant slab+manifest (unknown format tag →
+    Err; truncated slab / offset-length overflow / short manifest →
+    checked_view decline; H1 padded-stride pinned at the writer),
+    down_features sidecar (bin-without-manifest and missing shape[1]
+    → Err, OOB → decline), .vlp (corrupt/truncated base64 → wholesale
+    rejection, zero half-applied ops — M4/M5 pinned), .lknn
+    (magic/version/truncation/absurd-count), down_meta.bin (truncation,
+    checked-arithmetic overflow, allocation-bomb regression on both
+    readers). Cross-platform: byte-level LE golden vectors for
+    le_floats, .vlp base64, down_meta.bin, .lknn — exact bytes, not
+    round-trip equality; no BE runner exists, the goldens are the
+    guard. The two §3 LOW conformance violations fixed: legacy
+    `down_meta::read_binary` now bounds every allocation by the real
+    file size with checked arithmetic (mirrors `mmap_binary`; module
+    split into `down_meta/{mod,read}.rs`), and the Vindexfile parser
+    got quote-aware tuple splitting (`INSERT ("Acme, Inc", …)`),
+    hard errors on missing/unknown/duplicate DELETE condition keys,
+    and `find_free_feature().unwrap_or(0)` → error instead of
+    silently overwriting feature 0; `.lknn` capacity hints bounded by
+    remaining bytes as part of the same pass. Perf benchmark protocol
+    is a documented follow-up in conformance-v1.md §4 (walk-vs-dense
+    parity exists as item 20; no numbers faked). [larql-vindex,
     larql-vindex-spec]
 23. **Doc drift** — README `0.008 ms/layer` headline needs the
     HNSW-vs-brute/which-N qualifier vs the 2.65 ms full-projection figure;
