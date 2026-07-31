@@ -95,19 +95,28 @@ pub(super) fn run_prefill(
     Some((last_row(&h), rs))
 }
 
-/// Executor-driven decode step. Caller MUST have already checked that
-/// `executor.dispatch_kind() != Fused`.
+/// Executor-driven decode step, mutating `rs` in place. Caller MUST have
+/// already checked that `executor.dispatch_kind() != Fused`.
+///
+/// Failure invariant: on any `None` return (transient executor / backend
+/// failure), the canonical state — `stored`, the cold tiers, and
+/// `next_position` — is untouched, so the engine can retry or fall back
+/// through another path with the same store.
 pub(super) fn run_decode(
     weights: larql_inference::WeightsView,
     executor: &dyn LayerExecutor,
     ffn: &dyn FfnBackend,
     policy: &BoundaryLayerPolicy,
-    mut rs: RsStorePerLayer,
+    rs: &mut RsStorePerLayer,
     token_id: u32,
-) -> Option<(Array2<f32>, RsStorePerLayer)> {
+) -> Option<Array2<f32>> {
     let backend = executor.backend();
     let num_layers = weights.num_layers;
     let abs_position = rs.next_position;
+    // The executor path extends `stored` without maintaining the walk
+    // path's hot-K/V cache; drop the (droppable-derivative) cache so a
+    // later walk-path decode cannot attend over a stale buffer.
+    rs.hot_kv = None;
     let mut h_new = embed_tokens_pub(&weights, &[token_id]);
     // PLE inputs are per-token — recompute for this single-token decode
     // step, matching the legacy `kv_decode_step_run` recipe exactly.
@@ -195,17 +204,24 @@ pub(super) fn run_decode(
                 rs.cold_encoded = Some(layers);
             }
         }
-        extend_cold_kv_with_overflow(
+        if extend_cold_kv_with_overflow(
             weights,
             backend,
             policy,
-            &mut rs,
+            rs,
             &overflow_per_layer,
             cold_abs_pos,
-        );
+        )
+        .is_none()
+        {
+            // Per-layer K/V recompute failed: the helper dropped `cold_kv`
+            // wholesale (atomicity — no layer desync possible), so the next
+            // decode step rebuilds cold K/V from `cold_encoded`.
+            debug_assert!(rs.cold_kv.is_none(), "failed extend must drop cold_kv");
+        }
     }
 
-    Some((last_row(&h_new), rs))
+    Some(last_row(&h_new))
 }
 
 #[cfg(test)]
@@ -287,7 +303,7 @@ mod tests {
         let executor = LocalWalkExecutor::new(&backend);
         let ffn = NullFfn;
         let policy = BoundaryLayerPolicy::bf16_uniform("test", weights.num_layers);
-        let (_, rs) = run_prefill(
+        let (_, mut rs) = run_prefill(
             larql_inference::WeightsView::dense(&weights),
             &executor,
             &ffn,
@@ -301,22 +317,22 @@ mod tests {
             "no overflow expected after prefill"
         );
 
-        let (hidden, rs_after) = run_decode(
+        let hidden = run_decode(
             larql_inference::WeightsView::dense(&weights),
             &executor,
             &ffn,
             &policy,
-            rs,
+            &mut rs,
             1,
         )
         .expect("decode should succeed");
         assert_eq!(hidden.shape(), &[1, weights.hidden_size]);
-        assert_eq!(rs_after.next_position, 2);
-        for slab in &rs_after.stored {
+        assert_eq!(rs.next_position, 2);
+        for slab in &rs.stored {
             assert_eq!(slab.shape()[0], 2, "hot slab grew to 2 rows");
         }
         // Still no overflow at this scale.
-        assert!(rs_after.cold_encoded.is_none());
+        assert!(rs.cold_encoded.is_none());
     }
 
     /// Executor-driven loops must run the same per-layer sequence as the
@@ -381,16 +397,15 @@ mod tests {
 
         for step in 0..DECODE_STEPS {
             let token = FIRST_DECODE_TOKEN + step as u32;
-            let (h_exec, rs_next) = run_decode(
+            let h_exec = run_decode(
                 larql_inference::WeightsView::dense(&weights),
                 &executor,
                 &ffn,
                 &policy,
-                rs,
+                &mut rs,
                 token,
             )
             .expect("executor PLE decode");
-            rs = rs_next;
             let h_ref = kv_decode_step_run(
                 &weights,
                 &ffn,
@@ -434,7 +449,7 @@ mod tests {
         let executor = LocalWalkExecutor::new(&backend);
         let ffn = NullFfn;
         let policy = BoundaryLayerPolicy::bf16_uniform("test", weights.num_layers);
-        let (_, rs) = run_prefill(
+        let (_, mut rs) = run_prefill(
             larql_inference::WeightsView::dense(&weights),
             &executor,
             &ffn,
@@ -454,21 +469,27 @@ mod tests {
             .unwrap_or(0);
         assert_eq!(initial_cold_rows, 1, "1 row in cold after prefill");
 
-        let (_, rs_after) = run_decode(
+        run_decode(
             larql_inference::WeightsView::dense(&weights),
             &executor,
             &ffn,
             &policy,
-            rs,
+            &mut rs,
             3,
         )
         .unwrap();
-        let after_cold_rows = rs_after
+        let after_cold_rows = rs
             .cold_encoded
             .as_ref()
             .map(|l| l[0].n_positions)
             .unwrap_or(0);
         assert_eq!(after_cold_rows, 2, "decode evicted 1 more row to cold");
-        assert_eq!(rs_after.next_position, 4);
+        assert_eq!(rs.next_position, 4);
+        // cold_kv must track cold_encoded row-for-row (atomic extend).
+        let cold_kv = rs.cold_kv.as_ref().expect("overflow keeps cold_kv");
+        for (k, v) in cold_kv {
+            assert_eq!(k.shape()[0], 2, "cold K rows must match cold_encoded");
+            assert_eq!(v.shape()[0], 2, "cold V rows must match cold_encoded");
+        }
     }
 }

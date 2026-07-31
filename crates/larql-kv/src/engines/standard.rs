@@ -49,14 +49,40 @@ impl BackendSlot {
     }
 }
 
+/// Which dispatch shape populated `handles` at prefill. Decode must
+/// follow the recorded mode: the two shapes are not interchangeable
+/// (a coarse handle is one whole-model `CpuQ4kCacheHandle`/Metal cache;
+/// per-layer handles are one `CpuKvHandle` per layer), and inferring
+/// the mode from `handles.len()` conflates "coarse handle" with
+/// "1-layer model" — the misdispatch panicked in the backend downcast.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum PrefillDispatchMode {
+    /// Backend coarse (fused) path: `handles` is a single whole-model
+    /// cache handle from `coarse_prefill`.
+    Coarse,
+    /// Per-layer dispatch: `handles` has one entry per layer.
+    PerLayer,
+}
+
 /// Production K/V cache engine. `window_size: None` = unbounded growth
 /// (the `--kv-cache standard` flag); `Some(N)` = sliding window (the
 /// `--kv-cache markov-bounded --context-window N` flag combo).
+///
+/// Windowed quant note: the coarse trait surface has no window
+/// parameter, so when `window_size` is `Some(N)` the quant entry points
+/// decline the coarse path and run per-layer dispatch (which enforces
+/// the window via `clip_kv`) — correctness over speed. See
+/// [`Self::prefill_quant`].
 pub struct StandardEngine {
     window_size: Option<usize>,
-    /// One handle per layer; populated by `prefill`. `None` before
+    /// One handle per layer (per-layer mode) or a single whole-model
+    /// handle (coarse mode); populated by `prefill*`. `None` before
     /// prefill or if the engine has been reset.
     handles: Option<Vec<KvHandle>>,
+    /// Which dispatch shape populated `handles` — set together with
+    /// `handles` at every prefill entry point; `None` iff `handles`
+    /// is `None`. Decode entry points follow this, never handle count.
+    prefill_mode: Option<PrefillDispatchMode>,
     /// Tracks the absolute token position of the next token to be
     /// decoded. Set at the end of `prefill` to `prompt_ids.len()`;
     /// incremented after each `decode_step`. The legacy `KvCache` had
@@ -80,6 +106,7 @@ impl StandardEngine {
         Self {
             window_size,
             handles: None,
+            prefill_mode: None,
             abs_position: 0,
             backend: BackendSlot::Sync(backend),
             dequant_scratch: larql_inference::DequantScratch::new(),
@@ -97,6 +124,7 @@ impl StandardEngine {
         Self {
             window_size,
             handles: None,
+            prefill_mode: None,
             abs_position: 0,
             backend: BackendSlot::Async(backend),
             dequant_scratch: larql_inference::DequantScratch::new(),
@@ -147,6 +175,7 @@ impl StandardEngine {
             })?,
         };
         self.handles = Some(handles);
+        self.prefill_mode = Some(PrefillDispatchMode::PerLayer);
         self.abs_position = token_ids.len();
         Ok(hidden)
     }
@@ -189,6 +218,7 @@ impl StandardEngine {
             )?,
         };
         self.handles = Some(handles);
+        self.prefill_mode = Some(PrefillDispatchMode::PerLayer);
         // Critical: position pointer must be derived from the hidden
         // row count, NOT from any token count — the input may contain
         // vision rows that aren't tokens. Decode-loop correctness
@@ -319,10 +349,10 @@ impl KvEngine for StandardEngine {
     fn prefill_quant(
         &mut self,
         weights: &ModelWeights,
-        ffn: &dyn FfnBackend,
+        _ffn: &dyn FfnBackend,
         index: &larql_inference::larql_vindex::VectorIndex,
         token_ids: &[u32],
-        _backend: &dyn larql_inference::ComputeBackend,
+        backend: &dyn larql_inference::ComputeBackend,
     ) -> Result<Array2<f32>, EngineError> {
         if token_ids.is_empty() {
             return Err(EngineError::EmptyPrompt);
@@ -331,48 +361,87 @@ impl KvEngine for StandardEngine {
         // is the production-speed Q4K path on CPU (~24 tok/s on Gemma
         // 3 4B vs ~0.4 tok/s through per-layer dispatch). Quant-agnostic:
         // the backend inspects `index` to pick the right kernel.
-        let coarse = match &self.backend {
-            BackendSlot::Sync(b) => b.as_ref().coarse_prefill(weights, token_ids, Some(index)),
-            BackendSlot::Async(b) => b.as_ref().coarse_prefill(weights, token_ids, Some(index)),
+        //
+        // WINDOW GATE: the coarse trait surface (`coarse_prefill` /
+        // `coarse_decode_step`) has no window parameter, so the coarse
+        // path always attends over the FULL context. A windowed engine
+        // (`window_size: Some(N)`, the `markov-bounded` flag combo)
+        // must therefore decline coarse and take the per-layer path,
+        // whose dispatch enforces the window via `clip_kv` — otherwise
+        // the same CLI flag gives windowed behaviour on one backend and
+        // full-context on another while `info()` reports `window=N`.
+        // Correctness over speed; threading a window through the coarse
+        // trait (5 methods × CPU + Metal impls + fused kernels) is the
+        // eventual fast path if windowed quant becomes hot.
+        let coarse = if self.window_size.is_none() {
+            match &self.backend {
+                BackendSlot::Sync(b) => b.as_ref().coarse_prefill(weights, token_ids, Some(index)),
+                BackendSlot::Async(b) => b.as_ref().coarse_prefill(weights, token_ids, Some(index)),
+            }
+        } else {
+            None
         };
         if let Some((hidden, handle)) = coarse {
             // Store as a single-element handles vec — the `KvHandle`
             // wraps the backend's whole-model cache (not per-layer).
             self.handles = Some(vec![handle]);
+            self.prefill_mode = Some(PrefillDispatchMode::Coarse);
             self.abs_position = token_ids.len();
             return Ok(hidden);
         }
         // Backend doesn't have a coarse path (e.g. f32 model, or
         // hybrid-MoE / cross-layer-KV models that don't fit the cached
-        // shape). Fall back to per-layer dispatch, dequantising attention
-        // into the engine-owned scratch (`do_prefill` resolves it through a
-        // `WeightsView::with_scratch`) — `weights` stays immutable.
+        // shape), or the engine is windowed. Fall back to per-layer
+        // dispatch, dequantising attention into the engine-owned scratch
+        // (`do_prefill` resolves it through a `WeightsView::with_scratch`)
+        // — `weights` stays immutable.
         larql_inference::vindex::ensure_attn_tensors_dequantised(
             &mut self.dequant_scratch,
             weights,
             index,
         );
-        self.do_prefill(weights, ffn, token_ids, Some(index))
+        // The caller passes `NullFfn` on the quant path (the bench/CLI
+        // contract: engines route FFN internally from the vindex — see
+        // `NoCacheEngine::prefill_quant`). Forwarding it verbatim would
+        // run an identity FFN through `run_ffn` (h + normed(h) garbage)
+        // on exactly the archs that decline coarse, so substitute the
+        // real Q4K FFN walk built from the vindex.
+        let walk_ffn = larql_inference::vindex::WalkFfn::from_config(
+            weights,
+            index,
+            larql_inference::vindex::WalkFfnConfig::dense(weights.num_layers),
+        )
+        .with_backend(backend);
+        self.do_prefill(weights, &walk_ffn, token_ids, Some(index))
     }
 
     fn decode_step_quant(
         &mut self,
         weights: &ModelWeights,
-        ffn: &dyn FfnBackend,
+        _ffn: &dyn FfnBackend,
         index: &larql_inference::larql_vindex::VectorIndex,
         token_id: u32,
-        _backend: &dyn larql_inference::ComputeBackend,
+        backend: &dyn larql_inference::ComputeBackend,
     ) -> Result<Array2<f32>, EngineError> {
-        let handles = self
-            .handles
-            .as_mut()
+        // Decode must follow the dispatch mode RECORDED at prefill —
+        // never the handle count: a 1-layer model's per-layer prefill
+        // also yields exactly one handle, and feeding that per-layer
+        // handle to the coarse path is a shape misdispatch (the backend
+        // downcast used to panic on it).
+        let mode = self
+            .prefill_mode
             .ok_or_else(|| EngineError::InvariantViolation {
                 what: "decode_step called before prefill (handles missing)".into(),
             })?;
-        // If prefill_quant used the coarse path, `handles` is a one-element
-        // vec carrying the backend's whole-model cache. Try the coarse
-        // decode step first.
-        if handles.len() == 1 {
+        if mode == PrefillDispatchMode::Coarse {
+            let handles = self
+                .handles
+                .as_mut()
+                .ok_or_else(|| EngineError::InvariantViolation {
+                    what: "decode_step called before prefill (handles missing)".into(),
+                })?;
+            // Invariant: Coarse mode stores exactly one whole-model
+            // handle (set together with the mode in `prefill_quant`).
             let handle = &mut handles[0];
             let coarse = match &self.backend {
                 BackendSlot::Sync(b) => b.as_ref().coarse_decode_step(
@@ -390,20 +459,42 @@ impl KvEngine for StandardEngine {
                     self.abs_position,
                 ),
             };
-            if let Some(h) = coarse {
-                self.abs_position += 1;
-                return Ok(h);
-            }
+            return match coarse {
+                Some(h) => {
+                    self.abs_position += 1;
+                    Ok(h)
+                }
+                // A coarse-prefilled cache CANNOT flow through the
+                // per-layer path (whole-model handle vs one handle per
+                // layer), so a coarse decode failure is terminal —
+                // erroring beats the old behaviour of falling through
+                // and panicking in the per-layer downcast.
+                None => Err(EngineError::BackendFailure {
+                    details: "coarse_decode_step failed on a coarse-prefilled cache; \
+                              the whole-model handle cannot be decoded per-layer"
+                        .into(),
+                }),
+            };
         }
-        // Per-layer dispatch fallback. Dequantise attention into the
-        // engine-owned scratch (idempotent — persists across decode steps);
-        // `do_decode_step` resolves it through a `WeightsView::with_scratch`.
+        // Per-layer dispatch (recorded mode: PerLayer). Dequantise
+        // attention into the engine-owned scratch (idempotent — persists
+        // across decode steps); `do_decode_step` resolves it through a
+        // `WeightsView::with_scratch`.
         larql_inference::vindex::ensure_attn_tensors_dequantised(
             &mut self.dequant_scratch,
             weights,
             index,
         );
-        self.do_decode_step(weights, ffn, token_id, Some(index))
+        // Same FFN substitution as `prefill_quant` — the caller's FFN
+        // is `NullFfn` by contract on the quant path; route the real
+        // Q4K FFN walk from the vindex.
+        let walk_ffn = larql_inference::vindex::WalkFfn::from_config(
+            weights,
+            index,
+            larql_inference::vindex::WalkFfnConfig::dense(weights.num_layers),
+        )
+        .with_backend(backend);
+        self.do_decode_step(weights, &walk_ffn, token_id, Some(index))
     }
 
     /// Resident-weights variants (task #16): the caller has already made the
@@ -997,12 +1088,13 @@ mod tests {
     // ── Q4K paths via Q4K fixture ─────────────────────────────────────────
     //
     // `prefill_quant` / `decode_step_quant` first try the backend's
-    // `coarse_prefill` / `coarse_decode_step`. On `CpuBackend` the coarse
-    // path returns None (no fused decode kernel), so the engine falls
-    // through to `ensure_attn_tensors_dequantised` + `do_prefill`. The
-    // Q4K-equipped fixture (`make_test_q4k_vindex` + `make_test_q4k_weights`)
-    // has the attn Q4K slices `insert_q4k_layer_tensors` needs to dequant
-    // without panicking, unlocking the dequant-then-f32 fallback branch.
+    // `coarse_prefill` / `coarse_decode_step`. The Q4K-equipped fixture
+    // (`make_test_q4k_vindex` + `make_test_q4k_weights`) satisfies the
+    // cached-decode contract, so an UNWINDOWED engine takes the coarse
+    // path on `CpuBackend` (verified by
+    // `coarse_prefill_records_coarse_mode_and_decodes_coarse`); the
+    // per-layer dequant fallback is exercised by the windowed tests
+    // further down (windowed engines decline coarse by design).
 
     #[test]
     fn prefill_quant_cpu_fallback_runs_via_dequant() {
@@ -1226,6 +1318,301 @@ mod tests {
         assert!(
             engine.memory_bytes() > mem_before,
             "K/V cache should grow after async-slot Q4K decode step"
+        );
+    }
+
+    // ── Windowed quant path honors the window (bug fix) ───────────────────
+    //
+    // The coarse trait surface (`coarse_prefill` / `coarse_decode_step`)
+    // has no window parameter, so a windowed engine that took the coarse
+    // path silently attended over the FULL context while `info()`
+    // reported `window=N`. The fix declines coarse whenever
+    // `window_size.is_some()` and routes through the per-layer path,
+    // whose dispatch enforces the window via `clip_kv`. These tests
+    // assert the actual row accounting, not just shape.
+
+    /// Window used by the windowed-quant tests — deliberately smaller
+    /// than the prompt so prefill-time clipping is exercised.
+    const QUANT_WINDOW: usize = 2;
+    /// Decode steps run after prefill in the windowed-quant tests.
+    const QUANT_DECODE_STEPS: usize = 3;
+
+    #[test]
+    fn prefill_quant_windowed_bounds_cached_rows_to_window() {
+        use larql_inference::ffn::NullFfn;
+        use larql_inference::test_utils::{make_test_q4k_vindex, make_test_q4k_weights};
+        let weights = make_test_q4k_weights();
+        let index = make_test_q4k_vindex(&weights);
+        let backend = larql_compute::cpu_backend();
+        let ffn = NullFfn;
+        let prompt = [0u32, 1, 2, 3, 4]; // 5 tokens > QUANT_WINDOW
+        let mut engine = StandardEngine::new(Some(QUANT_WINDOW));
+        engine
+            .prefill_quant(&weights, &ffn, &index, &prompt, &*backend)
+            .expect("windowed prefill_quant");
+        // The load-bearing assertion: the cache must hold at most
+        // `window` rows. On the (window-less) coarse path this is the
+        // full prompt length — the bug this test pins.
+        assert!(
+            engine.window_tokens() <= QUANT_WINDOW,
+            "windowed quant prefill must bound cached rows to window={QUANT_WINDOW}, \
+             got {} (coarse path ignores the window)",
+            engine.window_tokens()
+        );
+        // Decode past the window: the bound must hold on every step.
+        for step in 0..QUANT_DECODE_STEPS {
+            let token = (5 + step) as u32;
+            engine
+                .decode_step_quant(&weights, &ffn, &index, token, &*backend)
+                .expect("windowed decode_step_quant");
+            assert!(
+                engine.window_tokens() <= QUANT_WINDOW,
+                "window bound violated after decode step {step}: {} rows",
+                engine.window_tokens()
+            );
+        }
+    }
+
+    /// Windowed quant output must be bit-identical to the per-layer
+    /// windowed path — because post-fix it IS the per-layer windowed
+    /// path. The reference drives the engine internals directly with an
+    /// explicitly-constructed `WalkFfn` (the substitution
+    /// `prefill_quant` performs itself), so any divergence means the
+    /// quant entry points stopped enforcing the window or stopped
+    /// routing the real FFN.
+    #[test]
+    fn windowed_quant_path_matches_per_layer_windowed_reference() {
+        use larql_inference::ffn::NullFfn;
+        use larql_inference::test_utils::{make_test_q4k_vindex, make_test_q4k_weights};
+        let weights = make_test_q4k_weights();
+        let index = make_test_q4k_vindex(&weights);
+        let backend = larql_compute::cpu_backend();
+        let prompt = [0u32, 1, 2, 3, 4];
+        let bits = |h: &Array2<f32>| h.iter().map(|v| v.to_bits()).collect::<Vec<u32>>();
+
+        // Engine A: public quant entry points, caller passes NullFfn
+        // (the bench-harness contract — engines route FFN internally).
+        let ffn = NullFfn;
+        let mut engine_a = StandardEngine::new(Some(QUANT_WINDOW));
+        let h_a = engine_a
+            .prefill_quant(&weights, &ffn, &index, &prompt, &*backend)
+            .expect("engine A windowed prefill_quant");
+
+        // Engine B: the per-layer windowed reference — same dequant
+        // scratch handling + explicit WalkFfn, driven through the
+        // internal per-layer body.
+        let mut engine_b = StandardEngine::new(Some(QUANT_WINDOW));
+        larql_inference::vindex::ensure_attn_tensors_dequantised(
+            &mut engine_b.dequant_scratch,
+            &weights,
+            &index,
+        );
+        let walk_ffn = larql_inference::vindex::WalkFfn::from_config(
+            &weights,
+            &index,
+            larql_inference::vindex::WalkFfnConfig::dense(weights.num_layers),
+        )
+        .with_backend(&*backend);
+        let h_b = engine_b
+            .do_prefill(&weights, &walk_ffn, &prompt, Some(&index))
+            .expect("engine B per-layer windowed prefill");
+        assert_eq!(
+            bits(&h_a),
+            bits(&h_b),
+            "windowed quant prefill must match the per-layer windowed reference bit-for-bit"
+        );
+
+        for step in 0..QUANT_DECODE_STEPS {
+            let token = (5 + step) as u32;
+            let h_a = engine_a
+                .decode_step_quant(&weights, &ffn, &index, token, &*backend)
+                .expect("engine A windowed decode_step_quant");
+            let h_b = engine_b
+                .do_decode_step(&weights, &walk_ffn, token, Some(&index))
+                .expect("engine B per-layer windowed decode");
+            assert_eq!(
+                bits(&h_a),
+                bits(&h_b),
+                "windowed quant decode step {step} must match the per-layer reference bit-for-bit"
+            );
+        }
+    }
+
+    // ── Per-layer quant fallback routes the real FFN (bug fix) ────────────
+    //
+    // The bench/CLI passes `NullFfn` on the quant path (engines route
+    // FFN internally from the vindex — see `NoCacheEngine`). The
+    // per-layer quant fallback used to forward the caller's `NullFfn`
+    // verbatim into `run_ffn`, silently producing `h + normed(h)`
+    // garbage on exactly the archs that decline coarse. Post-fix the
+    // fallback substitutes a `WalkFfn` built from the vindex; this test
+    // bit-compares against an explicitly-constructed `WalkFfn` driven
+    // through the same internals. A window larger than the whole run
+    // forces the per-layer path without any clipping effect.
+
+    /// Window larger than prompt + all decode steps — forces the
+    /// per-layer quant path (coarse is declined when windowed) while
+    /// keeping `clip_kv` a no-op, so this isolates the FFN routing.
+    const NO_CLIP_WINDOW: usize = 64;
+
+    #[test]
+    fn quant_fallback_with_null_ffn_matches_explicit_walk_ffn_reference() {
+        use larql_inference::ffn::NullFfn;
+        use larql_inference::test_utils::{make_test_q4k_vindex, make_test_q4k_weights};
+        let weights = make_test_q4k_weights();
+        let index = make_test_q4k_vindex(&weights);
+        let backend = larql_compute::cpu_backend();
+        let prompt = [0u32, 1, 2];
+        let bits = |h: &Array2<f32>| h.iter().map(|v| v.to_bits()).collect::<Vec<u32>>();
+
+        // Engine A: public quant entry points with NullFfn.
+        let ffn = NullFfn;
+        let mut engine_a = StandardEngine::new(Some(NO_CLIP_WINDOW));
+        let h_a = engine_a
+            .prefill_quant(&weights, &ffn, &index, &prompt, &*backend)
+            .expect("engine A prefill_quant");
+
+        // Engine B: same internals, explicit WalkFfn.
+        let mut engine_b = StandardEngine::new(Some(NO_CLIP_WINDOW));
+        larql_inference::vindex::ensure_attn_tensors_dequantised(
+            &mut engine_b.dequant_scratch,
+            &weights,
+            &index,
+        );
+        let walk_ffn = larql_inference::vindex::WalkFfn::from_config(
+            &weights,
+            &index,
+            larql_inference::vindex::WalkFfnConfig::dense(weights.num_layers),
+        )
+        .with_backend(&*backend);
+        let h_b = engine_b
+            .do_prefill(&weights, &walk_ffn, &prompt, Some(&index))
+            .expect("engine B reference prefill");
+        assert_eq!(
+            bits(&h_a),
+            bits(&h_b),
+            "quant-fallback prefill with NullFfn must substitute the real WalkFfn \
+             (bit-parity with the explicit-WalkFfn reference)"
+        );
+
+        for step in 0..QUANT_DECODE_STEPS {
+            let token = (3 + step) as u32;
+            let h_a = engine_a
+                .decode_step_quant(&weights, &ffn, &index, token, &*backend)
+                .expect("engine A decode_step_quant");
+            let h_b = engine_b
+                .do_decode_step(&weights, &walk_ffn, token, Some(&index))
+                .expect("engine B reference decode");
+            assert_eq!(
+                bits(&h_a),
+                bits(&h_b),
+                "quant-fallback decode step {step} with NullFfn must match the \
+                 explicit-WalkFfn reference bit-for-bit"
+            );
+        }
+    }
+
+    // ── Prefill-mode tracking (bug fix) ───────────────────────────────────
+    //
+    // `decode_step_quant` used to infer "coarse handle" from
+    // `handles.len() == 1`, which conflates it with "1-layer model":
+    // a 1-layer model prefilled via the per-layer path hit the coarse
+    // downcast (`cpu_q4k_cache_mut`) with a `CpuKvHandle` and panicked.
+    // The engine now records which mode prefill used and decode follows
+    // the recorded mode.
+
+    #[test]
+    fn one_layer_per_layer_prefill_then_decode_step_quant_does_not_panic() {
+        use larql_inference::ffn::NullFfn;
+        use larql_inference::test_utils::{make_test_q4k_vindex, make_test_q4k_weights_layers};
+        /// A single decoder layer — the count that used to be
+        /// indistinguishable from the coarse single-handle shape.
+        const ONE_LAYER: usize = 1;
+        let weights = make_test_q4k_weights_layers(ONE_LAYER);
+        let index = make_test_q4k_vindex(&weights);
+        let backend = larql_compute::cpu_backend();
+        let prompt = [0u32, 1, 2];
+        let bits = |h: &Array2<f32>| h.iter().map(|v| v.to_bits()).collect::<Vec<u32>>();
+
+        let walk_ffn = larql_inference::vindex::WalkFfn::from_config(
+            &weights,
+            &index,
+            larql_inference::vindex::WalkFfnConfig::dense(weights.num_layers),
+        )
+        .with_backend(&*backend);
+
+        // Engine A: per-layer prefill via the resident entry point
+        // (per-layer handles — for a 1-layer model that is exactly one
+        // handle), then decode through the public quant entry point.
+        let mut engine_a = StandardEngine::new(None);
+        engine_a
+            .prefill_resident(&weights, &walk_ffn, &index, &prompt)
+            .expect("engine A per-layer prefill_resident");
+        assert_eq!(
+            engine_a.handles.as_ref().map(|h| h.len()),
+            Some(ONE_LAYER),
+            "1-layer per-layer prefill must produce exactly one per-layer handle"
+        );
+        // Pre-fix: panics in `cpu_q4k_cache_mut` (coarse downcast on a
+        // per-layer `CpuKvHandle`). Post-fix: follows the recorded
+        // per-layer mode.
+        let ffn = NullFfn;
+        let h_a = engine_a
+            .decode_step_quant(&weights, &ffn, &index, 3, &*backend)
+            .expect("decode_step_quant after per-layer prefill on a 1-layer model");
+
+        // Engine B: pure per-layer reference for the same step.
+        let mut engine_b = StandardEngine::new(None);
+        engine_b
+            .prefill_resident(&weights, &walk_ffn, &index, &prompt)
+            .expect("engine B per-layer prefill_resident");
+        larql_inference::vindex::ensure_attn_tensors_dequantised(
+            &mut engine_b.dequant_scratch,
+            &weights,
+            &index,
+        );
+        let h_b = engine_b
+            .do_decode_step(&weights, &walk_ffn, 3, Some(&index))
+            .expect("engine B per-layer reference decode");
+        assert_eq!(
+            bits(&h_a),
+            bits(&h_b),
+            "1-layer decode_step_quant must produce per-layer parity, not a coarse \
+             misdispatch"
+        );
+    }
+
+    /// After a *coarse* quant prefill the engine must keep decoding
+    /// coarse — the recorded mode, not the handle count, drives the
+    /// dispatch. (Unwindowed engine + the coarse-capable Q4K fixture
+    /// takes the coarse path on CPU; the handle is the whole-model
+    /// `CpuQ4kCacheHandle`.)
+    #[test]
+    fn coarse_prefill_records_coarse_mode_and_decodes_coarse() {
+        use larql_inference::ffn::NullFfn;
+        use larql_inference::test_utils::{make_test_q4k_vindex, make_test_q4k_weights};
+        let weights = make_test_q4k_weights();
+        let index = make_test_q4k_vindex(&weights);
+        let backend = larql_compute::cpu_backend();
+        let ffn = NullFfn;
+        let prompt = [0u32, 1, 2];
+        let mut engine = StandardEngine::new(None);
+        engine
+            .prefill_quant(&weights, &ffn, &index, &prompt, &*backend)
+            .expect("coarse prefill_quant");
+        assert_eq!(
+            engine.prefill_mode,
+            Some(PrefillDispatchMode::Coarse),
+            "unwindowed quant prefill on a coarse-capable backend must record Coarse"
+        );
+        let cached_before = engine.window_tokens();
+        engine
+            .decode_step_quant(&weights, &ffn, &index, 3, &*backend)
+            .expect("coarse decode_step_quant");
+        assert_eq!(
+            engine.window_tokens(),
+            cached_before + 1,
+            "coarse decode must extend the whole-model cache by exactly one row"
         );
     }
 }

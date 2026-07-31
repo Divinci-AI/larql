@@ -82,6 +82,12 @@ pub enum EngineKind {
         injection_layer: usize,
         inject_coefficient: f32,
         top_k: usize,
+        /// BOS token id to strip from the front of the query when
+        /// assembling the injection context (`bos=N` in the spec).
+        /// `None` = strip nothing / defer to the architecture's
+        /// structural `bos_token_id()`; there is no hardcoded model
+        /// default.
+        bos_token_id: Option<u32>,
     },
     /// `BoundaryKvEngine`: Standard semantics + per-chunk
     /// `larql-boundary` frame emission. See
@@ -122,7 +128,7 @@ impl EngineKind {
     /// unlimited-context:window=256
     /// turbo-quant:bits=3
     /// tq4
-    /// apollo:layer=25,coef=8.0,top_k=12
+    /// apollo:layer=25,coef=8.0,top_k=12,bos=2
     /// ```
     pub fn from_name(spec: &str) -> Option<Self> {
         // Split "name:key=val,key=val" into name + param pairs.
@@ -178,6 +184,9 @@ impl EngineKind {
                     injection_layer: get_usize("layer", cfg.injection_layer),
                     inject_coefficient: get_f32("coef", cfg.inject_coefficient),
                     top_k: get_usize("top_k", cfg.top_k),
+                    // No hardcoded model-specific BOS default (cfg default
+                    // is None): callers name it explicitly via `bos=N`.
+                    bos_token_id: params.get("bos").and_then(|v| v.parse().ok()),
                 })
             }
             "boundary-kv" | "boundary_kv" | "boundary" => Some(EngineKind::BoundaryKv {
@@ -358,11 +367,15 @@ impl EngineKind {
                 injection_layer,
                 inject_coefficient,
                 top_k,
+                bos_token_id,
             } => AnyEngine::Retrieval(Box::new(apollo::ApolloEngine::new(
                 apollo::InjectionConfig {
                     injection_layer,
                     inject_coefficient,
                     top_k,
+                    // `bos=N` spec param; `None` (unset) defers to the
+                    // structural `weights.arch.bos_token_id()` at prefill.
+                    bos_token_id,
                 },
             ))),
             EngineKind::BoundaryKv {
@@ -498,9 +511,19 @@ mod tests {
             Some(EngineKind::Apollo {
                 injection_layer: 25,
                 top_k: 12,
+                // No `bos=` param → None: never a hardcoded model default.
+                bos_token_id: None,
                 ..
             }) => {}
-            other => panic!("expected Apollo{{layer=25,top_k=12}}, got {other:?}"),
+            other => panic!("expected Apollo{{layer=25,top_k=12,bos=None}}, got {other:?}"),
+        }
+        match EngineKind::from_name("apollo:layer=25,bos=2") {
+            Some(EngineKind::Apollo {
+                injection_layer: 25,
+                bos_token_id: Some(2),
+                ..
+            }) => {}
+            other => panic!("expected Apollo{{layer=25,bos=Some(2)}}, got {other:?}"),
         }
         match EngineKind::from_name("markov-rs:unknown=999") {
             Some(EngineKind::MarkovResidual {
@@ -747,6 +770,7 @@ mod compliance_tests {
                 injection_layer: 30,
                 inject_coefficient: 10.0,
                 top_k: 8,
+                bos_token_id: None,
             },
         ]
     }
