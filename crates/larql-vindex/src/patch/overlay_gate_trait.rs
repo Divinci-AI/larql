@@ -60,8 +60,8 @@ impl GateLookup for PatchedVindex {
         // patched layer, decline so the caller falls through to
         // `gate_knn`, which this type overrides with the overlay-aware
         // merge (2026-07-30 review, item #13).
-        let layer_is_patched = self.overrides_gate.keys().any(|&(l, _)| l == layer)
-            || self.deleted.iter().any(|&(l, _)| l == layer);
+        let layer_is_patched =
+            self.overrides_gate.has_layer(layer) || self.deleted.iter().any(|&(l, _)| l == layer);
         if layer_is_patched {
             return None;
         }
@@ -76,7 +76,7 @@ impl GateLookup for PatchedVindex {
         // path, which `PatchedVindex::gate_knn` overrides correctly.
         // Returns the union of selected feature indices across all
         // rows, deduplicated.
-        if self.overrides_gate.iter().all(|((l, _), _)| *l != layer) {
+        if !self.overrides_gate.has_layer(layer) {
             // No overrides at this layer — base path is correct.
             return self.base.gate_knn_batch(layer, x, top_k);
         }
@@ -105,13 +105,11 @@ impl PatchOverrides for PatchedVindex {
         // Gate overrides live on the patch overlay (not the base
         // index). Surface them through the trait so the sparse
         // inference fallback can read the strong installed gate.
-        self.overrides_gate
-            .get(&(layer, feature))
-            .map(|v| v.as_slice())
+        self.overrides_gate.get(layer, feature)
     }
 
     fn has_overrides_at(&self, layer: usize) -> bool {
-        self.overrides_gate.keys().any(|(l, _)| *l == layer) || self.base.has_overrides_at(layer)
+        self.overrides_gate.has_layer(layer) || self.base.has_overrides_at(layer)
     }
 
     /// Union of the base's up/down override slots, the overlay's gate
@@ -126,7 +124,7 @@ impl PatchOverrides for PatchedVindex {
             .into_iter()
             .map(|s| (s.feature, s.tombstoned))
             .collect();
-        for &(l, f) in self.overrides_gate.keys() {
+        for (l, f, _) in self.overrides_gate.iter() {
             if l == layer {
                 slots.entry(f).or_insert(false);
             }

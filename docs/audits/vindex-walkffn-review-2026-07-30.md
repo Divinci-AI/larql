@@ -1,6 +1,6 @@
 # Vindex + WalkFFN review — 2026-07-30
 
-> **Remediation status (2026-07-31): 21 of 24 items closed.** Tiers 0
+> **Remediation status (2026-07-31): 22 of 24 items closed.** Tiers 0
 > and 1 landed in full on 2026-07-30 (commits `6907a209`, `e55b3edf`,
 > `6b5067f6`, `e21475f2`), including all four high-severity findings.
 > Item 13 resolved 2026-07-31 with the finding INVERTED (`c9ec5e1f`):
@@ -23,8 +23,17 @@
 > `FeatureSelector` criterion for only those M via per-row primitives
 > (O(M·d), formulas single-sourced with `joint_gate_knn`), declines
 > observable (`shortlist:declined`), cost pinned by a mock that panics
-> on any full-projection call. Open:
-> KnnStore unification (21), v1 conformance contract (22), doc drift
+> on any full-projection call. KnnStore unification (item 21, §5
+> item 6) closed 2026-07-31 at the retrieval-kernel level: the
+> parallel `key_matrices`/`dirty` scoring machinery is deleted and
+> both `PatchedVindex::gate_knn` and every `KnnStore` query score
+> through the shared `patch/gate_overlay.rs::GateOverlay` (H3 guard,
+> mixed-width fallback, auto-invalidating per-layer snapshots);
+> API + `.vlp`/`knn_store.bin` formats unchanged; full arch-B
+> retirement is explicitly gated in the rewritten
+> `FFN_VINDEX_UNIFICATION_SPEC.md` (FR1/FR2 routers ship on the
+> post-logits override; α calibration unvalidated). Open:
+> v1 conformance contract (22), doc drift
 > (23), hygiene (24), plus tracked follow-ups (server/lql
 > `try_apply_patch` migration, remote http/sharded transport coverage,
 > logit-contribution trace field, walk-FFN thresholds surfaced into
@@ -347,6 +356,10 @@ stands):
 6. **KnnStore unification unfinished** — confirmed: `KnnStore` still
    exported and live in `patch/knn_store_io.rs`, `overlay.rs`,
    `overlay_apply.rs`; the unification spec still describes it.
+   *(Resolved 2026-07-31 at the retrieval-kernel level — shared
+   `GateOverlay` scoring structure, parallel query path deleted,
+   formats/API kept; full arch-B retirement gated in the rewritten
+   spec. See ROADMAP item 21.)*
 7. **Vindex v1 conformance contract** — capability manifest, exact tensor
    layouts, quant tags, corruption tests, cross-platform round trips,
    benchmark protocols. Mostly assembling what exists (spec crate,

@@ -81,13 +81,9 @@ impl PatchedVindex {
 
     /// Application body. Every `*_b64` field has already been decode-
     /// checked by `validate_patch_vectors`, so the inner `if let Ok`
-    /// arms cannot silently skip a vector.
+    /// arms cannot silently skip a vector. Gate-snapshot invalidation
+    /// is handled per-layer inside `GateOverlay`'s mutators.
     fn apply_patch_unchecked(&mut self, patch: VindexPatch) {
-        // Collect the layers whose `overrides_gate` we touch so we
-        // can invalidate exactly those cache entries at the end. A
-        // single patch usually touches one or a handful of layers;
-        // the HashSet bounds invalidation cost to O(touched_layers).
-        let mut touched_layers: std::collections::HashSet<usize> = std::collections::HashSet::new();
         for op in &patch.operations {
             match op {
                 PatchOp::InsertKnn {
@@ -152,8 +148,7 @@ impl PatchedVindex {
                     self.deleted.remove(&key);
                     if let Some(b64) = gate_vector_b64 {
                         if let Ok(vec) = decode_gate_vector(b64) {
-                            self.overrides_gate.insert(key, vec);
-                            touched_layers.insert(key.0);
+                            self.overrides_gate.insert(key.0, key.1, vec);
                         }
                     }
                     if let Some(b64) = up_vector_b64 {
@@ -202,8 +197,7 @@ impl PatchedVindex {
                     }
                     if let Some(b64) = gate_vector_b64 {
                         if let Ok(vec) = decode_gate_vector(b64) {
-                            self.overrides_gate.insert(key, vec);
-                            touched_layers.insert(key.0);
+                            self.overrides_gate.insert(key.0, key.1, vec);
                         }
                     }
                     if let Some(b64) = up_vector_b64 {
@@ -220,26 +214,15 @@ impl PatchedVindex {
                 PatchOp::Delete { .. } => {
                     self.overrides_meta.insert(key, None);
                     self.deleted.insert(key);
-                    // Always invalidate on Delete — even if the gate
-                    // entry was absent, the per-layer feature set
-                    // shrunk and any cached matrix is stale.
-                    let was_present = self.overrides_gate.remove(&key).is_some();
-                    if was_present {
-                        touched_layers.insert(key.0);
-                    }
+                    // `GateOverlay::remove` invalidates the layer's
+                    // snapshot even when the gate entry was absent —
+                    // the per-layer feature set shrunk either way.
+                    self.overrides_gate.remove(key.0, key.1);
                 }
                 PatchOp::InsertKnn { .. } | PatchOp::DeleteKnn { .. } => {
                     unreachable!("KNN ops handled above");
                 }
             }
-        }
-        // Per-layer invalidation: only drop cache entries for layers
-        // this patch actually mutated. Patches that touch one layer
-        // leave every other layer's cache hot, which matters for
-        // high-frequency single-layer patch streams (e.g. Exp 52
-        // compile loops, INSERT bursts at a single L26 cache).
-        for layer in touched_layers {
-            self.invalidate_gate_cache_layer(layer);
         }
         self.patches.push(patch);
     }
@@ -255,10 +238,10 @@ impl PatchedVindex {
     /// Rebuild override maps from scratch (after removing a patch).
     fn rebuild_overrides(&mut self) {
         self.overrides_meta.clear();
+        // Clears rows AND every layer's cached snapshot.
         self.overrides_gate.clear();
         self.deleted.clear();
         self.knn_store = super::knn_store::KnnStore::default();
-        self.invalidate_gate_cache();
         let patches: Vec<VindexPatch> = self.patches.drain(..).collect();
         for patch in patches {
             self.apply_patch(patch);
@@ -354,8 +337,8 @@ mod tests {
             down_meta: None,
         }]);
         pv.apply_patch(patch);
-        assert!(pv.overrides_gate.contains_key(&(3, 7)));
-        let stored = &pv.overrides_gate[&(3, 7)];
+        assert!(pv.overrides_gate.contains(3, 7));
+        let stored = pv.overrides_gate.get(3, 7).unwrap();
         assert_eq!(stored.len(), 3);
         assert_eq!(stored[0].to_bits(), 1.0f32.to_bits());
     }
@@ -420,7 +403,7 @@ mod tests {
             down_meta: None,
         }]);
         pv.apply_patch(insert_patch);
-        assert!(pv.overrides_gate.contains_key(&(0, 1)));
+        assert!(pv.overrides_gate.contains(0, 1));
 
         let delete_patch = make_patch(vec![PatchOp::Delete {
             layer: 0,
@@ -428,7 +411,7 @@ mod tests {
             reason: None,
         }]);
         pv.apply_patch(delete_patch);
-        assert!(!pv.overrides_gate.contains_key(&(0, 1)));
+        assert!(!pv.overrides_gate.contains(0, 1));
         assert!(pv.deleted.contains(&(0, 1)));
     }
 
@@ -451,7 +434,7 @@ mod tests {
         let meta = pv.overrides_meta[&(0, 2)].as_ref().unwrap();
         assert_eq!(meta.top_token, "updated");
         // No gate override set
-        assert!(!pv.overrides_gate.contains_key(&(0, 2)));
+        assert!(!pv.overrides_gate.contains(0, 2));
     }
 
     #[test]
