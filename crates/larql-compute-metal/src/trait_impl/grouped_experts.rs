@@ -153,6 +153,88 @@ impl MetalBackend {
         Ok(crate::buffers::read_buffer_f32(&buf_out, offsets.len() * n))
     }
 
+    /// Q4_K sibling of [`Self::q6k_grouped_experts`] — what the engine's MoE
+    /// down projection needs, since that path stores experts in Q4_K.
+    ///
+    /// Same contract: bit-exact against stacking per-expert `q4k_matvec` calls,
+    /// offset table rather than a concatenated artifact, explicit input layout.
+    pub fn q4k_grouped_experts(
+        &self,
+        weights: &[u8],
+        offsets: &[ExpertOffset],
+        x: &[f32],
+        n: usize,
+        k: usize,
+        layout: InputLayout,
+    ) -> Result<Vec<f32>, GroupedError> {
+        if offsets.is_empty() {
+            return Err(GroupedError::NoExpertsSelected);
+        }
+        if k % Q6K_SUPERBLOCK_ELEMS != 0 {
+            return Err(GroupedError::KNotSuperblockAligned { k });
+        }
+        const Q4K_BLOCK_BYTES: usize = 144;
+        let per_expert = n * (k / Q6K_SUPERBLOCK_ELEMS) * Q4K_BLOCK_BYTES;
+        for (slot, off) in offsets.iter().enumerate() {
+            let need = off.0 as usize + per_expert;
+            if need > weights.len() {
+                return Err(GroupedError::OffsetOutOfRange {
+                    slot,
+                    offset: off.0,
+                    need,
+                    have: weights.len(),
+                });
+            }
+        }
+        let x_needed = match layout {
+            InputLayout::Shared => k,
+            InputLayout::PerSlot => k * offsets.len(),
+        };
+        if x.len() < x_needed {
+            return Err(GroupedError::OffsetOutOfRange {
+                slot: 0,
+                offset: 0,
+                need: x_needed,
+                have: x.len(),
+            });
+        }
+        let x_stride: u32 = match layout {
+            InputLayout::Shared => 0,
+            InputLayout::PerSlot => k as u32,
+        };
+
+        let raw: Vec<u32> = offsets.iter().map(|o| o.0).collect();
+        let buf_w = self.bufs.get_bytes(weights);
+        let buf_o = self.bufs.get_bytes(bytemuck_cast(&raw));
+        let buf_x = self.bufs.transient_from_f32(&x[..x_needed]);
+        let buf_out = self.bufs.output((offsets.len() * n * 4) as u64);
+        let n_u32 = n as u32;
+        let k_u32 = k as u32;
+
+        let handle = &self.quant.q4k_grouped_experts_pipeline;
+        let row_tiles = (n as u64).div_ceil(handle.rows_per_tg);
+
+        let cmd = self.queue.new_command_buffer();
+        let enc = cmd.new_compute_command_encoder();
+        enc.set_compute_pipeline_state(&handle.state);
+        enc.set_buffer(0, Some(&buf_w), 0);
+        enc.set_buffer(1, Some(&buf_o), 0);
+        enc.set_buffer(2, Some(&buf_x), 0);
+        enc.set_buffer(3, Some(&buf_out), 0);
+        enc.set_bytes(4, 4, &n_u32 as *const u32 as *const std::ffi::c_void);
+        enc.set_bytes(5, 4, &k_u32 as *const u32 as *const std::ffi::c_void);
+        enc.set_bytes(6, 4, &x_stride as *const u32 as *const std::ffi::c_void);
+        enc.dispatch_thread_groups(
+            metal::MTLSize::new(row_tiles, offsets.len() as u64, 1),
+            metal::MTLSize::new(handle.threads_per_tg, 1, 1),
+        );
+        enc.end_encoding();
+        cmd.commit();
+        cmd.wait_until_completed();
+
+        Ok(crate::buffers::read_buffer_f32(&buf_out, offsets.len() * n))
+    }
+
     /// Threadgroups this dispatch launches, against what one expert would.
     ///
     /// Exposed so a bench can state the occupancy claim numerically instead of
@@ -300,6 +382,43 @@ mod tests {
             &per_slot[N..2 * N],
             "slot 1 must read a different row under PerSlot"
         );
+    }
+
+    #[test]
+    fn q4k_grouped_matches_per_expert_dispatches_with_per_slot_inputs() {
+        // The exact contract the Gemma MoE integration depends on: Q4_K
+        // weights, one dispatch, each slot consuming its own activation.
+        use larql_compute::cpu::ops::q4_common::quantize_q4_k;
+        let Some(be) = MetalBackend::new() else { return };
+
+        let mut bank = Vec::new();
+        let mut offs = Vec::new();
+        let mut per = 0usize;
+        for e in 0..SELECTED {
+            let q = quantize_q4_k(&synth(N, K, e + 1));
+            per = q.len();
+            offs.push(ExpertOffset(bank.len() as u32));
+            bank.extend_from_slice(&q);
+        }
+        let xs: Vec<f32> = (0..K * SELECTED)
+            .map(|i| ((i % 251) as f32 - 125.0) * 0.01)
+            .collect();
+
+        let grouped = be
+            .q4k_grouped_experts(&bank, &offs, &xs, N, K, InputLayout::PerSlot)
+            .expect("dispatch");
+
+        for (slot, off) in offs.iter().enumerate() {
+            let lo = off.0 as usize;
+            let solo = be
+                .q4k_matvec(&bank[lo..lo + per], &xs[slot * K..(slot + 1) * K], N, K)
+                .expect("reference");
+            assert_eq!(
+                &grouped[slot * N..(slot + 1) * N],
+                &solo[..],
+                "Q4_K slot {slot} diverged"
+            );
+        }
     }
 
     #[test]

@@ -40,6 +40,7 @@ pub mod q4k_ffn_gate_up_coop;
 pub mod q4k_ffn_gate_up_f16acc;
 pub mod q4k_geglu_down;
 pub mod q4k_matmul;
+pub mod q4k_grouped_experts;
 pub mod q4k_matvec;
 pub mod q4k_matvec_8sg;
 pub mod q4k_matvec_stride32;
@@ -101,6 +102,7 @@ pub fn all_shaders() -> String {
     src.push_str(q8_attn_proj::SHADER);
     src.push_str(mxfp4_matvec::SHADER);
     src.push_str(q6k_grouped_experts::SHADER);
+    src.push_str(q4k_grouped_experts::SHADER);
     src.push_str(q4k_matvec::SHADER);
     src.push_str(q4k_matvec_8sg::SHADER);
     src.push_str(q4k_matvec_stride32::SHADER);

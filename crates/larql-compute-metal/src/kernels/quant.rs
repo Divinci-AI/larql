@@ -43,6 +43,8 @@ pub struct QuantKernels {
     /// Q6_K grouped-expert matvec: every selected expert in one dispatch, so
     /// the grid carries 16x the threadgroups of a single expert matrix (K3a).
     pub q6k_grouped_experts_pipeline: KernelHandle,
+    /// Q4_K sibling — what the engine's MoE down projection needs.
+    pub q4k_grouped_experts_pipeline: KernelHandle,
 
     /// Production-active Q4_K matvec — picked from [`BackendOptions`]
     /// at construction (`q4k_matvec_use_4sg` flips between the two).
@@ -78,6 +80,8 @@ impl QuantKernels {
         let mxfp4_matvec_pipeline = h::<shaders::mxfp4_matvec::Kernel>(device, library);
         let q6k_grouped_experts_pipeline =
             h::<shaders::q6k_grouped_experts::Kernel>(device, library);
+        let q4k_grouped_experts_pipeline =
+            h::<shaders::q4k_grouped_experts::Kernel>(device, library);
 
         let q4k_matvec_4sg_pipeline = h::<shaders::q4k_matvec::Kernel>(device, library);
         let q4k_matvec_8sg_pipeline = h::<shaders::q4k_matvec_8sg::Kernel>(device, library);
@@ -103,6 +107,7 @@ impl QuantKernels {
             q8_matvec_pipeline,
             mxfp4_matvec_pipeline,
             q6k_grouped_experts_pipeline,
+            q4k_grouped_experts_pipeline,
             q4k_matvec_pipeline,
             q4k_matvec_4sg_pipeline,
             q4k_matvec_8sg_pipeline,
