@@ -861,7 +861,31 @@ what's exact, approximate, observed, reconstructed):**
     row_dot bytes as the dense base (not f32-recomputed), old-down rows
     from the feature-major sidecar. Lands as a routing-ladder branch, not
     a rewrite. [larql-inference, larql-vindex]
-17. **Runtime trace emission** — replace `take_trace`'s post-hoc
+17. ✅ **Runtime trace emission** (DONE 2026-07-31 — the post-hoc
+    `gate_knn` re-run is GONE: `with_trace` upgrades every call to
+    `Observe::Record` and folds the executed path's observation into
+    per-(position, layer) records at the routing-ladder exit (new
+    `walk_ffn/trace.rs`), riding the item-15 seam rather than a parallel
+    channel. `SparseActivations` entries carry the kernels' own gate/up
+    scores (`record_scored`) plus per-position kernel labels, so
+    serial/gather/parallel/weights-fallback report the values they
+    actually computed (gather now returns its fused gate/up dots);
+    records carry gate_score/up_score/activation/rank/path +
+    residual_delta_norm (`‖out_row‖`); `‖down_row‖` is served only from
+    the selector's prebuilt lazy norm cache, never computed for tracing;
+    dense whole-layer paths emit the layer summary and decline
+    per-feature records rather than fabricating. `take_trace` rebuilds
+    the public `WalkTrace` from the runtime records — hits are the
+    EXECUTED features, `WalkHit` extended additively
+    (up_score/activation/down_row_norm/rank; post-hoc KNN views build
+    via the new `WalkHit::from_gate` and stay honestly `None`) — and
+    `take_runtime_trace` exposes full fidelity. Field names follow the
+    chuk-introspect snake_case vocabulary; no dependency added. Pinned
+    by `take_trace_reports_executed_route_not_gate_knn`: a pool route
+    vs a decoy `gate_knn` — the trace must equal the executed route,
+    which the old re-run structurally cannot return. Target-logit
+    contribution needs lm_head access → documented out of scope in
+    `trace.rs`) — replace `take_trace`'s post-hoc
     `gate_knn` re-run (`mod.rs:281-306`, which ignores selector/pools/
     cell-router and records scores, not contributions) with emission from
     the executed path: gate, up, activation, ‖down‖, residual-delta,

@@ -14,13 +14,23 @@
 //! (2026-07-30 review, M2: this branch used to silently report zeros;
 //! fixed by the forward/forward_observed split).
 
+/// One observed feature from a rayon chunk's scan:
+/// `(feature, activation, gate_score, up_score)` — the same values the
+/// chunk's scaled-adds consumed, so the runtime trace reports the
+/// EXECUTED projections (2026-07-30 review, item 17).
+type ChunkAct = (usize, f32, f32, f32);
+
 /// One rayon chunk's contribution: its partial `[hidden]` output
-/// accumulator, plus the `(feature, activation)` pairs it scanned.
+/// accumulator, plus the observed features it scanned.
 ///
-/// The pairs are only populated when observing; on the hot path the
+/// The entries are only populated when observing; on the hot path the
 /// inner `Vec` never allocates. Named because the tuple-of-vectors shape
 /// is otherwise opaque at the collection site.
-type ChunkPartial = (Vec<f32>, Vec<(usize, f32)>);
+type ChunkPartial = (Vec<f32>, Vec<ChunkAct>);
+
+/// Dispatch-trace / per-position kernel label for this branch — single
+/// source for `trace_path` and the observation's kernel labels.
+pub(super) const PATH_SPARSE_PARALLEL: &str = "sparse:parallel_q4k_down";
 
 use rayon::prelude::*;
 
@@ -96,7 +106,7 @@ impl<'a> WalkFfn<'a> {
             .par_chunks(chunk_size)
             .map(|chunk| {
                 let mut partial = vec![0.0f32; hidden];
-                let mut acts: Vec<(usize, f32)> = Vec::new();
+                let mut acts: Vec<ChunkAct> = Vec::new();
                 for &(feat, gate_score) in chunk {
                     let up_score = if let Some(up_view) = up_native_ref {
                         up_view.row(feat).dot(&x_row)
@@ -118,7 +128,7 @@ impl<'a> WalkFfn<'a> {
                     };
                     let act = activated_gate * up_score;
                     if collect_acts {
-                        acts.push((feat, act));
+                        acts.push((feat, act, gate_score, up_score));
                     }
                     if act.abs() > activation_floor {
                         let row_start = feat * hidden;
@@ -144,10 +154,11 @@ impl<'a> WalkFfn<'a> {
 
         if let Some(o) = obs.as_mut() {
             for (_, acts) in &partials {
-                for &(feat, act) in acts {
-                    o.record(position, feat, act);
+                for &(feat, act, gate_score, up_score) in acts {
+                    o.record_scored(position, feat, act, Some(gate_score), Some(up_score));
                 }
             }
+            o.set_kernel(position, PATH_SPARSE_PARALLEL);
         }
 
         if let Some(h) = &self.phase_timings {
@@ -159,7 +170,7 @@ impl<'a> WalkFfn<'a> {
             h.calls.fetch_add(1, Relaxed);
         }
 
-        self.trace_path(layer, "sparse:parallel_q4k_down");
+        self.trace_path(layer, PATH_SPARSE_PARALLEL);
         true
     }
 }

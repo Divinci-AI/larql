@@ -268,6 +268,13 @@ pub struct PyWalkHit {
     inner_feature: usize,
     inner_gate_score: f32,
     inner_meta: FeatureMeta,
+    // Runtime-trace fields (2026-07-30 review, item 17): populated
+    // when the hit comes from an executed walk trace, `None` on
+    // post-hoc KNN views such as `Vindex.walk`.
+    inner_up_score: Option<f32>,
+    inner_activation: Option<f32>,
+    inner_down_row_norm: Option<f32>,
+    inner_rank: Option<usize>,
 }
 
 #[pymethods]
@@ -295,6 +302,26 @@ impl PyWalkHit {
     }
 
     #[getter]
+    fn up_score(&self) -> Option<f32> {
+        self.inner_up_score
+    }
+
+    #[getter]
+    fn activation(&self) -> Option<f32> {
+        self.inner_activation
+    }
+
+    #[getter]
+    fn down_row_norm(&self) -> Option<f32> {
+        self.inner_down_row_norm
+    }
+
+    #[getter]
+    fn rank(&self) -> Option<usize> {
+        self.inner_rank
+    }
+
+    #[getter]
     fn top_token(&self) -> &str {
         &self.inner_meta.top_token
     }
@@ -319,6 +346,10 @@ impl From<WalkHit> for PyWalkHit {
             inner_feature: h.feature,
             inner_gate_score: h.gate_score,
             inner_meta: h.meta,
+            inner_up_score: h.up_score,
+            inner_activation: h.activation,
+            inner_down_row_norm: h.down_row_norm,
+            inner_rank: h.rank,
         }
     }
 }

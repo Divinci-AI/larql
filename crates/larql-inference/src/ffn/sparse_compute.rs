@@ -170,7 +170,9 @@ fn sparse_ffn_forward_impl(
     for s in 0..seq_len {
         let x_row = x.row(s);
 
-        // Compute sparse activations
+        // Compute sparse activations. Each arm records its own
+        // observation so the projection scores it computed ride along
+        // (runtime trace, 2026-07-30 review item 17).
         if let Some(ref gate_sub) = gate_sub {
             let gate_proj = gate_sub.dot(&x_row);
             let up_proj = up_sub.dot(&x_row);
@@ -182,6 +184,11 @@ fn sparse_ffn_forward_impl(
                     g * sigmoid(g)
                 };
                 sparse_act[i] = activated * up_proj[i];
+            }
+            if let Some(o) = obs.as_mut() {
+                for (i, &feat) in features.iter().enumerate() {
+                    o.record_scored(s, feat, sparse_act[i], Some(gate_proj[i]), Some(up_proj[i]));
+                }
             }
         } else {
             let up_proj = up_sub.dot(&x_row);
@@ -204,11 +211,13 @@ fn sparse_ffn_forward_impl(
                     v * sigmoid(v)
                 };
             }
-        }
-
-        if let Some(o) = obs.as_mut() {
-            for (i, &feat) in features.iter().enumerate() {
-                o.record(s, feat, sparse_act[i]);
+            if let Some(o) = obs.as_mut() {
+                // Non-gated FFN: the single pre-activation projection
+                // (incl. up-bias) is the gate-position score; there is
+                // no separate up projection to report.
+                for (i, &feat) in features.iter().enumerate() {
+                    o.record_scored(s, feat, sparse_act[i], Some(vals[i]), None);
+                }
             }
         }
 
@@ -306,6 +315,14 @@ fn sparse_ffn_forward_full_impl(
     for s in 0..seq_len {
         let x_row = x.row(s);
 
+        // Per-slot projection scores retained for the observation
+        // record (runtime trace, 2026-07-30 review item 17). Only
+        // allocated when observing; phase 2 overwrites the entries of
+        // any recomputed (overridden) slots so the record carries the
+        // POST-override scores the executed output used.
+        let mut scored: Option<Vec<(Option<f32>, Option<f32>)>> =
+            obs.is_some().then(|| vec![(None, None); k]);
+
         // Phase 1: compute baseline activations for every feature
         // using gathered dense weights.
         if let Some(ref gate_sub) = gate_sub {
@@ -319,6 +336,11 @@ fn sparse_ffn_forward_full_impl(
                     g * sigmoid(g)
                 };
                 sparse_act[i] = activated * up_proj[i];
+            }
+            if let Some(sc) = scored.as_mut() {
+                for i in 0..k {
+                    sc[i] = (Some(gate_proj[i]), Some(up_proj[i]));
+                }
             }
         } else {
             let up_proj = up_sub.dot(&x_row);
@@ -340,6 +362,13 @@ fn sparse_ffn_forward_full_impl(
                 } else {
                     v * sigmoid(v)
                 };
+            }
+            if let Some(sc) = scored.as_mut() {
+                // Non-gated: the single pre-activation projection
+                // (incl. up-bias) is the gate-position score.
+                for i in 0..k {
+                    sc[i] = (Some(vals[i]), None);
+                }
             }
         }
 
@@ -400,13 +429,22 @@ fn sparse_ffn_forward_full_impl(
             } else {
                 activated
             };
+            if let Some(sc) = scored.as_mut() {
+                sc[i] = if is_gated {
+                    (Some(g), Some(up_score))
+                } else {
+                    (Some(g), None)
+                };
+            }
         }
 
-        // Observation records the POST-override slot activations —
-        // phase 2 has already re-computed any overridden slots.
+        // Observation records the POST-override slot activations and
+        // the projection scores that produced them — phase 2 has
+        // already re-computed any overridden slots.
         if let Some(o) = obs.as_mut() {
+            let sc = scored.as_ref().expect("scored allocated iff observing");
             for (i, &feat) in features.iter().enumerate() {
-                o.record(s, feat, sparse_act[i]);
+                o.record_scored(s, feat, sparse_act[i], sc[i].0, sc[i].1);
             }
         }
 
@@ -601,7 +639,7 @@ mod tests {
             FfnActivations::Sparse(s) => {
                 assert_eq!(s.seq_len(), 3);
                 for pos in 0..3 {
-                    let recorded: Vec<usize> = s.position(pos).iter().map(|&(f, _)| f).collect();
+                    let recorded: Vec<usize> = s.position(pos).iter().map(|e| e.feature).collect();
                     assert_eq!(recorded, feats, "exactly the K computed features");
                 }
             }
@@ -830,8 +868,8 @@ mod tests {
         let lookup = |s: &SparseActivations, feat: usize| {
             s.position(0)
                 .iter()
-                .find(|(f, _)| *f == feat)
-                .map(|&(_, a)| a)
+                .find(|e| e.feature == feat)
+                .map(|e| e.activation)
                 .expect("computed feature must be recorded")
         };
         assert!(

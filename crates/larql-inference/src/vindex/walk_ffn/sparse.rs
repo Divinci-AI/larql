@@ -42,6 +42,13 @@ use super::WalkFfn;
 use crate::ffn::{FfnActivations, SparseActivations};
 use crate::vindex::walk_config::FeatureSelector;
 
+/// Dispatch-trace / per-position kernel label for the serial
+/// per-feature loop — single source for `trace_path` and the runtime
+/// trace's observation labels (2026-07-30 review, item 17).
+pub(super) const PATH_SPARSE_SERIAL: &str = "sparse:serial";
+/// Same, for the gather-contiguous Q4K kernel (`sparse_gather.rs`).
+pub(super) const PATH_SPARSE_GATHER: &str = "sparse:gather_q4k";
+
 impl<'a> WalkFfn<'a> {
     /// Sparse walk FFN — see module docs.
     ///
@@ -156,17 +163,26 @@ impl<'a> WalkFfn<'a> {
             {
                 if let Some(feats) = self.gather_route_feats(layer, x_slice, top_k) {
                     if feats.len() >= GATHER_MIN_FEATURES {
-                        if let Some((out_vec, acts)) =
+                        if let Some(g) =
                             self.gather_q4k_accumulate(layer, &feats, x_slice, use_gelu, hidden)
                         {
                             let mut out_row = out.row_mut(s);
-                            out_row.as_slice_mut().unwrap().copy_from_slice(&out_vec);
+                            out_row.as_slice_mut().unwrap().copy_from_slice(&g.out);
                             if let Some(o) = obs.as_mut() {
-                                for (&feat, &a) in feats.iter().zip(&acts) {
-                                    o.record(s, feat, a);
+                                // The gate/up dots the fused kernels
+                                // actually computed ride into the record.
+                                for (i, &feat) in feats.iter().enumerate() {
+                                    o.record_scored(
+                                        s,
+                                        feat,
+                                        g.acts[i],
+                                        Some(g.gate_scores[i]),
+                                        Some(g.up_scores[i]),
+                                    );
                                 }
+                                o.set_kernel(s, PATH_SPARSE_GATHER);
                             }
-                            self.trace_path(layer, "sparse:gather_q4k");
+                            self.trace_path(layer, PATH_SPARSE_GATHER);
                             continue;
                         }
                     }
@@ -200,7 +216,13 @@ impl<'a> WalkFfn<'a> {
 
             // Serial per-feature loop — the correctness baseline.
             for (feat, gate_score) in hits {
-                let act = if is_gated {
+                // `(activation, gate-position score, up score)` — the
+                // scores are recorded alongside the activation so the
+                // runtime trace reports the EXECUTED projections
+                // (2026-07-30 review, item 17). Non-gated archs have a
+                // single projection: its post-bias value is the
+                // gate-position score, and there is no up score.
+                let (act, gate_obs, up_obs) = if is_gated {
                     let up_ov = if layer_has_overrides {
                         self.index.up_override(layer, feat)
                     } else {
@@ -219,7 +241,7 @@ impl<'a> WalkFfn<'a> {
                     } else {
                         gate_score * crate::ffn::sigmoid(gate_score)
                     };
-                    activated_gate * up_score
+                    (activated_gate * up_score, gate_score, Some(up_score))
                 } else {
                     let mut v = gate_score;
                     if let Some(ref bias) = up_bias_for_layer {
@@ -227,17 +249,18 @@ impl<'a> WalkFfn<'a> {
                             v += bias[feat];
                         }
                     }
-                    if use_gelu {
+                    let act = if use_gelu {
                         crate::ffn::gelu_tanh(v)
                     } else {
                         v * crate::ffn::sigmoid(v)
-                    }
+                    };
+                    (act, v, None)
                 };
 
                 if let Some(o) = obs.as_mut() {
                     // Recorded regardless of the floor: the floor gates
                     // the down accumulate, not activation observation.
-                    o.record(s, feat, act);
+                    o.record_scored(s, feat, act, Some(gate_obs), up_obs);
                 }
 
                 if act.abs() > activation_floor {
@@ -264,6 +287,10 @@ impl<'a> WalkFfn<'a> {
                     }
                 }
             }
+
+            if let Some(o) = obs.as_mut() {
+                o.set_kernel(s, PATH_SPARSE_SERIAL);
+            }
         }
 
         // Down bias
@@ -274,7 +301,7 @@ impl<'a> WalkFfn<'a> {
             crate::forward::add_bias(&mut out, bias);
         }
 
-        self.trace_path(layer, "sparse:serial");
+        self.trace_path(layer, PATH_SPARSE_SERIAL);
         Some((out, obs.map(FfnActivations::Sparse)))
     }
 }

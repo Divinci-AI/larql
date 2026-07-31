@@ -26,6 +26,8 @@ impl<'a> WalkFfn<'a> {
             backend: None,
             trace_residuals: std::cell::RefCell::new(Vec::new()),
             record_trace: false,
+            runtime_trace: std::cell::RefCell::new(Vec::new()),
+            last_path: std::cell::Cell::new(super::trace::PATH_UNROUTED),
             l1_cache: None,
             dispatch_trace: std::cell::RefCell::new(None),
             phase_timings: None,

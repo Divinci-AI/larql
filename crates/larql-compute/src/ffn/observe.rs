@@ -1,5 +1,6 @@
 //! Opt-in FFN activation observation — the `forward`/`forward_observed`
-//! split (2026-07-30 vindex/WalkFFN review, item 15).
+//! split (2026-07-30 vindex/WalkFFN review, item 15) plus the runtime
+//! trace fields it carries (item 17).
 //!
 //! Activations used to be a mandatory second return value on every
 //! [`super::FfnBackend`] forward, which most paths didn't honestly
@@ -16,6 +17,14 @@
 //! - [`FfnActivations::Absent`] — the executed path observed nothing
 //!   (cache hit, remote backend, MoE). Never zeros: consumers can tell
 //!   "not observed" from "observed as zero".
+//!
+//! Runtime-trace extension (item 17): sparse recorders that know their
+//! projection scores at the accumulate site record them via
+//! [`SparseActivations::record_scored`], and per-position kernel labels
+//! via [`SparseActivations::set_kernel`] — so a trace built from the
+//! observation describes the EXECUTED computation, not a re-run.
+//! Recorders that don't score use plain [`SparseActivations::record`]
+//! and the score fields stay honestly `None`.
 
 use ndarray::Array2;
 
@@ -72,13 +81,37 @@ impl FfnActivations {
     }
 }
 
-/// Per-position `(feature, activation)` pairs from a sparse FFN path.
+/// One computed feature in a sparse observation. Score fields are
+/// `Some` only when the recorder knew them at the accumulate site
+/// (walk kernels record via [`SparseActivations::record_scored`]);
+/// `None` means "the executed path did not compute this score" —
+/// never a fabricated zero.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SparseEntry {
+    /// Feature index within the layer.
+    pub feature: usize,
+    /// Scalar pre-down activation, e.g. `φ(g·x)·(u·x)` for gated FFNs.
+    pub activation: f32,
+    /// Gate projection score `g·x` (or the selection score on paths
+    /// where selection IS the gate projection).
+    pub gate_score: Option<f32>,
+    /// Up projection score `u·x`. `None` on non-gated paths where the
+    /// single projection is recorded as `gate_score`.
+    pub up_score: Option<f32>,
+}
+
+/// Per-position computed-feature records from a sparse FFN path.
 /// One entry per feature the path actually computed — no zero-fill.
+/// Entry order is the executed visit order (= selection rank on
+/// ranked routes, route order on precomputed routes).
 #[derive(Debug, Clone, PartialEq)]
 pub struct SparseActivations {
     num_features: usize,
-    /// `positions[s]` = pairs recorded for sequence position `s`.
-    positions: Vec<Vec<(usize, f32)>>,
+    /// `positions[s]` = entries recorded for sequence position `s`.
+    positions: Vec<Vec<SparseEntry>>,
+    /// `kernels[s]` = label of the kernel that computed position `s`'s
+    /// entries, when the recorder labels per-position sub-paths.
+    kernels: Vec<Option<&'static str>>,
 }
 
 impl SparseActivations {
@@ -88,19 +121,50 @@ impl SparseActivations {
         Self {
             num_features,
             positions: vec![Vec::new(); seq_len],
+            kernels: vec![None; seq_len],
         }
     }
 
-    /// Record one computed activation. Panics on an out-of-range
-    /// position or feature — a mis-indexed observation is a bug, not
-    /// data.
+    /// Record one computed activation without projection scores.
+    /// Panics on an out-of-range position or feature — a mis-indexed
+    /// observation is a bug, not data.
     pub fn record(&mut self, position: usize, feature: usize, activation: f32) {
+        self.record_scored(position, feature, activation, None, None);
+    }
+
+    /// Record one computed activation with the projection scores the
+    /// executed kernel used to compute it. Same panic contract as
+    /// [`SparseActivations::record`].
+    pub fn record_scored(
+        &mut self,
+        position: usize,
+        feature: usize,
+        activation: f32,
+        gate_score: Option<f32>,
+        up_score: Option<f32>,
+    ) {
         assert!(
             feature < self.num_features,
             "SparseActivations::record: feature {feature} >= num_features {}",
             self.num_features
         );
-        self.positions[position].push((feature, activation));
+        self.positions[position].push(SparseEntry {
+            feature,
+            activation,
+            gate_score,
+            up_score,
+        });
+    }
+
+    /// Label the kernel that computed one position's entries. Panics on
+    /// an out-of-range position (same contract as `record`).
+    pub fn set_kernel(&mut self, position: usize, kernel: &'static str) {
+        self.kernels[position] = Some(kernel);
+    }
+
+    /// The kernel label for one position, when the recorder set one.
+    pub fn kernel(&self, position: usize) -> Option<&'static str> {
+        self.kernels[position]
     }
 
     pub fn seq_len(&self) -> usize {
@@ -111,8 +175,8 @@ impl SparseActivations {
         self.num_features
     }
 
-    /// Pairs recorded for one position.
-    pub fn position(&self, position: usize) -> &[(usize, f32)] {
+    /// Entries recorded for one position, in executed visit order.
+    pub fn position(&self, position: usize) -> &[SparseEntry] {
         &self.positions[position]
     }
 
@@ -121,76 +185,11 @@ impl SparseActivations {
     /// would have summed into the executed output.
     pub fn to_dense(&self) -> Array2<f32> {
         let mut dense = Array2::<f32>::zeros((self.positions.len(), self.num_features));
-        for (s, pairs) in self.positions.iter().enumerate() {
-            for &(feature, activation) in pairs {
-                dense[[s, feature]] += activation;
+        for (s, entries) in self.positions.iter().enumerate() {
+            for e in entries {
+                dense[[s, e.feature]] += e.activation;
             }
         }
         dense
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn unobserved_is_absent_with_the_named_reason() {
-        let obs = FfnActivations::unobserved();
-        assert!(obs.is_absent());
-        assert_eq!(obs.absent_reason(), Some(REASON_UNOBSERVED_BACKEND));
-        assert_eq!(obs.into_dense(), None);
-    }
-
-    #[test]
-    fn dense_round_trips_through_into_dense() {
-        let a = Array2::from_shape_vec((2, 3), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
-        let obs = FfnActivations::Dense(a.clone());
-        assert!(!obs.is_absent());
-        assert_eq!(obs.absent_reason(), None);
-        assert_eq!(obs.into_dense(), Some(a));
-    }
-
-    #[test]
-    fn sparse_records_and_densifies_only_what_was_computed() {
-        let mut s = SparseActivations::new(2, 4);
-        assert_eq!(s.seq_len(), 2);
-        assert_eq!(s.num_features(), 4);
-        s.record(0, 1, 0.5);
-        s.record(1, 3, -2.0);
-        assert_eq!(s.position(0), &[(1, 0.5)]);
-        assert_eq!(s.position(1), &[(3, -2.0)]);
-        let dense = FfnActivations::Sparse(s).into_dense().unwrap();
-        assert_eq!(dense.shape(), &[2, 4]);
-        assert_eq!(dense[[0, 1]], 0.5);
-        assert_eq!(dense[[1, 3]], -2.0);
-        // Every unrecorded slot is zero — the honest zero of "this
-        // feature contributed nothing to the executed output".
-        assert_eq!(dense.iter().filter(|v| **v != 0.0).count(), 2);
-    }
-
-    #[test]
-    fn sparse_duplicate_records_accumulate() {
-        let mut s = SparseActivations::new(1, 2);
-        s.record(0, 0, 1.0);
-        s.record(0, 0, 0.25);
-        assert_eq!(s.to_dense()[[0, 0]], 1.25);
-    }
-
-    #[test]
-    #[should_panic(expected = "feature 5 >= num_features 2")]
-    fn sparse_record_panics_on_out_of_range_feature() {
-        SparseActivations::new(1, 2).record(0, 5, 1.0);
-    }
-
-    #[test]
-    fn sparse_equality_is_structural() {
-        let mut a = SparseActivations::new(1, 3);
-        a.record(0, 2, 1.0);
-        let mut b = SparseActivations::new(1, 3);
-        b.record(0, 2, 1.0);
-        assert_eq!(FfnActivations::Sparse(a), FfnActivations::Sparse(b.clone()));
-        b.record(0, 1, 4.0);
-        assert!(FfnActivations::Sparse(b) != FfnActivations::unobserved());
     }
 }

@@ -40,4 +40,4 @@ pub use kquant_forward::{
 pub use l1_cache::FfnL1Cache;
 pub use loader::{open_inference_vindex, ENV_VINDEX_PATH};
 pub use walk_config::{CellRouter, FeatureSelector, WalkFfnConfig};
-pub use walk_ffn::{PhaseTimingsHandle, WalkFfn};
+pub use walk_ffn::{LayerTraceRecord, PhaseTimingsHandle, TracedFeature, WalkFfn};

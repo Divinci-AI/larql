@@ -41,6 +41,7 @@
 //! - `full_mmap.rs`               — gate/up/down in three separate mmap files
 //! - `exact.rs`                   — gate/up from safetensors, down from mmap
 //! - `observe.rs`                 — Observe mode (forward / forward_observed split)
+//! - `trace.rs`                   — runtime trace records + take_trace rebuild
 //! - `helpers.rs`                 — cross-path utilities + trace metadata
 //! - `builders.rs`                — constructors and builder methods
 //! - `timings.rs`                 — phase-timing sink + env-var trace plumbing
@@ -56,6 +57,14 @@
 //! the `(feature, activation)` pairs they computed, dense paths hand
 //! over their intrinsic activation matrix, and the L1 cache read is
 //! bypassed (recompute) rather than fabricating zeros.
+//!
+//! Runtime trace (2026-07-30 review, item 17, `trace.rs`): enabling
+//! `with_trace` upgrades every call to `Observe::Record` and folds the
+//! executed path's observation into per-(position, layer) records at
+//! the ladder exit — `take_trace` reports the features the walk
+//! EXECUTED (selector/pool/cell-router included), not a post-hoc
+//! `gate_knn` re-run. Tracing therefore shares Record-mode semantics:
+//! the L1 cache read is bypassed while the trace is on.
 
 use ndarray::Array2;
 
@@ -67,7 +76,7 @@ use crate::vindex::walk_config::WalkFfnConfig;
 use larql_compute::prelude::*;
 use observe::Observe;
 
-use larql_vindex::{GateIndex, WalkHit, WalkTrace};
+use larql_vindex::GateIndex;
 
 mod base_delta;
 mod builders;
@@ -87,6 +96,7 @@ mod sparse_parallel;
 mod sparse_route;
 mod thresholds;
 mod timings;
+mod trace;
 
 #[cfg(test)]
 mod base_delta_tests;
@@ -94,9 +104,12 @@ mod base_delta_tests;
 mod dispatch_tests;
 #[cfg(test)]
 mod routing_tests;
+#[cfg(test)]
+mod trace_tests;
 
 pub use helpers::DispatchEntry;
 pub use timings::PhaseTimingsHandle;
+pub use trace::{LayerTraceRecord, TracedFeature};
 
 pub struct WalkFfn<'a> {
     pub weights: &'a ModelWeights,
@@ -105,6 +118,15 @@ pub struct WalkFfn<'a> {
     pub backend: Option<&'a dyn ComputeBackend>,
     trace_residuals: std::cell::RefCell<Vec<(usize, Vec<f32>)>>,
     record_trace: bool,
+    /// Runtime trace sink (2026-07-30 review, item 17). Populated by
+    /// `fold_runtime_trace` at every routing-ladder exit when
+    /// `record_trace` is set — the records describe the EXECUTED path,
+    /// not a post-hoc `gate_knn` re-run. Drained by `take_trace` /
+    /// `take_runtime_trace` (`trace.rs`).
+    runtime_trace: std::cell::RefCell<Vec<trace::LayerTraceRecord>>,
+    /// Name of the most recent `trace_path` call — the executed ladder
+    /// path for the current layer call by the time the trace folds.
+    last_path: std::cell::Cell<&'static str>,
     l1_cache: Option<FfnL1Cache>,
     /// Dispatch-trace sink. `None` = disabled. When `Some`, every walk
     /// path appends a (layer, name) entry on exit. Used by the routing
@@ -162,6 +184,7 @@ impl<'a> WalkFfn<'a> {
     /// opt into the in-memory trace. The env var check is cheap on
     /// the unset path (one thread-local lookup per layer).
     pub(super) fn trace_path(&self, layer: usize, path: &'static str) {
+        self.last_path.set(path);
         if let Some(vec) = self.dispatch_trace.borrow_mut().as_mut() {
             vec.push(DispatchEntry { layer, path });
         }
@@ -181,33 +204,6 @@ impl<'a> WalkFfn<'a> {
     /// keeps appending.
     pub fn peek_residuals(&self) -> Vec<(usize, Vec<f32>)> {
         self.trace_residuals.borrow().clone()
-    }
-
-    pub fn take_trace(&self) -> WalkTrace {
-        let residuals = self
-            .trace_residuals
-            .borrow_mut()
-            .drain(..)
-            .collect::<Vec<_>>();
-        let mut layers = Vec::with_capacity(residuals.len());
-        for (layer, residual) in residuals {
-            let r = ndarray::Array1::from_vec(residual);
-            let hits = self.index.gate_knn(layer, &r, self.top_k_for(layer));
-            let walk_hits: Vec<WalkHit> = hits
-                .into_iter()
-                .filter_map(|(feature, gate_score)| {
-                    let meta = self.index.feature_meta(layer, feature)?.clone();
-                    Some(WalkHit {
-                        layer,
-                        feature,
-                        gate_score,
-                        meta,
-                    })
-                })
-                .collect();
-            layers.push((layer, walk_hits));
-        }
-        WalkTrace { layers }
     }
 
     /// Ladder steps 4–9 — the whole-layer, override-blind paths, in
@@ -349,6 +345,30 @@ impl<'a> WalkFfn<'a> {
 }
 
 impl<'a> WalkFfn<'a> {
+    /// Route one layer, then — when the runtime trace is enabled —
+    /// fold the executed path's observation into the trace sink
+    /// (2026-07-30 review, item 17). Tracing upgrades `Skip` to
+    /// `Record` so the sparse kernels emit their per-feature records;
+    /// that also bypasses the L1 cache read (a hit observes nothing),
+    /// exactly like an ordinary observed call.
+    fn forward_routed(
+        &self,
+        layer: usize,
+        x: &Array2<f32>,
+        observe: Observe,
+    ) -> (Array2<f32>, Option<FfnActivations>) {
+        let observe = if self.record_trace {
+            Observe::Record
+        } else {
+            observe
+        };
+        let result = self.forward_ladder(layer, x, observe);
+        if self.record_trace {
+            self.fold_runtime_trace(layer, &result.0, result.1.as_ref());
+        }
+        result
+    }
+
     /// The routing ladder, parameterised on observation mode. Both trait
     /// entry points run THIS body, so `forward` and `forward_observed`
     /// can never route differently — the only mode-dependent behaviour
@@ -357,7 +377,7 @@ impl<'a> WalkFfn<'a> {
     ///
     /// Invariant: returns `Some` observation iff `observe` is `Record`
     /// — except the `Skip`-only L1 hit, which returns `None` trivially.
-    fn forward_routed(
+    fn forward_ladder(
         &self,
         layer: usize,
         x: &Array2<f32>,
@@ -499,7 +519,9 @@ impl<'a> WalkFfn<'a> {
 impl<'a> FfnBackend for WalkFfn<'a> {
     fn forward(&self, layer: usize, x: &Array2<f32>) -> Array2<f32> {
         // `Observe::Skip` — by construction no walk path touches an
-        // activation buffer on this route.
+        // activation buffer on this route (unless the runtime trace is
+        // enabled, which deliberately upgrades to `Record` so the trace
+        // can report the executed features — see `forward_routed`).
         self.forward_routed(layer, x, Observe::Skip).0
     }
 

@@ -235,12 +235,7 @@ impl VectorIndex {
                 .into_iter()
                 .filter_map(|(feature, gate_score)| {
                     let meta = self.feature_meta(layer, feature)?;
-                    Some(WalkHit {
-                        layer,
-                        feature,
-                        gate_score,
-                        meta,
-                    })
+                    Some(WalkHit::from_gate(layer, feature, gate_score, meta))
                 })
                 .collect();
             trace_layers.push((layer, walk_hits));

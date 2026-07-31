@@ -11,6 +11,22 @@ use rayon::prelude::*;
 
 use super::WalkFfn;
 
+/// Output of [`WalkFfn::gather_q4k_accumulate`]: one position's output
+/// row plus the per-feature values the fused kernels computed, all
+/// aligned with the route's `feats` order. The scores ride into the
+/// observation record so the runtime trace reports the EXECUTED
+/// gate/up dots, not a re-scored twin (2026-07-30 review, item 17).
+pub(super) struct GatherAccumulate {
+    /// `[hidden]` output row (down accumulate over the route).
+    pub out: Vec<f32>,
+    /// Scalar activation per route feature.
+    pub acts: Vec<f32>,
+    /// Gate row-dot per route feature (recomputed from gathered bytes).
+    pub gate_scores: Vec<f32>,
+    /// Up row-dot per route feature.
+    pub up_scores: Vec<f32>,
+}
+
 impl<'a> WalkFfn<'a> {
     /// The known-pool route feature set for the gather fast path:
     /// cell-router pool if a router is attached, else the precomputed
@@ -63,11 +79,10 @@ impl<'a> WalkFfn<'a> {
     /// (caller falls back to the correct scalar paths) when the sidecar is
     /// absent — pinned by `gather_q4k_accumulate_declines_without_down_sidecar`.
     ///
-    /// Returns `(out[hidden], acts[feats.len()])`. **Gate is recomputed** from
-    /// gathered gate bytes (not taken from any prior scattered scoring) so the
-    /// whole gate/up/down pass is contiguous — `feats` need only be the route's
-    /// feature indices.
-    #[allow(clippy::type_complexity)]
+    /// Returns a [`GatherAccumulate`] aligned with `feats`. **Gate is
+    /// recomputed** from gathered gate bytes (not taken from any prior
+    /// scattered scoring) so the whole gate/up/down pass is contiguous —
+    /// `feats` need only be the route's feature indices.
     pub(super) fn gather_q4k_accumulate(
         &self,
         layer: usize,
@@ -75,7 +90,7 @@ impl<'a> WalkFfn<'a> {
         x_slice: &[f32],
         use_gelu: bool,
         hidden: usize,
-    ) -> Option<(Vec<f32>, Vec<f32>)> {
+    ) -> Option<GatherAccumulate> {
         let slices = self.index.interleaved_kquant_layer_data(layer)?;
         let gate_info = larql_vindex::quant::registry::lookup(slices[0].1)?;
         let up_info = larql_vindex::quant::registry::lookup(slices[1].1)?;
@@ -157,7 +172,12 @@ impl<'a> WalkFfn<'a> {
                 *o += v;
             }
         }
-        Some((out, acts))
+        Some(GatherAccumulate {
+            out,
+            acts,
+            gate_scores: gate_s,
+            up_scores: up_s,
+        })
     }
 }
 

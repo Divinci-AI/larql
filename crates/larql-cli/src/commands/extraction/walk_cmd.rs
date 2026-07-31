@@ -1207,11 +1207,20 @@ fn print_walk_trace(trace: &larql_vindex::WalkTrace, down_top_k: usize) {
                 .collect::<Vec<_>>()
                 .join(", ");
 
+            // Executed-path values (2026-07-30 review, item 17): hits
+            // now come from the runtime trace, so the activation the
+            // walk actually computed is available. Absent on post-hoc
+            // KNN views — print nothing rather than a fake number.
+            let act = hit
+                .activation
+                .map(|a| format!("  act={a:+.3}"))
+                .unwrap_or_default();
             println!(
-                "  {:2}. F{:<5} gate={:+.3}  hears={:15}  c={:.2}  down=[{}]",
+                "  {:2}. F{:<5} gate={:+.3}{}  hears={:15}  c={:.2}  down=[{}]",
                 i + 1,
                 hit.feature,
                 hit.gate_score,
+                act,
                 format!("{:?}", hit.meta.top_token),
                 hit.meta.c_score,
                 down_tokens,
