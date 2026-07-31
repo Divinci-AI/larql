@@ -719,6 +719,8 @@ Item 9 is a new *kind* of state, not a new state policy — the taxonomy gains a
 
 Item 18 is the one item with a scheduled consumer outside this document: [`dec-funnel.md` §DEC-2](dec-funnel.md) states no tier-capacity number may be quoted before it exists (DEC-0 measured unique-expert bytes at 13.9 % of naive at B64 — ~7.2× headroom).
 
+> **Do not carry that 7.2× to K3.** It was measured on gemma4-26b-a4b-q4k at **8-of-128 = 6.25 % activation**. K3 is **16-of-896 = 1.79 %**, where unions overlap far less: `dec8-5-k3-batch-union` puts the same quantity at **~3.0×** at B64. Union amortisation is `B·k / E·(1-(1-k/E)^B)` and depends on `k/E`, not batch alone. See [`dec-funnel.md` §1 standing rule R2](dec-funnel.md).
+
 ### Harvest / metrology (`larql dec-bench`)
 
 | # | Feature | Kind | Rung | Phase | Gate |

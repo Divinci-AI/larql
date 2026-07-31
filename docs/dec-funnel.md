@@ -32,6 +32,44 @@ Everything is pure inference — exact function, relocated weights. The walk/spa
 
 `dec/movement_ratio` = bytes crossing the attention↔weights boundary per token ÷ expert/FFN weight bytes touched per token. Offload ≈ 1.0 by construction; this architecture targets 10⁻³–10⁻⁴. Reported on every run; it is the one number that makes the categorical difference legible. **Measured at DEC-0: 1.2–1.9 × 10⁻³ (dense path), 5.2–8.2 × 10⁻⁴ (routed-expert path).**
 
+### Standing rules — numbers that don't travel
+
+**R0 — Every ratio ships with its convention named.** R1–R6 are all special cases. A measured number carries a hidden condition — the corpus it was scored on, the activation fraction it was measured at, the component it was divided by, the bytes it assumed present, the units it was expressed in, the execution it presumed. State the condition *with* the number, every time, or the next person to reuse it (including you, next week) reuses it somewhere the condition doesn't hold.
+
+**Seven instances of one failure shape in a single week**, each a measured, correct number reused where its hidden condition didn't hold — and every one caught by arithmetic before any compute was spent on it. They are cheap to check and expensive to miss, so they are rules rather than anecdotes. Read this section before quoting any number in it.
+
+**R1 — A bits/char figure must state its byte range, and both sides of a comparison must use the same one.** From [`k3-funnel.md`](k3-funnel.md) §4.7.7: §4.7.6 read a 2.5× engine disagreement that was entirely a corpus artifact — larql on boilerplate against a reference on prose. A corpus slice is a fixture; `--bytes 384` on a Gutenberg file cannot distinguish "the model is good" from "the text is boilerplate."
+
+**R2 — Never transfer an expert-union or amortisation number across activation fractions.** From `dec8-5-k3-batch-union`: DEC-0 measured `experts_union_frac` = 0.1386 at batch 64, i.e. ~7.2× amortisation. That is a **6.25%-activation** number (8-of-128). K3 activates **1.79%** (16-of-896) and gets **3.0×** at the same batch, because sparser routing means unions overlap less. Union amortisation is `B·k / E·(1-(1-k/E)^B)` — it depends on `k/E`, not on batch alone. Quote the activation fraction with the ratio, always.
+
+*The shape R1 and R2 share:* a number that is real, measured, and silently conditioned on something that doesn't come with it. When reusing a measured ratio in a new setting, name the condition it was measured under before the ratio itself.
+
+**R3 — Divide bandwidth by the whole read, not the interesting part of it.** From `dec8-6-slice-touch-ledger`: K3's always-on dense weights are 29.86 GB/token against the routed experts' 25.83 — the *larger* half. A ceiling computed from the routed term alone reads 14.2 tok/s; the real figure is 6.6. If a component is named in the prose it belongs in the denominator.
+
+**R4 — Zero-out ceiling. Before testing a lever, set the bytes it targets to zero.** If the *untouched* bytes still violate the target budget, that lever cannot decide the target, and any experiment scoped to it is answering a question that has already been closed. One line, run before the experiment is designed.
+
+R4 convicts a whole week of this ladder retrospectively. Zero K3's routed expert bytes entirely and the dense half still reads 29.86 GB/token, which at 367 GB/s caps decode at 12.3 tok/s. Therefore:
+
+- row sparsity could never have decided 20 tok/s on the slice (`dec8-1`, bars withdrawn),
+- nor could perfect expert compression of any kind,
+- and the 63× lever stack that opened the whole investigation dies in a single line — its five levers all targeted bytes that were never the binding half.
+
+Run R4 first. It is free, and it is the difference between a month of fidelity work and one division.
+
+**R5 — Work-width / commit-width separation.** Costs are set by every position *evaluated*; throughput is set by positions *committed*. Never use accepted length as verification width unless acceptance is perfect. A drafter proposing `T` positions of which `A` commit makes the target read the routed union across all `T` and bank only `A` tokens — so the condition is `D + ρ_r·R·u(T) ≤ η·B₂₀·A(T)`, with `T`, `A(T)` and `u(T)` three independent quantities. `T` is a design knob, not a drafter property: `u(T)` grows near-linearly at K3's sparsity while `A(T)` saturates, so the tolerable routed retention `ρ_max(T)` has an interior optimum (measured: T=3 at η=1.0, T=5 at η=0.80). A drafter's shipped width is not its best width.
+
+DEC-9.2's pre-registration was withdrawn twice under these rules — once for scaling a routed-zeroed constant (R4/R0), once for using one variable as both union index and amortisation divisor (R5). Both before any compute.
+
+**R6 — Logical / physical reuse separation.** A union, batch or block-width ratio is only *potential* reuse. Report the physical tensor loads that realise it; never substitute logical uniqueness for bytes actually read. Two claims that do not follow from measuring a union: **expert union does not imply grouped expert loading**, and **block width does not imply one dense-weight read**. Define `d(T)` = actual dense bytes read ÷ `D` and `r(T)` = actual routed bytes read ÷ `ρ_r·R`. Ideal execution gives `d=1, r=u(T)`; a naive token loop gives `d≈T, r≈T`. §DEC-2 already flags the routed server as streaming experts per row, with the measured union recorded as *unrealised scheduler headroom pending expert grouping* — so this is a known gap, not a hypothetical one.
+
+**Keep `d`/`r` out of `η`.** `d(T)`, `r(T)` are how many bytes were *touched*; `η_D(T)`, `η_R(T)` are how efficiently those bytes were *served*. A repeated tensor load is work amplification, not poor dequantisation. Collapsing both into one scalar lets them trade off invisibly — which is R0's failure mode with two dials instead of one.
+
+### Two conventions this ladder now fixes
+
+**Routed retention `ρ_r` is not 1.87.** That figure is DEC-8.6's R4 zero-out ratio (`total/dense`), never a routed-side result — it wore the wrong hat for two rungs. The banked routed-side floor is DEC-8.0's equal-thirds measurement: `w1`/`w2`/`w3` are 5,849,088 bytes each, so folding `w3` to per-feature scalars leaves **ρ_r ≤ 0.667** (a 1.5× routed reduction). Everything below that is row sparsity — parameterised as `row_factor`, **owner DEC-8.1, unset until it reports**. One banked number, one named unknown, no stipulations.
+
+**Vision is excluded from the dense term `D`.** The DEC-8.6 ledger sums `language_model` layers plus text embeddings only; `vision_tower` and `mm_projector` are never counted. By residual against the 1.561 TB repo they are ~2 GB BF16, under 2% of `D` at 4-bit. Stated because an unnamed inclusion convention on the dense term is exactly where this ladder's arithmetic keeps finding its bodies — if a multimodal demo is ever in scope, `D` must be recomputed, not adjusted.
+
 ## 2. Claims under test
 
 | ID | Claim | Falsifier |
