@@ -67,12 +67,27 @@ const SPIN_HOT: u32 = 256_000;
 const YIELD_UNTIL: u32 = SPIN_HOT + 64;
 const PARK_BACKSTOP: Duration = Duration::from_secs(1);
 
-/// Cross-thread dispatch state. Published to workers by the `epoch` release
-/// store; workers read the task fields only after the matching acquire load,
-/// so the plain `Relaxed` value stores are safe (epoch is the synchroniser).
+/// Cross-thread dispatch state. The `epoch` release store wakes workers; the
+/// `slot_seq` seqlock + `task_gen` stamp make the task fields safe to read,
+/// because epoch-wakeup alone does not prove the slot still belongs to the
+/// observed dispatch (see `slot_seq`).
 struct Shared {
     /// Bumped once per `for_each_chunk`; workers wake when it changes.
     epoch: AtomicU64,
+    /// Seqlock over the task fields (`data`/`tramp`/`num_chunks`/`completed`/
+    /// `panicked`/`task_gen`): odd while the dispatcher rewrites them, bumped
+    /// even when stable. Readers snapshot the fields between two equal even
+    /// reads. Needed because a worker can observe the epoch bump for dispatch
+    /// N yet reach the fields only after N's barrier passed (possible exactly
+    /// when its block in N was empty, so the barrier didn't need it) and
+    /// dispatch N+1 has begun overwriting the slot.
+    slot_seq: AtomicU64,
+    /// Epoch value the current slot contents belong to, written inside the
+    /// seqlock. A participant runs the slot only when this matches the epoch
+    /// it observed — otherwise its `completed` increments would count toward
+    /// a dispatch it did not run, the barrier would release early, and the
+    /// closure would drop while another participant still executes it.
+    task_gen: AtomicU64,
     /// Chunks finished this dispatch; the barrier waits for `== num_chunks`.
     /// With static block ownership each chunk is run exactly once, so this
     /// reaching `num_chunks` proves every trampoline call has returned — no
@@ -149,17 +164,22 @@ fn worker_loop(shared: Arc<Shared>, worker_id: usize, n_participants: usize) {
         if shared.shutdown.load(Ordering::Relaxed) {
             return;
         }
-        run_chunks(&shared, worker_id, n_participants);
+        // Pass the epoch this worker is answering; `run_chunks` refuses the
+        // slot if it has already been re-published for a later dispatch (the
+        // loop then re-observes the new epoch and runs it exactly once).
+        run_chunks(&shared, worker_id, n_participants, epoch);
     }
 }
 
 /// Run this participant's statically-assigned chunks, as one **contiguous
 /// block** of the chunk index space.
 ///
-/// Static ownership — rather than a shared resettable cursor — is what makes
-/// `completed == num_chunks` a sound barrier across back-to-back dispatches: no
-/// participant can re-claim a chunk the next dispatch reset, so once the count
-/// is reached every trampoline call has returned and the closure is safe to
+/// Static ownership — rather than a shared resettable cursor — plus the
+/// `task_gen` guard is what makes `completed == num_chunks` a sound barrier
+/// across back-to-back dispatches: no participant can re-claim a chunk the
+/// next dispatch reset, and no participant can run (or count toward) a
+/// dispatch other than the one whose epoch it observed, so once the count is
+/// reached every trampoline call has returned and the closure is safe to
 /// drop. *Contiguous* blocks are as static as the round-robin stride this
 /// previously used (`c += n_participants`) — each chunk still has exactly one
 /// owner — so that argument is untouched by the change from stride to block.
@@ -179,13 +199,31 @@ fn worker_loop(shared: Arc<Shared>, worker_id: usize, n_participants: usize) {
 /// Chunk cost is uniform for every current caller (equal row counts per chunk),
 /// so the load-balancing advantage strided ownership would have under uneven
 /// chunk cost does not apply; llama.cpp's pool partitions rows the same way.
-fn run_chunks(shared: &Shared, participant_id: usize, n_participants: usize) {
+fn run_chunks(shared: &Shared, participant_id: usize, n_participants: usize, expected_gen: u64) {
+    // Seqlock-consistent snapshot of the task slot, refused unless it still
+    // belongs to `expected_gen`. Guards the empty-block straggler: a
+    // participant whose block in dispatch N was empty is not needed by N's
+    // barrier, so N can finish and N+1 can rewrite the slot while this
+    // participant sits between its epoch read and these loads. Running a
+    // mismatched slot would execute N+1's chunks attributed to N — and then
+    // again when the loop notices the epoch moved — over-counting `completed`
+    // so N+1's barrier releases while other participants still execute the
+    // (then dropped) closure.
+    let seq_before = shared.slot_seq.load(Ordering::Acquire);
+    if seq_before & 1 == 1 {
+        return; // dispatcher mid-rewrite; caller re-observes the epoch
+    }
     let num = shared.num_chunks.load(Ordering::Relaxed);
     let tramp_addr = shared.tramp.load(Ordering::Relaxed);
+    let data = shared.data.load(Ordering::Relaxed) as *const ();
+    let gen = shared.task_gen.load(Ordering::Relaxed);
+    std::sync::atomic::fence(Ordering::Acquire);
+    if shared.slot_seq.load(Ordering::Relaxed) != seq_before || gen != expected_gen {
+        return; // torn snapshot, or the slot was re-published for a later dispatch
+    }
     if tramp_addr == 0 || num == 0 || participant_id >= n_participants {
         return;
     }
-    let data = shared.data.load(Ordering::Relaxed) as *const ();
     // SAFETY: `tramp_addr` is a `fn(*const (), usize)` stored by the dispatcher
     // before the epoch release; recovered here after the epoch acquire.
     let tramp: fn(*const (), usize) = unsafe { std::mem::transmute(tramp_addr) };
@@ -231,6 +269,8 @@ impl SpinPool {
         let n_threads = n_threads.max(1);
         let shared = Arc::new(Shared {
             epoch: AtomicU64::new(0),
+            slot_seq: AtomicU64::new(0),
+            task_gen: AtomicU64::new(0),
             completed: AtomicUsize::new(0),
             num_chunks: AtomicUsize::new(0),
             data: AtomicPtr::new(std::ptr::null_mut()),
@@ -286,7 +326,12 @@ impl SpinPool {
         // uncontended in the single-driver decode loop.
         let _dispatch = self.dispatch_lock.lock().unwrap_or_else(|e| e.into_inner());
         let shared = &self.shared;
-        // Publish the task, then release it to workers via the epoch bump.
+        // Publish the task inside the slot seqlock, then release it to workers
+        // via the epoch bump. The seqlock + `task_gen` let a straggler from the
+        // previous dispatch (empty block there, so the barrier didn't wait for
+        // it) detect that the slot no longer belongs to the epoch it observed.
+        let gen = shared.epoch.load(Ordering::Relaxed) + 1;
+        shared.slot_seq.fetch_add(1, Ordering::AcqRel); // odd: slot unstable
         shared
             .data
             .store(&body as *const F as *mut (), Ordering::Relaxed);
@@ -296,7 +341,9 @@ impl SpinPool {
         shared.num_chunks.store(num_chunks, Ordering::Relaxed);
         shared.completed.store(0, Ordering::Relaxed);
         shared.panicked.store(false, Ordering::Relaxed);
-        shared.epoch.fetch_add(1, Ordering::Release);
+        shared.task_gen.store(gen, Ordering::Relaxed);
+        shared.slot_seq.fetch_add(1, Ordering::Release); // even: slot stable
+        shared.epoch.store(gen, Ordering::Release);
 
         // Wake any worker that parked during an idle gap so the barrier never
         // stalls ~park_timeout waiting on its assigned block. Unparking a
@@ -307,8 +354,9 @@ impl SpinPool {
             w.thread().unpark();
         }
 
-        // The dispatcher participates as participant 0.
-        run_chunks(shared, 0, self.n_threads);
+        // The dispatcher participates as participant 0. Its expected
+        // generation is the one it just published, so it always runs.
+        run_chunks(shared, 0, self.n_threads, gen);
 
         // Completion barrier: wait until every chunk has finished. With static
         // block ownership, `completed == num_chunks` means every trampoline
@@ -1048,6 +1096,42 @@ mod tests {
                     s.spawn(move || rd_run(caller, 8, 34));
                 }
             });
+        }
+
+        /// Empty-block straggler pin: alternate a 1-chunk dispatch (most
+        /// participants own an empty block, so the barrier passes without
+        /// them) with a wide dispatch, back-to-back. Pre-`task_gen` a
+        /// straggler from the 1-chunk dispatch could read the re-published
+        /// slot, run the wide dispatch's chunks attributed to the old epoch,
+        /// then run them AGAIN on re-observing the epoch — over-counting
+        /// `completed`, releasing the barrier early, and letting the closure
+        /// drop while another worker still executed it (SIGSEGV under
+        /// coverage instrumentation, where the window is widest). Exactly-once
+        /// per chunk is the observable invariant; the counters are re-created
+        /// per dispatch so a late write from a released dispatch is also a
+        /// use-after-free the harness can catch.
+        #[test]
+        fn alternating_block_sizes_run_each_chunk_exactly_once() {
+            use std::sync::atomic::AtomicU8;
+            const PARTICIPANTS: usize = 4;
+            const WIDE_CHUNKS: usize = 7;
+            const ITERATIONS: usize = 50_000;
+            let pool = SpinPool::new(PARTICIPANTS);
+            for iter in 0..ITERATIONS {
+                let n = if iter % 2 == 0 { 1 } else { WIDE_CHUNKS };
+                let counters: Vec<AtomicU8> =
+                    (0..n).map(|_| AtomicU8::new(0)).collect();
+                pool.for_each_chunk(n, |c| {
+                    counters[c].fetch_add(1, Ordering::Relaxed);
+                });
+                for (c, counter) in counters.iter().enumerate() {
+                    assert_eq!(
+                        counter.load(Ordering::Relaxed),
+                        1,
+                        "iter {iter}: chunk {c} of {n} not run exactly once"
+                    );
+                }
+            }
         }
     }
 }
