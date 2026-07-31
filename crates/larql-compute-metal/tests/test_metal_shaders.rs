@@ -1467,9 +1467,23 @@ fn full_pipeline_seq1_produces_nonzero() {
     assert!(result.is_some(), "full_pipeline_q4 should return Some");
     let output = result.unwrap();
     assert_eq!(output.len(), hidden);
+    // Finiteness is checked separately from magnitude. `v.abs() > 1e-6` is
+    // false for NaN, so a NaN-filled result used to fail here with the message
+    // "output should be nonzero" — which sent the investigation hunting for a
+    // zeroed buffer when in fact every element was NaN. See the construction
+    // lock in `backend::MetalBackend::with_options`.
+    let non_finite = output.iter().filter(|v| !v.is_finite()).count();
+    assert_eq!(
+        non_finite,
+        0,
+        "Pipeline output has {non_finite}/{} non-finite values; head={:?}",
+        output.len(),
+        &output[..output.len().min(8)]
+    );
     assert!(
         output.iter().any(|&v| v.abs() > 1e-6),
-        "Pipeline output should be nonzero"
+        "Pipeline output is finite but all-zero; head={:?}",
+        &output[..output.len().min(8)]
     );
 }
 
