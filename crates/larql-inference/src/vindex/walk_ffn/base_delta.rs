@@ -13,9 +13,11 @@
 //! extra dots on the dense base. Inserts into slots the base has no
 //! row for are pure additions; tombstones (DELETE) pure subtractions.
 //!
-//! Exactness conditions (all enforced by `base_delta_slots`, which
-//! declines — returns `None` — whenever one fails, routing the layer
-//! to the pre-existing sparse/fallback override arm):
+//! Exactness conditions (all enforced by `base_delta_preconditions`,
+//! which declines — returns `Err` naming the failed condition —
+//! whenever one fails, routing the layer to the pre-existing
+//! sparse/fallback override arm; the planner reports the same string
+//! as the rung's skip reason):
 //!
 //! 1. The OLD contribution is computed from the SAME quantised bytes
 //!    the dense base consumed, via the unified `ffn_row_dot` /
@@ -48,23 +50,51 @@ const FFN_UP: usize = 1;
 /// `ffn_row_*` component id for the down projection.
 const FFN_DOWN: usize = 2;
 
+// Precondition-failure reasons — `Err` payloads of
+// `base_delta_preconditions`, surfaced verbatim by the planner as the
+// `override:base_delta` rung's skip reason (item 18).
+pub(super) const BD_NOT_GATED: &str = "base+delta needs a gated FFN (aᵢ = φ(g·x)·(u·x))";
+pub(super) const BD_SPARSE_CONFIG: &str =
+    "explicit sparse K — the ladder would run the walk, so there is no dense base to correct";
+pub(super) const BD_BAD_SHAPE: &str = "input shape unsupported (empty seq or hidden-size mismatch)";
+pub(super) const BD_DIVERGENT_STORAGE: &str =
+    "FP4/Q4_0/full-mmap/feature-major-down storage would divert base and row dispatch onto different bytes";
+pub(super) const BD_NO_COHERENT_BASE: &str =
+    "need exactly one of {Q4K, f32} interleaved storage for a byte-coherent dense base";
+pub(super) const BD_UP_SIDECAR: &str =
+    "f32 up sidecar would hijack the up row dot away from the Q4K base bytes";
+pub(super) const BD_NO_DOWN_SIDECAR: &str =
+    "old-down subtraction needs the feature-major Q4K down sidecar";
+pub(super) const BD_NO_SLOT_ENUMERATION: &str =
+    "index cannot enumerate override slots (point-query only)";
+
 impl<'a> WalkFfn<'a> {
     /// Check every base+delta precondition for `layer` and return the
-    /// enumerated patch slots when the path can run exactly. `None`
-    /// means decline — see the module doc for the condition list.
-    fn base_delta_slots(&self, layer: usize) -> Option<Vec<OverrideSlot>> {
+    /// enumerated patch slots when the path can run exactly. `Err`
+    /// names the first failed condition — see the module doc for the
+    /// condition list; the planner reports the string as the rung's
+    /// skip reason.
+    pub(super) fn base_delta_preconditions(
+        &self,
+        layer: usize,
+        seq_len: usize,
+        hidden: usize,
+    ) -> Result<Vec<OverrideSlot>, &'static str> {
         // Gated FFNs only: the aᵢ(x) = φ(g·x)(u·x) decomposition is
         // the gated form. (Activation dispatch below mirrors the
         // sparse walk / kquant-native paths exactly: GeluTanh|Gelu →
         // gelu_tanh, everything else → SiLU.)
         if self.weights.arch.ffn_type() != larql_models::FfnType::Gated {
-            return None;
+            return Err(BD_NOT_GATED);
         }
         // An explicit sparse K means the unpatched ladder would route
         // the (override-aware) walk, not a whole-layer dense path —
         // there is no dense base to correct.
         if self.config.is_sparse(layer) {
-            return None;
+            return Err(BD_SPARSE_CONFIG);
+        }
+        if seq_len == 0 || hidden != self.weights.hidden_size {
+            return Err(BD_BAD_SHAPE);
         }
         // Storage coherence (exactness conditions 1–2). FP4 has no
         // whole-layer dense path; Q4_0 has no `ffn_row_dot` arm;
@@ -76,7 +106,7 @@ impl<'a> WalkFfn<'a> {
             || self.index.has_full_mmap_ffn()
             || self.index.has_down_features()
         {
-            return None;
+            return Err(BD_DIVERGENT_STORAGE);
         }
         let kquant = self.index.has_interleaved_kquant();
         let native = self.index.has_interleaved();
@@ -84,21 +114,25 @@ impl<'a> WalkFfn<'a> {
             // Both → the ladder's base (Q4K, step 4) and the row
             // dispatch (native f32 first) would read different bytes.
             // Neither → no whole-layer base at all.
-            return None;
+            return Err(BD_NO_COHERENT_BASE);
         }
         if kquant {
             // A feature-major f32 up sidecar would hijack the up row
             // dot away from the Q4K bytes the base consumed.
             if self.index.up_layer_matrix(layer).is_some() {
-                return None;
+                return Err(BD_UP_SIDECAR);
             }
             // Old-down subtraction needs the feature-major sidecar
             // (exactness condition 2).
-            self.index.down_features_q4k_layer_data(layer)?;
+            if self.index.down_features_q4k_layer_data(layer).is_none() {
+                return Err(BD_NO_DOWN_SIDECAR);
+            }
         }
         // Enumeration must be exhaustive; point-query-only indexes
         // (`override_slots_at` default `None`) decline.
-        self.index.override_slots_at(layer)
+        self.index
+            .override_slots_at(layer)
+            .ok_or(BD_NO_SLOT_ENUMERATION)
     }
 
     /// Exact patched forward: dense base + per-slot corrections.
@@ -115,12 +149,9 @@ impl<'a> WalkFfn<'a> {
         x: &Array2<f32>,
         observe: Observe,
     ) -> Option<(Array2<f32>, Option<FfnActivations>)> {
-        let slots = self.base_delta_slots(layer)?;
         let seq_len = x.shape()[0];
         let hidden = x.shape()[1];
-        if seq_len == 0 || hidden != self.weights.hidden_size {
-            return None;
-        }
+        let slots = self.base_delta_preconditions(layer, seq_len, hidden).ok()?;
 
         // Dense base — the SAME whole-layer ladder body the unpatched
         // routing runs (exactness condition 3). On a patched index the

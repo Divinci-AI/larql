@@ -46,9 +46,24 @@
 //! - `builders.rs`                — constructors and builder methods
 //! - `timings.rs`                 — phase-timing sink + env-var trace plumbing
 //!
+//! - `plan.rs` / `planner.rs`      — explicit execution plan + the planning half
+//!   of the ladder (2026-07-30 review, item 18)
+//!
 //! Adding a new storage format should almost never touch `mod.rs` — add
-//! a new module with a single walk function, one branch in the routing
-//! ladder, and a unit test in `routing_tests.rs`.
+//! a new module with a single walk function, one rung in the planner
+//! (`planner.rs`), one arm in `execute_plan`, and a unit test in
+//! `routing_tests.rs` / `plan_tests.rs`.
+//!
+//! Planning (2026-07-30 review, item 18, `plan.rs` + `planner.rs`):
+//! path selection is an explicit decision value. `plan_layer` walks
+//! the CONDITIONS above and returns an [`FfnPlan`] — the rung that
+//! will run plus a structured [`PlanReason`] (why this rung, why not
+//! each rung above it, which thresholds fired); `forward_ladder` then
+//! just executes the plan. A path that declines mid-execution
+//! (returns `None`) triggers a re-plan with that rung excluded, and
+//! the eventual plan's reason records the decline — inspect it via
+//! [`WalkFfn::plan_for`] (pure, no side effects) or the runtime
+//! trace's `plan_reason` field.
 //!
 //! Observation (2026-07-30 review, item 15): `forward` runs every path
 //! in `Observe::Skip` mode, which by construction never allocates or
@@ -88,6 +103,8 @@ mod interleaved_kquant_dequant;
 mod interleaved_kquant_native;
 mod interleaved_q4;
 mod observe;
+mod plan;
+mod planner;
 mod selector;
 mod sparse;
 mod sparse_gather;
@@ -103,13 +120,18 @@ mod base_delta_tests;
 #[cfg(test)]
 mod dispatch_tests;
 #[cfg(test)]
+mod plan_tests;
+#[cfg(test)]
 mod routing_tests;
 #[cfg(test)]
 mod trace_tests;
 
 pub use helpers::DispatchEntry;
+pub use plan::{FfnPlan, PlanReason, PlanRung, SkippedRung, ThresholdCheck};
 pub use timings::PhaseTimingsHandle;
 pub use trace::{LayerTraceRecord, TracedFeature};
+
+use plan::PlanExclusions;
 
 pub struct WalkFfn<'a> {
     pub weights: &'a ModelWeights,
@@ -224,61 +246,43 @@ impl<'a> WalkFfn<'a> {
         layer: usize,
         x: &Array2<f32>,
     ) -> Option<(Array2<f32>, Array2<f32>)> {
-        // 4. Q4K native — direct matvec via `kquant_matmul_transb`. Same
-        //    kernel `ffn_decode_step_native` uses. Goes ahead of Q4_0 /
-        //    f32 interleaved / full_mmap / dequant because for a vindex
-        //    that has both Q4K and one of those, this is the fast path.
-        if self.index.has_interleaved_kquant() {
-            if let Some(r) = self.walk_ffn_kquant_native(layer, x) {
+        for rung in planner::WHOLE_LAYER_RUNGS {
+            if !self.whole_layer_rung_available(rung) {
+                continue;
+            }
+            if let Some(r) = self.execute_whole_layer_rung(rung, layer, x) {
                 return Some(r);
             }
         }
-
-        // 5. Q4_0 interleaved — batched GPU submission when the
-        //    backend implements `q4_matvec_pair_batch` (probed by
-        //    calling — see `walk_ffn_q4_interleaved`), C kernel
-        //    otherwise. Gate on the format the data actually is:
-        //    the slab is Q4_0, and gating on Q4_K here used to
-        //    admit `CpuBackend` (which advertises Q4_K matvec but
-        //    not the batch API) into an unwrap-on-None panic.
-        if self.index.has_interleaved_q4()
-            && self
-                .backend
-                .is_some_and(|be| be.supports_quant(::larql_compute::QuantFormat::Q4_0))
-        {
-            if let Some(r) = self.walk_ffn_q4_interleaved(layer, x) {
-                return Some(r);
-            }
-        }
-
-        // 6. f32 interleaved.
-        if self.index.has_interleaved() {
-            if let Some(r) = self.walk_ffn_interleaved(layer, x) {
-                return Some(r);
-            }
-        }
-
-        // 7. Full mmap — gate/up/down in separate files.
-        if self.index.has_full_mmap_ffn() {
-            if let Some(r) = self.walk_ffn_full_mmap(layer, x) {
-                return Some(r);
-            }
-        }
-
-        // 8. Q4K interleaved dequant — fallback for non-gated archs and
-        //    any case where `walk_ffn_kquant_native` returns `None`.
-        if self.index.has_interleaved_kquant() {
-            if let Some(r) = self.walk_ffn_kquant_dequant(layer, x) {
-                return Some(r);
-            }
-        }
-
-        // 9. Exact — down from mmap, gate/up from safetensors.
-        if self.index.has_down_features() {
-            return Some(self.walk_ffn_exact(layer, x));
-        }
-
         None
+    }
+
+    /// Run ONE whole-layer rung (4–9). `None` = the path declined —
+    /// the caller falls through (`forward_unpatched_whole_layer`) or
+    /// re-plans (`forward_ladder`). Rung priority and availability
+    /// conditions live in `planner.rs` (`WHOLE_LAYER_RUNGS` /
+    /// `whole_layer_rung_available`); rationale for the ordering is in
+    /// the module doc's routing table.
+    fn execute_whole_layer_rung(
+        &self,
+        rung: PlanRung,
+        layer: usize,
+        x: &Array2<f32>,
+    ) -> Option<(Array2<f32>, Array2<f32>)> {
+        debug_assert!(
+            planner::WHOLE_LAYER_RUNGS.contains(&rung),
+            "not a whole-layer rung: {rung:?}"
+        );
+        match rung {
+            PlanRung::KquantNative => self.walk_ffn_kquant_native(layer, x),
+            PlanRung::InterleavedQ4 => self.walk_ffn_q4_interleaved(layer, x),
+            PlanRung::InterleavedF32 => self.walk_ffn_interleaved(layer, x),
+            PlanRung::FullMmap => self.walk_ffn_full_mmap(layer, x),
+            PlanRung::KquantDequant => self.walk_ffn_kquant_dequant(layer, x),
+            PlanRung::Exact => Some(self.walk_ffn_exact(layer, x)),
+            // Guarded by the debug_assert above; nothing to execute.
+            _ => None,
+        }
     }
 
     /// Ladder step 10 — sparse matmul against safetensors weights, and
@@ -362,9 +366,9 @@ impl<'a> WalkFfn<'a> {
         } else {
             observe
         };
-        let result = self.forward_ladder(layer, x, observe);
+        let (result, plan) = self.forward_ladder(layer, x, observe);
         if self.record_trace {
-            self.fold_runtime_trace(layer, &result.0, result.1.as_ref());
+            self.fold_runtime_trace(layer, &result.0, result.1.as_ref(), &plan);
         }
         result
     }
@@ -375,6 +379,13 @@ impl<'a> WalkFfn<'a> {
     /// is whether activations are recorded and whether the L1 cache
     /// read is consulted.
     ///
+    /// Selection is the planner's (`plan_layer`, item 18): this body
+    /// only performs the L1 probe (the one side-effecting input the
+    /// planner must not own — hit/miss stats), executes the planned
+    /// rung, and re-plans with the rung excluded when a fallible path
+    /// declines. Returns the executed plan alongside the result so the
+    /// runtime trace can record the reason.
+    ///
     /// Invariant: returns `Some` observation iff `observe` is `Record`
     /// — except the `Skip`-only L1 hit, which returns `None` trivially.
     fn forward_ladder(
@@ -382,137 +393,121 @@ impl<'a> WalkFfn<'a> {
         layer: usize,
         x: &Array2<f32>,
         observe: Observe,
-    ) -> (Array2<f32>, Option<FfnActivations>) {
+    ) -> ((Array2<f32>, Option<FfnActivations>), FfnPlan) {
         let num_features = self.index.num_features(layer);
-        if num_features == 0 {
-            self.trace_path(layer, "zero_features_dense");
-            let dense_ffn = crate::ffn::WeightFfn {
-                weights: self.weights,
-            };
-            return if observe.recording() {
-                let (out, obs) = dense_ffn.forward_observed(layer, x);
-                (out, Some(obs))
-            } else {
-                (dense_ffn.forward(layer, x), None)
-            };
-        }
+        let has_overrides = self.index.has_overrides_at(layer);
+        let seq_len = x.shape()[0];
 
-        if self.record_trace {
-            let seq_len = x.shape()[0];
+        if num_features > 0 && self.record_trace {
             let last_row = x.row(seq_len - 1).to_vec();
             self.trace_residuals.borrow_mut().push((layer, last_row));
         }
 
-        // Override-aware routing: patched layers bypass the L1 cache and
-        // every whole-layer path below, because those would silently
-        // produce wrong activations for overridden features.
-        if self.index.has_overrides_at(layer) {
-            // 1a. Exact base+delta (2026-07-30 review, item 16): dense
-            //     base through the unpatched whole-layer ladder, plus
-            //     O(|patch|) per-slot corrections. Declines (None) when
-            //     its exactness preconditions don't hold — the patched
-            //     layer then takes the sparse walk as before, so the
-            //     override→forced-sparse cliff only remains where
-            //     base+delta cannot be exact.
-            if let Some(result) = self.walk_ffn_base_delta(layer, x, observe) {
-                return result;
-            }
-            // 1b. Override-aware sparse walk.
-            if let Some(result) = self.walk_ffn_sparse(layer, x, observe) {
-                // The sparse path has already called trace_path — no
-                // need to rewrite; its name carries the specialisation.
-                return result;
-            }
-            // Sparse failed (missing/corrupt FFN payload). Do NOT fall
-            // through: the L1 cache and every whole-layer ladder path
-            // below are override-blind and would silently serve
-            // pre-patch weights. The safetensors fallback is the only
-            // other override-aware path — take it directly.
-            return self.weights_fallback(layer, x, observe);
-        }
-
-        // L1 cache: single-position only. Key is a path-independent
-        // hash of the residual, so any walk path that produces the
-        // same output fills the same slot.
-        let seq_len = x.shape()[0];
-        let l1_key: Option<u64> = if seq_len == 1 && self.l1_cache.is_some() {
-            let x_row = x.row(0);
-            let owned;
-            let slice: &[f32] = if let Some(s) = x_row.as_slice() {
-                s
-            } else {
-                owned = x_row.to_vec();
-                &owned
-            };
-            Some(FfnL1Cache::residual_key(slice))
-        } else {
+        // L1 cache probe — single-position, non-overridden layers only
+        // (patched layers must bypass the cache: its entries are
+        // override-blind and can never be invalidated by the override
+        // machinery). Key is a path-independent hash of the residual,
+        // so any walk path that produces the same output fills the
+        // same slot. The read is Skip-mode only: the cache stores
+        // outputs, so a hit has nothing honest to say about
+        // activations — an observed call recomputes and refreshes the
+        // slot (2026-07-30 review, item 15). Exactly one `get` per
+        // eligible call, preserving hit/miss accounting.
+        let l1_key = (num_features > 0 && !has_overrides && seq_len == 1 && self.l1_cache.is_some())
+            .then(|| planner::residual_l1_key(x));
+        let l1_row: Option<Vec<f32>> = if observe.recording() {
             None
+        } else {
+            l1_key.and_then(|key| self.l1_cache.as_ref().and_then(|c| c.get(layer, key)))
         };
 
-        // The cache stores outputs only, so a hit can serve `forward`
-        // but has nothing honest to say about activations. An observed
-        // call therefore BYPASSES the read and recomputes (2026-07-30
-        // review, item 15 — the hit used to fabricate an all-zero
-        // activation matrix); the recomputed result refreshes the slot.
-        if !observe.recording() {
-            if let Some(key) = l1_key {
-                if let Some(cache) = &self.l1_cache {
-                    if let Some(cached) = cache.get(layer, key) {
-                        let hidden = x.shape()[1];
-                        let mut out = Array2::<f32>::zeros((1, hidden));
-                        out.row_mut(0)
-                            .assign(&ndarray::ArrayView1::from(cached.as_slice()));
-                        self.trace_path(layer, "l1_cache_hit");
-                        return (out, None);
+        let mut exclude = PlanExclusions::default();
+        loop {
+            let plan = self.plan_layer(layer, x, observe, l1_row.is_some(), exclude);
+            let rung = plan.rung();
+            match self.execute_plan(rung, layer, x, observe, l1_row.as_deref()) {
+                Some(result) => {
+                    // Fill the L1 slot from the fallthrough-ladder
+                    // rungs only — a hit re-inserting itself is a
+                    // pointless write, and override/zero-feature plans
+                    // never have a key.
+                    if rung != PlanRung::L1CacheHit {
+                        if let (Some(key), Some(cache)) = (l1_key, self.l1_cache.as_ref()) {
+                            cache.insert(layer, key, result.0.row(0).to_vec());
+                        }
                     }
+                    return (result, plan);
                 }
+                // Runtime decline: honest re-plan from the next rung.
+                // The next plan's `skipped` list carries this rung
+                // with a "declined at execution" reason.
+                None => exclude = exclude.with(rung),
             }
         }
+    }
 
-        // Routing ladder. Each branch either `break`s with a result or
-        // falls through to the next. See the routing table in the
-        // module doc for priority order.
-        let result: (Array2<f32>, Option<FfnActivations>) = 'routing: {
-            // 2. Explicit sparse K from the user.
-            if self.config.is_sparse(layer) {
-                if let Some(r) = self.walk_ffn_sparse(layer, x, observe) {
-                    break 'routing r;
-                }
+    /// Execute one planned rung. `None` = the path declined at
+    /// runtime; `forward_ladder` re-plans. Selection logic lives in
+    /// the planner — this match is intentionally condition-free.
+    fn execute_plan(
+        &self,
+        rung: PlanRung,
+        layer: usize,
+        x: &Array2<f32>,
+        observe: Observe,
+        l1_row: Option<&[f32]>,
+    ) -> Option<(Array2<f32>, Option<FfnActivations>)> {
+        match rung {
+            PlanRung::ZeroFeaturesDense => {
+                self.trace_path(layer, "zero_features_dense");
+                let dense_ffn = crate::ffn::WeightFfn {
+                    weights: self.weights,
+                };
+                Some(if observe.recording() {
+                    let (out, obs) = dense_ffn.forward_observed(layer, x);
+                    (out, Some(obs))
+                } else {
+                    (dense_ffn.forward(layer, x), None)
+                })
             }
-
-            // 3. FP4/FP8 storage (exp 26) — no dedicated dense path.
-            //    The sparse walk's unified ffn_row_* dispatch handles
-            //    FP4/FP8 transparently via GateIndex. Routing FP4
-            //    vindexes through sparse here is the whole point of
-            //    the trait refactor: zero format-specific code in the
-            //    walk kernel.
-            if self.index.has_fp4_storage() {
-                if let Some(r) = self.walk_ffn_sparse(layer, x, observe) {
-                    break 'routing r;
-                }
+            PlanRung::L1CacheHit => {
+                let row = l1_row.expect("L1CacheHit is only planned when the probe returned a row");
+                let hidden = x.shape()[1];
+                let mut out = Array2::<f32>::zeros((1, hidden));
+                out.row_mut(0).assign(&ndarray::ArrayView1::from(row));
+                self.trace_path(layer, "l1_cache_hit");
+                Some((out, None))
             }
-
+            // 1a. Exact base+delta (2026-07-30 review, item 16): dense
+            //     base through the unpatched whole-layer ladder, plus
+            //     O(|patch|) per-slot corrections. Declines when its
+            //     exactness preconditions don't hold mid-execution.
+            PlanRung::OverrideBaseDelta => self.walk_ffn_base_delta(layer, x, observe),
+            // 1b / 2 / 3 all run the sparse walk (FP4/FP8 is handled
+            // by the unified ffn_row_* dispatch — that transparency is
+            // the point of the trait refactor). The sparse path calls
+            // trace_path itself; its name carries the specialisation.
+            PlanRung::OverrideSparse | PlanRung::Sparse | PlanRung::Fp4Sparse => {
+                self.walk_ffn_sparse(layer, x, observe)
+            }
             // 4–9. Whole-layer paths (shared with base+delta's base).
             //      Their activation matrix is an intrinsic intermediate
             //      (the down projection consumes it), so `Skip` merely
             //      drops it — no extra allocation either way.
-            if let Some((out, act)) = self.forward_unpatched_whole_layer(layer, x) {
-                break 'routing (out, observe.dense(act));
-            }
-
-            // 10. Last resort: sparse matmul against safetensors weights.
-            //     Fires when the vindex has no FFN payload of its own
-            //     (extract_level = Browse without pinned weights).
-            break 'routing self.weights_fallback(layer, x, observe);
-        };
-
-        if let Some(key) = l1_key {
-            if let Some(cache) = &self.l1_cache {
-                cache.insert(layer, key, result.0.row(0).to_vec());
-            }
+            PlanRung::KquantNative
+            | PlanRung::InterleavedQ4
+            | PlanRung::InterleavedF32
+            | PlanRung::FullMmap
+            | PlanRung::KquantDequant
+            | PlanRung::Exact => self
+                .execute_whole_layer_rung(rung, layer, x)
+                .map(|(out, act)| (out, observe.dense(act))),
+            // 10. Last resort — and the only override-aware path
+            //     besides the sparse walk, so overridden layers whose
+            //     walk declines are PLANNED here directly (never fall
+            //     through override-blind paths).
+            PlanRung::WeightsFallback => Some(self.weights_fallback(layer, x, observe)),
         }
-
-        result
     }
 }
 

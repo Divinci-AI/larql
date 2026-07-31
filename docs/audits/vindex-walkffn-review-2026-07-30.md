@@ -1,22 +1,28 @@
 # Vindex + WalkFFN review — 2026-07-30
 
-> **Remediation status (2026-07-31): 19 of 24 items closed.** Tiers 0
+> **Remediation status (2026-07-31): 20 of 24 items closed.** Tiers 0
 > and 1 landed in full on 2026-07-30 (commits `6907a209`, `e55b3edf`,
 > `6b5067f6`, `e21475f2`), including all four high-severity findings.
 > Item 13 resolved 2026-07-31 with the finding INVERTED (`c9ec5e1f`):
 > `gate_walk` was never wired on `VectorIndex`, so `enable_hnsw()` had
 > been leaking approximate selection INTO walk numerics — the exact
 > opposite of §5's claim; the intended exact-first chain is now wired
-> and pinned. Tier 2 is three-quarters done: base+delta patched
-> execution (`b813c018`), the forward/forward_observed split
-> (`4e592c68` + `69ade08b`), and runtime trace emission (`c6f31ad8`).
+> and pinned. Tier 2 is complete: base+delta patched execution
+> (`b813c018`), the forward/forward_observed split (`4e592c68` +
+> `69ade08b`), runtime trace emission (`c6f31ad8`), and the execution
+> planner (item 18, §5 item 3): `FfnPlan`/`PlanReason` in
+> `walk_ffn/plan.rs` + `planner.rs`, base+delta as a plan variant,
+> declines re-planned with an exclusion set and recorded in the
+> reason, `WalkFfn::plan_for` pure inspection, routing pinned
+> decision-identical by the unchanged dispatch/routing suites.
 > The walk-vs-dense parity suite (item 20) landed with the per-file
 > 90%-coverage pass (`e21475f2`); every walk_ffn file is ≥90% line
-> coverage. Open: execution planner (18), two-stage selection (19),
+> coverage. Open: two-stage selection (19),
 > KnnStore unification (21), v1 conformance contract (22), doc drift
 > (23), hygiene (24), plus tracked follow-ups (server/lql
 > `try_apply_patch` migration, remote http/sharded transport coverage,
-> logit-contribution trace field). Per-item detail:
+> logit-contribution trace field, walk-FFN thresholds surfaced into
+> `WalkFfnConfig`). Per-item detail:
 > [`ROADMAP.md`](../../ROADMAP.md) § "Vindex + WalkFFN review
 > (2026-07-30)".
 

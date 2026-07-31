@@ -318,9 +318,10 @@ fn base_delta_tombstone_observed_activation_is_zero() {
     assert_eq!(ffn.forward(0, &input), out_p);
 }
 
-/// Decline branches of `base_delta_slots` / `walk_ffn_base_delta` —
-/// each precondition failure must return `None` (the caller then takes
-/// the sparse/fallback override routes), never a wrong "exact" result.
+/// Decline branches of `base_delta_preconditions` /
+/// `walk_ffn_base_delta` — each precondition failure must return
+/// `None` (the caller then takes the sparse/fallback override
+/// routes), never a wrong "exact" result.
 #[test]
 fn base_delta_declines_when_preconditions_fail() {
     let (weights, inner) = fixture();

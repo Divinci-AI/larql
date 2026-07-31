@@ -736,16 +736,18 @@ a silent-wrong-numerics cluster in the quantized walk paths (same
 "produces a number, the number is a lie" theme as the DEC review), and
 **no walk-vs-dense numerical parity test anywhere in the tree**.
 
-**Status 2026-07-31: 19 of 24 closed.** Tiers 0–1 in full (2026-07-30,
+**Status 2026-07-31: 20 of 24 closed.** Tiers 0–1 in full (2026-07-30,
 incl. all four HIGHs); item 13 resolved with the finding inverted (the
 exact-first gate chain is now actually wired — `enable_hnsw()` had been
-leaking approximate selection into walk numerics); Tier 2: base+delta
-(16), forward/forward_observed split (15), runtime trace emission (17)
-all shipped; parity suite (20) landed with the per-file ≥90% coverage
-pass. Open: 18 (planner), 19 (two-stage selection), 21 (KnnStore
-unification), 22 (v1 conformance), 23 (doc drift), 24 (hygiene) +
-tracked follow-ups (server/lql `try_apply_patch` migration, remote
-transport coverage harness, logit-contribution trace field).
+leaking approximate selection into walk numerics); Tier 2 complete:
+base+delta (16), forward/forward_observed split (15), runtime trace
+emission (17), execution planner (18) all shipped; parity suite (20)
+landed with the per-file ≥90% coverage pass. Open: 19 (two-stage
+selection), 21 (KnnStore unification), 22 (v1 conformance), 23 (doc
+drift), 24 (hygiene) + tracked follow-ups (server/lql
+`try_apply_patch` migration, remote transport coverage harness,
+logit-contribution trace field, walk-FFN thresholds surfaced into
+`WalkFfnConfig`).
 
 Sequencing is interaction-driven: Tier 0's padded-stride fix **gates**
 Tier 2's base+delta (the delta path leans on the same row-dot/sidecar
@@ -902,7 +904,39 @@ what's exact, approximate, observed, reconstructed):**
     the executed path: gate, up, activation, ‖down‖, residual-delta,
     logit contribution, rank, path. Align with the chuk-introspect schema
     — no second trace format. [larql-inference]
-18. **Execution planner** — `VindexFfnPlan` enum + structured reason
+18. ✅ **Execution planner** (DONE 2026-07-31 — path selection is an
+    explicit decision value: `FfnPlan` (new `walk_ffn/plan.rs`), one
+    variant per ladder destination incl. `OverrideBaseDelta` as a plan
+    variant per the freeze condition, names aligned to the trace_path
+    vocabulary. Every variant carries a structured `PlanReason` —
+    layer/seq_len/num_features/has_overrides, the `selected`
+    condition, a `skipped` list stating why EACH higher-priority rung
+    did not fire (base+delta declines name the exact failed
+    precondition — `base_delta_preconditions` now returns
+    `Result<slots, &'static str>`), and pre-execution `ThresholdCheck`s
+    (requested K vs FULL_K_DENSITY, single-sourced from
+    `hits_len_ge_intermediate` so `satisfied` honours `force_walk`).
+    The planner (`planner.rs` `plan_layer`) is the ladder's ONLY
+    condition source: `forward_ladder` plans, then `execute_plan`
+    matches condition-free, and `forward_unpatched_whole_layer`
+    (base+delta's base) iterates the same `WHOLE_LAYER_RUNGS` table.
+    Try-then-fallthrough handled honestly: a path returning `None`
+    mid-execution re-plans with that rung in a `PlanExclusions` set,
+    and the executed plan's reason records "declined at execution" —
+    pinned by a test where six lying capability flags each decline and
+    the ladder lands exactly where the pre-planner code did.
+    Inspection: public `WalkFfn::plan_for` (pure — L1 probed via new
+    stats-free `FfnL1Cache::peek`, no dispatch entries, no execution);
+    the runtime trace's `LayerTraceRecord` gains `plan_reason`
+    (additive — `DispatchEntry`'s literal construction is pinned by
+    routing tests). Routing is decision-identical: every dispatch/
+    routing/trace test passes unchanged, same trace_path strings; the
+    executed forward keeps exactly one L1 `get` per eligible call so
+    hit/miss accounting is preserved. 20 planner tests (one per rung +
+    decline-re-plan + purity); changed/new files ≥96% line coverage.
+    Thresholds stay in `thresholds.rs`, REFERENCED by reasons —
+    surfacing them into `WalkFfnConfig` is a tracked follow-up) —
+    `VindexFfnPlan` enum + structured reason
     (plan/reason/layer/features/overrides), config-surfaced thresholds
     replacing the magic ratios; only freeze once base+delta exists as a
     plan variant. The ladder's trace_path names + routing tests are the

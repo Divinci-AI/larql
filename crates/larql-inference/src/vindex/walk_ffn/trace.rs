@@ -24,6 +24,7 @@
 
 use ndarray::Array2;
 
+use super::plan::FfnPlan;
 use super::WalkFfn;
 use crate::ffn::FfnActivations;
 use larql_vindex::{WalkHit, WalkTrace};
@@ -69,6 +70,12 @@ pub struct LayerTraceRecord {
     /// `‖out_row‖` — the L2 norm of the residual delta this layer's
     /// FFN wrote at this position.
     pub residual_delta_norm: f32,
+    /// The executed plan's reason summary (2026-07-30 review, item
+    /// 18) — why the ladder chose this path over every rung above it,
+    /// including any rungs that declined at execution and were
+    /// re-planned past. Same string for every position of one layer
+    /// call.
+    pub plan_reason: String,
     /// Executed features. Empty for dense whole-layer paths: they
     /// compute every feature with no per-feature selection data, so
     /// per-feature records would require extra compute — the trace
@@ -97,7 +104,9 @@ impl<'a> WalkFfn<'a> {
         layer: usize,
         out: &Array2<f32>,
         obs: Option<&FfnActivations>,
+        plan: &FfnPlan,
     ) {
+        let plan_reason = plan.reason().summary();
         let mut sink = self.runtime_trace.borrow_mut();
         for s in 0..out.shape()[0] {
             let residual_delta_norm = out.row(s).iter().map(|v| v * v).sum::<f32>().sqrt();
@@ -127,6 +136,7 @@ impl<'a> WalkFfn<'a> {
                 position: s,
                 path,
                 residual_delta_norm,
+                plan_reason: plan_reason.clone(),
                 features,
             });
         }
