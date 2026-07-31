@@ -513,6 +513,23 @@ mod tests {
     }
 
     #[test]
+    fn view_ffn_forward_and_observed_match_weight_ffn() {
+        use super::FfnBackend;
+        let weights = make_test_weights();
+        let view = ViewFfn {
+            view: WeightsView::dense(&weights),
+        };
+        let dense = WeightFfn { weights: &weights };
+        let input = x(2, weights.hidden_size);
+        assert_eq!(view.name(), "view");
+        assert_eq!(view.forward(0, &input), dense.forward(0, &input));
+        let (out_v, obs_v) = view.forward_observed(0, &input);
+        let (out_d, obs_d) = dense.forward_observed(0, &input);
+        assert_eq!(out_v, out_d, "a dense view resolves the same tensors");
+        assert_eq!(obs_v, obs_d, "and observes the same dense activation");
+    }
+
+    #[test]
     fn null_ffn_forward_observed_is_absent_not_fabricated() {
         use super::FfnBackend;
         let input = x(2, 4);
@@ -648,10 +665,13 @@ mod tests {
             weights: &weights,
             index: &index,
         };
+        assert_eq!(ffn.name(), "q4k-matmul");
         let (got_out, got_obs) = ffn.forward_observed(0, &input);
         let got_act = got_obs
             .into_dense()
             .expect("q4k-direct is a dense path — observation must be Dense");
+        // `forward` shares `forward_full` — identical output, no observation.
+        assert_eq!(ffn.forward(0, &input), got_out);
 
         let max_out: f32 = ref_out
             .iter()

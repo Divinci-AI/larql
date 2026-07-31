@@ -369,3 +369,47 @@ fn parse_layer_range(s: &str) -> Option<(usize, usize)> {
         None
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A shard-less backend: every layer is unowned. Constructible
+    /// without a network because the no-shard arms are exactly the
+    /// code that must not depend on one.
+    fn empty_backend() -> LayerShardedBackend {
+        LayerShardedBackend { shards: Vec::new() }
+    }
+
+    #[test]
+    fn no_shard_forward_returns_zero_delta() {
+        let be = empty_backend();
+        let x = Array2::<f32>::from_elem((2, 4), 1.0);
+        let out = be.forward(0, &x);
+        assert_eq!(out.shape(), &[2, 4]);
+        assert!(out.iter().all(|v| *v == 0.0), "unowned layer → zero delta");
+        assert_eq!(be.name(), "layer-sharded-remote");
+    }
+
+    #[test]
+    fn no_shard_forward_observed_is_absent_with_named_reason() {
+        let be = empty_backend();
+        let x = Array2::<f32>::from_elem((1, 4), 1.0);
+        let (out, obs) = be.forward_observed(0, &x);
+        assert!(out.iter().all(|v| *v == 0.0));
+        assert_eq!(
+            obs.absent_reason(),
+            Some(REASON_NO_SHARD_FOR_LAYER),
+            "a zero delta from an unowned layer must be marked unobserved, \
+             never a fabricated activation tensor"
+        );
+        assert!(be.forward_moe_full_layer(0, &x).is_none());
+    }
+
+    #[test]
+    fn parse_layer_range_accepts_ordered_and_rejects_reversed() {
+        assert_eq!(parse_layer_range("3-7"), Some((3, 7)));
+        assert_eq!(parse_layer_range("7-3"), None);
+        assert_eq!(parse_layer_range("x-3"), None);
+    }
+}

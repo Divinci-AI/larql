@@ -189,6 +189,52 @@ fn walk_ffn_zero_features_falls_back_to_weight_ffn() {
 }
 
 #[test]
+fn walk_ffn_zero_features_observed_reports_dense_weight_ffn_activation() {
+    // Same fallback, observed entry point: the WeightFfn detour is a
+    // dense path, so the observation must be a real Dense activation.
+    let weights = shared_weights();
+    let zero_idx = MockGateIndex { n_features: 0 };
+    let ffn = WalkFfn::new_unlimited(weights, &zero_idx).with_dispatch_trace();
+    let x = input(1, weights.hidden_size);
+    let (out, obs) = ffn.forward_observed(0, &x);
+    assert_eq!(
+        ffn.take_dispatch_trace().last().map(|e| e.path),
+        Some("zero_features_dense")
+    );
+    assert_eq!(out.shape(), &[1, weights.hidden_size]);
+    let act = obs
+        .into_dense()
+        .expect("WeightFfn fallback observes densely");
+    assert_eq!(act.shape(), &[1, weights.intermediate_size]);
+}
+
+#[test]
+fn overridden_layer_observed_lands_on_override_fallback_with_real_observation() {
+    // M7's observed twin: base_delta and the sparse walk both decline
+    // (no FFN payload), so the observed call must land on the
+    // override-aware safetensors fallback and report the activations it
+    // actually computed — not zeros, not Absent.
+    let weights = shared_weights();
+    let index = OverriddenNoPayloadIndex {
+        inner: mock_index(weights),
+    };
+    let walk = WalkFfn::new_unlimited(weights, &index).with_dispatch_trace();
+    let x = input(1, weights.hidden_size);
+    let (out, obs) = walk.forward_observed(0, &x);
+    assert_eq!(
+        walk.take_dispatch_trace().last().map(|e| e.path),
+        Some("weights_fallback:override")
+    );
+    assert!(!obs.is_absent(), "the fallback computes — it must observe");
+    let act = obs.into_dense().expect("observation densifies");
+    assert!(
+        act.iter().any(|v| v.abs() > 0.0),
+        "real activations, not the old fabricated zeros"
+    );
+    assert_eq!(out, walk.forward(0, &x), "Skip/Record outputs agree");
+}
+
+#[test]
 fn walk_ffn_with_backend() {
     let weights = shared_weights();
     let idx = mock_index(weights);

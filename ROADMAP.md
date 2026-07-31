@@ -820,7 +820,34 @@ what's exact, approximate, observed, reconstructed):**
 
 **Tier 2 — capability (the strategic-review core, in this order):**
 
-15. **`forward` / `forward_observed(observer)` split** — activations
+15. ✅ **`forward` / `forward_observed` split** (DONE 2026-07-31 —
+    `FfnBackend::forward_with_activation` is GONE; the trait is
+    `forward` (hot, never touches an activation buffer) +
+    `forward_observed` returning `FfnActivations` (new module
+    `larql-compute/src/ffn/observe.rs`): `Dense` for dense paths (the
+    matrix is an intrinsic intermediate), `Sparse` per-position
+    `(feature, activation)` pairs for exactly the K computed features,
+    `Absent {reason}` for paths that observe nothing — the trait default,
+    so unobserving backends (remote walk's fabricated `[seq,1]` zeros,
+    MoE's output-as-activation, seven larql-kv/server stubs) now say so
+    instead of inventing tensors. `WalkFfn` routes both entry points
+    through one `forward_routed(.., Observe)` body — identical routing by
+    construction; `Skip` mode threads through every walk path
+    (sparse/gather/parallel/base_delta/weights_fallback +
+    `sparse_compute`'s split plain/`_observed` API) so the old
+    `seq_len × intermediate` zero-fill no longer exists on generation.
+    The parallel Q4K down branch reports its REAL per-feature activations
+    (the pinned all-zeros parity test flipped to assert bit-equality with
+    the serial halves); an L1 hit serves `forward` but an observed call
+    BYPASSES the cache read and recomputes (pinned); base_delta reports
+    post-patch slot activations (new `base_delta_tests.rs`, incl. decline
+    branches — 20%→95% file coverage). `run_ffn`'s capture arm densifies
+    via `FfnActivations::into_dense()` (Absent → `None`, never zeros), so
+    hooks/trace/server consumers kept their `Option<Array2>` shape;
+    changed files ≥90% line coverage except the pre-existing
+    network-debt pair `remote/http.rs` / `remote/sharded.rs` (12%→35%
+    with new no-shard observation pins; rest needs a mock-server
+    harness)) — activations
     become opt-in; sparse paths emit `(FeatureId, f32)` pairs instead of a
     dense `seq_len × intermediate` zero-fill. Subsumes (by construction)
     the parallel-path zero activations (`sparse.rs:283-371`) and the L1

@@ -748,6 +748,46 @@ mod tests {
         }
     }
 
+    /// The override arm of the full routing ladder, observed: this
+    /// index answers only point queries (`override_slots_at` keeps its
+    /// `None` default) so base+delta declines, and the override-aware
+    /// sparse walk serves the observed call with its real activations
+    /// (mod.rs arm 1b in `Observe::Record` mode).
+    #[test]
+    fn override_arm_forward_observed_routes_sparse_with_real_observation() {
+        use crate::ffn::FfnBackend;
+        use std::sync::Arc;
+        let weights = make_test_q4k_weights();
+        let inner = make_test_q4k_vindex(&weights);
+        let hidden = weights.hidden_size;
+        let overridden = OverrideQ4kIndex {
+            inner: &inner,
+            up_zero_feat: 1,
+            down_zero_feat: 2,
+            zeros: vec![0.0; hidden],
+        };
+        let pool: Vec<usize> = vec![0, 1, 2, 3];
+        let cfg = WalkFfnConfig::sparse(weights.num_layers, pool.len())
+            .with_pool_per_layer(Arc::new(vec![pool; weights.num_layers]))
+            .with_precomputed_routing(true);
+        let ffn = WalkFfn::from_config(&weights, &overridden, cfg).with_dispatch_trace();
+        let input = x(1, hidden);
+        let (out, obs) = ffn.forward_observed(0, &input);
+        assert_eq!(
+            ffn.take_dispatch_trace().last().map(|e| e.path),
+            Some("sparse:serial"),
+            "point-query-only overrides must route the sparse walk"
+        );
+        let act = obs.into_dense().expect("sparse observation densifies");
+        assert!(act.iter().any(|v| v.abs() > 0.0), "real activations");
+        assert_eq!(
+            act[[0, 1]],
+            0.0,
+            "zero up override kills that slot's observed activation"
+        );
+        assert_eq!(out, ffn.forward(0, &input), "Skip/Record outputs agree");
+    }
+
     /// A non-contiguous input (column-major storage) must produce the
     /// same output as the same values in standard layout — pins the
     /// owned-slice fallbacks in the per-position preamble.
