@@ -736,6 +736,17 @@ a silent-wrong-numerics cluster in the quantized walk paths (same
 "produces a number, the number is a lie" theme as the DEC review), and
 **no walk-vs-dense numerical parity test anywhere in the tree**.
 
+**Status 2026-07-31: 19 of 24 closed.** Tiers 0–1 in full (2026-07-30,
+incl. all four HIGHs); item 13 resolved with the finding inverted (the
+exact-first gate chain is now actually wired — `enable_hnsw()` had been
+leaking approximate selection into walk numerics); Tier 2: base+delta
+(16), forward/forward_observed split (15), runtime trace emission (17)
+all shipped; parity suite (20) landed with the per-file ≥90% coverage
+pass. Open: 18 (planner), 19 (two-stage selection), 21 (KnnStore
+unification), 22 (v1 conformance), 23 (doc drift), 24 (hygiene) +
+tracked follow-ups (server/lql `try_apply_patch` migration, remote
+transport coverage harness, logit-contribution trace field).
+
 Sequencing is interaction-driven: Tier 0's padded-stride fix **gates**
 Tier 2's base+delta (the delta path leans on the same row-dot/sidecar
 machinery, and GPT-OSS-20B hidden=2880 is K3 rung 1); the
