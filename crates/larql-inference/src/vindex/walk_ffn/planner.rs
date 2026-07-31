@@ -63,7 +63,8 @@ pub(super) const SEL_OVERRIDE_FALLBACK: &str =
     "overridden layer — override-aware safetensors fallback (must never fall through to override-blind paths)";
 const SEL_L1_HIT: &str = "single-position hot call; residual key present in the L1 output cache";
 const SEL_SPARSE: &str = "explicit per-layer sparse K configured";
-const SEL_FP4: &str = "FP4/FP8 storage is per-feature by construction — routed through the sparse walk";
+const SEL_FP4: &str =
+    "FP4/FP8 storage is per-feature by construction — routed through the sparse walk";
 const SEL_KQUANT_NATIVE: &str = "interleaved K-quant storage — direct fused-decode matvec";
 const SEL_INTERLEAVED_Q4: &str = "interleaved Q4_0 slab + backend with Q4_0 kernels";
 const SEL_INTERLEAVED_F32: &str = "f32 interleaved mmap — three BLAS gemms";
@@ -75,6 +76,13 @@ const SEL_LAST_RESORT: &str = "last resort — sparse matmul against safetensors
 /// Name of the full-K density cutoff in `thresholds.rs`, as reported
 /// by the Sparse plan's [`ThresholdCheck`].
 pub(super) const THRESHOLD_FULL_K_DENSITY: &str = "FULL_K_DENSITY";
+
+/// Name of the two-stage shortlist width check (item 19, `shortlist.rs`)
+/// in the Sparse plan's [`ThresholdCheck`]: `actual` = configured M,
+/// `cutoff` = the layer's K (M must cover K), `satisfied` = the
+/// two-stage selection will actually run (M ≥ K and the selector has a
+/// rerank criterion — `Random` has none).
+pub(super) const THRESHOLD_SHORTLIST_M: &str = "SHORTLIST_M";
 
 /// Path-independent L1 key for a single-position input's residual row
 /// — the same hashing `forward_ladder` has always used.
@@ -217,6 +225,21 @@ impl<'a> WalkFfn<'a> {
                 cutoff: (num_features * FULL_K_DENSITY_NUM) / FULL_K_DENSITY_DEN,
                 satisfied: hits_len_ge_intermediate(&self.config, layer, num_features),
             });
+            // Two-stage shortlist (item 19): recorded whenever the
+            // selector-dispatch route would consult it (pools and the
+            // cell router take precedence and carry their own
+            // two-stage machinery).
+            if let Some(m) = self.config.shortlist_m {
+                if self.config.pool_per_layer.is_none() && self.config.cell_router.is_none() {
+                    thresholds.push(ThresholdCheck {
+                        name: THRESHOLD_SHORTLIST_M,
+                        actual: m,
+                        cutoff: k,
+                        satisfied: m >= k
+                            && super::shortlist::criterion_inputs(self.config.selector).is_some(),
+                    });
+                }
+            }
             decide!(PlanRung::Sparse, SEL_SPARSE);
         } else {
             skip!(PlanRung::Sparse, BECAUSE_NOT_SPARSE);

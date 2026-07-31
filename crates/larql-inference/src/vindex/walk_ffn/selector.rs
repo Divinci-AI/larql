@@ -21,6 +21,7 @@ use std::sync::Arc;
 use ndarray::{Array1, Array2};
 
 use super::helpers::selection_weight_cmp_desc;
+use super::shortlist::{criterion_inputs, criterion_weight, rerank_cmp};
 use super::WalkFfn;
 use crate::vindex::walk_config::FeatureSelector;
 
@@ -138,9 +139,11 @@ impl<'a> WalkFfn<'a> {
 
     /// Top-K features by a joint criterion. Computes full gate scores
     /// once via `gate_scores_batch_backend`, multiplies by per-feature
-    /// weights derived from `kind`, takes top-K by `|weighted|`, and
-    /// returns `(feat_idx, raw_gate_score)` so the FFN math downstream
-    /// is unchanged.
+    /// weights derived from `kind` (formulas single-sourced in
+    /// `shortlist::criterion_weight`), takes top-K by `|weighted|` in
+    /// the deterministic `rerank_cmp` order, and returns
+    /// `(feat_idx, raw_gate_score)` so the FFN math downstream is
+    /// unchanged.
     ///
     /// Falls back to the production `gate_walk` path if the joint norms
     /// can't be computed (e.g. no Q4K cache yet), so the walk still
@@ -181,99 +184,73 @@ impl<'a> WalkFfn<'a> {
             return self.fallback_top_k(layer, residual, top_k, kind);
         }
 
-        // Per-feature joint weight. Random skips the weight lookup.
-        let weighted: Vec<(usize, f32, f32)> = match kind {
-            FeatureSelector::GateOnly => row
-                .iter()
-                .enumerate()
-                .map(|(i, &g)| (i, g, g.abs()))
-                .collect(),
-            FeatureSelector::GateXDownNorm => {
-                let Some(down_norms) = self.down_row_norms(layer) else {
-                    return self.fallback_top_k(layer, residual, top_k, kind);
-                };
-                row.iter()
-                    .enumerate()
-                    .map(|(i, &g)| {
-                        let dn = down_norms.get(i).copied().unwrap_or(0.0);
-                        (i, g, g.abs() * dn)
-                    })
-                    .collect()
-            }
-            FeatureSelector::GateXUpDownNorm => {
-                let Some(down_norms) = self.down_row_norms(layer) else {
-                    return self.fallback_top_k(layer, residual, top_k, kind);
-                };
-                let Some(up_norms) = self.up_row_norms(layer) else {
-                    return self.fallback_top_k(layer, residual, top_k, kind);
-                };
-                row.iter()
-                    .enumerate()
-                    .map(|(i, &g)| {
-                        let dn = down_norms.get(i).copied().unwrap_or(0.0);
-                        let un = up_norms.get(i).copied().unwrap_or(0.0);
-                        (i, g, g.abs() * dn * un)
-                    })
-                    .collect()
-            }
-            FeatureSelector::GateXUpScore => {
-                let Some(up_scores) = self.compute_full_up_scores(layer, residual) else {
-                    return self.fallback_top_k(layer, residual, top_k, kind);
-                };
-                row.iter()
-                    .enumerate()
-                    .map(|(i, &g)| {
-                        let u = up_scores.get(i).copied().unwrap_or(0.0);
-                        (i, g, g.abs() * u.abs())
-                    })
-                    .collect()
-            }
-            FeatureSelector::ActXUpScoreXDownNorm => {
-                let Some(up_scores) = self.compute_full_up_scores(layer, residual) else {
-                    return self.fallback_top_k(layer, residual, top_k, kind);
-                };
-                let Some(down_norms) = self.down_row_norms(layer) else {
-                    return self.fallback_top_k(layer, residual, top_k, kind);
-                };
-                let arch = &*self.weights.arch;
-                let use_gelu = matches!(
-                    arch.activation(),
-                    larql_models::Activation::GeluTanh | larql_models::Activation::Gelu
-                );
-                row.iter()
-                    .enumerate()
-                    .map(|(i, &g)| {
-                        let activated = if use_gelu {
-                            crate::ffn::gelu_tanh(g)
-                        } else {
-                            g * crate::ffn::sigmoid(g)
-                        };
-                        let u = up_scores.get(i).copied().unwrap_or(0.0);
-                        let dn = down_norms.get(i).copied().unwrap_or(0.0);
-                        (i, g, (activated * u).abs() * dn)
-                    })
-                    .collect()
-            }
-            FeatureSelector::Random => {
-                use rand::seq::SliceRandom;
-                let mut rng = rand::thread_rng();
-                let mut idxs: Vec<usize> = (0..num_features).collect();
-                idxs.shuffle(&mut rng);
-                idxs.truncate(top_k.min(num_features));
-                return idxs.into_iter().map(|i| (i, row[i])).collect();
-            }
+        // Per-feature joint weight — formulas single-sourced in
+        // `shortlist::criterion_weight` (shared with the two-stage
+        // rerank so the two paths cannot drift). Random has no
+        // criterion (`criterion_inputs` returns None) and short-circuits.
+        let Some(needs) = criterion_inputs(kind) else {
+            use rand::seq::SliceRandom;
+            let mut rng = rand::thread_rng();
+            let mut idxs: Vec<usize> = (0..num_features).collect();
+            idxs.shuffle(&mut rng);
+            idxs.truncate(top_k.min(num_features));
+            return idxs.into_iter().map(|i| (i, row[i])).collect();
         };
+        let down_norms = if needs.down_norm {
+            match self.down_row_norms(layer) {
+                Some(n) => Some(n),
+                None => return self.fallback_top_k(layer, residual, top_k, kind),
+            }
+        } else {
+            None
+        };
+        let up_norms = if needs.up_norm {
+            match self.up_row_norms(layer) {
+                Some(n) => Some(n),
+                None => return self.fallback_top_k(layer, residual, top_k, kind),
+            }
+        } else {
+            None
+        };
+        let up_scores = if needs.up_score {
+            match self.compute_full_up_scores(layer, residual) {
+                Some(s) => Some(s),
+                None => return self.fallback_top_k(layer, residual, top_k, kind),
+            }
+        } else {
+            None
+        };
+        let use_gelu = self.selector_use_gelu();
+        let at = |v: &Option<Arc<Vec<f32>>>, i: usize| {
+            v.as_ref()
+                .map(|v| v.get(i).copied().unwrap_or(0.0))
+                .unwrap_or(0.0)
+        };
+        let mut weighted: Vec<(usize, f32, f32)> = row
+            .iter()
+            .enumerate()
+            .map(|(i, &g)| {
+                let u = up_scores
+                    .as_ref()
+                    .map(|v| v.get(i).copied().unwrap_or(0.0))
+                    .unwrap_or(0.0);
+                let w =
+                    criterion_weight(kind, use_gelu, g, u, at(&up_norms, i), at(&down_norms, i));
+                (i, g, w)
+            })
+            .collect();
 
-        // Partial sort: top-K by weighted score. For top_k ≥ num_features,
-        // sort the full list (rare; falls into the dense-equivalent path).
-        // NaN weights panic (`selection_weight_cmp_desc`) — same contract
+        // Partial sort to the top-K by weighted score, then a full sort
+        // of those K into the deterministic rerank order (`rerank_cmp`)
+        // so the reported rank order matches the two-stage path. NaN
+        // weights panic (`selection_weight_cmp_desc`) — same contract
         // as `top_k_by_abs` on the production gate-KNN path.
         let take = top_k.min(num_features);
-        let mut weighted = weighted;
         weighted.select_nth_unstable_by(take.saturating_sub(1).min(num_features - 1), |a, b| {
             selection_weight_cmp_desc(a.2, b.2)
         });
         weighted.truncate(take);
+        weighted.sort_unstable_by(rerank_cmp);
         weighted.into_iter().map(|(i, g, _)| (i, g)).collect()
     }
 
@@ -395,13 +372,7 @@ impl<'a> WalkFfn<'a> {
             self.selector_fallbacks
                 .set(self.selector_fallbacks.get() + 1);
         }
-        self.index
-            .gate_walk(layer, residual, top_k)
-            .or_else(|| {
-                self.backend
-                    .and_then(|be| self.index.gate_knn_q4(layer, residual, top_k, be))
-            })
-            .unwrap_or_else(|| self.index.gate_knn(layer, residual, top_k))
+        self.production_gate_chain(layer, residual, top_k)
     }
 }
 

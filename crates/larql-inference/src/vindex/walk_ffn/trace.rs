@@ -125,7 +125,10 @@ impl<'a> WalkFfn<'a> {
                             down_row_norm: self.peek_down_row_norm(layer, e.feature),
                         })
                         .collect();
-                    (sa.kernel(s).unwrap_or_else(|| self.last_path.get()), features)
+                    (
+                        sa.kernel(s).unwrap_or_else(|| self.last_path.get()),
+                        features,
+                    )
                 }
                 // Dense / absent observations carry no per-feature
                 // selection data — emit the layer summary only.

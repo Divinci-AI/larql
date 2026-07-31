@@ -941,7 +941,43 @@ what's exact, approximate, observed, reconstructed):**
     replacing the magic ratios; only freeze once base+delta exists as a
     plan variant. The ladder's trace_path names + routing tests are the
     seed; add the reason field. [larql-inference]
-19. **Two-stage selection: shortlist top-M by gate, exact rerank** — the
+19. ✅ **Two-stage selection: shortlist top-M by gate, exact rerank**
+    (DONE 2026-07-31 — opt-in `WalkFfnConfig::shortlist_m:
+    Option<usize>` (+ `with_shortlist_m`; `None` = single-stage,
+    default everywhere), consumed on the selector-dispatch route (new
+    `walk_ffn/shortlist.rs`): stage 1 takes the top-M through the
+    production `gate_walk` → `gate_knn_q4` → `gate_knn` chain (now
+    factored as `production_gate_chain`, shared with the `GateOnly`
+    route and the joint fallback — no new projection code); stage 2
+    evaluates the configured criterion for ONLY those M candidates —
+    per-candidate up dots via the per-row `ffn_row_dot`, norms from
+    the existing lazy caches, O(M·d), never a full projection — and
+    fully sorts to the final top-K (`rerank_cmp`: weight desc, feature
+    asc on ties; the runtime trace's `rank` field is therefore the
+    FINAL rerank order, and `joint_gate_knn` sorts its top-K by the
+    same comparator so the two paths report identical order). The
+    weight formulas are single-sourced in `criterion_weight` /
+    `criterion_inputs` — `joint_gate_knn`'s inline per-variant
+    closures were extracted onto them, so the full-projection and
+    two-stage paths cannot drift. Hits keep the
+    `(feat_idx, raw_gate_score)` contract; `shortlist_m` forces the
+    per-position walk (like pools — the full-K gemv rewrite would
+    bypass the structure); the Sparse plan reason records a
+    `SHORTLIST_M` `ThresholdCheck` (actual=M, cutoff=K, satisfied =
+    two-stage actually runs). M < K, `Random` (no criterion), or
+    missing stage-2 inputs decline to single-stage OBSERVABLY — a
+    `shortlist:declined` dispatch-trace entry +
+    `shortlist_decline_count`, the M10 `selector:fallback` precedent.
+    Pinned by 13 tests (`shortlist_tests.rs`): M=N two-stage ==
+    `joint_gate_knn` (same features, same order, raw scores) for every
+    scored selector; a huge-‖down‖/tiny-gate decoy the full-projection
+    rerank picks but the top-M gate shortlist structurally excludes;
+    observable declines; default-off bit-identical to single-stage;
+    and the cost pin — a delegating index that PANICS on
+    `gate_scores_batch`/`gate_scores_batch_backend`/
+    `kquant_matmul_transb` runs a full two-stage forward clean, while
+    its counting twin shows single-stage joint pays ≥2 full
+    projections. Changed/new files ≥94% line coverage) — the
     rerank criterion already exists as
     `FeatureSelector::ActXUpScoreXDownNorm`; add the shortlist structure
     so it stops paying full projections. Production-cost shape of the

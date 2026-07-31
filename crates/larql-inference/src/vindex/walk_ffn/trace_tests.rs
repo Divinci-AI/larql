@@ -239,9 +239,8 @@ fn dense_paths_emit_summary_without_per_feature_records() {
         assert_eq!(rec.residual_delta_norm, expected);
     }
     // The WalkTrace view keeps the layer entry with empty hits.
-    let ffn =
-        WalkFfn::from_config(&weights, &index, WalkFfnConfig::dense(weights.num_layers))
-            .with_trace();
+    let ffn = WalkFfn::from_config(&weights, &index, WalkFfnConfig::dense(weights.num_layers))
+        .with_trace();
     ffn.forward(0, &x(1, weights.hidden_size));
     let trace = ffn.take_trace();
     assert_eq!(trace.layers.len(), 1);

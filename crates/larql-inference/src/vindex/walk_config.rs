@@ -116,6 +116,29 @@ pub struct WalkFfnConfig {
     /// `rank_within_pool` to narrow the cell pool to top-K, else uses the
     /// pool directly (the gate-KNN-union route — no within-cell ranking).
     pub cell_router: Option<std::sync::Arc<CellRouter>>,
+    /// Optional two-stage shortlist width M (2026-07-30 review, item
+    /// 19). When set, the selector-dispatch route (no pool, no cell
+    /// router) selects in two stages: stage 1 takes the top-M
+    /// candidates through the production gate chain (`gate_walk` →
+    /// `gate_knn_q4` → `gate_knn`) — the one projection every walk
+    /// already pays; stage 2 evaluates the configured
+    /// [`FeatureSelector`] criterion for ONLY those M candidates via
+    /// per-row primitives (O(M·d)) and reranks them to the final
+    /// top-K. This replaces the joint selectors' full-projection
+    /// scoring (`gate_scores_batch` over all N features, plus a second
+    /// full up projection for the up-score criteria) with the
+    /// production-cost shape: shortlist by gate, rerank by
+    /// `|φ(g·x)(u·x)|·‖d‖`.
+    ///
+    /// `None` (the default) keeps single-stage selection exactly as
+    /// before. M must be ≥ the layer's K; a layer where M < K (or the
+    /// selector is `Random`, which has no rerank criterion) declines
+    /// to single-stage selection observably — a `shortlist:declined`
+    /// dispatch-trace entry plus `WalkFfn::shortlist_decline_count`,
+    /// following the `selector:fallback` precedent. Setting M also
+    /// forces the per-position walk (like `pool_per_layer`): the
+    /// full-K gemv rewrite would bypass the two-stage structure.
+    pub shortlist_m: Option<usize>,
 }
 
 impl WalkFfnConfig {
@@ -140,6 +163,7 @@ impl WalkFfnConfig {
             precomputed_routing: false,
             rank_within_pool: false,
             cell_router: None,
+            shortlist_m: None,
         }
     }
 
@@ -154,6 +178,7 @@ impl WalkFfnConfig {
             precomputed_routing: false,
             rank_within_pool: false,
             cell_router: None,
+            shortlist_m: None,
         }
     }
 
@@ -173,6 +198,7 @@ impl WalkFfnConfig {
             precomputed_routing: false,
             rank_within_pool: false,
             cell_router: None,
+            shortlist_m: None,
         }
     }
 
@@ -220,6 +246,13 @@ impl WalkFfnConfig {
         self
     }
 
+    /// Enable two-stage shortlist-then-rerank selection at width M.
+    /// See `shortlist_m`.
+    pub fn with_shortlist_m(mut self, m: usize) -> Self {
+        self.shortlist_m = Some(m);
+        self
+    }
+
     /// K for a layer. Out-of-range layers fall through to the last entry
     /// (or None if the config is empty) — mirrors `LayerFfnRouter::get`.
     pub fn k_for(&self, layer: usize) -> Option<usize> {
@@ -253,6 +286,7 @@ impl Default for WalkFfnConfig {
             precomputed_routing: false,
             rank_within_pool: false,
             cell_router: None,
+            shortlist_m: None,
         }
     }
 }
@@ -353,6 +387,17 @@ mod tests {
         assert!(!WalkFfnConfig::dense(2).rank_within_pool);
         assert!(!WalkFfnConfig::hybrid(4, 2, 8).rank_within_pool);
         assert!(!WalkFfnConfig::default().rank_within_pool);
+    }
+
+    #[test]
+    fn with_shortlist_m_sets_width() {
+        let cfg = WalkFfnConfig::sparse(2, 8);
+        assert_eq!(cfg.shortlist_m, None);
+        assert_eq!(cfg.with_shortlist_m(64).shortlist_m, Some(64));
+        // Constructors default it off — two-stage selection is opt-in.
+        assert_eq!(WalkFfnConfig::dense(2).shortlist_m, None);
+        assert_eq!(WalkFfnConfig::hybrid(4, 2, 8).shortlist_m, None);
+        assert_eq!(WalkFfnConfig::default().shortlist_m, None);
     }
 
     #[test]

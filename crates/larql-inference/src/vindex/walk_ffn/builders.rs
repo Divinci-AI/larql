@@ -34,6 +34,7 @@ impl<'a> WalkFfn<'a> {
             down_norms_cache: std::cell::RefCell::new(vec![None; num_layers]),
             up_norms_cache: std::cell::RefCell::new(vec![None; num_layers]),
             selector_fallbacks: std::cell::Cell::new(0),
+            shortlist_declines: std::cell::Cell::new(0),
         }
     }
 

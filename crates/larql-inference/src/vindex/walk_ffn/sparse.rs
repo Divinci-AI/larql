@@ -113,12 +113,14 @@ impl<'a> WalkFfn<'a> {
         let activation_floor = self.config.effective_activation_floor();
 
         // ── Full-K gemv fast path (`sparse_gemv.rs`) ─────────────────────
-        // Skipped when a non-default selector is configured or a per-layer
-        // pool restriction is set: in both cases gemv would bypass the
-        // alternative selection criterion, so we force the walk.
+        // Skipped when a non-default selector is configured, a per-layer
+        // pool restriction is set, or a two-stage shortlist is requested:
+        // in all three cases gemv would bypass the alternative selection
+        // structure, so we force the walk.
         let selector_forces_walk = !matches!(self.config.selector, FeatureSelector::GateOnly)
             || self.config.pool_per_layer.is_some()
-            || self.config.cell_router.is_some();
+            || self.config.cell_router.is_some()
+            || self.config.shortlist_m.is_some();
         let k_is_full =
             !selector_forces_walk && hits_len_ge_intermediate(&self.config, layer, intermediate);
         if !layer_has_overrides && is_gated && k_is_full {

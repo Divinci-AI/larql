@@ -10,7 +10,10 @@
 //! 2. **Per-layer pool** — precomputed route (cheap O(|pool|) scoring
 //!    when `precomputed_routing`) or the full-projection
 //!    `pool_restricted_gate_knn` fallback.
-//! 3. **Selector dispatch** — production `gate_walk` → `gate_knn_q4` →
+//! 3. **Two-stage shortlist** (`shortlist_m`, item 19) — top-M by the
+//!    production gate chain, criterion rerank over only those M
+//!    (`shortlist.rs`); declines observably to the selector dispatch.
+//! 4. **Selector dispatch** — production `gate_walk` → `gate_knn_q4` →
 //!    `gate_knn` chain for `GateOnly`, `joint_gate_knn` for the joint
 //!    criteria.
 //!
@@ -107,25 +110,40 @@ impl<'a> WalkFfn<'a> {
             } else {
                 self.pool_restricted_gate_knn(layer, x_owned, top_k, pool)
             }
+        } else if let Some(m) = self.config.shortlist_m {
+            // Two-stage shortlist-then-rerank (2026-07-30 review, item
+            // 19, `shortlist.rs`): top-M by the production gate chain,
+            // criterion rerank for only those M (O(M·d) — no full
+            // joint projection). Declines to `single_stage_hits` with
+            // the observable `shortlist:declined` signal.
+            self.shortlist_rerank(layer, x_owned, x_slice, top_k, m, self.config.selector)
         } else {
-            match self.config.selector {
-                // Exact-first, deliberately: `gate_walk` (batched exact
-                // gemv) before the HNSW-aware `gate_knn` fallback — see
-                // the module doc's HNSW note.
-                FeatureSelector::GateOnly => self
-                    .index
-                    .gate_walk(layer, x_owned, top_k)
-                    .or_else(|| {
-                        self.backend
-                            .and_then(|be| self.index.gate_knn_q4(layer, x_owned, top_k, be))
-                    })
-                    .unwrap_or_else(|| self.index.gate_knn(layer, x_owned, top_k)),
-                kind @ (FeatureSelector::GateXDownNorm
-                | FeatureSelector::GateXUpDownNorm
-                | FeatureSelector::GateXUpScore
-                | FeatureSelector::ActXUpScoreXDownNorm
-                | FeatureSelector::Random) => self.joint_gate_knn(layer, x_owned, top_k, kind),
-            }
+            self.single_stage_hits(layer, x_owned, top_k, self.config.selector)
+        }
+    }
+
+    /// Single-stage selector dispatch — the pre-shortlist behaviour,
+    /// bit-for-bit: the production chain for `GateOnly`, the
+    /// full-projection `joint_gate_knn` for the joint criteria. Also
+    /// the fallback a declined shortlist lands on (with the declined
+    /// call's own `kind`).
+    pub(super) fn single_stage_hits(
+        &self,
+        layer: usize,
+        x_owned: &ndarray::Array1<f32>,
+        top_k: usize,
+        kind: FeatureSelector,
+    ) -> Vec<(usize, f32)> {
+        match kind {
+            // Exact-first, deliberately: `gate_walk` (batched exact
+            // gemv) before the HNSW-aware `gate_knn` fallback — see
+            // the module doc's HNSW note.
+            FeatureSelector::GateOnly => self.production_gate_chain(layer, x_owned, top_k),
+            kind @ (FeatureSelector::GateXDownNorm
+            | FeatureSelector::GateXUpDownNorm
+            | FeatureSelector::GateXUpScore
+            | FeatureSelector::ActXUpScoreXDownNorm
+            | FeatureSelector::Random) => self.joint_gate_knn(layer, x_owned, top_k, kind),
         }
     }
 }

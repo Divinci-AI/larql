@@ -106,6 +106,7 @@ mod observe;
 mod plan;
 mod planner;
 mod selector;
+mod shortlist;
 mod sparse;
 mod sparse_gather;
 mod sparse_gemv;
@@ -123,6 +124,8 @@ mod dispatch_tests;
 mod plan_tests;
 #[cfg(test)]
 mod routing_tests;
+#[cfg(test)]
+mod shortlist_tests;
 #[cfg(test)]
 mod trace_tests;
 
@@ -170,6 +173,13 @@ pub struct WalkFfn<'a> {
     /// was not the selector that ran (2026-07-30 review, M10). Also
     /// surfaced per-call as a `selector:fallback` dispatch-trace entry.
     pub(super) selector_fallbacks: std::cell::Cell<u64>,
+    /// Count of configured two-stage shortlist selections that
+    /// declined to single-stage (M < K, `Random` selector, or stage-2
+    /// inputs unavailable — 2026-07-30 review, item 19). Non-zero
+    /// means at least one layer call did NOT get the O(M·d)
+    /// shortlist cost shape the config claims. Also surfaced per-call
+    /// as a `shortlist:declined` dispatch-trace entry.
+    pub(super) shortlist_declines: std::cell::Cell<u64>,
 }
 
 impl<'a> WalkFfn<'a> {
@@ -182,6 +192,14 @@ impl<'a> WalkFfn<'a> {
     /// means the sweep's selector label lies for at least some calls.
     pub fn selector_fallback_count(&self) -> u64 {
         self.selector_fallbacks.get()
+    }
+
+    /// Number of configured two-stage shortlist selections that
+    /// declined to single-stage so far (item 19). Check after a run
+    /// with `shortlist_m` set: non-zero means some calls paid the
+    /// single-stage full-projection cost, not the shortlist's O(M·d).
+    pub fn shortlist_decline_count(&self) -> u64 {
+        self.shortlist_declines.get()
     }
 
     pub fn l1_cache_stats(&self) -> Option<(u64, u64)> {
@@ -413,8 +431,9 @@ impl<'a> WalkFfn<'a> {
         // activations — an observed call recomputes and refreshes the
         // slot (2026-07-30 review, item 15). Exactly one `get` per
         // eligible call, preserving hit/miss accounting.
-        let l1_key = (num_features > 0 && !has_overrides && seq_len == 1 && self.l1_cache.is_some())
-            .then(|| planner::residual_l1_key(x));
+        let l1_key =
+            (num_features > 0 && !has_overrides && seq_len == 1 && self.l1_cache.is_some())
+                .then(|| planner::residual_l1_key(x));
         let l1_row: Option<Vec<f32>> = if observe.recording() {
             None
         } else {

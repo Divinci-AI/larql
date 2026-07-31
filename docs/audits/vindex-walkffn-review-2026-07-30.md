@@ -1,6 +1,6 @@
 # Vindex + WalkFFN review — 2026-07-30
 
-> **Remediation status (2026-07-31): 20 of 24 items closed.** Tiers 0
+> **Remediation status (2026-07-31): 21 of 24 items closed.** Tiers 0
 > and 1 landed in full on 2026-07-30 (commits `6907a209`, `e55b3edf`,
 > `6b5067f6`, `e21475f2`), including all four high-severity findings.
 > Item 13 resolved 2026-07-31 with the finding INVERTED (`c9ec5e1f`):
@@ -17,7 +17,13 @@
 > decision-identical by the unchanged dispatch/routing suites.
 > The walk-vs-dense parity suite (item 20) landed with the per-file
 > 90%-coverage pass (`e21475f2`); every walk_ffn file is ≥90% line
-> coverage. Open: two-stage selection (19),
+> coverage. Two-stage shortlist-then-rerank selection (item 19, §5
+> item 5) landed 2026-07-31: opt-in `WalkFfnConfig::shortlist_m`,
+> stage 1 = top-M through the production gate chain, stage 2 = the
+> `FeatureSelector` criterion for only those M via per-row primitives
+> (O(M·d), formulas single-sourced with `joint_gate_knn`), declines
+> observable (`shortlist:declined`), cost pinned by a mock that panics
+> on any full-projection call. Open:
 > KnnStore unification (21), v1 conformance contract (22), doc drift
 > (23), hygiene (24), plus tracked follow-ups (server/lql
 > `try_apply_patch` migration, remote http/sharded transport coverage,

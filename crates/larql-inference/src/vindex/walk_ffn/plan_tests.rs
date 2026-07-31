@@ -406,7 +406,11 @@ fn declining_paths_replan_to_the_next_rung_and_record_the_decline() {
         PlanRung::KquantDequant,
     ] {
         assert!(
-            reason.contains(&format!("{} ({})", declined.name(), planner::BECAUSE_DECLINED)),
+            reason.contains(&format!(
+                "{} ({})",
+                declined.name(),
+                planner::BECAUSE_DECLINED
+            )),
             "missing decline record for {declined:?} in: {reason}"
         );
     }
@@ -471,7 +475,10 @@ fn non_contiguous_single_row_input_plans_via_owned_key() {
     let ffn = WalkFfn::new_unlimited(weights, &idx).with_l1_cache(weights.num_layers);
     let mut x = input(1, weights.hidden_size);
     x.invert_axis(ndarray::Axis(1));
-    assert!(x.row(0).as_slice().is_none(), "fixture must be non-contiguous");
+    assert!(
+        x.row(0).as_slice().is_none(),
+        "fixture must be non-contiguous"
+    );
     let plan = ffn.plan_for(0, &x);
     assert_eq!(
         because_for(&plan, PlanRung::L1CacheHit),
