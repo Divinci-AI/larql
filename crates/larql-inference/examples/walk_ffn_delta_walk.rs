@@ -61,9 +61,13 @@ impl FfnBackend for CapturingFfn<'_> {
         self.rec(layer, x);
         self.inner.forward(layer, x)
     }
-    fn forward_with_activation(&self, layer: usize, x: &Array2<f32>) -> (Array2<f32>, Array2<f32>) {
+    fn forward_observed(
+        &self,
+        layer: usize,
+        x: &Array2<f32>,
+    ) -> (Array2<f32>, larql_inference::ffn::FfnActivations) {
         self.rec(layer, x);
-        self.inner.forward_with_activation(layer, x)
+        self.inner.forward_observed(layer, x)
     }
     fn name(&self) -> &str {
         "capturing"

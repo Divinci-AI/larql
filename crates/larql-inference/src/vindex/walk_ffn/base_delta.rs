@@ -36,7 +36,9 @@
 
 use ndarray::Array2;
 
+use super::observe::Observe;
 use super::WalkFfn;
+use crate::ffn::FfnActivations;
 use larql_vindex::OverrideSlot;
 
 /// `ffn_row_*` component id for the gate projection.
@@ -103,11 +105,16 @@ impl<'a> WalkFfn<'a> {
     /// Returns `None` (decline) when preconditions fail or a slot's
     /// storage turns out inconsistent mid-computation — the caller
     /// then takes the pre-existing sparse/fallback override routes.
+    ///
+    /// Observation: the base's activation matrix is intrinsic to the
+    /// dense ladder, so `Record` mode reports it (with the patched
+    /// slots' post-patch activations written in) and `Skip` drops it.
     pub(super) fn walk_ffn_base_delta(
         &self,
         layer: usize,
         x: &Array2<f32>,
-    ) -> Option<(Array2<f32>, Array2<f32>)> {
+        observe: Observe,
+    ) -> Option<(Array2<f32>, Option<FfnActivations>)> {
         let slots = self.base_delta_slots(layer)?;
         let seq_len = x.shape()[0];
         let hidden = x.shape()[1];
@@ -119,7 +126,8 @@ impl<'a> WalkFfn<'a> {
         // routing runs (exactness condition 3). On a patched index the
         // whole-layer paths read only base bytes, so this is the
         // pre-patch output the delta corrects.
-        let (mut out, mut activation) = self.forward_unpatched_whole_layer(layer, x)?;
+        let (mut out, base_activation) = self.forward_unpatched_whole_layer(layer, x)?;
+        let mut activation = observe.recording().then_some(base_activation);
 
         let use_gelu = matches!(
             self.weights.arch.activation(),
@@ -179,16 +187,12 @@ impl<'a> WalkFfn<'a> {
                     // φ(0) = 0 for both SiLU and GELU-tanh, so a slot
                     // with no gate anywhere correctly activates to 0.
                     let g_new = match self.index.gate_override(layer, feat) {
-                        Some(gv) if gv.len() == hidden => {
-                            ndarray::ArrayView1::from(gv).dot(&x_row)
-                        }
+                        Some(gv) if gv.len() == hidden => ndarray::ArrayView1::from(gv).dot(&x_row),
                         Some(_) => return None, // wrong-width override
                         None => g_old.unwrap_or(0.0),
                     };
                     let u_new = match self.index.up_override(layer, feat) {
-                        Some(uv) if uv.len() == hidden => {
-                            ndarray::ArrayView1::from(uv).dot(&x_row)
-                        }
+                        Some(uv) if uv.len() == hidden => ndarray::ArrayView1::from(uv).dot(&x_row),
                         Some(_) => return None,
                         None => u_old.unwrap_or(0.0),
                     };
@@ -222,8 +226,10 @@ impl<'a> WalkFfn<'a> {
 
                 // Post-patch activation for the slot (0 for tombstones
                 // and inserts beyond the base activation width).
-                if feat < activation.shape()[1] {
-                    activation[[s, feat]] = a_new;
+                if let Some(act) = activation.as_mut() {
+                    if feat < act.shape()[1] {
+                        act[[s, feat]] = a_new;
+                    }
                 }
             }
 
@@ -233,6 +239,6 @@ impl<'a> WalkFfn<'a> {
         }
 
         self.trace_path(layer, "override:base_delta");
-        Some((out, activation))
+        Some((out, activation.map(FfnActivations::Dense)))
     }
 }

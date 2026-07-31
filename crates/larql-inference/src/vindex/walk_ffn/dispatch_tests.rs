@@ -160,14 +160,20 @@ fn walk_ffn_sparse_vs_dense_same_shape() {
 }
 
 #[test]
-fn walk_ffn_with_activation_returns_activation() {
+fn walk_ffn_forward_observed_returns_activation_and_matches_forward() {
     let weights = shared_weights();
     let idx = mock_index(weights);
     let ffn = WalkFfn::new_unlimited(weights, &idx);
     let x = input(2, weights.hidden_size);
-    let (out, act) = ffn.forward_with_activation(0, &x);
+    let (out, obs) = ffn.forward_observed(0, &x);
     assert_eq!(out.shape(), &[2, weights.hidden_size]);
+    let act = obs
+        .into_dense()
+        .expect("an executed walk path must observe activations");
     assert_eq!(act.shape()[0], 2, "activation should have seq_len rows");
+    // The split's core contract: both entry points run the same routed
+    // body, so the outputs are identical.
+    assert_eq!(out, ffn.forward(0, &x));
 }
 
 #[test]
@@ -296,6 +302,52 @@ fn walk_ffn_with_l1_cache_records_misses_then_hits() {
     // Whether the second call hits depends on the cache key — so we
     // just assert hits is a sensible non-overflowing count.
     assert!(hits + misses >= 2);
+}
+
+/// Item 15 (2026-07-30 review): the L1 cache stores outputs only, so a
+/// hit used to fabricate an all-zero activation matrix. The observed
+/// entry point must instead BYPASS the cache read and recompute — real
+/// observation, identical output — while the hot `forward` keeps
+/// serving hits.
+#[test]
+fn l1_cache_hit_serves_forward_but_observed_bypasses_and_recomputes() {
+    let weights = shared_weights();
+    let idx = mock_index(weights);
+    let ffn = WalkFfn::new_unlimited(weights, &idx)
+        .with_l1_cache(weights.num_layers)
+        .with_dispatch_trace();
+    let x = input(1, weights.hidden_size);
+
+    // Warm the cache, then confirm the hot path serves the hit.
+    let warm = ffn.forward(0, &x);
+    let served = ffn.forward(0, &x);
+    assert_eq!(warm, served);
+    let trace = ffn.take_dispatch_trace();
+    assert_eq!(
+        trace.last().map(|e| e.path),
+        Some("l1_cache_hit"),
+        "second identical hot call must be served from L1, got {trace:?}"
+    );
+
+    // Observed call on the same residual: recomputes (no l1_cache_hit
+    // trace), returns the same output, and reports a REAL observation.
+    let (out_obs, obs) = ffn.forward_observed(0, &x);
+    let trace = ffn.take_dispatch_trace();
+    assert!(
+        trace.iter().all(|e| e.path != "l1_cache_hit"),
+        "observed call must bypass the L1 read, got {trace:?}"
+    );
+    assert_eq!(out_obs, warm, "bypass recomputes the identical output");
+    assert!(
+        !obs.is_absent(),
+        "the recomputed path must observe real activations, never fabricate"
+    );
+    let act = obs.into_dense().expect("non-absent observation densifies");
+    assert!(
+        act.iter().any(|v| v.abs() > 0.0),
+        "mock fixture produces non-zero activations — all-zero would mean \
+         the old fabricated-zeros bug is back"
+    );
 }
 
 #[test]

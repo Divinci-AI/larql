@@ -1,10 +1,10 @@
 //! `WalkFfn` — FFN backend that replaces dense matmul with vindex lookups.
 //!
-//! Routing table (priority order, see `forward_with_activation`):
+//! Routing table (priority order, see `forward_routed`):
 //!
 //! | # | Condition                                            | Path                         |
 //! | - | ---------------------------------------------------- | ---------------------------- |
-//! | 0 | `seq_len == 1` and L1 cache has the residual         | `l1_cache_hit`               |
+//! | 0 | `seq_len == 1`, L1 cache hit, `Observe::Skip` only   | `l1_cache_hit`               |
 //! | 1a| `index.has_overrides_at(layer)` + delta preconditions| `override:base_delta`        |
 //! | 1b| `index.has_overrides_at(layer)`                      | `override:sparse`            |
 //! | 2 | `config.is_sparse(layer)`                            | `sparse:*`                   |
@@ -40,6 +40,7 @@
 //! - `interleaved_kquant_dequant.rs`— K-quant dequant, full f32 dense after decode
 //! - `full_mmap.rs`               — gate/up/down in three separate mmap files
 //! - `exact.rs`                   — gate/up from safetensors, down from mmap
+//! - `observe.rs`                 — Observe mode (forward / forward_observed split)
 //! - `helpers.rs`                 — cross-path utilities + trace metadata
 //! - `builders.rs`                — constructors and builder methods
 //! - `timings.rs`                 — phase-timing sink + env-var trace plumbing
@@ -47,15 +48,24 @@
 //! Adding a new storage format should almost never touch `mod.rs` — add
 //! a new module with a single walk function, one branch in the routing
 //! ladder, and a unit test in `routing_tests.rs`.
+//!
+//! Observation (2026-07-30 review, item 15): `forward` runs every path
+//! in `Observe::Skip` mode, which by construction never allocates or
+//! fills an activation buffer; `forward_observed` runs `Observe::Record`
+//! and returns an honest [`FfnActivations`] — sparse paths emit exactly
+//! the `(feature, activation)` pairs they computed, dense paths hand
+//! over their intrinsic activation matrix, and the L1 cache read is
+//! bypassed (recompute) rather than fabricating zeros.
 
 use ndarray::Array2;
 
-use crate::ffn::sparse_compute::sparse_ffn_forward;
-use crate::ffn::FfnBackend;
+use crate::ffn::sparse_compute::{sparse_ffn_forward, sparse_ffn_forward_observed};
+use crate::ffn::{FfnActivations, FfnBackend};
 use crate::model::ModelWeights;
 use crate::vindex::l1_cache::FfnL1Cache;
 use crate::vindex::walk_config::WalkFfnConfig;
 use larql_compute::prelude::*;
+use observe::Observe;
 
 use larql_vindex::{GateIndex, WalkHit, WalkTrace};
 
@@ -68,6 +78,7 @@ mod interleaved;
 mod interleaved_kquant_dequant;
 mod interleaved_kquant_native;
 mod interleaved_q4;
+mod observe;
 mod selector;
 mod sparse;
 mod sparse_gather;
@@ -280,7 +291,12 @@ impl<'a> WalkFfn<'a> {
     /// whose sparse walk fails: every whole-layer ladder path is
     /// override-blind, so an overridden layer must land here, never
     /// fall through (2026-07-30 review, finding M7).
-    fn weights_fallback(&self, layer: usize, x: &Array2<f32>) -> (Array2<f32>, Array2<f32>) {
+    fn weights_fallback(
+        &self,
+        layer: usize,
+        x: &Array2<f32>,
+        observe: Observe,
+    ) -> (Array2<f32>, Option<FfnActivations>) {
         let top_k = self.top_k_for(layer);
         let features = self.index.gate_knn_batch(layer, x, top_k);
         let has_any_override = features.iter().any(|&f| {
@@ -300,32 +316,65 @@ impl<'a> WalkFfn<'a> {
                 .filter(|o| o.gate.is_some() || o.up.is_some() || o.down.is_some())
                 .collect();
             self.trace_path(layer, "weights_fallback:override");
-            return crate::ffn::sparse_ffn_forward_with_full_overrides(
-                self.weights,
-                layer,
-                x,
-                &features,
-                &slot_overrides,
-            );
+            return if observe.recording() {
+                let (out, obs) = crate::ffn::sparse_ffn_forward_with_full_overrides_observed(
+                    self.weights,
+                    layer,
+                    x,
+                    &features,
+                    &slot_overrides,
+                );
+                (out, Some(obs))
+            } else {
+                (
+                    crate::ffn::sparse_ffn_forward_with_full_overrides(
+                        self.weights,
+                        layer,
+                        x,
+                        &features,
+                        &slot_overrides,
+                    ),
+                    None,
+                )
+            };
         }
         self.trace_path(layer, "weights_fallback:sparse");
-        sparse_ffn_forward(self.weights, layer, x, &features)
+        if observe.recording() {
+            let (out, obs) = sparse_ffn_forward_observed(self.weights, layer, x, &features);
+            (out, Some(obs))
+        } else {
+            (sparse_ffn_forward(self.weights, layer, x, &features), None)
+        }
     }
 }
 
-impl<'a> FfnBackend for WalkFfn<'a> {
-    fn forward(&self, layer: usize, x: &Array2<f32>) -> Array2<f32> {
-        self.forward_with_activation(layer, x).0
-    }
-
-    fn forward_with_activation(&self, layer: usize, x: &Array2<f32>) -> (Array2<f32>, Array2<f32>) {
+impl<'a> WalkFfn<'a> {
+    /// The routing ladder, parameterised on observation mode. Both trait
+    /// entry points run THIS body, so `forward` and `forward_observed`
+    /// can never route differently — the only mode-dependent behaviour
+    /// is whether activations are recorded and whether the L1 cache
+    /// read is consulted.
+    ///
+    /// Invariant: returns `Some` observation iff `observe` is `Record`
+    /// — except the `Skip`-only L1 hit, which returns `None` trivially.
+    fn forward_routed(
+        &self,
+        layer: usize,
+        x: &Array2<f32>,
+        observe: Observe,
+    ) -> (Array2<f32>, Option<FfnActivations>) {
         let num_features = self.index.num_features(layer);
         if num_features == 0 {
             self.trace_path(layer, "zero_features_dense");
             let dense_ffn = crate::ffn::WeightFfn {
                 weights: self.weights,
             };
-            return dense_ffn.forward_with_activation(layer, x);
+            return if observe.recording() {
+                let (out, obs) = dense_ffn.forward_observed(layer, x);
+                (out, Some(obs))
+            } else {
+                (dense_ffn.forward(layer, x), None)
+            };
         }
 
         if self.record_trace {
@@ -345,11 +394,11 @@ impl<'a> FfnBackend for WalkFfn<'a> {
             //     layer then takes the sparse walk as before, so the
             //     override→forced-sparse cliff only remains where
             //     base+delta cannot be exact.
-            if let Some(result) = self.walk_ffn_base_delta(layer, x) {
+            if let Some(result) = self.walk_ffn_base_delta(layer, x, observe) {
                 return result;
             }
             // 1b. Override-aware sparse walk.
-            if let Some(result) = self.walk_ffn_sparse(layer, x) {
+            if let Some(result) = self.walk_ffn_sparse(layer, x, observe) {
                 // The sparse path has already called trace_path — no
                 // need to rewrite; its name carries the specialisation.
                 return result;
@@ -359,7 +408,7 @@ impl<'a> FfnBackend for WalkFfn<'a> {
             // below are override-blind and would silently serve
             // pre-patch weights. The safetensors fallback is the only
             // other override-aware path — take it directly.
-            return self.weights_fallback(layer, x);
+            return self.weights_fallback(layer, x, observe);
         }
 
         // L1 cache: single-position only. Key is a path-independent
@@ -380,15 +429,22 @@ impl<'a> FfnBackend for WalkFfn<'a> {
             None
         };
 
-        if let Some(key) = l1_key {
-            if let Some(cache) = &self.l1_cache {
-                if let Some(cached) = cache.get(layer, key) {
-                    let hidden = x.shape()[1];
-                    let mut out = Array2::<f32>::zeros((1, hidden));
-                    out.row_mut(0)
-                        .assign(&ndarray::ArrayView1::from(cached.as_slice()));
-                    self.trace_path(layer, "l1_cache_hit");
-                    return (out, Array2::zeros((1, num_features)));
+        // The cache stores outputs only, so a hit can serve `forward`
+        // but has nothing honest to say about activations. An observed
+        // call therefore BYPASSES the read and recomputes (2026-07-30
+        // review, item 15 — the hit used to fabricate an all-zero
+        // activation matrix); the recomputed result refreshes the slot.
+        if !observe.recording() {
+            if let Some(key) = l1_key {
+                if let Some(cache) = &self.l1_cache {
+                    if let Some(cached) = cache.get(layer, key) {
+                        let hidden = x.shape()[1];
+                        let mut out = Array2::<f32>::zeros((1, hidden));
+                        out.row_mut(0)
+                            .assign(&ndarray::ArrayView1::from(cached.as_slice()));
+                        self.trace_path(layer, "l1_cache_hit");
+                        return (out, None);
+                    }
                 }
             }
         }
@@ -396,10 +452,10 @@ impl<'a> FfnBackend for WalkFfn<'a> {
         // Routing ladder. Each branch either `break`s with a result or
         // falls through to the next. See the routing table in the
         // module doc for priority order.
-        let result: (Array2<f32>, Array2<f32>) = 'routing: {
+        let result: (Array2<f32>, Option<FfnActivations>) = 'routing: {
             // 2. Explicit sparse K from the user.
             if self.config.is_sparse(layer) {
-                if let Some(r) = self.walk_ffn_sparse(layer, x) {
+                if let Some(r) = self.walk_ffn_sparse(layer, x, observe) {
                     break 'routing r;
                 }
             }
@@ -411,20 +467,23 @@ impl<'a> FfnBackend for WalkFfn<'a> {
             //    the trait refactor: zero format-specific code in the
             //    walk kernel.
             if self.index.has_fp4_storage() {
-                if let Some(r) = self.walk_ffn_sparse(layer, x) {
+                if let Some(r) = self.walk_ffn_sparse(layer, x, observe) {
                     break 'routing r;
                 }
             }
 
             // 4–9. Whole-layer paths (shared with base+delta's base).
-            if let Some(r) = self.forward_unpatched_whole_layer(layer, x) {
-                break 'routing r;
+            //      Their activation matrix is an intrinsic intermediate
+            //      (the down projection consumes it), so `Skip` merely
+            //      drops it — no extra allocation either way.
+            if let Some((out, act)) = self.forward_unpatched_whole_layer(layer, x) {
+                break 'routing (out, observe.dense(act));
             }
 
             // 10. Last resort: sparse matmul against safetensors weights.
             //     Fires when the vindex has no FFN payload of its own
             //     (extract_level = Browse without pinned weights).
-            break 'routing self.weights_fallback(layer, x);
+            break 'routing self.weights_fallback(layer, x, observe);
         };
 
         if let Some(key) = l1_key {
@@ -434,6 +493,22 @@ impl<'a> FfnBackend for WalkFfn<'a> {
         }
 
         result
+    }
+}
+
+impl<'a> FfnBackend for WalkFfn<'a> {
+    fn forward(&self, layer: usize, x: &Array2<f32>) -> Array2<f32> {
+        // `Observe::Skip` — by construction no walk path touches an
+        // activation buffer on this route.
+        self.forward_routed(layer, x, Observe::Skip).0
+    }
+
+    fn forward_observed(&self, layer: usize, x: &Array2<f32>) -> (Array2<f32>, FfnActivations) {
+        let (out, obs) = self.forward_routed(layer, x, Observe::Record);
+        (
+            out,
+            obs.expect("forward_routed(Record) always yields an observation"),
+        )
     }
 
     fn name(&self) -> &str {

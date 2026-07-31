@@ -178,13 +178,6 @@ mod layer_ffn_or_moe_tests {
         fn forward(&self, _layer: usize, x: &Array2<f32>) -> Array2<f32> {
             Array2::zeros(x.raw_dim())
         }
-        fn forward_with_activation(
-            &self,
-            _layer: usize,
-            x: &Array2<f32>,
-        ) -> (Array2<f32>, Array2<f32>) {
-            (Array2::zeros(x.raw_dim()), Array2::zeros((x.nrows(), 1)))
-        }
         fn name(&self) -> &str {
             "sentinel"
         }
@@ -231,9 +224,12 @@ mod layer_ffn_or_moe_tests {
         let x = Array2::<f32>::zeros((2, 4));
         assert_eq!(s.name(), "sentinel");
         assert_eq!(s.forward(0, &x).shape(), &[2, 4]);
-        let (o, a) = s.forward_with_activation(0, &x);
+        let (o, obs) = s.forward_observed(0, &x);
         assert_eq!(o.shape(), &[2, 4]);
-        assert_eq!(a.shape(), &[2, 1]);
+        assert!(
+            obs.is_absent(),
+            "sentinel stub must not fabricate activations"
+        );
     }
 }
 

@@ -371,7 +371,13 @@ impl ResidualCapture {
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
-/// Serialises the env-var window in [`run_with_dump_dir`].
+/// Serialises every dump-directory env-var window in this module tree.
+///
+/// Shared with [`super::stages::run_with_two_env_vars`] rather than kept
+/// private: both helpers point process-global variables at per-call
+/// tempdirs, and two *different* helpers racing corrupts a capture just
+/// as thoroughly as two calls to the same one. One lock for the whole
+/// mechanism is the only version that is obviously correct.
 ///
 /// Env vars are process-global, so two concurrent captures would each
 /// point the *same* variable at their own tempdir. This is not
@@ -391,7 +397,7 @@ impl ResidualCapture {
 /// `--test-threads=1` upstream") but nothing enforced it, and the
 /// default invocation violates it. The invariant belongs with the
 /// function that owns the global, not with each caller.
-static DUMP_DIR_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(super) static DUMP_DIR_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Set the named env var to a fresh tempdir, run `f`, and return the
 /// tempdir guard so the caller can read files before it drops. The

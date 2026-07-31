@@ -132,6 +132,7 @@ impl<'a> WalkFfn<'a> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::observe::Observe;
     use crate::test_utils::{
         make_test_q4k_vindex, make_test_q4k_weights, make_test_vindex, make_test_weights,
     };
@@ -161,7 +162,7 @@ mod tests {
             .with_precomputed_routing(true);
         let ffn = WalkFfn::from_config(&weights, &index, cfg);
         let (out, _act) = ffn
-            .walk_ffn_sparse(0, &x(1, weights.hidden_size))
+            .walk_ffn_sparse(0, &x(1, weights.hidden_size), Observe::Skip)
             .expect("precomputed-routing walk should produce output");
         assert_eq!(out.shape(), &[1, weights.hidden_size]);
         assert!(out.iter().all(|v| v.is_finite()));
@@ -187,7 +188,7 @@ mod tests {
         let cfg = WalkFfnConfig::sparse(nl, 8).with_cell_router(Arc::new(router));
         let ffn = WalkFfn::from_config(&weights, &index, cfg);
         let (out, _act) = ffn
-            .walk_ffn_sparse(0, &x(1, hidden))
+            .walk_ffn_sparse(0, &x(1, hidden), Observe::Skip)
             .expect("cell-router walk should produce output");
         assert_eq!(out.shape(), &[1, hidden]);
         assert!(out.iter().all(|v| v.is_finite()));
@@ -210,7 +211,7 @@ mod tests {
         };
         let cfg = WalkFfnConfig::sparse(weights.num_layers, 8).with_cell_router(Arc::new(router));
         let ffn = WalkFfn::from_config(&weights, &index, cfg);
-        let result = ffn.walk_ffn_sparse(0, &x(1, weights.hidden_size));
+        let result = ffn.walk_ffn_sparse(0, &x(1, weights.hidden_size), Observe::Skip);
         assert!(result.is_some());
     }
 
@@ -231,7 +232,7 @@ mod tests {
             .with_rank_within_pool(true);
         let ffn = WalkFfn::from_config(&weights, &index, cfg);
         let (out, _act) = ffn
-            .walk_ffn_sparse(0, &x(1, weights.hidden_size))
+            .walk_ffn_sparse(0, &x(1, weights.hidden_size), Observe::Skip)
             .expect("ranked two-stage walk should produce output");
         assert_eq!(out.shape(), &[1, weights.hidden_size]);
         assert!(out.iter().all(|v| v.is_finite()));
@@ -284,12 +285,12 @@ mod tests {
         let ffn = WalkFfn::from_config(&weights, &index, cfg);
         let input = x(1, weights.hidden_size);
         let (base, _) = ffn
-            .walk_ffn_sparse(0, &input)
+            .walk_ffn_sparse(0, &input, Observe::Skip)
             .expect("walk with hnsw disabled");
         index.enable_hnsw(EF_SEARCH);
         assert!(index.is_hnsw_enabled());
         let (toggled, _) = ffn
-            .walk_ffn_sparse(0, &input)
+            .walk_ffn_sparse(0, &input, Observe::Skip)
             .expect("walk with hnsw enabled");
         assert_eq!(
             base, toggled,

@@ -165,11 +165,20 @@ impl<'a> WalkFfn<'a> {
 mod tests {
     use std::sync::Arc;
 
+    use super::super::observe::Observe;
+    use crate::ffn::FfnActivations;
     use crate::test_utils::{
         attach_down_features_q4k_to_test_vindex, make_test_q4k_vindex, make_test_q4k_weights,
     };
     use crate::vindex::{CellRouter, WalkFfn, WalkFfnConfig};
     use ndarray::Array2;
+
+    /// Densify a Record-mode observation for assertions.
+    fn obs_dense(obs: Option<FfnActivations>) -> Array2<f32> {
+        obs.expect("Record mode observes")
+            .into_dense()
+            .expect("walk observations materialise densely")
+    }
 
     fn x(seq: usize, hidden: usize) -> Array2<f32> {
         Array2::from_shape_vec(
@@ -261,9 +270,10 @@ mod tests {
         let pool: Vec<usize> = (0..weights.intermediate_size).collect();
 
         let gather_ffn = walk_pool(&weights, &with_sidecar, pool.clone());
-        let (out_g, act_g) = gather_ffn
-            .walk_ffn_sparse(0, &input)
+        let (out_g, obs_g) = gather_ffn
+            .walk_ffn_sparse(0, &input, Observe::Record)
             .expect("gather-eligible walk runs");
+        let act_g = obs_dense(obs_g);
         assert!(
             gather_ffn
                 .take_dispatch_trace()
@@ -273,9 +283,10 @@ mod tests {
         );
 
         let serial_ffn = walk_pool(&weights, &without_sidecar, pool);
-        let (out_s, act_s) = serial_ffn
-            .walk_ffn_sparse(0, &input)
+        let (out_s, obs_s) = serial_ffn
+            .walk_ffn_sparse(0, &input, Observe::Record)
             .expect("serial walk runs");
+        let act_s = obs_dense(obs_s);
         assert!(
             serial_ffn
                 .take_dispatch_trace()

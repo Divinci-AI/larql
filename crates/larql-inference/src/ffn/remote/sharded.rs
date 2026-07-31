@@ -16,6 +16,11 @@ use super::http::{RemoteFfnConfig, RemoteFfnError, RemoteWalkBackend, WirePrefer
 use crate::ffn::FfnBackend;
 use larql_compute::cpu::ops::q4k_q8k_dot::Q8KActivation;
 
+/// [`crate::ffn::FfnActivations::Absent`] reason when no shard owns the
+/// requested layer — the backend returns a zero output delta and has
+/// observed nothing.
+const REASON_NO_SHARD_FOR_LAYER: &str = "no shard owns this layer (zero FFN delta, unobserved)";
+
 struct LayerShard {
     start: usize,
     end: usize, // inclusive
@@ -279,13 +284,22 @@ impl FfnBackend for LayerShardedBackend {
         }
     }
 
-    fn forward_with_activation(&self, layer: usize, x: &Array2<f32>) -> (Array2<f32>, Array2<f32>) {
+    fn forward_observed(
+        &self,
+        layer: usize,
+        x: &Array2<f32>,
+    ) -> (Array2<f32>, crate::ffn::FfnActivations) {
         match self.shard_for(layer) {
-            Some(shard) => shard.forward_with_activation(layer, x),
-            None => {
-                let z = Array2::zeros(x.raw_dim());
-                (z.clone(), z)
-            }
+            // Delegates to `RemoteWalkBackend`'s trait default — the
+            // shard wire protocol carries outputs only, so the honest
+            // observation is Absent.
+            Some(shard) => shard.forward_observed(layer, x),
+            None => (
+                Array2::zeros(x.raw_dim()),
+                crate::ffn::FfnActivations::Absent {
+                    reason: REASON_NO_SHARD_FOR_LAYER,
+                },
+            ),
         }
     }
 

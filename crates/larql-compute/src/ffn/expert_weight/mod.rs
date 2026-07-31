@@ -36,6 +36,12 @@ use crate::forward::{add_bias, dot_proj};
 /// Number of projections fused into one `gate_up` bias row.
 const FUSED_HALVES: usize = 2;
 
+/// [`FfnActivations::Absent`](super::FfnActivations::Absent) reason for
+/// MoE layers: per-token expert routing means there is no single
+/// pre-down activation tensor to observe.
+const REASON_MOE_NO_SINGLE_ACTIVATION: &str =
+    "MoE layer has no single pre-down activation (per-token expert routing)";
+
 /// Per-expert f32 MoE FFN over `ModelWeights`.
 ///
 /// Construct on a model whose architecture reports [`ModelArchitecture::is_moe`]
@@ -211,13 +217,21 @@ impl FfnBackend for ExpertWeightFfn<'_> {
         })
     }
 
-    fn forward_with_activation(&self, layer: usize, x: &Array2<f32>) -> (Array2<f32>, Array2<f32>) {
-        // A MoE layer has no single pre-down activation — each token visits a
-        // different set of experts. Report the block output for both rather
-        // than inventing one, so a capture consumer sees real numbers of the
-        // right shape instead of a silently meaningless tensor.
-        let out = self.forward(layer, x);
-        (out.clone(), out)
+    fn forward_observed(
+        &self,
+        layer: usize,
+        x: &Array2<f32>,
+    ) -> (Array2<f32>, super::FfnActivations) {
+        // A MoE layer has no single pre-down activation — each token
+        // visits a different set of experts. Report Absent rather than
+        // inventing one (the pre-split impl returned the block output as
+        // the "activation", which was real numbers but the wrong object).
+        (
+            self.forward(layer, x),
+            super::FfnActivations::Absent {
+                reason: REASON_MOE_NO_SINGLE_ACTIVATION,
+            },
+        )
     }
 
     fn name(&self) -> &str {
@@ -531,12 +545,16 @@ mod tests {
     }
 
     #[test]
-    fn forward_with_activation_returns_matching_shapes() {
+    fn forward_observed_reports_absent_with_the_moe_reason() {
         let weights = gpt_oss_weights();
         let ffn = ExpertWeightFfn { weights: &weights };
-        let (out, act) = ffn.forward_with_activation(0, &one_hot(1, 0.5));
+        let (out, obs) = ffn.forward_observed(0, &one_hot(1, 0.5));
         assert_eq!(out.shape(), &[1, HIDDEN]);
-        assert_eq!(act.shape(), &[1, HIDDEN]);
+        assert_eq!(
+            obs.absent_reason(),
+            Some(REASON_MOE_NO_SINGLE_ACTIVATION),
+            "MoE must decline observation, never invent an activation tensor"
+        );
     }
 
     #[test]

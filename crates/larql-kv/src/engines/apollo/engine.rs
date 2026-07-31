@@ -1171,14 +1171,6 @@ mod tests {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             ndarray::Array2::zeros((x.shape()[0], self.hidden))
         }
-        fn forward_with_activation(
-            &self,
-            layer: usize,
-            x: &ndarray::Array2<f32>,
-        ) -> (ndarray::Array2<f32>, ndarray::Array2<f32>) {
-            let out = self.forward(layer, x);
-            (out.clone(), out)
-        }
         fn name(&self) -> &str {
             "counting"
         }

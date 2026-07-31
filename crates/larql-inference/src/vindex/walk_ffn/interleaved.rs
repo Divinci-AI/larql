@@ -87,8 +87,12 @@ mod tests {
         let input = x(2, f.weights.hidden_size);
 
         for layer in 0..f.weights.num_layers {
-            let (out_w, act_w) = walk.forward_with_activation(layer, &input);
-            let (out_d, act_d) = dense.forward_with_activation(layer, &input);
+            let (out_w, obs_w) = walk.forward_observed(layer, &input);
+            let act_w = obs_w
+                .into_dense()
+                .expect("dense walk path observes densely");
+            let (out_d, obs_d) = dense.forward_observed(layer, &input);
+            let act_d = obs_d.into_dense().expect("WeightFfn observes densely");
             assert_eq!(out_w.shape(), out_d.shape());
             for (w, d) in act_w.iter().zip(act_d.iter()) {
                 assert!(

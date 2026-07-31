@@ -676,14 +676,6 @@ mod tests {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             ndarray::Array2::zeros((x.shape()[0], self.hidden))
         }
-        fn forward_with_activation(
-            &self,
-            layer: usize,
-            x: &ndarray::Array2<f32>,
-        ) -> (ndarray::Array2<f32>, ndarray::Array2<f32>) {
-            let out = self.forward(layer, x);
-            (out.clone(), out)
-        }
         fn name(&self) -> &str {
             "counting"
         }
@@ -932,9 +924,12 @@ mod tests {
             hidden: 4,
         };
         let x = ndarray::Array2::<f32>::zeros((1, 4));
-        let (out, act) = ffn.forward_with_activation(0, &x);
+        let (out, obs) = ffn.forward_observed(0, &x);
         assert_eq!(out.shape(), &[1, 4]);
-        assert_eq!(act.shape(), &[1, 4]);
+        assert!(
+            obs.is_absent(),
+            "counting stub must not fabricate activations"
+        );
         assert_eq!(ffn.name(), "counting");
         let exec = FusedStubExecutor {
             backend: larql_compute::CpuBackend,

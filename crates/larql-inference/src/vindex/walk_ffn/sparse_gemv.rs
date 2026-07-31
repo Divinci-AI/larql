@@ -74,6 +74,7 @@ impl<'a> WalkFfn<'a> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::observe::Observe;
     use crate::test_utils::{make_test_q4k_vindex, make_test_q4k_weights, make_test_weights};
     use crate::vindex::{WalkFfn, WalkFfnConfig};
     use ndarray::Array2;
@@ -97,7 +98,7 @@ mod tests {
         let cfg = WalkFfnConfig::dense(weights.num_layers);
         let ffn = WalkFfn::from_config(&weights, &index, cfg);
         let out = ffn
-            .walk_ffn_sparse(0, &x(1, weights.hidden_size))
+            .walk_ffn_sparse(0, &x(1, weights.hidden_size), Observe::Skip)
             .expect("dense-K sparse walk should succeed");
         assert_eq!(out.0.shape(), &[1, weights.hidden_size]);
     }
@@ -113,10 +114,10 @@ mod tests {
         let cfg = WalkFfnConfig::dense(weights.num_layers);
         let backend = larql_compute::cpu_backend();
         let ffn = WalkFfn::from_config(&weights, &index, cfg).with_backend(&*backend);
-        let result = ffn.walk_ffn_sparse(0, &x(1, weights.hidden_size));
+        let result = ffn.walk_ffn_sparse(0, &x(1, weights.hidden_size), Observe::Skip);
         // Full-K + Q4K — either takes the fast path (Some) or falls through
         // to the serial loop (also Some). Just exercise the wiring.
-        if let Some((out, _activation)) = result {
+        if let Some((out, _obs)) = result {
             assert_eq!(out.shape(), &[1, weights.hidden_size]);
             assert!(out.iter().all(|v| v.is_finite()));
         }
@@ -141,9 +142,13 @@ mod tests {
         let ffn = WalkFfn::from_config(&weights, &index, cfg).with_dispatch_trace();
         let input = x(2, weights.hidden_size);
 
-        let (out_w, act_w) = ffn
-            .walk_ffn_sparse(0, &input)
+        let (out_w, obs_w) = ffn
+            .walk_ffn_sparse(0, &input, Observe::Record)
             .expect("full-K gemv walk runs");
+        let act_w = obs_w
+            .expect("Record mode observes")
+            .into_dense()
+            .expect("gemv observation is Dense");
         let trace = ffn.take_dispatch_trace();
         assert_eq!(trace.len(), 1);
         assert_eq!(
@@ -152,7 +157,8 @@ mod tests {
         );
 
         let dense = WeightFfn { weights: &weights };
-        let (out_d, act_d) = dense.forward_with_activation(0, &input);
+        let (out_d, obs_d) = dense.forward_observed(0, &input);
+        let act_d = obs_d.into_dense().expect("dense path observes densely");
         assert_eq!(out_w.shape(), out_d.shape());
         assert_eq!(act_w.shape(), act_d.shape());
         for (w, d) in act_w.iter().zip(act_d.iter()) {
@@ -186,7 +192,13 @@ mod tests {
         let ffn = WalkFfn::from_config(&weights, &index, cfg).with_dispatch_trace();
         let input = x(1, hidden);
 
-        let (out_w, act_w) = ffn.walk_ffn_sparse(0, &input).expect("gemv walk runs");
+        let (out_w, obs_w) = ffn
+            .walk_ffn_sparse(0, &input, Observe::Record)
+            .expect("gemv walk runs");
+        let act_w = obs_w
+            .expect("Record mode observes")
+            .into_dense()
+            .expect("gemv observation is Dense");
         let trace = ffn.take_dispatch_trace();
         assert_eq!(trace.len(), 1);
         assert_eq!(

@@ -36,17 +36,25 @@
 use ndarray::Array2;
 
 use super::helpers::hits_len_ge_intermediate;
+use super::observe::Observe;
 use super::thresholds::GATHER_MIN_FEATURES;
 use super::WalkFfn;
+use crate::ffn::{FfnActivations, SparseActivations};
 use crate::vindex::walk_config::FeatureSelector;
 
 impl<'a> WalkFfn<'a> {
     /// Sparse walk FFN — see module docs.
+    ///
+    /// In `Observe::Record` mode the walk emits exactly the `(feature,
+    /// activation)` pairs it computes (full-K gemv reports its intrinsic
+    /// dense matrix); in `Skip` mode no activation buffer exists at all
+    /// — the returned observation is `None`.
     pub(super) fn walk_ffn_sparse(
         &self,
         layer: usize,
         x: &Array2<f32>,
-    ) -> Option<(Array2<f32>, Array2<f32>)> {
+        observe: Observe,
+    ) -> Option<(Array2<f32>, Option<FfnActivations>)> {
         let hidden = x.shape()[1];
         let seq_len = x.shape()[0];
         let intermediate = self.index.num_features(layer);
@@ -81,7 +89,12 @@ impl<'a> WalkFfn<'a> {
         self.index.prefetch_interleaved_kquant_layer(layer + 1);
 
         let mut out = Array2::<f32>::zeros((seq_len, hidden));
-        let mut full_activation = Array2::<f32>::zeros((seq_len, intermediate));
+        // Observation record — only in Record mode; the per-feature
+        // loops below push exactly what they compute into it. The old
+        // dense `seq_len × intermediate` zero-fill is gone.
+        let mut obs = observe
+            .recording()
+            .then(|| SparseActivations::new(seq_len, intermediate));
 
         let layer_has_overrides = self.index.has_overrides_at(layer);
         let up_bias_for_layer = if !is_gated {
@@ -102,10 +115,12 @@ impl<'a> WalkFfn<'a> {
         let k_is_full =
             !selector_forces_walk && hits_len_ge_intermediate(&self.config, layer, intermediate);
         if !layer_has_overrides && is_gated && k_is_full {
-            if let Some(r) =
+            if let Some((gemv_out, act)) =
                 self.sparse_full_k_gemv(layer, x, up_native, down_native, use_gelu, intermediate)
             {
-                return Some(r);
+                // The gemv computes every feature; its activation matrix
+                // is intrinsic, so the observation is honestly Dense.
+                return Some((gemv_out, observe.dense(act)));
             }
         }
 
@@ -146,8 +161,10 @@ impl<'a> WalkFfn<'a> {
                         {
                             let mut out_row = out.row_mut(s);
                             out_row.as_slice_mut().unwrap().copy_from_slice(&out_vec);
-                            for (&feat, &a) in feats.iter().zip(&acts) {
-                                full_activation[[s, feat]] = a;
+                            if let Some(o) = obs.as_mut() {
+                                for (&feat, &a) in feats.iter().zip(&acts) {
+                                    o.record(s, feat, a);
+                                }
                             }
                             self.trace_path(layer, "sparse:gather_q4k");
                             continue;
@@ -175,6 +192,8 @@ impl<'a> WalkFfn<'a> {
                 layer_has_overrides,
                 gate_knn_ns,
                 &mut out_row,
+                s,
+                obs.as_mut(),
             ) {
                 continue;
             }
@@ -215,7 +234,11 @@ impl<'a> WalkFfn<'a> {
                     }
                 };
 
-                full_activation[[s, feat]] = act;
+                if let Some(o) = obs.as_mut() {
+                    // Recorded regardless of the floor: the floor gates
+                    // the down accumulate, not activation observation.
+                    o.record(s, feat, act);
+                }
 
                 if act.abs() > activation_floor {
                     let down_ov = if layer_has_overrides {
@@ -252,17 +275,26 @@ impl<'a> WalkFfn<'a> {
         }
 
         self.trace_path(layer, "sparse:serial");
-        Some((out, full_activation))
+        Some((out, obs.map(FfnActivations::Sparse)))
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::observe::Observe;
+    use crate::ffn::FfnActivations;
     use crate::test_utils::{
         make_test_q4k_vindex, make_test_q4k_weights, make_test_vindex, make_test_weights,
     };
     use crate::vindex::{WalkFfn, WalkFfnConfig};
     use ndarray::Array2;
+
+    /// Densify a Record-mode observation for assertions.
+    fn obs_dense(obs: Option<FfnActivations>) -> Array2<f32> {
+        obs.expect("Record mode observes")
+            .into_dense()
+            .expect("walk observations materialise densely")
+    }
 
     fn x(seq: usize, hidden: usize) -> Array2<f32> {
         Array2::from_shape_vec(
@@ -282,10 +314,10 @@ mod tests {
         let index = make_test_q4k_vindex(&weights);
         let cfg = WalkFfnConfig::sparse(weights.num_layers, 8);
         let ffn = WalkFfn::from_config(&weights, &index, cfg);
-        let result = ffn.walk_ffn_sparse(0, &x(1, weights.hidden_size));
-        if let Some((out, activation)) = result {
+        let result = ffn.walk_ffn_sparse(0, &x(1, weights.hidden_size), Observe::Record);
+        if let Some((out, obs)) = result {
             assert_eq!(out.shape(), &[1, weights.hidden_size]);
-            assert_eq!(activation.shape()[0], 1);
+            assert_eq!(obs_dense(obs).shape()[0], 1);
         }
     }
 
@@ -312,7 +344,7 @@ mod tests {
         };
 
         let (out_low, act_low) = WalkFfn::from_config(&weights, &index, cfg(0.0))
-            .walk_ffn_sparse(0, &x(1, weights.hidden_size))
+            .walk_ffn_sparse(0, &x(1, weights.hidden_size), Observe::Record)
             .expect("sparse walk runs on the Q4K fixture");
         assert!(
             out_low.iter().any(|v| v.abs() > 0.0),
@@ -321,7 +353,7 @@ mod tests {
         );
 
         let (out_high, act_high) = WalkFfn::from_config(&weights, &index, cfg(f32::MAX))
-            .walk_ffn_sparse(0, &x(1, weights.hidden_size))
+            .walk_ffn_sparse(0, &x(1, weights.hidden_size), Observe::Record)
             .expect("sparse walk runs on the Q4K fixture");
         assert!(
             out_high.iter().all(|v| *v == 0.0),
@@ -344,9 +376,9 @@ mod tests {
         let cfg = WalkFfnConfig::sparse(weights.num_layers, 4);
         let ffn = WalkFfn::from_config(&weights, &index, cfg);
         let result = ffn
-            .walk_ffn_sparse(0, &x(2, weights.hidden_size))
+            .walk_ffn_sparse(0, &x(2, weights.hidden_size), Observe::Skip)
             .expect("feature-major f32 fixture should produce output");
-        let (out, _activation) = result;
+        let (out, _obs) = result;
         assert_eq!(out.shape(), &[2, weights.hidden_size]);
         assert!(out.iter().all(|v| v.is_finite()));
     }
@@ -359,7 +391,7 @@ mod tests {
         let index = make_test_vindex(&weights);
         let cfg = WalkFfnConfig::sparse(weights.num_layers, 4);
         let ffn = WalkFfn::from_config(&weights, &index, cfg);
-        let result = ffn.walk_ffn_sparse(0, &x(1, weights.hidden_size));
+        let result = ffn.walk_ffn_sparse(0, &x(1, weights.hidden_size), Observe::Skip);
         assert!(result.is_none());
     }
 
@@ -378,7 +410,7 @@ mod tests {
         let cfg = WalkFfnConfig::sparse(weights.num_layers, 4);
         let ffn = WalkFfn::from_config(&weights, &index, cfg);
         let out = ffn
-            .walk_ffn_sparse(0, &x(1, weights.hidden_size))
+            .walk_ffn_sparse(0, &x(1, weights.hidden_size), Observe::Skip)
             .expect("starcoder2 + feature-major fixture should produce output");
         assert_eq!(out.0.shape(), &[1, weights.hidden_size]);
         assert!(out.0.iter().all(|v| v.is_finite()));
@@ -488,7 +520,8 @@ mod tests {
         let ffn = WalkFfn::new_unlimited(&weights, &index).with_dispatch_trace();
 
         let input = x(1, weights.hidden_size);
-        let (out, act) = ffn.forward_with_activation(0, &input);
+        let (out, obs) = ffn.forward_observed(0, &input);
+        let act = obs.into_dense().expect("sparse observation densifies");
 
         let trace = ffn.take_dispatch_trace();
         assert_eq!(trace.len(), 1);
@@ -530,7 +563,9 @@ mod tests {
         let ffn = WalkFfn::new_unlimited(&weights, &index).with_dispatch_trace();
 
         // Direct: the walk itself must decline.
-        assert!(ffn.walk_ffn_sparse(0, &x(1, weights.hidden_size)).is_none());
+        assert!(ffn
+            .walk_ffn_sparse(0, &x(1, weights.hidden_size), Observe::Skip)
+            .is_none());
 
         // Ladder: FP4 step fails → fall through to weights_fallback.
         let out = ffn.forward(0, &x(1, weights.hidden_size));
@@ -554,7 +589,9 @@ mod tests {
             fail_scaled_add: false,
         };
         let ffn = WalkFfn::new_unlimited(&weights, &index);
-        assert!(ffn.walk_ffn_sparse(0, &x(1, weights.hidden_size)).is_none());
+        assert!(ffn
+            .walk_ffn_sparse(0, &x(1, weights.hidden_size), Observe::Record)
+            .is_none());
     }
 
     // ── Override arms of the serial loop ────────────────────────────────
@@ -657,9 +694,10 @@ mod tests {
         };
         let input = x(1, hidden);
 
-        let (out_base, act_base) = WalkFfn::from_config(&weights, &inner, cfg())
-            .walk_ffn_sparse(0, &input)
+        let (out_base, obs_base) = WalkFfn::from_config(&weights, &inner, cfg())
+            .walk_ffn_sparse(0, &input, Observe::Record)
             .expect("baseline walk runs");
+        let act_base = obs_dense(obs_base);
 
         let overridden = OverrideQ4kIndex {
             inner: &inner,
@@ -667,9 +705,10 @@ mod tests {
             down_zero_feat,
             zeros: vec![0.0; hidden],
         };
-        let (out_ov, act_ov) = WalkFfn::from_config(&weights, &overridden, cfg())
-            .walk_ffn_sparse(0, &input)
+        let (out_ov, obs_ov) = WalkFfn::from_config(&weights, &overridden, cfg())
+            .walk_ffn_sparse(0, &input, Observe::Record)
             .expect("override walk runs");
+        let act_ov = obs_dense(obs_ov);
 
         // Up override → that feature's activation is exactly 0.
         assert!(
@@ -744,10 +783,10 @@ mod tests {
         );
 
         let (out_std, act_std) = WalkFfn::from_config(&weights, &index, cfg())
-            .walk_ffn_sparse(0, &x_std)
+            .walk_ffn_sparse(0, &x_std, Observe::Record)
             .expect("contiguous walk runs");
         let (out_cm, act_cm) = WalkFfn::from_config(&weights, &index, cfg())
-            .walk_ffn_sparse(0, &x_cm)
+            .walk_ffn_sparse(0, &x_cm, Observe::Record)
             .expect("column-major walk runs");
         assert_eq!(out_cm, out_std);
         assert_eq!(act_cm, act_std);

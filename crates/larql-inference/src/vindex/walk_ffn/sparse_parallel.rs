@@ -8,14 +8,25 @@
 //! `sparse:parallel_q4k_down`; phase timings recorded when a
 //! `PhaseTimingsHandle` is attached.
 //!
-//! Known limitation (2026-07-30 review, M2): this branch does not write
-//! `full_activation` — activation output is silently zero for positions
-//! it handles. Fixed by the forward/forward_observed split (Tier 2).
+//! When observing (`obs = Some`), each rayon chunk also collects its
+//! `(feature, activation)` pairs, merged into the caller's record after
+//! the reduce — the same real values the scan used for its scaled-adds
+//! (2026-07-30 review, M2: this branch used to silently report zeros;
+//! fixed by the forward/forward_observed split).
+
+/// One rayon chunk's contribution: its partial `[hidden]` output
+/// accumulator, plus the `(feature, activation)` pairs it scanned.
+///
+/// The pairs are only populated when observing; on the hot path the
+/// inner `Vec` never allocates. Named because the tuple-of-vectors shape
+/// is otherwise opaque at the collection site.
+type ChunkPartial = (Vec<f32>, Vec<(usize, f32)>);
 
 use rayon::prelude::*;
 
 use super::thresholds::PARALLEL_DOWN_MIN_HITS;
 use super::WalkFfn;
+use crate::ffn::SparseActivations;
 
 impl<'a> WalkFfn<'a> {
     /// Try the rayon-parallel Q4K-down-cache scan for one position.
@@ -36,6 +47,8 @@ impl<'a> WalkFfn<'a> {
         layer_has_overrides: bool,
         gate_knn_ns: u64,
         out_row: &mut ndarray::ArrayViewMut1<'_, f32>,
+        position: usize,
+        mut obs: Option<&mut SparseActivations>,
     ) -> bool {
         let hidden = x_slice.len();
         let activation_floor = self.config.effective_activation_floor();
@@ -73,11 +86,17 @@ impl<'a> WalkFfn<'a> {
         let chunk_size = hits.len().div_ceil(n_threads);
         let up_native_ref = up_native.as_ref();
 
+        // When observing, each chunk collects the (feature, activation)
+        // pairs it scanned — the SAME values its scaled-adds consumed.
+        // `Vec::new()` never allocates until pushed, so the unobserved
+        // hot path pays nothing.
+        let collect_acts = obs.is_some();
         let t_scan = std::time::Instant::now();
-        let partials: Vec<Vec<f32>> = hits
+        let partials: Vec<ChunkPartial> = hits
             .par_chunks(chunk_size)
             .map(|chunk| {
                 let mut partial = vec![0.0f32; hidden];
+                let mut acts: Vec<(usize, f32)> = Vec::new();
                 for &(feat, gate_score) in chunk {
                     let up_score = if let Some(up_view) = up_native_ref {
                         up_view.row(feat).dot(&x_row)
@@ -98,6 +117,9 @@ impl<'a> WalkFfn<'a> {
                         gate_score * crate::ffn::sigmoid(gate_score)
                     };
                     let act = activated_gate * up_score;
+                    if collect_acts {
+                        acts.push((feat, act));
+                    }
                     if act.abs() > activation_floor {
                         let row_start = feat * hidden;
                         let down_row = &down_data[row_start..row_start + hidden];
@@ -106,19 +128,27 @@ impl<'a> WalkFfn<'a> {
                         pv.scaled_add(act, &dv);
                     }
                 }
-                partial
+                (partial, acts)
             })
             .collect();
         let parallel_scan_ns = t_scan.elapsed().as_nanos() as u64;
 
         let t_reduce = std::time::Instant::now();
         let out_slice = out_row.as_slice_mut().unwrap();
-        for p in &partials {
+        for (p, _) in &partials {
             for i in 0..hidden {
                 out_slice[i] += p[i];
             }
         }
         let reduce_ns = t_reduce.elapsed().as_nanos() as u64;
+
+        if let Some(o) = obs.as_mut() {
+            for (_, acts) in &partials {
+                for &(feat, act) in acts {
+                    o.record(position, feat, act);
+                }
+            }
+        }
 
         if let Some(h) = &self.phase_timings {
             use std::sync::atomic::Ordering::Relaxed;
@@ -149,6 +179,7 @@ mod tests {
 
     use ndarray::Array2;
 
+    use super::super::observe::Observe;
     use super::super::thresholds::PARALLEL_DOWN_MIN_HITS;
     use crate::test_utils::{
         attach_up_features_f32_only_to_test_vindex, make_test_q4k_vindex,
@@ -194,10 +225,13 @@ mod tests {
     /// Route of `PARALLEL_DOWN_MIN_HITS` features on the wide Q4K-only
     /// fixture fires `sparse:parallel_q4k_down`; the output must equal
     /// the sum of two serial half-route walks (per-feature linearity).
-    /// Also pins the M2 known limitation: the parallel branch does not
-    /// write `full_activation` (all-zero) while the serial halves do —
-    /// this assertion flips when the Tier-2 forward/forward_observed
-    /// split fixes M2.
+    ///
+    /// FLIPPED 2026-07-31 (the M2 pin): before the
+    /// forward/forward_observed split this test asserted the parallel
+    /// branch reported all-zero activations ("will flip loudly when the
+    /// Tier-2 fix lands"). It now asserts the branch reports the REAL
+    /// per-feature activations — bit-equal to the serial halves, which
+    /// compute the same up-dots against the same dequant cache.
     #[test]
     fn parallel_q4k_down_matches_serial_half_route_sum() {
         let weights = make_test_q4k_weights_wide();
@@ -216,9 +250,13 @@ mod tests {
         let timings = Arc::new(super::super::timings::PhaseTimingsHandle::default());
         let par_ffn =
             walk_pool(&weights, &index, full.clone()).with_phase_timings(Arc::clone(&timings));
-        let (out_par, act_par) = par_ffn
-            .walk_ffn_sparse(0, &input)
+        let (out_par, obs_par) = par_ffn
+            .walk_ffn_sparse(0, &input, Observe::Record)
             .expect("wide Q4K fixture supports the sparse walk");
+        let act_par = obs_par
+            .expect("Record mode observes")
+            .into_dense()
+            .expect("sparse observation densifies");
         let par_trace = par_ffn.take_dispatch_trace();
         assert!(
             par_trace
@@ -235,15 +273,20 @@ mod tests {
 
         let serial = |pool: &[usize]| {
             let ffn = walk_pool(&weights, &index, pool.to_vec());
-            let r = ffn
-                .walk_ffn_sparse(0, &input)
+            let (out, obs) = ffn
+                .walk_ffn_sparse(0, &input, Observe::Record)
                 .expect("serial half-route runs");
             let trace = ffn.take_dispatch_trace();
             assert!(
                 trace.iter().all(|e| e.path != "sparse:parallel_q4k_down"),
                 "half routes stay below PARALLEL_DOWN_MIN_HITS → serial"
             );
-            r
+            (
+                out,
+                obs.expect("Record mode observes")
+                    .into_dense()
+                    .expect("sparse observation densifies"),
+            )
         };
         let (out_a, act_a) = serial(first);
         let (out_b, act_b) = serial(second);
@@ -258,15 +301,18 @@ mod tests {
             "parallel vs serial-half-sum rel L2 = {err} (expected < 1e-4)"
         );
 
-        // M2 pin (module doc "Known limitation"): parallel writes no
-        // activations; the serial halves observed real ones.
-        assert!(
-            act_par.iter().all(|v| *v == 0.0),
-            "M2: the parallel branch is documented to leave full_activation zero"
-        );
+        // The flipped M2 pin: the parallel branch's observed activations
+        // equal the serial halves' — per-feature values are single
+        // up-dot × gate products on identical bytes, so equality is
+        // exact, not approximate.
         assert!(
             act_a.iter().any(|v| v.abs() > 0.0) && act_b.iter().any(|v| v.abs() > 0.0),
             "serial halves must record non-zero activations for the parity to mean anything"
+        );
+        let serial_acts = &act_a + &act_b;
+        assert_eq!(
+            act_par, serial_acts,
+            "parallel branch must observe the REAL activations it scanned"
         );
     }
 
@@ -290,8 +336,8 @@ mod tests {
         let (first, second) = full.split_at(PARALLEL_DOWN_MIN_HITS / 2);
 
         let par_ffn = walk_pool(&weights, &index, full.clone());
-        let (out_par, _act) = par_ffn
-            .walk_ffn_sparse(0, &input)
+        let (out_par, _obs) = par_ffn
+            .walk_ffn_sparse(0, &input, Observe::Skip)
             .expect("wide Q4K fixture with native up supports the sparse walk");
         assert!(
             par_ffn
@@ -303,7 +349,7 @@ mod tests {
 
         let serial = |pool: &[usize]| {
             walk_pool(&weights, &index, pool.to_vec())
-                .walk_ffn_sparse(0, &input)
+                .walk_ffn_sparse(0, &input, Observe::Skip)
                 .expect("serial half-route runs")
                 .0
         };

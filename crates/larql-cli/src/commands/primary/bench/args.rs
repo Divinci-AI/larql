@@ -55,7 +55,7 @@ pub struct BenchArgs {
     ///   markov-rs-codec[:window=N]            — markov-rs with bf16 cold tier (2× cold saving)
     ///   unlimited-context:window=N            — per-window K/V checkpoints
     ///   turbo-quant[:bits=3|4]                — WHT + Lloyd-Max codec; experimental
-    ///   apollo:layer=N,coef=F,top_k=K         — boundary-residual injection; experimental
+    ///   apollo:layer=N,coef=F,top_k=K,bos=B   — boundary-residual injection; experimental
     ///   boundary-kv:chunk_tokens=N,sequence_id=S  — Standard + larql-boundary frame emission
     ///
     /// List separator: `;` (preferred) or `,` (legacy). Use `;` when any engine

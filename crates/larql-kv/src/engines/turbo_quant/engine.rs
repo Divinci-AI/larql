@@ -1615,14 +1615,6 @@ mod integration_tests {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             ndarray::Array2::zeros((x.shape()[0], self.hidden))
         }
-        fn forward_with_activation(
-            &self,
-            layer: usize,
-            x: &ndarray::Array2<f32>,
-        ) -> (ndarray::Array2<f32>, ndarray::Array2<f32>) {
-            let out = self.forward(layer, x);
-            (out.clone(), out)
-        }
         fn name(&self) -> &str {
             "counting"
         }
@@ -1709,18 +1701,21 @@ mod integration_tests {
     }
 
     #[test]
-    fn counting_ffn_forward_with_activation_returns_paired_arrays() {
+    fn counting_ffn_forward_observed_runs_forward_and_reports_absent() {
         use larql_inference::ffn::FfnBackend;
         let ffn = CountingFfn {
             calls: std::sync::atomic::AtomicUsize::new(0),
             hidden: 8,
         };
         let x = ndarray::Array2::<f32>::zeros((3, 8));
-        let (h, act) = ffn.forward_with_activation(0, &x);
+        let (h, obs) = ffn.forward_observed(0, &x);
         assert_eq!(h.shape(), &[3, 8]);
-        assert_eq!(act.shape(), &[3, 8]);
+        assert!(
+            obs.is_absent(),
+            "counting stub must not fabricate activations"
+        );
         assert_eq!(ffn.name(), "counting");
-        // The `forward_with_activation` impl delegates to `forward`, so
+        // The default `forward_observed` delegates to `forward`, so
         // exactly one call is recorded.
         assert_eq!(ffn.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     }

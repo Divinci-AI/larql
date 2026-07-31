@@ -1119,8 +1119,7 @@ mod tests {
             let pool = SpinPool::new(PARTICIPANTS);
             for iter in 0..ITERATIONS {
                 let n = if iter % 2 == 0 { 1 } else { WIDE_CHUNKS };
-                let counters: Vec<AtomicU8> =
-                    (0..n).map(|_| AtomicU8::new(0)).collect();
+                let counters: Vec<AtomicU8> = (0..n).map(|_| AtomicU8::new(0)).collect();
                 pool.for_each_chunk(n, |c| {
                     counters[c].fetch_add(1, Ordering::Relaxed);
                 });

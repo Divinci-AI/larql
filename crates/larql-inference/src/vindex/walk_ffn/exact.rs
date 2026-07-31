@@ -134,8 +134,12 @@ mod tests {
         let dense = WeightFfn { weights: &weights };
         let input = x(2, weights.hidden_size);
 
-        let (out_w, act_w) = walk.forward_with_activation(0, &input);
-        let (out_d, act_d) = dense.forward_with_activation(0, &input);
+        let (out_w, obs_w) = walk.forward_observed(0, &input);
+        let act_w = obs_w
+            .into_dense()
+            .expect("dense walk path observes densely");
+        let (out_d, obs_d) = dense.forward_observed(0, &input);
+        let act_d = obs_d.into_dense().expect("WeightFfn observes densely");
         assert_close(&act_w, &act_d, "activation");
         assert_close(&out_w, &out_d, "output");
         let trace = walk.take_dispatch_trace();
@@ -154,7 +158,8 @@ mod tests {
         let dense = WeightFfn { weights: &weights };
         let input = x(1, weights.hidden_size);
         let (out_w, act_w) = walk.walk_ffn_exact(0, &input);
-        let (out_d, act_d) = dense.forward_with_activation(0, &input);
+        let (out_d, obs_d) = dense.forward_observed(0, &input);
+        let act_d = obs_d.into_dense().expect("WeightFfn observes densely");
         assert_close(&act_w, &act_d, "activation");
         assert_close(&out_w, &out_d, "output");
         assert_eq!(walk.take_dispatch_trace()[0].path, "exact");
@@ -176,7 +181,8 @@ mod tests {
         let dense = WeightFfn { weights: &weights };
         let input = x(1, weights.hidden_size);
         let (out_w, act_w) = walk.walk_ffn_exact(0, &input);
-        let (out_d, act_d) = dense.forward_with_activation(0, &input);
+        let (out_d, obs_d) = dense.forward_observed(0, &input);
+        let act_d = obs_d.into_dense().expect("WeightFfn observes densely");
         assert_close(&act_w, &act_d, "activation");
         assert_close(&out_w, &out_d, "output");
     }
@@ -212,7 +218,8 @@ mod tests {
             "full_mmap",
             "dropped FFN weights must divert to the full-mmap walk"
         );
-        let (out_d, act_d) = dense.forward_with_activation(0, &input);
+        let (out_d, obs_d) = dense.forward_observed(0, &input);
+        let act_d = obs_d.into_dense().expect("WeightFfn observes densely");
         assert_close(&act_w, &act_d, "activation");
         assert_close(&out_w, &out_d, "output");
     }
