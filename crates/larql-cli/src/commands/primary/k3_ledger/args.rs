@@ -54,6 +54,8 @@ pub enum K3LedgerCmd {
     Block(BlockArgs),
     /// Can MXFP4 transcode to Q6_K exactly? Scans e8m0 exponent spread.
     TranscodeScan(TranscodeScanArgs),
+    /// Composed per-class ceiling, and the R4 best case for each proposed lever.
+    Ceilings(CeilingsArgs),
 }
 
 #[derive(Debug, Args)]
@@ -138,4 +140,14 @@ pub struct TranscodeScanArgs {
     /// How many expert `weight_scale` tensors to sample from the shard.
     #[arg(long, default_value_t = 24)]
     pub tensors: usize,
+}
+
+#[derive(Debug, Args)]
+pub struct CeilingsArgs {
+    /// Serving format for the dense path, in all-in bits per weight.
+    #[arg(long, default_value_t = 4.25)]
+    pub dense_bits: f64,
+    /// Serving format for the routed experts, in all-in bits per weight.
+    #[arg(long, default_value_t = 4.25)]
+    pub routed_bits: f64,
 }

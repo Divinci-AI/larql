@@ -459,3 +459,98 @@ pub fn transcode_scan(
     println!("VERDICT: {}", m.verdict());
     Ok(())
 }
+
+pub fn ceilings(geom: &K3Geometry, a: &super::args::CeilingsArgs, as_json: bool) -> R {
+    use super::classes::{self, KernelClass, Scenario};
+
+    let base = classes::census(geom, a.dense_bits, a.routed_bits);
+    let composed = classes::compose(base.clone(), classes::BW_GB_S, KernelClass::Down.eta());
+
+    if as_json {
+        println!("{}", serde_json::to_string_pretty(&composed)?);
+        return Ok(());
+    }
+
+    header(geom);
+    println!();
+    println!("--- per-class census (dense {:.2} bits, routed {:.2} bits) ---",
+        a.dense_bits, a.routed_bits);
+    println!("{:<28} {:>9} {:>9} {:>6} {:>9}", "class", "params B", "GB/token", "eta", "ms/token");
+    for r in &composed.rows {
+        println!("{:<28} {:>9.2} {:>9.2} {:>6.2} {:>9.2}",
+            r.name, r.params as f64 / 1e9, r.bytes() / 1e9, r.eta(),
+            r.seconds(classes::BW_GB_S) * 1e3);
+    }
+    println!("{:<28} {:>9} {:>9.2} {:>6} {:>9.2}", "TOTAL", "",
+        composed.total_bytes / 1e9, "", composed.seconds_per_token * 1e3);
+    println!();
+    println!("  COMPOSED ceiling {:.2} tok/s", composed.tok_s);
+    println!("  scalar-eta quote {:.2} tok/s  -> overstates by {:.2}x",
+        composed.scalar_tok_s, composed.scalar_overstates_by);
+    println!();
+
+    println!("  eta provenance (R0 — none of these may be quoted bare):");
+    for c in [
+        KernelClass::AttnProjection,
+        KernelClass::GateUp,
+        KernelClass::Down,
+        KernelClass::RoutedExpert,
+    ] {
+        println!(
+            "    {:.2}  {:<28} {}{}",
+            c.eta(),
+            c.label(),
+            c.provenance(),
+            if c.is_provisional() { "   [PROVISIONAL]" } else { "" }
+        );
+    }
+    println!();
+
+    println!("--- R4 best case per proposed lever (ceiling if it FULLY succeeds) ---");
+    let mut scen: Vec<(&str, Vec<classes::ClassRow>)> = vec![
+        ("exp1 exact MXFP4 layout: all classes -> best eta",
+         classes::apply(&base, Scenario::AllClassesAtBestEta)),
+        ("exp3 3-bit KDA attention",
+         classes::apply(&base, Scenario::Rebits("KDA attention projections", 3.0))),
+        ("exp3+ 2.5-bit KDA attention",
+         classes::apply(&base, Scenario::Rebits("KDA attention projections", 2.5))),
+        ("exp4 expert fusion: routed shape 0.64 -> 0.89",
+         classes::apply(&base, Scenario::LiftClass(KernelClass::RoutedExpert, 0.89))),
+        ("exp3+exp4 stacked: 2.5-bit KDA + expert shape fixed",
+         classes::apply_all(&base, &[
+             Scenario::Rebits("KDA attention projections", 2.5),
+             Scenario::LiftClass(KernelClass::RoutedExpert, 0.89),
+         ])),
+        ("exp4+ expert fusion to the roofline (0.95)",
+         classes::apply(&base, Scenario::LiftClass(KernelClass::RoutedExpert, 0.95))),
+        ("R4 floor: routed experts ZEROED",
+         classes::apply(&base, Scenario::Zero("routed experts (top-k)"))),
+        ("STACKED: 2.5-bit KDA + every class at best eta",
+         classes::apply_all(&base, &[
+             Scenario::Rebits("KDA attention projections", 2.5),
+             Scenario::AllClassesAtBestEta,
+         ])),
+        ("STACKED + routed experts also zeroed (absolute ceiling)",
+         classes::apply_all(&base, &[
+             Scenario::Rebits("KDA attention projections", 2.5),
+             Scenario::AllClassesAtBestEta,
+             Scenario::Zero("routed experts (top-k)"),
+         ])),
+    ];
+    let mut scored: Vec<(String, f64)> = scen
+        .drain(..)
+        .map(|(n, rows)| {
+            let c = classes::compose(rows, classes::BW_GB_S, KernelClass::Down.eta());
+            (n.to_string(), c.tok_s)
+        })
+        .collect();
+    scored.sort_by(|x, y| y.1.partial_cmp(&x.1).unwrap());
+    for (name, tok) in &scored {
+        let gain = tok / composed.tok_s;
+        println!("  {:<48} {:>6.2} tok/s  ({:+.0}%)", name, tok, 100.0 * (gain - 1.0));
+    }
+    println!();
+    println!("  baseline (measured per-class eta, today's formats) {:.2} tok/s", composed.tok_s);
+    println!("  Order the programme by these, not by how interesting each sounds.");
+    Ok(())
+}
