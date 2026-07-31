@@ -41,8 +41,27 @@
 > §3 LOW conformance violations (the legacy `down_meta::read_binary`
 > allocation bomb, the Vindexfile bare-comma/`unwrap_or(0)` items)
 > are fixed with regression tests; the perf benchmark protocol is a
-> documented follow-up in that doc (§4). Open: doc drift
-> (23), hygiene (24), plus tracked follow-ups (server/lql
+> documented follow-up in that doc (§4). Doc drift (23, §5 item 8)
+> closed 2026-08-01: every cited number traced to its source first —
+> the README/operations-spec `0.008 ms/layer` + `0.3 ms` 34-layer
+> walk headline was the pre-2026-04-05 `vindex_bench` example at its
+> reduced 1024×256 synthetic shape, replaced with the current
+> criterion `vindex_ops` numbers at both shapes (22.7 µs synthetic /
+> 2.64 ms Gemma 10240×2560) plus the exact-brute-gemv scope note
+> from the item-13 inversion (`enable_hnsw` = gate-KNN consumers
+> only); the extract-level default contradiction resolved in favour
+> of the code (CLI defaults to inference, bare LQL `EXTRACT` to
+> browse — stated per surface); walk.md's "K=8092" kept rather than
+> "corrected" to 8192 — the 2026-04-03 boundary sweep and sparse.md
+> literally ran the 8092 harness constant (79% of 10240, genuinely
+> sparse; K≥8192 hits the 80% full-K dense rewrite), now documented
+> as such — and the "production" framing rebalanced (WalkFfn =
+> instrumentable/editable execution layer + CPU sparse path; Q4K GPU
+> decode ~88 tok/s is the perf centre), with historical results kept
+> and date-qualified; campaign-sweep updates for runtime trace
+> emission (17), base+delta-first (16) and GateOverlay-backed
+> KnnStore (21) folded into the same docs. Open: hygiene (24), plus
+> tracked follow-ups (server/lql
 > `try_apply_patch` migration, remote http/sharded transport coverage,
 > logit-contribution trace field, walk-FFN thresholds surfaced into
 > `WalkFfnConfig`). Per-item detail:
@@ -379,6 +398,12 @@ stands):
    "Lossless at K=8092" (typo for 8192) and "production" framing. The
    review itself being misled by stale docs is the strongest argument for
    fixing them.
+   *(Resolved 2026-08-01 — see the header note and ROADMAP item 23.
+   One finding adjusted on verification: the boundary sweep, sparse.md
+   and the remote-codec tests all literally ran K=8092 — the typo is
+   baked into the 2026-04 harness constant, not walk.md — so the doc
+   now documents 8092 as the harness's literal K instead of silently
+   rewriting history to 8192.)*
 
 **Rejected/adjusted from the strategic review:** the WalkFfn→VindexFfn
 rename undersells the load-bearing identity (the full-K gemv path proves

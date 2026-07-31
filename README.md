@@ -380,11 +380,15 @@ Three extraction levels:
 
 | Level | CLI Flag | LQL Syntax | Size (f16) | Enables |
 |-------|----------|-----------|-----------|---------|
-| Browse | `--level browse` (default) | `EXTRACT MODEL ... INTO ...` | ~3 GB | DESCRIBE, WALK, SELECT |
-| Inference | `--level inference` | `... WITH INFERENCE` | ~6 GB | + INFER |
+| Browse | `--level browse` | `EXTRACT MODEL ... INTO ...` (LQL default) | ~3 GB | DESCRIBE, WALK, SELECT |
+| Inference | `--level inference` (CLI default) | `... WITH INFERENCE` | ~6 GB | + INFER |
 | All | `--level all` | `... WITH ALL` | ~10 GB | + COMPILE |
 
-Add `--f16` to halve file sizes with negligible accuracy loss.
+Defaults differ by surface: `larql extract` defaults to `--level
+inference` (`larql-cli` `extract_index_cmd.rs`), matching the quick
+start above; a bare LQL `EXTRACT MODEL` statement defaults to browse
+(`larql-lql` `parser/lifecycle.rs`). Storage is f16 by default — pass
+`--f32` to opt out (doubles file sizes).
 
 ## Architecture
 
@@ -430,7 +434,7 @@ let index = VectorIndex::load_vindex(&path, &mut cb)?;
 let patched = PatchedVindex::new(index);
 
 // Query
-let hits = patched.gate_knn(layer, &query, 10);  // 0.008ms/layer
+let hits = patched.gate_knn(layer, &query, 10);  // exact BLAS gemv — ~2.6ms/layer at Gemma 3 4B shape (10240×2560)
 let trace = patched.walk(&query, &layers, 10);    // multi-layer scan
 
 // Mutate (patch overlay — base files never modified)
@@ -632,14 +636,31 @@ extraction-only flows (DESCRIBE, KNN, vindex publish) work today.
 
 ### Vindex Operations
 
+Criterion (`cargo bench -p larql-vindex --bench vindex_ops`), M3 Max,
+synthetic data. All KNN/walk rows are the **exact brute-force BLAS
+gemv** — the walk hot path never consults HNSW (`enable_hnsw` only
+affects gate-KNN serving consumers such as the browse `walk()` and
+server KNN endpoints; pinned by `gate_walk_ignores_hnsw_toggle`).
+An earlier revision of this table quoted `0.008 ms`/layer and a
+`0.3 ms` 34-layer walk — those came from the reduced 1024×256
+synthetic shape in the pre-2026-04-05 `vindex_bench` example
+("reduced from 10240/2560/34 for bench speed"), not the production
+shape below.
+
 | Operation | Latency |
 |---|---|
-| Gate KNN (per layer) | 0.008ms |
-| Walk (34 layers) | 0.3ms |
-| Feature lookup | <1ns |
-| Save gates (8 MB) | 1.1ms |
-| Load vindex | 8ms |
-| Mutate (meta + gate) | 617ns |
+| Gate KNN, per layer (1024f × 256h synthetic) | 22.7 µs |
+| Gate KNN, per layer (10240f × 2560h — Gemma 3 4B shape) | 2.64 ms |
+| Walk (8L × 1024f × 256h synthetic) | 216 µs |
+| Walk (8L × 10240f × 2560h — Gemma band) | 21.2 ms |
+| Feature meta lookup | ~245 ns |
+| Save gates (8 MB) | 2.0 ms |
+| Load vindex (mmap) | 261 µs |
+| Mutate (meta + gate) | 301 ns |
+
+Full tables (per-shape KNN, Q4/Metal, HNSW-vs-brute, W2 feature-major
+down): [crates/larql-vindex/README.md](crates/larql-vindex/README.md)
+and [crates/larql-vindex/PERFORMANCE.md](crates/larql-vindex/PERFORMANCE.md).
 
 ### Inference Engine (Gemma 3 4B, Apple Silicon M3 Max)
 

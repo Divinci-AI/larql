@@ -747,8 +747,14 @@ pass; KnnStore unified at the retrieval-kernel level (21 — full arch-B
 retirement explicitly gated in the spec, see the item); v1 conformance
 contract (22) shipped 2026-08-01 (corruption suite + LE golden
 vectors + `docs/conformance-v1.md`; perf benchmark protocol is a
-documented follow-up in that doc). Open: 23 (doc
-drift), 24 (hygiene) + tracked follow-ups
+documented follow-up in that doc); doc drift (23) closed 2026-08-01
+(every number re-verified against its bench/experiment source — the
+0.008 ms headline was the pre-2026-04-05 reduced-shape `vindex_bench`
+example; extract-default contradiction resolved in favour of the code,
+per surface; walk.md K=8092 kept — it is the literal harness constant,
+now documented as such — and WalkFfn reframed as the
+instrumentable/editable layer + CPU sparse path). Open: 24 (hygiene)
++ tracked follow-ups
 (server/lql `try_apply_patch` migration, remote transport coverage
 harness, logit-contribution trace field, walk-FFN thresholds surfaced
 into `WalkFfnConfig`).
@@ -1059,11 +1065,39 @@ what's exact, approximate, observed, reconstructed):**
     is a documented follow-up in conformance-v1.md §4 (walk-vs-dense
     parity exists as item 20; no numbers faked). [larql-vindex,
     larql-vindex-spec]
-23. **Doc drift** — README `0.008 ms/layer` headline needs the
-    HNSW-vs-brute/which-N qualifier vs the 2.65 ms full-projection figure;
-    README extract-level default contradiction; walk.md "Lossless at
-    K=8092" (typo) + "production" framing. The external review being
-    misled by these is the argument for fixing them. [docs]
+23. ✅ **Doc drift** (DONE 2026-08-01 — every number traced to its
+    source before editing. The `0.008 ms/layer` + `0.3 ms` 34-layer
+    walk headline (repo README, vindex `operations-spec.md`) was the
+    pre-2026-04-05 `vindex_bench` example at its reduced 1024×256
+    synthetic shape ("reduced from 10240/2560/34 for bench speed"),
+    scaled to 34 layers — replaced with the current criterion
+    `vindex_ops` numbers at BOTH shapes (22.7 µs at 1024×256, 2.64 ms
+    at the Gemma 10240×2560 production shape) plus an explicit
+    exact-brute-gemv note: the walk hot path never consults HNSW,
+    `enable_hnsw` is gate-KNN-consumers-only (item 13 inversion), now
+    also stated in the crate README's interpretability recipe.
+    Extract-level default contradiction resolved IN FAVOUR OF THE
+    CODE: `larql extract` defaults to `--level inference`
+    (`extract_index_cmd.rs:46`) while bare LQL `EXTRACT MODEL`
+    defaults to browse (`lql parser/lifecycle.rs:17`) — the README
+    table now says which default belongs to which surface, and the
+    stale "add `--f16`" footer became "f16 is the default, `--f32`
+    opts out". walk.md "Lossless at K=8092": NOT fixed by swapping
+    8092→8192 — the 2026-04-03 boundary sweep, sparse.md and the
+    remote-codec tests all literally ran K=8092 (the typo is baked
+    into the harness), so the doc now says exactly that, notes
+    8092 = 79% of 10240 stays genuinely sparse while K≥8192 hits the
+    80% full-K dense rewrite (`thresholds.rs`), and date-qualifies
+    the 97.91% figure (LQL-spec INFER example run, not the sweep).
+    walk.md/ffn-README "production" framing reframed: WalkFfn =
+    instrumentable/editable execution layer + CPU sparse path, Q4K
+    GPU decode (~88 tok/s vs ~1.9 tok/s CPU INFER walk) is the perf
+    centre; historical results kept, date-qualified. Campaign-sweep
+    fixes: runtime trace emission + `new_with_trace` in walk.md
+    (item 17), base+delta-first for patched layers in walk.md + the
+    crate README W2 note (item 16), `gate_overlay.rs`/KnnStore
+    GateOverlay-backed scoring in the crate README tree (item 21),
+    `walk_ffn.rs` → `walk_ffn/` paths. No code changes.) [docs]
 24. **Hygiene** — file splits (`walk_ffn/mod.rs` 926 → timings/ladder/
     builders; `sparse.rs` 842 → gemv/route/parallel/gather;
     `overlay.rs` 959; `huggingface/download/mod.rs` 1329;
