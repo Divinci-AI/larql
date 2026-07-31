@@ -46,6 +46,13 @@ pub(super) fn write_norms_and_router(
             arch.attn_v_bias_key(layer),
             arch.attn_o_bias_key(layer),
             arch.attn_sinks_key(layer),
+            // LayerNorm biases. Added 2026-07-31 for the same reason as the
+            // attention biases above: nothing named them, so GPT-2 and
+            // StarCoder2 lost the `β` of every `γ·x̂ + β` at extraction while
+            // the Metal `layer_norm` shader implemented `+ bias` and always
+            // took its no-bias variant. `None` for RMSNorm architectures.
+            arch.input_layernorm_bias_key(layer),
+            arch.post_attention_layernorm_bias_key(layer),
             // Gemma 4 per-layer scalar multiplier. Stored as a 0-D scalar
             // in safetensors, surfaced through WeightSource as a 1-element
             // vector. The forward path multiplies h by this value after
@@ -138,12 +145,21 @@ pub(super) fn write_norms_and_router(
         }
     }
 
-    // Final model norm (after last layer)
-    if let Some(data) = source.get_vector("norm.weight") {
+    // Final model norm (after last layer).
+    // Final norm, resolved through the accessor rather than a literal.
+    // Every reader (`layer_graph::logits`, `predict`, `trace::vocab`,
+    // `kquant_forward::cached`) uses `arch.final_norm_key()`, so a
+    // hardcoded key here agrees only as long as no architecture
+    // overrides it — at which point the writer would store under one
+    // name and the reader look for another, and the final norm would
+    // vanish silently. Same writer/reader split that lost the
+    // attention biases (`docs/k3-funnel.md` §4.6.1).
+    let final_norm_key = arch.final_norm_key().to_string();
+    if let Some(data) = source.get_vector(&final_norm_key) {
         let bytes = crate::config::dtype::encode_floats(&data, norms_dtype);
         norms_file.write_all(&bytes)?;
         norm_entries.push(WeightEntry {
-            key: "norm.weight".into(),
+            key: final_norm_key.clone(),
             kind: kind::VECTOR.into(),
             shape: vec![data.len()],
             offset: norms_offset,
@@ -151,6 +167,26 @@ pub(super) fn write_norms_and_router(
             file: NORMS_BIN.into(),
         });
         norms_offset += bytes.len() as u64;
+    }
+
+    // Final LayerNorm bias — `None` for RMSNorm architectures. Resolved
+    // through the accessor rather than a literal, unlike the weight above:
+    // an architecture whose final norm is not literally `norm.weight`
+    // already loses the weight here, which is its own latent gap.
+    if let Some(key) = arch.final_norm_bias_key() {
+        if let Some(data) = source.get_vector(&key) {
+            let bytes = crate::config::dtype::encode_floats(&data, norms_dtype);
+            norms_file.write_all(&bytes)?;
+            norm_entries.push(WeightEntry {
+                key,
+                kind: kind::VECTOR.into(),
+                shape: vec![data.len()],
+                offset: norms_offset,
+                length: bytes.len() as u64,
+                file: NORMS_BIN.into(),
+            });
+            norms_offset += bytes.len() as u64;
+        }
     }
 
     // Gemma 4 E2B PLE global projection norm (small vector).

@@ -1329,6 +1329,56 @@ fn starcoder2_detection() {
     assert_eq!(arch.config().num_layers, 30);
 }
 
+/// LayerNorm is `γ·x̂ + β`, so a LayerNorm architecture must name its `β`.
+///
+/// Nothing named a norm bias until 2026-07-31: extraction never wrote one and
+/// `build_pipeline_layers` hardcoded `input_norm_bias: None`, so every
+/// vindex-backed and Metal path silently dropped the shift term for GPT-2 and
+/// StarCoder2 — while the Metal `layer_norm` shader implemented `+ bias` and
+/// always selected its no-bias variant.
+#[test]
+fn starcoder2_names_its_layernorm_biases() {
+    let arch = starcoder2_arch();
+    assert_eq!(
+        arch.input_layernorm_bias_key(3).as_deref(),
+        Some("layers.3.input_layernorm.bias")
+    );
+    assert_eq!(
+        arch.post_attention_layernorm_bias_key(3).as_deref(),
+        Some("layers.3.post_attention_layernorm.bias")
+    );
+    assert_eq!(arch.final_norm_bias_key().as_deref(), Some("norm.bias"));
+}
+
+/// An RMSNorm architecture has no `β` at all, so it must claim none —
+/// otherwise the coverage audit would treat a nonexistent tensor as expected
+/// and extraction would ask for a key that can never resolve.
+#[test]
+fn an_rmsnorm_architecture_claims_no_layernorm_bias() {
+    let arch = detect_from_json(&serde_json::json!({
+        "model_type": "llama",
+        "hidden_size": 64, "num_hidden_layers": 2, "intermediate_size": 128,
+        "num_attention_heads": 4, "num_key_value_heads": 4, "vocab_size": 32
+    }));
+    assert_eq!(arch.norm_type(), larql_models::NormType::RmsNorm);
+    assert!(arch.input_layernorm_bias_key(0).is_none());
+    assert!(arch.post_attention_layernorm_bias_key(0).is_none());
+    assert!(arch.final_norm_bias_key().is_none());
+}
+
+/// The bias key is derived from the weight key, so it tracks any architecture
+/// that overrides its norm naming instead of drifting from it.
+#[test]
+fn the_norm_bias_key_tracks_the_weight_key() {
+    let arch = starcoder2_arch();
+    for layer in [0usize, 7] {
+        let weight = arch.input_layernorm_key(layer);
+        let bias = arch.input_layernorm_bias_key(layer).unwrap();
+        assert_eq!(bias, weight.replace(".weight", ".bias"));
+        assert!(bias.ends_with(".bias"));
+    }
+}
+
 #[test]
 fn starcoder2_norm_and_activation() {
     let arch = starcoder2_arch();

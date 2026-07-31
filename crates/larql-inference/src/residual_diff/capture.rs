@@ -495,16 +495,31 @@ mod tests {
 
     #[test]
     fn run_with_dump_dir_restores_prior_env() {
-        std::env::set_var("LARQL_TEST_RESID_DUMP_DIR_RESTORE", "previous");
-        let dir = run_with_dump_dir("LARQL_TEST_RESID_DUMP_DIR_RESTORE", || {}).unwrap();
-        // After f returns the env var is restored — we observe via env::var,
-        // not via the tempdir guard which is still alive here.
+        const ENV: &str = "LARQL_TEST_RESID_DUMP_DIR_RESTORE";
+        std::env::set_var(ENV, "previous");
+
+        // Observe the state *inside* `f` — that is the window the dump hooks
+        // actually run in, and the only place the claim "the tempdir existed
+        // and the var pointed at it" is checkable. The previous version
+        // asserted `dir.path().exists() || !dir.path().exists()`, which is a
+        // tautology: it can never fail, so it pinned nothing. Same shape as
+        // the plausibility-only timestamp tests in `docs/k3-funnel.md` §4.5.
+        let mut seen_var = String::new();
+        let mut existed_during = false;
+        let dir = run_with_dump_dir(ENV, || {
+            seen_var = std::env::var(ENV).unwrap_or_default();
+            existed_during = std::path::Path::new(&seen_var).is_dir();
+        })
+        .unwrap();
+
+        assert!(existed_during, "the tempdir must exist while `f` runs");
         assert_eq!(
-            std::env::var("LARQL_TEST_RESID_DUMP_DIR_RESTORE").unwrap(),
-            "previous"
+            seen_var,
+            dir.path().to_string_lossy(),
+            "`f` must see the var pointing at this call's tempdir"
         );
-        // Sanity: the tempdir actually existed during f.
-        assert!(dir.path().exists() || !dir.path().exists()); // either is fine post-drop
+        // And afterwards the prior value is back.
+        assert_eq!(std::env::var(ENV).unwrap(), "previous");
         std::env::remove_var("LARQL_TEST_RESID_DUMP_DIR_RESTORE");
     }
 
@@ -513,6 +528,120 @@ mod tests {
         std::env::remove_var("LARQL_TEST_RESID_DUMP_DIR_NONE");
         let _ = run_with_dump_dir("LARQL_TEST_RESID_DUMP_DIR_NONE", || {}).unwrap();
         assert!(std::env::var("LARQL_TEST_RESID_DUMP_DIR_NONE").is_err());
+    }
+
+    /// `cpu_prefill` end to end on a synthetic Q4K model.
+    ///
+    /// The four capture constructors were entirely untested: they drive a real
+    /// forward pass and read the resulting `.f32` dumps back, so the only way
+    /// to cover them is to actually run one. The CPU path needs no GPU, so it
+    /// can run everywhere — the three `metal_*` constructors cannot, which is
+    /// why this file sits outside the crate's coverage `include_globs`.
+    ///
+    /// Asserts the shape contract the comparison code depends on: one entry
+    /// per layer, each `seq_len * hidden` floats, all finite.
+    #[test]
+    fn cpu_prefill_captures_every_layer() {
+        let mut weights = crate::test_utils::make_test_q4k_weights();
+        let index = crate::test_utils::make_test_q4k_vindex(&weights);
+        let ids: Vec<u32> = vec![1, 2, 3];
+
+        let capture = ResidualCapture::cpu_prefill(&mut weights, &ids, &index)
+            .expect("cpu prefill capture on the synthetic Q4K fixture");
+
+        assert_eq!(capture.num_layers(), weights.num_layers);
+        assert_eq!(capture.seq_len, ids.len());
+        assert_eq!(capture.hidden_size, weights.hidden_size);
+        for (l, layer) in capture.layers.iter().enumerate() {
+            assert_eq!(
+                layer.len(),
+                ids.len() * weights.hidden_size,
+                "layer {l} has the wrong element count"
+            );
+            assert!(
+                layer.iter().all(|v| v.is_finite()),
+                "layer {l} has non-finite values"
+            );
+        }
+    }
+
+    /// `project_to_last_position` on a real capture must agree with
+    /// `last_position` for every layer — the two are used interchangeably by
+    /// the parity suites when comparing a prefill against a decode step.
+    #[test]
+    fn projecting_a_real_capture_matches_last_position() {
+        let mut weights = crate::test_utils::make_test_q4k_weights();
+        let index = crate::test_utils::make_test_q4k_vindex(&weights);
+        let capture = ResidualCapture::cpu_prefill(&mut weights, &[1, 2, 3], &index)
+            .expect("cpu prefill capture");
+
+        let projected = capture.project_to_last_position();
+        assert_eq!(projected.seq_len, 1);
+        for l in 0..capture.num_layers() {
+            assert_eq!(projected.layers[l], capture.last_position(l).to_vec());
+        }
+    }
+
+    /// `metal_prefill` on the same synthetic Q4K fixture.
+    ///
+    /// Gated on macOS because it needs a real Metal device; the three
+    /// `metal_*` constructors are why this file cannot reach the 90% floor in
+    /// a Linux CI coverage run, and why it sits outside `include_globs`. The
+    /// test still earns its place — it means the constructor is exercised
+    /// somewhere rather than nowhere.
+    #[test]
+    #[cfg(all(feature = "gpu", target_os = "macos"))]
+    fn metal_prefill_captures_every_layer() {
+        let Some(backend) = larql_compute_metal::MetalBackend::new() else {
+            eprintln!("skip: no Metal device");
+            return;
+        };
+        let mut weights = crate::test_utils::make_test_q4k_weights();
+        let index = crate::test_utils::make_test_q4k_vindex(&weights);
+        let ids: Vec<u32> = vec![1, 2, 3];
+
+        let capture = ResidualCapture::metal_prefill(&mut weights, &ids, &index, &backend)
+            .expect("metal prefill capture on the synthetic Q4K fixture");
+
+        assert_eq!(capture.num_layers(), weights.num_layers);
+        assert_eq!(capture.hidden_size, weights.hidden_size);
+        for (l, layer) in capture.layers.iter().enumerate() {
+            assert!(
+                layer.iter().all(|v| v.is_finite()),
+                "layer {l} has non-finite values"
+            );
+        }
+    }
+
+    /// A panic while the dump-dir lock is held must not cascade.
+    ///
+    /// `run_with_dump_dir` recovers from a poisoned lock via
+    /// `into_inner()` rather than unwrapping. The guarded state is just an
+    /// env var, which is restored on every path, so a poisoned lock carries
+    /// no corrupt data — whereas propagating the poison would turn one
+    /// failing test into every subsequent capture failing too, which is
+    /// exactly the cascade this module was fixed to remove.
+    #[test]
+    fn a_poisoned_lock_does_not_cascade() {
+        const ENV: &str = "LARQL_TEST_RESID_DUMP_DIR_POISON";
+
+        // Poison it: panic inside a thread while holding the guard.
+        let poisoned = std::thread::spawn(|| {
+            let _g = DUMP_DIR_ENV_LOCK.lock().unwrap();
+            panic!("deliberate panic to poison the lock");
+        })
+        .join();
+        assert!(poisoned.is_err(), "the helper thread must have panicked");
+        assert!(DUMP_DIR_ENV_LOCK.is_poisoned(), "lock should be poisoned");
+
+        // The next caller still works.
+        let mut saw = String::new();
+        let dir = run_with_dump_dir(ENV, || {
+            saw = std::env::var(ENV).unwrap_or_default();
+        })
+        .expect("a poisoned lock must not stop a capture");
+        assert_eq!(saw, dir.path().to_string_lossy());
+        assert!(std::env::var(ENV).is_err(), "env var restored");
     }
 
     /// Concurrent callers must each observe **their own** tempdir for the

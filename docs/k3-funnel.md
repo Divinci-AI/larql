@@ -278,6 +278,8 @@ A sink logit of +8 dominates the softmax unless real attention logits exceed it.
 1. **Implement sinks** — `attn_sinks_key()` on `ModelArchitecture`, extraction into the attention slice, and the concat-softmax-truncate in both the CPU and Metal attention kernels. Scoped to R1, gated by GB.
 2. **Add an extraction tensor-coverage audit.** The general defect is that *a tensor the checkpoint has and the extractor does not recognise is silently discarded, and nothing anywhere reports it.* Every source tensor should be classifiable as extracted, deliberately dropped by a named rule (multimodal, MTP-preserved, …), or **unrecognised — which should be loud**. This is the extraction-side sibling of `larql capabilities` in [`vindex-factory.md` §15.2](vindex-factory.md), which checks architectures at PR time; this checks *tensors* at extraction time.
 
+   **Built 2026-07-31.** `extract::coverage` plus a `tensor_audit` stage that runs first in `build_vindex_streaming`, so an unaddressable checkpoint fails in seconds rather than after a multi-minute extraction. Reports always; fatal under `LARQL_EXTRACT_STRICT=1`, which is set in the `larql-vindex` CI workflow. Clean on ten checkpoints including Qwen3-30B-A3B at 18,867 tensors and Gemma 3's 439 SigLIP tensors (classified `non-text-tower`). It measures *naming* rather than consumption — the necessary condition, and where every silent drop found so far actually lived. Its first outputs: GPT-2 from HF safetensors is 1-of-160 addressable, and LayerNorm `β` was being dropped for GPT-2 and StarCoder2 (§4.7.9). Follow-ups in [`ROADMAP.md`](../ROADMAP.md) §"Extraction tensor-coverage audit".
+
 **This is the ladder working exactly as designed.** A silently-dropped tensor class, on a novel architecture, discovered on a 13 GB model that runs locally — rather than at 2.8 T where the only oracle is an API and the symptom would have been "the outputs are subtly wrong and we don't know why". K3 is guaranteed to carry tensors larql has never seen (QB bias, AttnRes block state, LatentMoE projections); item 2 above is what turns that guarantee from a silent hazard into a startup error.
 
 #### 4.6.1 It is not just sinks — 5 of 11 attention tensors are dropped
@@ -645,7 +647,31 @@ The read now lives in the trait default (`larql-models/src/config.rs`), which al
 
 **Carried, not done.** The remaining mechanism fix is to make silent inheritance impossible — no behavioural default at all, so a new MoE architecture fails to compile until it declares a policy — paired with a lint rejecting test configs that omit fields the policy branches on. That is a breaking change across every architecture and is deliberately not bundled with this correction.
 
-#### 4.7.9 Consequences to carry
+#### 4.7.9 The coverage audit's first two findings (2026-07-31)
+
+§4.6's work-item 2 is built: `extract::coverage` plus a `tensor_audit` stage that runs first in `build_vindex_streaming`. Reports always, fatal under `LARQL_EXTRACT_STRICT=1` (set in the `larql-vindex` CI workflow). Ten checkpoints audit clean, including Qwen3-30B-A3B at 18,867 tensors and Gemma 3's 439 SigLIP tensors classified `non-text-tower`.
+
+It measures **naming**, not consumption — a recognised tensor is one extraction *can* reach. That is the necessary condition, and it is where every silent drop in this document actually lived: in each case the extractor asked for every key it was told about, and nobody had told it.
+
+**Finding A — GPT-2 from HF safetensors is 1-of-160 addressable.** `gpt2.rs` matches the trait defaults only *after* the GGUF→HF normalisation, so a raw HF checkpoint (`h.N.attn.c_attn.weight`, `wte.weight`, `ln_1.*`) is unreachable. It is not silent — extraction fails late at the embeddings stage — but the message names one missing tensor rather than 159 unaddressable ones.
+
+**Finding B — LayerNorm `β` was dropped for GPT-2 and StarCoder2.** This is the sinks pattern (§4.6) a fourth time, and the most complete instance of it:
+
+| link | state before |
+|---|---|
+| trait accessor for a norm bias | **did not exist** |
+| extraction | never asked, never wrote |
+| `build_pipeline_layers` | hardcoded `input_norm_bias: None` |
+| Metal `layer_norm` shader | **implemented** `+ bias`, and always took its no-bias variant |
+| CPU dense `apply_norm` | resolved it by mangling `".weight"` → `".bias"` — so this path was correct |
+
+LayerNorm is `γ·x̂ + β`. The consequence was that raw-safetensors CPU inference was right while **every vindex-backed and Metal path silently lost the shift term**, on two architectures in the support table.
+
+Fixed by three additive accessors derived once from the weight key and gated on `NormType`, so RMSNorm families correctly claim nothing and an architecture that overrides its norm naming gets the matching bias for free. Extraction now writes them; `build_pipeline_layers` resolves them. Both weight writers also stopped hardcoding `"norm.weight"` in favour of `arch.final_norm_key()` — they had agreed with every reader only by coincidence.
+
+**Status is "the tensor flows end to end", not "the output is verified."** Restoring `β` changes numerics for GPT-2 and StarCoder2 and wants a GB-shaped measurement before it is called complete. Tracked in [`ROADMAP.md`](../ROADMAP.md) §"Extraction tensor-coverage audit + silent-drop follow-ups".
+
+#### 4.7.10 Consequences to carry
 
 - **Every GPT-OSS vindex extracted before 2026-07-30 has mixed gate/up rows in its gate sketch** and needs re-extracting. Nothing was served from those rows (see below), but any KNN/walk routing analysis over them is void.
 - **GPT-OSS was never servable from a vindex anyway.** `write_per_layer_moe_kquant` gates on `ExpertFormat::PackedBF16`, so a packed-MXFP4 model writes **no per-layer expert store at all** — extraction reports success and the expert weights simply aren't there. That bounds the blast radius of finding 1 to the gate sketch, and it is a prerequisite for item 14 nobody had noticed was missing.

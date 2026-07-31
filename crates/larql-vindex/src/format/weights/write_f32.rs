@@ -692,12 +692,20 @@ pub fn write_model_weights_with_opts(
             }
         }
 
-        // Final norm (model.norm.weight)
-        if let Some(data) = source.get_vector("norm.weight") {
+        // Final norm, resolved through the accessor rather than a literal.
+        // Every reader (`layer_graph::logits`, `predict`, `trace::vocab`,
+        // `kquant_forward::cached`) uses `arch.final_norm_key()`, so a
+        // hardcoded key here agrees only as long as no architecture
+        // overrides it — at which point the writer would store under one
+        // name and the reader look for another, and the final norm would
+        // vanish silently. Same writer/reader split that lost the
+        // attention biases (`docs/k3-funnel.md` §4.6.1).
+        let final_norm_key = arch.final_norm_key().to_string();
+        if let Some(data) = source.get_vector(&final_norm_key) {
             let bytes = crate::config::dtype::encode_floats(&data, dtype);
             norms_file.write_all(&bytes)?;
             entries.push(WeightEntry {
-                key: "norm.weight".into(),
+                key: final_norm_key.clone(),
                 kind: kind::VECTOR.into(),
                 shape: vec![data.len()],
                 offset: norms_offset,

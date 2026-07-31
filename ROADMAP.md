@@ -736,18 +736,19 @@ a silent-wrong-numerics cluster in the quantized walk paths (same
 "produces a number, the number is a lie" theme as the DEC review), and
 **no walk-vs-dense numerical parity test anywhere in the tree**.
 
-**Status 2026-07-31: 20 of 24 closed.** Tiers 0–1 in full (2026-07-30,
+**Status 2026-07-31: 22 of 24 closed.** Tiers 0–1 in full (2026-07-30,
 incl. all four HIGHs); item 13 resolved with the finding inverted (the
 exact-first gate chain is now actually wired — `enable_hnsw()` had been
 leaking approximate selection into walk numerics); Tier 2 complete:
 base+delta (16), forward/forward_observed split (15), runtime trace
-emission (17), execution planner (18) all shipped; parity suite (20)
-landed with the per-file ≥90% coverage pass. Open: 19 (two-stage
-selection), 21 (KnnStore unification), 22 (v1 conformance), 23 (doc
-drift), 24 (hygiene) + tracked follow-ups (server/lql
-`try_apply_patch` migration, remote transport coverage harness,
-logit-contribution trace field, walk-FFN thresholds surfaced into
-`WalkFfnConfig`).
+emission (17), execution planner (18), two-stage selection (19) all
+shipped; parity suite (20) landed with the per-file ≥90% coverage
+pass; KnnStore unified at the retrieval-kernel level (21 — full arch-B
+retirement explicitly gated in the spec, see the item). Open: 22 (v1
+conformance), 23 (doc drift), 24 (hygiene) + tracked follow-ups
+(server/lql `try_apply_patch` migration, remote transport coverage
+harness, logit-contribution trace field, walk-FFN thresholds surfaced
+into `WalkFfnConfig`).
 
 Sequencing is interaction-driven: Tier 0's padded-stride fix **gates**
 Tier 2's base+delta (the delta path leans on the same row-dot/sidecar
@@ -993,7 +994,35 @@ what's exact, approximate, observed, reconstructed):**
     hand-copied replica that can drift without failing). No test anywhere
     compares walk output against dense ground truth on a served vindex.
     [larql-inference, larql-server]
-21. **KnnStore unification** — still exported and live in
+21. ✅ **KnnStore unification** (DONE 2026-07-31 — unified at the
+    RETRIEVAL-KERNEL level; honestly short of full arch-B retirement,
+    which is now explicitly gated in the spec rather than silently
+    pending. The parallel scoring implementation is GONE: `KnnStore`'s
+    private `key_matrices` GEMM + `dirty`-flag rebuild machinery is
+    deleted, and its L2-normalized keys now live as rows in the new
+    shared `patch/gate_overlay.rs::GateOverlay` — the same structure
+    that holds `PatchedVindex`'s gate overrides — so `gate_knn` and
+    every KNN query score through ONE kernel carrying the campaign's
+    hardening (H3 zero-width guard, mixed-width slow-path fallback,
+    per-layer snapshot cache). Mutators invalidate their own layer's
+    snapshot, retiring the manual `invalidate_gate_cache*` calls (a
+    forgotten-invalidation hazard class). What stays KnnStore-specific
+    is POLICY, not machinery: entity/relation/target entry metadata,
+    normalize-on-insert, rank-by-raw-cosine (vs `gate_knn`'s `|score|`
+    merged with base hits — match the statistic to the operation).
+    Public API, `.vlp` `InsertKnn`/`DeleteKnn` ops and the
+    `knn_store.bin` format are unchanged; all five consumer crates
+    (inference/lql/server/python/engine) compile untouched. Full
+    "FFN = KNN index = vindex" (spec §3: appended-slot
+    `AppendFeature`, delete the post-logits override) is NOT done —
+    the FR1/FR2/early-exit routers (2026-06/07) shipped ON the
+    post-logits override after the spec was written, and the α
+    calibration (spec Q2) plus the 189-fact parity benchmark are
+    unvalidated empirical work; `FFN_VINDEX_UNIFICATION_SPEC.md`
+    rewritten to describe the post-unification reality and the
+    remaining gate. Regression pins: query correctness after entity
+    removal renumbers indices, clone-preserves-retrieval; changed
+    files ≥90% line coverage in-crate) — still exported and live in
     `patch/knn_store_io.rs`/`overlay.rs`/`overlay_apply.rs`; the
     unification spec still describes it. Until removed, "FFN = KNN index =
     vindex" is partly aspiration. [larql-vindex]
@@ -1018,6 +1047,84 @@ what's exact, approximate, observed, reconstructed):**
     cwd-relative probing); colocated tests for `hnsw.rs` (455L, zero
     tests), `index/mutate/mod.rs`, `write_f32.rs` (777L); bare `0/1/2`
     component indices → `FFN_DOWN` et al. [larql-vindex, larql-inference]
+
+### Extraction tensor-coverage audit + silent-drop follow-ups (2026-07-31)
+
+Built the audit §4.6 work-item 2 asked for: every source tensor is classified
+as **recognised** (an architecture accessor names it), **dropped by a named
+rule**, or **unrecognised** — and the third bucket is loud.
+`extract::coverage` + the `tensor_audit` stage, which runs *first* in
+`build_vindex_streaming` so an unaddressable checkpoint fails in seconds
+rather than after a multi-minute extraction. Reports always; fatal under
+`LARQL_EXTRACT_STRICT=1`, which is now set in the `larql-vindex` CI workflow.
+
+The case for it was five silent drops in one week, none caught automatically:
+5 of 11 attention tensors (§4.6.1), 3 of 8 MLP tensors (§4.7), the
+`gate_walk` trait default silently `None` (review item 13), a
+`moe_intermediate_size()` defaulting to 0, and LayerNorm `β` — see item 3.
+
+Validated on ten checkpoints: Qwen3-30B-A3B (18,867 tensors), OLMoE (3,219),
+gpt-oss-20b, Gemma 3 4B (439 SigLIP tensors correctly classified
+`non-text-tower`), all clean. **GPT-2 from HF safetensors: 1 of 160
+recognised** — see item 2.
+
+1. **Migrate `residual_diff` off process-global env vars onto the
+   thread-local override.** `larql_compute::options::set_env_override`
+   exists precisely to replace `std::env::set_var`, "which races concurrent
+   `getenv` on the decode path and SIGSEGVs libc" — and all three dump sites
+   already read through `options::env_value`, which consults it first.
+   `run_with_dump_dir` / `run_with_two_env_vars` never adopted it; they were
+   fixed on 2026-07-31 with a shared mutex, which is correct but serialises
+   four ~110 s captures. Thread-local removes the shared state instead of
+   guarding it. **Prerequisite:** the dump hook must read the var on the same
+   thread that set it — true for the CPU path (`hidden.rs`'s own test relies
+   on it), plausible for Metal encoding, but a read inside a rayon worker
+   would silently stop dumping. Verify against the 4-model parity suite
+   (~7 min) before switching. Needs an additive `clear_env_override(name)`;
+   today only `clear_fast_path_overrides()` (clears all) exists.
+   [larql-inference, larql-compute]
+2. **GPT-2: rename or add an HF-safetensors variant.** `gpt2.rs` matches the
+   trait defaults only *after* the GGUF→HF normalisation, so a raw HF
+   checkpoint (`h.N.attn.c_attn.weight`, `wte.weight`, `ln_1.*`) is
+   unaddressable. It fails late at the embeddings stage with a one-tensor
+   message rather than silently, but 159 of 160 tensors are unreachable.
+   Needs the `h.N.` prefix + `c_attn`/`c_fc`/`c_proj` spellings, and a drop
+   rule for `h.N.attn.bias` (the causal mask — a derived constant, not a
+   weight, so it belongs in `coverage::rules`). Unblocked by item 3.
+   [larql-models]
+3. **Verify the restored LayerNorm `β` numerically.** No accessor named a
+   norm bias until 2026-07-31, so extraction never wrote one and
+   `build_pipeline_layers` hardcoded `input_norm_bias: None` — while the
+   Metal `layer_norm` shader implemented `+ bias` and always took its
+   no-bias variant. The CPU dense path got away with it by mangling the
+   weight key, which is why raw-safetensors inference was right and every
+   vindex-backed path dropped the shift, for **GPT-2 and StarCoder2**. Now
+   declared, extracted and resolved; the honest status is "the tensor flows
+   end to end", not "the output is correct". Wants a GB-shaped measurement.
+   [larql-models, larql-vindex, larql-compute]
+4. **Consumption-level coverage audit.** The current audit measures
+   *naming*, not consumption — a recognised tensor is one extraction *can*
+   reach, not one it wrote. Naming is where all five drops actually lived,
+   so this closes the bug class that has bitten; recording `WeightSource`
+   reads would subsume it and also catch "named but never asked for".
+   [larql-vindex]
+5. **`capture.rs` cannot reach the 90 % floor in Linux CI.** ~250 of its 408
+   lines are `metal_decode` / `metal_decode_steps` / `metal_prefill`, which
+   need a Metal device by construction — which is why the file sits outside
+   the crate's `include_globs`. Raised 34 % → ~50 % by testing `cpu_prefill`
+   for the first time, plus a macOS-gated `metal_prefill` test so the
+   constructor is exercised somewhere. Either accept the exclusion
+   permanently and say so in the policy note, or split the GPU dispatch from
+   the dump-readback logic so the latter is testable everywhere.
+   [larql-inference]
+6. **`named_keys` is hand-maintained against 62 trait accessors.** A new
+   `*_key` accessor not wired into `collect()` makes its tensors report as
+   *unrecognised* — noisy, never quiet, and the pin test catches it at the
+   source. It has already fired twice for real (`moe_post_ffn1_norm_key`;
+   then the three norm-bias accessors). If the accessor count keeps growing,
+   consider deriving the list rather than pinning a count.
+   [larql-vindex]
+
 
 ---
 

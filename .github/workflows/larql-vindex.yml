@@ -32,6 +32,13 @@ on:
 
 env:
   LARQL_VINDEX_COVERAGE_MIN: 71
+  # Fail extraction on any source tensor no `ModelArchitecture` accessor
+  # names. Off by default in the library (flipping it would break existing
+  # extractions of merely-incomplete architectures), but CI is exactly where
+  # an unnamed tensor should stop the line: every silent-drop bug this
+  # codebase has had was a naming gap that shipped because nothing failed.
+  # See `extract::streaming::stages::tensor_audit`.
+  LARQL_EXTRACT_STRICT: 1
 
 jobs:
   test:

@@ -366,6 +366,57 @@ pub trait ModelArchitecture: Send + Sync {
             self.layer_prefix(layer)
         )
     }
+
+    // ── LayerNorm biases (declared 2026-07-31) ──
+    //
+    // LayerNorm is `γ·x̂ + β`; RMSNorm has no β. These default to `None` so
+    // every RMSNorm architecture is unaffected, and only the `NormType::
+    // LayerNorm` families (GPT-2, StarCoder2) override them.
+    //
+    // Until these existed, no accessor anywhere named a norm bias, so
+    // extraction never wrote one and `build_pipeline_layers` hardcoded
+    // `input_norm_bias: None` — while the Metal `layer_norm` shader
+    // implemented `+ bias` and its no-bias variant was always the one
+    // selected. The CPU dense path got away with it by mangling the weight
+    // key (`".weight"` → `".bias"`), which is why raw-safetensors inference
+    // was right and every vindex-backed path silently dropped the shift.
+    // Same shape as the attention-sinks gap in `docs/k3-funnel.md` §4.6.
+
+    /// Bias for the input LayerNorm. `None` for RMSNorm architectures.
+    fn input_layernorm_bias_key(&self, layer: usize) -> Option<String> {
+        self.norm_bias_of(&self.input_layernorm_key(layer))
+    }
+
+    /// Bias for the post-attention LayerNorm. `None` for RMSNorm.
+    fn post_attention_layernorm_bias_key(&self, layer: usize) -> Option<String> {
+        self.norm_bias_of(&self.post_attention_layernorm_key(layer))
+    }
+
+    /// Bias for the final LayerNorm. `None` for RMSNorm.
+    fn final_norm_bias_key(&self) -> Option<String> {
+        self.norm_bias_of(self.final_norm_key())
+    }
+
+    /// The bias key paired with a norm *weight* key, if this architecture's
+    /// norm has a bias at all.
+    ///
+    /// Derived from the weight key rather than written out per architecture,
+    /// so an architecture that overrides its norm naming gets the matching
+    /// bias for free and the two cannot drift apart. Gated on
+    /// [`NormType::LayerNorm`] so RMSNorm families answer `None` rather than
+    /// claiming a tensor they do not have.
+    ///
+    /// Uses `strip_suffix` rather than a `replace(".weight", ".bias")`:
+    /// `replace` rewrites *every* occurrence, so a key that contained the
+    /// substring earlier in its path would be silently mangled.
+    fn norm_bias_of(&self, weight_key: &str) -> Option<String> {
+        if self.norm_type() != NormType::LayerNorm {
+            return None;
+        }
+        weight_key
+            .strip_suffix(".weight")
+            .map(|stem| format!("{stem}.bias"))
+    }
     fn pre_feedforward_layernorm_key(&self, layer: usize) -> Option<String> {
         Some(format!(
             "{}pre_feedforward_layernorm.weight",
