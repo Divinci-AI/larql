@@ -940,9 +940,7 @@ pub fn profile_shape_census(n_layers: usize, warmup: usize, iters: usize) -> Vec
             let cold_ms = mean(&times);
             let cold_gbs = mb / cold_ms;
             let eta = cold_gbs / ROOFLINE_GB_S;
-            println!(
-                "{label:<24} {kernel:<6} {mb:>9.1} {cold_ms:>9.3} {cold_gbs:>9.1} {eta:>6.2}"
-            );
+            println!("{label:<24} {kernel:<6} {mb:>9.1} {cold_ms:>9.3} {cold_gbs:>9.1} {eta:>6.2}");
             out.push(ShapeCell {
                 kernel: if kernel == "q4k" { "q4k" } else { "q6k" },
                 shape: label,

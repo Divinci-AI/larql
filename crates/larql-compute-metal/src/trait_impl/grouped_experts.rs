@@ -34,9 +34,16 @@ pub struct ExpertOffset(pub u32);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GroupedError {
     /// `k` is not a whole number of Q6_K super-blocks.
-    KNotSuperblockAligned { k: usize },
+    KNotSuperblockAligned {
+        k: usize,
+    },
     /// An offset plus one expert's payload runs past the buffer.
-    OffsetOutOfRange { slot: usize, offset: u32, need: usize, have: usize },
+    OffsetOutOfRange {
+        slot: usize,
+        offset: u32,
+        need: usize,
+        have: usize,
+    },
     NoExpertsSelected,
 }
 
@@ -86,7 +93,7 @@ impl MetalBackend {
         if offsets.is_empty() {
             return Err(GroupedError::NoExpertsSelected);
         }
-        if k % Q6K_SUPERBLOCK_ELEMS != 0 {
+        if !k.is_multiple_of(Q6K_SUPERBLOCK_ELEMS) {
             return Err(GroupedError::KNotSuperblockAligned { k });
         }
         let per_expert = n * (k / Q6K_SUPERBLOCK_ELEMS) * Q6K_SUPERBLOCK_BYTES;
@@ -170,7 +177,7 @@ impl MetalBackend {
         if offsets.is_empty() {
             return Err(GroupedError::NoExpertsSelected);
         }
-        if k % Q6K_SUPERBLOCK_ELEMS != 0 {
+        if !k.is_multiple_of(Q6K_SUPERBLOCK_ELEMS) {
             return Err(GroupedError::KNotSuperblockAligned { k });
         }
         const Q4K_BLOCK_BYTES: usize = 144;
@@ -286,11 +293,15 @@ mod tests {
     fn matches_sixteen_separate_dispatches_exactly() {
         // Bit-exact, not within tolerance: the reduction body is copied
         // verbatim, so any difference means the addressing is wrong.
-        let Some(be) = MetalBackend::new() else { return };
+        let Some(be) = MetalBackend::new() else {
+            return;
+        };
         let (buf, offs, per) = bank();
         let x: Vec<f32> = (0..K).map(|i| ((i % 251) as f32 - 125.0) * 0.01).collect();
 
-        let grouped = be.q6k_grouped_experts(&buf, &offs, &x, N, K, InputLayout::Shared).expect("dispatch");
+        let grouped = be
+            .q6k_grouped_experts(&buf, &offs, &x, N, K, InputLayout::Shared)
+            .expect("dispatch");
 
         for (slot, off) in offs.iter().enumerate() {
             let lo = off.0 as usize;
@@ -306,7 +317,9 @@ mod tests {
     fn the_grid_carries_the_expert_dimension() {
         // The occupancy claim, made numeric: 16 experts must multiply the
         // threadgroup count, not merely reorder the same work.
-        let Some(be) = MetalBackend::new() else { return };
+        let Some(be) = MetalBackend::new() else {
+            return;
+        };
         let (single, grouped) = be.grouped_threadgroups(3584, 16);
         assert_eq!(single, 896, "one expert at ROWS_PER_TG=4");
         assert_eq!(grouped, 14_336, "16 experts dispatched together");
@@ -314,10 +327,14 @@ mod tests {
 
     #[test]
     fn a_single_selected_expert_still_works() {
-        let Some(be) = MetalBackend::new() else { return };
+        let Some(be) = MetalBackend::new() else {
+            return;
+        };
         let (buf, offs, per) = bank();
         let x: Vec<f32> = (0..K).map(|i| ((i % 97) as f32 - 48.0) * 0.02).collect();
-        let one = be.q6k_grouped_experts(&buf, &offs[..1], &x, N, K, InputLayout::Shared).unwrap();
+        let one = be
+            .q6k_grouped_experts(&buf, &offs[..1], &x, N, K, InputLayout::Shared)
+            .unwrap();
         let solo = be.q6k_matvec(&buf[..per], &x, N, K).unwrap();
         assert_eq!(one, solo);
     }
@@ -326,19 +343,29 @@ mod tests {
     fn slots_may_repeat_the_same_expert() {
         // Real routing can send several positions to one expert; the offset
         // table must tolerate duplicates rather than assume distinctness.
-        let Some(be) = MetalBackend::new() else { return };
+        let Some(be) = MetalBackend::new() else {
+            return;
+        };
         let (buf, offs, _) = bank();
         let x: Vec<f32> = (0..K).map(|i| ((i % 31) as f32 - 15.0) * 0.05).collect();
         let dup = vec![offs[3], offs[3], offs[7]];
-        let got = be.q6k_grouped_experts(&buf, &dup, &x, N, K, InputLayout::Shared).unwrap();
-        assert_eq!(&got[..N], &got[N..2 * N], "same expert must give same output");
+        let got = be
+            .q6k_grouped_experts(&buf, &dup, &x, N, K, InputLayout::Shared)
+            .unwrap();
+        assert_eq!(
+            &got[..N],
+            &got[N..2 * N],
+            "same expert must give same output"
+        );
     }
 
     #[test]
     fn per_slot_inputs_match_per_expert_dispatches() {
         // The regime the engine's DOWN projection actually needs: each expert
         // consumes its own intermediate activation, not a shared hidden state.
-        let Some(be) = MetalBackend::new() else { return };
+        let Some(be) = MetalBackend::new() else {
+            return;
+        };
         let (buf, offs, per) = bank();
         let xs: Vec<f32> = (0..K * SELECTED)
             .map(|i| ((i % 251) as f32 - 125.0) * 0.01)
@@ -365,7 +392,9 @@ mod tests {
     fn shared_and_per_slot_disagree_when_inputs_differ() {
         // Guards the silent-wrong-answer failure: if the stride were ignored,
         // these two would agree and the bug would be invisible.
-        let Some(be) = MetalBackend::new() else { return };
+        let Some(be) = MetalBackend::new() else {
+            return;
+        };
         let (buf, offs, _) = bank();
         let xs: Vec<f32> = (0..K * SELECTED)
             .map(|i| ((i % 97) as f32 - 48.0) * 0.02)
@@ -376,7 +405,11 @@ mod tests {
         let per_slot = be
             .q6k_grouped_experts(&buf, &offs, &xs, N, K, InputLayout::PerSlot)
             .unwrap();
-        assert_eq!(&shared[..N], &per_slot[..N], "slot 0 reads x[0..K] either way");
+        assert_eq!(
+            &shared[..N],
+            &per_slot[..N],
+            "slot 0 reads x[0..K] either way"
+        );
         assert_ne!(
             &shared[N..2 * N],
             &per_slot[N..2 * N],
@@ -389,7 +422,9 @@ mod tests {
         // The exact contract the Gemma MoE integration depends on: Q4_K
         // weights, one dispatch, each slot consuming its own activation.
         use larql_compute::cpu::ops::q4_common::quantize_q4_k;
-        let Some(be) = MetalBackend::new() else { return };
+        let Some(be) = MetalBackend::new() else {
+            return;
+        };
 
         let mut bank = Vec::new();
         let mut offs = Vec::new();
@@ -423,7 +458,9 @@ mod tests {
 
     #[test]
     fn rejects_an_offset_that_would_read_past_the_buffer() {
-        let Some(be) = MetalBackend::new() else { return };
+        let Some(be) = MetalBackend::new() else {
+            return;
+        };
         let (buf, offs, _) = bank();
         let x = vec![0.1f32; K];
         let bad = vec![ExpertOffset(buf.len() as u32 - 16)];

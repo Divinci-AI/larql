@@ -69,9 +69,17 @@ struct Shape {
 
 const SHAPES: [Shape; 2] = [
     // Five of these per KDA layer dominate the always-on dense term.
-    Shape { label: "KDA projection", out: 12288, inp: 7168 },
+    Shape {
+        label: "KDA projection",
+        out: 12288,
+        inp: 7168,
+    },
     // One routed-expert branch, in the 3584-dim latent space.
-    Shape { label: "expert branch", out: 3072, inp: 3584 },
+    Shape {
+        label: "expert branch",
+        out: 3072,
+        inp: 3584,
+    },
 ];
 
 fn arg_mb(name: &str, default: usize) -> usize {
@@ -100,7 +108,12 @@ struct WorkingSet {
 }
 
 impl WorkingSet {
-    fn build(out: usize, inp: usize, target_bytes: usize, quantise: impl Fn(&[f32]) -> Vec<u8>) -> Self {
+    fn build(
+        out: usize,
+        inp: usize,
+        target_bytes: usize,
+        quantise: impl Fn(&[f32]) -> Vec<u8>,
+    ) -> Self {
         let one = quantise(&synth_f32(out, inp, 0));
         let n = (target_bytes / one.len().max(1)).max(2);
         let mut mats = Vec::with_capacity(n);
@@ -108,7 +121,10 @@ impl WorkingSet {
         for salt in 1..n {
             mats.push(quantise(&synth_f32(out, inp, salt)));
         }
-        Self { mats, cursor: std::cell::Cell::new(0) }
+        Self {
+            mats,
+            cursor: std::cell::Cell::new(0),
+        }
     }
 
     fn next(&self) -> &[u8] {
@@ -198,11 +214,15 @@ fn validity_check(records: &[Measured]) -> bool {
             sound = false;
             println!(
                 "  !! {} ({:.1} MB) took {:.3} ms while {} ({:.1} MB) took {:.3} ms",
-                small.label, small.bytes / 1e6, small.secs * 1e3,
-                big.label, big.bytes / 1e6, big.secs * 1e3,
+                small.label,
+                small.bytes / 1e6,
+                small.secs * 1e3,
+                big.label,
+                big.bytes / 1e6,
+                big.secs * 1e3,
             );
-            let overhead = small.secs - (big.secs - small.secs)
-                * small.bytes / (big.bytes - small.bytes).max(1.0);
+            let overhead = small.secs
+                - (big.secs - small.secs) * small.bytes / (big.bytes - small.bytes).max(1.0);
             if overhead > 0.0 {
                 println!("     implied fixed cost per call ~{:.3} ms", overhead * 1e3);
             }
@@ -221,8 +241,17 @@ fn main() {
     println!("======================================================================");
     println!("working set {ws_mb} MB rotating (P-cluster L2 is 16 MB — a single");
     println!("  matrix in a loop would measure cache, not memory)");
-    println!("roofline: {GPU_ATTAINABLE_GB_S:.0} GB/s GPU-attainable, {CPU_ATTAINABLE_GB_S:.0} GB/s CPU");
-    println!("Metal backend: {}", if metal.is_some() { "available" } else { "UNAVAILABLE" });
+    println!(
+        "roofline: {GPU_ATTAINABLE_GB_S:.0} GB/s GPU-attainable, {CPU_ATTAINABLE_GB_S:.0} GB/s CPU"
+    );
+    println!(
+        "Metal backend: {}",
+        if metal.is_some() {
+            "available"
+        } else {
+            "UNAVAILABLE"
+        }
+    );
     println!();
     println!("FINDING (pre-measurement): no MXFP4 arm exists in QuantMatVec on");
     println!("  either backend, and no MXFP4 shader exists in larql-compute-metal.");
@@ -236,7 +265,13 @@ fn main() {
         let mxfp4_payload = weights as f64 * MXFP4_PAYLOAD_BYTES;
         let x = synth_x(sh.inp);
 
-        println!("### {} [{}, {}] — {:.2} M weights", sh.label, sh.out, sh.inp, weights as f64 / 1e6);
+        println!(
+            "### {} [{}, {}] — {:.2} M weights",
+            sh.label,
+            sh.out,
+            sh.inp,
+            weights as f64 / 1e6
+        );
         println!(
             "    MXFP4 {:.2} MB all-in / {:.2} MB payload; f32 would be {:.2} MB",
             mxfp4_all_in / 1e6,
@@ -244,7 +279,7 @@ fn main() {
             weights as f64 * 4.0 / 1e6
         );
 
-        let q4k_ws = WorkingSet::build(sh.out, sh.inp, target_bytes, |w| quantize_q4_k(w));
+        let q4k_ws = WorkingSet::build(sh.out, sh.inp, target_bytes, quantize_q4_k);
         let q4k_bytes = q4k_ws.bytes_each();
         println!(
             "    Q4K {:.2} MB each ({:.3} B/weight), {} copies = {:.0} MB rotating",
@@ -259,13 +294,19 @@ fn main() {
         println!("  -- Q4K fused matvec (reference; MXFP4 has no equivalent) --");
         let t_cold = bench(secs, || {
             let w = q4k_ws.next();
-            CpuBackend.q4k_matvec(w, &x, sh.out, sh.inp).map(|o| o[0]).unwrap_or(0.0)
+            CpuBackend
+                .q4k_matvec(w, &x, sh.out, sh.inp)
+                .map(|o| o[0])
+                .unwrap_or(0.0)
         });
         report("CPU, rotating working set", t_cold, q4k_bytes, 1);
 
         let hot = &q4k_ws.mats[0];
         let t_warm = bench(secs, || {
-            CpuBackend.q4k_matvec(hot, &x, sh.out, sh.inp).map(|o| o[0]).unwrap_or(0.0)
+            CpuBackend
+                .q4k_matvec(hot, &x, sh.out, sh.inp)
+                .map(|o| o[0])
+                .unwrap_or(0.0)
         });
         report("CPU, one matrix re-read (CACHE)", t_warm, q4k_bytes, 1);
         println!(
@@ -278,7 +319,9 @@ fn main() {
             let (t_metal, fast, slow) = repeat(5, || {
                 bench(secs, || {
                     let w = q4k_ws.next();
-                    m.q4k_matvec(w, &x, sh.out, sh.inp).map(|o| o[0]).unwrap_or(0.0)
+                    m.q4k_matvec(w, &x, sh.out, sh.inp)
+                        .map(|o| o[0])
+                        .unwrap_or(0.0)
                 })
             });
             report("Metal, rotating (median of 5)", t_metal, q4k_bytes, 1);
@@ -288,7 +331,11 @@ fn main() {
                 spread,
                 q4k_bytes / slow / 1e9,
                 q4k_bytes / fast / 1e9,
-                if spread > 1.3 { "  <- UNSTABLE, not a usable eta" } else { "" }
+                if spread > 1.3 {
+                    "  <- UNSTABLE, not a usable eta"
+                } else {
+                    ""
+                }
             );
             metal_records.push(Measured {
                 label: sh.label,
@@ -303,7 +350,10 @@ fn main() {
                     let w = q4k_ws.next();
                     let mut acc = 0.0;
                     for _ in 0..t {
-                        acc += m.q4k_matvec(w, &x, sh.out, sh.inp).map(|o| o[0]).unwrap_or(0.0);
+                        acc += m
+                            .q4k_matvec(w, &x, sh.out, sh.inp)
+                            .map(|o| o[0])
+                            .unwrap_or(0.0);
                     }
                     acc
                 });
@@ -316,11 +366,17 @@ fn main() {
         // ---- today's only MXFP4 path --------------------------------------
         println!("  -- MXFP4: bulk dequant to f32 buffer, then matvec --");
         let groups = sh.inp / 32;
-        let blocks: Vec<u8> = (0..sh.out * groups * 16).map(|i| ((i * 37 + 11) % 251) as u8).collect();
-        let scales: Vec<u8> = (0..sh.out * groups).map(|i| (120 + (i % 15)) as u8).collect();
+        let blocks: Vec<u8> = (0..sh.out * groups * 16)
+            .map(|i| ((i * 37 + 11) % 251) as u8)
+            .collect();
+        let scales: Vec<u8> = (0..sh.out * groups)
+            .map(|i| (120 + (i % 15)) as u8)
+            .collect();
 
         let t_dq = bench(secs, || {
-            dequantize_expert(&blocks, &scales, sh.out, groups).map(|w| w[0]).unwrap_or(0.0)
+            dequantize_expert(&blocks, &scales, sh.out, groups)
+                .map(|w| w[0])
+                .unwrap_or(0.0)
         });
         report("dequantize_expert alone", t_dq, mxfp4_all_in, 0);
 
@@ -338,7 +394,10 @@ fn main() {
             acc
         });
         report("dequant + f32 matvec (full path)", t_full, mxfp4_all_in, 1);
-        println!("    codec is {:.0}% of the full path", 100.0 * t_dq / t_full);
+        println!(
+            "    codec is {:.0}% of the full path",
+            100.0 * t_dq / t_full
+        );
         println!();
         println!("  -- traffic decomposition: MXFP4 is being used as STORAGE, not compute --");
         println!("     per weight, the materialisation path moves:");
@@ -358,9 +417,7 @@ fn main() {
         println!("     This is why MXFP4 eta is not merely hard to measure: the current");
         println!("     implementation is not executing MXFP4 as a compressed compute");
         println!("     format at all.");
-        println!(
-            "    NOTE: this arm cannot rotate a working set — dequantize_expert takes"
-        );
+        println!("    NOTE: this arm cannot rotate a working set — dequantize_expert takes");
         println!("      one (blocks, scales) pair, so it re-reads the same source. That");
         println!("      FLATTERS it, and it still loses. Treat as an upper bound.");
         println!();
@@ -407,7 +464,10 @@ fn main() {
             "    - best isolated reading {:.0} GB/s vs banked end-to-end {:.0}-{:.0} GB/s",
             best_gb_s, BANKED_E2E_METAL_GB_S.0, BANKED_E2E_METAL_GB_S.1
         );
-        println!("      for the same kernel class — a {:.0}x discrepancy.", BANKED_E2E_METAL_GB_S.0 / best_gb_s.max(1e-9));
+        println!(
+            "      for the same kernel class — a {:.0}x discrepancy.",
+            BANKED_E2E_METAL_GB_S.0 / best_gb_s.max(1e-9)
+        );
         println!();
         println!("  VERDICT: an isolated single-dispatch matvec does not sample the");
         println!("  regime decode runs in. This is already recorded as a house rule:");

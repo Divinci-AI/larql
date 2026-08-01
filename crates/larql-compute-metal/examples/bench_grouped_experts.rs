@@ -33,10 +33,8 @@ fn main() {
 #[cfg(target_os = "macos")]
 fn main() {
     use larql_compute::cpu::ops::q4_common::quantize_q6_k;
-    use larql_compute::QuantMatVec;
     use larql_compute_metal::trait_impl::grouped_experts::ExpertOffset;
     use larql_compute_metal::MetalBackend;
-    use std::time::Instant;
 
     const N: usize = 3584; // K3 expert branch rows
     const K: usize = 3072; // latent reduction
@@ -76,18 +74,19 @@ fn main() {
         per_expert as f64 / 1e6,
         total_bytes / 1e6
     );
-    println!("  threadgroups: {single_tgs} ungrouped -> {grouped_tgs} grouped ({}x)",
-        grouped_tgs / single_tgs);
+    println!(
+        "  threadgroups: {single_tgs} ungrouped -> {grouped_tgs} grouped ({}x)",
+        grouped_tgs / single_tgs
+    );
     println!();
 
     // Both arms batched into one command buffer, so the ratio isolates
     // occupancy from commit+wait amortisation. A naive bench commits once per
     // expert ungrouped and once total grouped, which mixes scheduling with the
     // removal of 15 commit+waits and overstates the gain.
-    let (ung_gbs, grp_gbs) =
-        larql_compute_metal::diag::kernel_profile::profile_grouped_experts(
-            N, K, TOP_K, BATCH, WARMUP, ITERS,
-        );
+    let (ung_gbs, grp_gbs) = larql_compute_metal::diag::kernel_profile::profile_grouped_experts(
+        N, K, TOP_K, BATCH, WARMUP, ITERS,
+    );
     let eta_ungrouped = ung_gbs / ROOFLINE;
     let eta_grouped = grp_gbs / ROOFLINE;
     println!(
@@ -102,8 +101,10 @@ fn main() {
 
     println!();
     println!("--- verdict against the pre-registered bars ---");
-    println!("  ungrouped eta {eta_ungrouped:.2}  ->  grouped eta {eta_grouped:.2}   ({:.2}x)",
-        eta_grouped / eta_ungrouped);
+    println!(
+        "  ungrouped eta {eta_ungrouped:.2}  ->  grouped eta {eta_grouped:.2}   ({:.2}x)",
+        eta_grouped / eta_ungrouped
+    );
     let verdict = if eta_grouped >= 0.87 {
         "PASS (stretch) — reaches the large-shape band; occupancy fully explains the 0.64"
     } else if eta_grouped >= 0.80 {

@@ -34,7 +34,9 @@ fn main() {
     let (gw4, gd6) = (find("q4k", "gemma Wo"), find("q6k", "gemma down"));
     let (ka4, ka6) = (find("q4k", "K3 KDA"), find("q6k", "K3 KDA"));
     if let (Some(gw4), Some(gd6)) = (gw4, gd6) {
-        println!("  anchors: gemma Wo q4k {gw4:.2} (banked 0.59), gemma down q6k {gd6:.2} (banked 0.85)");
+        println!(
+            "  anchors: gemma Wo q4k {gw4:.2} (banked 0.59), gemma down q6k {gd6:.2} (banked 0.85)"
+        );
     }
     if let (Some(a4), Some(a6)) = (ka4, ka6) {
         println!("  K3 KDA attention: q4k {a4:.2}, q6k {a6:.2}");
@@ -43,8 +45,10 @@ fn main() {
             println!("     rebuild the composed ceiling with attention at {a6:.2}.");
         } else if let Some(d6) = gd6 {
             if a6 < d6 * 0.85 {
-                println!("  => SHAPE-BORNE. The same q6k kernel loses {:.0}% moving from",
-                    100.0 * (1.0 - a6 / d6));
+                println!(
+                    "  => SHAPE-BORNE. The same q6k kernel loses {:.0}% moving from",
+                    100.0 * (1.0 - a6 / d6)
+                );
                 println!("     the down shape to the attention shape. The transcode ceiling");
                 println!("     stands, AND every future attention kernel inherits this —");
                 println!("     it is a design constraint on the family, not one kernel to fix.");

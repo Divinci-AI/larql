@@ -40,7 +40,11 @@ pub enum Mxfp4Error {
     /// `k` is not a whole number of 32-element groups.
     KNotGroupAligned { k: usize },
     /// Buffer smaller than the shape requires.
-    ShortBuffer { what: &'static str, got: usize, need: usize },
+    ShortBuffer {
+        what: &'static str,
+        got: usize,
+        need: usize,
+    },
     /// A ladder rung that does not exist yet.
     Unimplemented(&'static str),
 }
@@ -78,6 +82,11 @@ impl MetalBackend {
     /// rather than silently looping, because a loop here would be exactly the
     /// token-loop non-reuse that this ladder exists to remove — measured at
     /// `d(T) = r(T) = T`.
+    // Eight arguments is the kernel's actual signature: two weight planes
+    // (packed, scales), the activation, three shape scalars, and the layout.
+    // Bundling them into a params struct would hide the shape contract that
+    // the guards below check one by one.
+    #[allow(clippy::too_many_arguments)]
     pub fn mxfp4_matmul_small_block(
         &self,
         packed: &[u8],
@@ -96,7 +105,7 @@ impl MetalBackend {
                 "block width t > 1 (K2); refusing to emulate it with a token loop",
             ));
         }
-        if k % GROUP_ELEMS != 0 {
+        if !k.is_multiple_of(GROUP_ELEMS) {
             return Err(Mxfp4Error::KNotGroupAligned { k });
         }
 
@@ -118,7 +127,11 @@ impl MetalBackend {
             });
         }
         if x.len() < k {
-            return Err(Mxfp4Error::ShortBuffer { what: "x", got: x.len(), need: k });
+            return Err(Mxfp4Error::ShortBuffer {
+                what: "x",
+                got: x.len(),
+                need: k,
+            });
         }
 
         let buf_p = self.bufs.get_bytes(packed);
@@ -198,10 +211,16 @@ mod tests {
     fn matches_the_bulk_dequant_reference() {
         let (p, s) = synth(M, K, 1);
         let x: Vec<f32> = (0..K).map(|i| ((i % 251) as f32 - 125.0) * 0.01).collect();
-        let Some(got) = run(&p, &s, &x, M, K) else { return };
+        let Some(got) = run(&p, &s, &x, M, K) else {
+            return;
+        };
         let want = reference(&p, &s, &x, M, K);
 
-        assert!(cosine(&got, &want) > 0.999_999, "cosine {}", cosine(&got, &want));
+        assert!(
+            cosine(&got, &want) > 0.999_999,
+            "cosine {}",
+            cosine(&got, &want)
+        );
         for (g, w) in got.iter().zip(&want) {
             let rel = (g - w).abs() / w.abs().max(1e-3);
             assert!(rel < 1e-4, "got {g} want {w} (rel {rel})");
@@ -214,7 +233,9 @@ mod tests {
         // must not drop rows or write past the output.
         let (p, s) = synth(M, K, 2);
         let x: Vec<f32> = (0..K).map(|i| ((i % 97) as f32 - 48.0) * 0.02).collect();
-        let Some(got) = run(&p, &s, &x, M, K) else { return };
+        let Some(got) = run(&p, &s, &x, M, K) else {
+            return;
+        };
         assert_eq!(got.len(), M);
         let want = reference(&p, &s, &x, M, K);
         assert!(cosine(&got, &want) > 0.999_999);
@@ -225,11 +246,11 @@ mod tests {
         // e8m0 byte 0 means 0.0, not 2^-127.
         let groups = K / GROUP_ELEMS;
         let (p, mut s) = synth(M, K, 3);
-        for g in 0..groups {
-            s[g] = 0; // whole first row zeroed
-        }
+        s[..groups].fill(0); // whole first row zeroed
         let x: Vec<f32> = (0..K).map(|i| ((i % 31) as f32 - 15.0) * 0.1).collect();
-        let Some(got) = run(&p, &s, &x, M, K) else { return };
+        let Some(got) = run(&p, &s, &x, M, K) else {
+            return;
+        };
         assert_eq!(got[0], 0.0, "row with all-zero scales must be exactly 0");
         let want = reference(&p, &s, &x, M, K);
         assert!(cosine(&got[1..], &want[1..]) > 0.999_999);
@@ -243,8 +264,14 @@ mod tests {
         let (p, mut s) = synth(M, K, 4);
         s[0] = 255;
         let x: Vec<f32> = (0..K).map(|i| ((i % 17) as f32 - 8.0) * 0.05).collect();
-        let Some(got) = run(&p, &s, &x, M, K) else { return };
-        assert!(got[0].is_nan(), "255 scale must propagate NaN, got {}", got[0]);
+        let Some(got) = run(&p, &s, &x, M, K) else {
+            return;
+        };
+        assert!(
+            got[0].is_nan(),
+            "255 scale must propagate NaN, got {}",
+            got[0]
+        );
     }
 
     #[test]
@@ -262,16 +289,24 @@ mod tests {
         }
         let s: Vec<u8> = (0..M * groups).map(|i| (125 + (i % 5)) as u8).collect();
         let x: Vec<f32> = (0..K).map(|i| ((i % 13) as f32 - 6.0) * 0.3).collect();
-        let Some(got) = run(&p, &s, &x, M, K) else { return };
+        let Some(got) = run(&p, &s, &x, M, K) else {
+            return;
+        };
         let want = reference(&p, &s, &x, M, K);
-        assert!(cosine(&got, &want) > 0.999_99, "cosine {}", cosine(&got, &want));
+        assert!(
+            cosine(&got, &want) > 0.999_99,
+            "cosine {}",
+            cosine(&got, &want)
+        );
     }
 
     #[test]
     fn is_deterministic_across_repeats() {
         let (p, s) = synth(M, K, 5);
         let x: Vec<f32> = (0..K).map(|i| ((i % 251) as f32 - 125.0) * 0.01).collect();
-        let Some(first) = run(&p, &s, &x, M, K) else { return };
+        let Some(first) = run(&p, &s, &x, M, K) else {
+            return;
+        };
         for _ in 0..4 {
             assert_eq!(run(&p, &s, &x, M, K).unwrap(), first);
         }
@@ -281,7 +316,9 @@ mod tests {
     fn rejects_a_token_loop_instead_of_emulating_one() {
         let (p, s) = synth(M, K, 6);
         let x: Vec<f32> = vec![0.5; K * 4];
-        let Some(be) = MetalBackend::new() else { return };
+        let Some(be) = MetalBackend::new() else {
+            return;
+        };
         let err = be
             .mxfp4_matmul_small_block(&p, &s, &x, M, K, 4, Mxfp4Layout::SeparateTensors)
             .unwrap_err();
@@ -292,7 +329,9 @@ mod tests {
     fn rejects_unaligned_k_and_short_buffers() {
         let (p, s) = synth(M, K, 7);
         let x = vec![0.1f32; K];
-        let Some(be) = MetalBackend::new() else { return };
+        let Some(be) = MetalBackend::new() else {
+            return;
+        };
         let l = Mxfp4Layout::SeparateTensors;
         assert!(matches!(
             be.mxfp4_matmul_small_block(&p, &s, &x, M, K + 1, 1, l),
