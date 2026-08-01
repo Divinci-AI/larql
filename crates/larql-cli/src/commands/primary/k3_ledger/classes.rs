@@ -82,6 +82,10 @@ pub enum Regime {
     ColdRotating,
     /// Borrowed from a neighbouring shape rather than measured here.
     Borrowed,
+    /// Not a measurement at all — a modelling constant with no variance, such
+    /// as unquantised f32 reaching the roofline by definition. Cannot swing, so
+    /// it cannot select a bit-width, so the noise refusal does not apply.
+    Definitional,
 }
 
 /// A measured efficiency **with its observed spread**, never a bare scalar.
@@ -118,9 +122,9 @@ impl MeasuredEfficiency {
             regime,
         }
     }
-    /// A single unrepeated figure carried over from another shape.
-    pub const fn borrowed(central: f64) -> Self {
-        Self::new(central, central, central, 0, Regime::Borrowed)
+    /// A modelling constant with no variance.
+    pub const fn definitional(central: f64) -> Self {
+        Self::new(central, central, central, 0, Regime::Definitional)
     }
     /// Widest observed relative swing, as a fraction of `central`.
     pub fn spread_fraction(&self) -> f64 {
@@ -129,9 +133,12 @@ impl MeasuredEfficiency {
         }
         (self.observed_high - self.observed_low) / self.central
     }
-    /// True when the class is measured tightly enough to decide a bit-width.
+    /// True when the class is settled enough to select a target.
+    ///
+    /// A definitional constant qualifies with no repeats — it has no variance
+    /// to be uncertain about. Everything else needs three repeats inside 5%.
     pub fn is_decision_grade(&self) -> bool {
-        self.repeats >= 3 && self.spread_fraction() <= 0.05
+        self.regime == Regime::Definitional || (self.repeats >= 3 && self.spread_fraction() <= 0.05)
     }
 }
 
@@ -177,7 +184,7 @@ impl KernelClass {
             Self::RoutedExpert => {
                 MeasuredEfficiency::new(0.67, 0.63, 0.70, 3, Regime::ColdRotating)
             }
-            Self::Unquantised => MeasuredEfficiency::borrowed(1.00),
+            Self::Unquantised => MeasuredEfficiency::definitional(1.00),
         }
     }
 
@@ -315,6 +322,45 @@ pub struct ComposedCeiling {
     pub scalar_tok_s: f64,
     pub scalar_overstates_by: f64,
     pub rows: Vec<ClassRow>,
+}
+
+/// All-in bits per weight the banked efficiencies were **measured under**.
+///
+/// R7: eta is meaningful only within a fixed storage representation. Every
+/// figure in `KernelClass::efficiency` came from `q6k_matvec` reading Q6_K
+/// bytes. Recomposing them at another density holds eta fixed across a
+/// container change, which is exactly what R7 forbids as a performance claim —
+/// the crossover measured the penalty directly (MXFP4 arm D 0.724 against
+/// Q6_K 0.89 on the routed class).
+pub const ETA_MEASURED_UNDER_BITS: f64 = 210.0 * 8.0 / 256.0;
+
+/// Does this composition reuse the banked etas outside the container they were
+/// measured in? If so the result is a **density-only upper bound**, not a
+/// reachable rate.
+pub fn density_only_bound(dense_bits: f64, routed_bits: f64) -> bool {
+    (dense_bits - ETA_MEASURED_UNDER_BITS).abs() > 1e-9
+        || (routed_bits - ETA_MEASURED_UNDER_BITS).abs() > 1e-9
+}
+
+/// Classes carrying bytes whose efficiency is too noisy to select a target.
+///
+/// Returned rather than warned about: the house precedent is a bench that exits
+/// instead of handing the frontier a number it cannot stand behind. A warning
+/// beside a plausible float gets read past; a refusal does not.
+pub fn not_decision_grade(rows: &[ClassRow]) -> Vec<(KernelClass, MeasuredEfficiency)> {
+    let mut seen: Vec<KernelClass> = Vec::new();
+    let mut out = Vec::new();
+    for r in rows {
+        if r.bits <= 0.0 || r.eta_override.is_some() || seen.contains(&r.class) {
+            continue;
+        }
+        seen.push(r.class);
+        let m = r.class.efficiency();
+        if !m.is_decision_grade() {
+            out.push((r.class, m));
+        }
+    }
+    out
 }
 
 /// Which end of each class's observed range to compose at.

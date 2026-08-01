@@ -626,7 +626,44 @@ pub fn ceilings(geom: &K3Geometry, a: &super::args::CeilingsArgs, as_json: bool)
     }
     println!();
 
+    if classes::density_only_bound(a.dense_bits, a.routed_bits) {
+        println!(
+            "  !! DENSITY-ONLY UPPER BOUND — these etas were measured under {:.4} bpw",
+            classes::ETA_MEASURED_UNDER_BITS
+        );
+        println!(
+            "     (Q6_K), and this composition reuses them at {:.4}/{:.4}. R7 forbids",
+            a.dense_bits, a.routed_bits
+        );
+        println!("     carrying eta across a container change: the crossover measured MXFP4");
+        println!("     arm D at 0.724 against Q6_K's 0.89 on the routed class. Apply that");
+        println!("     penalty before quoting this as reachable — it is an upper bound.");
+        println!();
+    }
+
+    let ungraded = classes::not_decision_grade(&composed.rows);
     println!("--- R4 best case per proposed lever (ceiling if it FULLY succeeds) ---");
+    if !ungraded.is_empty() {
+        println!("  REFUSED — this ordering selects the programme, and these classes are");
+        println!("  too noisy to select anything (>5% observed spread over n repeats):");
+        for (c, m) in &ungraded {
+            println!(
+                "    {:<28} {:.2} [{:.2}-{:.2}] n={}",
+                c.label(),
+                m.central,
+                m.observed_low,
+                m.observed_high,
+                m.repeats
+            );
+        }
+        println!("  Run `diag_eta_repeats` on those shapes and re-bank before ordering.");
+        println!();
+        println!(
+            "  baseline (measured per-class eta, today's formats) {:.2} tok/s",
+            composed.tok_s
+        );
+        return Ok(());
+    }
     let mut scen: Vec<(&str, Vec<classes::ClassRow>)> = vec![
         (
             "exp1 exact MXFP4 layout: all classes -> best eta",
@@ -687,20 +724,27 @@ pub fn ceilings(geom: &K3Geometry, a: &super::args::CeilingsArgs, as_json: bool)
             ),
         ),
     ];
-    let mut scored: Vec<(String, f64)> = scen
+    // Each scenario carries its OWN band. Quoting the baseline's range beside a
+    // scenario's central value is the R0 failure in miniature — the band would
+    // not even contain the number it sits next to.
+    let mut scored: Vec<(String, f64, f64, f64)> = scen
         .drain(..)
         .map(|(n, rows)| {
-            let c = classes::compose(rows, classes::BW_GB_S, KernelClass::Down.eta());
-            (n.to_string(), c.tok_s)
+            let c = classes::compose(rows.clone(), classes::BW_GB_S, KernelClass::Down.eta());
+            let lo = classes::compose_at(&rows, classes::BW_GB_S, classes::Bound::Low);
+            let hi = classes::compose_at(&rows, classes::BW_GB_S, classes::Bound::High);
+            (n.to_string(), c.tok_s, lo, hi)
         })
         .collect();
     scored.sort_by(|x, y| y.1.partial_cmp(&x.1).unwrap());
-    for (name, tok) in &scored {
+    for (name, tok, lo, hi) in &scored {
         let gain = tok / composed.tok_s;
         println!(
-            "  {:<48} {:>6.2} tok/s  ({:+.0}%)",
+            "  {:<48} {:>6.2} [{:.2}-{:.2}]  ({:+.0}%)",
             name,
             tok,
+            lo,
+            hi,
             100.0 * (gain - 1.0)
         );
     }
@@ -1083,10 +1127,17 @@ pub fn freqmass(a: &super::args::FreqMassArgs, as_json: bool) -> R {
         })
         .map(|(i, _)| i);
 
+    // Always censused: the cold-tail counts are a measurement DEC-8.4 wants and
+    // cost one pass. Only the per-symbol vector is opt-in, since at K3's 92x896
+    // it would dwarf everything else in the document.
+    let census = super::symbol_mass::census(&trace);
+    let census = if a.per_symbol {
+        census
+    } else {
+        census.without_rows()
+    };
+
     if as_json {
-        // The per-symbol vector is opt-in: it is the allocator's input, not the
-        // curve's, and at K3's bank it dwarfs everything else in the document.
-        let census = a.per_symbol.then(|| super::symbol_mass::census(&trace));
         println!(
             "{}",
             serde_json::to_string_pretty(&json!({
@@ -1095,13 +1146,13 @@ pub fn freqmass(a: &super::args::FreqMassArgs, as_json: bool) -> R {
                 "curve": curve,
                 "support": support,
                 "operating_index": op,
-                "per_symbol": census,
+                "symbol_mass": census,
             }))?
         );
         return Ok(());
     }
     if a.per_symbol {
-        eprintln!("note: --per-symbol emits into the JSON document only; add --json");
+        eprintln!("note: --per-symbol emits the row vector into JSON only; add --json");
     }
 
     println!("=== frequency-mass coverage — {} ===", a.pool.display());
@@ -1164,6 +1215,29 @@ pub fn freqmass(a: &super::args::FreqMassArgs, as_json: bool) -> R {
         );
     }
     println!();
+    let unobs: Vec<usize> = census
+        .coverage_by_stratum
+        .iter()
+        .map(|c| c.unobserved)
+        .collect();
+    if let (Some(&lo), Some(&hi)) = (unobs.iter().min(), unobs.iter().max()) {
+        println!(
+            "cold tail — {} of {} symbol-stratum pairs UNOBSERVED in this capture ({:.1}%),",
+            census.unobserved_symbols,
+            census.routing_strata * census.alphabet,
+            100.0 * census.unobserved_symbols as f64
+                / (census.routing_strata * census.alphabet) as f64,
+        );
+        println!(
+            "  spread {lo}-{hi} per stratum — tier per stratum, not globally. Unobserved is NOT"
+        );
+        println!("  zero probability: it bounds the rate, it does not measure it.");
+        println!("  This is STATIC structure varying by layer — not the per-layer ADAPTATION");
+        println!("  the causal arm above refutes. Both hold; do not collapse them.");
+        println!("  R2 WARNING: quantile balancing exists to flatten exactly this, so of");
+        println!("  everything here it is the number least likely to survive to K3.");
+        println!();
+    }
     println!("  λ=1.00 static slice (pooled prior, leave-one-out) · λ=0.00 causal adaptive cache");
     println!("  oracle ranks by the scored events themselves · null destroys session identity");
     println!("  mass/res = coverage per unit residency — the axis a cold-tier lever moves along");

@@ -16,6 +16,31 @@ use super::super::dec_bench::capture_format::{CapturePool, ROUTING_SENTINEL_EXPE
 /// carried no selection, or a slot freed by zero-weight stripping upstream.
 pub const SENTINEL: u32 = u32::MAX;
 
+/// What the symbols in a trace actually are. Carried so an exported
+/// distribution says which bank it describes — expert mass and feature mass are
+/// not numerically transferable, and a file that does not name its unit invites
+/// exactly that substitution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SelectionUnit {
+    /// An MoE expert (DEC-8.4).
+    Expert,
+    /// An FFN feature row inside one expert (DEC-8.1).
+    Feature,
+    /// Unlabelled — the estimators do not care, but an export should.
+    Symbol,
+}
+
+impl SelectionUnit {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Expert => "expert",
+            Self::Feature => "feature",
+            Self::Symbol => "symbol",
+        }
+    }
+}
+
 /// `[session][step][stratum][width]` selections, sentinel-padded.
 #[derive(Debug, Clone)]
 pub struct SelectionTrace {
@@ -24,6 +49,7 @@ pub struct SelectionTrace {
     strata: usize,
     width: usize,
     alphabet: usize,
+    unit: SelectionUnit,
     ids: Vec<u32>,
     active: Vec<usize>,
 }
@@ -80,9 +106,21 @@ impl SelectionTrace {
             strata,
             width,
             alphabet,
+            unit: SelectionUnit::Symbol,
             ids,
             active,
         })
+    }
+
+    /// Label what the symbols are. Additive: the estimators ignore it and only
+    /// exports read it.
+    pub fn with_unit(mut self, unit: SelectionUnit) -> Self {
+        self.unit = unit;
+        self
+    }
+
+    pub fn unit(&self) -> SelectionUnit {
+        self.unit
     }
 
     /// Adapt a DEC residual capture pool captured with `--routing`.
@@ -115,7 +153,10 @@ impl SelectionTrace {
                 }
             }
         }
-        Self::new(sessions, steps, strata, width, max_id as usize + 1, ids)
+        Ok(
+            Self::new(sessions, steps, strata, width, max_id as usize + 1, ids)?
+                .with_unit(SelectionUnit::Expert),
+        )
     }
 
     pub fn sessions(&self) -> usize {
@@ -128,6 +169,11 @@ impl SelectionTrace {
 
     pub fn width(&self) -> usize {
         self.width
+    }
+
+    /// Every stratum, including those that carried no selection.
+    pub fn strata(&self) -> usize {
+        self.strata
     }
 
     pub fn alphabet(&self) -> usize {

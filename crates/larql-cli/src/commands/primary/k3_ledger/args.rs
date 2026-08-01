@@ -103,6 +103,13 @@ pub struct FreqMassArgs {
     /// 55-65 GB expert cache is 5-7% of its bank, so the default is 6.25%.
     #[arg(long, default_value_t = 0.0625)]
     pub operating_residency: f64,
+
+    /// Also emit the measured per-symbol mass vector (counts and probabilities,
+    /// per stratum) — DEC-8.4's precision allocator consumes this rather than
+    /// differencing the coverage curve. JSON only; one row per selected symbol,
+    /// so a 92-layer 896-expert bank emits tens of thousands.
+    #[arg(long)]
+    pub per_symbol: bool,
 }
 
 #[derive(Debug, Args)]

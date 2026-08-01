@@ -28,6 +28,35 @@
 //! counting noise alone, so `oracle - null` is the locality signal and `oracle`
 //! on its own overstates it. Scoring adaptation without the null is how a
 //! finite-sample artifact gets read as a 3x lever.
+//!
+//! ## "No layer class wins" is about ADAPTATION, not about structure
+//!
+//! On the DEC-0 Gemma pool the per-stratum spread of `causal - static` was
+//! -0.012 +/- 0.015 with no layer where adaptation won. That sentence is quotable
+//! and will be misquoted, so state its scope: it says **per-layer cache budgets
+//! keyed on session adaptation are unsupported**. It says nothing about whether
+//! layers differ statically — and they differ enormously.
+//!
+//! [`super::symbol_mass`] measured, on the same pool: unobserved experts per
+//! layer ranging 3 to 68 of 128, and effective bank size (participation ratio)
+//! from 14.8 to 50.5. `corr(unobserved, top-8 coverage) = +0.861` across the 30
+//! layers, so the layers with a large dead set also concentrate mass in their
+//! survivors — one narrow-bank axis rather than a live set beside a separate
+//! dead one. Static per-layer heterogeneity is therefore **strongly supported**
+//! by exactly the pool that refuted the adaptive form.
+//!
+//! Both statements are needed. A four-layer-class serving policy gets no support
+//! in its adaptive form and strong support in its static form, and the two must
+//! not be collapsed into one verdict on "per-layer anything".
+//!
+//! ## R2: this is the least transferable number in the set
+//!
+//! K3's Stable LatentMoE applies quantile balancing, which exists precisely to
+//! flatten routing load. Per-layer tail heterogeneity is close to a direct
+//! measurement of what QB is designed to remove — more so than the coverage
+//! curve, which measures skew QB tolerates. Treat the spread as characterising
+//! *this* model's routing, not as a K3 design input; the R2/R3 adapter rungs
+//! supply the K3 version.
 
 use serde::Serialize;
 

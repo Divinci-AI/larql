@@ -13,6 +13,8 @@
 //!   frontier  — DEC-8.7a dense-precision frontier, R4 ceiling (pure, gated).
 //!   block     — DEC-9.2 speculative block economics, R5/R6 (pure, gated).
 //!   selection_trace — generic "which symbols did this position pick" (pure).
+//!   symbol_mass — the measured per-symbol routing mass vector, counts kept
+//!               alongside probabilities; DEC-8.4's allocator input (pure).
 //!   freqmass  — frequency-mass coverage: static / adaptive / oracle / null.
 //!               Model-agnostic and symbol-agnostic; grades the resident bank,
 //!               the static slice, and compact-dense with one instrument (pure).
@@ -45,6 +47,7 @@ pub mod scenario;
 pub mod selection_trace;
 pub mod serving_format;
 pub mod symbol_census;
+pub mod symbol_mass;
 pub mod touch;
 pub mod transcode;
 
