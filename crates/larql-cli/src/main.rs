@@ -566,6 +566,9 @@ fn main() {
         .expect("spawn larql-main thread")
         .join()
         .expect("larql-main thread panicked");
+    // Flush the latent-mask channel survival counts, if that probe was
+    // collecting them. No-op unless `LARQL_MOE_LATENT_STATS` is set.
+    larql_compute::cpu::ops::moe::latent_mask::dump_stats();
     std::process::exit(code);
 }
 

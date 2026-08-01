@@ -190,6 +190,33 @@ impl<'a> ExpertWeightFfn<'a> {
         }
         trace::record(layer, traced);
 
+        // Latent-axis sparsity probe — opt-in, default off = byte-identical.
+        // Applied AFTER `router_logits` above so the trained router still
+        // selects the same experts with the same weights; only the shared
+        // input handed to them is reduced. Masking channel `j` is exactly
+        // equivalent to not reading column `j` of every routed expert's gate
+        // and up matrices, which is the leverage this probe is testing.
+        let mask = crate::cpu::ops::moe::latent_mask::active();
+        let mut retained_per_token: Vec<Vec<bool>> = Vec::new();
+        let x_owned;
+        let x = if let Some(m) = mask {
+            let mut masked = x.clone();
+            for mut row in masked.axis_iter_mut(Axis(0)) {
+                let slice = row.as_slice_mut().expect("contiguous row");
+                let retained = m.mask_in_place(slice);
+                // Recorded PER LAYER: channel `j` in different layers are
+                // unrelated coordinates, so a channel-indexed histogram
+                // summed across layers is uniform by construction and
+                // cannot detect a per-layer stable subset.
+                crate::cpu::ops::moe::latent_mask::record_stats(layer, &retained);
+                retained_per_token.push(retained);
+            }
+            x_owned = masked;
+            &x_owned
+        } else {
+            x
+        };
+
         let mut out = Array2::<f32>::zeros(x.raw_dim());
         for (expert, (tokens, weights)) in buckets.iter().enumerate() {
             if tokens.is_empty() {
@@ -201,6 +228,17 @@ impl<'a> ExpertWeightFfn<'a> {
                 let contribution = &expert_out.slice(s![i, ..]) * weight;
                 let mut dst = out.slice_mut(s![token, ..]);
                 dst += &contribution;
+            }
+        }
+
+        // Both-sides variant: mask the same channels on the aggregated
+        // expert output, so `down` shrinks too. Input-side alone leaves a
+        // third of expert bytes fixed and caps the lever at 1.448×.
+        if let Some(m) = mask.filter(|m| m.both_sides) {
+            for (t, mut row) in out.axis_iter_mut(Axis(0)).enumerate() {
+                if let Some(retained) = retained_per_token.get(t) {
+                    m.apply(row.as_slice_mut().expect("contiguous row"), retained);
+                }
             }
         }
         Some(out)
