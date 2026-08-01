@@ -49,7 +49,14 @@ impl RegionCoordinate {
     }
 }
 
-/// Why a required region is not usable — **role-local causes only**.
+/// Why a required region is not usable — **role-local, whole-role causes only**.
+///
+/// Partial segment coverage is deliberately absent. A role covering some of
+/// the required population has `C ≠ ∅` and is therefore *usable*; whether the
+/// alternative can run is then a question about how the roles' coverage sets
+/// relate, which `compatibility::SegmentCompatibility` answers. Recording it
+/// here as well would state the same fact at two levels and invite them to
+/// disagree.
 ///
 /// Cross-role segment incompatibility deliberately does *not* live here. It is
 /// a relational fact about two roles' coverage failing to form one executable
@@ -61,13 +68,6 @@ pub enum AbsenceKind {
     /// No segment carries this role. The variant was never extracted, or the
     /// slice dropped it. Fix: extract or fetch the variant.
     AbsentEverywhere,
-    /// Some segments carry it, others do not. Almost always a partial fetch or
-    /// an interrupted incremental pack. Fix: complete the transfer — the
-    /// variant exists.
-    PartialSegmentCoverage {
-        present: Vec<u16>,
-        missing: Vec<u16>,
-    },
     /// The active profile or slice deliberately omits it. Not a defect — an
     /// analysis-only browse slice has no `down` by design. Fix: none; use a
     /// profile that selects it.
@@ -87,25 +87,9 @@ impl AbsenceKind {
     pub fn describe(&self) -> String {
         match self {
             Self::AbsentEverywhere => "absent from every selected segment".into(),
-            Self::PartialSegmentCoverage { present, missing } => format!(
-                "present in segments {}, missing from {}",
-                join(present),
-                join(missing)
-            ),
             Self::OmittedBySelection => "omitted by the active selection".into(),
         }
     }
-}
-
-fn join(segments: &[u16]) -> String {
-    if segments.is_empty() {
-        return "none".into();
-    }
-    segments
-        .iter()
-        .map(|s| s.to_string())
-        .collect::<Vec<_>>()
-        .join(", ")
 }
 
 #[cfg(test)]
@@ -160,30 +144,9 @@ mod tests {
     }
 
     #[test]
-    fn partial_coverage_names_both_sides() {
-        let a = AbsenceKind::PartialSegmentCoverage {
-            present: vec![0],
-            missing: vec![1, 2],
-        };
-        assert!(a.is_defect());
-        let s = a.describe();
-        assert!(s.contains("segments 0"), "{s}");
-        assert!(s.contains("1, 2"), "{s}");
-    }
-
-    #[test]
     fn a_deliberate_omission_is_not_a_defect() {
         // A browse slice has no `down` by design. Reporting that as corruption
         // teaches operators to ignore the diagnostic.
         assert!(!AbsenceKind::OmittedBySelection.is_defect());
-    }
-
-    #[test]
-    fn an_empty_segment_list_reads_as_none_not_as_blank() {
-        let a = AbsenceKind::PartialSegmentCoverage {
-            present: Vec::new(),
-            missing: vec![0],
-        };
-        assert!(a.describe().contains("segments none"), "{}", a.describe());
     }
 }

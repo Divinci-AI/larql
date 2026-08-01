@@ -30,13 +30,21 @@
 pub mod authority;
 pub mod compatibility;
 pub mod coordinate;
-pub mod operand;
+pub mod kernel;
+pub mod role;
 pub mod selection;
+pub mod traversal;
+#[cfg(test)]
+mod traversal_tests;
 
 pub use authority::{
     derive_authority, AuthorityInputs, DerivedAuthority, Fidelity, StructuralChange,
 };
 pub use compatibility::{IncompatibilityShape, RoleSegmentCoverage, SegmentCompatibility};
 pub use coordinate::{AbsenceKind, RegionCoordinate};
-pub use operand::{KernelId, KernelMaturity, OperandCapability};
+pub use kernel::{KernelId, KernelMaturity};
+pub use role::{OperandAvailability, ReferenceSupport, RoleCapability};
 pub use selection::{BankSelection, SelectedRegion};
+pub use traversal::{
+    traverse_bank, AlternativeReport, BankCapabilityReport, ReferenceCodecs, ReferenceExecution,
+};
