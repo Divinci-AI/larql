@@ -516,4 +516,49 @@ mod tests {
         };
         assert!((a.eta(367.0) - 0.899).abs() < 0.01);
     }
+
+    /// Drive the tournament end-to-end at minimum params, matching the
+    /// `profile_grouped_experts` smoke pattern. Skips on hosts without a
+    /// Metal device.
+    ///
+    /// This is the only test that runs the arms against each other rather
+    /// than checking a helper in isolation, so it is what would catch an
+    /// arm that stopped agreeing with the oracle.
+    #[test]
+    fn race_smoke_runs_every_arm_and_they_agree() {
+        if MetalBackend::new().is_none() {
+            return;
+        }
+        // K a multiple of the superblock, N not a multiple of the tile so the
+        // row-remainder path runs too.
+        let arms = race(260, GROUP * GROUPS_PER_SB, 2, 1, 0, 1);
+        assert!(!arms.is_empty(), "the tournament must produce arms");
+
+        for a in &arms {
+            assert!(!a.name.is_empty());
+            assert!(a.bytes > 0.0 && a.bpw > 0.0, "{}: no payload", a.name);
+            assert!(a.ms.is_finite() && a.ms > 0.0, "{}: bad time", a.name);
+            assert!(a.gbs.is_finite() && a.gbs > 0.0, "{}: bad rate", a.name);
+            assert!(a.eta(367.0) > 0.0, "{}: eta", a.name);
+        }
+
+        // Ceiling probes compute something other than the matvec, so only the
+        // checked arms are required to agree with the oracle.
+        let checked: Vec<_> = arms.iter().filter(|a| a.checked).collect();
+        assert!(!checked.is_empty(), "at least one arm must be checked");
+        for a in checked {
+            assert!(
+                a.max_abs_diff.is_finite(),
+                "{}: oracle diff not finite",
+                a.name
+            );
+            assert!(
+                a.first_bad.is_none(),
+                "{} disagrees with arm A at index {:?} (cross_diff {})",
+                a.name,
+                a.first_bad,
+                a.cross_diff
+            );
+        }
+    }
 }
