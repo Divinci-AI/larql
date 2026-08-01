@@ -1267,6 +1267,110 @@ recognised** — see item 2.
    [larql-vindex]
 
 
+### K3 serving-format ladder + efficiency re-bank (2026-08-01)
+
+Two rungs closed and one measurement corrected. Registry: `dec8-11`, `dec8-12`
+(programme `dec`); rules R7/R8 added to [`docs/dec-funnel.md`](docs/dec-funnel.md) §1.
+
+**The exact-format search is finished.** K3's experts are MXFP4, so a group
+reconstructs at most 15 distinct values — 4 payload bits is the floor by
+counting, not by search, and MXFP4 already spends exactly it. Doubled, the
+alphabet is not an arithmetic progression, so the smallest affine grid
+containing it needs 25 levels: **Q4_K can never be exact** (9 levels short),
+Q5_K can but is dominated, and **Q6_K is the cheapest exact container that can
+actually serve today**. The variable-rate loophole is closed too — measured
+entropy 3.75 bits over 7.86 M real weights, and **0.0000%** of tiles hold ≤8
+symbols at any block size ≥64, so palettes and escape codes are dead. Exact
+floor **4.06731 bpw**. `larql k3-ledger formats` / `symbol-census`.
+
+**MXFP4's low kernel efficiency is the container, not a defect.** Seven crossed
+arms at the real expert shape decomposed the winner into skeleton 76% / fp4
+decode 22% / input gather 2%, with the skeleton already streaming at 0.95 of
+attainable bandwidth. Four decoders tried; the ordering is monotone in table
+size and a table-free bit-manipulation decoder is worst by 37%. **The
+expert-side kernel line closes at single-token width.**
+
+**Numbers, and they moved down twice — both times because a measurement got
+honest, never because anything got slower:**
+
+| claim | status |
+|---|---|
+| **3.02 tok/s** | controlled healthy-regime exact-Q6_K composed ceiling |
+| **2.79–3.18** | observed, composed **paired per run** over 7 accepted runs |
+| **3.65 tok/s** | + grouped routed experts — clean measurement, integration still required |
+| **4.15 tok/s** | + routed MXFP4 — a **kernel projection**, maturity `Grouped`, below `is_servable()` |
+| **5.49 tok/s** | density-only **upper bound**; reuses Q6_K efficiencies at MXFP4 density, which R7 forbids |
+| *unmeasured* | **sustained** laptop throughput under the degradation regime below |
+
+**Two harness bugs, both silent, both now guarded.** `BufferCache::get_bytes`
+keys on `(pointer, length)`, so same-length *temporaries* aliased and returned
+each other's buffers — which meant the cold-rotation loop feeding every
+efficiency figure was handing back **one buffer eight times**. The composed
+ledger survived it (3.70 → 3.68), because the dominant term is also the
+steadiest. And a 16-run promotion campaign found that **more repeats make it
+worse**: 9 runs were unusable as the machine degraded under sustained load and
+the attention control fell 0.89 → 0.06. Runs are a time series, not
+exchangeable draws.
+
+1. **Run the sustained end-to-end decode, and name the degradation.** The nine
+   rejected runs are a second scoreboard nobody has measured: report throughput
+   by time window (startup / healthy / late / steady-state floor) over 20–30
+   minutes with system telemetry. Thermal, power management, memory pressure
+   and paging are all still live candidates. **The demo number is this one, not
+   3.02** — and it may be lower.
+   [larql-compute-metal]
+
+2. **Promote `gate/up` and the ungrouped expert shape across independent
+   cool-start sessions.** Both sit at 2.2–2.4% relative standard error against a
+   1% bar, and both feed DEC-8.7b's target row — which is the only live
+   throughput rung now that kernel efficiency is closed as a lever. The R4 lever
+   ordering *refuses to print* until they clear. Not another same-session
+   campaign; that reproduces the artifact. Check the histogram for bimodality
+   before banking a mean.
+   [larql-cli]
+
+3. **Finish the grouped-down integration A/B on a loaded model.** DEC-8.9's
+   kernel risk is retired and its `next_action` carries the six-step order;
+   this is what converts 3.02 → 3.65 from projection into result, and it is the
+   nearest end-to-end milestone.
+   [larql-compute-metal, larql-inference]
+
+4. **Resolve `A_log` before any KDA numerics.** K3's checkpoint ships `[128]`
+   where the reference module allocates `num_heads` = `[96]`, and two readings
+   of the geometry each explain the large tensors while breaking one small one
+   — **shapes cannot decide it**. `kda_a_log` fails closed and ships a
+   deliberately rectangular discriminating fixture, because the two readings
+   coincide on the diagonal and a square fixture would pass vacuously.
+   [larql-cli, larql-models]
+
+5. **Build a sentinel with a working set ≥ the largest class it gates.**
+   Attention is currently both a banked class and the control, so its 0.876 is
+   self-selected and biased upward. The obvious cheap fix is *worse*: a 21 MB
+   sentinel admitted two runs where the 72 MB attention cell had already
+   collapsed. Degradation is size-dependent; the K2 weights-only probe (89.5 MB)
+   is the candidate.
+   [larql-compute-metal]
+
+6. **`prefill_q4_seq4_synthetic_smoke` is flaky at ~3–5%, all-NaN output.**
+   Found by the new commit gate, which runs `--all-targets` rather than the
+   `--lib` subset. Failure mode is the *entire* prefill output NaN, not a
+   drifted value. **Bisect did not resolve it and n=16 per commit was
+   underpowered**: pooled 3 failures in 88 runs, with the failures landing on
+   two non-adjacent commits and 0/16 on the commits between them — at an 8%
+   true rate, `P(0 in 16) = 0.26`, so a clean 16 proves nothing and ~36 runs
+   per candidate are needed. Not attributable to any one change on the
+   evidence available. Same family as the threadgroup-scratch reuse race fixed
+   earlier in fused attention, so treat it as a real race rather than noise;
+   localising it wants a proper campaign, not another bisect.
+   [larql-compute-metal]
+
+7. **Attention E/F ceiling probes — parked, bar pre-registered.** R7 means
+   attention's 0.87–0.89 may describe its container rather than a fixable
+   kernel. Same harness, needs Q6_K variants. **If the skeleton returns ≥ 0.93
+   the class is closed and no decoder work is licensed.** Run it when preparing
+   dense-format work or DEC-8.7b, not before the integration above.
+   [larql-compute-metal]
+
 ---
 
 ## Cleanup / consolidation track (added 2026-06-12)
