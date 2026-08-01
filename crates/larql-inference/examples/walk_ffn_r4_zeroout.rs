@@ -95,6 +95,11 @@ const REPEATS: usize = 16;
 /// which the cell is reported as thermally invalid rather than believed.
 const SENTINEL_DRIFT_LIMIT: f64 = 0.10;
 
+/// Dense-sentinel IQR/median above which the cell is treated as disturbed.
+/// A drift-only gate is porous: quartile means can agree while a single
+/// repeat spikes 4×, which is exactly the cell that must not be believed.
+const SENTINEL_SPREAD_LIMIT: f64 = 0.10;
+
 /// 1-minute load average above which the box is treated as contended.
 /// A concurrent build is as fatal to a ratio experiment as throttling.
 const LOAD_LIMIT: f64 = 3.0;
@@ -195,11 +200,25 @@ fn summarise(values: &[f64]) -> Summary {
 
 /// Drift in the throttle sentinel: mean of the last quarter of repeats
 /// against the first quarter. Large positive = the box slowed mid-run.
+///
+/// Drift alone is NOT sufficient: it is computed from quartile means, so a
+/// single dense repeat spiking (one cell saw 543 ms against a 127 ms median)
+/// can leave drift small while the cell is plainly disturbed. Pair it with
+/// [`sentinel_spread`].
 fn sentinel_drift(dense_us: &[f64]) -> f64 {
     let q = (dense_us.len() / 4).max(1);
     let head: f64 = dense_us[..q].iter().sum::<f64>() / q as f64;
     let tail: f64 = dense_us[dense_us.len() - q..].iter().sum::<f64>() / q as f64;
     (tail - head) / head
+}
+
+/// Dispersion of the throttle sentinel: IQR as a fraction of the median.
+/// Catches the disturbed-but-not-drifting cell that [`sentinel_drift`]
+/// passes — an outlier repeat inflates the spread even when the quartile
+/// means agree.
+fn sentinel_spread(dense_us: &[f64]) -> f64 {
+    let s = summarise(dense_us);
+    (s.p75 - s.p25) / s.median
 }
 
 // ── Trace helpers ────────────────────────────────────────────────────
@@ -457,22 +476,21 @@ fn main() {
         }
 
         let drift = sentinel_drift(&samples[ARM_DENSE]);
+        let spread = sentinel_spread(&samples[ARM_DENSE]);
         let dense_sum = summarise(&samples[ARM_DENSE]);
+        let invalid = drift.abs() > SENTINEL_DRIFT_LIMIT || spread > SENTINEL_SPREAD_LIMIT;
 
         println!(
             "── {} K={k}  ({routed_layers} routed layers)  dense {:.0} µs [{:.0}–{:.0}]  \
-             {:.1} tok/s  sentinel drift {:+.1}%{}",
+             {:.1} tok/s  sentinel drift {:+.1}% spread {:.1}%{}",
             band_label(band),
             dense_sum.median,
             dense_sum.min,
             dense_sum.max,
             1e6 / dense_sum.median,
             drift * 100.0,
-            if drift.abs() > SENTINEL_DRIFT_LIMIT {
-                "  ⚠ THERMALLY INVALID"
-            } else {
-                ""
-            }
+            spread * 100.0,
+            if invalid { "  ⚠ CELL DISTURBED" } else { "" }
         );
         for p in &parity {
             println!("     {p}");
