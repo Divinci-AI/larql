@@ -27,8 +27,14 @@
 //! derivation circular — a profile whose validity depended on capabilities
 //! derived from that same profile.
 
+pub mod authority;
 pub mod coordinate;
 pub mod operand;
+pub mod selection;
 
+pub use authority::{
+    derive_authority, AuthorityInputs, DerivedAuthority, Fidelity, StructuralChange,
+};
 pub use coordinate::{AbsenceKind, RegionCoordinate};
 pub use operand::{KernelId, KernelMaturity, OperandCapability};
+pub use selection::{BankSelection, SelectedRegion};
