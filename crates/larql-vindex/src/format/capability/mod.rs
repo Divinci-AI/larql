@@ -28,6 +28,7 @@
 //! derived from that same profile.
 
 pub mod authority;
+pub mod compatibility;
 pub mod coordinate;
 pub mod operand;
 pub mod selection;
@@ -35,6 +36,7 @@ pub mod selection;
 pub use authority::{
     derive_authority, AuthorityInputs, DerivedAuthority, Fidelity, StructuralChange,
 };
+pub use compatibility::{IncompatibilityShape, RoleSegmentCoverage, SegmentCompatibility};
 pub use coordinate::{AbsenceKind, RegionCoordinate};
 pub use operand::{KernelId, KernelMaturity, OperandCapability};
 pub use selection::{BankSelection, SelectedRegion};

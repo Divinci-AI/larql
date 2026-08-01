@@ -140,7 +140,6 @@ impl OperandCapability {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::format::lyrw2::region_role::RegionRole;
 
     fn kernel(maturity: KernelMaturity) -> OperandCapability {
         OperandCapability::KernelExecutable {
@@ -258,18 +257,5 @@ mod tests {
         })
         .describe();
         assert!(s.contains("missing from 1"), "{s}");
-    }
-
-    #[test]
-    fn incompatible_segment_sets_are_reported_as_absence_not_as_unsupported() {
-        // Nothing is strictly missing, but the layer cannot execute — the fix
-        // is to reconcile the selection, so it belongs under absence.
-        let c = OperandCapability::Absent(AbsenceKind::IncompatibleSegmentSet {
-            role_segments: vec![0],
-            other_role: RegionRole::Gate,
-            other_segments: vec![1],
-        });
-        assert!(!c.bytes_present());
-        assert!(c.indicates_index_defect());
     }
 }

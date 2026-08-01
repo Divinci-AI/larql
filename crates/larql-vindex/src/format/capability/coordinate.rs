@@ -49,8 +49,13 @@ impl RegionCoordinate {
     }
 }
 
-/// Why a required region is not usable. Similar execution outcomes, different
-/// fixes — which is the whole reason these are not collapsed into "absent".
+/// Why a required region is not usable — **role-local causes only**.
+///
+/// Cross-role segment incompatibility deliberately does *not* live here. It is
+/// a relational fact about two roles' coverage failing to form one executable
+/// population, so assigning it to each operand separately would state a
+/// symptom twice and the cause nowhere. It lives on the alternative
+/// evaluation instead (see `compatibility::SegmentCompatibility`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AbsenceKind {
     /// No segment carries this role. The variant was never extracted, or the
@@ -62,14 +67,6 @@ pub enum AbsenceKind {
     PartialSegmentCoverage {
         present: Vec<u16>,
         missing: Vec<u16>,
-    },
-    /// Present across a segment set that does not match another selected
-    /// role's. The layer cannot be executed even though nothing is strictly
-    /// missing. Fix: reconcile the selection, not the storage.
-    IncompatibleSegmentSet {
-        role_segments: Vec<u16>,
-        other_role: RegionRole,
-        other_segments: Vec<u16>,
     },
     /// The active profile or slice deliberately omits it. Not a defect — an
     /// analysis-only browse slice has no `down` by design. Fix: none; use a
@@ -94,16 +91,6 @@ impl AbsenceKind {
                 "present in segments {}, missing from {}",
                 join(present),
                 join(missing)
-            ),
-            Self::IncompatibleSegmentSet {
-                role_segments,
-                other_role,
-                other_segments,
-            } => format!(
-                "covers segments {} but '{}' covers {} — no segment carries both",
-                join(role_segments),
-                other_role.name(),
-                join(other_segments)
             ),
             Self::OmittedBySelection => "omitted by the active selection".into(),
         }
@@ -182,19 +169,6 @@ mod tests {
         let s = a.describe();
         assert!(s.contains("segments 0"), "{s}");
         assert!(s.contains("1, 2"), "{s}");
-    }
-
-    #[test]
-    fn an_incompatible_segment_set_names_the_conflicting_role() {
-        let a = AbsenceKind::IncompatibleSegmentSet {
-            role_segments: vec![0],
-            other_role: RegionRole::Gate,
-            other_segments: vec![1],
-        };
-        assert!(a.is_defect());
-        let s = a.describe();
-        assert!(s.contains("gate"), "{s}");
-        assert!(s.contains("no segment carries both"), "{s}");
     }
 
     #[test]
