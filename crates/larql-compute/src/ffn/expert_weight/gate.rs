@@ -21,10 +21,13 @@ pub fn apply(
     activation: Activation,
 ) -> Array2<f32> {
     match policy {
-        ExpertGatePolicy::Gated => match activation {
-            Activation::GeluTanh | Activation::Gelu => gelu_tanh_gate_up(gate, up),
-            _ => silu_gate_up(gate, up),
-        },
+        ExpertGatePolicy::Gated => {
+            if activation.uses_gelu_tanh_gate_up() {
+                gelu_tanh_gate_up(gate, up)
+            } else {
+                silu_gate_up(gate, up)
+            }
+        }
         ExpertGatePolicy::ClampedGlu { limit, alpha } => clamped_glu(gate, up, limit, alpha),
     }
 }

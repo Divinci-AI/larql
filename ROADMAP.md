@@ -736,7 +736,7 @@ a silent-wrong-numerics cluster in the quantized walk paths (same
 "produces a number, the number is a lie" theme as the DEC review), and
 **no walk-vs-dense numerical parity test anywhere in the tree**.
 
-**Status 2026-08-01: 23 of 24 closed.** Tiers 0–1 in full (2026-07-30,
+**Status 2026-08-01: PROGRAMME CLOSED — 24 of 24.** Tiers 0–1 in full (2026-07-30,
 incl. all four HIGHs); item 13 resolved with the finding inverted (the
 exact-first gate chain is now actually wired — `enable_hnsw()` had been
 leaking approximate selection into walk numerics); Tier 2 complete:
@@ -753,11 +753,21 @@ documented follow-up in that doc); doc drift (23) closed 2026-08-01
 example; extract-default contradiction resolved in favour of the code,
 per surface; walk.md K=8092 kept — it is the literal harness constant,
 now documented as such — and WalkFfn reframed as the
-instrumentable/editable layer + CPU sparse path). Open: 24 (hygiene)
-+ tracked follow-ups
-(server/lql `try_apply_patch` migration, remote transport coverage
-harness, logit-contribution trace field, walk-FFN thresholds surfaced
-into `WalkFfnConfig`).
+instrumentable/editable layer + CPU sparse path); hygiene (24) closed
+2026-08-01, triaged per its own licence — done: generic-engine
+vocabularies → data files behind a loud-fallback search chain, the two
+deferred 16384→10240 fixes, the activation dispatch (27 sites) onto one
+exhaustive helper, FFN component constants unified, 41 colocated tests
+for `hnsw.rs`/`mutate`/`write_f32.rs` (97/96/93% line coverage);
+documented remainder: the >250-line file splits (see the item).
+Standing follow-ups carried out of the programme: server/lql
+`try_apply_patch` migration, remote transport coverage harness,
+logit-contribution trace field, walk-FFN thresholds surfaced into
+`WalkFfnConfig`, HNSW level-0 graph fragmentation at n≳64 (new finding
+from item 24's test pass — naive `add_connection` eviction orphans
+nodes; recall@10 collapses to 0.16 at n=200 uniform), and the remaining
+file splits (`huggingface/download/mod.rs` 1329, `patch/overlay.rs`
+1071, `quant/convert.rs` 653).
 
 Sequencing is interaction-driven: Tier 0's padded-stride fix **gates**
 Tier 2's base+delta (the delta path leans on the same row-dot/sidecar
@@ -1098,7 +1108,77 @@ what's exact, approximate, observed, reconstructed):**
     crate README W2 note (item 16), `gate_overlay.rs`/KnnStore
     GateOverlay-backed scoring in the crate README tree (item 21),
     `walk_ffn.rs` → `walk_ffn/` paths. No code changes.) [docs]
-24. **Hygiene** — file splits (`walk_ffn/mod.rs` 926 → timings/ladder/
+24. ✅ **Hygiene** (DONE 2026-08-01 — triaged per the item's own
+    licence: worked in priority order, each piece fully or not at all,
+    remainder documented. **(1) Generic-engine violations:** the
+    English word lists (countries/languages/months/numbers + the
+    148-word stop list) and the Wikidata category vocabulary are OUT
+    of `clustering/` engine code and into `data/entity_patterns.json`
+    + `data/stop_words.json` (+ the existing
+    `data/wikidata_categories.json`), loaded through the new
+    `clustering/data_files.rs` search chain — `LARQL_DATA_DIR` env dir
+    → compile-time workspace `data/`, explicit config path via the
+    `*_from(path)` loaders, NEVER cwd; `load_reference_databases`'s
+    identical cwd-probe (`data`/`../data`/`../../data`) fixed with the
+    same resolver; fallbacks are minimal built-in core sets and LOUD
+    (stderr `warning:`). Bare `0.25` floor → `MIN_CATEGORY_SIMILARITY`;
+    the "60%+" doc-vs-`0.5`-code pattern threshold resolved in favour
+    of the code as `PATTERN_MATCH_FRACTION` (+ `MORPHOLOGICAL_MAX_LEN`);
+    class order is data (language before country), pinned. Tests cover
+    data-file loading, env-dir precedence, missing/invalid/empty-file
+    loud fallbacks, threshold boundaries, and a behavioural
+    similarity-floor pair through `auto_label_clusters_from_embeddings`;
+    clustering files 93–100% line coverage. **(2) The two deferred
+    item-23 16384 fixes:** Gemma 3 4B intermediate is 10240 (verified
+    against `larql-models` `gemma3.rs:195`) — `docs/ffn-cache.md:46`
+    now states the real sparse gate (below the 4/5 `FULL_K_DENSITY`
+    rewrite ⇒ `top_k < 8192`, 8092 qualifies) and lql
+    `insert/capture.rs:99` says 10240. **(3) Activation dispatch:**
+    27 copies of the GeluTanh|Gelu → gelu-tanh-else-SiLU match (10
+    `walk_ffn/` files, `sparse_compute.rs` ×3, `layer_graph/template.rs`,
+    `kquant_forward/walk_ffn.rs` ×4 across larql-inference AND
+    larql-compute, `cached.rs`, `ffn/weight.rs` ×4,
+    `expert_weight/gate.rs`, 3 examples) now route through ONE helper,
+    `larql_models::Activation::uses_gelu_tanh_gate_up()` — a
+    wildcard-free exhaustive match (a hypothetical new variant is a
+    compile error, not a silent SiLU landing; pinned by tests incl. a
+    `#[should_panic]` for `Relu`, which has no kernel and no in-tree
+    arch). Two silently-drifted copies found en route (`weight.rs`
+    gated arms and `cached.rs` matched `GeluTanh` only, dropping exact
+    `Gelu` to SiLU) are now consistent. **(4) Component constants:**
+    `FFN_GATE`/`FFN_UP` added beside `FFN_DOWN` +
+    `FFN_COMPONENTS_PER_LAYER`, pub in larql-vindex (crate-root
+    export) and mirrored in `larql_compute::kv_index` with
+    compile-time equality pins in `kv_index_impl.rs`; every bare
+    `0/1/2` walk/kquant call site replaced (selector norms, sparse
+    row-dot/scaled-add, sparse_parallel, `interleaved_q4`'s `* 3` →
+    `FFN_COMPONENTS_PER_LAYER` + component-slice helper, both
+    `kquant_forward/walk_ffn.rs`, and `base_delta.rs`'s local consts
+    unified on the vindex ones). **(5) Colocated tests, 41 new:**
+    `index/compute/hnsw.rs` 0 → 12 tests at 97.3% line coverage
+    (insert/search, recall@10 = 0.97 vs brute force on clustered
+    synthetic, level-RNG determinism with the LCG constants pinned);
+    `index/mutate/mod.rs` 14 tests at 96.0% (meta/gate/override
+    mutation, INSERT/DELETE-then-query, save→load round trips incl.
+    mmap→heap promotion); `format/weights/write_f32.rs` 15 tests at
+    92.6% (round trip through the f32 loader, MoE/MLA/BitNet writer
+    branches, error paths). New finding pinned honestly rather than
+    papered over: HNSW's level-0 graph FRAGMENTS as n grows — naive
+    `add_connection` eviction orphans nodes (~33/200 BFS-reachable,
+    recall@10 0.16 at n=200 uniform even with ef=n; fully connected
+    ≤~64) — production gate-KNN at 10K+ features may be silently
+    degraded; carried as a standing follow-up. **REMAINDER (documented,
+    not done): (6) file splits** — `huggingface/download/mod.rs` 1329,
+    `patch/overlay.rs` 1071, `quant/convert.rs` 653 still exceed the
+    250-line rule (94/196 vindex src files over; `walk_ffn/mod.rs` is
+    already down to 553 and `sparse.rs` to 861 via the Tier-2 sibling
+    decompositions). Verification: larql-vindex 1296 lib tests +
+    integration suites, larql-inference 1423 lib tests, larql-models /
+    larql-compute / larql-lql all green; clippy + fmt clean on changed
+    files; changed/new files ≥90% line coverage except
+    `larql-models/src/config.rs` (63% file-wide pre-existing
+    trait-default debt; the added helper's lines are 100% covered))
+    — file splits (`walk_ffn/mod.rs` 926 → timings/ladder/
     builders; `sparse.rs` 842 → gemv/route/parallel/gather;
     `overlay.rs` 959; `huggingface/download/mod.rs` 1329;
     `quant/convert.rs` 655 — 88/186 vindex files exceed the 250-line

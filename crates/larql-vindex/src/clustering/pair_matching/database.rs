@@ -147,50 +147,45 @@ pub struct ReferenceDatabases {
     pub wordnet: Option<RelationDatabase>,
 }
 
-/// Load all available reference databases from the data directory.
+/// Filename of the Wikidata (subject, object) triples database.
+pub const WIKIDATA_TRIPLES_FILE: &str = "wikidata_triples.json";
+/// Filename of the WordNet relations database.
+pub const WORDNET_RELATIONS_FILE: &str = "wordnet_relations.json";
+
+/// Load all available reference databases.
+///
+/// Files are resolved through the [`crate::clustering::data_files`]
+/// search chain (`LARQL_DATA_DIR` → workspace `data/`; never
+/// cwd-relative). Both databases are optional enrichment — absence is a
+/// normal configuration and yields `None`, which downstream labeling
+/// reports as "0/K clusters labeled" rather than failing.
 pub fn load_reference_databases() -> ReferenceDatabases {
-    let mut result = ReferenceDatabases {
-        wikidata: None,
-        wordnet: None,
+    let load = |filename: &str,
+                loader: fn(&Path) -> Option<RelationDatabase>,
+                name: &str|
+     -> Option<RelationDatabase> {
+        let path = crate::clustering::data_files::resolve_data_file(filename)?;
+        let db = loader(&path)?;
+        eprintln!(
+            "  Loaded {name}: {} relations, {} pairs",
+            db.num_relations(),
+            db.num_pairs()
+        );
+        Some(db)
     };
 
-    for base in &["data", "../data", "../../data"] {
-        let base = Path::new(base);
-
-        if result.wikidata.is_none() {
-            let wikidata_path = base.join("wikidata_triples.json");
-            if wikidata_path.exists() {
-                if let Some(db) = RelationDatabase::load_wikidata(&wikidata_path) {
-                    eprintln!(
-                        "  Loaded Wikidata: {} relations, {} pairs",
-                        db.num_relations(),
-                        db.num_pairs()
-                    );
-                    result.wikidata = Some(db);
-                }
-            }
-        }
-
-        if result.wordnet.is_none() {
-            let wordnet_path = base.join("wordnet_relations.json");
-            if wordnet_path.exists() {
-                if let Some(db) = RelationDatabase::load_wordnet(&wordnet_path) {
-                    eprintln!(
-                        "  Loaded WordNet: {} relations, {} pairs",
-                        db.num_relations(),
-                        db.num_pairs()
-                    );
-                    result.wordnet = Some(db);
-                }
-            }
-        }
-
-        if result.wikidata.is_some() && result.wordnet.is_some() {
-            break;
-        }
+    ReferenceDatabases {
+        wikidata: load(
+            WIKIDATA_TRIPLES_FILE,
+            RelationDatabase::load_wikidata,
+            "Wikidata",
+        ),
+        wordnet: load(
+            WORDNET_RELATIONS_FILE,
+            RelationDatabase::load_wordnet,
+            "WordNet",
+        ),
     }
-
-    result
 }
 
 #[cfg(test)]
@@ -386,10 +381,18 @@ mod tests {
         assert!(RelationDatabase::load_wordnet(&path).is_none());
     }
 
-    // Note: `load_reference_databases` walks `./data/`, `../data/`,
-    // `../../data/` relative to cwd. Testing it would require
-    // mutating cwd which breaks parallel test isolation. The two
-    // loaders it dispatches to (`load_wikidata`, `load_wordnet`)
-    // are individually tested above; the wrapper itself is exercised
-    // implicitly when downstream callers invoke it from the binary.
+    #[test]
+    fn load_reference_databases_resolves_without_cwd() {
+        // The workspace checkout carries both data files; resolution
+        // goes through the data_files chain (compile-time workspace
+        // path), so this holds regardless of the process cwd — the
+        // pre-2026-07-30-review code probed `data`/`../data`/`../../data`
+        // relative to cwd and silently lost the databases when launched
+        // from elsewhere.
+        let dbs = load_reference_databases();
+        let wikidata = dbs.wikidata.expect("workspace data/wikidata_triples.json");
+        let wordnet = dbs.wordnet.expect("workspace data/wordnet_relations.json");
+        assert!(wikidata.num_relations() > 0);
+        assert!(wordnet.num_relations() > 0);
+    }
 }

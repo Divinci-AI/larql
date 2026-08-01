@@ -61,8 +61,12 @@ fn absurd_feature_count_is_error_not_allocation() {
     bytes.extend_from_slice(&u32::MAX.to_le_bytes()); // num_features
     std::fs::write(tmp.path().join(DOWN_META_BIN), &bytes).unwrap();
     // u32::MAX features × record_size overflows the checked multiply.
-    assert!(read_err(tmp.path()).contains("overflow") || read_err(tmp.path()).contains("truncated"));
-    assert!(mmap_err(tmp.path()).contains("overflow") || mmap_err(tmp.path()).contains("truncated"));
+    assert!(
+        read_err(tmp.path()).contains("overflow") || read_err(tmp.path()).contains("truncated")
+    );
+    assert!(
+        mmap_err(tmp.path()).contains("overflow") || mmap_err(tmp.path()).contains("truncated")
+    );
 }
 
 /// A plausible-but-unbacked feature count (1000 features, no records)
@@ -74,8 +78,16 @@ fn truncated_records_are_error() {
     let mut bytes = header(1, TOP_K);
     bytes.extend_from_slice(&UNBACKED_FEATURES.to_le_bytes());
     std::fs::write(tmp.path().join(DOWN_META_BIN), &bytes).unwrap();
-    assert!(read_err(tmp.path()).contains("truncated"), "{}", read_err(tmp.path()));
-    assert!(mmap_err(tmp.path()).contains("truncated"), "{}", mmap_err(tmp.path()));
+    assert!(
+        read_err(tmp.path()).contains("truncated"),
+        "{}",
+        read_err(tmp.path())
+    );
+    assert!(
+        mmap_err(tmp.path()).contains("truncated"),
+        "{}",
+        mmap_err(tmp.path())
+    );
 }
 
 /// A huge top_k combined with a feature count overflows the checked
@@ -86,8 +98,16 @@ fn record_size_overflow_is_error() {
     let mut bytes = header(1, u32::MAX);
     bytes.extend_from_slice(&u32::MAX.to_le_bytes()); // num_features
     std::fs::write(tmp.path().join(DOWN_META_BIN), &bytes).unwrap();
-    assert!(read_err(tmp.path()).contains("overflow"), "{}", read_err(tmp.path()));
-    assert!(mmap_err(tmp.path()).contains("overflow"), "{}", mmap_err(tmp.path()));
+    assert!(
+        read_err(tmp.path()).contains("overflow"),
+        "{}",
+        read_err(tmp.path())
+    );
+    assert!(
+        mmap_err(tmp.path()).contains("overflow"),
+        "{}",
+        mmap_err(tmp.path())
+    );
 }
 
 /// Truncated mid-header: shorter than the 16-byte header.
@@ -109,7 +129,9 @@ fn corrupt_down_meta_fails_full_vindex_load() {
     let mut bytes = header(1, TOP_K);
     bytes.extend_from_slice(&u32::MAX.to_le_bytes());
     std::fs::write(tmp.path().join(DOWN_META_BIN), &bytes).unwrap();
-    let err = load_dir(tmp.path()).err().expect("corrupt down_meta fails load");
+    let err = load_dir(tmp.path())
+        .err()
+        .expect("corrupt down_meta fails load");
     assert!(err.to_string().contains("down_meta.bin"), "{err}");
 }
 

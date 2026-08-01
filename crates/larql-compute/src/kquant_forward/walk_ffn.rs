@@ -1,6 +1,7 @@
 use crate::cpu::ops::q4k_q8k_dot::{
     q4k_q8k_gate_up_into, q4k_q8k_matvec_into, quantize_x_to_q8k, Q8KActivation,
 };
+use crate::kv_index::{FFN_DOWN, FFN_GATE, FFN_UP};
 use ndarray::Array2;
 
 use super::dequant::dequantize_matrix;
@@ -28,7 +29,7 @@ pub fn kquant_ffn_forward_layer(
             )
         });
 
-    let gate = if let Some(arc) = index.kquant_ffn_layer_once(layer, 0) {
+    let gate = if let Some(arc) = index.kquant_ffn_layer_once(layer, FFN_GATE) {
         let w_gate =
             ndarray::ArrayView2::from_shape((intermediate, hidden), &arc[..intermediate * hidden])
                 .expect("gate cache shape");
@@ -37,7 +38,7 @@ pub fn kquant_ffn_forward_layer(
         let w_gate = dequantize_matrix(ffn[0].0, ffn[0].1, intermediate, hidden);
         dot_proj(x, &w_gate)
     };
-    let up = if let Some(arc) = index.kquant_ffn_layer_once(layer, 1) {
+    let up = if let Some(arc) = index.kquant_ffn_layer_once(layer, FFN_UP) {
         let w_up =
             ndarray::ArrayView2::from_shape((intermediate, hidden), &arc[..intermediate * hidden])
                 .expect("up cache shape");
@@ -46,15 +47,14 @@ pub fn kquant_ffn_forward_layer(
         let w_up = dequantize_matrix(ffn[1].0, ffn[1].1, intermediate, hidden);
         dot_proj(x, &w_up)
     };
-    let activation = match arch.activation() {
-        larql_models::Activation::GeluTanh | larql_models::Activation::Gelu => {
-            gelu_tanh_gate_up(&gate, &up)
-        }
-        _ => silu_gate_up(&gate, &up),
+    let activation = if arch.activation().uses_gelu_tanh_gate_up() {
+        gelu_tanh_gate_up(&gate, &up)
+    } else {
+        silu_gate_up(&gate, &up)
     };
     // Down projection: use LRU dequant cache (component=2 stores feature-major = w_down^T).
     let n = intermediate * hidden;
-    if let Some(arc) = index.kquant_ffn_layer_once(layer, 2) {
+    if let Some(arc) = index.kquant_ffn_layer_once(layer, FFN_DOWN) {
         let w_down_t = ndarray::ArrayView2::from_shape((intermediate, hidden), &arc[..n])
             .expect("down cache shape");
         activation.dot(&w_down_t)
@@ -122,11 +122,10 @@ pub fn kquant_ffn_forward_layer_q8k(
     let gate = Array2::from_shape_vec((1, intermediate), gate_flat).expect("gate shape");
     let up = Array2::from_shape_vec((1, intermediate), up_flat).expect("up shape");
 
-    let activation = match arch.activation() {
-        larql_models::Activation::GeluTanh | larql_models::Activation::Gelu => {
-            gelu_tanh_gate_up(&gate, &up)
-        }
-        _ => silu_gate_up(&gate, &up),
+    let activation = if arch.activation().uses_gelu_tanh_gate_up() {
+        gelu_tanh_gate_up(&gate, &up)
+    } else {
+        silu_gate_up(&gate, &up)
     };
 
     // Down projection: Q4K×Q8K NEON — quantise the f32 activation once,
@@ -148,7 +147,7 @@ pub fn kquant_ffn_forward_layer_q8k(
         // Fallback: OnceLock cache + ndarray dot; consults `ffn[2].1` via
         // `dequantize_matrix`, so any down format is handled correctly.
         let n = intermediate * hidden;
-        if let Some(arc) = index.kquant_ffn_layer_once(layer, 2) {
+        if let Some(arc) = index.kquant_ffn_layer_once(layer, FFN_DOWN) {
             let w_down_t = ndarray::ArrayView2::from_shape((intermediate, hidden), &arc[..n])
                 .expect("down cache shape");
             activation.dot(&w_down_t)

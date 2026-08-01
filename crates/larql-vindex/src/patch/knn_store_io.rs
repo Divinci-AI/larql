@@ -304,7 +304,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("store.lknn");
         let mut store = KnnStore::default();
-        store.add(3, vec![1.0, 0.0], 42, "Paris".into(), "France".into(), "capital".into(), 0.9);
+        store.add(
+            3,
+            vec![1.0, 0.0],
+            42,
+            "Paris".into(),
+            "France".into(),
+            "capital".into(),
+            0.9,
+        );
         store.save(&path).unwrap();
         let loaded = KnnStore::load(&path).unwrap();
         assert_eq!(loaded.len(), 1);

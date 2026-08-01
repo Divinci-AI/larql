@@ -12,6 +12,7 @@
 use ndarray::Array2;
 
 use super::WalkFfn;
+use larql_vindex::{FFN_COMPONENTS_PER_LAYER, FFN_DOWN, FFN_GATE, FFN_UP};
 
 impl<'a> WalkFfn<'a> {
     pub(super) fn walk_ffn_q4_interleaved(
@@ -32,22 +33,22 @@ impl<'a> WalkFfn<'a> {
         let q4_bytes_per_matrix = larql_compute::QuantFormat::Q4_0
             .packed_matrix_bytes(intermediate, hidden)
             .expect("Q4_0 interleaved FFN format must have packed geometry");
-        let q4_bytes_per_layer = q4_bytes_per_matrix * 3;
+        let q4_bytes_per_layer = q4_bytes_per_matrix * FFN_COMPONENTS_PER_LAYER;
         let layer_start = layer * q4_bytes_per_layer;
 
-        let gate_q4 = &q4_mmap[layer_start..layer_start + q4_bytes_per_matrix];
-        let up_q4 =
-            &q4_mmap[layer_start + q4_bytes_per_matrix..layer_start + 2 * q4_bytes_per_matrix];
-        let down_q4 =
-            &q4_mmap[layer_start + 2 * q4_bytes_per_matrix..layer_start + 3 * q4_bytes_per_matrix];
+        // Component slices in wire order (gate, up, down).
+        let component = |c: usize| {
+            &q4_mmap
+                [layer_start + c * q4_bytes_per_matrix..layer_start + (c + 1) * q4_bytes_per_matrix]
+        };
+        let gate_q4 = component(FFN_GATE);
+        let up_q4 = component(FFN_UP);
+        let down_q4 = component(FFN_DOWN);
 
         self.index.prefetch_interleaved_q4_layer(layer + 1);
 
         let arch = &*self.weights.arch;
-        let use_gelu = matches!(
-            arch.activation(),
-            larql_models::Activation::GeluTanh | larql_models::Activation::Gelu
-        );
+        let use_gelu = arch.activation().uses_gelu_tanh_gate_up();
 
         let mut out = Array2::<f32>::zeros((seq_len, hidden));
         let mut full_activation = Array2::<f32>::zeros((seq_len, intermediate));

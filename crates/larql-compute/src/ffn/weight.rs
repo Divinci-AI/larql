@@ -241,9 +241,10 @@ impl Q4kMatmulFfn<'_> {
         let activation = if arch.ffn_type() == larql_models::FfnType::Gated {
             let gate = Self::project(gate_bytes, gate_fmt, x, intermediate, hidden, seq);
             let up = Self::project(up_bytes, up_fmt, x, intermediate, hidden, seq);
-            match arch.activation() {
-                larql_models::Activation::GeluTanh => gelu_tanh_gate_up(&gate, &up),
-                _ => silu_gate_up(&gate, &up),
+            if arch.activation().uses_gelu_tanh_gate_up() {
+                gelu_tanh_gate_up(&gate, &up)
+            } else {
+                silu_gate_up(&gate, &up)
             }
         } else {
             let mut projected = Self::project(up_bytes, up_fmt, x, intermediate, hidden, seq);
@@ -253,11 +254,10 @@ impl Q4kMatmulFfn<'_> {
             {
                 add_bias(&mut projected, bias);
             }
-            match arch.activation() {
-                larql_models::Activation::GeluTanh | larql_models::Activation::Gelu => {
-                    projected.mapv(gelu_tanh)
-                }
-                _ => projected.mapv(|v| v * sigmoid(v)),
+            if arch.activation().uses_gelu_tanh_gate_up() {
+                projected.mapv(gelu_tanh)
+            } else {
+                projected.mapv(|v| v * sigmoid(v))
             }
         };
 
@@ -349,9 +349,10 @@ pub fn dense_ffn_forward_backend(
             .unwrap_or_else(|| panic!("{compact_hint} (key: {})", arch.ffn_gate_key(layer)));
         let gate = dot_proj_gpu(x, w_gate, backend);
         let up = dot_proj_gpu(x, w_up, backend);
-        match arch.activation() {
-            larql_models::Activation::GeluTanh => gelu_tanh_gate_up(&gate, &up),
-            _ => silu_gate_up(&gate, &up),
+        if arch.activation().uses_gelu_tanh_gate_up() {
+            gelu_tanh_gate_up(&gate, &up)
+        } else {
+            silu_gate_up(&gate, &up)
         }
     } else {
         let mut projected = dot_proj_gpu(x, w_up, backend);
@@ -361,11 +362,10 @@ pub fn dense_ffn_forward_backend(
         {
             add_bias(&mut projected, bias);
         }
-        match arch.activation() {
-            larql_models::Activation::GeluTanh | larql_models::Activation::Gelu => {
-                projected.mapv(gelu_tanh)
-            }
-            _ => projected.mapv(|v| v * sigmoid(v)),
+        if arch.activation().uses_gelu_tanh_gate_up() {
+            projected.mapv(gelu_tanh)
+        } else {
+            projected.mapv(|v| v * sigmoid(v))
         }
     };
 

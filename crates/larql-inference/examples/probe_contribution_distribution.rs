@@ -422,10 +422,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             let arch = &*weights.arch;
-            let use_gelu = matches!(
-                arch.activation(),
-                larql_models::Activation::GeluTanh | larql_models::Activation::Gelu
-            );
+            let use_gelu = arch.activation().uses_gelu_tanh_gate_up();
 
             // Per-feature `down_row · unembed[target]` — the linearised
             // direct effect of moving 1 unit along this feature's down

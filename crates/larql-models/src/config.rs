@@ -28,6 +28,36 @@ pub enum Activation {
     Relu,
 }
 
+impl Activation {
+    /// Which of the two implemented gate/up FFN kernel families this
+    /// activation dispatches to on the CPU walk / kquant paths:
+    /// `true` = gelu-tanh, `false` = SiLU.
+    ///
+    /// This is the ONE definition of that mapping — the 2026-07-30
+    /// vindex/walk-FFN review (§4) found it copy-pasted across eight
+    /// walk backends, where a new `Activation` variant would silently
+    /// land in the SiLU arm. The match is deliberately exhaustive (no
+    /// wildcard): adding a variant fails compilation here instead.
+    ///
+    /// - [`Activation::Gelu`] (exact GELU) is served by the tanh
+    ///   approximation — a deliberate, documented approximation on
+    ///   these paths (no exact-GELU kernel exists; no in-tree
+    ///   architecture currently returns `Gelu`).
+    /// - [`Activation::Relu`] has NO gate/up kernel; it panics loudly
+    ///   rather than silently computing SiLU numerics. No in-tree
+    ///   architecture returns `Relu`.
+    pub fn uses_gelu_tanh_gate_up(self) -> bool {
+        match self {
+            Activation::GeluTanh | Activation::Gelu => true,
+            Activation::Silu => false,
+            Activation::Relu => panic!(
+                "Activation::Relu has no gate/up FFN kernel on the walk/kquant paths \
+                 (only gelu-tanh and SiLU are implemented)"
+            ),
+        }
+    }
+}
+
 /// How an expert's fused gate/up projection becomes the down projection's
 /// input.
 ///
@@ -1376,5 +1406,31 @@ mod tests {
     #[test]
     fn kv_recomputable_from_residuals_by_default() {
         assert!(DefaultsArch(base_config()).kv_recomputable_from_residuals());
+    }
+
+    // ── Activation::uses_gelu_tanh_gate_up — the ONE gate/up kernel
+    //    mapping (2026-07-30 review §4 dedupe) ─────────────────────────
+
+    #[test]
+    fn gelu_family_maps_to_gelu_tanh_kernel() {
+        assert!(Activation::GeluTanh.uses_gelu_tanh_gate_up());
+        // Exact GELU is served by the tanh approximation — documented.
+        assert!(Activation::Gelu.uses_gelu_tanh_gate_up());
+    }
+
+    #[test]
+    fn silu_maps_to_silu_kernel() {
+        assert!(!Activation::Silu.uses_gelu_tanh_gate_up());
+    }
+
+    /// A variant with no gate/up kernel must fail LOUDLY, never
+    /// silently compute SiLU numerics. Together with the helper's
+    /// wildcard-free match (a new `Activation` variant is a compile
+    /// error there), this pins the review requirement that a
+    /// hypothetical new activation cannot silently land in the SiLU arm.
+    #[test]
+    #[should_panic(expected = "no gate/up FFN kernel")]
+    fn relu_panics_instead_of_silently_running_silu() {
+        Activation::Relu.uses_gelu_tanh_gate_up();
     }
 }

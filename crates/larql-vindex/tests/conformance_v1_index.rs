@@ -46,7 +46,9 @@ fn missing_required_field_is_error() {
         "embed_scale": 1.0, "layers": [], "down_top_k": 1
     }"#;
     let tmp = vindex_with_index_json(json);
-    let err = load_dir(tmp.path()).err().expect("missing num_layers errors");
+    let err = load_dir(tmp.path())
+        .err()
+        .expect("missing num_layers errors");
     assert!(err.to_string().contains("num_layers"), "{err}");
 }
 
@@ -90,7 +92,9 @@ fn out_of_range_layer_entry_is_error_not_panic() {
         ]
     }"#;
     let tmp = vindex_with_index_json(json);
-    let err = load_dir(tmp.path()).err().expect("out-of-range layer errors");
+    let err = load_dir(tmp.path())
+        .err()
+        .expect("out-of-range layer errors");
     let msg = err.to_string();
     assert!(msg.contains("out of range"), "{msg}");
     assert!(msg.contains('5'), "{msg}");

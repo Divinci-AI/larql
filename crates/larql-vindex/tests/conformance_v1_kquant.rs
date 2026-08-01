@@ -197,5 +197,7 @@ fn writer_pads_rows_to_super_block() {
     // Row 1's logical data starts at the padded stride, and the pad
     // tail is zero-filled.
     assert_eq!(padded[PADDED_COLS], data[NON_ALIGNED_COLS]);
-    assert!(padded[NON_ALIGNED_COLS..PADDED_COLS].iter().all(|&v| v == 0.0));
+    assert!(padded[NON_ALIGNED_COLS..PADDED_COLS]
+        .iter()
+        .all(|&v| v == 0.0));
 }

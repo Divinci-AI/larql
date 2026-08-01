@@ -24,10 +24,7 @@ impl<'a> WalkFfn<'a> {
         self.index.prefetch_interleaved_layer(layer + 1);
 
         let arch = &*self.weights.arch;
-        let use_gelu = matches!(
-            arch.activation(),
-            larql_models::Activation::GeluTanh | larql_models::Activation::Gelu
-        );
+        let use_gelu = arch.activation().uses_gelu_tanh_gate_up();
 
         let gate_scores = larql_compute::dot_proj_gpu(x, &gate_view, self.backend);
         let up_scores = larql_compute::dot_proj_gpu(x, &up_view, self.backend);

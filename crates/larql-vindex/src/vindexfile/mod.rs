@@ -457,10 +457,8 @@ mod tests {
         // Layer 1 (num_layers / INSERT_LAYER_BAND_DIVISOR) has no
         // features at all — `find_free_feature` must return None there.
         std::fs::create_dir_all(&dir).unwrap();
-        let gate_vectors: Vec<Option<ndarray::Array2<f32>>> = vec![
-            Some(ndarray::Array2::from_elem((4, 8), 0.25)),
-            None,
-        ];
+        let gate_vectors: Vec<Option<ndarray::Array2<f32>>> =
+            vec![Some(ndarray::Array2::from_elem((4, 8), 0.25)), None];
         let down_meta: Vec<Option<Vec<Option<crate::index::FeatureMeta>>>> = vec![None, None];
         let index = VectorIndex::new(gate_vectors, down_meta, 2, 8);
         let layer_infos = index.save_gate_vectors(&dir).unwrap();

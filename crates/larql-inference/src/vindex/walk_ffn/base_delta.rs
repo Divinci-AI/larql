@@ -41,14 +41,7 @@ use ndarray::Array2;
 use super::observe::Observe;
 use super::WalkFfn;
 use crate::ffn::FfnActivations;
-use larql_vindex::OverrideSlot;
-
-/// `ffn_row_*` component id for the gate projection.
-const FFN_GATE: usize = 0;
-/// `ffn_row_*` component id for the up projection.
-const FFN_UP: usize = 1;
-/// `ffn_row_*` component id for the down projection.
-const FFN_DOWN: usize = 2;
+use larql_vindex::{OverrideSlot, FFN_DOWN, FFN_GATE, FFN_UP};
 
 // Precondition-failure reasons — `Err` payloads of
 // `base_delta_preconditions`, surfaced verbatim by the planner as the
@@ -160,10 +153,7 @@ impl<'a> WalkFfn<'a> {
         let (mut out, base_activation) = self.forward_unpatched_whole_layer(layer, x)?;
         let mut activation = observe.recording().then_some(base_activation);
 
-        let use_gelu = matches!(
-            self.weights.arch.activation(),
-            larql_models::Activation::GeluTanh | larql_models::Activation::Gelu
-        );
+        let use_gelu = self.weights.arch.activation().uses_gelu_tanh_gate_up();
         let phi = |g: f32| {
             if use_gelu {
                 crate::ffn::gelu_tanh(g)

@@ -71,6 +71,9 @@ pub use index::core::{
 };
 pub use index::residency::{LayerState, ResidencyManager};
 pub use index::router::{RouteResult, RouterIndex};
+// FFN component indices for `ffn_row_*` / `kquant_ffn_layer*` calls —
+// compile-time pinned equal to `larql_compute`'s in `kv_index_impl.rs`.
+pub use index::storage::ffn_store::{FFN_COMPONENTS_PER_LAYER, FFN_DOWN, FFN_GATE, FFN_UP};
 
 // Describe
 pub use describe::{DescribeEdge, LabelSource};

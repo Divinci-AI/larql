@@ -24,6 +24,7 @@ use super::helpers::selection_weight_cmp_desc;
 use super::shortlist::{criterion_inputs, criterion_weight, rerank_cmp};
 use super::WalkFfn;
 use crate::vindex::walk_config::FeatureSelector;
+use larql_vindex::{FFN_DOWN, FFN_UP};
 
 impl<'a> WalkFfn<'a> {
     /// Public view of `down_row_norms` for probes/examples. Same lazy
@@ -46,13 +47,14 @@ impl<'a> WalkFfn<'a> {
         self.compute_full_up_scores(layer, residual)
     }
 
-    /// Lazy per-layer `‖down_row‖`. Triggers `kquant_ffn_layer(layer, 2)`
-    /// on first call, then caches the norms.
+    /// Lazy per-layer `‖down_row‖`. Triggers
+    /// `kquant_ffn_layer(layer, FFN_DOWN)` on first call, then caches
+    /// the norms.
     pub(super) fn down_row_norms(&self, layer: usize) -> Option<Arc<Vec<f32>>> {
         if let Some(Some(arc)) = self.down_norms_cache.borrow().get(layer) {
             return Some(Arc::clone(arc));
         }
-        let down_data = self.index.kquant_ffn_layer(layer, 2)?;
+        let down_data = self.index.kquant_ffn_layer(layer, FFN_DOWN)?;
         let num_features = self.index.num_features(layer);
         let hidden = self.weights.hidden_size;
         if down_data.len() < num_features * hidden {
@@ -110,13 +112,14 @@ impl<'a> WalkFfn<'a> {
         }
     }
 
-    /// Lazy per-layer `‖up_row‖`. Triggers `kquant_ffn_layer(layer, 1)`
-    /// on first call, then caches the norms.
+    /// Lazy per-layer `‖up_row‖`. Triggers
+    /// `kquant_ffn_layer(layer, FFN_UP)` on first call, then caches
+    /// the norms.
     pub(super) fn up_row_norms(&self, layer: usize) -> Option<Arc<Vec<f32>>> {
         if let Some(Some(arc)) = self.up_norms_cache.borrow().get(layer) {
             return Some(Arc::clone(arc));
         }
-        let up_data = self.index.kquant_ffn_layer(layer, 1)?;
+        let up_data = self.index.kquant_ffn_layer(layer, FFN_UP)?;
         let num_features = self.index.num_features(layer);
         let hidden = self.weights.hidden_size;
         if up_data.len() < num_features * hidden {
@@ -620,10 +623,7 @@ mod tests {
             .expect("up scores");
         // Gemma-3 fixture → GeluTanh activation, matching the selector's
         // `use_gelu` branch for ActXUpScoreXDownNorm.
-        assert!(matches!(
-            weights.arch.activation(),
-            larql_models::Activation::GeluTanh | larql_models::Activation::Gelu
-        ));
+        assert!(weights.arch.activation().uses_gelu_tanh_gate_up());
 
         let cases: Vec<(FeatureSelector, Vec<f32>, &str)> = vec![
             (

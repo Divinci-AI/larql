@@ -19,7 +19,7 @@ pub struct PhaseTimingsHandle {
     /// → `gate_knn_q4` → `gate_knn` fallback chain). Counts once per
     /// (position, layer) — i.e. once per `parallel_q4k_down` call.
     pub gate_knn_ns: std::sync::atomic::AtomicU64,
-    /// Time inside `kquant_ffn_layer(layer, 2)` — should be ~0 once the
+    /// Time inside `kquant_ffn_layer(layer, FFN_DOWN)` — should be ~0 once the
     /// dequantised down cache is warm.
     pub cache_fetch_ns: std::sync::atomic::AtomicU64,
     /// Time spent in the `par_chunks().map().collect()` scan — the

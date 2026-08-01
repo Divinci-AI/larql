@@ -41,6 +41,7 @@ use super::thresholds::GATHER_MIN_FEATURES;
 use super::WalkFfn;
 use crate::ffn::{FfnActivations, SparseActivations};
 use crate::vindex::walk_config::FeatureSelector;
+use larql_vindex::{FFN_DOWN, FFN_UP};
 
 /// Dispatch-trace / per-position kernel label for the serial
 /// per-feature loop — single source for `trace_path` and the runtime
@@ -85,10 +86,7 @@ impl<'a> WalkFfn<'a> {
 
         let arch = &*self.weights.arch;
         let is_gated = arch.ffn_type() == larql_models::FfnType::Gated;
-        let use_gelu = matches!(
-            arch.activation(),
-            larql_models::Activation::GeluTanh | larql_models::Activation::Gelu
-        );
+        let use_gelu = arch.activation().uses_gelu_tanh_gate_up();
 
         // Hint the kernel to start streaming layer N+1's Q4_K/Q6_K bytes
         // into the page cache while we work on N. No-op when there's no
@@ -236,7 +234,7 @@ impl<'a> WalkFfn<'a> {
                         up_view.row(feat).dot(&x_row)
                     } else {
                         // Unified dispatch: FP4 → native → Q4K, per GateIndex.
-                        self.index.ffn_row_dot(layer, 1, feat, x_slice)?
+                        self.index.ffn_row_dot(layer, FFN_UP, feat, x_slice)?
                     };
                     let activated_gate = if use_gelu {
                         crate::ffn::gelu_tanh(gate_score)
@@ -282,7 +280,7 @@ impl<'a> WalkFfn<'a> {
                         // Unified dispatch: FP4 → native → Q4K-via-cache, per GateIndex.
                         if !self
                             .index
-                            .ffn_row_scaled_add(layer, 2, feat, act, out_slice)
+                            .ffn_row_scaled_add(layer, FFN_DOWN, feat, act, out_slice)
                         {
                             return None;
                         }

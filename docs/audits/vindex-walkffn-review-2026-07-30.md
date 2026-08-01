@@ -1,6 +1,7 @@
 # Vindex + WalkFFN review — 2026-07-30
 
-> **Remediation status (2026-08-01): 23 of 24 items closed.** Tiers 0
+> **Remediation status (2026-08-01): PROGRAMME CLOSED — all 24 items.**
+> Tiers 0
 > and 1 landed in full on 2026-07-30 (commits `6907a209`, `e55b3edf`,
 > `6b5067f6`, `e21475f2`), including all four high-severity findings.
 > Item 13 resolved 2026-07-31 with the finding INVERTED (`c9ec5e1f`):
@@ -60,11 +61,35 @@
 > decode ~88 tok/s is the perf centre), with historical results kept
 > and date-qualified; campaign-sweep updates for runtime trace
 > emission (17), base+delta-first (16) and GateOverlay-backed
-> KnnStore (21) folded into the same docs. Open: hygiene (24), plus
-> tracked follow-ups (server/lql
-> `try_apply_patch` migration, remote http/sharded transport coverage,
-> logit-contribution trace field, walk-FFN thresholds surfaced into
-> `WalkFfnConfig`). Per-item detail:
+> KnnStore (21) folded into the same docs. Hygiene (24) closed
+> 2026-08-01, triaged per its own licence: the §4 generic-engine
+> violations fixed (English word lists + Wikidata categories out of
+> `clustering/` into `data/entity_patterns.json` /
+> `data/stop_words.json` / `data/wikidata_categories.json`, loaded via
+> a `LARQL_DATA_DIR`-then-workspace search chain — never cwd — with
+> minimal LOUD built-in fallbacks; the bare 0.25 floor and the
+> 50%-majority pattern threshold named and pinned); the two deferred
+> item-23 16384→10240 fixes landed (Gemma 3 4B intermediate verified
+> = 10240); the GeluTanh/SiLU dispatch — §4 counted 8 copies, 27
+> existed across walk/kquant/weight/expert paths by close — routes
+> through one wildcard-free exhaustive
+> `Activation::uses_gelu_tanh_gate_up()` (new variants are compile
+> errors; two drifted GeluTanh-only copies made consistent); FFN
+> component indices unified on pub `FFN_GATE`/`FFN_UP`/`FFN_DOWN`
+> constants with cross-crate compile-time pins; and the three
+> untested §4 files got 41 colocated tests (`hnsw.rs` 97.3%,
+> `index/mutate/mod.rs` 96.0%, `write_f32.rs` 92.6% line coverage).
+> That test pass surfaced a NEW finding, pinned not papered over:
+> HNSW's level-0 graph fragments beyond ~64 nodes (naive
+> `add_connection` eviction orphans nodes; recall@10 = 0.16 at n=200
+> uniform even with ef=n). Standing follow-ups carried out of the
+> closed programme: server/lql `try_apply_patch` migration, remote
+> http/sharded transport coverage, logit-contribution trace field,
+> walk-FFN thresholds surfaced into `WalkFfnConfig`, the HNSW
+> level-0 fragmentation above, and the remaining >250-line file
+> splits (`huggingface/download/mod.rs` 1329, `patch/overlay.rs`
+> 1071, `quant/convert.rs` 653 — the item-24 documented remainder).
+> Per-item detail:
 > [`ROADMAP.md`](../../ROADMAP.md) § "Vindex + WalkFFN review
 > (2026-07-30)".
 

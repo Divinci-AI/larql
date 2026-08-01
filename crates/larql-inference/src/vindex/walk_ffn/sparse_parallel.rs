@@ -37,6 +37,7 @@ use rayon::prelude::*;
 use super::thresholds::PARALLEL_DOWN_MIN_HITS;
 use super::WalkFfn;
 use crate::ffn::SparseActivations;
+use larql_vindex::FFN_DOWN;
 
 impl<'a> WalkFfn<'a> {
     /// Try the rayon-parallel Q4K-down-cache scan for one position.
@@ -71,7 +72,7 @@ impl<'a> WalkFfn<'a> {
             && down_native_absent;
         let t_cache = std::time::Instant::now();
         let down_cache_local: Option<std::sync::Arc<Vec<f32>>> = if parallelisable {
-            self.index.kquant_ffn_layer(layer, 2)
+            self.index.kquant_ffn_layer(layer, FFN_DOWN)
         } else {
             None
         };

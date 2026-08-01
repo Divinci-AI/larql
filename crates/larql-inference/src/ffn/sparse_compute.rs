@@ -133,10 +133,7 @@ fn sparse_ffn_forward_impl(
     }
 
     let is_gated = arch.ffn_type() == larql_models::FfnType::Gated;
-    let use_gelu = matches!(
-        arch.activation(),
-        larql_models::Activation::GeluTanh | larql_models::Activation::Gelu
-    );
+    let use_gelu = arch.activation().uses_gelu_tanh_gate_up();
 
     // Gather weight rows for selected features
     let up_buf = gather_rows(w_up, features, hidden);
@@ -279,10 +276,7 @@ fn sparse_ffn_forward_full_impl(
     }
 
     let is_gated = arch.ffn_type() == larql_models::FfnType::Gated;
-    let use_gelu = matches!(
-        arch.activation(),
-        larql_models::Activation::GeluTanh | larql_models::Activation::Gelu
-    );
+    let use_gelu = arch.activation().uses_gelu_tanh_gate_up();
 
     // Gather original weight rows. Per-feature overrides will be
     // applied below by re-computing the dot products for the
@@ -535,10 +529,7 @@ pub fn select_top_k_features(
 ) -> Vec<usize> {
     let arch = &*weights.arch;
     let is_gated = arch.ffn_type() == larql_models::FfnType::Gated;
-    let use_gelu = matches!(
-        arch.activation(),
-        larql_models::Activation::GeluTanh | larql_models::Activation::Gelu
-    );
+    let use_gelu = arch.activation().uses_gelu_tanh_gate_up();
 
     let proj = if is_gated {
         let w_gate = weights.tensors.get(&arch.ffn_gate_key(layer)).unwrap();

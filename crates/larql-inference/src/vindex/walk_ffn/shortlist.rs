@@ -139,10 +139,7 @@ impl<'a> WalkFfn<'a> {
     /// Whether the selection criteria activate with GELU (vs SiLU) —
     /// the same arch check the sparse walk applies to its activations.
     pub(super) fn selector_use_gelu(&self) -> bool {
-        matches!(
-            self.weights.arch.activation(),
-            larql_models::Activation::GeluTanh | larql_models::Activation::Gelu
-        )
+        self.weights.arch.activation().uses_gelu_tanh_gate_up()
     }
 
     /// The production gate-selection chain — exact `gate_walk` first,

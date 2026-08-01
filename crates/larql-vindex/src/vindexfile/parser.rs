@@ -229,11 +229,7 @@ fn extract_triple(s: &str, line_num: usize) -> Result<(String, String, String), 
         )));
     }
 
-    Ok((
-        unquote(&parts[0]),
-        unquote(&parts[1]),
-        unquote(&parts[2]),
-    ))
+    Ok((unquote(&parts[0]), unquote(&parts[1]), unquote(&parts[2])))
 }
 
 /// Split on commas that are *outside* double-quoted spans. Returns
@@ -418,18 +414,22 @@ PATCH ./patch.vlp
 
     #[test]
     fn delete_condition_unknown_key_is_error() {
-        let input =
-            "FROM ./b\nDELETE entity = \"A\" AND relation = \"r\" AND victim = \"t\"\n";
+        let input = "FROM ./b\nDELETE entity = \"A\" AND relation = \"r\" AND victim = \"t\"\n";
         let err = parse_vindexfile_str(input).unwrap_err();
-        assert!(err.to_string().contains("unknown DELETE condition key"), "{err}");
+        assert!(
+            err.to_string().contains("unknown DELETE condition key"),
+            "{err}"
+        );
     }
 
     #[test]
     fn delete_condition_duplicate_key_is_error() {
-        let input =
-            "FROM ./b\nDELETE entity = \"A\" AND entity = \"B\" AND target = \"t\"\n";
+        let input = "FROM ./b\nDELETE entity = \"A\" AND entity = \"B\" AND target = \"t\"\n";
         let err = parse_vindexfile_str(input).unwrap_err();
-        assert!(err.to_string().contains("duplicate DELETE condition key"), "{err}");
+        assert!(
+            err.to_string().contains("duplicate DELETE condition key"),
+            "{err}"
+        );
     }
 
     #[test]
