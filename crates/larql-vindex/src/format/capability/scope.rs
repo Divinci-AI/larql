@@ -76,20 +76,19 @@ impl CapabilityReport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::format::capability::authority::{AuthorityInputs, DerivedAuthority, Fidelity};
-    use crate::format::capability::operation::{
-        OperationAdmission, OperationFailure, OperationPlan,
-    };
+    use crate::format::capability::authority::Fidelity;
+    use crate::format::capability::coordinate::RegionCoordinate;
+    use crate::format::capability::operation::OperationFailure;
+    use crate::format::capability::plan::{OperationPlan, PlannedRegion, QualifiedOperationRoute};
+    use crate::format::lyrw2::region_role::RegionRole;
 
     fn available(fidelity: Fidelity) -> OperationCapability {
-        OperationCapability {
-            admission: OperationAdmission::Available(OperationPlan::default()),
-            authority: Some(DerivedAuthority::of(&AuthorityInputs {
-                selected_fidelities: vec![fidelity],
-                execution_complete: true,
-                structural: None,
-            })),
-        }
+        OperationCapability::available(vec![QualifiedOperationRoute::new(OperationPlan::fixed(
+            vec![PlannedRegion::new(
+                RegionCoordinate::new(0, 0, None, RegionRole::Gate),
+                fidelity,
+            )],
+        ))])
     }
 
     fn unavailable() -> OperationCapability {
@@ -134,17 +133,12 @@ mod tests {
         // honest — and neither derived from the other.
         let r = browse_over_intact_document();
         assert_eq!(
-            r.document
-                .reconstruct_canonical
-                .authority
-                .as_ref()
-                .unwrap()
-                .level,
-            Fidelity::SourceEquivalent
+            r.document.reconstruct_canonical.best_achievable_authority(),
+            Some(Fidelity::SourceEquivalent)
         );
         assert_eq!(
-            r.profile.walk.authority.as_ref().unwrap().level,
-            Fidelity::SourceExact
+            r.profile.walk.best_achievable_authority(),
+            Some(Fidelity::SourceExact)
         );
     }
 

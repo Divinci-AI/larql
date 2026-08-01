@@ -49,6 +49,23 @@ impl RegionCoordinate {
     }
 }
 
+/// A bank, without a role or segment — the unit a plan choice is made over.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct BankCoordinate {
+    pub layer: u32,
+    pub bank_id: u16,
+}
+
+impl BankCoordinate {
+    pub fn new(layer: u32, bank_id: u16) -> Self {
+        Self { layer, bank_id }
+    }
+
+    pub fn describe(&self) -> String {
+        format!("layer {} bank {}", self.layer, self.bank_id)
+    }
+}
+
 /// Why a required region is not usable — **role-local, whole-role causes only**.
 ///
 /// Partial segment coverage is deliberately absent. A role covering some of
@@ -154,6 +171,24 @@ mod tests {
         assert_eq!(v[0].layer, 0);
         assert_eq!(v[1].segment, Some(0));
         assert_eq!(v[2].segment, Some(1));
+    }
+
+    #[test]
+    fn a_bank_coordinate_names_layer_and_bank_only() {
+        let b = BankCoordinate::new(37, 2);
+        assert_eq!(b.describe(), "layer 37 bank 2");
+    }
+
+    #[test]
+    fn bank_coordinates_sort_by_layer_then_bank() {
+        let mut v = [
+            BankCoordinate::new(1, 0),
+            BankCoordinate::new(0, 5),
+            BankCoordinate::new(1, 1),
+        ];
+        v.sort();
+        assert_eq!(v[0], BankCoordinate::new(0, 5));
+        assert_eq!(v[2], BankCoordinate::new(1, 1));
     }
 
     #[test]

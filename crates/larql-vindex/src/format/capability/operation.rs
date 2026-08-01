@@ -22,8 +22,9 @@
 //! summarised, and it is why each operation declares a narrow dependency
 //! surface rather than consulting a shared "is the index healthy" verdict.
 
-use super::authority::DerivedAuthority;
+use super::authority::Fidelity;
 use super::coordinate::RegionCoordinate;
+use super::plan::QualifiedOperationRoute;
 
 /// Why an operation cannot run.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,47 +88,17 @@ impl Degradation {
     }
 }
 
-/// What an operation would actually use if it ran.
-///
-/// Carrying the region list is what lets authority be folded over *this
-/// operation's* regions rather than the whole index.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct OperationPlan {
-    /// Regions this operation consumes. The authority fold's domain.
-    pub regions: Vec<RegionCoordinate>,
-    /// Layers this operation touches.
-    pub layers: Vec<u32>,
-}
-
-impl OperationPlan {
-    pub fn is_empty(&self) -> bool {
-        self.regions.is_empty()
-    }
-}
-
 /// Whether an operation can run, and how completely.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OperationAdmission {
-    Available(OperationPlan),
-    Degraded {
-        plan: OperationPlan,
-        reasons: Vec<Degradation>,
-    },
-    Unavailable {
-        reasons: Vec<OperationFailure>,
-    },
+    Available,
+    Degraded { reasons: Vec<Degradation> },
+    Unavailable { reasons: Vec<OperationFailure> },
 }
 
 impl OperationAdmission {
     pub fn is_available(&self) -> bool {
-        matches!(self, Self::Available(_) | Self::Degraded { .. })
-    }
-
-    pub fn plan(&self) -> Option<&OperationPlan> {
-        match self {
-            Self::Available(p) | Self::Degraded { plan: p, .. } => Some(p),
-            Self::Unavailable { .. } => None,
-        }
+        matches!(self, Self::Available | Self::Degraded { .. })
     }
 
     /// Whether admission failed because the selection is contradictory, as
@@ -143,7 +114,7 @@ impl OperationAdmission {
 
     pub fn describe(&self) -> String {
         match self {
-            Self::Available(_) => "available".into(),
+            Self::Available => "available".into(),
             Self::Degraded { reasons, .. } => format!(
                 "available, degraded: {}",
                 reasons
@@ -164,236 +135,78 @@ impl OperationAdmission {
     }
 }
 
-/// Admission plus the fidelity of the regions this operation actually reads.
+/// Admission plus every route that admits it.
+///
+/// Authority is deliberately **not** a field here. An operation can run more
+/// than one way, the ways can differ in fidelity, and no route has been bound
+/// yet — so there is no single number that is both meaningful and honest. A
+/// caller wanting one must ask for a *ceiling* and be told it is achievable
+/// rather than achieved.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OperationCapability {
     pub admission: OperationAdmission,
-    /// `None` when there is nothing honest to say.
-    ///
-    /// Two cases, and the second is the subtle one. An unavailable operation
-    /// has no fidelity because it does not run. A **contradictory selection**
-    /// also has none — and must not be handed `analysis-only` or
-    /// `structurally-approximate` merely because those are low lattice values.
-    /// Assigning a weak-but-valid authority to an invalid selection would
-    /// launder a refusal into a downgrade, which is exactly what the
-    /// fail-closed rule exists to prevent.
-    pub authority: Option<DerivedAuthority>,
+    /// Empty exactly when unavailable. That equivalence is the fail-closed
+    /// invariant: no routes means no authority, and a contradictory selection
+    /// therefore cannot acquire a weak-but-valid fidelity by default.
+    pub routes: Vec<QualifiedOperationRoute>,
 }
 
 impl OperationCapability {
+    pub fn available(routes: Vec<QualifiedOperationRoute>) -> Self {
+        Self {
+            admission: OperationAdmission::Available,
+            routes,
+        }
+    }
+
+    pub fn degraded(routes: Vec<QualifiedOperationRoute>, reasons: Vec<Degradation>) -> Self {
+        Self {
+            admission: OperationAdmission::Degraded { reasons },
+            routes,
+        }
+    }
+
     pub fn unavailable(reasons: Vec<OperationFailure>) -> Self {
         Self {
             admission: OperationAdmission::Unavailable { reasons },
-            authority: None,
+            routes: Vec::new(),
         }
     }
 
     pub fn is_available(&self) -> bool {
         self.admission.is_available()
     }
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::format::capability::authority::{AuthorityInputs, Fidelity};
-    use crate::format::lyrw2::region_role::RegionRole;
-
-    fn coordinate() -> RegionCoordinate {
-        RegionCoordinate::new(3, 0, Some(1), RegionRole::Down)
+    /// The strongest fidelity any admitted route could achieve.
+    ///
+    /// Named *achievable* on purpose. Binding has not chosen a route, so this
+    /// is a ceiling; quoting it as the fidelity of an execution would describe
+    /// a decision nobody has made.
+    pub fn best_achievable_authority(&self) -> Option<Fidelity> {
+        self.routes
+            .iter()
+            .map(|r| r.best_achievable_authority().level)
+            .max()
     }
 
-    fn plan() -> OperationPlan {
-        OperationPlan {
-            regions: vec![coordinate()],
-            layers: vec![3],
-        }
+    /// The weakest fidelity binding could land on across admitted routes.
+    pub fn worst_achievable_authority(&self) -> Option<Fidelity> {
+        self.routes
+            .iter()
+            .map(|r| r.worst_achievable_authority().level)
+            .min()
     }
 
-    #[test]
-    fn available_and_degraded_both_admit() {
-        assert!(OperationAdmission::Available(plan()).is_available());
-        assert!(OperationAdmission::Degraded {
-            plan: plan(),
-            reasons: vec![Degradation::MissingQueryMetadata { what: "labels" }],
-        }
-        .is_available());
+    /// Whether every admitted route carries the same settled fidelity, so the
+    /// ceiling is also the answer.
+    pub fn authority_is_settled(&self) -> bool {
+        !self.routes.is_empty()
+            && self.best_achievable_authority() == self.worst_achievable_authority()
     }
 
-    #[test]
-    fn unavailable_does_not_admit_and_has_no_plan() {
-        let a = OperationAdmission::Unavailable {
-            reasons: vec![OperationFailure::NoExecutableRoute { layer: 3 }],
-        };
-        assert!(!a.is_available());
-        assert!(a.plan().is_none());
-    }
-
-    #[test]
-    fn a_degraded_operation_still_carries_its_plan() {
-        // Degradation reduces richness, not reach — the regions are still read.
-        let a = OperationAdmission::Degraded {
-            plan: plan(),
-            reasons: vec![Degradation::MissingQueryMetadata { what: "down_meta" }],
-        };
-        assert_eq!(a.plan(), Some(&plan()));
-    }
-
-    #[test]
-    fn an_invalid_selection_gets_no_authority_rather_than_a_weak_one() {
-        // The subtle case: analysis-only is a *valid* low fidelity. Handing it
-        // to a contradictory selection would launder a refusal into a
-        // downgrade, and a caller checking "is this at least analysis-only?"
-        // would wrongly proceed.
-        let c = OperationCapability::unavailable(vec![OperationFailure::InvalidSelection {
-            detail: "gate covers 0, down covers 1".into(),
-        }]);
-        assert_eq!(c.authority, None);
-        assert!(c.admission.is_invalid_selection());
-        assert!(!c.is_available());
-    }
-
-    #[test]
-    fn an_ordinary_unavailability_is_not_an_invalid_selection() {
-        let c = OperationCapability::unavailable(vec![OperationFailure::MissingDocumentInput {
-            what: "tokenizer",
-        }]);
-        assert!(!c.admission.is_invalid_selection());
-    }
-
-    #[test]
-    fn a_missing_contract_is_distinct_from_missing_bytes() {
-        // Remote execution cannot be inferred from local absence; the two must
-        // never read alike.
-        let contract = OperationFailure::MissingContract {
-            what: "routed wire contract",
-        };
-        let bytes = OperationFailure::RequiredRegionUnusable {
-            coordinate: coordinate(),
-            cause: "absent".into(),
-        };
-        assert!(contract.describe().contains("cannot be inferred"));
-        assert!(!bytes.describe().contains("cannot be inferred"));
-    }
-
-    #[test]
-    fn failures_carry_exact_coordinates() {
-        let f = OperationFailure::RequiredRegionUnusable {
-            coordinate: coordinate(),
-            cause: "absent from every selected segment".into(),
-        };
-        let s = f.describe();
-        assert!(s.contains("layer 3"), "{s}");
-        assert!(s.contains("bank 0"), "{s}");
-        assert!(s.contains("role down"), "{s}");
-        assert!(s.contains("segment 1"), "{s}");
-    }
-
-    #[test]
-    fn missing_query_metadata_says_correctness_is_unchanged() {
-        // §15.3: absent query metadata downgrades richness, never WALK
-        // correctness. The wording matters — an operator must not read it as
-        // "results may be wrong".
-        let d = Degradation::MissingQueryMetadata {
-            what: "feature_labels.json",
-        };
-        assert!(
-            d.describe().contains("unchanged correctness"),
-            "{}",
-            d.describe()
-        );
-    }
-
-    #[test]
-    fn an_available_operation_can_carry_a_derived_authority() {
-        let c = OperationCapability {
-            admission: OperationAdmission::Available(plan()),
-            authority: Some(DerivedAuthority::of(&AuthorityInputs {
-                selected_fidelities: vec![Fidelity::SourceExact],
-                execution_complete: true,
-                structural: None,
-            })),
-        };
-        assert!(c.is_available());
-        assert_eq!(c.authority.unwrap().level, Fidelity::SourceExact);
-    }
-
-    #[test]
-    fn a_non_browsable_bank_degrades_rather_than_failing() {
-        // Other banks stay reachable, so the operation runs with reduced reach.
-        let d = Degradation::BankNotBrowsable {
-            bank_id: 4,
-            reason: "fused region cannot be strided".into(),
-        };
-        let s = d.describe();
-        assert!(s.contains("bank 4"), "{s}");
-        assert!(s.contains("cannot be strided"), "{s}");
-    }
-
-    #[test]
-    fn every_failure_kind_renders_distinguishably() {
-        let rendered: Vec<String> = [
-            OperationFailure::RequiredRegionUnusable {
-                coordinate: coordinate(),
-                cause: "absent".into(),
-            },
-            OperationFailure::InvalidSelection {
-                detail: "disjoint segments".into(),
-            },
-            OperationFailure::MissingDocumentInput { what: "embeddings" },
-            OperationFailure::MissingContract {
-                what: "routed wire",
-            },
-            OperationFailure::NoExecutableRoute { layer: 7 },
-        ]
-        .iter()
-        .map(|f| f.describe())
-        .collect();
-        // No two failures should read alike — an operator triages from these.
-        for i in 0..rendered.len() {
-            for j in (i + 1)..rendered.len() {
-                assert_ne!(rendered[i], rendered[j]);
-            }
-        }
-        assert!(rendered[1].contains("invalid selection"));
-        assert!(rendered[2].contains("embeddings"));
-        assert!(rendered[4].contains("layer 7"));
-    }
-
-    #[test]
-    fn admission_descriptions_state_the_verdict_first() {
-        assert!(OperationAdmission::Available(plan())
-            .describe()
-            .starts_with("available"));
-        assert!(OperationAdmission::Degraded {
-            plan: plan(),
-            reasons: vec![Degradation::MissingQueryMetadata { what: "labels" }],
-        }
-        .describe()
-        .starts_with("available, degraded"));
-        assert!(OperationAdmission::Unavailable {
-            reasons: vec![OperationFailure::NoExecutableRoute { layer: 0 }],
-        }
-        .describe()
-        .starts_with("unavailable"));
-    }
-
-    #[test]
-    fn an_available_operation_is_never_an_invalid_selection() {
-        assert!(!OperationAdmission::Available(plan()).is_invalid_selection());
-        assert!(!OperationAdmission::Degraded {
-            plan: plan(),
-            reasons: Vec::new(),
-        }
-        .is_invalid_selection());
-    }
-
-    #[test]
-    fn a_plan_names_the_regions_authority_will_fold_over() {
-        // The whole point of carrying a plan: authority is per-operation, so
-        // its domain has to be the operation's own regions.
-        assert_eq!(plan().regions, vec![coordinate()]);
-        assert!(!plan().is_empty());
-        assert!(OperationPlan::default().is_empty());
+    /// Internal consistency: routes exist exactly when the operation admits.
+    pub fn is_well_formed(&self) -> bool {
+        // Reads oddly but is the honest form: admitted iff routes exist.
+        self.is_available() != self.routes.is_empty()
     }
 }

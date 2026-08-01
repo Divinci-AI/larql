@@ -32,6 +32,11 @@ pub mod compatibility;
 pub mod coordinate;
 pub mod kernel;
 pub mod operation;
+#[cfg(test)]
+mod operation_tests;
+pub mod plan;
+#[cfg(test)]
+mod plan_tests;
 pub mod reconstruction;
 #[cfg(test)]
 mod reconstruction_tests;
@@ -48,8 +53,9 @@ pub use authority::{
 pub use compatibility::{IncompatibilityShape, RoleSegmentCoverage, SegmentCompatibility};
 pub use coordinate::{AbsenceKind, RegionCoordinate};
 pub use kernel::{KernelId, KernelMaturity};
-pub use operation::{
-    Degradation, OperationAdmission, OperationCapability, OperationFailure, OperationPlan,
+pub use operation::{Degradation, OperationAdmission, OperationCapability, OperationFailure};
+pub use plan::{
+    OperationPlan, PlanChoice, PlannedRegion, QualifiedAlternative, QualifiedOperationRoute,
 };
 pub use reconstruction::{
     CanonicalSelection, CatalogueVariant, ReconstructionFailure, RegionSetCatalogue,
