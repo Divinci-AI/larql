@@ -48,9 +48,38 @@
 //! 1024 steps and top-8, an expert routed at the uniform rate would go
 //! unobserved with probability ~1e-29. By the rule of three an unobserved
 //! expert sits below 3/1024 per step against a uniform 0.0625 — at least
-//! twentyfold below uniform. What it is *not* is globally cold: this capture is
-//! 64 unrelated single-turn prompts, i.e. a domain **mixture**, so an expert
-//! unrouted here may be hot for one domain within it. Tier per domain.
+//! twentyfold below uniform.
+//!
+//! ## The domain-mixture caveat has a sign, and it differs per statistic
+//!
+//! This capture is 64 unrelated single-turn prompts — a domain **mixture**. The
+//! standing habit is to attach that caveat once, at capture level, which applies
+//! it with the wrong sign to half the outputs. It depends on whether the
+//! statistic rewards breadth or narrowness:
+//!
+//! - **Coverage curve — anti-conservative.** A mixture is the anti-case for
+//!   domain locality, so a domain-specific slice would do *better* than measured.
+//! - **Unobserved count / participation ratio — conservative.** A
+//!   domain-selective layer would show a *wide* union across 64 unrelated
+//!   prompts. Measuring a narrow one anyway is stronger evidence of genuine
+//!   narrowness than the same number on a single-domain pool would be.
+//!
+//! Same pool, opposite directions. State the sign with the statistic.
+//!
+//! ## Frequency identifies pruning candidates; it does not license pruning
+//!
+//! An expert unobserved here may still matter on an unrepresented input. Only
+//! mean-ablation under DEC-8.1's protocol — held-out KL, top-1 agreement,
+//! replacement controls — can decide deletion. The R4 zero-out is the precedent:
+//! a reduction real in one currency (row count) converted at 23-40% into the one
+//! that mattered (throughput). Frequency-to-fidelity is the same conversion with
+//! different units.
+//!
+//! One structural point in pruning's favour, worth recording beside the hold:
+//! removing whole experts leaves the survivors running **grouped dense**, so it
+//! composes with compiled compact-dense instead of fighting it. R4 refuted the
+//! runtime-gather form of the sparsity thesis, not this one — if mean-ablation
+//! clears it, it lands on the surviving route rather than reopening a closed one.
 
 use serde::Serialize;
 

@@ -74,6 +74,11 @@ pub enum KernelClass {
     Unquantised,
 }
 
+/// Repeats below which no amount of apparent tightness counts.
+pub const MIN_REPEATS: u32 = 5;
+/// Relative standard error a class must reach to select a target.
+pub const MAX_RELATIVE_SE: f64 = 0.01;
+
 /// The measurement regime an efficiency was taken under. Not decoration: the
 /// same kernel reads very differently from a buffer that is partly L2-resident.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -108,23 +113,45 @@ pub struct MeasuredEfficiency {
     pub central: f64,
     pub observed_low: f64,
     pub observed_high: f64,
+    /// Standard error of the mean. **This, not the spread, decides whether a
+    /// class may select a target.** Observed extremes are the honest thing to
+    /// *display*, but `max - min` is non-decreasing in sample count, so gating
+    /// on it rewards collecting less data — measured directly: attention showed
+    /// 2% spread over 3 repeats and 5.7% over 7, while its SE fell.
+    pub std_error: f64,
     pub repeats: u32,
     pub regime: Regime,
 }
 
 impl MeasuredEfficiency {
-    pub const fn new(central: f64, lo: f64, hi: f64, repeats: u32, regime: Regime) -> Self {
+    pub const fn new(
+        central: f64,
+        lo: f64,
+        hi: f64,
+        std_error: f64,
+        repeats: u32,
+        regime: Regime,
+    ) -> Self {
         Self {
             central,
             observed_low: lo,
             observed_high: hi,
+            std_error,
             repeats,
             regime,
         }
     }
     /// A modelling constant with no variance.
     pub const fn definitional(central: f64) -> Self {
-        Self::new(central, central, central, 0, Regime::Definitional)
+        Self::new(central, central, central, 0.0, 0, Regime::Definitional)
+    }
+
+    /// Standard error as a fraction of the central estimate.
+    pub fn relative_std_error(&self) -> f64 {
+        if self.central == 0.0 {
+            return f64::INFINITY;
+        }
+        self.std_error / self.central
     }
     /// Widest observed relative swing, as a fraction of `central`.
     pub fn spread_fraction(&self) -> f64 {
@@ -138,7 +165,8 @@ impl MeasuredEfficiency {
     /// A definitional constant qualifies with no repeats — it has no variance
     /// to be uncertain about. Everything else needs three repeats inside 5%.
     pub fn is_decision_grade(&self) -> bool {
-        self.regime == Regime::Definitional || (self.repeats >= 3 && self.spread_fraction() <= 0.05)
+        self.regime == Regime::Definitional
+            || (self.repeats >= MIN_REPEATS && self.relative_std_error() <= MAX_RELATIVE_SE)
     }
 }
 
@@ -168,22 +196,23 @@ impl KernelClass {
 
     /// Banked efficiency with its observed range.
     ///
-    /// Re-measured 2026-08-01 over three genuine cold-rotating repeats, after
-    /// the rotation was found to be handing back one buffer eight times. The
-    /// correction is NOT uniformly downward — the ungrouped expert shape came
-    /// back 0.63-0.70 against a banked 0.64, so the old numbers were not simply
-    /// flattering.
+    /// Banked 2026-08-01 from a 16-run campaign, **9 runs rejected** by a
+    /// within-run control. `diag_eta_repeats` watches the attention cell, which
+    /// is large and steady; across the campaign it collapsed from 0.89 to 0.06
+    /// as the machine degraded under back-to-back load. Averaging all 16 would
+    /// have banked attention at 0.52 and the down class at 0.53 — wrong by a
+    /// factor, and it would have looked like more data.
+    ///
+    /// Runs are therefore NOT exchangeable samples on this hardware; they are a
+    /// time series with a hard degradation after roughly seven censuses. Any
+    /// future campaign needs the control gate, not more repeats.
     pub fn efficiency(self) -> MeasuredEfficiency {
+        use Regime::ColdRotating as C;
         match self {
-            // 72 MB read: the largest term and the steady one.
-            Self::AttnProjection => {
-                MeasuredEfficiency::new(0.88, 0.87, 0.89, 3, Regime::ColdRotating)
-            }
-            Self::GateUp => MeasuredEfficiency::new(0.83, 0.82, 0.84, 3, Regime::ColdRotating),
-            Self::Down => MeasuredEfficiency::new(0.78, 0.73, 0.82, 3, Regime::ColdRotating),
-            Self::RoutedExpert => {
-                MeasuredEfficiency::new(0.67, 0.63, 0.70, 3, Regime::ColdRotating)
-            }
+            Self::AttnProjection => MeasuredEfficiency::new(0.876, 0.85, 0.90, 0.0075, 7, C),
+            Self::GateUp => MeasuredEfficiency::new(0.799, 0.70, 0.84, 0.0177, 7, C),
+            Self::Down => MeasuredEfficiency::new(0.784, 0.76, 0.80, 0.0057, 7, C),
+            Self::RoutedExpert => MeasuredEfficiency::new(0.614, 0.54, 0.67, 0.0145, 7, C),
             Self::Unquantised => MeasuredEfficiency::definitional(1.00),
         }
     }

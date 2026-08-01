@@ -605,8 +605,9 @@ pub fn ceilings(geom: &K3Geometry, a: &super::args::CeilingsArgs, as_json: bool)
     ] {
         let m = c.efficiency();
         println!(
-            "    {:.2} [{:.2}-{:.2}] n={}  {:<28} {}{}{}",
+            "    {:.3} +/-{:.4} [{:.2}-{:.2}] n={}  {:<28} {}{}{}",
             m.central,
+            m.std_error,
             m.observed_low,
             m.observed_high,
             m.repeats,
@@ -645,12 +646,18 @@ pub fn ceilings(geom: &K3Geometry, a: &super::args::CeilingsArgs, as_json: bool)
     println!("--- R4 best case per proposed lever (ceiling if it FULLY succeeds) ---");
     if !ungraded.is_empty() {
         println!("  REFUSED — this ordering selects the programme, and these classes are");
-        println!("  too noisy to select anything (>5% observed spread over n repeats):");
+        println!(
+            "  too noisy to select anything (need n>={} and relative SE <= {:.0}%):",
+            classes::MIN_REPEATS,
+            100.0 * classes::MAX_RELATIVE_SE
+        );
         for (c, m) in &ungraded {
             println!(
-                "    {:<28} {:.2} [{:.2}-{:.2}] n={}",
+                "    {:<28} {:.3} +/-{:.4} SE ({:.1}% rel) [{:.2}-{:.2}] n={}",
                 c.label(),
                 m.central,
+                m.std_error,
+                100.0 * m.relative_std_error(),
                 m.observed_low,
                 m.observed_high,
                 m.repeats
@@ -1236,6 +1243,14 @@ pub fn freqmass(a: &super::args::FreqMassArgs, as_json: bool) -> R {
         println!("  the causal arm above refutes. Both hold; do not collapse them.");
         println!("  R2 WARNING: quantile balancing exists to flatten exactly this, so of");
         println!("  everything here it is the number least likely to survive to K3.");
+        println!();
+        println!("  domain-mixture caveat, BY STATISTIC — the sign differs, so it cannot be");
+        println!("  stated once for the whole capture:");
+        println!("    coverage curve      ANTI-CONSERVATIVE — a mixture is the anti-case for");
+        println!("                        locality; a domain slice would beat these numbers.");
+        println!("    unobserved count    CONSERVATIVE — a domain-selective layer would show a");
+        println!("                        WIDE union across unrelated prompts. Narrow anyway");
+        println!("                        is stronger evidence, not weaker.");
         println!();
     }
     println!("  λ=1.00 static slice (pooled prior, leave-one-out) · λ=0.00 causal adaptive cache");

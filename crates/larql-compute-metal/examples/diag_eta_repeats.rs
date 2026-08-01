@@ -1,10 +1,18 @@
 //! Promote the NOT-DECISION-GRADE efficiency classes by repeating the census.
 //!
-//! `k3_ledger::classes` banks `down` at 0.78 [0.73-0.82] and the ungrouped
-//! expert shape at 0.67 [0.63-0.70] over three repeats. Both exceed the 5%
-//! decision-grade bar, and both feed DEC-8.7b's target-row selection — which,
-//! now that the eta programme is closed as a throughput lever, is the only live
-//! throughput rung. A 10% swing on either can pick a different bit-width.
+`down` and the ungrouped expert shape both feed DEC-8.7b's target-row
+//! selection — the only live throughput rung once the eta programme closed as a
+//! lever — and both were too noisy to select anything. This promotes them.
+//!
+//! ## More repeats is not automatically more information
+//!
+//! The first campaign here ran 16 censuses back to back and **9 were garbage**:
+//! the machine degraded under sustained load and the attention control fell from
+//! 0.89 to 0.06. Averaging all sixteen would have banked attention at 0.52 and
+//! the down class at 0.53 — wrong by a factor, and it would have looked like
+//! more data rather than less. Runs are a time series with a hard degradation,
+//! not exchangeable draws, so the control gate is the load-bearing part and the
+//! repeat count is not.
 //!
 //! This calls `profile_shape_census` **verbatim**, so the samples are drawn from
 //! the identical protocol the bank was drawn from. A faster focused loop would
@@ -34,8 +42,8 @@ fn main() {
 fn main() {
     use larql_compute_metal::diag::kernel_profile::profile_shape_census;
 
-    /// Cells to promote, plus attention as a stability control — it banked at
-    /// 2% spread, so if it widens here the harness moved, not the kernels.
+    /// Cells to promote, plus attention as the control. It is the largest and
+    /// steadiest cell, so when it moves the machine moved, not the kernels.
     const TARGETS: [(&str, &str); 3] = [
         ("K3 latent up 7168x3584", "q6k"),
         ("K3 expert w2 3584x3072", "q6k"),
@@ -50,21 +58,53 @@ fn main() {
     println!("eta repeats: {n} runs of the census protocol (34 layers, 5 warmup, 30 iters)");
     println!();
 
+    // The control gate. Runs are NOT exchangeable samples on this hardware: a
+    // 16-run campaign watched the attention cell fall from 0.89 to 0.06 as the
+    // machine degraded under back-to-back load, and averaging all of them would
+    // have banked attention at 0.52 — wrong by a factor, while looking like
+    // more data. So each run is admitted only if the large steady control is
+    // still where it belongs.
+    const CONTROL: usize = 2;
+    const CONTROL_FLOOR: f64 = 0.80;
+
     let mut samples: Vec<Vec<f64>> = vec![Vec::new(); TARGETS.len()];
+    let mut rejected: Vec<(usize, f64)> = Vec::new();
     for run in 0..n {
         let cells = profile_shape_census(34, 5, 30);
-        for (i, (shape, kernel)) in TARGETS.iter().enumerate() {
-            if let Some(c) = cells
+        let read = |i: usize| -> Option<f64> {
+            let (shape, kernel) = TARGETS[i];
+            cells
                 .iter()
-                .find(|c| c.shape == *shape && c.kernel == *kernel)
-            {
-                samples[i].push(c.eta);
+                .find(|c| c.shape == shape && c.kernel == kernel)
+                .map(|c| c.eta)
+        };
+        match read(CONTROL) {
+            Some(ctrl) if ctrl >= CONTROL_FLOOR => {
+                for i in 0..TARGETS.len() {
+                    if let Some(v) = read(i) {
+                        samples[i].push(v);
+                    }
+                }
             }
+            Some(ctrl) => rejected.push((run + 1, ctrl)),
+            None => {}
         }
         eprint!("\r  run {}/{n}", run + 1);
     }
     eprintln!();
     println!();
+    if !rejected.is_empty() {
+        println!(
+            "REJECTED {}/{n} runs — control {} below {CONTROL_FLOOR}:",
+            rejected.len(),
+            TARGETS[CONTROL].0
+        );
+        for (r, c) in &rejected {
+            println!("  run {r:>3}: control {c:.2}");
+        }
+        println!("  A degrading machine is not a wider distribution. Do not average these.");
+        println!();
+    }
 
     for (i, (shape, kernel)) in TARGETS.iter().enumerate() {
         let mut v = samples[i].clone();
@@ -91,10 +131,16 @@ fn main() {
 
         println!("{shape}  {kernel}   n={}", v.len());
         println!(
-            "  mean {mean:.4}  SE {se:.4}   observed {lo:.3}-{hi:.3}  spread {:.1}%",
+            "  mean {mean:.4}  SE {se:.4} ({:.1}% rel)   observed {lo:.3}-{hi:.3}  spread {:.1}%",
+            100.0 * se / mean,
             100.0 * (hi - lo) / mean
         );
-        println!("  samples: {:?}", v.iter().map(|x| (x * 1000.0).round() / 1000.0).collect::<Vec<_>>());
+        println!(
+            "  samples: {:?}",
+            v.iter()
+                .map(|x| (x * 1000.0).round() / 1000.0)
+                .collect::<Vec<_>>()
+        );
 
         // Coarse histogram over the observed range.
         const BINS: usize = 10;
@@ -118,10 +164,17 @@ fn main() {
             gaps.len(),
             max_gap / med_gap
         );
-        let decision_grade = (hi - lo) / mean <= 0.05;
+        // SE, not spread: max-min is non-decreasing in n, so gating on it
+        // rewards collecting less data. Measured: attention showed 2% spread
+        // over 3 repeats and 5.7% over 7, while its SE fell.
+        let decision_grade = v.len() >= 5 && se / mean <= 0.01;
         println!(
-            "  => {} at the 5% bar{}",
-            if decision_grade { "DECISION-GRADE" } else { "still NOT decision-grade" },
+            "  => {} (n>=5, rel SE <= 1%){}",
+            if decision_grade {
+                "DECISION-GRADE"
+            } else {
+                "still NOT decision-grade"
+            },
             if max_gap / med_gap > 3.0 {
                 "; interior gap is large — inspect for two modes before banking a mean"
             } else {

@@ -39,11 +39,33 @@
 //!
 //! [`super::symbol_mass`] measured, on the same pool: unobserved experts per
 //! layer ranging 3 to 68 of 128, and effective bank size (participation ratio)
-//! from 14.8 to 50.5. `corr(unobserved, top-8 coverage) = +0.861` across the 30
-//! layers, so the layers with a large dead set also concentrate mass in their
-//! survivors — one narrow-bank axis rather than a live set beside a separate
-//! dead one. Static per-layer heterogeneity is therefore **strongly supported**
-//! by exactly the pool that refuted the adaptive form.
+//! from 14.8 to 50.5. Static per-layer heterogeneity is therefore **strongly
+//! supported** by exactly the pool that refuted the adaptive form.
+//!
+//! **What varies is mostly how many experts get used, not how unevenly.** The
+//! tempting headline is `corr(unobserved, top-8 coverage) = +0.861`, and it is
+//! inflated: top-*k* at fixed `k` is not independent of support size — eight of
+//! 60 observed is 13% of the support, eight of 125 is 6.4%, so a smaller-support
+//! layer scores higher under an identical probability *shape*. Controlling for
+//! that, three shape-only statistics agree at roughly half the strength:
+//!
+//! | statistic | corr with unobserved count |
+//! |---|---|
+//! | top-8 coverage (fixed count, confounded) | +0.861 |
+//! | top-10% of support (fixed fraction) | +0.543 |
+//! | normalised participation ratio | -0.501 |
+//! | Gini over observed | +0.659 |
+//!
+//! So the shape effect is real, consistent in direction, and **moderate**: a
+//! narrow-bank layer does use its survivors somewhat more unevenly, but not
+//! dramatically (normalised PR spans only 0.207-0.436, mean 0.289).
+//!
+//! Call this a **narrow effective bank**, not router collapse. Collapse names a
+//! mechanism — a few dominant experts running away with the mass — which would
+//! drive normalised PR sharply down in the dead-set layers, and it does not.
+//! L5 is a smaller bank used with roughly ordinary evenness. The distinction
+//! sets the lever: prune the unused set, and do not expect a second win from
+//! pruning within the survivors.
 //!
 //! Both statements are needed. A four-layer-class serving policy gets no support
 //! in its adaptive form and strong support in its static form, and the two must
