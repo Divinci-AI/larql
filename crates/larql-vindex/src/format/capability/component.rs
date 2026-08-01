@@ -90,6 +90,105 @@ impl ComponentCoordinate {
     }
 }
 
+/// What an adapter expects a component to be.
+///
+/// Presence and readability are not enough. A readable tensor of the wrong
+/// shape is neither an unsupported build nor a missing file — it is an invalid
+/// index or an adapter mismatch, and it is a plausible-output trap: a
+/// wrong-but-compatible shape can survive a long way down a generic buffer
+/// path before failing, or worse, be interpreted and never fail at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComponentContract {
+    pub shape: Vec<u32>,
+    pub kind: TensorKind,
+}
+
+/// Coarse shape class, checked before dimensions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TensorKind {
+    Matrix,
+    Vector,
+}
+
+impl TensorKind {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Matrix => "matrix",
+            Self::Vector => "vector",
+        }
+    }
+}
+
+impl ComponentContract {
+    pub fn matrix(rows: u32, cols: u32) -> Self {
+        Self {
+            shape: vec![rows, cols],
+            kind: TensorKind::Matrix,
+        }
+    }
+
+    pub fn vector(len: u32) -> Self {
+        Self {
+            shape: vec![len],
+            kind: TensorKind::Vector,
+        }
+    }
+
+    pub fn describe(&self) -> String {
+        format!("{} {:?}", self.kind.name(), self.shape)
+    }
+}
+
+/// Why a component can or cannot be used, with the cause preserved.
+///
+/// Five states because they imply five different repairs. Collapsing any pair
+/// would make the report say "unavailable" where an operator needs to know
+/// whether to fetch a file, upgrade the binary, fix the profile, or report a
+/// bug in the extractor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ComponentUsability {
+    Usable,
+    /// The profile dropped it on purpose. Not a defect.
+    DeliberatelyOmitted,
+    /// Missing with nothing declaring the omission. A defect.
+    AbsentUndeclared,
+    /// Present and intact; this build cannot interpret it. Not a defect —
+    /// the artifact may simply be newer.
+    UnsupportedEncoding(ReferenceSupport),
+    /// Present and readable, but not what the adapter expects. An invalid
+    /// index or an adapter mismatch, never a build limitation.
+    ContractMismatch {
+        expected: ComponentContract,
+        found: ComponentContract,
+    },
+}
+
+impl ComponentUsability {
+    pub fn is_usable(&self) -> bool {
+        matches!(self, Self::Usable)
+    }
+
+    /// Whether this indicates something wrong with the artifact, as opposed to
+    /// a scoping choice or a build limitation.
+    pub fn indicates_defect(&self) -> bool {
+        matches!(self, Self::AbsentUndeclared | Self::ContractMismatch { .. })
+    }
+
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Usable => "usable".into(),
+            Self::DeliberatelyOmitted => "omitted by the active selection".into(),
+            Self::AbsentUndeclared => "absent, with no declared omission".into(),
+            Self::UnsupportedEncoding(s) => s.describe(),
+            Self::ContractMismatch { expected, found } => format!(
+                "expected {} but found {} — invalid index or adapter mismatch",
+                expected.describe(),
+                found.describe()
+            ),
+        }
+    }
+}
+
 /// A manifest-addressed tensor the profile selected.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelectedTensor {
@@ -99,6 +198,9 @@ pub struct SelectedTensor {
     /// Set when the profile deliberately dropped this tensor. Distinguishes an
     /// intentional client slice from a damaged index carrying the same gap.
     pub omitted: Option<AbsenceKind>,
+    /// What is actually stored, for contract checking. `None` when the
+    /// selection did not record it.
+    pub contract: Option<ComponentContract>,
 }
 
 impl SelectedTensor {
@@ -108,31 +210,52 @@ impl SelectedTensor {
             fidelity,
             support: ReferenceSupport::Supported,
             omitted: None,
+            contract: None,
         }
     }
 
-    /// Whether this tensor can contribute to a computation.
-    pub fn is_usable(&self) -> bool {
-        self.omitted.is_none() && self.support.is_supported()
+    pub fn with_contract(mut self, contract: ComponentContract) -> Self {
+        self.contract = Some(contract);
+        self
     }
 
-    /// Why it cannot, in words an operator can act on.
-    pub fn reason_unusable(&self) -> Option<String> {
-        if self.is_usable() {
-            return None;
-        }
+    /// Usability against an optional expected contract.
+    ///
+    /// Order matters: absence outranks encoding, which outranks shape. Asking
+    /// whether a missing tensor has the right shape is not a question.
+    pub fn usability(&self, expected: Option<&ComponentContract>) -> ComponentUsability {
         if let Some(kind) = &self.omitted {
-            return Some(kind.describe());
+            return if kind.is_defect() {
+                ComponentUsability::AbsentUndeclared
+            } else {
+                ComponentUsability::DeliberatelyOmitted
+            };
         }
-        Some(self.support.describe())
+        if !self.support.is_supported() {
+            return ComponentUsability::UnsupportedEncoding(self.support.clone());
+        }
+        match (expected, &self.contract) {
+            (Some(want), Some(have)) if want != have => ComponentUsability::ContractMismatch {
+                expected: want.clone(),
+                found: have.clone(),
+            },
+            _ => ComponentUsability::Usable,
+        }
     }
 
-    /// Whether the gap indicates a damaged index rather than a scoping choice.
+    /// Whether this tensor can contribute, ignoring any contract.
+    pub fn is_usable(&self) -> bool {
+        self.usability(None).is_usable()
+    }
+
     pub fn indicates_defect(&self) -> bool {
-        match &self.omitted {
-            Some(kind) => kind.is_defect(),
-            None => false,
-        }
+        self.usability(None).indicates_defect()
+    }
+
+    /// Why it cannot be used, ignoring any contract.
+    pub fn reason_unusable(&self) -> Option<String> {
+        let u = self.usability(None);
+        (!u.is_usable()).then(|| u.describe())
     }
 }
 

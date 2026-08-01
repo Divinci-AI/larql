@@ -31,7 +31,11 @@ pub mod authority;
 pub mod compatibility;
 pub mod component;
 pub mod coordinate;
+pub mod decode_requirements;
 pub mod kernel;
+pub mod local_decode;
+#[cfg(test)]
+mod local_decode_tests;
 pub mod operation;
 #[cfg(test)]
 mod operation_tests;
@@ -57,8 +61,13 @@ pub use authority::{
 };
 pub use compatibility::{IncompatibilityShape, RoleSegmentCoverage, SegmentCompatibility};
 pub use component::{ComponentCoordinate, SelectedComponent, SelectedTensor, WeightClass};
-pub use coordinate::{AbsenceKind, RegionCoordinate};
+pub use coordinate::{AbsenceKind, BankCoordinate, RegionCoordinate};
+pub use decode_requirements::{
+    ComponentRequirement, DecodeRequirements, LayerDecodeRequirements, LocalDecodeRequest,
+    MoeLayerRequirements, Requirement,
+};
 pub use kernel::{KernelId, KernelMaturity};
+pub use local_decode::{infer_local_decode, ResolvedDocumentSelection};
 pub use operation::{Degradation, OperationAdmission, OperationCapability, OperationFailure};
 pub use plan::{
     OperationPlan, PlanChoice, PlannedRegion, QualifiedAlternative, QualifiedOperationRoute,
