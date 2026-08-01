@@ -580,17 +580,12 @@ pub fn ceilings(geom: &K3Geometry, a: &super::args::CeilingsArgs, as_json: bool)
         composed.seconds_per_token * 1e3
     );
     println!();
-    let central = classes::compose_at(&composed.rows, classes::BW_GB_S, classes::Bound::Central);
-    debug_assert!(
-        (central - composed.tok_s).abs() < 1e-9,
-        "Bound::Central must equal compose()"
-    );
-    let lo = classes::compose_at(&composed.rows, classes::BW_GB_S, classes::Bound::Low);
-    let hi = classes::compose_at(&composed.rows, classes::BW_GB_S, classes::Bound::High);
+    let (lo, hi) = classes::observed_range(&composed.rows, classes::BW_GB_S);
     println!("  COMPOSED ceiling {:.2} tok/s", composed.tok_s);
     println!(
-        "  observed composition range {lo:.2}-{hi:.2}  (every class at its worst / best \
-         of 3 cold-rotating repeats)"
+        "  observed composition range {lo:.2}-{hi:.2}  (min-max of {} PAIRED per-run \
+         compositions, not a component-extrema envelope)",
+        classes::ACCEPTED_RUNS
     );
     println!(
         "  scalar-eta quote {:.2} tok/s  -> overstates by {:.2}x",
@@ -744,8 +739,7 @@ pub fn ceilings(geom: &K3Geometry, a: &super::args::CeilingsArgs, as_json: bool)
         .drain(..)
         .map(|(n, rows)| {
             let c = classes::compose(rows.clone(), classes::BW_GB_S, KernelClass::Down.eta());
-            let lo = classes::compose_at(&rows, classes::BW_GB_S, classes::Bound::Low);
-            let hi = classes::compose_at(&rows, classes::BW_GB_S, classes::Bound::High);
+            let (lo, hi) = classes::observed_range(&rows, classes::BW_GB_S);
             (n.to_string(), c.tok_s, lo, hi)
         })
         .collect();

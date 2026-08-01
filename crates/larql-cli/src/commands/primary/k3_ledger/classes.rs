@@ -390,35 +390,53 @@ pub fn not_decision_grade(rows: &[ClassRow]) -> Vec<(KernelClass, MeasuredEffici
     out
 }
 
-/// Which end of each class's observed range to compose at.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Bound {
-    Central,
-    /// Every class at its worst observed efficiency.
-    Low,
-    /// Every class at its best observed efficiency.
-    High,
+/// Control-passing runs in the banked campaign.
+pub const ACCEPTED_RUNS: usize = 7;
+
+/// Per-run efficiency samples, **paired by run index** across classes.
+///
+/// Paired, because every class moved together: the campaign's degradation was
+/// common-mode. Combining each class's independent minimum into one low bound
+/// and each maximum into one high bound produces a *component-extrema
+/// envelope*, which is 1.18x wider than anything actually observed and
+/// describes a run that never happened. Composing run-by-run and reporting the
+/// min/median/max of those compositions reports only real machine states.
+pub fn samples(class: KernelClass) -> [f64; ACCEPTED_RUNS] {
+    match class {
+        KernelClass::AttnProjection => [0.89, 0.88, 0.90, 0.89, 0.85, 0.87, 0.85],
+        KernelClass::GateUp => [0.79, 0.83, 0.84, 0.81, 0.80, 0.82, 0.70],
+        KernelClass::Down => [0.79, 0.78, 0.80, 0.80, 0.76, 0.79, 0.77],
+        KernelClass::RoutedExpert => [0.67, 0.62, 0.62, 0.61, 0.54, 0.62, 0.62],
+        KernelClass::Unquantised => [1.0; ACCEPTED_RUNS],
+    }
 }
 
-/// Compose at one end of the observed ranges, so a report can print a band.
+/// Compose the ledger once per accepted run, preserving the pairing.
 ///
-/// The band is what the ranges are FOR: a target generator that consumes a
-/// single scalar lets a 10% measurement swing on a small class silently select
-/// a bit-width.
-pub fn compose_at(rows: &[ClassRow], bw: f64, bound: Bound) -> f64 {
-    let secs: f64 = rows
-        .iter()
-        .map(|r| {
-            let e = match (r.eta_override, bound) {
-                (Some(o), _) => o,
-                (None, Bound::Central) => r.class.efficiency().central,
-                (None, Bound::Low) => r.class.efficiency().observed_low,
-                (None, Bound::High) => r.class.efficiency().observed_high,
-            };
-            r.bytes() / (bw * 1e9 * e)
+/// A row with an `eta_override` (a scenario) holds that value across all runs —
+/// the scenario asserts an efficiency rather than having measured one.
+pub fn compose_observed(rows: &[ClassRow], bw: f64) -> Vec<f64> {
+    (0..ACCEPTED_RUNS)
+        .map(|run| {
+            let secs: f64 = rows
+                .iter()
+                .map(|r| {
+                    let e = r.eta_override.unwrap_or_else(|| samples(r.class)[run]);
+                    r.bytes() / (bw * 1e9 * e)
+                })
+                .sum();
+            1.0 / secs
         })
-        .sum();
-    1.0 / secs
+        .collect()
+}
+
+/// Min / max of the per-run compositions — an OBSERVED range, not an envelope.
+pub fn observed_range(rows: &[ClassRow], bw: f64) -> (f64, f64) {
+    let c = compose_observed(rows, bw);
+    (
+        c.iter().cloned().fold(f64::INFINITY, f64::min),
+        c.iter().cloned().fold(f64::NEG_INFINITY, f64::max),
+    )
 }
 
 /// Compose per-class times into one throughput ceiling.
