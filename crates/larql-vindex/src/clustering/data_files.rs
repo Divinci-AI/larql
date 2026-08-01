@@ -102,6 +102,21 @@ mod tests {
     }
 
     #[test]
+    fn workspace_dir_is_anchored_at_compile_time_not_cwd() {
+        // The 2026-07-30 review finding: the old code probed
+        // `data`/`../data`/`../../data` relative to the process cwd, so the
+        // loaded vocabulary silently depended on where the binary was
+        // launched from. Anchoring at CARGO_MANIFEST_DIR makes every
+        // candidate absolute — this holds whether or not the file exists,
+        // so it stays a real guard in a checkout without `data/`.
+        assert!(
+            workspace_data_dir().is_absolute(),
+            "workspace data dir {:?} is cwd-relative",
+            workspace_data_dir()
+        );
+    }
+
+    #[test]
     fn missing_everywhere_is_none() {
         assert!(resolve_data_file_with_env("no_such_vocab_file.json", None).is_none());
     }
