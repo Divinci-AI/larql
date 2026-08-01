@@ -46,6 +46,7 @@ pub mod selection;
 pub mod traversal;
 #[cfg(test)]
 mod traversal_tests;
+pub mod walk_request;
 
 pub use authority::{
     derive_authority, AuthorityInputs, DerivedAuthority, Fidelity, StructuralChange,
@@ -66,4 +67,7 @@ pub use scope::{CapabilityReport, DocumentCapabilities, ProfileCapabilities};
 pub use selection::{BankSelection, SelectedRegion};
 pub use traversal::{
     traverse_bank, AlternativeReport, BankCapabilityReport, ReferenceCodecs, ReferenceExecution,
+};
+pub use walk_request::{
+    validate_query_vector, PartialPolicy, QueryVectorFault, WalkInput, WalkRequest, WalkTarget,
 };

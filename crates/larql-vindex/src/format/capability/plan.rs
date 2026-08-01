@@ -75,6 +75,13 @@ pub struct PlanChoice {
 impl PlanChoice {
     /// The alternative whose weakest region is strongest — the best fidelity
     /// binding *could* achieve here.
+    ///
+    /// **Introspection and planning only.** This must never be used as a
+    /// binding tie-break: when two alternatives carry equal authority, kernel
+    /// binding has to stay free to choose on support and performance grounds.
+    /// An authority-oriented tie-break here would silently decide a question
+    /// that belongs to the kernel registry, and would do so on a criterion
+    /// that cannot distinguish the candidates anyway.
     pub fn best_alternative(&self) -> Option<&QualifiedAlternative> {
         self.alternatives
             .iter()
