@@ -52,13 +52,18 @@ representations: BF16, FP8-like, FP4-like
 ```
 Catches: shared-expert reduction order, router-normalisation participation, mixed routed/shared storage.
 
-**D — K3-shaped (Mini-K3, 1/16 dims)**
+**D — K3-shaped (Mini-K3)** [dimensions frozen 2026-08-01]
 ```
-hidden 448 (=7168/16) · latent 224 · expert intermediate 192
-experts 56 or 112 (functional) — 896 only in the byte-faithful bank
-top_k 16 · shared 2 · programme latent-moe-v1
+hidden 512 · latent 256 · expert intermediate 256
+experts 112 · top_k 16 · shared 2 · programme latent-moe-v1
 ```
 Same architecture graph, same routing shape, same shared latent projections; small enough to regenerate and rewrite repeatedly.
+
+**Why not the literal 1/16 downscale.** The draft-1 dimensions (448 / 224 / 192) break Q4_K/Q6_K superblock alignment on every matrix: `pad_cols_to_256` pads 224 → 256 (+14 %) and 192 → 256 (+33 %), so the fixture's byte ledger would be a padding artefact rather than a scaled K3. No proportional downscale fixes it — alignment needs `latent/d ≡ 0 (mod 256)` and `inter/d ≡ 0 (mod 256)`, and with `3584 = 2⁹·7`, `3072 = 2¹⁰·3` that admits only `d ∈ {1, 2}`. 512 / 256 / 256 is 256-aligned everywhere, preserves K3's 2:1 hidden:latent exactly, and pads nowhere. The one deviation is intermediate:latent, which is 1:1 here against K3's 1:0.857.
+
+**Why 112 experts, not 56.** 56 preserves the literal 1/16 expert-count scaling but is not a whole multiple of the 16-expert group width, so it would bake a partial group into the fixture — and group width dividing segment width is a physical-design *rule* (§7), not a preference. 112 = 7 × 16 divides cleanly, stays tiny, and leaves exact-K3-scale fidelity where it belongs: the byte-faithful bank, which runs 896 unscaled.
+
+**Standing caveat:** never quote a byte or latency number from this fixture as a K3 number. It answers correctness, not SSD.
 
 ### 1.2 Byte-faithful K3 routed bank
 

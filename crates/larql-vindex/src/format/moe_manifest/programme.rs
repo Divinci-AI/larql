@@ -53,6 +53,38 @@ pub const ALL_PROGRAMMES: [Programme; 5] = [
 /// requirement that the two "produce identical results under one manifest".
 pub type RoleAlternative = &'static [RegionRole];
 
+/// Why a programme is not satisfied, and against which layout that was judged.
+///
+/// Carrying the alternative alongside the gap is what lets a diagnostic say
+/// *"closest accepted layout: gate_up_fused + down; missing down"* rather than
+/// a bare list of roles the reader then has to reverse-engineer a layout from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unsatisfied {
+    /// The layout this gap was measured against.
+    pub closest: RoleAlternative,
+    /// Roles absent from `closest`.
+    pub missing: Vec<RegionRole>,
+}
+
+impl Unsatisfied {
+    /// Human-readable form used verbatim in loader diagnostics.
+    pub fn describe(&self) -> String {
+        let layout = self
+            .closest
+            .iter()
+            .map(|r| r.name())
+            .collect::<Vec<_>>()
+            .join(" + ");
+        let missing = self
+            .missing
+            .iter()
+            .map(|r| r.name())
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("closest accepted layout: {layout}; missing {missing}")
+    }
+}
+
 impl Programme {
     pub fn from_id(id: u16) -> Option<Self> {
         match id {
@@ -135,25 +167,39 @@ impl Programme {
             .find(|alt| alt.iter().all(|role| present.contains(role)))
     }
 
-    /// Roles missing from the *closest* alternative — the one needing fewest
-    /// additions. Empty when the programme is already satisfied.
+    /// The closest unsatisfied alternative, or `None` when already satisfied.
     ///
-    /// Reporting the closest alternative rather than the first matters for
-    /// diagnostics: an index holding `gate_up_fused` should be told it needs
-    /// `down`, not that it needs `gate`, `up` and `down`.
-    pub fn missing_roles(self, present: &[RegionRole]) -> Vec<RegionRole> {
+    /// "Closest" is the alternative needing fewest additions. **Ties resolve by
+    /// declaration order** in [`Programme::role_alternatives`] — `min_by_key`
+    /// keeps the first minimum, and the alternatives are a fixed `&'static`
+    /// slice, so the chosen alternative cannot drift as internal iteration
+    /// changes. That determinism is what makes the diagnostic quotable.
+    pub fn closest_unsatisfied(self, present: &[RegionRole]) -> Option<Unsatisfied> {
         if self.satisfied_by(present).is_some() {
-            return Vec::new();
+            return None;
         }
         self.role_alternatives()
             .iter()
-            .map(|alt| {
-                alt.iter()
+            .copied()
+            .map(|alt| Unsatisfied {
+                closest: alt,
+                missing: alt
+                    .iter()
                     .copied()
                     .filter(|role| !present.contains(role))
-                    .collect::<Vec<_>>()
+                    .collect(),
             })
-            .min_by_key(|missing| missing.len())
+            .min_by_key(|u| u.missing.len())
+    }
+
+    /// Roles missing from the closest alternative. Empty when satisfied.
+    ///
+    /// Reporting the closest alternative rather than the first matters: an
+    /// index holding `gate_up_fused` should be told it needs `down`, not that
+    /// it needs `gate`, `up` and `down`.
+    pub fn missing_roles(self, present: &[RegionRole]) -> Vec<RegionRole> {
+        self.closest_unsatisfied(present)
+            .map(|u| u.missing)
             .unwrap_or_default()
     }
 
@@ -268,6 +314,57 @@ mod tests {
     fn missing_roles_reports_everything_when_nothing_is_present() {
         let missing = Programme::GatedMlpV1.missing_roles(&[]);
         assert_eq!(missing, vec![RegionRole::GateUpFused, RegionRole::Down]);
+    }
+
+    #[test]
+    fn a_tie_resolves_to_the_first_declared_alternative() {
+        // Nothing present: fused needs 2 additions, decomposed needs 3, so no
+        // tie there. Construct a real tie by supplying the roles that make both
+        // alternatives equidistant, and require the DECLARED-FIRST one wins.
+        let present = [RegionRole::Gate, RegionRole::Up, RegionRole::GateUpFused];
+        let u = Programme::GatedMlpV1.closest_unsatisfied(&present).unwrap();
+        assert_eq!(u.missing, vec![RegionRole::Down]);
+        // Both alternatives are missing exactly `down`; fused is declared first.
+        assert_eq!(u.closest, &[RegionRole::GateUpFused, RegionRole::Down][..]);
+    }
+
+    #[test]
+    fn the_chosen_alternative_is_stable_across_repeated_calls() {
+        // The alternatives are a fixed &'static slice, so this cannot drift —
+        // pinned because a drifting diagnostic is a diagnostic nobody trusts.
+        let present = [RegionRole::Gate];
+        let first = Programme::GatedMlpV1.closest_unsatisfied(&present);
+        for _ in 0..8 {
+            assert_eq!(Programme::GatedMlpV1.closest_unsatisfied(&present), first);
+        }
+    }
+
+    #[test]
+    fn the_description_names_the_layout_it_judged_against() {
+        let present = [RegionRole::GateUpFused];
+        let u = Programme::GatedMlpV1.closest_unsatisfied(&present).unwrap();
+        assert_eq!(
+            u.describe(),
+            "closest accepted layout: gate_up_fused + down; missing down"
+        );
+    }
+
+    #[test]
+    fn the_description_lists_every_missing_role() {
+        let u = Programme::GptOssExpertV1
+            .closest_unsatisfied(&[RegionRole::GateUpFused])
+            .unwrap();
+        let text = u.describe();
+        assert!(text.contains("gate_up_fused + down + bias"), "{text}");
+        assert!(text.contains("missing down, bias"), "{text}");
+    }
+
+    #[test]
+    fn a_satisfied_programme_has_no_unsatisfied_report() {
+        assert_eq!(
+            Programme::GatedMlpV1.closest_unsatisfied(&FUSED_PRESENT),
+            None
+        );
     }
 
     #[test]

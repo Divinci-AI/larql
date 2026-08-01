@@ -42,7 +42,7 @@ pub(super) fn bank(num_entries: u32) -> BankDescriptor {
         intermediate_dim: INTERMEDIATE,
         output_dim: HIDDEN,
         region_schema_count: SCHEMAS,
-        browse: BrowseMode::Eager,
+        browse: BrowseMode::Direct,
     }
 }
 

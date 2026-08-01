@@ -28,7 +28,7 @@ fn bank() -> BankDescriptor {
         intermediate_dim: INTERMEDIATE,
         output_dim: HIDDEN,
         region_schema_count: 2,
-        browse: BrowseMode::Eager,
+        browse: BrowseMode::Direct,
     }
 }
 

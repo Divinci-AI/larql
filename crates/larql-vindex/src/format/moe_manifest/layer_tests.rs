@@ -121,11 +121,106 @@ fn an_unknown_programme_is_named_with_its_storage() {
 
 #[test]
 fn an_unknown_programme_does_not_also_report_a_space_contradiction() {
-    // One root cause, one defect. A second misleading defect sends the reader
-    // chasing input_space when the real problem is the programme name.
+    // One root cause, one defect — for the checks that DEPEND on the
+    // programme. A misleading space contradiction sends the reader chasing
+    // input_space when the real problem is the name.
+    //
+    // Asserted by absence of the dependent defect, deliberately not by a total
+    // count: a count assertion would forbid reporting *independent* defects
+    // alongside, which is the over-suppression this scoping exists to avoid.
     let mut l = residual_layer();
     l.routed_bank.programme = "not-a-programme".into();
-    assert_eq!(l.defects().len(), 1, "{:?}", l.defects());
+    assert!(!l
+        .defects()
+        .iter()
+        .any(|d| matches!(d, LayerDefect::InputSpaceContradictsProgramme { .. })));
+}
+
+#[test]
+fn an_unknown_programme_does_not_conceal_independent_storage_defects() {
+    // A typo'd programme name must not hide a second, real corruption sitting
+    // behind it — storage shape is not a function of programme identity.
+    let mut l = residual_layer();
+    l.routed_bank.programme = "not-a-programme".into();
+    l.routed_bank.storage = "  ".into();
+    l.routed_bank.experts = 0;
+
+    let defects = l.defects();
+    assert!(defects
+        .iter()
+        .any(|d| matches!(d, LayerDefect::UnknownProgramme { .. })));
+    assert!(defects.contains(&LayerDefect::BankHasNoStorage {
+        layer: LAYER,
+        which: "routed"
+    }));
+    assert!(defects.contains(&LayerDefect::BankHasNoExperts {
+        layer: LAYER,
+        which: "routed"
+    }));
+}
+
+#[test]
+fn a_shared_bank_does_not_require_a_sink() {
+    // The asymmetry that must stay pinned: a sink needs a shared bank, but
+    // always-active shared experts OUTSIDE sink normalisation are valid —
+    // that is Kimi-Linear's arrangement. `shared_expert_sink` must never
+    // become shorthand for "this layer has shared experts".
+    let mut l = latent_layer();
+    l.router.shared_expert_sink = false;
+    assert!(l.shared_bank.is_some());
+    assert!(l.is_well_formed(), "{:?}", l.defects());
+}
+
+#[test]
+fn an_empty_bank_storage_reference_is_refused() {
+    let mut l = residual_layer();
+    l.routed_bank.storage = String::new();
+    assert!(l.defects().contains(&LayerDefect::BankHasNoStorage {
+        layer: LAYER,
+        which: "routed"
+    }));
+}
+
+#[test]
+fn two_banks_sharing_one_storage_reference_are_refused() {
+    let mut l = latent_layer();
+    l.shared_bank.as_mut().unwrap().storage = l.routed_bank.storage.clone();
+    assert!(l
+        .defects()
+        .iter()
+        .any(|d| matches!(d, LayerDefect::DuplicateBankStorage { .. })));
+}
+
+#[test]
+fn two_empty_storage_references_report_emptiness_not_duplication() {
+    // Both blank is one defect class, not two — reporting "duplicate storage
+    // ''" on top would be noise pointing at the wrong fix.
+    let mut l = latent_layer();
+    l.routed_bank.storage = String::new();
+    l.shared_bank.as_mut().unwrap().storage = String::new();
+    assert!(!l
+        .defects()
+        .iter()
+        .any(|d| matches!(d, LayerDefect::DuplicateBankStorage { .. })));
+}
+
+#[test]
+fn a_zero_width_bank_is_refused() {
+    let mut l = residual_layer();
+    l.routed_bank.expert_dims.as_mut().unwrap().intermediate = 0;
+    assert!(l
+        .defects()
+        .iter()
+        .any(|d| matches!(d, LayerDefect::BankHasZeroDimension { .. })));
+}
+
+#[test]
+fn an_undeclared_dims_bank_is_not_treated_as_zero_width() {
+    // Absent dims mean unknown, not zero — reporting a zero-width defect
+    // would be inventing a fact the manifest never stated.
+    let mut l = residual_layer();
+    l.routed_bank.expert_dims = None;
+    assert!(l.is_well_formed(), "{:?}", l.defects());
 }
 
 #[test]

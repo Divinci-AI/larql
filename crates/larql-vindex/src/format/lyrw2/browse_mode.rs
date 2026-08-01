@@ -16,7 +16,7 @@ pub enum BrowseMode {
     #[default]
     None,
     /// Gate rows live in their own region — a direct read.
-    Eager,
+    Direct,
     /// Gate rows live in a fused region and are reached by striding.
     Strided,
 }
@@ -24,7 +24,7 @@ pub enum BrowseMode {
 impl BrowseMode {
     pub fn from_flags(flags: u16) -> Self {
         match flags & BANK_FLAG_BROWSE_MASK {
-            1 => Self::Eager,
+            1 => Self::Direct,
             2 => Self::Strided,
             // 0 and the unassigned 3 both mean "not browse-enabled". An
             // unknown mode must never read as browsable.
@@ -35,7 +35,7 @@ impl BrowseMode {
     pub fn to_flag_bits(self) -> u16 {
         match self {
             Self::None => 0,
-            Self::Eager => 1,
+            Self::Direct => 1,
             Self::Strided => 2,
         }
     }
@@ -54,7 +54,7 @@ impl BrowseMode {
     pub fn is_satisfiable_by(self, packing: Packing) -> bool {
         match self {
             Self::None => true,
-            Self::Eager => true,
+            Self::Direct => true,
             Self::Strided => packing.permits_strided_gate_read(),
         }
     }
@@ -62,7 +62,7 @@ impl BrowseMode {
     pub fn name(self) -> &'static str {
         match self {
             Self::None => "none",
-            Self::Eager => "eager",
+            Self::Direct => "direct",
             Self::Strided => "strided",
         }
     }
@@ -74,7 +74,7 @@ mod tests {
 
     #[test]
     fn modes_round_trip_through_flag_bits() {
-        for mode in [BrowseMode::None, BrowseMode::Eager, BrowseMode::Strided] {
+        for mode in [BrowseMode::None, BrowseMode::Direct, BrowseMode::Strided] {
             assert_eq!(BrowseMode::from_flags(mode.to_flag_bits()), mode);
         }
     }
@@ -87,8 +87,8 @@ mod tests {
 
     #[test]
     fn bits_above_the_mask_are_ignored() {
-        let with_noise = BrowseMode::Eager.to_flag_bits() | 0xFFFC;
-        assert_eq!(BrowseMode::from_flags(with_noise), BrowseMode::Eager);
+        let with_noise = BrowseMode::Direct.to_flag_bits() | 0xFFFC;
+        assert_eq!(BrowseMode::from_flags(with_noise), BrowseMode::Direct);
     }
 
     #[test]
@@ -98,8 +98,8 @@ mod tests {
     }
 
     #[test]
-    fn eager_and_strided_are_browsable() {
-        assert!(BrowseMode::Eager.is_browsable());
+    fn direct_and_strided_are_browsable() {
+        assert!(BrowseMode::Direct.is_browsable());
         assert!(BrowseMode::Strided.is_browsable());
     }
 
@@ -111,13 +111,13 @@ mod tests {
     }
 
     #[test]
-    fn eager_and_none_accept_any_packing() {
+    fn direct_and_none_accept_any_packing() {
         for packing in [
             Packing::RowMajor,
             Packing::BlocksWithScalesInline,
             Packing::BlocksValues,
         ] {
-            assert!(BrowseMode::Eager.is_satisfiable_by(packing));
+            assert!(BrowseMode::Direct.is_satisfiable_by(packing));
             assert!(BrowseMode::None.is_satisfiable_by(packing));
         }
     }
@@ -125,7 +125,7 @@ mod tests {
     #[test]
     fn names_are_stable() {
         assert_eq!(BrowseMode::None.name(), "none");
-        assert_eq!(BrowseMode::Eager.name(), "eager");
+        assert_eq!(BrowseMode::Direct.name(), "direct");
         assert_eq!(BrowseMode::Strided.name(), "strided");
     }
 }

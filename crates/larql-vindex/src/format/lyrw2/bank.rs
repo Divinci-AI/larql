@@ -121,7 +121,7 @@ mod tests {
             intermediate_dim: 3_072,
             output_dim: 3_584,
             region_schema_count: 2,
-            browse: BrowseMode::Eager,
+            browse: BrowseMode::Direct,
         }
     }
 
@@ -200,7 +200,7 @@ mod tests {
         assert_eq!(read_u16(&buf, 0), Some(0), "bank_id");
         assert_eq!(read_u16(&buf, 2), Some(1), "bank_kind = routed");
         assert_eq!(read_u16(&buf, 4), Some(2), "region_schema_count");
-        assert_eq!(read_u16(&buf, 6), Some(1), "flags = browse eager");
+        assert_eq!(read_u16(&buf, 6), Some(1), "flags = browse direct");
         assert_eq!(read_u32(&buf, 8), Some(896), "num_entries");
         assert_eq!(read_u32(&buf, 12), Some(3_584), "input_dim");
         assert_eq!(read_u32(&buf, 16), Some(3_072), "intermediate_dim");

@@ -112,6 +112,27 @@ pub enum LayerDefect {
          for the router to score"
     )]
     SinkWithoutSharedBank { layer: u32 },
+
+    #[error("layer {layer}: {which} bank has an empty storage reference")]
+    BankHasNoStorage { layer: u32, which: &'static str },
+
+    #[error("layer {layer}: routed and shared banks both name storage '{storage}'")]
+    DuplicateBankStorage { layer: u32, storage: String },
+
+    #[error("layer {layer}: {which} bank declares zero experts")]
+    BankHasNoExperts { layer: u32, which: &'static str },
+
+    #[error(
+        "layer {layer}: {which} bank declares a zero dimension \
+         (input {input}, intermediate {intermediate}, output {output})"
+    )]
+    BankHasZeroDimension {
+        layer: u32,
+        which: &'static str,
+        input: u32,
+        intermediate: u32,
+        output: u32,
+    },
 }
 
 impl MoeLayer {
@@ -120,11 +141,19 @@ impl MoeLayer {
     /// These are checks the *manifest* can fail on its own, before any weight
     /// byte is read — distinct from operand-absence, which needs the LYRW
     /// files and lives in the capability check (§11).
+    ///
+    /// **Suppression is dependency-scoped, not blanket.** An unresolvable
+    /// programme suppresses only the checks whose *interpretation* depends on
+    /// knowing the programme — currently the input-space compatibility test.
+    /// Storage-shape defects are independent of programme identity and always
+    /// run, so a typo'd programme name can never conceal a duplicate storage
+    /// reference or a zero-width bank sitting behind it.
     pub fn defects(&self) -> Vec<LayerDefect> {
         let mut out = Vec::new();
         self.check_programmes_resolve(&mut out);
         self.check_latent_consistency(&mut out);
         self.check_router(&mut out);
+        self.check_bank_storage(&mut out);
         out
     }
 
@@ -186,6 +215,45 @@ impl MoeLayer {
 
         if self.router.shared_expert_sink && self.shared_bank.is_none() {
             out.push(LayerDefect::SinkWithoutSharedBank { layer: self.layer });
+        }
+    }
+
+    /// Storage-shape checks. Independent of programme identity by design —
+    /// see the suppression note on [`MoeLayer::defects`].
+    fn check_bank_storage(&self, out: &mut Vec<LayerDefect>) {
+        for (which, bank) in self.labelled_banks() {
+            if bank.storage.trim().is_empty() {
+                out.push(LayerDefect::BankHasNoStorage {
+                    layer: self.layer,
+                    which,
+                });
+            }
+            if bank.experts == 0 {
+                out.push(LayerDefect::BankHasNoExperts {
+                    layer: self.layer,
+                    which,
+                });
+            }
+            if let Some(d) = bank.expert_dims {
+                if d.input == 0 || d.intermediate == 0 || d.output == 0 {
+                    out.push(LayerDefect::BankHasZeroDimension {
+                        layer: self.layer,
+                        which,
+                        input: d.input,
+                        intermediate: d.intermediate,
+                        output: d.output,
+                    });
+                }
+            }
+        }
+
+        if let Some(shared) = &self.shared_bank {
+            if !shared.storage.trim().is_empty() && shared.storage == self.routed_bank.storage {
+                out.push(LayerDefect::DuplicateBankStorage {
+                    layer: self.layer,
+                    storage: shared.storage.clone(),
+                });
+            }
         }
     }
 

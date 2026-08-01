@@ -577,7 +577,7 @@ A browse-enabled index requires gate rows to be readable without decoding up. Tw
 1. **Decomposed storage** (`gate` + `up` regions): clean gate-only reads; the E1/V2-1 fused-vs-decomposed parity requirement already guarantees kernels accept it.
 2. **Fused storage with strided browse** (`gate_up_fused`): legal only when the packing permits striding into the gate half without decoding up rows (row-major f16 yes; interleaved quantised blocks generally no).
 
-The choice is recorded per bank at extraction time (a `browse: eager | strided | none` tag in the bank descriptor's flags). **Serving-only indexes may fuse freely.** A browse-enabled index defaults to decomposed unless E1/E7 shows the fused serving advantage exceeds its own promotion bar — the previous blanket "gate/up stay fused" prior is withdrawn.
+The choice is recorded per bank at extraction time (a `browse: none | direct | strided` tag in the bank descriptor's flags, matching §6.2's normative encoding). **Serving-only indexes may fuse freely.** A browse-enabled index defaults to decomposed unless E1/E7 shows the fused serving advantage exceeds its own promotion bar — the previous blanket "gate/up stay fused" prior is withdrawn.
 
 ### 15.3 Query metadata (`query/`)
 

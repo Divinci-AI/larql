@@ -126,7 +126,7 @@ mod tests {
             intermediate_dim: 8,
             output_dim: 8,
             region_schema_count: SCHEMAS as u16,
-            browse: BrowseMode::Eager,
+            browse: BrowseMode::Direct,
         };
         let schemas = vec![
             RegionSchema::unpaired(
