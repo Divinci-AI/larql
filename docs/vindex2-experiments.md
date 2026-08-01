@@ -1,4 +1,4 @@
-# VINDEX2 Experimental Programme
+# VINDEX3 Experimental Programme
 
 **Version:** 1.0-draft-1
 **Date:** 2026-08-01
@@ -145,7 +145,7 @@ Build superblock, LYRW v2 header/bank/segment/region tables, manifest schema, pr
 - missing required regions diagnosed with `{layer, bank, role, segment}` precision;
 - a profile that drops a required component cannot exceed its derived authority (§9.2) — verified by test, not review;
 - **profile resolution**: a profile can select only variants physically present; selecting an absent variant fails naming region set, requested variant and present variants; no code path performs silent conversion; region-level fidelity aggregates to profile authority as weakest-link; a profile referencing incompatible segment sets is refused;
-- generation boundary enforced: the v2 loader refuses a VINDEX1 directory (and vice versa) with a precise "requires VINDEX{n} loader" error naming both versions — never a parse error, never silent conversion (spec §6.6/§12.1).
+- generation boundary enforced: the v2 loader refuses a VINDEX2 directory (and vice versa) with a precise "requires VINDEX{n} loader" error naming both versions — never a parse error, never silent conversion (spec §6.6/§12.1).
 
 ### V2-1 — Generic reference executor (runs E1 arms functionally)
 
@@ -176,9 +176,9 @@ Import and execute in order: Gemma MoE → GPT-OSS → **Kimi-Linear-48B-A3B** �
 
 ## 3. Experiments
 
-### E0 — VINDEX1 preservation matrix (continuous regression, not a one-shot)
+### E0 — VINDEX2 preservation matrix (continuous regression, not a one-shot)
 
-VINDEX2 development must not degrade the shipped generation. E0 runs using the same binary that carries the v2 code, from the first V2-0 commit onward, in CI.
+VINDEX3 development must not degrade the shipped generation. E0 runs using the same binary that carries the v2 code, from the first V2-0 commit onward, in CI.
 
 #### E0 corpus — constructed and pinned [amended 2026-08-01]
 
@@ -186,13 +186,24 @@ Draft-1 said "existing production v1 indexes". On the actual rig that named **no
 
 | | Corpus | Purpose |
 | - | ------ | ------- |
-| **C1** | A fresh Gemma v1 extract — full index plus all six slice presets | The primary subject. Covers every v1 path the matrix exercises. |
+| **C1** | A fresh Gemma v1 extract at **`--level all`**, plus all eight slice presets cut from it (`client`, `attn`, `embed`, `server`, `browse`, `router`, `expert-server`, `all`) | The primary subject. Covers every v1 path the matrix exercises. `--level all` is required, not preferred: the `all` preset needs `lm_head` and the `router` preset needs router weights, neither of which `--level inference` extracts — a lower level would silently reduce preset coverage to those the extract happened to reach. |
 | **C2** | Published v1 artifacts pulled from the hub | Exercises the `publish`/`pull` path and the generation stamp against artifacts this box did not build. |
 | **C3** | **Golden outputs captured once from the pre-v2 binary and committed** | The comparison baseline. |
 
-**C3 is load-bearing.** Without committed goldens, "zero behavioural regression" quietly degrades into "the two binaries agree with each other" — a condition any *shared* bug satisfies. The goldens must be captured from a binary that predates the v2 code and stored in the repo, so the assertion is against a fixed record rather than a live second run.
+**C3 is load-bearing.** Without committed goldens, "zero behavioural regression" quietly degrades into "the two binaries agree with each other" — a condition any *shared* bug satisfies. The goldens must be captured from a binary that predates the v2 code, so the assertion is against a fixed record rather than a live second run.
 
-**Ordering constraint:** C1 and C3 must be captured **before the first lyrw2 commit lands on the main line**, while the pre-v2 baseline binary is still trivially buildable at `HEAD~1`. After that the baseline has to be reconstructed from history, which is possible but no longer free — and a reconstructed baseline is exactly the sort of thing that quietly drifts.
+**Pin recipes, not artifacts.** C1 is a multi-GB directory and C2 is a download; neither belongs in the repo, and neither needs to — both are *reproducible*. What gets committed is the recipe and the outputs:
+
+| Item | Committed? | Why |
+| ---- | ---------- | --- |
+| C1 vindex | No — **recipe pinned** | Re-extractable from the checkpoint at any time. Pin: model repo + revision hash + exact extract flags (`--level all --quant q4k`). |
+| C2 hub artifacts | No — **coordinates pinned** | Re-pullable. Pin: artifact ref + expected checksums. |
+| C3 goldens | **Yes** | Small text. The only thing that cannot be regenerated *later* without also regenerating the binary that produced it. |
+| C3 baseline binary | No — **commit SHA pinned** | `git checkout <sha> && cargo build --release -p larql-cli` reproduces it. Git keeps the SHA reachable indefinitely. |
+
+**There is no expiry.** An earlier draft of this section claimed C1/C3 had to be captured before VINDEX3 merged, on the grounds that the pre-v2 baseline stopped being available. That was wrong: the checkpoint still extracts and the baseline commit is still checkoutable. The correct reason to build the corpus early is that E0 is specified as *continuous* — it should be catching regressions as later V2-0 work (manifest, profiles, capability checking) touches shared code, not auditing at the end. Early because the gate is meant to be live, not because anything is running out.
+
+**What must be recorded, or the corpus is unfalsifiable:** the baseline commit SHA inside the golden set itself. Without it a reader cannot tell whether a given golden predates the v2 work it is supposed to police.
 
 **Matrix**
 
@@ -212,7 +223,7 @@ generation dispatch             → index.json.version 2→3 routing correct;
 
 **Acceptance:** zero behavioural change on every v1 path, measured **against the C3 goldens** — token-identical serving, identical verify verdicts, identical slice/publish/pull outputs. The K3 artefact itself only ever needs v2; E0 protects everyone already on v1.
 
-**Decision rule:** any E0 regression blocks merge, full stop. VINDEX2 defaulting for new extractions (§12.1 support policy) is gated on E0 green plus the ABI freeze.
+**Decision rule:** any E0 regression blocks merge, full stop. VINDEX3 defaulting for new extractions (§12.1 support policy) is gated on E0 green plus the ABI freeze.
 
 ### E1 — LYRW physical-layout gate
 
@@ -335,14 +346,30 @@ Proves "the model IS the database" survives v2 as a measured property, not a slo
 **Arms** (on fixtures A–D, then the byte-faithful bank, then loaded Gemma):
 
 ```
-W0  v1 control: WALK over an extracted gate_vectors.bin (Gemma only)
+W0  VINDEX2 control: WALK over an extracted gate_vectors.bin
+    — DENSE MODELS ONLY, see the coverage note below
 W1  in-place WALK over decomposed gate regions (f16)
 W2  in-place WALK over fused gate_up regions, strided (f16 row-major)
 W3  in-place WALK over block-quantised gate regions (lazy dequant)
 W4  gate-only browse SLICE built by region copy (spec §15.5)
 ```
 
-**Measure:** top-K ranking parity vs W0 (exact for f16; ranking-overlap metric for W3, with the v1 §12.2 4-bit noise caveat as the expected failure shape); cold bytes faulted per WALK; queries/sec warm; slice size vs v1's ~3 GB browse economics; latent-WALK correctness and query-projection overhead on fixture D and the K3-shaped bank; DESCRIBE/SELECT correctness against `query/` sidecars, including latent-bank `down_meta` computed through the full output path.
+#### Coverage note — W0 is not a control for expert regions [amended 2026-08-01]
+
+Measured on a fresh VINDEX2 extract of Gemma 4 26B A4B (128 experts × 704 expert width, hidden 2816, 30 layers): the shipped generation's `gate_vectors.bin` exposes **2,112 walkable features per layer** — the *dense* FFN width. The expert population would contribute **128 × 704 = 90,112**. The expert weights are present and decode correctly (30 files, 12 GB); they are simply **not part of the searchable surface**.
+
+So W0 covers 2.3 % of what §15.1 specifies, and on a MoE model it contains no expert regions at all. W1/W2/W3/W4 are *about* expert regions. Comparing them to W0 would measure a coverage difference wearing a parity result's clothes, and the registered pass condition ("identical top-K rankings") is unevaluable because the two arms do not rank over the same population.
+
+**Resolution — the claim is restated, not the control rebuilt.** Making expert features searchable is a **new capability of VINDEX3, not parity with VINDEX2**. Writing it up as parity would be claiming a comparison that cannot be made. Concretely, E7 splits:
+
+| Claim | Arms | Baseline |
+| ----- | ---- | -------- |
+| **Parity** — in-place region WALK matches the extracted-index path | W0 vs W1 on a **dense** model | W0, a genuine like-for-like control |
+| **Capability** — expert features are searchable in place, with no separate index | W1/W2/W3/W4 on MoE | none exists; correctness is established against the weights themselves, not against W0 |
+
+The rejected alternative was constructing an expert-bearing VINDEX2 index specifically to serve as a control. It would be a control built *for* the experiment rather than the thing that shipped — a weaker claim that reads as a stronger one.
+
+**Measure:** top-K ranking parity vs W0 **on the dense arm** (exact for f16; ranking-overlap metric for W3, with the v1 §12.2 4-bit noise caveat as the expected failure shape); for the capability arm, ranking correctness against directly-computed gate dot products rather than against W0. Plus, for both: cold bytes faulted per WALK; queries/sec warm; slice size vs v1's ~3 GB browse economics; latent-WALK correctness and query-projection overhead on fixture D and the K3-shaped bank; DESCRIBE/SELECT correctness against `query/` sidecars, including latent-bank `down_meta` computed through the full output path.
 
 **Decision rules.**
 - W1 vs W2 sets the browse half of the §15.2 fusion decision: fused storage keeps browse eligibility only if strided WALK is within 10% of decomposed on cold bytes and warm throughput; otherwise browse-enabled indexes mandate decomposed gate/up.
@@ -405,7 +432,7 @@ forbidden:  LYRW2 byte-layout changes · new region roles · new packing modes �
 6. "Dropping down" locally resolves to "skip the routed branch," never a half-expert mode (E5).
 7. Exact remote deployment moves the whole routed branch, not split projections (O4 arithmetic holds).
 8. L1 wins E1; L2/L3 die there.
-9. In-place WALK over decomposed f16 gate regions matches the v1 `gate_vectors.bin` path within noise — no dedicated query index is ever needed (E7/W1).
+9. **(Revised 2026-08-01, on measuring the VINDEX2 control.)** Split in two, because the original prior conflated a parity claim with a capability claim. **(9a)** On a *dense* model, in-place WALK over decomposed f16 gate regions matches the VINDEX2 `gate_vectors.bin` path within noise (E7/W0-vs-W1). **(9b)** On a *MoE* model, expert features are searchable in place at all — which VINDEX2 does not do, so there is no baseline to match and no dedicated query index is needed because none previously existed for this population. Falsifier for 9b is a correctness failure against directly-computed gate dot products, not a parity failure against W0.
 10. Quantised-region browse (E7/W3) fails the ranking-overlap floor for ≤4-bit formats, and browse-enabled indexes keep gate at f16 as a per-region divergence — the query layer becomes the second consumer of per-region format tags after E4.
 11. Dual-generation support costs nothing on the v1 hot path — E0 stays green throughout without a single v1-loader change (the generations share a trait, not code).
 12. E8 passes: the held-out conventional MoE onboards with an importer + manifest + existing `gated-mlp-v1` programme, zero format-layer diffs — the envelope generalises beyond its design set.

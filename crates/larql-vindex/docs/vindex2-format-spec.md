@@ -1,23 +1,23 @@
-# Vindex Format Specification v2 (VINDEX2)
+# Vindex Format Specification — VINDEX3
 
 **Version:** 2.0-draft-2
 **Date:** 2026-08-01 (draft-2: three binary-layout corrections + two clarifications from the first lyrw2 implementation — §6.2, §6.4, §6.3, §6.5; recorded per pre-freeze amendment rule)
 **Status:** Draft — pre-registration. No byte is frozen until the V2-0..V2-2 gates in the companion experiments document pass.
-**Predecessor:** [format-spec.md v0.4](format-spec.md) (VINDEX1)
+**Predecessor:** [format-spec.md v0.4](format-spec.md) (VINDEX2)
 **Companion:** [`vindex2-experiments.md`](../../../docs/vindex2-experiments.md) (pre-registered experimental programme), [Conformance v1](conformance-v1.md), [Operations](operations-spec.md), [Ecosystem](ecosystem-spec.md), [LQL](../../../docs/lql-guide.md)
 **Implementation target:** `larql-vindex` crate (Rust)
 
 ---
 
-## 1. What is VINDEX2?
+## 1. What is VINDEX3?
 
-VINDEX2 is a **general-purpose serving container for sparse models** — serving meaning both inference *and* the LQL query surface (WALK, DESCRIBE, SELECT, EXPLAIN). It is the successor to the VINDEX1 dense/Gemma-oriented layout, and it exists to answer one question well:
+VINDEX3 is a **general-purpose serving container for sparse models** — serving meaning both inference *and* the LQL query surface (WALK, DESCRIBE, SELECT, EXPLAIN). It is the successor to the VINDEX2 dense/Gemma-oriented layout, and it exists to answer one question well:
 
 > Extract a supported checkpoint **once** into a stable, component-addressed layout, then vary **what is loaded, where it resides, what precision it uses, and whether a component is executed or queried** — without ever rebuilding the index.
 
-**The model IS the database** remains the founding principle, not a v1 legacy: the gate regions inside LYRW v2 banks *are* the KNN index, exactly as `gate_vectors.bin` *was* W_gate. v2 does not add a query index next to the weights; it keeps the weights queryable (§15).
+**The model IS the database** remains the founding principle, not a VINDEX2 legacy: the gate regions inside LYRW v2 banks *are* the KNN index, exactly as `gate_vectors.bin` *was* W_gate. VINDEX3 does not add a query index next to the weights; it keeps the weights queryable (§15).
 
-The key principles of VINDEX1 are retained unchanged:
+The key principles of VINDEX2 are retained unchanged:
 
 - **The model IS the database.** Each weight tensor is stored once, canonically, in its serving format. Nothing is stored twice.
 - **Weights are separated by function, not by file size.** Sharding follows what inference does with a weight, not an arbitrary byte boundary.
@@ -25,7 +25,7 @@ The key principles of VINDEX1 are retained unchanged:
 - **Loaders dispatch on declared tags, never sniff filenames.**
 - **Fail closed.** A profile that lacks a required operand refuses to load with a precise diagnosis; it never silently degrades authority.
 
-The genuinely new pieces in v2 are exactly five:
+The genuinely new pieces in VINDEX3 are exactly five:
 
 1. **Per-region quantisation.** Format belongs to each weight region, not to the entire layer file.
 2. **Multiple physical segments per logical expert bank.** A logical layer can span several files without changing model semantics.
@@ -55,15 +55,15 @@ K3 is the stress test — largest bank, latent expert space, shared pre/post pro
 
 ## 2. Scope and non-goals
 
-VINDEX2 serves **one fixed checkpoint efficiently under different inference and query policies**. Browse/LQL is in scope (§15); training is not. It is explicitly not:
+VINDEX3 serves **one fixed checkpoint efficiently under different inference and query policies**. Browse/LQL is in scope (§15); training is not. It is explicitly not:
 
 - **A model-development store.** No optimisation for training, fine-tuning, gradient updates, adapter merging, or frequently rewritten weights. No copy-on-write component versioning. One extraction, then runtime policy.
-- **A general neural-graph container.** VINDEX2 does not duplicate ONNX/safetensors-plus-compiler. The expert-programme vocabulary is deliberately bounded (§8.3).
+- **A general neural-graph container.** VINDEX3 does not duplicate ONNX/safetensors-plus-compiler. The expert-programme vocabulary is deliberately bounded (§8.3).
 - **A locality store.** Hot sets, retained experts, cache allocation, prefetch depth, local-versus-remote placement and reduced-top-K are **runtime metadata over the index**, never physical-format decisions (§9).
 
 The supported contract is:
 
-> Sparse decoder MoEs composed from routed and shared expert banks, optional pre/post transforms, declarative routing/reduction semantics, and a bounded expert-programme vocabulary — plus every dense model VINDEX1 supports, expressed as the degenerate single-entry case.
+> Sparse decoder MoEs composed from routed and shared expert banks, optional pre/post transforms, declarative routing/reduction semantics, and a bounded expert-programme vocabulary — plus every dense model VINDEX2 supports, expressed as the degenerate single-entry case.
 
 Genuinely novel expert topologies extend via a new `programme_id` (§8.4) without changing region storage.
 
@@ -71,9 +71,9 @@ Genuinely novel expert topologies extend via a new `programme_id` (§8.4) withou
 
 ## 3. Design principles
 
-Principles 1–3 carry over from VINDEX1 §5.12; principle 1 is **amended** in v2.
+Principles 1–3 carry over from VINDEX2 §5.12; principle 1 is **amended** in VINDEX3.
 
-1. **Structure is orthogonal to quantisation — now at region granularity.** v1 declared one `quant_format` per layer file, forbidding `gate/up = Q6_K, down = MXFP4` inside a layer. v2 moves the format tag to each weight region. Re-quantising one projection role is rewriting those regions (or adding a sibling segment), not replacing the layer.
+1. **Structure is orthogonal to quantisation — now at region granularity.** VINDEX2 declared one `quant_format` per layer file, forbidding `gate/up = Q6_K, down = MXFP4` inside a layer. VINDEX3 moves the format tag to each weight region. Re-quantising one projection role is rewriting those regions (or adding a sibling segment), not replacing the layer.
 2. **Unified for dense and MoE.** A dense layer is a bank with `num_entries = 1`. Binary format and dispatch path are identical.
 3. **Native OS addressability.** Each segment file is independently mmap'd; expert sharding reads only assigned entry byte ranges; no offset arithmetic into a global blob.
 4. **The split rule.** A component gets independent physical identity **only when LARQL may independently omit it, quantise it, place it, prefetch it, execute it — or query it.** Conceptual tensor taxonomy is not a reason to split. The query clause matters: WALK reads gate rows without up or down, so on a browse-enabled index the gate role has an independent access pattern by construction (§15.2), even if inference always fetches gate/up/down together.
@@ -254,15 +254,15 @@ The fast-path contract is unchanged from v1: known kernels may **require** exact
 
 ### 6.6 Relationship to the v1 layer files — greenfield, deliberately
 
-LYRW v2 owes **no binary compatibility** to the §5.12 `layers/*.weights` files. Those files are an internal detail of VINDEX1: they exist only inside VINDEX1 directories, are parsed only by the VINDEX1 loader path, and were never a public contract in their own right. No external tool depends on their byte layout.
+LYRW v2 owes **no binary compatibility** to the §5.12 `layers/*.weights` files. Those files are an internal detail of VINDEX2: they exist only inside VINDEX2 directories, are parsed only by the VINDEX2 loader path, and were never a public contract in their own right. No external tool depends on their byte layout.
 
 Consequences:
 
 - **No synthesis adapter.** A LYRW v2 reader never opens a v1 layer file, and vice versa. Each container generation's loader reads its own layer format, end of story.
 - **No in-place upgrade** of multi-hundred-GB indexes. Migration is `checkpoint → vindex2 extractor`, or optionally `vindex1 → vindex2 importer` — a standalone tool, not a loader feature.
-- **Design freedom.** The bank-level region-schema table (§6.4), explicit value/scale pairing, and segment descriptors are all clean-sheet choices that a v1-compat shim would have contaminated. The `LYRW` magic and `format_version=2` are retained purely as self-description and forensics — a v1 reader that encounters a v2 file fails fast on the version field with a precise "requires VINDEX2 loader" error, never a parse error.
+- **Design freedom.** The bank-level region-schema table (§6.4), explicit value/scale pairing, and segment descriptors are all clean-sheet choices that a v1-compat shim would have contaminated. The `LYRW` magic and `format_version=2` are retained purely as self-description and forensics — a v1 reader that encounters a v2 file fails fast on the version field with a precise "requires VINDEX3 loader" error, never a parse error.
 
-The compatibility obligation that **does** bind is one level up: larql must support VINDEX1 and VINDEX2 side by side (§12.1).
+The compatibility obligation that **does** bind is one level up: larql must support VINDEX2 and VINDEX3 side by side (§12.1).
 
 ---
 
@@ -484,10 +484,12 @@ Three version surfaces already exist; v2 adds nothing loosely named "vindex v2" 
 
 | Contract | v1 value | v2 value |
 | -------- | -------- | -------- |
-| LYRW `format_version` | 1 (VINDEX1-internal) | **2** (self-description only; no cross-reading, §6.6) |
+| LYRW `format_version` | 1 (VINDEX2-internal) | **2** (self-description only; no cross-reading, §6.6) — trails the container generation by one, permanently |
 | `index.json` `version` | 2 | **3** — the container-generation discriminator |
 | `vindex_spec_version` | 1 | **2** (programme manifest + profiles enter the validated public contract) |
 | MoE manifest schema | — | **1** (new) |
+
+**On the numbering.** The container generation *is* `index.json.version` — VINDEX2 is `version: 2`, VINDEX3 is `version: 3`. An earlier draft called the shipped generation "VINDEX1" while its `index.json.version` was already 2, putting a permanent off-by-one between the name and the sole discriminator. Both were renamed so the two agree. The LYRW layer format keeps its own sequence (v1 in VINDEX2, v2 in VINDEX3) and is deliberately not aligned: it is a different artifact with a different lifetime, and its numbering was already correct.
 
 The FP4 additive-extension precedent is retained within each generation: new region formats, roles and programme ids are enum additions, not format bumps.
 
@@ -495,12 +497,12 @@ The FP4 additive-extension precedent is retained within each generation: new reg
 
 The binding obligation is not between the two on-disk formats (there is none — §6.6). It is that **one larql binary supports both vindex generations, indefinitely for reading and serving**:
 
-- **Detection.** `index.json.version` is the sole discriminator: `2` → VINDEX1 loader, `3` → VINDEX2 loader. No filename sniffing, no directory-shape heuristics. A missing or unknown version fails naming the version found and the versions this binary supports.
+- **Detection.** `index.json.version` is the sole discriminator: `2` → VINDEX2 loader, `3` → VINDEX3 loader. No filename sniffing, no directory-shape heuristics. A missing or unknown version fails naming the version found and the versions this binary supports.
 - **One entry point.** `Vindex::open(path)` returns the generation-appropriate handle behind a common trait; `larql run / serve / verify / slice / publish / pull` all accept either generation. Generation-specific verbs (e.g. profile selection) error precisely on a v1 index rather than silently no-op.
 - **No cross-loading, no silent conversion.** The v1 loader path is frozen-but-maintained: it never opens v2 directories, never gains v2 features, and v2 code never re-implements v1 parsing. Conversion is only ever the explicit `vindex1 → vindex2` importer.
 - **Hub and distribution.** `larql publish` stamps the container generation into the hub artifact metadata; `larql pull` selects the reader from that stamp and refuses a generation the installed binary lacks — before downloading terabytes, not after.
 - **Wire protocols are generation-agnostic.** The expert-RPC and FFN-dispatch wire contracts carry activations and results, not container bytes; a grid may therefore mix v1 and v2 shards. A shard's container generation is a local concern of that shard's loader.
-- **Support policy.** VINDEX1 remains fully supported for read/verify/serve/publish/pull. New extractions default to VINDEX2 once the ABI freezes **and** the E0 preservation matrix passes; v1 extraction remains available until then and is deprecated (not removed) after.
+- **Support policy.** VINDEX2 remains fully supported for read/verify/serve/publish/pull. New extractions default to VINDEX3 once the ABI freezes **and** the E0 preservation matrix passes; v1 extraction remains available until then and is deprecated (not removed) after.
 
 ---
 
@@ -556,7 +558,7 @@ Registered prior (falsifiable): one file-set per routed layer (two segments for 
 
 ## 15. Query layer — the model IS the database
 
-The LQL browse surface (WALK, DESCRIBE, SELECT, EXPLAIN WALK) is a first-class consumer of VINDEX2, with the same single-copy contract as v1: **no query index is stored beside the weights; the weights are the query index.**
+The LQL browse surface (WALK, DESCRIBE, SELECT, EXPLAIN WALK) is a first-class consumer of VINDEX3, with the same single-copy contract as v1: **no query index is stored beside the weights; the weights are the query index.**
 
 ### 15.1 What replaces `gate_vectors.bin`
 
@@ -605,11 +607,11 @@ K3's gate rows live in the 3584-dim latent space; WALK queries originate in resi
 
 ## 16. Success criteria — "done" is defined here, in advance
 
-VINDEX2 is a successful successor when all seven hold. Each is bound to the gate or experiment that proves it, so the bar cannot drift after the fact:
+VINDEX3 is a successful successor when all seven hold. Each is bound to the gate or experiment that proves it, so the bar cannot drift after the fact:
 
 | # | Criterion | Proven by |
 | - | --------- | --------- |
-| 1 | An existing VINDEX1 model loads, verifies, serves and publishes through the dual-generation binary with zero behavioural regression | E0 (continuous, CI) |
+| 1 | An existing VINDEX2 model loads, verifies, serves and publishes through the dual-generation binary with zero behavioural regression | E0 (continuous, CI) |
 | 2 | Gemma and GPT-OSS run through the same LYRW2 bank machinery and the same production dispatch interface | V2-3, V2-4 rungs 1–2 |
 | 3 | Routed **and** shared banks are genuinely generic — proven on a shared-expert model or fixture, not asserted | Fixture C + **KL-48B (1 shared) and Inkling-Small (2 shared, sink router)** — real, V2-4 rungs 3–4 |
 | 4 | K3 is extracted once and served with no K3-specific physical layout — only a manifest and an adapter | V2-4 rung 4 |
