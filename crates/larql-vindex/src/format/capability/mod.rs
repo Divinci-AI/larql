@@ -32,7 +32,11 @@ pub mod compatibility;
 pub mod coordinate;
 pub mod kernel;
 pub mod operation;
+pub mod reconstruction;
+#[cfg(test)]
+mod reconstruction_tests;
 pub mod role;
+pub mod scope;
 pub mod selection;
 pub mod traversal;
 #[cfg(test)]
@@ -47,7 +51,12 @@ pub use kernel::{KernelId, KernelMaturity};
 pub use operation::{
     Degradation, OperationAdmission, OperationCapability, OperationFailure, OperationPlan,
 };
+pub use reconstruction::{
+    CanonicalSelection, CatalogueVariant, ReconstructionFailure, RegionSetCatalogue,
+    TensorReconstruction,
+};
 pub use role::{OperandAvailability, ReferenceSupport, RoleCapability};
+pub use scope::{CapabilityReport, DocumentCapabilities, ProfileCapabilities};
 pub use selection::{BankSelection, SelectedRegion};
 pub use traversal::{
     traverse_bank, AlternativeReport, BankCapabilityReport, ReferenceCodecs, ReferenceExecution,
