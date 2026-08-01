@@ -246,7 +246,16 @@ pub fn parse_layer_weights_header(data: &[u8]) -> Option<LayerWeightsHeader> {
     if magic != MAGIC {
         return None;
     }
-    // format_version at [4..8] — currently ignored, forward-compatible
+    // A newer `format_version` may change the offset-table stride. Parsing it
+    // with this version's stride would not bounds-fail — it would yield offsets
+    // that are still inside the file, and hand the caller a plausible byte range
+    // from the wrong place. Refuse instead: the one production caller
+    // (`format/weights/load/q4k.rs`) treats `None` as "skip this layer", so an
+    // unreadable file degrades to a clean miss rather than to wrong weights.
+    let version = u32::from_le_bytes(data[4..8].try_into().ok()?);
+    if version > FORMAT_VERSION {
+        return None;
+    }
     let quant_raw = u32::from_le_bytes(data[8..12].try_into().ok()?);
     let format = match quant_raw {
         0 => LayerWeightFormat::F32,
