@@ -26,6 +26,7 @@ pub mod graph_walk_knn;
 pub mod kv_append_attend_fused;
 pub mod kv_attention;
 pub mod layer_norm;
+pub mod mxfp4_grouped_experts;
 pub mod mxfp4_matvec;
 pub mod per_layer_embed;
 pub mod post_attn_residual_norm_store;
@@ -101,6 +102,7 @@ pub fn all_shaders() -> String {
     src.push_str(fused_ops::SHADER);
     src.push_str(q8_attn_proj::SHADER);
     src.push_str(mxfp4_matvec::SHADER);
+    src.push_str(&mxfp4_grouped_experts::shader());
     src.push_str(q6k_grouped_experts::SHADER);
     src.push_str(q4k_grouped_experts::SHADER);
     src.push_str(q4k_matvec::SHADER);

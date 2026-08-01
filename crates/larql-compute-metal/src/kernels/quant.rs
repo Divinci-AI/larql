@@ -46,6 +46,19 @@ pub struct QuantKernels {
     /// Q4_K sibling — what the engine's MoE down projection needs.
     pub q4k_grouped_experts_pipeline: KernelHandle,
 
+    /// K2 layout/decode tournament: four MXFP4 grouped-expert arms that read
+    /// the same weights through different scale layouts and decode strategies.
+    /// Candidates, not production paths — see `shaders::mxfp4_grouped_experts`.
+    pub mxfp4g_split_lut16_pipeline: KernelHandle,
+    pub mxfp4g_inter_lut16_pipeline: KernelHandle,
+    pub mxfp4g_inter_pair_pipeline: KernelHandle,
+    pub mxfp4g_inter_magsign_pipeline: KernelHandle,
+    /// Ceiling probes, not candidates: trivial affine decode, and weights-only
+    /// (no X gather). They bracket how much of the gap is decode vs skeleton.
+    pub mxfp4g_inter_bits_pipeline: KernelHandle,
+    pub mxfp4g_inter_affine_pipeline: KernelHandle,
+    pub mxfp4g_inter_nox_pipeline: KernelHandle,
+
     /// Production-active Q4_K matvec — picked from [`BackendOptions`]
     /// at construction (`q4k_matvec_use_4sg` flips between the two).
     pub q4k_matvec_pipeline: KernelHandle,
@@ -83,6 +96,21 @@ impl QuantKernels {
         let q4k_grouped_experts_pipeline =
             h::<shaders::q4k_grouped_experts::Kernel>(device, library);
 
+        let mxfp4g_split_lut16_pipeline =
+            h::<shaders::mxfp4_grouped_experts::KernelSplitLut16>(device, library);
+        let mxfp4g_inter_lut16_pipeline =
+            h::<shaders::mxfp4_grouped_experts::KernelInterLut16>(device, library);
+        let mxfp4g_inter_pair_pipeline =
+            h::<shaders::mxfp4_grouped_experts::KernelInterPair>(device, library);
+        let mxfp4g_inter_magsign_pipeline =
+            h::<shaders::mxfp4_grouped_experts::KernelInterMagSign>(device, library);
+        let mxfp4g_inter_bits_pipeline =
+            h::<shaders::mxfp4_grouped_experts::KernelInterBits>(device, library);
+        let mxfp4g_inter_affine_pipeline =
+            h::<shaders::mxfp4_grouped_experts::KernelInterAffine>(device, library);
+        let mxfp4g_inter_nox_pipeline =
+            h::<shaders::mxfp4_grouped_experts::KernelInterNoX>(device, library);
+
         let q4k_matvec_4sg_pipeline = h::<shaders::q4k_matvec::Kernel>(device, library);
         let q4k_matvec_8sg_pipeline = h::<shaders::q4k_matvec_8sg::Kernel>(device, library);
         let q4k_matvec_stride32_pipeline =
@@ -108,6 +136,13 @@ impl QuantKernels {
             mxfp4_matvec_pipeline,
             q6k_grouped_experts_pipeline,
             q4k_grouped_experts_pipeline,
+            mxfp4g_split_lut16_pipeline,
+            mxfp4g_inter_lut16_pipeline,
+            mxfp4g_inter_pair_pipeline,
+            mxfp4g_inter_magsign_pipeline,
+            mxfp4g_inter_bits_pipeline,
+            mxfp4g_inter_affine_pipeline,
+            mxfp4g_inter_nox_pipeline,
             q4k_matvec_pipeline,
             q4k_matvec_4sg_pipeline,
             q4k_matvec_8sg_pipeline,
