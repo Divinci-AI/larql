@@ -1,6 +1,6 @@
 //! Promote the NOT-DECISION-GRADE efficiency classes by repeating the census.
 //!
-`down` and the ungrouped expert shape both feed DEC-8.7b's target-row
+//! `down` and the ungrouped expert shape both feed DEC-8.7b's target-row
 //! selection — the only live throughput rung once the eta programme closed as a
 //! lever — and both were too noisy to select anything. This promotes them.
 //!
