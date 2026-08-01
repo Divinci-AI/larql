@@ -74,6 +74,67 @@ pub enum KernelClass {
     Unquantised,
 }
 
+/// The measurement regime an efficiency was taken under. Not decoration: the
+/// same kernel reads very differently from a buffer that is partly L2-resident.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum Regime {
+    /// Distinct weight buffers per call, working set far beyond L2.
+    ColdRotating,
+    /// Borrowed from a neighbouring shape rather than measured here.
+    Borrowed,
+}
+
+/// A measured efficiency **with its observed spread**, never a bare scalar.
+///
+/// Exists because the cold-rotate harness bug removed a false precision as well
+/// as a bias. Once the rotation genuinely rotated, the small shapes moved
+/// 10-12% across repeats while attention moved 2%. The composed total is stable
+/// (attention dominates and is the steady term) but **every per-class decision
+/// reads the noisy inputs directly** — which class to compress, the frontier's
+/// target row, the serving-format choice. Aggregate robustness does not license
+/// per-class precision, so the range travels with the number.
+///
+/// `observed_low`/`observed_high` are the **observed extremes**, not a standard
+/// error. They are deliberately not summarised into `+/- x`: with three repeats
+/// a spread cannot distinguish gaussian noise from two modes (page alignment,
+/// thermal state, allocator luck), and reporting a symmetric interval would
+/// claim it can.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct MeasuredEfficiency {
+    pub central: f64,
+    pub observed_low: f64,
+    pub observed_high: f64,
+    pub repeats: u32,
+    pub regime: Regime,
+}
+
+impl MeasuredEfficiency {
+    pub const fn new(central: f64, lo: f64, hi: f64, repeats: u32, regime: Regime) -> Self {
+        Self {
+            central,
+            observed_low: lo,
+            observed_high: hi,
+            repeats,
+            regime,
+        }
+    }
+    /// A single unrepeated figure carried over from another shape.
+    pub const fn borrowed(central: f64) -> Self {
+        Self::new(central, central, central, 0, Regime::Borrowed)
+    }
+    /// Widest observed relative swing, as a fraction of `central`.
+    pub fn spread_fraction(&self) -> f64 {
+        if self.central == 0.0 {
+            return 0.0;
+        }
+        (self.observed_high - self.observed_low) / self.central
+    }
+    /// True when the class is measured tightly enough to decide a bit-width.
+    pub fn is_decision_grade(&self) -> bool {
+        self.repeats >= 3 && self.spread_fraction() <= 0.05
+    }
+}
+
 impl KernelClass {
     /// What was actually measured, and under what conditions.
     pub fn provenance(self) -> &'static str {
@@ -98,14 +159,32 @@ impl KernelClass {
         matches!(self, Self::GateUp)
     }
 
-    pub fn eta(self) -> f64 {
+    /// Banked efficiency with its observed range.
+    ///
+    /// Re-measured 2026-08-01 over three genuine cold-rotating repeats, after
+    /// the rotation was found to be handing back one buffer eight times. The
+    /// correction is NOT uniformly downward — the ungrouped expert shape came
+    /// back 0.63-0.70 against a banked 0.64, so the old numbers were not simply
+    /// flattering.
+    pub fn efficiency(self) -> MeasuredEfficiency {
         match self {
-            Self::AttnProjection => 0.89,
-            Self::GateUp => 0.87,
-            Self::Down => 0.87,
-            Self::RoutedExpert => 0.64,
-            Self::Unquantised => 1.00,
+            // 72 MB read: the largest term and the steady one.
+            Self::AttnProjection => {
+                MeasuredEfficiency::new(0.88, 0.87, 0.89, 3, Regime::ColdRotating)
+            }
+            Self::GateUp => MeasuredEfficiency::new(0.83, 0.82, 0.84, 3, Regime::ColdRotating),
+            Self::Down => MeasuredEfficiency::new(0.78, 0.73, 0.82, 3, Regime::ColdRotating),
+            Self::RoutedExpert => {
+                MeasuredEfficiency::new(0.67, 0.63, 0.70, 3, Regime::ColdRotating)
+            }
+            Self::Unquantised => MeasuredEfficiency::borrowed(1.00),
         }
+    }
+
+    /// Central estimate. Use for ordinary reports; propagate the range through
+    /// anything that selects a target.
+    pub fn eta(self) -> f64 {
+        self.efficiency().central
     }
 
     pub fn label(self) -> &'static str {
@@ -236,6 +315,37 @@ pub struct ComposedCeiling {
     pub scalar_tok_s: f64,
     pub scalar_overstates_by: f64,
     pub rows: Vec<ClassRow>,
+}
+
+/// Which end of each class's observed range to compose at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Bound {
+    Central,
+    /// Every class at its worst observed efficiency.
+    Low,
+    /// Every class at its best observed efficiency.
+    High,
+}
+
+/// Compose at one end of the observed ranges, so a report can print a band.
+///
+/// The band is what the ranges are FOR: a target generator that consumes a
+/// single scalar lets a 10% measurement swing on a small class silently select
+/// a bit-width.
+pub fn compose_at(rows: &[ClassRow], bw: f64, bound: Bound) -> f64 {
+    let secs: f64 = rows
+        .iter()
+        .map(|r| {
+            let e = match (r.eta_override, bound) {
+                (Some(o), _) => o,
+                (None, Bound::Central) => r.class.efficiency().central,
+                (None, Bound::Low) => r.class.efficiency().observed_low,
+                (None, Bound::High) => r.class.efficiency().observed_high,
+            };
+            r.bytes() / (bw * 1e9 * e)
+        })
+        .sum();
+    1.0 / secs
 }
 
 /// Compose per-class times into one throughput ceiling.

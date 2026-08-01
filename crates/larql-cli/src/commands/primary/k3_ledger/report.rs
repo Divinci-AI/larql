@@ -580,13 +580,22 @@ pub fn ceilings(geom: &K3Geometry, a: &super::args::CeilingsArgs, as_json: bool)
         composed.seconds_per_token * 1e3
     );
     println!();
+    let lo = classes::compose_at(&composed.rows, classes::BW_GB_S, classes::Bound::Low);
+    let hi = classes::compose_at(&composed.rows, classes::BW_GB_S, classes::Bound::High);
     println!("  COMPOSED ceiling {:.2} tok/s", composed.tok_s);
+    println!(
+        "  observed composition range {lo:.2}-{hi:.2}  (every class at its worst / best \
+         of 3 cold-rotating repeats)"
+    );
     println!(
         "  scalar-eta quote {:.2} tok/s  -> overstates by {:.2}x",
         composed.scalar_tok_s, composed.scalar_overstates_by
     );
     println!();
 
+    println!("  ETA PROVENANCE: post-shape-census, true cold rotation, 3 repeats.");
+    println!("  A class whose range exceeds 5% is NOT decision-grade — do not let it");
+    println!("  select a bit-width without more repeats (R0).");
     println!("  eta provenance (R0 — none of these may be quoted bare):");
     for c in [
         KernelClass::AttnProjection,
@@ -594,15 +603,24 @@ pub fn ceilings(geom: &K3Geometry, a: &super::args::CeilingsArgs, as_json: bool)
         KernelClass::Down,
         KernelClass::RoutedExpert,
     ] {
+        let m = c.efficiency();
         println!(
-            "    {:.2}  {:<28} {}{}",
-            c.eta(),
+            "    {:.2} [{:.2}-{:.2}] n={}  {:<28} {}{}{}",
+            m.central,
+            m.observed_low,
+            m.observed_high,
+            m.repeats,
             c.label(),
             c.provenance(),
             if c.is_provisional() {
                 "   [PROVISIONAL]"
             } else {
                 ""
+            },
+            if m.is_decision_grade() {
+                ""
+            } else {
+                "   [NOT DECISION-GRADE]"
             }
         );
     }
@@ -1066,6 +1084,9 @@ pub fn freqmass(a: &super::args::FreqMassArgs, as_json: bool) -> R {
         .map(|(i, _)| i);
 
     if as_json {
+        // The per-symbol vector is opt-in: it is the allocator's input, not the
+        // curve's, and at K3's bank it dwarfs everything else in the document.
+        let census = a.per_symbol.then(|| super::symbol_mass::census(&trace));
         println!(
             "{}",
             serde_json::to_string_pretty(&json!({
@@ -1074,9 +1095,13 @@ pub fn freqmass(a: &super::args::FreqMassArgs, as_json: bool) -> R {
                 "curve": curve,
                 "support": support,
                 "operating_index": op,
+                "per_symbol": census,
             }))?
         );
         return Ok(());
+    }
+    if a.per_symbol {
+        eprintln!("note: --per-symbol emits into the JSON document only; add --json");
     }
 
     println!("=== frequency-mass coverage — {} ===", a.pool.display());
