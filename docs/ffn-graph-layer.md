@@ -121,7 +121,8 @@ use larql_inference::vindex::WalkFfn;
 let walk_ffn = WalkFfn::new(weights, &index, top_k);
 let result = predict_with_ffn(weights, tokenizer, &token_ids, 5, &walk_ffn);
 
-// With trace (for analysis — re-runs gate KNN lazily on take_trace)
+// With trace (for analysis — runtime records folded from the executed
+// path; take_trace() drains them, 2026-07-30 review item 17)
 let walk_ffn = WalkFfn::new_with_trace(weights, &index, top_k);
 let result = predict_with_ffn(weights, tokenizer, &token_ids, 5, &walk_ffn);
 let trace = walk_ffn.take_trace();

@@ -23,7 +23,7 @@
 //! pool + `ggml_barrier`.
 //!
 //! [`enabled`] gates whether callers route through here or stay on rayon. It is
-//! **on by default** (the yield backoff makes it safe on shared machines);
+//! **on by default** (idle workers park, so a quiet pool costs ~0 CPU);
 //! `LARQL_SPIN_POOL=0` forces the rayon path. Either way the arithmetic is
 //! identical — only *which threads run which chunks* differs.
 
@@ -47,26 +47,47 @@ thread_local! {
 ///   same pure-spin window that produced the measured decode win, so *active
 ///   decode behaviour is unchanged* — every inter-section gap within a token
 ///   stays in the spin phase, giving a ~ns wake.
-/// - **yield** (`< YIELD_UNTIL`): `yield_now()` — cooperative bridge once a wait
-///   outlives a whole token's worth of spinning (i.e. the loop went genuinely
-///   idle, or another process is starving this core). Hands the core to other
-///   runnable threads instead of burning it.
-/// - **park** (otherwise): deep idle between requests / runs, ~0 CPU. The
-///   dispatcher unparks all workers on every dispatch, so a parked worker wakes
-///   immediately on the next section — parking is cheap to enter; the timeout
-///   is only a shutdown-check backstop.
+/// - **yield** (`< YIELD_UNTIL`): a *brief* `yield_now()` bridge — one last
+///   chance for an about-to-arrive dispatch before paying a park/unpark. This
+///   used to be 128k iterations, which is not a bridge but a busy loop with a
+///   syscall in it: `yield_now` returns immediately on an idle core, so the
+///   phase burned as much CPU as spinning *plus* 128k `sched_yield` calls per
+///   idle transition per worker.
+/// - **park** (otherwise): deep idle between requests / runs. The dispatcher
+///   unparks all workers on every dispatch (and `Drop` unparks for shutdown),
+///   so the timeout is a pure liveness backstop and can be long. It used to be
+///   **50µs**, which meant a "parked" worker woke 20k times/sec — measured
+///   3.40 CPU-seconds per 5s of idle (68% of a core, ~856k involuntary context
+///   switches, 11 workers, M3 Max) burned by an idle pool, forever, because
+///   `global()` is process-lifetime.
 ///
-/// Net: spin = the win during active decode; yield+park = don't peg cores when
-/// the decode loop is idle — which is what makes on-by-default safe.
+/// Net: spin = the win during active decode; park = actually-zero CPU when the
+/// decode loop is idle — which is what makes on-by-default safe.
 const SPIN_HOT: u32 = 256_000;
-const YIELD_UNTIL: u32 = 384_000;
+const YIELD_UNTIL: u32 = SPIN_HOT + 64;
+const PARK_BACKSTOP: Duration = Duration::from_secs(1);
 
-/// Cross-thread dispatch state. Published to workers by the `epoch` release
-/// store; workers read the task fields only after the matching acquire load,
-/// so the plain `Relaxed` value stores are safe (epoch is the synchroniser).
+/// Cross-thread dispatch state. The `epoch` release store wakes workers; the
+/// `slot_seq` seqlock + `task_gen` stamp make the task fields safe to read,
+/// because epoch-wakeup alone does not prove the slot still belongs to the
+/// observed dispatch (see `slot_seq`).
 struct Shared {
     /// Bumped once per `for_each_chunk`; workers wake when it changes.
     epoch: AtomicU64,
+    /// Seqlock over the task fields (`data`/`tramp`/`num_chunks`/`completed`/
+    /// `panicked`/`task_gen`): odd while the dispatcher rewrites them, bumped
+    /// even when stable. Readers snapshot the fields between two equal even
+    /// reads. Needed because a worker can observe the epoch bump for dispatch
+    /// N yet reach the fields only after N's barrier passed (possible exactly
+    /// when its block in N was empty, so the barrier didn't need it) and
+    /// dispatch N+1 has begun overwriting the slot.
+    slot_seq: AtomicU64,
+    /// Epoch value the current slot contents belong to, written inside the
+    /// seqlock. A participant runs the slot only when this matches the epoch
+    /// it observed — otherwise its `completed` increments would count toward
+    /// a dispatch it did not run, the barrier would release early, and the
+    /// closure would drop while another participant still executes it.
+    task_gen: AtomicU64,
     /// Chunks finished this dispatch; the barrier waits for `== num_chunks`.
     /// With static block ownership each chunk is run exactly once, so this
     /// reaching `num_chunks` proves every trampoline call has returned — no
@@ -136,24 +157,29 @@ fn worker_loop(shared: Arc<Shared>, worker_id: usize, n_participants: usize) {
             } else if spins < YIELD_UNTIL {
                 std::thread::yield_now();
             } else {
-                thread::park_timeout(Duration::from_micros(50));
+                thread::park_timeout(PARK_BACKSTOP);
             }
         };
         seen_epoch = epoch;
         if shared.shutdown.load(Ordering::Relaxed) {
             return;
         }
-        run_chunks(&shared, worker_id, n_participants);
+        // Pass the epoch this worker is answering; `run_chunks` refuses the
+        // slot if it has already been re-published for a later dispatch (the
+        // loop then re-observes the new epoch and runs it exactly once).
+        run_chunks(&shared, worker_id, n_participants, epoch);
     }
 }
 
 /// Run this participant's statically-assigned chunks, as one **contiguous
 /// block** of the chunk index space.
 ///
-/// Static ownership — rather than a shared resettable cursor — is what makes
-/// `completed == num_chunks` a sound barrier across back-to-back dispatches: no
-/// participant can re-claim a chunk the next dispatch reset, so once the count
-/// is reached every trampoline call has returned and the closure is safe to
+/// Static ownership — rather than a shared resettable cursor — plus the
+/// `task_gen` guard is what makes `completed == num_chunks` a sound barrier
+/// across back-to-back dispatches: no participant can re-claim a chunk the
+/// next dispatch reset, and no participant can run (or count toward) a
+/// dispatch other than the one whose epoch it observed, so once the count is
+/// reached every trampoline call has returned and the closure is safe to
 /// drop. *Contiguous* blocks are as static as the round-robin stride this
 /// previously used (`c += n_participants`) — each chunk still has exactly one
 /// owner — so that argument is untouched by the change from stride to block.
@@ -173,13 +199,31 @@ fn worker_loop(shared: Arc<Shared>, worker_id: usize, n_participants: usize) {
 /// Chunk cost is uniform for every current caller (equal row counts per chunk),
 /// so the load-balancing advantage strided ownership would have under uneven
 /// chunk cost does not apply; llama.cpp's pool partitions rows the same way.
-fn run_chunks(shared: &Shared, participant_id: usize, n_participants: usize) {
+fn run_chunks(shared: &Shared, participant_id: usize, n_participants: usize, expected_gen: u64) {
+    // Seqlock-consistent snapshot of the task slot, refused unless it still
+    // belongs to `expected_gen`. Guards the empty-block straggler: a
+    // participant whose block in dispatch N was empty is not needed by N's
+    // barrier, so N can finish and N+1 can rewrite the slot while this
+    // participant sits between its epoch read and these loads. Running a
+    // mismatched slot would execute N+1's chunks attributed to N — and then
+    // again when the loop notices the epoch moved — over-counting `completed`
+    // so N+1's barrier releases while other participants still execute the
+    // (then dropped) closure.
+    let seq_before = shared.slot_seq.load(Ordering::Acquire);
+    if seq_before & 1 == 1 {
+        return; // dispatcher mid-rewrite; caller re-observes the epoch
+    }
     let num = shared.num_chunks.load(Ordering::Relaxed);
     let tramp_addr = shared.tramp.load(Ordering::Relaxed);
+    let data = shared.data.load(Ordering::Relaxed) as *const ();
+    let gen = shared.task_gen.load(Ordering::Relaxed);
+    std::sync::atomic::fence(Ordering::Acquire);
+    if shared.slot_seq.load(Ordering::Relaxed) != seq_before || gen != expected_gen {
+        return; // torn snapshot, or the slot was re-published for a later dispatch
+    }
     if tramp_addr == 0 || num == 0 || participant_id >= n_participants {
         return;
     }
-    let data = shared.data.load(Ordering::Relaxed) as *const ();
     // SAFETY: `tramp_addr` is a `fn(*const (), usize)` stored by the dispatcher
     // before the epoch release; recovered here after the epoch acquire.
     let tramp: fn(*const (), usize) = unsafe { std::mem::transmute(tramp_addr) };
@@ -225,6 +269,8 @@ impl SpinPool {
         let n_threads = n_threads.max(1);
         let shared = Arc::new(Shared {
             epoch: AtomicU64::new(0),
+            slot_seq: AtomicU64::new(0),
+            task_gen: AtomicU64::new(0),
             completed: AtomicUsize::new(0),
             num_chunks: AtomicUsize::new(0),
             data: AtomicPtr::new(std::ptr::null_mut()),
@@ -280,7 +326,12 @@ impl SpinPool {
         // uncontended in the single-driver decode loop.
         let _dispatch = self.dispatch_lock.lock().unwrap_or_else(|e| e.into_inner());
         let shared = &self.shared;
-        // Publish the task, then release it to workers via the epoch bump.
+        // Publish the task inside the slot seqlock, then release it to workers
+        // via the epoch bump. The seqlock + `task_gen` let a straggler from the
+        // previous dispatch (empty block there, so the barrier didn't wait for
+        // it) detect that the slot no longer belongs to the epoch it observed.
+        let gen = shared.epoch.load(Ordering::Relaxed) + 1;
+        shared.slot_seq.fetch_add(1, Ordering::AcqRel); // odd: slot unstable
         shared
             .data
             .store(&body as *const F as *mut (), Ordering::Relaxed);
@@ -290,7 +341,9 @@ impl SpinPool {
         shared.num_chunks.store(num_chunks, Ordering::Relaxed);
         shared.completed.store(0, Ordering::Relaxed);
         shared.panicked.store(false, Ordering::Relaxed);
-        shared.epoch.fetch_add(1, Ordering::Release);
+        shared.task_gen.store(gen, Ordering::Relaxed);
+        shared.slot_seq.fetch_add(1, Ordering::Release); // even: slot stable
+        shared.epoch.store(gen, Ordering::Release);
 
         // Wake any worker that parked during an idle gap so the barrier never
         // stalls ~park_timeout waiting on its assigned block. Unparking a
@@ -301,15 +354,48 @@ impl SpinPool {
             w.thread().unpark();
         }
 
-        // The dispatcher participates as participant 0.
-        run_chunks(shared, 0, self.n_threads);
+        // The dispatcher participates as participant 0. Its expected
+        // generation is the one it just published, so it always runs.
+        run_chunks(shared, 0, self.n_threads, gen);
 
-        // Completion barrier: spin until every chunk has finished. With static
+        // Completion barrier: wait until every chunk has finished. With static
         // block ownership, `completed == num_chunks` means every trampoline
         // call has returned (panics still count, see run_chunks), so it is safe
         // to let `body` drop as this returns.
+        //
+        // This backs off spin → yield, for the same reason `worker_loop` does.
+        // It used to be an unbounded `spin_loop()`, which **livelocks under
+        // oversubscription**: a dispatcher burns a whole core spinning on
+        // `completed` while the worker that owes the last chunk cannot get
+        // scheduled. With more runnable threads than cores — several concurrent
+        // dispatchers, this pool's persistent workers, and a `cargo test`
+        // harness running other tests alongside — every spinner holds its core
+        // for a full quantum and forward progress stalls for *seconds*. That is
+        // the `stress_concurrent_realistic_decode_shape_no_corruption` hang
+        // (reproduced 1-in-12 at `--test-threads=8`, worse in a full workspace
+        // run, worst under coverage instrumentation, and invisible standalone
+        // because a quiet machine has cores to spare).
+        //
+        // The backoff `worker_loop` received when the pool went default-on was
+        // only ever applied there; this barrier was left as a pure spin.
+        //
+        // It escalates to `yield_now` and **stays** there — it must never park.
+        // Nothing unparks a dispatcher: workers signal completion through the
+        // `completed` counter alone, so a parked dispatcher would sleep until
+        // its own timeout with no one to wake it. Yielding is what cedes the
+        // core to the worker we are waiting on.
+        //
+        // The fast path is unchanged: chunks complete in microseconds, so a
+        // decode-shaped dispatch never leaves the spin phase, and the measured
+        // +28% is preserved by construction.
+        let mut spins = 0u32;
         while shared.completed.load(Ordering::Acquire) < num_chunks {
-            std::hint::spin_loop();
+            spins += 1;
+            if spins < SPIN_HOT {
+                std::hint::spin_loop();
+            } else {
+                std::thread::yield_now();
+            }
         }
 
         // Re-raise the first chunk panic on this (the dispatching) thread, so a
@@ -333,8 +419,15 @@ impl SpinPool {
 impl Drop for SpinPool {
     fn drop(&mut self) {
         self.shared.shutdown.store(true, Ordering::Relaxed);
-        // Bump epoch so any spinning worker breaks out and re-checks shutdown.
+        // Bump epoch so any spinning worker breaks out and re-checks shutdown,
+        // and unpark so a parked worker doesn't sleep out its PARK_BACKSTOP
+        // before noticing. The store/bump-then-unpark order matters: a worker
+        // that checked the epoch just before the bump has its park token set
+        // and returns immediately.
         self.shared.epoch.fetch_add(1, Ordering::Release);
+        for w in &self.workers {
+            w.thread().unpark();
+        }
         for w in self.workers.drain(..) {
             let _ = w.join();
         }
@@ -525,6 +618,90 @@ where
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicU32;
+
+    // ── Wrapper scheduling parity ───────────────────────────────────────
+    //
+    // `par_chunks_mut`/`par_chunks_mut2` each branch on `enabled()`, so a CI
+    // run with one ambient setting leaves the other arm dead — and CI sets
+    // `LARQL_SPIN_POOL=0` (see .github/workflows/larql-compute.yml) because
+    // a spin barrier has no free core to spin on there. These drive both
+    // arms explicitly, so coverage and the equivalence claim both hold
+    // regardless of the ambient flag.
+    //
+    // The override is thread-local rather than `std::env::set_var`, which
+    // segfaults under parallel `getenv` (see `options::ENV_OVERRIDES`).
+
+    /// Run `f` with the spin pool forced on, then forced off, returning
+    /// both results for comparison.
+    fn both_arms<T, F: Fn() -> T>(f: F) -> (T, T) {
+        use crate::options::{clear_fast_path_overrides, set_fast_path_override, ENV_SPIN_POOL};
+        set_fast_path_override(ENV_SPIN_POOL, true);
+        let spin = f();
+        set_fast_path_override(ENV_SPIN_POOL, false);
+        let rayon = f();
+        clear_fast_path_overrides();
+        (spin, rayon)
+    }
+
+    #[test]
+    fn par_chunks_mut_agrees_across_both_schedulers() {
+        let run = || {
+            let mut out = vec![0u64; 1000];
+            par_chunks_mut(&mut out, 7, |ci, c| {
+                for (i, slot) in c.iter_mut().enumerate() {
+                    *slot = (ci as u64) * 1000 + i as u64;
+                }
+            });
+            out
+        };
+        let (spin, rayon) = both_arms(run);
+        assert_eq!(spin, rayon, "scheduler changed the result");
+        // Ragged tail: 1000 is not a multiple of 7, so the last chunk is
+        // short — the place an off-by-one would differ between arms.
+        assert_eq!(spin.len(), 1000);
+    }
+
+    #[test]
+    fn par_chunks_mut2_agrees_across_both_schedulers() {
+        let run = || {
+            let (mut a, mut b) = (vec![0u64; 517], vec![0u64; 517]);
+            par_chunks_mut2(&mut a, &mut b, 32, |ci, ca, cb| {
+                for (i, (x, y)) in ca.iter_mut().zip(cb.iter_mut()).enumerate() {
+                    *x = (ci as u64) << 20 | i as u64;
+                    *y = !*x;
+                }
+            });
+            (a, b)
+        };
+        let (spin, rayon) = both_arms(run);
+        assert_eq!(spin, rayon, "scheduler changed the result");
+        // The two outputs must stay index-aligned, which is the whole
+        // reason this wrapper exists.
+        assert!(spin.0.iter().zip(&spin.1).all(|(x, y)| *y == !*x));
+    }
+
+    #[test]
+    fn both_wrappers_no_op_on_empty_input_either_way() {
+        let (spin, rayon) = both_arms(|| {
+            let mut out: Vec<u64> = Vec::new();
+            par_chunks_mut(&mut out, 8, |_, _| unreachable!("no chunks to run"));
+            let (mut a, mut b): (Vec<u64>, Vec<u64>) = (Vec::new(), Vec::new());
+            par_chunks_mut2(&mut a, &mut b, 8, |_, _, _| unreachable!("no chunks"));
+            (out, a, b)
+        });
+        assert_eq!(spin, rayon);
+    }
+
+    #[test]
+    fn a_zero_chunk_size_is_a_no_op_either_way() {
+        let (spin, rayon) = both_arms(|| {
+            let mut out = vec![9u64; 4];
+            par_chunks_mut(&mut out, 0, |_, _| unreachable!("chunk==0 must not run"));
+            out
+        });
+        assert_eq!(spin, rayon);
+        assert_eq!(spin, vec![9u64; 4], "input must be untouched");
+    }
 
     #[test]
     fn runs_every_chunk_exactly_once() {
@@ -789,119 +966,171 @@ mod tests {
     // ── SIGSEGV reproduction attempt (three crash reports, all localizing
     // inside `par_chunks_mut`/`run_chunks`, fault addresses matching real
     // model dimensions or `0x1`) ────────────────────────────────────────────
+    //
+    // Gated on `heavy_tests`: these run a production-scale decode simulation
+    // (34 layers × hundreds of tokens, deliberately oversubscribed) and take
+    // minutes under coverage instrumentation on a 2-core CI runner — a spin
+    // barrier has no spare core to spin on there, so CI pays the worst case
+    // of exactly the contention these tests exist to provoke. Run locally via
+    // `make larql-compute-test-integration`.
+    #[cfg(feature = "heavy_tests")]
+    mod stress_decode_shape {
+        use super::*;
 
-    const RD_HIDDEN: usize = 2560;
-    const RD_INTER: usize = 10240;
-    const RD_Q_DIM: usize = 2048;
-    const RD_KV_DIM: usize = 1024;
-    const RD_ROWS_CHUNK: usize = 32;
-    const RD_ELEM_CHUNK: usize = 256;
+        const RD_HIDDEN: usize = 2560;
+        const RD_INTER: usize = 10240;
+        const RD_Q_DIM: usize = 2048;
+        const RD_KV_DIM: usize = 1024;
+        const RD_ROWS_CHUNK: usize = 32;
+        const RD_ELEM_CHUNK: usize = 256;
 
-    fn rd_f32_encode(caller: u64, round: u64, tag: u64, idx: usize) -> f32 {
-        // Cheap, collision-resistant-enough encoding of (caller, round, tag,
-        // idx) into an f32 so a read of the wrong slot/epoch/caller's data is
-        // caught as a mismatch rather than silently looking plausible.
-        ((caller.wrapping_mul(998_244_353)
-            ^ round.wrapping_mul(1_000_003)
-            ^ tag.wrapping_mul(97)
-            ^ idx as u64)
-            % 1_000_000) as f32
-    }
-    fn rd_fill_chunk(chunk: &mut [f32], global_start: usize, caller: u64, round: u64, tag: u64) {
-        for (local_i, v) in chunk.iter_mut().enumerate() {
-            // Cheap but non-trivial busy-work per element (~tens of ns) so a
-            // chunk's dispatched duration is closer to the real matvec
-            // kernel's (many SDOTs per row) than a near-instant synthetic
-            // write - in case the bug is timing/duration-dependent (spin ->
-            // yield -> park transitions calibrated around real chunk cost).
-            let mut acc = 0.0f32;
-            for j in 0..64u32 {
-                acc = acc * 1.0000001 + (j as f32).sin();
-            }
-            *v = rd_f32_encode(caller, round, tag, global_start + local_i) + acc * 0.0;
+        fn rd_f32_encode(caller: u64, round: u64, tag: u64, idx: usize) -> f32 {
+            // Cheap, collision-resistant-enough encoding of (caller, round, tag,
+            // idx) into an f32 so a read of the wrong slot/epoch/caller's data is
+            // caught as a mismatch rather than silently looking plausible.
+            ((caller.wrapping_mul(998_244_353)
+                ^ round.wrapping_mul(1_000_003)
+                ^ tag.wrapping_mul(97)
+                ^ idx as u64)
+                % 1_000_000) as f32
         }
-    }
-    fn rd_check(buf: &[f32], caller: u64, round: u64, tag: u64) {
-        for (i, &v) in buf.iter().enumerate() {
-            let want = rd_f32_encode(caller, round, tag, i);
-            assert_eq!(
-                v.to_bits(),
-                want.to_bits(),
-                "caller {caller} round {round} tag {tag} idx {i}: corrupted \
-                 (got {v}, want {want}) - buffer len {}",
-                buf.len()
-            );
-        }
-    }
-
-    /// One simulated decode step's worth of dispatches against `par_chunks_mut`
-    /// - the actual public entry point production uses, with the REAL
-    ///   gemma-3-4b-it row counts (q_dim=2048, kv_dim=1024, hidden=2560,
-    ///   intermediate=10240 - all exact multiples of their chunk sizes, same as
-    ///   production, so this can't exercise the underflow this file already
-    ///   hardened against; it's targeting a different bug). `caller` tags every
-    ///   value so concurrent callers (simulating overlapping requests) can tell
-    ///   their own data apart from a caller they got mixed up with.
-    fn rd_run(caller: u64, rounds: u64, layers: u64) {
-        let mut q = vec![0.0f32; RD_Q_DIM];
-        let mut k = vec![0.0f32; RD_KV_DIM];
-        let mut v = vec![0.0f32; RD_KV_DIM];
-        let mut o = vec![0.0f32; RD_HIDDEN];
-        let mut gate = vec![0.0f32; RD_INTER];
-        let mut up = vec![0.0f32; RD_INTER];
-        let mut activated = vec![0.0f32; RD_INTER];
-        let mut down = vec![0.0f32; RD_HIDDEN];
-
-        for round in 0..rounds {
-            for layer in 0..layers {
-                let tag = round * layers + layer;
-                for (buf, sub) in [
-                    (&mut q, 0u64),
-                    (&mut k, 1),
-                    (&mut v, 2),
-                    (&mut o, 3),
-                    (&mut gate, 4),
-                    (&mut up, 5),
-                    (&mut down, 7),
-                ] {
-                    let t = tag.wrapping_mul(8) + sub;
-                    par_chunks_mut(buf, RD_ROWS_CHUNK, |ci, chunk| {
-                        rd_fill_chunk(chunk, ci * RD_ROWS_CHUNK, caller, round, t)
-                    });
-                    rd_check(buf, caller, round, t);
+        fn rd_fill_chunk(
+            chunk: &mut [f32],
+            global_start: usize,
+            caller: u64,
+            round: u64,
+            tag: u64,
+        ) {
+            for (local_i, v) in chunk.iter_mut().enumerate() {
+                // Cheap but non-trivial busy-work per element (~tens of ns) so a
+                // chunk's dispatched duration is closer to the real matvec
+                // kernel's (many SDOTs per row) than a near-instant synthetic
+                // write - in case the bug is timing/duration-dependent (spin ->
+                // yield -> park transitions calibrated around real chunk cost).
+                let mut acc = 0.0f32;
+                for j in 0..64u32 {
+                    acc = acc * 1.0000001 + (j as f32).sin();
                 }
-                // Elementwise activation: 256-chunked, INTER-sized - the
-                // production shape at kquant_forward/cached.rs:869.
-                let t = tag.wrapping_mul(8) + 6;
-                par_chunks_mut(&mut activated, RD_ELEM_CHUNK, |ci, chunk| {
-                    rd_fill_chunk(chunk, ci * RD_ELEM_CHUNK, caller, round, t)
-                });
-                rd_check(&activated, caller, round, t);
+                *v = rd_f32_encode(caller, round, tag, global_start + local_i) + acc * 0.0;
             }
         }
-    }
-
-    /// Single sequential caller, at production scale (34 layers x 400
-    /// simulated tokens). `--test-threads` contention from other tests
-    /// sharing `global()` is part of the reproduction attempt - do not run
-    /// this test in isolation only.
-    #[test]
-    fn stress_realistic_decode_shape_no_corruption() {
-        rd_run(0, 40, 34);
-    }
-
-    /// Genuinely concurrent callers (unlike `concurrent_dispatchers_stay_
-    /// consistent` above, which uses one FIXED dispatch size for every
-    /// thread) - each thread runs its own independent `rd_run`-shaped decode
-    /// loop against the SAME shared `global()` pool at the SAME time, so
-    /// `dispatch_lock` has to actually serialize dispatchers with DIFFERENT
-    /// `(total, chunk)` shapes mid-flight, not just identical ones.
-    #[test]
-    fn stress_concurrent_realistic_decode_shape_no_corruption() {
-        std::thread::scope(|s| {
-            for caller in 0..6u64 {
-                s.spawn(move || rd_run(caller, 8, 34));
+        fn rd_check(buf: &[f32], caller: u64, round: u64, tag: u64) {
+            for (i, &v) in buf.iter().enumerate() {
+                let want = rd_f32_encode(caller, round, tag, i);
+                assert_eq!(
+                    v.to_bits(),
+                    want.to_bits(),
+                    "caller {caller} round {round} tag {tag} idx {i}: corrupted \
+                 (got {v}, want {want}) - buffer len {}",
+                    buf.len()
+                );
             }
-        });
+        }
+
+        /// One simulated decode step's worth of dispatches against `par_chunks_mut`
+        /// - the actual public entry point production uses, with the REAL
+        ///   gemma-3-4b-it row counts (q_dim=2048, kv_dim=1024, hidden=2560,
+        ///   intermediate=10240 - all exact multiples of their chunk sizes, same as
+        ///   production, so this can't exercise the underflow this file already
+        ///   hardened against; it's targeting a different bug). `caller` tags every
+        ///   value so concurrent callers (simulating overlapping requests) can tell
+        ///   their own data apart from a caller they got mixed up with.
+        fn rd_run(caller: u64, rounds: u64, layers: u64) {
+            let mut q = vec![0.0f32; RD_Q_DIM];
+            let mut k = vec![0.0f32; RD_KV_DIM];
+            let mut v = vec![0.0f32; RD_KV_DIM];
+            let mut o = vec![0.0f32; RD_HIDDEN];
+            let mut gate = vec![0.0f32; RD_INTER];
+            let mut up = vec![0.0f32; RD_INTER];
+            let mut activated = vec![0.0f32; RD_INTER];
+            let mut down = vec![0.0f32; RD_HIDDEN];
+
+            for round in 0..rounds {
+                for layer in 0..layers {
+                    let tag = round * layers + layer;
+                    for (buf, sub) in [
+                        (&mut q, 0u64),
+                        (&mut k, 1),
+                        (&mut v, 2),
+                        (&mut o, 3),
+                        (&mut gate, 4),
+                        (&mut up, 5),
+                        (&mut down, 7),
+                    ] {
+                        let t = tag.wrapping_mul(8) + sub;
+                        par_chunks_mut(buf, RD_ROWS_CHUNK, |ci, chunk| {
+                            rd_fill_chunk(chunk, ci * RD_ROWS_CHUNK, caller, round, t)
+                        });
+                        rd_check(buf, caller, round, t);
+                    }
+                    // Elementwise activation: 256-chunked, INTER-sized - the
+                    // production shape at kquant_forward/cached.rs:869.
+                    let t = tag.wrapping_mul(8) + 6;
+                    par_chunks_mut(&mut activated, RD_ELEM_CHUNK, |ci, chunk| {
+                        rd_fill_chunk(chunk, ci * RD_ELEM_CHUNK, caller, round, t)
+                    });
+                    rd_check(&activated, caller, round, t);
+                }
+            }
+        }
+
+        /// Single sequential caller, at production scale (34 layers x 400
+        /// simulated tokens). `--test-threads` contention from other tests
+        /// sharing `global()` is part of the reproduction attempt - do not run
+        /// this test in isolation only.
+        #[test]
+        fn stress_realistic_decode_shape_no_corruption() {
+            rd_run(0, 40, 34);
+        }
+
+        /// Genuinely concurrent callers (unlike `concurrent_dispatchers_stay_
+        /// consistent` above, which uses one FIXED dispatch size for every
+        /// thread) - each thread runs its own independent `rd_run`-shaped decode
+        /// loop against the SAME shared `global()` pool at the SAME time, so
+        /// `dispatch_lock` has to actually serialize dispatchers with DIFFERENT
+        /// `(total, chunk)` shapes mid-flight, not just identical ones.
+        #[test]
+        fn stress_concurrent_realistic_decode_shape_no_corruption() {
+            std::thread::scope(|s| {
+                for caller in 0..6u64 {
+                    s.spawn(move || rd_run(caller, 8, 34));
+                }
+            });
+        }
+
+        /// Empty-block straggler pin: alternate a 1-chunk dispatch (most
+        /// participants own an empty block, so the barrier passes without
+        /// them) with a wide dispatch, back-to-back. Pre-`task_gen` a
+        /// straggler from the 1-chunk dispatch could read the re-published
+        /// slot, run the wide dispatch's chunks attributed to the old epoch,
+        /// then run them AGAIN on re-observing the epoch — over-counting
+        /// `completed`, releasing the barrier early, and letting the closure
+        /// drop while another worker still executed it (SIGSEGV under
+        /// coverage instrumentation, where the window is widest). Exactly-once
+        /// per chunk is the observable invariant; the counters are re-created
+        /// per dispatch so a late write from a released dispatch is also a
+        /// use-after-free the harness can catch.
+        #[test]
+        fn alternating_block_sizes_run_each_chunk_exactly_once() {
+            use std::sync::atomic::AtomicU8;
+            const PARTICIPANTS: usize = 4;
+            const WIDE_CHUNKS: usize = 7;
+            const ITERATIONS: usize = 50_000;
+            let pool = SpinPool::new(PARTICIPANTS);
+            for iter in 0..ITERATIONS {
+                let n = if iter % 2 == 0 { 1 } else { WIDE_CHUNKS };
+                let counters: Vec<AtomicU8> = (0..n).map(|_| AtomicU8::new(0)).collect();
+                pool.for_each_chunk(n, |c| {
+                    counters[c].fetch_add(1, Ordering::Relaxed);
+                });
+                for (c, counter) in counters.iter().enumerate() {
+                    assert_eq!(
+                        counter.load(Ordering::Relaxed),
+                        1,
+                        "iter {iter}: chunk {c} of {n} not run exactly once"
+                    );
+                }
+            }
+        }
     }
 }

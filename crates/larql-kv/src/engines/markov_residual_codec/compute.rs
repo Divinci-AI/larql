@@ -9,6 +9,7 @@ use larql_compute::ComputeBackend;
 use larql_inference::attention::{run_attention_with_kv_backend, SharedKV};
 use larql_inference::ffn::BackendFfn;
 use larql_inference::forward::embed_tokens_pub;
+use larql_inference::forward::ple::precompute_per_layer_inputs;
 use ndarray::{s, Array2};
 
 use crate::engines::markov_residual::recompute_kv;
@@ -33,6 +34,8 @@ pub fn rs_prefill_codec(
     let num_layers = weights.num_layers;
     let seq_len = token_ids.len();
     let mut h = embed_tokens_pub(&weights, token_ids);
+    // Empty on non-PLE archs — `ple_inputs.get(layer)` then yields `None`.
+    let ple_inputs = precompute_per_layer_inputs(&weights, &h, token_ids);
     let mut stored: Vec<Array2<f32>> = Vec::with_capacity(num_layers);
     let be = Some(backend);
 
@@ -50,6 +53,7 @@ pub fn rs_prefill_codec(
             layer,
             &bffn,
             moe_ffn,
+            ple_inputs.get(layer),
         );
         h = h_out;
     }
@@ -111,6 +115,9 @@ pub fn rs_decode_step_codec(
     let num_layers = weights.num_layers;
     let abs_position = rs.next_position;
     let mut h_new = embed_tokens_pub(&weights, &[new_token_id]);
+    // PLE inputs are per-token — recompute for this single-token decode
+    // step, matching the legacy `kv_decode_step_run` recipe exactly.
+    let ple_inputs = precompute_per_layer_inputs(&weights, &h_new, &[new_token_id]);
     let mut new_stored: Vec<Array2<f32>> = Vec::with_capacity(num_layers);
 
     // W2 hot-K/V cache on the resident walk (2026-06-13), twin of
@@ -282,6 +289,7 @@ pub fn rs_decode_step_codec(
             layer,
             &bffn,
             moe_ffn,
+            ple_inputs.get(layer),
         );
         h_new = h_out;
     }

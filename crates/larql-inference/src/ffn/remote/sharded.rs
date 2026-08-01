@@ -16,6 +16,11 @@ use super::http::{RemoteFfnConfig, RemoteFfnError, RemoteWalkBackend, WirePrefer
 use crate::ffn::FfnBackend;
 use larql_compute::cpu::ops::q4k_q8k_dot::Q8KActivation;
 
+/// [`crate::ffn::FfnActivations::Absent`] reason when no shard owns the
+/// requested layer — the backend returns a zero output delta and has
+/// observed nothing.
+const REASON_NO_SHARD_FOR_LAYER: &str = "no shard owns this layer (zero FFN delta, unobserved)";
+
 struct LayerShard {
     start: usize,
     end: usize, // inclusive
@@ -279,13 +284,22 @@ impl FfnBackend for LayerShardedBackend {
         }
     }
 
-    fn forward_with_activation(&self, layer: usize, x: &Array2<f32>) -> (Array2<f32>, Array2<f32>) {
+    fn forward_observed(
+        &self,
+        layer: usize,
+        x: &Array2<f32>,
+    ) -> (Array2<f32>, crate::ffn::FfnActivations) {
         match self.shard_for(layer) {
-            Some(shard) => shard.forward_with_activation(layer, x),
-            None => {
-                let z = Array2::zeros(x.raw_dim());
-                (z.clone(), z)
-            }
+            // Delegates to `RemoteWalkBackend`'s trait default — the
+            // shard wire protocol carries outputs only, so the honest
+            // observation is Absent.
+            Some(shard) => shard.forward_observed(layer, x),
+            None => (
+                Array2::zeros(x.raw_dim()),
+                crate::ffn::FfnActivations::Absent {
+                    reason: REASON_NO_SHARD_FOR_LAYER,
+                },
+            ),
         }
     }
 
@@ -353,5 +367,49 @@ fn parse_layer_range(s: &str) -> Option<(usize, usize)> {
         Some((start, end))
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A shard-less backend: every layer is unowned. Constructible
+    /// without a network because the no-shard arms are exactly the
+    /// code that must not depend on one.
+    fn empty_backend() -> LayerShardedBackend {
+        LayerShardedBackend { shards: Vec::new() }
+    }
+
+    #[test]
+    fn no_shard_forward_returns_zero_delta() {
+        let be = empty_backend();
+        let x = Array2::<f32>::from_elem((2, 4), 1.0);
+        let out = be.forward(0, &x);
+        assert_eq!(out.shape(), &[2, 4]);
+        assert!(out.iter().all(|v| *v == 0.0), "unowned layer → zero delta");
+        assert_eq!(be.name(), "layer-sharded-remote");
+    }
+
+    #[test]
+    fn no_shard_forward_observed_is_absent_with_named_reason() {
+        let be = empty_backend();
+        let x = Array2::<f32>::from_elem((1, 4), 1.0);
+        let (out, obs) = be.forward_observed(0, &x);
+        assert!(out.iter().all(|v| *v == 0.0));
+        assert_eq!(
+            obs.absent_reason(),
+            Some(REASON_NO_SHARD_FOR_LAYER),
+            "a zero delta from an unowned layer must be marked unobserved, \
+             never a fabricated activation tensor"
+        );
+        assert!(be.forward_moe_full_layer(0, &x).is_none());
+    }
+
+    #[test]
+    fn parse_layer_range_accepts_ordered_and_rejects_reversed() {
+        assert_eq!(parse_layer_range("3-7"), Some((3, 7)));
+        assert_eq!(parse_layer_range("7-3"), None);
+        assert_eq!(parse_layer_range("x-3"), None);
     }
 }

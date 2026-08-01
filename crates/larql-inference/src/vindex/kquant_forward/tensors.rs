@@ -80,14 +80,9 @@ pub fn insert_q4k_layer_tensors(
         dequantize_matrix(ffn[1].0, ffn[1].1, intermediate, hidden).into_shared(),
     );
 
-    let inter_padded = intermediate.div_ceil(larql_models::quant::ggml::K_QUANT_BLOCK_ELEMS)
-        * larql_models::quant::ggml::K_QUANT_BLOCK_ELEMS;
-    let w_down = if inter_padded != intermediate {
-        let w = dequantize_matrix(ffn[2].0, ffn[2].1, hidden, inter_padded);
-        w.slice(ndarray::s![.., ..intermediate]).to_owned()
-    } else {
-        dequantize_matrix(ffn[2].0, ffn[2].1, hidden, intermediate)
-    };
+    // `dequantize_matrix` strips the writer's per-row super-block
+    // padding internally — logical dims only.
+    let w_down = dequantize_matrix(ffn[2].0, ffn[2].1, hidden, intermediate);
     scratch.insert(down_key.clone(), w_down.into_shared());
 
     Ok(vec![q_key, k_key, v_key, o_key, gate_key, up_key, down_key])

@@ -737,7 +737,20 @@ pub fn attention_decode_step_native(
 
     let softcap = arch.attn_logit_softcapping();
     let attn_out = gqa_attention_decode_step(
-        &q_rope, &k_concat, &v_concat, num_q, head_dim, reps, scale, softcap,
+        &q_rope,
+        &k_concat,
+        &v_concat,
+        num_q,
+        head_dim,
+        reps,
+        scale,
+        softcap,
+        crate::attention::sinks::resolve(
+            arch.attn_sinks_key(layer),
+            &weights.vectors,
+            num_q,
+            layer,
+        ),
     );
     let attn_out_row: &[f32] = attn_out.row(0).to_slice().or_else(|| attn_out.as_slice())?;
 
@@ -862,7 +875,7 @@ fn run_ffn_decode_step_q4k_direct(
     // scalar pass serial on the main thread while the workers slept.
     let mut activated = vec![0.0f32; intermediate];
     {
-        let gelu = matches!(arch.activation(), larql_models::Activation::GeluTanh);
+        let gelu = arch.activation().uses_gelu_tanh_gate_up();
         let sqrt_2_over_pi = (2.0f32 / std::f32::consts::PI).sqrt();
         let gate_ref = &gate_vec[..];
         let up_ref = &up_vec[..];

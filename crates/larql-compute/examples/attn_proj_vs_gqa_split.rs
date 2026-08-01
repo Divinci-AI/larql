@@ -139,7 +139,7 @@ fn main() {
             });
             let (gqa_ns, _c2) = bench(min_secs, || {
                 let a = gqa_attention_decode_step(
-                    &q_rope, &k_concat, &v_concat, g.num_q, g.head_dim, reps, scale, None,
+                    &q_rope, &k_concat, &v_concat, g.num_q, g.head_dim, reps, scale, None, None,
                 );
                 a[[0, 0]]
             });

@@ -75,11 +75,8 @@ impl FfnBackend for GradedFfn {
         }
         out
     }
-    fn forward_with_activation(&self, layer: usize, x: &Array2<f32>) -> (Array2<f32>, Array2<f32>) {
-        let o = self.forward(layer, x);
-        let inter = self.gate[layer].shape()[0];
-        (o, Array2::zeros((x.shape()[0], inter)))
-    }
+    // forward_observed: trait default (Absent) — this arm computes no
+    // observable activation tensor and must not fabricate one.
     fn name(&self) -> &str {
         "graded"
     }

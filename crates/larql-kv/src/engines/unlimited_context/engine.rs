@@ -100,12 +100,28 @@ pub struct UnlimitedContextEngine {
     pub(super) dequant_scratch: larql_inference::DequantScratch,
 }
 
+/// Smallest legal window. `window_size == 0` would make the fill check
+/// in `process()` (`current_window_tokens.len() >= window_size`) true
+/// forever with nothing consumed — an infinite close loop — so it is
+/// rejected at construction. `window_size == 1` is legal.
+const MIN_WINDOW_SIZE: usize = 1;
+
 impl UnlimitedContextEngine {
+    /// # Panics
+    ///
+    /// Panics if `window_size < MIN_WINDOW_SIZE` (i.e. zero).
     pub fn new(window_size: usize) -> Self {
         Self::with_backend(window_size, cpu_engine_backend())
     }
 
+    /// # Panics
+    ///
+    /// Panics if `window_size < MIN_WINDOW_SIZE` (i.e. zero).
     pub fn with_backend(window_size: usize, backend: Box<dyn EngineBackend>) -> Self {
+        assert!(
+            window_size >= MIN_WINDOW_SIZE,
+            "UnlimitedContextEngine window_size must be >= {MIN_WINDOW_SIZE}, got {window_size}"
+        );
         Self {
             window_size,
             checkpoints: CheckpointStore::new(),
@@ -286,9 +302,11 @@ impl UnlimitedContextEngine {
                 empty_prior(weights)
             }
         } else {
-            self.current_window_kv
-                .take()
-                .unwrap_or_else(|| empty_prior(weights))
+            // Mid-window the shadow MUST exist; seeding from an empty
+            // prior here would silently drop every in-window token from
+            // attention. Fail upward (typed BackendFailure at the
+            // KvEngine boundary) instead.
+            self.current_window_kv.take()?
         };
 
         let abs_start = self.abs_offset + self.current_window_tokens.len();
@@ -347,12 +365,8 @@ impl UnlimitedContextEngine {
                 (empty_prior(weights), 0)
             }
         } else {
-            (
-                self.current_window_kv
-                    .take()
-                    .unwrap_or_else(|| empty_prior(weights)),
-                self.current_window_kv_len,
-            )
+            // Mid-window the shadow MUST exist — see extend_current_quant.
+            (self.current_window_kv.take()?, self.current_window_kv_len)
         };
 
         let abs_start = self.abs_offset + self.current_window_tokens.len();
@@ -410,11 +424,19 @@ impl UnlimitedContextEngine {
         // HOnly this branch never fires (kv is always Some) and we
         // slice the engine-side shadow as before.
         let n = self.current_window_kv_len;
+        let window_len = self.current_window_tokens.len();
+        // Absolute stream position of this window's last token. The
+        // backend kv cache behind `kv_handle` is indexed by absolute
+        // position (the handle spans the whole stream since prefill),
+        // while the engine-side shadow holds only this window's rows.
+        let abs_end = self.abs_offset + window_len - 1;
         let last_kv: Vec<SharedKV> = match self.current_window_kv.take() {
             Some(kv) => {
                 if n == 0 {
                     Vec::new()
                 } else {
+                    // Shadow is window-local: its last logical row is
+                    // `n - 1` regardless of how many windows preceded.
                     kv.iter()
                         .map(|(k, v)| {
                             let last_k = k.slice(ndarray::s![n - 1..n, ..]).to_owned();
@@ -426,30 +448,27 @@ impl UnlimitedContextEngine {
             }
             None => {
                 // No CPU shadow — engine ran under HOnly. Read the
-                // last position's K/V back from the backend's kv cache
-                // for the checkpoint. If the backend doesn't support
-                // this path (older Metal builds, CPU), we have to
-                // emit an empty checkpoint; the engine's continuation
-                // will need to re-run prefill from the archived tokens
-                // rather than the K/V checkpoint. This is the cost of
-                // running HOnly without a backend-side snapshot
-                // affordance.
+                // window's last K/V back from the backend's kv cache at
+                // the ABSOLUTE index `abs_end`; the window-relative
+                // `n - 1` would re-read a row of the first window on
+                // every window after it. If there is no handle or the
+                // backend lacks the readback affordance, fall through
+                // with an empty checkpoint: the tokens are still
+                // archived and the counters reset (a wedged window
+                // would otherwise spin `process()` forever), and the
+                // mismatched empty checkpoint surfaces as an extend
+                // error on the next window instead of silent loss.
                 if n == 0 {
                     Vec::new()
                 } else if let Some(handle) = self.kv_handle.as_ref() {
-                    let last_pos = n - 1;
-                    let mut rows = Vec::with_capacity(self.last_hidden.as_ref().map_or(0, |h| {
-                        // num_layers proxy: ModelWeights isn't in scope
-                        // here, so we use the existing per-layer count
-                        // exposed by the backend on the first lookup.
-                        let _ = h;
-                        0
-                    }));
+                    debug_assert_eq!(
+                        n, window_len,
+                        "HOnly window shadow counter out of sync with window tokens"
+                    );
+                    let mut rows = Vec::new();
                     let mut layer = 0;
-                    while let Some((k_row, v_row)) = self
-                        .backend
-                        .as_ref()
-                        .read_kv_row_at(handle, layer, last_pos)
+                    while let Some((k_row, v_row)) =
+                        self.backend.as_ref().read_kv_row_at(handle, layer, abs_end)
                     {
                         let kv_dim = k_row.len();
                         let k = Array2::from_shape_vec((1, kv_dim), k_row)
@@ -461,14 +480,11 @@ impl UnlimitedContextEngine {
                     }
                     rows
                 } else {
-                    return;
+                    Vec::new()
                 }
             }
         };
         self.current_window_kv_len = 0;
-
-        let window_len = self.current_window_tokens.len();
-        let abs_end = self.abs_offset + window_len - 1;
 
         self.checkpoints
             .save(self.current_window_id, last_kv, abs_end);
@@ -758,9 +774,8 @@ impl UnlimitedContextEngine {
                 super::extend::empty_prior(weights)
             }
         } else {
-            self.current_window_kv
-                .take()
-                .unwrap_or_else(|| super::extend::empty_prior(weights))
+            // Mid-window the shadow MUST exist — see extend_current_quant.
+            self.current_window_kv.take()?
         };
 
         let num_layers = weights.num_layers;
@@ -773,6 +788,13 @@ impl UnlimitedContextEngine {
         for (i, &token_id) in chunk.iter().enumerate() {
             let abs_position = abs_start + i;
             let mut h = embed_tokens_pub(weights, &[token_id]);
+            // PLE inputs are per-token — this loop embeds one token at a
+            // time, matching the legacy `kv_decode_step_run` recipe exactly.
+            let ple_inputs = larql_inference::forward::ple::precompute_per_layer_inputs(
+                weights,
+                &h,
+                &[token_id],
+            );
 
             for (layer, kv_slot) in kv_cache.iter_mut().enumerate() {
                 let (h_out, new_kv) = executor.run_decode_layer(
@@ -783,7 +805,17 @@ impl UnlimitedContextEngine {
                     abs_position,
                     ffn,
                 )?;
-                h = h_out;
+                // `LayerExecutor::run_decode_layer` returns attention + bare
+                // FFN only (`LocalWalkExecutor`, the sole production impl,
+                // ends at `run_ffn`); the PLE + layer_scalar tail is the
+                // driving loop's responsibility, mirroring the legacy
+                // `kv_decode_step_run` sequence.
+                h = crate::engines::apply_ple_and_layer_scalar(
+                    weights,
+                    &h_out,
+                    layer,
+                    ple_inputs.get(layer),
+                );
                 *kv_slot = new_kv;
             }
             last_hidden = Some(h);
@@ -1245,14 +1277,6 @@ mod tests {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             ndarray::Array2::zeros((x.shape()[0], self.hidden))
         }
-        fn forward_with_activation(
-            &self,
-            layer: usize,
-            x: &ndarray::Array2<f32>,
-        ) -> (ndarray::Array2<f32>, ndarray::Array2<f32>) {
-            let out = self.forward(layer, x);
-            (out.clone(), out)
-        }
         fn name(&self) -> &str {
             "counting"
         }
@@ -1286,6 +1310,101 @@ mod tests {
             "executor path should dispatch FFN through the supplied backend \
              once per (token, layer); got {call_count} for {expected} \
              expected — engine is likely constructing its own FFN internally",
+        );
+    }
+
+    // ── window_size validation ────────────────────────────────────────────
+
+    #[test]
+    #[should_panic(expected = "window_size must be >= 1")]
+    fn zero_window_size_is_rejected_at_construction() {
+        let _ = UnlimitedContextEngine::new(0);
+    }
+
+    #[test]
+    fn window_size_one_is_legal() {
+        use larql_inference::test_utils::make_test_weights;
+        let weights = make_test_weights();
+        let mut engine = UnlimitedContextEngine::new(1);
+        engine.process(&weights, &[0u32, 1], None).expect("process");
+        assert_eq!(
+            engine.archive.len(),
+            2,
+            "window_size=1 closes one window per token"
+        );
+    }
+
+    // ── degenerate close / lost-shadow states ─────────────────────────────
+
+    /// A full window with neither a CPU shadow nor a backend handle is
+    /// unrecoverable K/V-wise, but the close must still archive the
+    /// tokens and reset the counters — pre-fix it early-returned with
+    /// the window intact, and `process()` spun forever re-trying the
+    /// close with zero free slots.
+    #[test]
+    fn close_window_without_shadow_or_handle_recovers_bookkeeping() {
+        let mut engine = UnlimitedContextEngine::new(2);
+        engine.current_window_tokens = vec![7, 8];
+        engine.current_window_kv = None;
+        engine.current_window_kv_len = 2;
+        engine.close_window();
+        assert_eq!(engine.archive.len(), 1, "tokens archived");
+        assert!(engine.current_window_tokens.is_empty(), "window reset");
+        assert_eq!(engine.abs_offset, 2);
+        assert_eq!(engine.current_window_id, 1);
+        let (ckpt, abs_end) = engine.checkpoints.load(0).expect("checkpoint entry");
+        assert!(
+            ckpt.is_empty(),
+            "unrecoverable K/V must yield an empty checkpoint, not stale rows"
+        );
+        assert_eq!(abs_end, 1);
+        let (tokens, abs_start) = engine.archive.retrieve(0).expect("archived tokens");
+        assert_eq!(tokens, &[7, 8]);
+        assert_eq!(abs_start, 0);
+    }
+
+    /// Mid-window decode with the shadow lost must surface an error —
+    /// pre-fix it silently seeded attention from an empty prior,
+    /// dropping every in-window token from the context.
+    #[test]
+    fn decode_with_lost_window_shadow_errors_instead_of_dropping_context() {
+        use larql_inference::ffn::WeightFfn;
+        use larql_inference::test_utils::make_test_weights;
+        let weights = make_test_weights();
+        let ffn = WeightFfn { weights: &weights };
+        let mut engine = UnlimitedContextEngine::new(8);
+        engine
+            .prefill(&weights, &ffn, &[0u32, 1, 2])
+            .expect("prefill");
+        engine.current_window_kv = None;
+        let res = engine.decode_step(&weights, &ffn, 3);
+        assert!(
+            res.is_err(),
+            "mid-window decode without the window shadow must error"
+        );
+    }
+
+    /// Same contract on the quant walk path (`extend_current_quant`).
+    #[test]
+    fn decode_step_quant_with_lost_window_shadow_errors() {
+        use larql_inference::ffn::NullFfn;
+        use larql_inference::test_utils::{make_test_q4k_vindex, make_test_q4k_weights};
+        let weights = make_test_q4k_weights();
+        let index = make_test_q4k_vindex(&weights);
+        let backend = larql_compute::cpu_backend();
+        let ffn = NullFfn;
+        let mut engine = UnlimitedContextEngine::new(512);
+        engine
+            .prefill_quant(&weights, &ffn, &index, &[0u32, 1], &*backend)
+            .expect("prefill");
+        // Simulate a failed dispatch step: handle dropped, shadow gone,
+        // window tokens still present.
+        engine.kv_handle = None;
+        engine.current_window_kv = None;
+        let res = engine.decode_step_quant(&weights, &ffn, &index, 2, &*backend);
+        assert!(
+            res.is_err(),
+            "quant decode without the window shadow must error"
         );
     }
 

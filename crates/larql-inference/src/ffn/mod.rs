@@ -24,7 +24,9 @@ mod tests;
 pub mod weight;
 
 pub use larql_compute::ffn::{
-    gelu_tanh, gelu_tanh_gate_up, sigmoid, silu_gate_up, FfnBackend, Q4K_Q8K_SUPERBLOCK_ELEMS,
+    expert_weight::resolvable as expert_weights_resolvable, gelu_tanh, gelu_tanh_gate_up, sigmoid,
+    silu_gate_up, ExpertWeightFfn, FfnActivations, FfnBackend, SparseActivations,
+    Q4K_Q8K_SUPERBLOCK_ELEMS,
 };
 
 // ── Re-exports ──
@@ -41,7 +43,8 @@ pub use remote::{
 };
 pub use sparse::SparseFfn;
 pub use sparse_compute::{
-    sparse_ffn_forward, sparse_ffn_forward_with_full_overrides, sparse_ffn_forward_with_overrides,
+    sparse_ffn_forward, sparse_ffn_forward_observed, sparse_ffn_forward_with_full_overrides,
+    sparse_ffn_forward_with_full_overrides_observed, sparse_ffn_forward_with_overrides,
     FeatureSlotOverride,
 };
 pub use weight::{dense_ffn_forward_backend, BackendFfn, NullFfn, ViewFfn, WeightFfn};

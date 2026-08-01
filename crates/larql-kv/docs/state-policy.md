@@ -73,15 +73,23 @@ changing its output distribution*.
 ### 2.3 Correctness contract
 
 The promise the engine makes about its output relative to a named
-reference. Five kinds today; the list is intentionally short.
+reference. Six kinds today; the list is intentionally short.
 
 | Contract | Promise | Example |
 |---|---|---|
 | `exact_logits` | bit-identical logits to a named reference (almost always `StandardEngine`) | `StandardEngine`, `NoCacheEngine`, `MarkovResidualEngine` (under arch preconditions) |
 | `bounded_KL(ε)` | next-token KL ≤ ε on a calibration corpus, with ε stated | `MarkovResidualCodecEngine` (bf16 cold tier) |
+| `codec_bounded_state` | bounded per-row distortion of the canonical state (stated per codec, e.g. round-trip cosine floor); output divergence (KL, hidden cosine) is empirically observed, not bounded | `TurboQuantEngine` (WHT + Lloyd-Max K/V codec) |
 | `greedy_equivalent` | argmax matches reference; full distribution may drift | candidate for FP4 / aggressive-quant engines |
 | `confidence_gated(τ)` | conforms to one of the stricter contracts when reference top-1 margin ≥ τ; may diverge below | candidate for retrieval-with-fallback engines |
 | `task_level_retrieval` | top-K matches reference on a labelled task; no token-level claim | `Apollo` (constellation-store hit path) |
+
+`codec_bounded_state` is deliberately distinct from `bounded_KL`:
+`bounded_KL` is earned through output-side calibration (an ε
+measured on a corpus), while `codec_bounded_state` bounds only the
+*state-side* distortion each row suffers on the way into the cache.
+An engine may not borrow `bounded_KL` on the strength of a per-row
+cosine figure.
 
 Contract kinds are an enum, not free text. If a new engine needs
 a new contract kind, that's a spec-extension PR — not an engine
@@ -119,8 +127,9 @@ Operational consequences:
   state (you can't reconstruct the pre-compression values), so the
   codec round-trip error is part of the contract, not part of a
   derivative-cache approximation. The contract is therefore
-  `bounded_KL` (or stricter, with measurement) — never
-  `exact_logits`.
+  `codec_bounded_state` (a per-row round-trip cosine floor; output
+  KL observed, not bounded) — never `exact_logits`, and not
+  `bounded_KL` unless someone actually calibrates an ε.
 
 The compression-safety insight that motivated this framing: **PCA-90
 boundary-spacing inversion**. Refreshing compressed residual state
@@ -227,7 +236,7 @@ The engines in `larql-kv` today, classified under the triple:
 | `BoundaryKvEngine` | KV tensors + chunk frames | — | `exact_logits` |
 | `BoundaryPerLayerEngine` | per-layer codec policy over residuals | hot KV | `bounded_KL(ε_l)` per-layer; calibrated |
 | `UnlimitedContextEngine` | KV tensors (within window) + per-window checkpoints + token archive | — | `exact_logits` within window |
-| `TurboQuantEngine` | quantised KV (in-place) | — | `bounded_KL` — codec round-trip ≥ cos 0.991 on real distributions |
+| `TurboQuantEngine` | quantised KV (in-place) | — | `codec_bounded_state` — per-row round-trip cos ≈ 0.9954 at 4-bit (Gaussian simulation, 2026-07-30); output KL observed, not bounded |
 | `Apollo` | boundary retrieval / residual injection store | — | `task_level_retrieval` |
 
 Some entries look surprising:

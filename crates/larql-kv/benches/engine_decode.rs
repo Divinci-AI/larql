@@ -48,6 +48,7 @@ fn all_engines() -> Vec<(&'static str, EngineKind)> {
                 injection_layer: 1,
                 inject_coefficient: 8.0,
                 top_k: 4,
+                bos_token_id: None,
             },
         ),
     ]

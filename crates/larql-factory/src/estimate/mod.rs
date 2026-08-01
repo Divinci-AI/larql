@@ -203,9 +203,7 @@ mod tests {
         assert!(matches!(err, HttpError::Status { status: 404, .. }));
     }
 
-    fn sample_recipe() -> Recipe {
-        Recipe::from_yaml(include_str!("../../testdata/gemma-3-4b-it.yaml")).unwrap()
-    }
+    use crate::test_support::sample_recipe;
 
     fn sample_dims() -> ModelDims {
         ModelDims {

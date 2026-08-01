@@ -573,12 +573,10 @@ impl FfnBackend for RemoteWalkBackend {
             .expect("RemoteWalkBackend: server output shape mismatch (validated above)")
     }
 
-    fn forward_with_activation(&self, layer: usize, x: &Array2<f32>) -> (Array2<f32>, Array2<f32>) {
-        let out = self.forward(layer, x);
-        let seq_len = x.shape()[0];
-        let zeros = Array2::<f32>::zeros((seq_len, 1));
-        (out, zeros)
-    }
+    // `forward_observed` keeps the trait default (forward + Absent):
+    // the wire protocol carries FFN outputs only, so a remote walk has
+    // no activations to report. The pre-split impl fabricated a
+    // `[seq_len, 1]` zero tensor here.
 
     fn forward_moe_full_layer(
         &self,

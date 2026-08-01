@@ -1,6 +1,10 @@
 # Rust
 target/
-coverage/
+# Anchored to the repo root: the generated llvm-cov report directory. An
+# unanchored `coverage/` matches ANY directory of that name at any depth,
+# which silently excluded `crates/larql-vindex/src/extract/coverage/` —
+# a source module — from `git add`. Keep the leading slash.
+/coverage/
 **/*.rs.bk
 .cargo/
 

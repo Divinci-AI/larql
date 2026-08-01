@@ -47,11 +47,15 @@ impl<'a> FfnBackend for RemoteMoeFfn<'a> {
         .forward(layer, x)
     }
 
-    fn forward_with_activation(&self, layer: usize, x: &Array2<f32>) -> (Array2<f32>, Array2<f32>) {
+    fn forward_observed(
+        &self,
+        layer: usize,
+        x: &Array2<f32>,
+    ) -> (Array2<f32>, crate::ffn::FfnActivations) {
         WeightFfn {
             weights: self.weights,
         }
-        .forward_with_activation(layer, x)
+        .forward_observed(layer, x)
     }
 
     fn name(&self) -> &str {
@@ -116,8 +120,9 @@ mod tests {
         let dense = ffn.forward(0, &x);
         assert_eq!(dense.shape()[0], 2);
         assert!(dense.iter().all(|v| v.is_finite()));
-        let (out, act) = ffn.forward_with_activation(0, &x);
+        let (out, obs) = ffn.forward_observed(0, &x);
         assert_eq!(out.shape()[0], 2);
+        let act = obs.into_dense().expect("dense fallback observes densely");
         assert_eq!(act.shape()[0], 2);
     }
 }

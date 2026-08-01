@@ -9,6 +9,72 @@ use super::config_io::{
     REQUIRED_CONFIG_FIELDS,
 };
 use super::*;
+use crate::config::ExpertRoutingPolicy;
+
+/// A Qwen3-30B-A3B config with `norm_topk_prob` set, cleared, or absent.
+fn qwen3_moe_config(norm_topk_prob: Option<bool>) -> serde_json::Value {
+    let mut config = serde_json::json!({
+        "model_type": "qwen3_moe",
+        "hidden_size": 2048,
+        "intermediate_size": 6144,
+        "moe_intermediate_size": 768,
+        "num_hidden_layers": 48,
+        "num_attention_heads": 32,
+        "num_key_value_heads": 8,
+        "num_experts": 128,
+        "num_experts_per_tok": 8
+    });
+    if let Some(flag) = norm_topk_prob {
+        config["norm_topk_prob"] = serde_json::json!(flag);
+    }
+    config
+}
+
+/// The routing order is a fact about the checkpoint, so the default reads it.
+///
+/// Guard for the third recurrence of `docs/k3-funnel.md` §4.7 finding 5: the
+/// `norm_topk_prob` read lived on `OlmoeArch` alone, so every other MoE
+/// architecture silently took `SoftmaxThenSelect` whatever its config said —
+/// a rescale of the entire expert branch that still produces fluent output.
+#[test]
+fn routing_policy_is_read_from_config_not_assumed() {
+    let policy_for = |flag| detect_from_json(&qwen3_moe_config(flag)).expert_routing_policy();
+
+    assert_eq!(
+        policy_for(Some(true)),
+        ExpertRoutingPolicy::NormalisedOverSelected,
+        "norm_topk_prob: true renormalises the selected weights"
+    );
+    assert_eq!(
+        policy_for(Some(false)),
+        ExpertRoutingPolicy::SoftmaxThenSelect
+    );
+    // Absent is the conservative reading: the checkpoint never asked for a
+    // renormalisation, so none is applied.
+    assert_eq!(policy_for(None), ExpertRoutingPolicy::SoftmaxThenSelect);
+}
+
+/// GPT-OSS fixes its routing order in the architecture rather than in config,
+/// so its override has to survive a config that says otherwise.
+#[test]
+fn an_architecture_owned_routing_order_beats_the_config() {
+    let config = serde_json::json!({
+        "model_type": "gpt_oss",
+        "hidden_size": 2880,
+        "intermediate_size": 2880,
+        "num_hidden_layers": 24,
+        "num_attention_heads": 64,
+        "num_key_value_heads": 8,
+        "num_local_experts": 32,
+        "experts_per_token": 4,
+        "norm_topk_prob": false
+    });
+
+    assert_eq!(
+        detect_from_json(&config).expert_routing_policy(),
+        ExpertRoutingPolicy::NormalisedOverSelected
+    );
+}
 
 #[test]
 fn test_detect_gemma3() {
@@ -250,7 +316,8 @@ fn test_detect_qwen3_moe_30b() {
         "num_attention_heads": 32,
         "num_key_value_heads": 8,
         "num_experts": 128,
-        "num_experts_per_tok": 8
+        "num_experts_per_tok": 8,
+        "norm_topk_prob": true
     });
 
     let arch = detect_from_json(&config);
@@ -259,6 +326,15 @@ fn test_detect_qwen3_moe_30b() {
     assert_eq!(arch.num_experts(), 128);
     assert_eq!(arch.num_experts_per_token(), 8);
     assert_eq!(arch.moe_intermediate_size(), 768);
+
+    // Load-bearing: this fixture used to omit `norm_topk_prob`, so it could not
+    // tell the two routing orders apart and `QwenArch` inherited the wrong one.
+    // Qwen3-30B-A3B really does ship `true`, and the orders differ by a rescale
+    // of the whole expert branch.
+    assert_eq!(
+        arch.expert_routing_policy(),
+        ExpertRoutingPolicy::NormalisedOverSelected
+    );
     assert_eq!(arch.moe_router_key(0).unwrap(), "layers.0.mlp.gate.weight");
     assert_eq!(
         arch.expert_ffn_gate_key(0, 5).unwrap(),
@@ -2150,4 +2226,65 @@ fn gpt2_legacy_field_aliases_parsed() {
     assert_eq!(arch.config().intermediate_size, 3072);
     // Eps alias also resolves.
     assert_eq!(arch.norm_eps(), 1e-5);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// kv_recomputable_from_residuals — structural capability predicate
+// for residual-recompute engines (markov-residual family).
+// ═══════════════════════════════════════════════════════════════
+
+#[test]
+fn kv_recomputable_from_residuals_true_for_rope_direct_projection_archs() {
+    // Gemma-family (RMSNorm + RoPE + direct K/V projection) satisfies
+    // every structural precondition.
+    let gemma = detect_from_json(&serde_json::json!({
+        "model_type": "gemma3",
+        "hidden_size": 2560,
+        "num_hidden_layers": 34,
+        "num_attention_heads": 8,
+        "num_key_value_heads": 4,
+    }));
+    assert!(gemma.kv_recomputable_from_residuals());
+
+    // Llama: same structural shape.
+    let llama = detect_from_json(&serde_json::json!({
+        "model_type": "llama",
+        "hidden_size": 4096,
+        "num_hidden_layers": 32,
+    }));
+    assert!(llama.kv_recomputable_from_residuals());
+}
+
+#[test]
+fn kv_recomputable_from_residuals_false_for_mla() {
+    // DeepSeek MLA compresses K/V through a decode-time latent; the
+    // residual-recompute path cannot rebuild K/V from
+    // `attn_k_key`/`attn_v_key` projections.
+    let deepseek = detect_from_json(&serde_json::json!({
+        "model_type": "deepseek_v2",
+        "hidden_size": 5120,
+        "num_hidden_layers": 60,
+        "num_attention_heads": 128,
+        "num_key_value_heads": 128,
+        "kv_lora_rank": 512,
+        "q_lora_rank": 1536,
+    }));
+    assert!(deepseek.uses_mla());
+    assert!(!deepseek.kv_recomputable_from_residuals());
+}
+
+#[test]
+fn kv_recomputable_from_residuals_false_for_learned_position_tables() {
+    // GPT-2's learned absolute position embedding (`wpe`) is applied at
+    // embed time by absolute index — outside the recompute path, which
+    // only re-derives RoPE.
+    let gpt2 = detect_from_json(&serde_json::json!({
+        "model_type": "gpt2",
+        "hidden_size": 768,
+        "num_hidden_layers": 12,
+        "num_attention_heads": 12,
+        "num_key_value_heads": 12,
+    }));
+    assert!(gpt2.position_embed_key().is_some());
+    assert!(!gpt2.kv_recomputable_from_residuals());
 }

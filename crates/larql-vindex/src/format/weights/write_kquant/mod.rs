@@ -140,8 +140,9 @@ fn pad_to_block(data: &[f32]) -> Vec<f32> {
 /// zero-pads the input vector to `padded_cols`).
 pub(super) fn pad_rows_to_block(data: &[f32], rows: usize, cols: usize) -> (Vec<f32>, usize) {
     debug_assert_eq!(data.len(), rows * cols);
-    let block = larql_models::quant::ggml::K_QUANT_BLOCK_ELEMS;
-    let padded_cols = cols.div_ceil(block) * block;
+    // One formula, shared with the readers (`kquant_decode`,
+    // `dequantize_matrix`): writer and decoders must agree on the stride.
+    let padded_cols = larql_models::quant::ggml::k_quant_padded_cols(cols);
     if padded_cols == cols {
         return (data.to_vec(), cols);
     }

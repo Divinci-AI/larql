@@ -14,7 +14,7 @@
 //! End-to-end attention dispatch + Q4K decode paths are covered by the
 //! integration tests on the inference engines (StandardEngine uses
 //! this `KvDispatch` impl through the trait).
-use super::handles::cpu_q4k_cache_mut;
+use super::handles::try_cpu_q4k_cache_mut;
 use super::*;
 use crate::attention::decode::q4k_direct_attn_enabled;
 use crate::kv_dispatch::{
@@ -167,14 +167,40 @@ fn cpu_handle_mut_panics_on_wrong_handle_type() {
     b.append_kv(&mut h, &[0.0; 4], &[0.0; 4], 0);
 }
 
+/// The coarse-decode downcast declines gracefully: a per-layer
+/// `CpuKvHandle` (or any non-Q4K-cache handle) yields `None`, not a
+/// panic — the engine interprets `None` as "coarse-decode this handle
+/// elsewhere" and takes its per-layer path. Pinned because the
+/// panicking predecessor aborted 1-layer models whose per-layer prefill
+/// produced exactly one handle.
 #[test]
-fn cpu_q4k_cache_mut_panics_on_wrong_handle_type() {
+fn try_cpu_q4k_cache_mut_returns_none_on_wrong_handle_type() {
     let mut h = KvHandle::new(CpuKvHandle::new(0, 4));
-    // Driving the Q4K-cache helper on a plain CpuKvHandle panics.
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        cpu_q4k_cache_mut(&mut h);
-    }));
-    assert!(result.is_err(), "wrong handle type must panic");
+    assert!(
+        try_cpu_q4k_cache_mut(&mut h).is_none(),
+        "wrong handle type must decline, not panic"
+    );
+    // The matching type still downcasts.
+    let mut q4k = KvHandle::new(CpuQ4kCacheHandle { cache: vec![None] });
+    assert!(try_cpu_q4k_cache_mut(&mut q4k).is_some());
+}
+
+/// `coarse_decode_step` with a per-layer handle returns `None` (the
+/// graceful decline surfaced through the trait method engines call).
+#[test]
+fn coarse_decode_step_declines_gracefully_on_per_layer_handle() {
+    use crate::test_fixtures::make_q4k_fixture_index;
+    use larql_models::test_fixtures::make_test_q4k_weights;
+    let b = backend();
+    let weights = make_test_q4k_weights();
+    let idx = make_q4k_fixture_index(&weights);
+    // A per-layer handle — the shape a per-layer prefill stores.
+    let mut h = KvHandle::new(CpuKvHandle::new(0, 4));
+    let result = b.coarse_decode_step(&weights, 0u32, Some(&idx), &mut h, 0);
+    assert!(
+        result.is_none(),
+        "coarse decode on a per-layer handle must return None, not panic"
+    );
 }
 
 /// Immutable downcast helper (`cpu_handle`) panics on the wrong
@@ -338,6 +364,65 @@ fn coarse_decode_step_returns_none_without_index() {
     let mut handle = KvHandle::new(CpuQ4kCacheHandle { cache: vec![None] });
     let result = b.coarse_decode_step(&weights, 0u32, None, &mut handle, 0);
     assert!(result.is_none());
+}
+
+/// `read_kv_row_at` on the coarse Q4K handle returns the row at the
+/// requested ABSOLUTE position, value-equal to the per-position K/V the
+/// state dump captured — the contract `UnlimitedContextEngine`'s
+/// boundary-checkpoint readback depends on.
+#[test]
+fn read_kv_row_at_returns_absolute_rows_matching_state_dump() {
+    use crate::test_fixtures::make_q4k_fixture_index;
+    use larql_models::test_fixtures::make_test_q4k_weights;
+    let b = backend();
+    let weights = make_test_q4k_weights();
+    let idx = make_q4k_fixture_index(&weights);
+    const PROMPT: [u32; 3] = [0, 1, 2];
+    let mut state = crate::PerLayerDecodeState::with_capacity(weights.num_layers);
+    let (_h, handle) = b
+        .coarse_prefill_with_state(&weights, &PROMPT, Some(&idx), Some(&mut state))
+        .expect("Q4K prefill succeeds");
+    let k_dump: Vec<Array2<f32>> = state
+        .k_new_per_layer
+        .into_iter()
+        .map(|h| h.into_array())
+        .collect();
+    let v_dump: Vec<Array2<f32>> = state
+        .v_new_per_layer
+        .into_iter()
+        .map(|h| h.into_array())
+        .collect();
+    for layer in 0..weights.num_layers {
+        for pos in 0..PROMPT.len() {
+            let (k_row, v_row) = b
+                .read_kv_row_at(&handle, layer, pos)
+                .expect("in-range row readback");
+            assert_eq!(
+                k_row,
+                k_dump[layer].row(pos).to_vec(),
+                "layer {layer} pos {pos}: K row != state-dump row"
+            );
+            assert_eq!(
+                v_row,
+                v_dump[layer].row(pos).to_vec(),
+                "layer {layer} pos {pos}: V row != state-dump row"
+            );
+        }
+        // Out-of-range position → None, not garbage.
+        assert!(b.read_kv_row_at(&handle, layer, PROMPT.len()).is_none());
+    }
+    // Out-of-range layer → None.
+    assert!(b.read_kv_row_at(&handle, weights.num_layers, 0).is_none());
+}
+
+/// `read_kv_row_at` returns None for the per-layer `CpuKvHandle` shape
+/// (no cross-layer cache to index into).
+#[test]
+fn read_kv_row_at_returns_none_for_per_layer_handle() {
+    let b = backend();
+    let mut h = b.alloc_kv_buffer(0, 4, 4);
+    b.append_kv(&mut h, &[1.0; 4], &[2.0; 4], 0);
+    assert!(b.read_kv_row_at(&h, 0, 0).is_none());
 }
 
 /// `coarse_prefill_with_state` returns None when the arch can't run

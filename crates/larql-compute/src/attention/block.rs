@@ -465,14 +465,18 @@ fn run_attention_block_core(
 
     // GQA attention
     let softcap = arch.attn_logit_softcapping();
+    // Attention sinks: one learned logit per query head, competing in the
+    // softmax and then discarded (GPT-OSS). Absent for every other
+    // architecture, in which case the softmax is the ordinary one.
+    let sinks = super::sinks::resolve(arch.attn_sinks_key(layer), &weights.vectors, num_q, layer);
     let reduced_qk_weights = reduced_qk_rank.map(|rank| {
         gqa_reduced_qk_all_weights(
-            &q_rope, &k_rope, num_q, head_dim, reps, scale, seq_len, softcap, rank,
+            &q_rope, &k_rope, num_q, head_dim, reps, scale, seq_len, softcap, sinks, rank,
         )
     });
     let (mut attn_out, attn_weights, full_all_attn_weights) = if capture_all_attention {
         let (out, all_weights) = gqa_attention_with_all_weights(
-            &q_rope, &k_rope, &v_final, num_q, head_dim, reps, scale, seq_len, softcap,
+            &q_rope, &k_rope, &v_final, num_q, head_dim, reps, scale, seq_len, softcap, sinks,
         );
         (out, None, Some(all_weights))
     } else {
@@ -487,6 +491,7 @@ fn run_attention_block_core(
             seq_len,
             capture_attention,
             softcap,
+            sinks,
         );
         (out, weights, None)
     };

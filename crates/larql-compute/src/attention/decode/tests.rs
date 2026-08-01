@@ -143,13 +143,94 @@ fn gqa_decode_step_applies_softcap() {
     let q = Array2::from_elem((1, 4), 0.5f32); // num_q=1, head_dim=4
     let k = Array2::from_elem((1, 4), 0.25f32);
     let v = Array2::from_shape_vec((1, 4), vec![1.0, 2.0, 3.0, 4.0]).unwrap();
-    let out = gqa_attention_decode_step(&q, &k, &v, 1, 4, 1, 1.0, Some(30.0));
+    let out = gqa_attention_decode_step(&q, &k, &v, 1, 4, 1, 1.0, Some(30.0), None);
     assert_eq!(out.shape(), &[1, 4]);
     // Single key → softmax weight 1.0 → output is exactly the V row.
     for d in 0..4 {
         assert!((out[[0, d]] - v[[0, d]]).abs() < 1e-5);
     }
     assert!(out.iter().all(|x| x.is_finite()));
+}
+
+// ── Spin-pool vs rayon scheduling parity ───────────────────────────
+
+/// Build a decode-step input set big enough that the two schedulers
+/// genuinely partition the heads differently (the spin pool hands each
+/// participant a contiguous block; rayon work-steals per chunk).
+/// Deterministic, so the two runs are comparable bit-for-bit.
+fn parity_inputs() -> (Array2<f32>, Array2<f32>, Array2<f32>) {
+    const NUM_Q: usize = 16;
+    const HEAD_DIM: usize = 8;
+    const TOTAL_LEN: usize = 24;
+    let q = Array2::from_shape_fn((1, NUM_Q * HEAD_DIM), |(_, i)| {
+        ((i % 13) as f32 - 6.0) * 0.125
+    });
+    let k = Array2::from_shape_fn((TOTAL_LEN, NUM_Q * HEAD_DIM), |(t, i)| {
+        ((t * 7 + i) % 11) as f32 * 0.0625 - 0.25
+    });
+    let v = Array2::from_shape_fn((TOTAL_LEN, NUM_Q * HEAD_DIM), |(t, i)| {
+        ((t * 3 + i * 5) % 17) as f32 * 0.03125
+    });
+    (q, k, v)
+}
+
+/// The spin-pool and rayon paths must produce bit-identical output.
+///
+/// `gqa_attention_decode_step` branches on `spin_pool::enabled()` and
+/// the two arms share one `head_body`, so the claim in that comment —
+/// "the result is identical to the previous serial loop" — is only
+/// actually checked here. It also matters for coverage: CI runs with a
+/// single ambient setting, so whichever arm isn't the default is dead
+/// unless a test drives both.
+///
+/// Uses the thread-local override rather than `std::env::set_var`,
+/// which segfaults under parallel `getenv` (see `options::ENV_OVERRIDES`).
+#[test]
+fn spin_pool_and_rayon_paths_agree_bitwise() {
+    use crate::options::{clear_fast_path_overrides, set_fast_path_override, ENV_SPIN_POOL};
+
+    let (q, k, v) = parity_inputs();
+    let run = || gqa_attention_decode_step(&q, &k, &v, 16, 8, 1, 0.35, None, None);
+
+    set_fast_path_override(ENV_SPIN_POOL, true);
+    let spin = run();
+    set_fast_path_override(ENV_SPIN_POOL, false);
+    let rayon = run();
+    clear_fast_path_overrides();
+
+    assert_eq!(spin.shape(), rayon.shape());
+    assert!(spin.iter().all(|x| x.is_finite()), "spin path produced NaN");
+    for (i, (s, r)) in spin.iter().zip(rayon.iter()).enumerate() {
+        assert_eq!(
+            s.to_bits(),
+            r.to_bits(),
+            "element {i}: spin {s} != rayon {r} — the two schedulers must not \
+             change the arithmetic, only which thread runs which head"
+        );
+    }
+}
+
+/// Both arms must also agree when sinks are in play — the sink is
+/// indexed per-head (`sinks[h]`), so a scheduler that mis-assigns `h`
+/// would silently apply the wrong head's sink.
+#[test]
+fn spin_pool_and_rayon_paths_agree_with_attention_sinks() {
+    use crate::options::{clear_fast_path_overrides, set_fast_path_override, ENV_SPIN_POOL};
+
+    let (q, k, v) = parity_inputs();
+    // Distinct per-head values so a swapped head index changes the result.
+    let sinks: Vec<f32> = (0..16).map(|h| h as f32 * 0.5 - 3.0).collect();
+    let run = || gqa_attention_decode_step(&q, &k, &v, 16, 8, 1, 0.35, None, Some(&sinks));
+
+    set_fast_path_override(ENV_SPIN_POOL, true);
+    let spin = run();
+    set_fast_path_override(ENV_SPIN_POOL, false);
+    let rayon = run();
+    clear_fast_path_overrides();
+
+    for (i, (s, r)) in spin.iter().zip(rayon.iter()).enumerate() {
+        assert_eq!(s.to_bits(), r.to_bits(), "element {i} diverged under sinks");
+    }
 }
 
 // ── Q4K-direct decode-step path ────────────────────────────────────

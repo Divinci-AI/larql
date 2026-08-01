@@ -9,6 +9,7 @@ use ndarray::Array2;
 
 use larql_inference::attention::{run_attention_block_decode_step_backend, SharedKV};
 use larql_inference::ffn::BackendFfn;
+use larql_inference::forward::ple::precompute_per_layer_inputs;
 use larql_inference::forward::{embed_tokens_pub, run_ffn};
 use larql_inference::model::ModelWeights;
 use larql_inference::vindex::{WalkFfn, WalkFfnConfig};
@@ -73,6 +74,9 @@ pub fn rs_extend_from_checkpoint_backend(
     for (i, &token_id) in token_ids.iter().enumerate() {
         let abs_position = abs_start + i;
         let mut h = embed_tokens_pub(&weights, &[token_id]);
+        // PLE inputs are per-token — this loop embeds one token at a time,
+        // matching the legacy `kv_decode_step_run` recipe exactly.
+        let ple_inputs = precompute_per_layer_inputs(&weights, &h, &[token_id]);
 
         for (layer, kv_slot) in kv_cache.iter_mut().enumerate() {
             let kv_entry: Option<&SharedKV> = if kv_slot.0.shape()[0] > 0 {
@@ -102,6 +106,7 @@ pub fn rs_extend_from_checkpoint_backend(
                 layer,
                 &bffn,
                 moe_ffn,
+                ple_inputs.get(layer),
             );
             h = h_out;
             *kv_slot = new_kv;
@@ -165,6 +170,9 @@ pub fn rs_extend_inplace(
         // prior window length plus the tokens already appended this call.
         let len = prior_len + i;
         let mut h = embed_tokens_pub(&weights, &[token_id]);
+        // PLE inputs are per-token — this loop embeds one token at a time,
+        // matching the legacy `kv_decode_step_run` recipe exactly.
+        let ple_inputs = precompute_per_layer_inputs(&weights, &h, &[token_id]);
 
         for (layer, (k_buf, v_buf)) in kv_cache.iter_mut().enumerate() {
             let h_post_attn =
@@ -214,6 +222,7 @@ pub fn rs_extend_inplace(
                 layer,
                 &bffn,
                 moe_ffn,
+                ple_inputs.get(layer),
             );
             h = h_out;
         }
@@ -282,6 +291,9 @@ pub fn rs_extend_from_checkpoint_quant(
             None
         };
         let mut h = embed_tokens_pub(&weights, &[token_id]);
+        // PLE inputs are per-token — this loop embeds one token at a time,
+        // matching the legacy `kv_decode_step_run` recipe exactly.
+        let ple_inputs = precompute_per_layer_inputs(&weights, &h, &[token_id]);
         if let Some(start) = t_embed_start {
             t_embed += start.elapsed().as_secs_f64() * 1e6;
         }
@@ -345,10 +357,19 @@ pub fn rs_extend_from_checkpoint_quant(
             if ffn_native.is_none() && instrument {
                 t_ffn_helper_misses += 1;
             }
-            let h_out = ffn_native.unwrap_or_else(|| {
+            // Both branches return the bare post-FFN hidden —
+            // `ffn_decode_step_native` is also `moe_ffn_block_cpu`'s pre-PLE
+            // dense slab — so the PLE + layer_scalar tail applies to either.
+            let h_post_ffn = ffn_native.unwrap_or_else(|| {
                 let (h, _) = run_ffn(&weights, &h_post_attn, layer, &walk_ffn, false);
                 h
             });
+            let h_out = crate::engines::apply_ple_and_layer_scalar(
+                &weights,
+                &h_post_ffn,
+                layer,
+                ple_inputs.get(layer),
+            );
             if let Some(start) = t_ffn_start {
                 t_ffn += start.elapsed().as_secs_f64() * 1e6;
             }

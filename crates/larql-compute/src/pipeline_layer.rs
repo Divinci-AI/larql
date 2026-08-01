@@ -70,7 +70,13 @@ pub fn build_arch_params<'a>(
         .and_then(|v| v.first().copied())
         .unwrap_or(0.0);
 
+    let attn_sinks = arch
+        .attn_sinks_key(layer)
+        .and_then(|k| weights.vectors.get(&k))
+        .map(|v| v.as_slice());
+
     FullPipelineLayer {
+        attn_sinks,
         wq,
         wk,
         wv,
@@ -137,8 +143,18 @@ pub fn build_arch_params<'a>(
         sliding_window: sw,
         has_v_norm: arch.has_v_norm(),
         layer_scalar,
-        input_norm_bias: None,
-        post_attn_norm_bias: None,
+        // LayerNorm `β`. `None` for RMSNorm architectures, which have no
+        // bias term. These were hardcoded `None` until 2026-07-31, so every
+        // vindex-backed and Metal path silently dropped the shift for GPT-2
+        // and StarCoder2 even though the `layer_norm` shader implements it.
+        input_norm_bias: arch
+            .input_layernorm_bias_key(layer)
+            .and_then(|k| weights.vectors.get(&k))
+            .map(|v| v.as_slice()),
+        post_attn_norm_bias: arch
+            .post_attention_layernorm_bias_key(layer)
+            .and_then(|k| weights.vectors.get(&k))
+            .map(|v| v.as_slice()),
         q_norm_weight: arch
             .attn_q_norm_key(layer)
             .and_then(|k| weights.vectors.get(&k))

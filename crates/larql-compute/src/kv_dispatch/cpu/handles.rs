@@ -239,16 +239,15 @@ impl KvHandleInner for CpuQ4kCacheHandle {
     }
 }
 
-pub(super) fn cpu_q4k_cache_mut(h: &mut KvHandle) -> &mut CpuQ4kCacheHandle {
-    let backend_name = h.backend_name();
+/// Non-panicking downcast for the coarse-decode path. Returns `None`
+/// when the handle is not a `CpuQ4kCacheHandle` (e.g. a per-layer
+/// `CpuKvHandle` from the per-layer dispatch path) — the coarse intent
+/// contract lets callers interpret `None` as "this backend cannot
+/// coarse-decode this handle" and fall back, rather than aborting.
+/// Invariant: a `Some` return is the same handle `coarse_prefill`
+/// minted on this backend.
+pub(super) fn try_cpu_q4k_cache_mut(h: &mut KvHandle) -> Option<&mut CpuQ4kCacheHandle> {
     h.as_inner_mut()
         .as_any_mut()
         .downcast_mut::<CpuQ4kCacheHandle>()
-        .unwrap_or_else(|| {
-            panic!(
-                "CpuBackend::cached_decode_step_q4k received a foreign handle \
-                 (backend={backend_name}); handles must be allocated by the same \
-                 backend that consumes them"
-            )
-        })
 }

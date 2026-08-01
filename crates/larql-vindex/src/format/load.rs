@@ -78,6 +78,7 @@ impl VectorIndex {
             ];
             let mut total_gate = 0;
             for info in &config.layers {
+                check_layer_in_bounds(info.layer, num_layers)?;
                 gate_slices[info.layer] = crate::index::core::GateLayerSlice {
                     float_offset: info.offset as usize / bpf,
                     num_features: info.num_features,
@@ -237,6 +238,19 @@ impl VectorIndex {
     }
 }
 
+/// Validate a layer index parsed from `index.json` against the
+/// config's layer count. Layer entries index into vecs sized
+/// `config.num_layers`, so an out-of-range entry (truncated or
+/// hand-edited manifest) must surface as a parse error, not a panic.
+fn check_layer_in_bounds(layer: usize, num_layers: usize) -> Result<(), VindexError> {
+    if layer >= num_layers {
+        return Err(VindexError::Parse(format!(
+            "index.json layer entry {layer} out of range (num_layers = {num_layers})"
+        )));
+    }
+    Ok(())
+}
+
 /// Dequantize gate slices from `interleaved_kquant.bin` into an anonymous
 /// f16 mmap shaped like a real `gate_vectors.bin` file. Used when a
 /// Q4K vindex was extracted with `--drop-gate-vectors`.
@@ -287,6 +301,7 @@ fn synthesize_gate_from_q4k(
         num_layers
     ];
     for info in &config.layers {
+        check_layer_in_bounds(info.layer, num_layers)?;
         if !is_owned(info.layer) {
             continue;
         }
@@ -624,6 +639,60 @@ mod tests {
         let index = VectorIndex::load_vindex(dir.path(), &mut cb).unwrap();
         assert_eq!(index.num_layers, 3);
         assert_eq!(index.hidden_size, 8);
+    }
+
+    /// Regression (review 2026-07-30 H4): an index.json layer entry
+    /// with `layer >= num_layers` used to panic on
+    /// `gate_slices[info.layer] = …`. Malformed manifests must surface
+    /// as `VindexError::Parse`.
+    #[test]
+    fn load_vindex_out_of_range_layer_entry_errors() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("gate_vectors.bin"), vec![0u8; 32]).unwrap();
+        let json = serde_json::json!({
+            "version": 2,
+            "model": "test/unit",
+            "family": "llama",
+            "num_layers": 2,
+            "hidden_size": 8,
+            "intermediate_size": 4,
+            "vocab_size": 16,
+            "embed_scale": 1.0,
+            // layer 5 >= num_layers 2 — corrupt/hand-edited manifest
+            "layers": [
+                {"layer": 5, "num_features": 1, "offset": 0, "length": 32}
+            ],
+            "down_top_k": 5,
+            "has_model_weights": false,
+            "extract_level": "browse",
+            "dtype": "f32",
+            "quant": "none"
+        });
+        std::fs::write(dir.path().join("index.json"), json.to_string()).unwrap();
+        let mut cb = crate::index::SilentLoadCallbacks;
+        let err = match VectorIndex::load_vindex(dir.path(), &mut cb) {
+            Ok(_) => panic!("out-of-range layer entry must error, not load"),
+            Err(e) => e,
+        };
+        match err {
+            VindexError::Parse(msg) => {
+                assert!(msg.contains('5'), "should name the layer: {msg}");
+                assert!(msg.contains('2'), "should name the bound: {msg}");
+            }
+            other => panic!("expected Parse error, got {other:?}"),
+        }
+    }
+
+    /// Direct check of the shared bounds helper — also covers the
+    /// `synthesize_gate_from_q4k` path, which needs a full Q4K fixture
+    /// to reach end-to-end but calls the same helper first.
+    #[test]
+    fn check_layer_in_bounds_rejects_out_of_range() {
+        assert!(check_layer_in_bounds(0, 2).is_ok());
+        assert!(check_layer_in_bounds(1, 2).is_ok());
+        let err = check_layer_in_bounds(2, 2).expect_err("layer == num_layers");
+        assert!(err.to_string().contains("out of range"), "{err}");
+        assert!(check_layer_in_bounds(usize::MAX, 0).is_err());
     }
 
     #[test]

@@ -5,8 +5,8 @@ use crate::CpuBackend;
 use ndarray::Array2;
 
 use super::handles::{
-    cpu_handle, cpu_handle_mut, cpu_q4k_cache_mut, cpu_residual, CpuKvHandle, CpuQ4kCacheHandle,
-    CpuResidualHandle,
+    cpu_handle, cpu_handle_mut, cpu_residual, try_cpu_q4k_cache_mut, CpuKvHandle,
+    CpuQ4kCacheHandle, CpuResidualHandle,
 };
 use crate::attention::{run_attention_block_decode_step_backend, run_attention_with_kv_backend};
 use crate::kv_dispatch::{KvDispatch, KvHandle, ResidualHandle};
@@ -233,7 +233,11 @@ impl KvDispatch for CpuBackend {
         abs_position: usize,
     ) -> Option<Array2<f32>> {
         let index = index?;
-        let inner = cpu_q4k_cache_mut(handle);
+        // Graceful decline (not a panic) when the handle isn't the
+        // coarse `CpuQ4kCacheHandle` — e.g. a per-layer handle from a
+        // per-layer prefill. `None` tells the engine to use its
+        // per-layer decode path instead.
+        let inner = try_cpu_q4k_cache_mut(handle)?;
         // Prefer direct-matvec (no per-layer dequant) when supported.
         if crate::kquant_forward::supports_direct_matvec_decode(weights, index) {
             crate::kquant_forward::predict_kquant_decode_step_direct(
@@ -256,6 +260,30 @@ impl KvDispatch for CpuBackend {
         }
     }
 
+    /// Read K/V at absolute position `pos` for `layer` out of the
+    /// coarse Q4K cache handle. The cache rows are indexed by absolute
+    /// stream position (prefill row 0 onward), matching the trait
+    /// contract engines rely on for boundary-checkpoint readback
+    /// (`UnlimitedContextEngine::close_window` under HOnly). Returns
+    /// `None` for foreign handle shapes (per-layer `CpuKvHandle` has no
+    /// cross-layer cache) and for out-of-range `layer`/`pos`.
+    fn read_kv_row_at(
+        &self,
+        handle: &KvHandle,
+        layer: usize,
+        pos: usize,
+    ) -> Option<(Vec<f32>, Vec<f32>)> {
+        let inner = handle
+            .as_inner()
+            .as_any()
+            .downcast_ref::<CpuQ4kCacheHandle>()?;
+        let (k, v) = inner.cache.get(layer)?.as_ref()?;
+        if pos >= k.shape()[0] {
+            return None;
+        }
+        Some((k.row(pos).to_vec(), v.row(pos).to_vec()))
+    }
+
     /// CPU per-layer decode with optional state capture (W1-GPU step 3).
     /// Threads `Option<&mut PerLayerDecodeState>` into the same direct-
     /// matvec walk; when `Some`, each layer's `h_in` / `k_new` / `v_new`
@@ -275,7 +303,8 @@ impl KvDispatch for CpuBackend {
         state: Option<&mut crate::PerLayerDecodeState>,
     ) -> Option<Array2<f32>> {
         let index = index?;
-        let inner = cpu_q4k_cache_mut(handle);
+        // Same graceful decline as `coarse_decode_step` — see there.
+        let inner = try_cpu_q4k_cache_mut(handle)?;
         if crate::kquant_forward::supports_direct_matvec_decode(weights, index) {
             crate::kquant_forward::predict_kquant_decode_step_direct_with_state(
                 weights,

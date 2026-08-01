@@ -14,7 +14,10 @@ use clap::{Args, Subcommand};
 use indicatif::{ProgressBar, ProgressStyle};
 use larql_inference::attention::SharedKV;
 use larql_inference::forward::{apply_norm, dot_proj};
-use larql_inference::{encode_prompt, InferenceModel, ModelWeights, WeightFfn};
+use larql_inference::{
+    encode_prompt, expert_weights_resolvable, ExpertWeightFfn, FfnBackend, InferenceModel,
+    ModelWeights, WeightFfn,
+};
 use ndarray::{s, Array2};
 
 const LN_2: f64 = std::f64::consts::LN_2;
@@ -1402,6 +1405,28 @@ fn print_score_summary(summary: &ScoreSummary, bytes: usize, chars: usize) {
     println!("total bits:     {:>10.1}", summary.total_bits);
 }
 
+/// Pick the FFN backend that matches this model's architecture.
+///
+/// The scorer used to hardcode [`WeightFfn`], which resolves the *dense*
+/// `ffn_{gate,up,down}_key`. A mixture-of-experts model has no such tensors,
+/// so scoring one panicked with a misleading "this is a `--compact` vindex"
+/// hint — the tensors were not missing, they never existed for that
+/// architecture. That made `shannon verify` unusable on every MoE model, which
+/// is the entire model class the K3 ladder is built on (GPT-OSS, Kimi Linear,
+/// K3). See `docs/k3-funnel.md` §4.7.
+///
+/// `expert_weights_resolvable` gates on the weights actually being present, so
+/// a MoE architecture whose experts are packed rather than per-expert f32 still
+/// falls through to the dense path and fails with its own error rather than
+/// half-resolving here.
+fn score_ffn(weights: &ModelWeights) -> Box<dyn FfnBackend + '_> {
+    if weights.arch.is_moe() && expert_weights_resolvable(weights, 0) {
+        Box::new(ExpertWeightFfn { weights })
+    } else {
+        Box::new(WeightFfn { weights })
+    }
+}
+
 fn forward_hidden(
     weights: &ModelWeights,
     token_ids: &[u32],
@@ -1409,7 +1434,7 @@ fn forward_hidden(
     if token_ids.is_empty() {
         return Err("empty token window".into());
     }
-    let ffn = WeightFfn { weights };
+    let ffn = score_ffn(weights);
     let mut h = larql_inference::forward::embed_tokens_pub(weights, token_ids);
     let ple_inputs =
         larql_inference::forward::ple::precompute_per_layer_inputs(weights, &h, token_ids);
@@ -1423,7 +1448,7 @@ fn forward_hidden(
             larql_inference::WeightsView::dense(weights),
             &h,
             layer,
-            &ffn,
+            &*ffn,
             false,
             ple_inputs.get(layer),
             shared_kv,
@@ -1444,7 +1469,7 @@ fn forward_hidden_all_layers(
     if token_ids.is_empty() {
         return Err("empty token window".into());
     }
-    let ffn = WeightFfn { weights };
+    let ffn = score_ffn(weights);
     let h0 = larql_inference::forward::embed_tokens_pub(weights, token_ids);
     let ple_inputs =
         larql_inference::forward::ple::precompute_per_layer_inputs(weights, &h0, token_ids);
@@ -1461,7 +1486,7 @@ fn forward_hidden_all_layers(
             larql_inference::WeightsView::dense(weights),
             &h,
             layer,
-            &ffn,
+            &*ffn,
             false,
             ple_inputs.get(layer),
             shared_kv,

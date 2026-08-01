@@ -11,6 +11,7 @@ pub mod capabilities_cmd;
 pub mod card_cmd;
 pub mod dec_bench;
 pub mod diag_cmd;
+pub mod k3_ledger;
 pub mod link_cmd;
 pub mod list_cmd;
 pub mod model_cmd;

@@ -45,13 +45,15 @@ a local directory path — see [Model resolution](#model-resolution) below.
 ## Factory
 
 Vindex Factory tooling ([docs/vindex-factory.md](vindex-factory.md)) —
-recipe validation, `build_id`, capability reporting, card generation.
+recipe validation, `build_id`, capability reporting, card generation,
+and the PREFLIGHT→RELEASE build driver.
 
 | Command | Description |
 |---|---|
 | `recipe validate <FILE>` | Structurally validate a recipe file; prints every problem found. |
 | `recipe build-id <FILE>` | Print a recipe's `build_id` (content hash over source+extractor+outputs). |
-| `recipe estimate <FILE>` | Upstream size, per-output size, executor recommendation, and a cost band. The only `recipe` subcommand that touches the network. |
+| `recipe estimate <FILE>` | Upstream size, per-output size, executor recommendation, and a cost band. Touches the network. |
+| `recipe build <FILE> [--scratch-dir DIR]` | Run PREFLIGHT→RELEASE: fetch the pinned revision, extract, slice, verify checksums, publish private, then flip public. Prints a `BuildRecord` as JSON; exits non-zero on a stage failure. |
 | `capabilities` | Print this release's capability manifest — recognised architectures and what each supports. |
 | `card render` | Render a Hub model card from a recipe, manifest, and verification report. |
 
@@ -339,6 +341,69 @@ larql dec-bench drift gemma4-26b-a4b.vindex --ffn http://127.0.0.1:8081 \
 
 Drivers wrapping these for whole DEC stages live in `scripts/dec0-loopback.sh`
 (arm M), `scripts/dec0-arm-l.sh` (arm L / Linux) and `scripts/dec0p5-x86.sh`.
+
+### `larql k3-ledger`
+
+Checkpoint-derived serving arithmetic for the DEC-8/9 ladder — see
+[`docs/dec-funnel.md`](dec-funnel.md). Most subcommands are zero-compute: two
+HTTP range requests against the model repo for its tensor table, then division.
+Subcommands: `budget`, `touch`, `frontier`, `block`, `ceilings`, `formats`,
+`transcode-scan`, `symbol-census`, `kda-graph`, `freq-mass`.
+
+`formats` and `freq-mass` take **no checkpoint and no network** — the first is
+decided by counting the source alphabet, the second reads a local capture pool.
+
+#### `larql k3-ledger freq-mass`
+
+**Frequency-mass coverage**: what fraction of routing *events* a resident set of
+C symbols per layer actually serves. Support asks *which* symbols a session
+touches; mass asks *how often* — and only the second prices a cache. Consumes a
+`dec-bench capture --routing` pool.
+
+Four estimators, all scored on the **same** held-out window so only the
+residency-ranking key differs:
+
+| Arm | Key |
+|---|---|
+| `λ=1` static slice | pooled prior, **leave-one-out** so a session never fits itself |
+| `λ=0` causal cache | that session's own history only |
+| interior `λ` | shrinkage cache — the design that exists if neither pure arm wins |
+| oracle | ranks by the scored events themselves; unrealisable upper bound |
+| null | eval half redrawn from the pooled marginal, session identity destroyed |
+
+The null is load-bearing: a short fit window concentrates by counting noise
+alone, so `oracle − null` is the locality signal and `oracle` alone overstates it.
+
+| Flag | Description | Default |
+|---|---|---|
+| `--pool <DIR>` | Capture pool written with `dec-bench capture --routing` | — |
+| `--cache-sizes <LIST>` | Resident-set sizes, symbols per stratum | 1 2 4 8 16 32 64 |
+| `--lambdas <LIST>` | Shrinkage weights on the pooled prior | 0 .25 .5 .75 .9 1 |
+| `--fit-fraction <F>` | Share of each session's steps used to fit the adaptive key | 0.5 |
+| `--seed <N>` | Seed for the marginal-preserving null | 20260801 |
+| `--support-steps <LIST>` | Step counts at which to report support growth | 1 2 4 8 16 |
+| `--operating-residency <F>` | Residency fraction to grade at (K3's 55–65 GB slice is 5–7%) | 0.0625 |
+| `--per-symbol` | Also emit the measured per-symbol mass vector (JSON only) | false |
+| `--json` | Full record as JSON | false |
+
+```bash
+# grade a resident set against the banked DEC-0 routed pool
+larql k3-ledger freq-mass --pool bench/dec0/residuals-gemma4-26b-a4b-q4k-routed
+
+# DEC-8.4's allocator input: per-expert counts and probabilities, per layer
+larql k3-ledger freq-mass --pool bench/dec0/residuals-gemma4-26b-a4b-q4k-routed \
+  --per-symbol --json > mass.json
+```
+
+The instrument is **symbol-agnostic**: `SelectionTrace` calls the selected
+things *symbols* and never learns whether they are MoE experts (DEC-8.4) or FFN
+feature rows (DEC-8.1), so one set of conventions grades the resident-bank bet
+and the compact-subexpert bet. The export names its unit rather than assuming.
+
+Cold-tail counts (`observed_symbols`, `unobserved_symbols`, per-stratum
+coverage) are emitted whether or not `--per-symbol` is set — the row vector is
+opt-in because at K3's 92 × 896 it dwarfs the rest of the document. An absent
+symbol means **unobserved in this capture**, never zero probability.
 
 ### `larql model`
 
@@ -1459,11 +1524,12 @@ larql parity gemma4-31b.vindex --component layer --prompt "The capital of France
 
 Vindex Factory tooling — [docs/vindex-factory.md](vindex-factory.md) is
 the full spec; [crates/larql-factory/README.md](../crates/larql-factory/README.md)
-is the crate reference. Everything here runs locally with one exception
-(`recipe estimate`, which fetches the upstream repo's file listing and
-`config.json` over HTTP) — the recipe repo's remaining PR checks
-(upstream existence, licence allowlist, Hub name collision) aren't
-built yet.
+is the crate reference. `recipe estimate` fetches the upstream repo's
+file listing and `config.json` over HTTP; `recipe build` goes further
+and actually runs the pipeline (network + Hub credentials + disk) —
+everything else here is local and read-only. The recipe repo's
+remaining PR checks (upstream existence, licence allowlist, Hub name
+collision) aren't built yet.
 
 ### `larql recipe validate`
 
@@ -1542,6 +1608,62 @@ larql recipe estimate gemma-3-4b-it.yaml
 #   "cost_estimate_usd": { "low_usd": 1.31, "high_usd": 2.60 },
 #   "declared_max_usd": 12.0,
 #   "budget_warning": null
+# }
+```
+
+### `larql recipe build`
+
+Run PREFLIGHT through RELEASE (§7): check the scratch directory is
+writable, fetch the recipe's pinned revision, `larql extract`, `larql
+slice` for each declared output, measure what came out, `larql verify`
+(checksum integrity — not the numeric reconstruction/logit-match
+checks §8.1 describes, which need per-architecture tensor knowledge
+this driver doesn't have), `larql hf publish --private` per output,
+then `larql hf visibility --public` once every output has verified
+(§8's "nothing goes public unverified"). Every step self-invokes this
+same `larql` binary as a subprocess.
+
+MIRROR (R2) and REGISTER (chuk-experiments-server) aren't run here —
+nothing in this codebase talks to either, and the spec's own text
+assumes both belong to the rig worker. Pipe the printed `BuildRecord`
+JSON to whatever external harness owns them, the way `dec0-loopback.sh`
+already wraps `dec-bench`'s own JSON output.
+
+```
+larql recipe build <FILE> [--scratch-dir <DIR>]
+```
+
+| Flag | Description | Default |
+|---|---|---|
+| `--scratch-dir <DIR>` | Working directory for the HF cache and extracted/sliced outputs | a fresh temp directory, removed when the build finishes |
+
+Always prints a `BuildRecord` as JSON, whether the build passed or
+failed — a stage failure is data (`"status": "failed"`, which stage,
+its error message), not a crash. Exits non-zero when `"status"` isn't
+`"passed"`.
+
+**Example:**
+
+```bash
+larql recipe build gemma-3-4b-it.yaml
+# {
+#   "build_id": "398f1b8e29adecf2ef3838748558ae6b82b292b96ed8ab412725886e4194e30a",
+#   "recipe_name": "gemma-3-4b-it",
+#   "outputs": [
+#     { "preset": "full", "size_bytes": 6198374400, "repo": "chrishayuk/gemma-3-4b-it-vindex", "released": true },
+#     { "preset": "client", "size_bytes": 1073741824, "repo": "chrishayuk/gemma-3-4b-it-vindex-client", "released": true }
+#   ],
+#   "status": "passed"
+# }
+
+# A stage failure keeps whatever earlier stages completed:
+# {
+#   "build_id": "...",
+#   "recipe_name": "gemma-3-4b-it",
+#   "outputs": [{ "preset": "full", "size_bytes": 6198374400, "repo": null, "released": false }],
+#   "status": "failed",
+#   "stage": "publish",
+#   "message": "larql hf publish failed for chrishayuk/gemma-3-4b-it-vindex: 401 unauthorized"
 # }
 ```
 

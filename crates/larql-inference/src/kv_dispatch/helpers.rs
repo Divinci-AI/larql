@@ -24,29 +24,40 @@ use ndarray::Array2;
 use super::{EngineBackend, KvHandle};
 use crate::async_compute_backend::AsyncComputeBackend;
 use crate::ffn::FfnBackend;
+use crate::forward::layer::apply_layer_scalar;
+use crate::forward::ple::{apply_per_layer_embedding, precompute_per_layer_inputs};
 use crate::forward::{embed_tokens_pub, run_ffn};
 
-/// Per-layer FFN dispatch for the KV-cached engine path, MoE-aware.
+/// Per-layer FFN + PLE + layer_scalar dispatch for the KV-cached engine
+/// path, MoE-aware.
 ///
 /// On hybrid-MoE architectures, try the backend's
 /// [`FfnBackend::forward_moe_full_layer`] hook first — it returns the full
-/// layer output (dense `h1` + experts `h2` + combine + outer-norm). A
-/// remote-MoE backend ([`crate::ffn::RemoteMoeFfn`]) implements it to
-/// dispatch experts to the shards, giving CPU `--moe-shards` a real KV
-/// cache. When the hook declines (`None`) — or the model is dense — fall
-/// back to the standard dense FFN, preserving prior behaviour exactly.
+/// layer output (dense `h1` + experts `h2` + combine + outer-norm + PLE +
+/// layer_scalar; see `moe_ffn_block_cpu`, which applies the last two
+/// internally). A remote-MoE backend ([`crate::ffn::RemoteMoeFfn`])
+/// implements it to dispatch experts to the shards, giving CPU
+/// `--moe-shards` a real KV cache. When the hook declines (`None`) — or
+/// the model is dense — fall back to the standard dense FFN followed by
+/// `apply_per_layer_embedding` + `apply_layer_scalar`, mirroring the
+/// legacy `kv_prefill_run` / `kv_decode_step_run` per-layer sequence
+/// exactly (the issue-#98 fix; both are no-ops on non-Gemma-4 archs).
 fn ffn_or_moe_layer(
     weights: larql_models::WeightsView,
     h_post_attn: &Array2<f32>,
     layer: usize,
     ffn: &dyn FfnBackend,
+    ple_input: Option<&Array2<f32>>,
 ) -> Array2<f32> {
     if weights.arch.is_hybrid_moe() {
         if let Some(h_out) = ffn.forward_moe_full_layer(layer, h_post_attn) {
             return h_out;
         }
     }
-    run_ffn(&weights, h_post_attn, layer, ffn, false).0
+    let (h_post_ffn, _) = run_ffn(&weights, h_post_attn, layer, ffn, false);
+    let mut h_out = apply_per_layer_embedding(&weights, &h_post_ffn, layer, ple_input);
+    apply_layer_scalar(&weights, &mut h_out, layer);
+    h_out
 }
 
 /// Prefill the K/V cache through every layer using `backend`'s
@@ -70,7 +81,7 @@ pub fn kv_prefill_via_dispatch(
         return None;
     }
     let h = embed_tokens_pub(&weights, prompt_ids);
-    kv_prefill_from_hidden_via_dispatch(backend, weights, ffn, &h, window, index)
+    kv_prefill_from_hidden_via_dispatch(backend, weights, ffn, &h, Some(prompt_ids), window, index)
 }
 
 /// Multi-modal-aware peer of [`kv_prefill_via_dispatch`]. Takes
@@ -79,16 +90,23 @@ pub fn kv_prefill_via_dispatch(
 /// `Tokens` and `Precomputed` chunks) and drives the rest of prefill
 /// unchanged.
 ///
+/// `token_ids` feeds `precompute_per_layer_inputs` — PLE architectures
+/// (Gemma 4 E-series) need one token identity per hidden row. Pass
+/// `Some` whenever the rows are pure token embeds; `None` (the MM path,
+/// where precomputed vision/audio rows have no token ids) skips PLE, so
+/// PLE archs must prefill via the token entry point.
+///
 /// The text-only call `kv_prefill_via_dispatch(prompt_ids)` and
-/// `kv_prefill_from_hidden_via_dispatch(embed_tokens_pub(prompt_ids))`
-/// produce bit-identical output by construction — the former is a
-/// two-line wrapper around the latter. Pinned by tests at the bottom
-/// of this module.
+/// `kv_prefill_from_hidden_via_dispatch(embed_tokens_pub(prompt_ids),
+/// Some(prompt_ids))` produce bit-identical output by construction — the
+/// former is a thin wrapper around the latter. Pinned by tests at the
+/// bottom of this module.
 pub fn kv_prefill_from_hidden_via_dispatch(
     backend: &dyn EngineBackend,
     weights: larql_models::WeightsView,
     ffn: &dyn FfnBackend,
     initial_hidden: &Array2<f32>,
+    token_ids: Option<&[u32]>,
     window: Option<usize>,
     index: Option<&larql_vindex::VectorIndex>,
 ) -> Option<(Array2<f32>, Vec<KvHandle>)> {
@@ -98,6 +116,12 @@ pub fn kv_prefill_from_hidden_via_dispatch(
     let num_layers = weights.num_layers;
     let mut handles: Vec<KvHandle> = Vec::with_capacity(num_layers);
     let mut h = initial_hidden.clone();
+    // Empty for non-PLE archs (and for `token_ids: None`) — then
+    // `ple_inputs.get(layer)` yields `None` and PLE is a no-op.
+    let ple_inputs = match token_ids {
+        Some(ids) => precompute_per_layer_inputs(&weights, initial_hidden, ids),
+        None => Vec::new(),
+    };
 
     for layer in 0..num_layers {
         let _t_attn = std::time::Instant::now();
@@ -114,7 +138,7 @@ pub fn kv_prefill_from_hidden_via_dispatch(
         }
         handles.push(handle);
 
-        h = ffn_or_moe_layer(weights, &h_post_attn, layer, ffn);
+        h = ffn_or_moe_layer(weights, &h_post_attn, layer, ffn, ple_inputs.get(layer));
     }
 
     Some((last_row_as_2d(&h), handles))
@@ -148,6 +172,9 @@ pub fn kv_decode_step_via_dispatch(
         "kv_decode_step_via_dispatch: handles.len() must equal weights.num_layers"
     );
     let h_new = embed_tokens_pub(&weights, &[token_id]);
+    // PLE inputs are per-token — recompute for this single-token decode
+    // step, matching the legacy `kv_decode_step_run` recipe exactly.
+    let ple_inputs = precompute_per_layer_inputs(&weights, &h_new, &[token_id]);
     let mut h_step = h_new;
 
     for (layer, handle) in handles.iter_mut().enumerate().take(num_layers) {
@@ -164,7 +191,7 @@ pub fn kv_decode_step_via_dispatch(
         if let Some(w) = window {
             backend.clip_kv(handle, w);
         }
-        h_step = ffn_or_moe_layer(weights, &h_post_attn, layer, ffn);
+        h_step = ffn_or_moe_layer(weights, &h_post_attn, layer, ffn, ple_inputs.get(layer));
     }
 
     Some(h_step)
@@ -200,13 +227,22 @@ pub fn kv_prefill_via_dispatch_async(
         return None;
     }
     let h = embed_tokens_pub(&weights, prompt_ids);
-    kv_prefill_from_hidden_via_dispatch_async(backend, weights, ffn, &h, window, index)
+    kv_prefill_from_hidden_via_dispatch_async(
+        backend,
+        weights,
+        ffn,
+        &h,
+        Some(prompt_ids),
+        window,
+        index,
+    )
 }
 
 /// Async multi-modal-aware peer of [`kv_prefill_via_dispatch_async`].
-/// Same shape as [`kv_prefill_from_hidden_via_dispatch`] but routes
-/// per-layer attention through `AsyncComputeBackend` and reads each
-/// hidden via `read_hidden` before FFN. Flushes once at the end.
+/// Same shape as [`kv_prefill_from_hidden_via_dispatch`] (including the
+/// `token_ids` PLE contract) but routes per-layer attention through
+/// `AsyncComputeBackend` and reads each hidden via `read_hidden` before
+/// FFN. Flushes once at the end.
 ///
 /// Bit-identity contract: same as the sync peer. Pinned by the parity
 /// test at the bottom of this module — sync vs async must agree on
@@ -216,6 +252,7 @@ pub fn kv_prefill_from_hidden_via_dispatch_async(
     weights: larql_models::WeightsView,
     ffn: &dyn FfnBackend,
     initial_hidden: &Array2<f32>,
+    token_ids: Option<&[u32]>,
     window: Option<usize>,
     index: Option<&larql_vindex::VectorIndex>,
 ) -> Option<(Array2<f32>, Vec<KvHandle>)> {
@@ -225,6 +262,12 @@ pub fn kv_prefill_from_hidden_via_dispatch_async(
     let num_layers = weights.num_layers;
     let mut handles: Vec<KvHandle> = Vec::with_capacity(num_layers);
     let mut h = initial_hidden.clone();
+    // Empty for non-PLE archs (and for `token_ids: None`) — then
+    // `ple_inputs.get(layer)` yields `None` and PLE is a no-op.
+    let ple_inputs = match token_ids {
+        Some(ids) => precompute_per_layer_inputs(&weights, initial_hidden, ids),
+        None => Vec::new(),
+    };
 
     for layer in 0..num_layers {
         let (h_post_attn_handle, mut handle) = backend.attention_prefill_async(
@@ -242,7 +285,7 @@ pub fn kv_prefill_from_hidden_via_dispatch_async(
         handles.push(handle);
 
         let h_post_attn = backend.read_hidden(h_post_attn_handle);
-        h = ffn_or_moe_layer(weights, &h_post_attn, layer, ffn);
+        h = ffn_or_moe_layer(weights, &h_post_attn, layer, ffn, ple_inputs.get(layer));
     }
 
     backend.flush().ok()?;
@@ -272,6 +315,9 @@ pub fn kv_decode_step_via_dispatch_async(
         "kv_decode_step_via_dispatch_async: handles.len() must equal weights.num_layers"
     );
     let h_new = embed_tokens_pub(&weights, &[token_id]);
+    // PLE inputs are per-token — recompute for this single-token decode
+    // step, matching the legacy `kv_decode_step_run` recipe exactly.
+    let ple_inputs = precompute_per_layer_inputs(&weights, &h_new, &[token_id]);
     let mut h_step = h_new;
 
     for (layer, handle) in handles.iter_mut().enumerate().take(num_layers) {
@@ -287,7 +333,7 @@ pub fn kv_decode_step_via_dispatch_async(
             backend.clip_kv(handle, w);
         }
         let h_post_attn = backend.read_hidden(h_post_attn_handle);
-        h_step = ffn_or_moe_layer(weights, &h_post_attn, layer, ffn);
+        h_step = ffn_or_moe_layer(weights, &h_post_attn, layer, ffn, ple_inputs.get(layer));
     }
 
     backend.flush().ok()?;
@@ -604,6 +650,7 @@ mod tests {
             larql_models::WeightsView::dense(&weights),
             &ffn,
             &initial_hidden,
+            Some(&tokens),
             None,
             None,
         )
@@ -643,6 +690,7 @@ mod tests {
             larql_models::WeightsView::dense(&weights),
             &ffn,
             &initial_hidden,
+            Some(&tokens),
             None,
             None,
         )
@@ -668,6 +716,7 @@ mod tests {
             &empty_hidden,
             None,
             None,
+            None,
         );
         assert!(result.is_none(), "zero-row hidden should yield None");
 
@@ -676,6 +725,7 @@ mod tests {
             larql_models::WeightsView::dense(&weights),
             &ffn,
             &empty_hidden,
+            None,
             None,
             None,
         );

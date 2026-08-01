@@ -175,6 +175,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(hf_token_env)]
     fn hf_token_reads_the_env_var() {
         std::env::set_var(HF_TOKEN_ENV, "test-token-123");
         assert_eq!(hf_token(), Some("test-token-123".to_string()));
@@ -182,6 +183,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(hf_token_env)]
     fn hf_token_treats_blank_as_absent() {
         std::env::set_var(HF_TOKEN_ENV, "   ");
         assert_eq!(hf_token(), None);

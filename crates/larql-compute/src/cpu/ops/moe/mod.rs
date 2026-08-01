@@ -14,6 +14,7 @@
 mod cache;
 mod expert;
 mod forward;
+pub mod latent_mask;
 mod math;
 mod within_expert;
 

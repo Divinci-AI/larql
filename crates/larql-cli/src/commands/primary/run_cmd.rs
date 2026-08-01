@@ -118,7 +118,7 @@ pub struct RunArgs {
     ///   markov-rs[:window=N]        — residual-stream replacement
     ///   unlimited-context:window=N  — per-window K/V checkpoints
     ///   turbo-quant[:bits=3|4]      — WHT + Lloyd-Max codec
-    ///   apollo:layer=N,coef=F,top_k=K — boundary-residual injection (bench-only)
+    ///   apollo:layer=N,coef=F,top_k=K,bos=B — boundary-residual injection (bench-only)
     ///
     /// Falls back to the `LARQL_KV_ENGINE` env var when unset, and to
     /// the `--kv-cache` mapping when both are absent. CLI flag wins over

@@ -23,6 +23,7 @@ pub fn gqa_attention_decode_step<S1, S2>(
     reps: usize,
     scale: f64,
     softcap: Option<f32>,
+    sinks: Option<&[f32]>,
 ) -> Array2<f32>
 where
     S1: ndarray::Data<Elem = f32> + Sync,
@@ -61,18 +62,10 @@ where
                 }
                 scores[i] = s;
             }
-            // Softmax
-            let max_val = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-            let mut sum = 0.0f64;
-            for s in scores.iter_mut() {
-                let e = ((*s - max_val) as f64).exp();
-                *s = e as f32;
-                sum += e;
-            }
-            let inv_sum = (1.0 / sum) as f32;
-            for s in scores.iter_mut() {
-                *s *= inv_sum;
-            }
+            // Softmax, against this head's learned sink when the
+            // architecture has one (GPT-OSS). Shared with the prefill
+            // kernel so the two cannot drift.
+            crate::attention::softmax::softmax_in_place(scores, sinks.map(|s| s[h]));
             // Weighted sum of V
             let v_block = v_full.slice(ndarray::s![.., kv_off..kv_off + head_dim]);
             let scores_view = ndarray::ArrayView1::from(&scores[..]);

@@ -27,9 +27,7 @@ pub fn revision_tag(recipe: &Recipe, manifest: &VindexManifest, build_id: &str) 
 mod tests {
     use super::*;
 
-    fn sample_recipe() -> Recipe {
-        Recipe::from_yaml(include_str!("../../testdata/gemma-3-4b-it.yaml")).unwrap()
-    }
+    use crate::test_support::sample_recipe;
 
     fn sample_manifest(vindex_spec_version: u32) -> VindexManifest {
         larql_vindex_spec::test_fixtures::sample_manifest_with_spec_version(vindex_spec_version)

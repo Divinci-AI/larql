@@ -153,7 +153,20 @@ pub fn run_attention_block_decode_step_backend(
 
     let softcap = arch.attn_logit_softcapping();
     let attn_out = gqa_attention_decode_step(
-        &q_rope, &k_concat, &v_concat, num_q, head_dim, reps, scale, softcap,
+        &q_rope,
+        &k_concat,
+        &v_concat,
+        num_q,
+        head_dim,
+        reps,
+        scale,
+        softcap,
+        crate::attention::sinks::resolve(
+            arch.attn_sinks_key(layer),
+            &weights.vectors,
+            num_q,
+            layer,
+        ),
     );
 
     let mut attn_projected = dot_proj_gpu(&attn_out, w_o, backend);

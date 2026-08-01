@@ -10,7 +10,7 @@
 
 mod body;
 mod frontmatter;
-mod naming;
+pub(crate) mod naming;
 mod revision_tag;
 mod types;
 
@@ -33,11 +33,10 @@ pub fn render(inputs: &CardInputs) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Recipe;
 
     #[test]
     fn render_produces_frontmatter_delimiters_and_a_body() {
-        let recipe = Recipe::from_yaml(include_str!("../../testdata/gemma-3-4b-it.yaml")).unwrap();
+        let recipe = crate::test_support::sample_recipe();
         let manifest = larql_vindex_spec::test_fixtures::sample_manifest();
         let verification = VerificationReport {
             reconstruction: ReconstructionResult {

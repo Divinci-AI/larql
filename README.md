@@ -276,8 +276,9 @@ reviewable pipeline: a recipe file merged to `main` is a promise that a
 specific vindex exists on the Hub, built from a pinned upstream by a
 pinned `larql`, verified before it went public. Recipe schema,
 `build_id`, structural validation, capability manifest, card generation,
-and the size/cost estimate are built (`crates/larql-factory`); the
-build-stage driver that actually runs a recipe is not.
+the size/cost estimate, and the PREFLIGHT→RELEASE build driver are all
+built (`crates/larql-factory`); MIRROR and REGISTER stay external
+(§7 — a rig worker's job, not this binary's).
 
 ```bash
 # Structural validation — schema shape, thresholds, no network I/O
@@ -288,6 +289,9 @@ larql recipe build-id my-recipe.yaml
 
 # Upstream size, per-output size, executor recommendation, cost band
 larql recipe estimate my-recipe.yaml
+
+# Fetch, extract, slice, verify checksums, publish private, release public
+larql recipe build my-recipe.yaml
 
 # Which architectures this larql release recognises, and what each supports
 larql capabilities
@@ -376,11 +380,15 @@ Three extraction levels:
 
 | Level | CLI Flag | LQL Syntax | Size (f16) | Enables |
 |-------|----------|-----------|-----------|---------|
-| Browse | `--level browse` (default) | `EXTRACT MODEL ... INTO ...` | ~3 GB | DESCRIBE, WALK, SELECT |
-| Inference | `--level inference` | `... WITH INFERENCE` | ~6 GB | + INFER |
+| Browse | `--level browse` | `EXTRACT MODEL ... INTO ...` (LQL default) | ~3 GB | DESCRIBE, WALK, SELECT |
+| Inference | `--level inference` (CLI default) | `... WITH INFERENCE` | ~6 GB | + INFER |
 | All | `--level all` | `... WITH ALL` | ~10 GB | + COMPILE |
 
-Add `--f16` to halve file sizes with negligible accuracy loss.
+Defaults differ by surface: `larql extract` defaults to `--level
+inference` (`larql-cli` `extract_index_cmd.rs`), matching the quick
+start above; a bare LQL `EXTRACT MODEL` statement defaults to browse
+(`larql-lql` `parser/lifecycle.rs`). Storage is f16 by default — pass
+`--f32` to opt out (doubles file sizes).
 
 ## Architecture
 
@@ -404,7 +412,8 @@ larql-lql         LQL parser, executor, REPL, USE REMOTE client
     ↓
 larql-server      HTTP/gRPC server: serve vindexes over the network
 larql-cli         CLI commands (extract-index, build, serve, repl, convert, hf, verify)
-larql-factory     Vindex Factory driver: recipe schema, build_id, capabilities, card generator
+larql-factory     Vindex Factory driver: recipe schema, build_id, capabilities, card
+                  generator, build-stage driver (PREFLIGHT→RELEASE)
 
 # Portable (no LARQL deps; extract to sibling repo later)
 model-compute         bounded compute: native kernels (default) + wasmtime (opt-in)
@@ -425,7 +434,7 @@ let index = VectorIndex::load_vindex(&path, &mut cb)?;
 let patched = PatchedVindex::new(index);
 
 // Query
-let hits = patched.gate_knn(layer, &query, 10);  // 0.008ms/layer
+let hits = patched.gate_knn(layer, &query, 10);  // exact BLAS gemv — ~2.6ms/layer at Gemma 3 4B shape (10240×2560)
 let trace = patched.walk(&query, &layers, 10);    // multi-layer scan
 
 // Mutate (patch overlay — base files never modified)
@@ -611,6 +620,10 @@ Input formats: **safetensors** (HuggingFace), **GGUF** (llama.cpp, dequantized t
 
 Dense and full-precision MoE models support all operations (DESCRIBE, WALK, INFER). MXFP4-quantized MoE models (GPT-OSS) can be extracted and served but DESCRIBE/WALK produce noisy results due to 4-bit weight precision — use INFER for accurate knowledge queries. See [operations spec](docs/specs/vindex-operations-spec.md) for details.
 
+**GPT-OSS attention sinks (2026-07-29).** GPT-OSS attention uses a learned per-head *sink* logit that competes in the softmax and is then discarded, so attention weights over real positions deliberately sum to less than one. Until 2026-07-29 larql neither extracted nor applied it — along with all four projection biases — so 5 of 11 attention tensors per layer were silently dropped and the forward pass was systematically wrong. Both are now extracted and applied on the CPU and Metal paths, with numerical parity tests against the reference implementation. Details and the measured sink magnitudes are in [`docs/k3-funnel.md`](docs/k3-funnel.md) §4.6.
+
+**Known gap:** `larql shannon score` (and therefore `shannon verify`) uses a dense-only FFN backend, so it cannot score **any** MoE model, GPT-OSS included. Cross-engine bits/char verification is unavailable for MoE architectures until the scorer routes its FFN by architecture — see [`docs/k3-funnel.md`](docs/k3-funnel.md) §4.6.8.
+
 GPT-2 status: GGUF conversion (`larql convert gguf-to-vindex`) lands canonical
 weights — the loader transparently re-orients non-standard FFN layouts, splits
 the fused `attn_qkv` projection into per-head q/k/v, and surfaces learned
@@ -623,14 +636,31 @@ extraction-only flows (DESCRIBE, KNN, vindex publish) work today.
 
 ### Vindex Operations
 
+Criterion (`cargo bench -p larql-vindex --bench vindex_ops`), M3 Max,
+synthetic data. All KNN/walk rows are the **exact brute-force BLAS
+gemv** — the walk hot path never consults HNSW (`enable_hnsw` only
+affects gate-KNN serving consumers such as the browse `walk()` and
+server KNN endpoints; pinned by `gate_walk_ignores_hnsw_toggle`).
+An earlier revision of this table quoted `0.008 ms`/layer and a
+`0.3 ms` 34-layer walk — those came from the reduced 1024×256
+synthetic shape in the pre-2026-04-05 `vindex_bench` example
+("reduced from 10240/2560/34 for bench speed"), not the production
+shape below.
+
 | Operation | Latency |
 |---|---|
-| Gate KNN (per layer) | 0.008ms |
-| Walk (34 layers) | 0.3ms |
-| Feature lookup | <1ns |
-| Save gates (8 MB) | 1.1ms |
-| Load vindex | 8ms |
-| Mutate (meta + gate) | 617ns |
+| Gate KNN, per layer (1024f × 256h synthetic) | 22.7 µs |
+| Gate KNN, per layer (10240f × 2560h — Gemma 3 4B shape) | 2.64 ms |
+| Walk (8L × 1024f × 256h synthetic) | 216 µs |
+| Walk (8L × 10240f × 2560h — Gemma band) | 21.2 ms |
+| Feature meta lookup | ~245 ns |
+| Save gates (8 MB) | 2.0 ms |
+| Load vindex (mmap) | 261 µs |
+| Mutate (meta + gate) | 301 ns |
+
+Full tables (per-shape KNN, Q4/Metal, HNSW-vs-brute, W2 feature-major
+down): [crates/larql-vindex/README.md](crates/larql-vindex/README.md)
+and [crates/larql-vindex/PERFORMANCE.md](crates/larql-vindex/PERFORMANCE.md).
 
 ### Inference Engine (Gemma 3 4B, Apple Silicon M3 Max)
 
@@ -655,7 +685,7 @@ vs ollama gemma3:4b on the same machine: ~103 tok/s steady → **gap 1.17×**, w
 
 **CPU vs llama.cpp** (reconciled 2026-06-02, M3 Max, 8 threads, warm): larql **26.4** (StandardEngine) / 23.5 (legacy `bench --cpu`) vs **llama.cpp `-ngl 0` 43.0** tok/s → **gap ~1.6–1.8×**. The gap is per-core kernel quality — both attention and FFN already run the int8 Q8_K SDOT kernel; closing it is C12 (hand-asm; an opt-in `LARQL_Q4K_ASM=1` v1 lands +~4% isolated). `larql bench --cpu` now reports both the legacy and production-StandardEngine rows; `--ollama-cpu` forces a true CPU ollama baseline (default `--ollama` runs on Metal GPU). The earlier 1.5×/1.9× spread was two measurement confounds (path mismatch + an unwarmed-ollama artifact), not a regression — see `bench/baselines/c10_gemma3-4b_cpu_reconciled.json`.
 
-**Memory-bandwidth roofline** (measured 2026-07-29, M3 Max, AC, quiet — [`docs/diagnoses/memory-bandwidth-roofline.md`](docs/diagnoses/memory-bandwidth-roofline.md)): attainable **read** bandwidth is **127 GB/s on the CPU cluster** (saturating at *two* threads) vs **367 GB/s on the GPU**, against a 400 GB/s SoC spec — so the CPU reaches 31% of the chip's bandwidth and the GPU 92%, a **2.9× structural advantage** that no CPU kernel can close. Against that denominator the production CPU matvec runs at **50–91% of attainable** (the long-quoted "~47 GB/s effective" came from the bench's rayon arm, not the shipping path — the same shape is **98.7 GB/s** through `q4k_q8k_matvec_parallel`), and the Metal kernels at 74–85%. Practical reading: **CPU bandwidth work is essentially finished**; the bandwidth-bound half belongs on the GPU. Probe: `cargo run --release -p larql-compute --example membw_probe`.
+**Memory-bandwidth roofline** (measured 2026-07-29, M3 Max, AC, quiet — [`docs/diagnoses/memory-bandwidth-roofline.md`](docs/diagnoses/memory-bandwidth-roofline.md)): attainable **read** bandwidth is **127 GB/s on the CPU cluster** (saturating at *two* threads) vs **367 GB/s on the GPU**, against a 400 GB/s SoC spec — so the CPU reaches 31% of the chip's bandwidth and the GPU 92%, a **2.9× structural advantage** that no CPU kernel can close. Against that denominator the production CPU matvec runs at **50–91% of attainable** (the long-quoted "~47 GB/s effective" came from the bench's rayon arm, not the shipping path — the same shape is **98.7 GB/s** through `q4k_q8k_matvec_parallel`), and the Metal kernels at 74–85%. Practical reading: **CPU bandwidth work is essentially finished**; the bandwidth-bound half belongs on the GPU. Probe: `cargo run --release -p larql-compute --example membw_probe` (read its **spread** column before its GB/s column — a contended machine reports nonsense). KV-cache traffic was priced on the same ledger and came out small: the `sliding_window` caps 25 of 30 layers on the 26B, so f16 KV would buy only 3–8% of a token at chat-typical context and cannot explain the long-context decay — it is a client-density lever, not a speed one.
 
 **CPU prefill** (2026-06-22): the per-layer f32 dequant — long the dominant prefill cost (~2.7 s / ~2 tok/s on the 5-token prompt) — is gone. Q/K/V/O **and** gate/up/down now project straight from the Q4_K/Q6_K vindex bytes via amortised `q4k_matmul` / `q6k_matmul` (the Q6_K twin handles the default Q6_K `v_proj` / `down_proj`) with a hand-written aarch64 NEON inner dot. Gemma 3 4B Q4_K CPU prefill: **2746 ms → 233 ms (11.8×)**, closing the gap to llama.cpp `pp5` from ~55× to **~3×**; the NEON `q4k_matmul` at seq=5 beats f32 AMX sgemm while still skipping the dequant. See `bench/baselines/cpu/COMPARISON.md`.
 
@@ -844,7 +874,7 @@ The full surface is documented in `crates/larql-inference/ROADMAP.md` §
 | [docs/specs/vindex-ecosystem-spec.md](docs/specs/vindex-ecosystem-spec.md) | Distributed hosting, HuggingFace, Vindexfile (~85% implemented) |
 | [crates/larql-vindex-spec/SPEC.md](crates/larql-vindex-spec/SPEC.md) | Vindex v1 public contract — manifest schema, sharding rule, validation thresholds, model card tags |
 | [crates/larql-vindex-spec/schema/vindex-v1.schema.json](crates/larql-vindex-spec/schema/vindex-v1.schema.json) | JSON Schema 2020-12 mirror of the v1 manifest |
-| [docs/vindex-factory.md](docs/vindex-factory.md) | Vindex Factory — recipe-driven, verified, remote-executed vindex builds; `larql-factory` crate (recipe schema, `build_id`, validator, capability manifest, card generator) |
+| [docs/vindex-factory.md](docs/vindex-factory.md) | Vindex Factory — recipe-driven, verified, remote-executed vindex builds; `larql-factory` crate (recipe schema, `build_id`, validator, capability manifest, card generator, PREFLIGHT→RELEASE build driver) |
 | [crates/larql-factory/README.md](crates/larql-factory/README.md) | `larql-factory` crate reference — module layout, CLI usage, what's not built yet |
 | [docs/lql-guide.md](docs/lql-guide.md) | LQL quick start guide |
 | [docs/cli.md](docs/cli.md) | CLI reference |
@@ -865,6 +895,9 @@ The full surface is documented in `crates/larql-inference/ROADMAP.md` §
 | [docs/diagnoses/shannon-cross-engine-divergence.md](docs/diagnoses/shannon-cross-engine-divergence.md) | Forward-pass correctness diagnostic via `larql shannon verify` — three-engine bits/char comparison against HF/PyTorch and MLX, plus the three bugs it surfaced |
 | [scripts/README_shannon_score.md](scripts/README_shannon_score.md) | Cross-engine Shannon scorers — `larql shannon verify` + standalone scripts for MLX and HF |
 | [docs/audits/dec-readiness-review-2026-07-22.md](docs/audits/dec-readiness-review-2026-07-22.md) | DEC-readiness review of the server/router/remote-FFN data plane ahead of the DEC funnel programme — silent-corruption + security findings, remediation tracked in ROADMAP |
+| [docs/dec-funnel.md](docs/dec-funnel.md) | **DEC funnel** — decoupled attention/weights serving at batch and frontier scale; the experiment ladder, the claims table, and standing rules R0–R10 (numbers that don't travel between conventions) |
+| [docs/k3-funnel.md](docs/k3-funnel.md) | **K3 adapter ladder** — GPT-OSS-20B → Kimi Linear → K3, the three rungs that get a 2.8T hybrid-linear MoE onto the engine |
+| [docs/quant-obs.md](docs/quant-obs.md) | **Quant-Obs** — observer-metric ladder for quantisation sensitivity |
 
 ## Platform Support
 
