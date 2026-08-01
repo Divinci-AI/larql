@@ -477,4 +477,82 @@ mod tests {
             Err(GroupedError::NoExpertsSelected)
         ));
     }
+
+    #[test]
+    fn a_per_slot_input_shorter_than_the_slot_count_is_refused() {
+        // PerSlot indexes X at `slot * K`, so an x sized for Shared would read
+        // another slot's activation off the end rather than fail — the exact
+        // silent-wrong-answer this guard exists to prevent.
+        let (buf, offs, _) = bank();
+        let Some(be) = MetalBackend::new() else {
+            return;
+        };
+        let shared_sized = vec![0.1f32; K];
+        assert!(matches!(
+            be.q6k_grouped_experts(&buf, &offs, &shared_sized, N, K, InputLayout::PerSlot),
+            Err(GroupedError::OffsetOutOfRange { .. })
+        ));
+        // The same buffer is perfectly valid under Shared.
+        assert!(be
+            .q6k_grouped_experts(&buf, &offs, &shared_sized, N, K, InputLayout::Shared)
+            .is_ok());
+    }
+
+    #[test]
+    fn the_q4k_path_rejects_the_same_shape_faults_as_q6k() {
+        // q4k_grouped_experts carries its own guard prologue; a fault caught on
+        // the q6k path proves nothing about this one.
+        let x = vec![0.1f32; K];
+        let Some(be) = MetalBackend::new() else {
+            return;
+        };
+        let q4k_per_expert = N * (K / 256) * 144;
+        let buf = vec![0u8; q4k_per_expert * SELECTED];
+        let offs: Vec<ExpertOffset> = (0..SELECTED)
+            .map(|e| ExpertOffset((e * q4k_per_expert) as u32))
+            .collect();
+
+        assert!(matches!(
+            be.q4k_grouped_experts(&buf, &[], &x, N, K, InputLayout::Shared),
+            Err(GroupedError::NoExpertsSelected)
+        ));
+        assert!(matches!(
+            be.q4k_grouped_experts(&buf, &offs, &x, N, K + 1, InputLayout::Shared),
+            Err(GroupedError::KNotSuperblockAligned { .. })
+        ));
+        let past_end = vec![ExpertOffset(buf.len() as u32)];
+        assert!(matches!(
+            be.q4k_grouped_experts(&buf, &past_end, &x, N, K, InputLayout::Shared),
+            Err(GroupedError::OffsetOutOfRange { .. })
+        ));
+        assert!(matches!(
+            be.q4k_grouped_experts(&buf, &offs, &x, N, K, InputLayout::PerSlot),
+            Err(GroupedError::OffsetOutOfRange { .. })
+        ));
+    }
+
+    #[test]
+    fn every_error_variant_renders_its_own_diagnostic() {
+        let k_err = GroupedError::KNotSuperblockAligned { k: 513 }.to_string();
+        assert!(k_err.contains("513"), "{k_err}");
+
+        let off = GroupedError::OffsetOutOfRange {
+            slot: 3,
+            offset: 4096,
+            need: 8192,
+            have: 5000,
+        }
+        .to_string();
+        for expected in ["3", "4096", "8192", "5000"] {
+            assert!(off.contains(expected), "{off} missing {expected}");
+        }
+
+        assert!(GroupedError::NoExpertsSelected
+            .to_string()
+            .contains("empty selection"));
+
+        let boxed: Box<dyn std::error::Error> =
+            Box::new(GroupedError::KNotSuperblockAligned { k: 7 });
+        assert!(boxed.to_string().contains('7'));
+    }
 }

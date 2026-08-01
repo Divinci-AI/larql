@@ -346,4 +346,65 @@ mod tests {
             Err(Mxfp4Error::ShortBuffer { what: "scales", .. })
         ));
     }
+
+    #[test]
+    fn rejects_an_x_shorter_than_one_reduction() {
+        // x is indexed to K regardless of M, so a short activation would read
+        // past the buffer rather than produce a small answer.
+        let (p, s) = synth(M, K, 8);
+        let Some(be) = MetalBackend::new() else {
+            return;
+        };
+        assert!(matches!(
+            be.mxfp4_matmul_small_block(
+                &p,
+                &s,
+                &vec![0.1f32; K - 1],
+                M,
+                K,
+                1,
+                Mxfp4Layout::SeparateTensors
+            ),
+            Err(Mxfp4Error::ShortBuffer { what: "x", .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_the_interleaved_layout_rather_than_misreading_it() {
+        // Interleaved-per-group packs scales beside codewords, so decoding it
+        // with the separate-tensor addressing yields plausible numbers from the
+        // wrong bytes. It has to be refused, not attempted.
+        let (p, s) = synth(M, K, 9);
+        let x = vec![0.25f32; K];
+        let Some(be) = MetalBackend::new() else {
+            return;
+        };
+        assert!(matches!(
+            be.mxfp4_matmul_small_block(&p, &s, &x, M, K, 1, Mxfp4Layout::InterleavedPerGroup),
+            Err(Mxfp4Error::Unimplemented(_))
+        ));
+    }
+
+    #[test]
+    fn every_error_variant_renders_its_own_diagnostic() {
+        // These strings are what a caller sees when a shape contract fails, so
+        // each must name the quantity that was wrong.
+        let k_err = Mxfp4Error::KNotGroupAligned { k: 257 }.to_string();
+        assert!(k_err.contains("257"), "{k_err}");
+
+        let short = Mxfp4Error::ShortBuffer {
+            what: "packed",
+            got: 16,
+            need: 4608,
+        }
+        .to_string();
+        assert!(short.contains("packed") && short.contains("16") && short.contains("4608"));
+
+        let unimpl = Mxfp4Error::Unimplemented("block width t > 1").to_string();
+        assert!(unimpl.contains("block width t > 1"));
+
+        // The Error impl is what lets these cross an api boundary as `dyn Error`.
+        let boxed: Box<dyn std::error::Error> = Box::new(Mxfp4Error::KNotGroupAligned { k: 3 });
+        assert!(boxed.to_string().contains('3'));
+    }
 }

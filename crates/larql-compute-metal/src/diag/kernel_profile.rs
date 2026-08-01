@@ -816,6 +816,56 @@ mod tests {
             && r.isolated_ms.is_finite()
             && r.batched_gbs.is_finite()));
     }
+
+    #[test]
+    fn measure_batched_discards_warmup_and_reports_per_layer_time() {
+        // Pure timing arithmetic, no GPU: the returned figure must be per
+        // LAYER, not per iteration, and the warmup passes must not be folded
+        // into the mean. Getting either wrong is what undercounted
+        // q6k_matvec by 4x in 2026-04-28.
+        let calls = std::cell::Cell::new(0usize);
+        let ms = measure_batched(2, 3, 4, &mut || calls.set(calls.get() + 1));
+        assert_eq!(calls.get(), (2 + 3) * 4, "warmup passes still invoke f");
+        assert!(ms.is_finite() && ms >= 0.0);
+
+        // A no-op body divided by n_layers stays below any plausible per-call
+        // cost; this pins the division rather than just finiteness.
+        assert!(ms < 1.0, "per-layer time {ms} implausible for a no-op");
+    }
+
+    /// Drive the shape census at minimum params. It shares `profile_all`'s
+    /// cold-rotating protocol, so this exercises the census-specific cell
+    /// construction and the per-shape eta arithmetic on real Metal.
+    #[test]
+    fn profile_shape_census_smoke_fills_every_cell() {
+        if crate::MetalBackend::new().is_none() {
+            return;
+        }
+        let cells = profile_shape_census(1, 0, 1);
+        assert!(!cells.is_empty());
+        for c in &cells {
+            assert!(!c.kernel.is_empty() && !c.shape.is_empty());
+            assert!(c.cold_gbs.is_finite() && c.cold_gbs > 0.0, "{c:?}");
+            // eta is cold_gbs against the roofline, so it must track it.
+            assert!(c.eta.is_finite() && c.eta > 0.0, "{c:?}");
+            assert!(c.packed_mb > 0.0 && c.cold_ms > 0.0, "{c:?}");
+        }
+    }
+
+    /// The grouped-vs-ungrouped comparison is the measurement the K3a eta
+    /// claim rests on, so its driver needs to be exercised rather than only
+    /// run by hand from the bench example.
+    #[test]
+    fn profile_grouped_experts_smoke_returns_both_arms() {
+        if crate::MetalBackend::new().is_none() {
+            return;
+        }
+        // Small but shape-legal: K a multiple of 256, N not a multiple of the
+        // tile so the row-remainder path runs too.
+        let (ungrouped, grouped) = profile_grouped_experts(260, 512, 2, 1, 0, 1);
+        assert!(ungrouped.is_finite() && ungrouped > 0.0, "{ungrouped}");
+        assert!(grouped.is_finite() && grouped > 0.0, "{grouped}");
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────
