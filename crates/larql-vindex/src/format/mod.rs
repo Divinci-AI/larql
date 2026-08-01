@@ -8,6 +8,7 @@ pub mod fp4_codec;
 pub mod huggingface;
 pub mod le_floats;
 pub mod load;
+pub mod lyrw2;
 pub mod quant;
 pub mod spec;
 pub mod weights;
