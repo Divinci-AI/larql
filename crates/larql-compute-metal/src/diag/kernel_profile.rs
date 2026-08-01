@@ -240,7 +240,11 @@ pub fn profile_all(n_layers: usize, warmup: usize, iters: usize) -> Vec<KernelRe
             let weights: Vec<_> = (0..cold_n)
                 .map(|i| {
                     let w = quantize_q6_k(&synth_f32(n * k, 0.1 + i as f32 * 0.05));
-                    metal.bufs().get_bytes(&w)
+                    // uncached: `w` is a temporary and dies here. The cache
+                    // keys on (ptr, len), so successive same-size temporaries
+                    // reuse one address and the whole rotation collapses to a
+                    // single buffer — measured, 8 -> 1.
+                    metal.bufs().uncached_bytes(&w)
                 })
                 .collect();
             let mut times: Vec<f64> = Vec::with_capacity(iters);
@@ -369,13 +373,21 @@ pub fn profile_all(n_layers: usize, warmup: usize, iters: usize) -> Vec<KernelRe
             let weights_g: Vec<_> = (0..cold_n)
                 .map(|i| {
                     let w = quantize_q4_k(&synth_f32(n * k, 0.2 + i as f32 * 0.07));
-                    metal.bufs().get_bytes(&w)
+                    // uncached: `w` is a temporary and dies here. The cache
+                    // keys on (ptr, len), so successive same-size temporaries
+                    // reuse one address and the whole rotation collapses to a
+                    // single buffer — measured, 8 -> 1.
+                    metal.bufs().uncached_bytes(&w)
                 })
                 .collect();
             let weights_u: Vec<_> = (0..cold_n)
                 .map(|i| {
                     let w = quantize_q4_k(&synth_f32(n * k, 0.3 + i as f32 * 0.11));
-                    metal.bufs().get_bytes(&w)
+                    // uncached: `w` is a temporary and dies here. The cache
+                    // keys on (ptr, len), so successive same-size temporaries
+                    // reuse one address and the whole rotation collapses to a
+                    // single buffer — measured, 8 -> 1.
+                    metal.bufs().uncached_bytes(&w)
                 })
                 .collect();
 
@@ -958,7 +970,9 @@ pub fn profile_shape_census(n_layers: usize, warmup: usize, iters: usize) -> Vec
                     } else {
                         quantize_q6_k(&f)
                     };
-                    metal.bufs().get_bytes(&q)
+                    // See the note above: a temporary must not go through the
+                    // address-keyed cache, or the rotation is not a rotation.
+                    metal.bufs().uncached_bytes(&q)
                 })
                 .collect();
 

@@ -618,6 +618,34 @@ mod tests {
         );
     }
 
+    /// Regression for the cold-rotate collapse in `diag::kernel_profile`.
+    ///
+    /// Building a temporary inside a `map` and handing it to the address-keyed
+    /// cache produced 8 handles to ONE buffer, so every "cold" measurement
+    /// re-read a partially cache-resident buffer and overstated bandwidth.
+    /// `uncached_bytes` copies, so the temporary may die and each call is fresh.
+    #[test]
+    fn uncached_bytes_keeps_a_rotation_rotating() {
+        let Some(device) = metal::Device::system_default() else {
+            return;
+        };
+        let cache = BufferCache::new(&device);
+        let bufs: Vec<_> = (0..8u8)
+            .map(|i| {
+                let w: Vec<u8> = (0..4096u32).map(|j| (j as u8).wrapping_add(i)).collect();
+                cache.uncached_bytes(&w)
+            })
+            .collect();
+        let addrs: std::collections::BTreeSet<usize> =
+            bufs.iter().map(|b| b.contents() as usize).collect();
+        assert_eq!(
+            addrs.len(),
+            bufs.len(),
+            "rotation collapsed to {} buffers",
+            addrs.len()
+        );
+    }
+
     #[test]
     fn contents_match_detects_a_stale_buffer() {
         let Some(device) = metal::Device::system_default() else {
