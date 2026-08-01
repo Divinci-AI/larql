@@ -497,7 +497,17 @@ The FP4 additive-extension precedent is retained within each generation: new reg
 
 The binding obligation is not between the two on-disk formats (there is none — §6.6). It is that **one larql binary supports both vindex generations, indefinitely for reading and serving**:
 
-- **Detection.** `index.json.version` is the sole discriminator: `2` → VINDEX2 loader, `3` → VINDEX3 loader. No filename sniffing, no directory-shape heuristics. A missing or unknown version fails naming the version found and the versions this binary supports.
+- **Detection.** `index.json.version` is the sole **schema** discriminator, and the loader maps supported schema revisions to their owning container generation. No filename sniffing, no directory-shape heuristics. A missing or unknown version fails naming the version found and the schema sets this binary supports.
+
+  The mapping is **many-to-one, not an identity**:
+
+  | `index.json.version` | generation | note |
+  | -------------------- | ---------- | ---- |
+  | 1 | VINDEX2 | legacy schema; absent fields load with defaults |
+  | 2 | VINDEX2 | what a fresh VINDEX2 extraction writes |
+  | 3 | VINDEX3 | |
+
+  A generation is *named* for the schema it currently writes, not for the only schema it can read. Treating the version as a generation identifier rather than a generation floor refuses every legacy-schema index in existence — which E0 caught in practice, not in review. Unified dispatch routes schema 1 to the VINDEX2 loader; the VINDEX3 loader still refuses it by name.
 - **One entry point.** `Vindex::open(path)` returns the generation-appropriate handle behind a common trait; `larql run / serve / verify / slice / publish / pull` all accept either generation. Generation-specific verbs (e.g. profile selection) error precisely on a v1 index rather than silently no-op.
 - **No cross-loading, no silent conversion.** The v1 loader path is frozen-but-maintained: it never opens v2 directories, never gains v2 features, and v2 code never re-implements v1 parsing. Conversion is only ever the explicit `vindex1 → vindex2` importer.
 - **Hub and distribution.** `larql publish` stamps the container generation into the hub artifact metadata; `larql pull` selects the reader from that stamp and refuses a generation the installed binary lacks — before downloading terabytes, not after.

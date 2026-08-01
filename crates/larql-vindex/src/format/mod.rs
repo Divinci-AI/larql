@@ -7,6 +7,8 @@ pub mod down_meta;
 pub mod filenames;
 pub mod fp4_codec;
 pub mod generation;
+#[cfg(test)]
+mod generation_tests;
 pub mod huggingface;
 pub mod le_floats;
 pub mod load;

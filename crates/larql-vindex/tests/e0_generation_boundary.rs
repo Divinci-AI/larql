@@ -25,7 +25,7 @@ use std::path::Path;
 
 use larql_vindex::format::filenames::INDEX_JSON;
 use larql_vindex::format::generation::{
-    detect_generation, ContainerGeneration, V2_INDEX_VERSION, V3_INDEX_VERSION,
+    detect_generation, ContainerGeneration, V2_CURRENT_SCHEMA, V3_CURRENT_SCHEMA,
 };
 use larql_vindex::format::load::load_vindex_config;
 use larql_vindex::VindexError;
@@ -36,7 +36,7 @@ fn write_v2_index(dir: &Path) {
     std::fs::write(
         dir.join(INDEX_JSON),
         serde_json::json!({
-            "version": V2_INDEX_VERSION,
+            "version": V2_CURRENT_SCHEMA,
             "model": "e0-fixture",
             "family": "llama",
             "num_layers": 2,
@@ -57,7 +57,7 @@ fn write_v3_index(dir: &Path) {
     std::fs::write(
         dir.join(INDEX_JSON),
         serde_json::json!({
-            "version": V3_INDEX_VERSION,
+            "version": V3_CURRENT_SCHEMA,
             "moe_manifest": "moe_manifest.json",
             "profiles": ["exact", "browse"],
             "segments": { "routed/layer_000": 2 }
@@ -93,7 +93,7 @@ fn the_shipped_loader_still_loads_a_shipped_index() {
     let dir = tempdir().unwrap();
     write_v2_index(dir.path());
     let config = load_vindex_config(dir.path()).expect("VINDEX2 must still load");
-    assert_eq!(config.version, V2_INDEX_VERSION);
+    assert_eq!(config.version, V2_CURRENT_SCHEMA);
     assert_eq!(config.num_layers, 2);
 }
 

@@ -226,6 +226,26 @@ generation dispatch             → index.json.version 2→3 routing correct;
                                   unknown version fails naming both sides
 ```
 
+#### Two gates, named separately [amended 2026-08-01]
+
+"E0 green" must never be reported when only part of it ran. The matrix splits by what a runner can actually execute:
+
+| Gate | Covers | Where |
+| ---- | ------ | ----- |
+| **E0-CI** | Generation/schema boundary and every weight-free compatibility check. Needs no checkpoints. | Required merge check on every PR touching the crate |
+| **E0-FULL** | The checkpoint-backed matrix — token-identical decode, WALK rankings, slicing, sharding, publish/pull — against the committed C3 goldens | Local, against a real index; status recorded as "green at commit `<sha>`" |
+
+Reporting convention:
+
+```text
+E0-CI:   green on every merge
+E0-FULL: green at last recorded local run <commit>
+```
+
+E0-CI is deliberately the subset most at risk from VINDEX3 work: every commit touching the loader, the generation module or the LYRW parsers can break it, and nothing else in CI would notice. It caught a real regression on its first run — `index.json` schema 1 refused as a non-generation — which is the argument for it existing.
+
+A later improvement would add a tiny synthetic VINDEX2 artifact exercising load, verify, slice and one trivial decode in CI. That would not replace the multi-GB goldens, but it would narrow the gap between boundary-only checking and full local validation.
+
 **Acceptance:** zero behavioural change on every v1 path, measured **against the C3 goldens** — token-identical serving, identical verify verdicts, identical slice/publish/pull outputs. The K3 artefact itself only ever needs v2; E0 protects everyone already on v1.
 
 **Decision rule:** any E0 regression blocks merge, full stop. VINDEX3 defaulting for new extractions (§12.1 support policy) is gated on E0 green plus the ABI freeze.
