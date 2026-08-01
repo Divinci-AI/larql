@@ -895,6 +895,9 @@ The full surface is documented in `crates/larql-inference/ROADMAP.md` §
 | [docs/diagnoses/shannon-cross-engine-divergence.md](docs/diagnoses/shannon-cross-engine-divergence.md) | Forward-pass correctness diagnostic via `larql shannon verify` — three-engine bits/char comparison against HF/PyTorch and MLX, plus the three bugs it surfaced |
 | [scripts/README_shannon_score.md](scripts/README_shannon_score.md) | Cross-engine Shannon scorers — `larql shannon verify` + standalone scripts for MLX and HF |
 | [docs/audits/dec-readiness-review-2026-07-22.md](docs/audits/dec-readiness-review-2026-07-22.md) | DEC-readiness review of the server/router/remote-FFN data plane ahead of the DEC funnel programme — silent-corruption + security findings, remediation tracked in ROADMAP |
+| [docs/dec-funnel.md](docs/dec-funnel.md) | **DEC funnel** — decoupled attention/weights serving at batch and frontier scale; the experiment ladder, the claims table, and standing rules R0–R10 (numbers that don't travel between conventions) |
+| [docs/k3-funnel.md](docs/k3-funnel.md) | **K3 adapter ladder** — GPT-OSS-20B → Kimi Linear → K3, the three rungs that get a 2.8T hybrid-linear MoE onto the engine |
+| [docs/quant-obs.md](docs/quant-obs.md) | **Quant-Obs** — observer-metric ladder for quantisation sensitivity |
 
 ## Platform Support
 
