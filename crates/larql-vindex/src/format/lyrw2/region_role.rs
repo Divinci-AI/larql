@@ -10,6 +10,10 @@
 use super::consts::PAIR_ID_UNPAIRED;
 
 /// A registered region role, or an unrecognised tag preserved verbatim.
+///
+/// `Ord` follows the registry tag, so ordering is the spec's role order rather
+/// than declaration order in this enum — capability reports sort by coordinate
+/// and a stable, spec-derived order keeps their output diffable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RegionRole {
     Gate,
@@ -22,6 +26,18 @@ pub enum RegionRole {
     LatentOut,
     /// A tag this binary does not recognise. Round-trips unchanged.
     Unknown(u16),
+}
+
+impl PartialOrd for RegionRole {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for RegionRole {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.as_u16().cmp(&other.as_u16())
+    }
 }
 
 /// First tag in the vendor/experimental space (spec §6.5).
@@ -161,6 +177,33 @@ mod tests {
     #[test]
     fn unknown_role_name_admits_it_is_unknown() {
         assert_eq!(RegionRole::Unknown(42).name(), "role_42");
+    }
+
+    #[test]
+    fn roles_order_by_registry_tag_not_declaration() {
+        // Sorting a capability report must be stable and spec-derived, so the
+        // order follows §6.5's tag numbering.
+        let mut v = vec![
+            RegionRole::Down,
+            RegionRole::Gate,
+            RegionRole::Unknown(300),
+            RegionRole::Up,
+        ];
+        v.sort();
+        assert_eq!(
+            v,
+            vec![
+                RegionRole::Gate,
+                RegionRole::Up,
+                RegionRole::Down,
+                RegionRole::Unknown(300),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_unknown_role_sorts_after_every_registered_one() {
+        assert!(RegionRole::Unknown(256) > RegionRole::LatentOut);
     }
 
     #[test]

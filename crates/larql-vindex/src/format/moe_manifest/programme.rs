@@ -158,13 +158,28 @@ impl Programme {
         }
     }
 
-    /// Whether `present` satisfies this programme, and if so under which
-    /// alternative.
-    pub fn satisfied_by(self, present: &[RegionRole]) -> Option<RoleAlternative> {
+    /// **Every** alternative `present` satisfies, in declaration order.
+    ///
+    /// Deliberately not "the first match". A bank can physically satisfy both
+    /// `gate + up + down` and `gate_up_fused + down`, and the kernel registry
+    /// may support one at a higher maturity than the other. Collapsing to a
+    /// single alternative during semantic traversal would let a Production
+    /// fused kernel hide behind a Reference decomposed path — a correctness-
+    /// preserving but silently slower binding, which is the worst kind to
+    /// debug. Ranking is kernel binding's job; traversal must not pre-empt it.
+    pub fn satisfied_alternatives(self, present: &[RegionRole]) -> Vec<RoleAlternative> {
         self.role_alternatives()
             .iter()
             .copied()
-            .find(|alt| alt.iter().all(|role| present.contains(role)))
+            .filter(|alt| alt.iter().all(|role| present.contains(role)))
+            .collect()
+    }
+
+    /// Whether any alternative is satisfied.
+    pub fn is_satisfied_by(self, present: &[RegionRole]) -> bool {
+        self.role_alternatives()
+            .iter()
+            .any(|alt| alt.iter().all(|role| present.contains(role)))
     }
 
     /// The closest unsatisfied alternative, or `None` when already satisfied.
@@ -175,7 +190,7 @@ impl Programme {
     /// slice, so the chosen alternative cannot drift as internal iteration
     /// changes. That determinism is what makes the diagnostic quotable.
     pub fn closest_unsatisfied(self, present: &[RegionRole]) -> Option<Unsatisfied> {
-        if self.satisfied_by(present).is_some() {
+        if self.is_satisfied_by(present) {
             return None;
         }
         self.role_alternatives()
@@ -269,10 +284,57 @@ mod tests {
     }
 
     #[test]
+    fn a_bank_satisfying_both_layouts_reports_both() {
+        // The kernel registry may support one layout at a higher maturity than
+        // the other. Reporting only the first would let a Production fused
+        // kernel hide behind a Reference decomposed path.
+        let both = [
+            RegionRole::Gate,
+            RegionRole::Up,
+            RegionRole::GateUpFused,
+            RegionRole::Down,
+        ];
+        let alts = Programme::GatedMlpV1.satisfied_alternatives(&both);
+        assert_eq!(alts.len(), 2, "{alts:?}");
+        assert_eq!(alts[0], &[RegionRole::GateUpFused, RegionRole::Down][..]);
+        assert_eq!(
+            alts[1],
+            &[RegionRole::Gate, RegionRole::Up, RegionRole::Down][..]
+        );
+    }
+
+    #[test]
+    fn satisfied_alternatives_preserves_declaration_order() {
+        let both = [
+            RegionRole::Gate,
+            RegionRole::Up,
+            RegionRole::GateUpFused,
+            RegionRole::Down,
+        ];
+        let alts = Programme::GatedMlpV1.satisfied_alternatives(&both);
+        let declared = Programme::GatedMlpV1.role_alternatives();
+        assert_eq!(alts, declared.to_vec());
+    }
+
+    #[test]
+    fn only_the_satisfied_layouts_are_reported() {
+        // Fused-only storage satisfies the fused layout and not the other.
+        let alts = Programme::GatedMlpV1.satisfied_alternatives(&FUSED_PRESENT);
+        assert_eq!(alts, vec![&[RegionRole::GateUpFused, RegionRole::Down][..]]);
+    }
+
+    #[test]
+    fn an_unsatisfied_programme_reports_no_alternatives() {
+        assert!(Programme::GatedMlpV1
+            .satisfied_alternatives(&[RegionRole::Gate])
+            .is_empty());
+    }
+
+    #[test]
     fn a_gated_mlp_accepts_fused_or_decomposed() {
         let p = Programme::GatedMlpV1;
-        assert!(p.satisfied_by(&FUSED_PRESENT).is_some());
-        assert!(p.satisfied_by(&DECOMPOSED_PRESENT).is_some());
+        assert!(p.is_satisfied_by(&FUSED_PRESENT));
+        assert!(p.is_satisfied_by(&DECOMPOSED_PRESENT));
     }
 
     #[test]
@@ -280,16 +342,16 @@ mod tests {
         // Naming `gated-mlp-fused-fc1-v1` over decomposed regions is a manifest
         // error, not a storage one — `gated-mlp-v1` is the right name there.
         let p = Programme::GatedMlpFusedFc1V1;
-        assert!(p.satisfied_by(&FUSED_PRESENT).is_some());
-        assert!(p.satisfied_by(&DECOMPOSED_PRESENT).is_none());
+        assert!(p.is_satisfied_by(&FUSED_PRESENT));
+        assert!(!p.is_satisfied_by(&DECOMPOSED_PRESENT));
     }
 
     #[test]
     fn gpt_oss_needs_bias() {
         let p = Programme::GptOssExpertV1;
-        assert!(p.satisfied_by(&FUSED_PRESENT).is_none());
+        assert!(!p.is_satisfied_by(&FUSED_PRESENT));
         let with_bias = [RegionRole::GateUpFused, RegionRole::Down, RegionRole::Bias];
-        assert!(p.satisfied_by(&with_bias).is_some());
+        assert!(p.is_satisfied_by(&with_bias));
     }
 
     #[test]
@@ -373,7 +435,7 @@ mod tests {
         // never executable.
         let gate_only = [RegionRole::Gate];
         for p in ALL_PROGRAMMES {
-            assert!(p.satisfied_by(&gate_only).is_none(), "{}", p.name());
+            assert!(!p.is_satisfied_by(&gate_only), "{}", p.name());
             assert!(!p.missing_roles(&gate_only).is_empty(), "{}", p.name());
         }
     }
@@ -399,6 +461,6 @@ mod tests {
             RegionRole::Scales,
             RegionRole::Unknown(900),
         ];
-        assert!(Programme::GatedMlpV1.satisfied_by(&extra).is_some());
+        assert!(Programme::GatedMlpV1.is_satisfied_by(&extra));
     }
 }
