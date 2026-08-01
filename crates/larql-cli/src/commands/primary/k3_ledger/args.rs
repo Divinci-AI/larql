@@ -65,6 +65,44 @@ pub enum K3LedgerCmd {
     /// Trace which KDA projections read the same hidden state, and what a shared
     /// input rotation would have to be folded into. Reads the real tensor table.
     KdaGraph(KdaGraphArgs),
+    /// Frequency-mass coverage from a captured routing trace: what a resident
+    /// set of C symbols per stratum actually serves, static vs adaptive vs
+    /// oracle vs null. Reads a local pool — no checkpoint, no network.
+    FreqMass(FreqMassArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct FreqMassArgs {
+    /// DEC residual capture pool captured with `--routing`.
+    #[arg(long)]
+    pub pool: std::path::PathBuf,
+
+    /// Resident-set sizes to score, in symbols per stratum.
+    #[arg(long, num_args = 1.., default_values_t = [1usize, 2, 4, 8, 16, 32, 64])]
+    pub cache_sizes: Vec<usize>,
+
+    /// Shrinkage weights on the pooled prior. 1.0 = static slice, 0.0 = causal
+    /// adaptive cache; an interior winner is a shrinkage cache.
+    #[arg(long, num_args = 1.., default_values_t = [0.0f64, 0.25, 0.5, 0.75, 0.9, 1.0])]
+    pub lambdas: Vec<f64>,
+
+    /// Fraction of each session's steps used to fit the adaptive key; the rest
+    /// is scored. A cache cannot rank on events it has not seen.
+    #[arg(long, default_value_t = super::freqmass::DEFAULT_FIT_FRACTION)]
+    pub fit_fraction: f64,
+
+    /// Seed for the marginal-preserving null.
+    #[arg(long, default_value_t = super::freqmass::DEFAULT_NULL_SEED)]
+    pub seed: u64,
+
+    /// Step counts at which to report support (union) growth.
+    #[arg(long, num_args = 1.., default_values_t = [1usize, 2, 4, 8, 16])]
+    pub support_steps: Vec<usize>,
+
+    /// Residency fraction to grade the operating point at. K3's proposed
+    /// 55-65 GB expert cache is 5-7% of its bank, so the default is 6.25%.
+    #[arg(long, default_value_t = 0.0625)]
+    pub operating_residency: f64,
 }
 
 #[derive(Debug, Args)]

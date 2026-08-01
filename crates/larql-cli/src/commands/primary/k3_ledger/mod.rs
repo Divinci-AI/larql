@@ -12,6 +12,10 @@
 //!   touch     — DEC-8.6 resident weight-touch ledger (pure, gated).
 //!   frontier  — DEC-8.7a dense-precision frontier, R4 ceiling (pure, gated).
 //!   block     — DEC-9.2 speculative block economics, R5/R6 (pure, gated).
+//!   selection_trace — generic "which symbols did this position pick" (pure).
+//!   freqmass  — frequency-mass coverage: static / adaptive / oracle / null.
+//!               Model-agnostic and symbol-agnostic; grades the resident bank,
+//!               the static slice, and compact-dense with one instrument (pure).
 //!   kda_a_log — is A_log per-head or per-channel? Fails closed (pure).
 //!   kda_graph — which KDA projections share one input, for rotation (pure).
 //!   scenario  — the premises a `frontier` row is conditional on (pure).
@@ -29,12 +33,16 @@ pub mod block;
 pub mod budget;
 pub mod classes;
 pub mod fetch;
+pub mod freqmass;
+#[cfg(test)]
+mod freqmass_tests;
 pub mod frontier;
 pub mod geometry;
 pub mod kda_a_log;
 pub mod kda_graph;
 mod report;
 pub mod scenario;
+pub mod selection_trace;
 pub mod serving_format;
 pub mod symbol_census;
 pub mod touch;
@@ -47,6 +55,11 @@ pub fn run(args: K3LedgerArgs) -> Result<(), Box<dyn std::error::Error>> {
     // so it must not pay for geometry it never consults.
     if matches!(args.cmd, args::K3LedgerCmd::Formats) {
         return report::formats(args.json);
+    }
+    // Reads a local capture pool and knows nothing about K3 — must not fetch
+    // geometry, or the instrument stops working on every non-K3 trace.
+    if let args::K3LedgerCmd::FreqMass(a) = &args.cmd {
+        return report::freqmass(a, args.json);
     }
 
     let repo = fetch::Repo::new(&args.repo)?;
@@ -69,7 +82,7 @@ pub fn run(args: K3LedgerArgs) -> Result<(), Box<dyn std::error::Error>> {
         args::K3LedgerCmd::Block(a) => report::block(&geom, &premises, a, args.json),
         args::K3LedgerCmd::Ceilings(a) => report::ceilings(&geom, a, args.json),
         // Handled above, before geometry is fetched.
-        args::K3LedgerCmd::Formats => unreachable!(),
+        args::K3LedgerCmd::Formats | args::K3LedgerCmd::FreqMass(_) => unreachable!(),
         args::K3LedgerCmd::TranscodeScan(a) => {
             report::transcode_scan(&repo, &args.kda_shard, a, args.json)
         }

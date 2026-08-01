@@ -178,6 +178,15 @@ pub fn touch(geom: &K3Geometry, p: &ServingPremises, a: &TouchArgs, as_json: boo
             geom.top_k
         );
     }
+    println!();
+    println!("  the uniform hit count is a NULL, not a forecast — it assumes no routing skew,");
+    println!("  and real routing departs from it in BOTH directions. Measured on the DEC-0");
+    println!("  Gemma pool (8-of-128, 6.25% activation): a 6.25% resident set covered 42% of");
+    println!("  routing events, not 6.25% — uniform understated coverage ~6.8x. It also");
+    println!("  OVERstated per-session support 3.4x at 16 steps. Neither magnitude transfers");
+    println!("  to K3 (R2: different activation fraction, and quantile balancing flattens);");
+    println!("  the sign of the coverage error does, since uniform understates under any skew.");
+    println!("  Measure the real curve with `larql k3-ledger freq-mass --pool <capture>`.");
     Ok(())
 }
 
@@ -1019,6 +1028,145 @@ pub fn kda_graph(
             println!("        per-channel[0..3] {:.6?}", &pc[..3]);
             println!("        a SQUARE fixture would agree on the diagonal and prove nothing.");
         }
+    }
+    Ok(())
+}
+
+/// Frequency-mass coverage from a local capture pool. Takes no geometry: the
+/// instrument is model-agnostic and must keep working on non-K3 traces.
+pub fn freqmass(a: &super::args::FreqMassArgs, as_json: bool) -> R {
+    use super::freqmass::{self, MassCurveConfig};
+    use super::selection_trace::SelectionTrace;
+    use crate::commands::primary::dec_bench::capture_format::CapturePool;
+
+    let pool = CapturePool::open(&a.pool)?;
+    let trace = SelectionTrace::from_routing_pool(&pool)?;
+    let curve = freqmass::mass_curve(
+        &trace,
+        &MassCurveConfig {
+            cache_sizes: a.cache_sizes.clone(),
+            lambdas: a.lambdas.clone(),
+            fit_fraction: a.fit_fraction,
+            seed: a.seed,
+        },
+    )?;
+    let support = freqmass::support_curve(&trace, &a.support_steps);
+
+    // The operating point is a residency fraction, not a count: it is what
+    // transfers across banks of different size.
+    let op = curve
+        .residency_frac
+        .iter()
+        .enumerate()
+        .min_by(|x, y| {
+            (x.1 - a.operating_residency)
+                .abs()
+                .total_cmp(&(y.1 - a.operating_residency).abs())
+        })
+        .map(|(i, _)| i);
+
+    if as_json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "pool": a.pool.display().to_string(),
+                "model": pool.manifest.model,
+                "curve": curve,
+                "support": support,
+                "operating_index": op,
+            }))?
+        );
+        return Ok(());
+    }
+
+    println!("=== frequency-mass coverage — {} ===", a.pool.display());
+    println!("model    {}", pool.manifest.model);
+    println!(
+        "trace    {} sessions x {} steps x {} routing strata, width {} of {} ({:.3}% activation)",
+        trace.sessions(),
+        trace.steps(),
+        trace.active_strata().len(),
+        trace.width(),
+        trace.alphabet(),
+        trace.activation_fraction() * 100.0,
+    );
+    println!("         bank size INFERRED from the trace (max observed symbol + 1)");
+    println!(
+        "         fit {} steps -> eval {} steps, {} (session, stratum) cells scored",
+        curve.fit_steps, curve.eval_steps, curve.cells_scored,
+    );
+    println!("R2       every number below is conditional on that activation fraction");
+    println!();
+
+    if !support.is_empty() {
+        println!("support growth — measured against the memoryless-uniform null");
+        println!(
+            "  {:>6} {:>10} {:>8} {:>10} {:>15}",
+            "steps", "measured", "%bank", "uniform", "overstatement"
+        );
+        for p in &support {
+            println!(
+                "  {:>6} {:>10.1} {:>7.1}% {:>10.1} {:>14.2}x",
+                p.steps,
+                p.measured,
+                p.measured_frac * 100.0,
+                p.uniform,
+                p.overstatement,
+            );
+        }
+        println!();
+    }
+
+    print!("{:>5} {:>7}", "C", "%bank");
+    for arm in &curve.shrinkage {
+        print!("{:>9}", format!("λ={:.2}", arm.lambda));
+    }
+    println!("{:>9}{:>9}{:>9}", "oracle", "null", "mass/res");
+    let stat = curve.static_arm().map(|s| s.coverage.clone());
+    for (i, &c) in curve.cache_sizes.iter().enumerate() {
+        let marker = if Some(i) == op { "*" } else { " " };
+        print!("{marker}{:>4} {:>6.1}%", c, curve.residency_frac[i] * 100.0);
+        for arm in &curve.shrinkage {
+            print!("{:>9.4}", arm.coverage[i]);
+        }
+        let per = stat
+            .as_ref()
+            .map(|s| curve.mass_per_residency(s)[i])
+            .unwrap_or(f64::NAN);
+        println!(
+            "{:>9.4}{:>9.4}{:>8.2}x",
+            curve.oracle[i], curve.null[i], per
+        );
+    }
+    println!();
+    println!("  λ=1.00 static slice (pooled prior, leave-one-out) · λ=0.00 causal adaptive cache");
+    println!("  oracle ranks by the scored events themselves · null destroys session identity");
+    println!("  mass/res = coverage per unit residency — the axis a cold-tier lever moves along");
+    println!();
+
+    if let Some(i) = op {
+        let (realisable, oracle) = curve.miss_ratios(i).unwrap_or((f64::NAN, f64::NAN));
+        let (best_lambda, best) = curve.best_realisable(i).unwrap_or((f64::NAN, f64::NAN));
+        let stat_cov = stat.as_ref().map(|s| s[i]).unwrap_or(f64::NAN);
+        println!(
+            "operating point — C={} ({:.1}% of bank)",
+            curve.cache_sizes[i],
+            curve.residency_frac[i] * 100.0
+        );
+        println!(
+            "  static coverage        {stat_cov:.4}  (miss {:.4})",
+            1.0 - stat_cov
+        );
+        println!(
+            "  best realisable        {best:.4}  at λ={best_lambda:.2}  (miss {:.4})",
+            1.0 - best
+        );
+        println!("  REALISABLE PRIZE       {realisable:.2}x on the miss stream — what adaptation actually buys");
+        println!("  oracle bound           {oracle:.2}x — with every benefit of the doubt granted");
+        println!(
+            "  locality present       {:.4}  (oracle - null; the rest of the oracle gap is counting noise)",
+            curve.locality_signal(i)
+        );
     }
     Ok(())
 }
