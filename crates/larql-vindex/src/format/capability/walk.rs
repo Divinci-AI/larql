@@ -225,7 +225,10 @@ pub fn infer_walk(env: &WalkEnvironment, request: &WalkRequest) -> WalkCapabilit
     }
 
     let plan = OperationPlan {
-        fixed_regions,
+        fixed_components: fixed_regions
+            .iter()
+            .map(PlannedRegion::as_component)
+            .collect(),
         choices,
     };
     let completeness = if omitted.is_empty() {

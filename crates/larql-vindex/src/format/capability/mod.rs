@@ -29,6 +29,7 @@
 
 pub mod authority;
 pub mod compatibility;
+pub mod component;
 pub mod coordinate;
 pub mod kernel;
 pub mod operation;
@@ -55,6 +56,7 @@ pub use authority::{
     derive_authority, AuthorityInputs, DerivedAuthority, Fidelity, StructuralChange,
 };
 pub use compatibility::{IncompatibilityShape, RoleSegmentCoverage, SegmentCompatibility};
+pub use component::{ComponentCoordinate, SelectedComponent, SelectedTensor, WeightClass};
 pub use coordinate::{AbsenceKind, RegionCoordinate};
 pub use kernel::{KernelId, KernelMaturity};
 pub use operation::{Degradation, OperationAdmission, OperationCapability, OperationFailure};

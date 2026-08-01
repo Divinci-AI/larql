@@ -16,7 +16,7 @@ fn coordinate() -> RegionCoordinate {
 }
 
 fn route() -> QualifiedOperationRoute {
-    QualifiedOperationRoute::new(OperationPlan::fixed(vec![PlannedRegion::new(
+    QualifiedOperationRoute::new(OperationPlan::fixed_regions(vec![PlannedRegion::new(
         coordinate(),
         Fidelity::SourceExact,
     )]))

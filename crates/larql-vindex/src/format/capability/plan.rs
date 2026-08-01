@@ -30,22 +30,27 @@
 //! a value.
 
 use super::authority::{derive_authority, AuthorityInputs, DerivedAuthority, Fidelity};
-use super::coordinate::{BankCoordinate, RegionCoordinate};
+use super::component::{ComponentCoordinate, SelectedComponent};
+use super::coordinate::BankCoordinate;
 use crate::format::moe_manifest::programme::RoleAlternative;
 
 /// A region an operation would read, with the fidelity that feeds the fold.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlannedRegion {
-    pub coordinate: RegionCoordinate,
+    pub coordinate: super::coordinate::RegionCoordinate,
     pub fidelity: Fidelity,
 }
 
 impl PlannedRegion {
-    pub fn new(coordinate: RegionCoordinate, fidelity: Fidelity) -> Self {
+    pub fn new(coordinate: super::coordinate::RegionCoordinate, fidelity: Fidelity) -> Self {
         Self {
             coordinate,
             fidelity,
         }
+    }
+
+    pub fn as_component(&self) -> SelectedComponent {
+        SelectedComponent::region(self.coordinate.clone(), self.fidelity)
     }
 }
 
@@ -100,23 +105,31 @@ impl PlanChoice {
 /// What an operation would read, as fixed regions plus open choices.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct OperationPlan {
-    /// Regions every execution of this plan reads, whatever binding chooses.
-    pub fixed_regions: Vec<PlannedRegion>,
+    /// Components every execution of this plan reads, whatever binding
+    /// chooses. Bank regions *and* manifest-addressed tensors — a decode path
+    /// needs embeddings, norms, routers and transforms, none of which are
+    /// bank regions.
+    pub fixed_components: Vec<SelectedComponent>,
     /// Independent choice groups. Empty for a plan with a single shape.
     pub choices: Vec<PlanChoice>,
 }
 
 impl OperationPlan {
     /// A plan with no open choices.
-    pub fn fixed(regions: Vec<PlannedRegion>) -> Self {
+    pub fn fixed(components: Vec<SelectedComponent>) -> Self {
         Self {
-            fixed_regions: regions,
+            fixed_components: components,
             choices: Vec::new(),
         }
     }
 
+    /// A plan whose fixed side is bank regions only — the WALK shape.
+    pub fn fixed_regions(regions: Vec<PlannedRegion>) -> Self {
+        Self::fixed(regions.iter().map(PlannedRegion::as_component).collect())
+    }
+
     pub fn is_empty(&self) -> bool {
-        self.fixed_regions.is_empty() && self.choices.is_empty()
+        self.fixed_components.is_empty() && self.choices.is_empty()
     }
 
     /// Whether binding still has a decision to make.
@@ -125,15 +138,19 @@ impl OperationPlan {
     }
 
     /// Every coordinate this plan could read, for diagnostics.
-    pub fn all_coordinates(&self) -> Vec<RegionCoordinate> {
-        let mut out: Vec<RegionCoordinate> = self
-            .fixed_regions
+    pub fn all_coordinates(&self) -> Vec<ComponentCoordinate> {
+        let mut out: Vec<ComponentCoordinate> = self
+            .fixed_components
             .iter()
-            .map(|r| r.coordinate.clone())
+            .map(|c| c.coordinate())
             .collect();
         for choice in &self.choices {
             for alt in &choice.alternatives {
-                out.extend(alt.regions.iter().map(|r| r.coordinate.clone()));
+                out.extend(
+                    alt.regions
+                        .iter()
+                        .map(|r| ComponentCoordinate::BankRegion(r.coordinate.clone())),
+                );
             }
         }
         out.sort();
@@ -145,7 +162,8 @@ impl OperationPlan {
         &self,
         pick: impl Fn(&PlanChoice) -> Option<&QualifiedAlternative>,
     ) -> DerivedAuthority {
-        let mut fidelities: Vec<Fidelity> = self.fixed_regions.iter().map(|r| r.fidelity).collect();
+        let mut fidelities: Vec<Fidelity> =
+            self.fixed_components.iter().map(|c| c.fidelity()).collect();
         for choice in &self.choices {
             if let Some(alt) = pick(choice) {
                 fidelities.extend(alt.regions.iter().map(|r| r.fidelity));

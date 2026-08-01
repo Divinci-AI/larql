@@ -83,12 +83,12 @@ mod tests {
     use crate::format::lyrw2::region_role::RegionRole;
 
     fn available(fidelity: Fidelity) -> OperationCapability {
-        OperationCapability::available(vec![QualifiedOperationRoute::new(OperationPlan::fixed(
-            vec![PlannedRegion::new(
+        OperationCapability::available(vec![QualifiedOperationRoute::new(
+            OperationPlan::fixed_regions(vec![PlannedRegion::new(
                 RegionCoordinate::new(0, 0, None, RegionRole::Gate),
                 fidelity,
-            )],
-        ))])
+            )]),
+        )])
     }
 
     fn unavailable() -> OperationCapability {

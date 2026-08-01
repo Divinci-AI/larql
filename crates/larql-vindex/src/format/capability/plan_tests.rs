@@ -20,7 +20,7 @@ fn region(layer: u32, role: RegionRole, fidelity: Fidelity) -> PlannedRegion {
 
 /// A route reading one exact gate region — the direct-browse shape.
 fn direct_gate_route() -> QualifiedOperationRoute {
-    QualifiedOperationRoute::new(OperationPlan::fixed(vec![region(
+    QualifiedOperationRoute::new(OperationPlan::fixed_regions(vec![region(
         0,
         RegionRole::Gate,
         Fidelity::SourceExact,
@@ -29,7 +29,7 @@ fn direct_gate_route() -> QualifiedOperationRoute {
 
 /// A route striding an approximate fused region — same operation, worse bytes.
 fn strided_fused_route() -> QualifiedOperationRoute {
-    QualifiedOperationRoute::new(OperationPlan::fixed(vec![region(
+    QualifiedOperationRoute::new(OperationPlan::fixed_regions(vec![region(
         0,
         RegionRole::GateUpFused,
         Fidelity::NumericallyApproximate,
@@ -137,7 +137,7 @@ fn two_way_choice(layer: u32) -> PlanChoice {
 fn a_choice_group_reports_a_range_rather_than_a_value() {
     // Binding has not chosen, so the honest statement is an interval.
     let plan = OperationPlan {
-        fixed_regions: Vec::new(),
+        fixed_components: Vec::new(),
         choices: vec![two_way_choice(0)],
     };
     assert!(plan.has_open_choices());
@@ -156,7 +156,7 @@ fn thirty_independent_choices_do_not_enumerate() {
     // The property the representation exists for: 2^30 whole-model routes are
     // never materialised. Thirty choice groups stay thirty.
     let plan = OperationPlan {
-        fixed_regions: Vec::new(),
+        fixed_components: Vec::new(),
         choices: (0..30).map(two_way_choice).collect(),
     };
     assert_eq!(plan.choices.len(), 30);
@@ -174,11 +174,9 @@ fn thirty_independent_choices_do_not_enumerate() {
 fn a_fixed_region_drags_the_ceiling_down_across_every_choice() {
     // Weakest-link still applies: no binding can beat the fixed regions.
     let plan = OperationPlan {
-        fixed_regions: vec![region(
-            0,
-            RegionRole::LatentIn,
-            Fidelity::NumericallyApproximate,
-        )],
+        fixed_components: vec![
+            region(0, RegionRole::LatentIn, Fidelity::NumericallyApproximate).as_component(),
+        ],
         choices: vec![PlanChoice {
             bank: BankCoordinate::new(0, 0),
             alternatives: vec![alternative(FUSED, Fidelity::SourceExact)],
@@ -193,7 +191,7 @@ fn a_fixed_region_drags_the_ceiling_down_across_every_choice() {
 #[test]
 fn a_single_alternative_choice_is_not_an_open_choice() {
     let plan = OperationPlan {
-        fixed_regions: Vec::new(),
+        fixed_components: Vec::new(),
         choices: vec![PlanChoice {
             bank: BankCoordinate::new(0, 0),
             alternatives: vec![alternative(FUSED, Fidelity::SourceEquivalent)],
@@ -232,7 +230,9 @@ fn the_best_alternative_is_the_one_whose_weakest_region_is_strongest() {
 #[test]
 fn a_plan_lists_every_coordinate_it_could_read() {
     let plan = OperationPlan {
-        fixed_regions: vec![region(0, RegionRole::LatentIn, Fidelity::SourceExact)],
+        fixed_components: vec![
+            region(0, RegionRole::LatentIn, Fidelity::SourceExact).as_component()
+        ],
         choices: vec![two_way_choice(0)],
     };
     let coords = plan.all_coordinates();

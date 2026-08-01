@@ -218,7 +218,9 @@ fn a_residual_bank_puts_no_transform_in_the_plan() {
         &WalkRequest::surface(vector()),
     );
     let coords = r.capability.routes[0].plan.all_coordinates();
-    assert!(!coords.iter().any(|c| c.role == RegionRole::LatentIn));
+    assert!(!coords
+        .iter()
+        .any(|c| c.role() == Some(RegionRole::LatentIn)));
 }
 
 #[test]
@@ -228,7 +230,9 @@ fn a_latent_bank_consumes_routed_input() {
         &WalkRequest::surface(vector()),
     );
     let coords = r.capability.routes[0].plan.all_coordinates();
-    assert!(coords.iter().any(|c| c.role == RegionRole::LatentIn));
+    assert!(coords
+        .iter()
+        .any(|c| c.role() == Some(RegionRole::LatentIn)));
 }
 
 #[test]
