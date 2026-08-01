@@ -80,9 +80,9 @@ fn main() {
         };
         match read(CONTROL) {
             Some(ctrl) if ctrl >= CONTROL_FLOOR => {
-                for i in 0..TARGETS.len() {
+                for (i, slot) in samples.iter_mut().enumerate() {
                     if let Some(v) = read(i) {
-                        samples[i].push(v);
+                        slot.push(v);
                     }
                 }
             }
