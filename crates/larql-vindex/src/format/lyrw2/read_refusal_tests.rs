@@ -23,16 +23,18 @@ fn a_v1_file_is_refused_by_generation_not_by_parse_error() {
     bytes[VERSION_FIELD..VERSION_FIELD + 4].copy_from_slice(&1u32.to_le_bytes());
     let err = Lyrw2Reader::parse(&bytes).unwrap_err();
     assert!(matches!(err, Lyrw2Error::WrongGeneration { found: 1, .. }));
-    assert!(err.to_string().contains("VINDEX1"), "{err}");
+    assert!(err.to_string().contains("VINDEX2"), "{err}");
 }
 
 #[test]
 fn a_future_generation_is_refused_rather_than_guessed_at() {
-    let mut bytes = single_segment_file("v3-generation.weights");
+    let mut bytes = single_segment_file("lyrw3-generation.weights");
     bytes[VERSION_FIELD..VERSION_FIELD + 4].copy_from_slice(&3u32.to_le_bytes());
     let err = Lyrw2Reader::parse(&bytes).unwrap_err();
     assert!(matches!(err, Lyrw2Error::WrongGeneration { found: 3, .. }));
-    assert!(err.to_string().contains("VINDEX3"), "{err}");
+    // LYRW format_version 3 belongs to a VINDEX4 container, not VINDEX3 —
+    // the layer sequence trails the container sequence by one.
+    assert!(err.to_string().contains("VINDEX4"), "{err}");
 }
 
 #[test]

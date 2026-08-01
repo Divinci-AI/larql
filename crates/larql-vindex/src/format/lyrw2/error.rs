@@ -81,16 +81,25 @@ pub enum Lyrw2Error {
 
 impl Lyrw2Error {
     /// Build the generation error, deriving which loader the caller needs from
-    /// the version actually found. A v1 file must produce "requires VINDEX1",
-    /// never a parse error.
+    /// the version actually found. A LYRW v1 file must produce "requires the
+    /// VINDEX2 loader", never a parse error.
     pub fn wrong_generation(found: u32) -> Self {
         Self::WrongGeneration {
             found,
             supported: FORMAT_VERSION,
-            // LYRW format_version N belongs to container generation N.
-            required_generation: found,
+            required_generation: container_generation_for(found),
         }
     }
+}
+
+/// LYRW `format_version` N is carried by container generation N + 1.
+///
+/// The two sequences are offset because LYRW started at 1 while `index.json`
+/// was already at 2. Reporting the LYRW number alone would name a version no
+/// CLI flag or directory is labelled with, so the error translates it into the
+/// loader the caller actually has to reach for.
+const fn container_generation_for(lyrw_format_version: u32) -> u32 {
+    lyrw_format_version + 1
 }
 
 #[cfg(test)]
@@ -112,14 +121,23 @@ mod tests {
     #[test]
     fn wrong_generation_names_the_loader_the_caller_needs() {
         let s = Lyrw2Error::wrong_generation(1).to_string();
-        assert!(s.contains("VINDEX1"), "{s}");
+        assert!(s.contains("VINDEX2"), "{s}");
         assert!(s.contains("version 2"), "{s}");
     }
 
     #[test]
     fn wrong_generation_names_a_future_loader_too() {
+        // LYRW format_version 3 would be carried by a VINDEX4 container —
+        // the offset applies forwards as well as backwards.
         let s = Lyrw2Error::wrong_generation(3).to_string();
-        assert!(s.contains("VINDEX3"), "{s}");
+        assert!(s.contains("VINDEX4"), "{s}");
+    }
+
+    #[test]
+    fn the_generation_offset_holds_across_the_range() {
+        for lyrw in 1u32..=4 {
+            assert_eq!(container_generation_for(lyrw), lyrw + 1);
+        }
     }
 
     #[test]

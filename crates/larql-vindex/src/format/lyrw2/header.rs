@@ -2,7 +2,7 @@
 //!
 //! The magic is shared with v1 deliberately. It buys forensics, not
 //! compatibility: a v1 reader recognises the file, reaches the version field,
-//! and refuses precisely — "requires the VINDEX2 loader" — instead of parsing
+//! and refuses precisely — "requires the VINDEX3 loader" — instead of parsing
 //! a v2 table at the v1 stride and returning bytes from the wrong expert.
 
 use super::consts::{FORMAT_VERSION, HEADER_BYTES, HEADER_FLAG_MULTI_SEGMENT, MAGIC};
@@ -164,7 +164,7 @@ mod tests {
         buf[4..8].copy_from_slice(&1u32.to_le_bytes());
         let err = Lyrw2Header::decode(&buf).unwrap_err();
         assert!(matches!(err, Lyrw2Error::WrongGeneration { found: 1, .. }));
-        assert!(err.to_string().contains("VINDEX1"), "{err}");
+        assert!(err.to_string().contains("VINDEX2"), "{err}");
     }
 
     #[test]

@@ -1,4 +1,4 @@
-//! LYRW v2 — the VINDEX2 per-layer weight container (format spec §6).
+//! LYRW v2 — the VINDEX3 per-layer weight container (format spec §6).
 //!
 //! LYRW v2 describes **storage only**: banks, entries, region schemas, offsets
 //! and formats. It carries no programme identity — the MoE manifest binds
