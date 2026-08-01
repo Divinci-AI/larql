@@ -279,10 +279,16 @@ fn evaluate_role(
     usable.sort_unstable();
 
     // Present but usable in no required segment, with no codec objection: the
-    // regions live outside the required population, which is indistinguishable
-    // from absence for this selection.
+    // regions live outside the required population. Distinct from absence —
+    // the bytes are real and the repair is to reconcile the selection.
     if selection.is_segmented() && usable.is_empty() && support.is_supported() {
-        return absent(coordinate, AbsenceKind::AbsentEverywhere);
+        return absent(
+            coordinate,
+            AbsenceKind::PresentOutsidePopulation {
+                found: selection.segments_with(role),
+                required: selection.required_segments.clone(),
+            },
+        );
     }
 
     RoleCapability {

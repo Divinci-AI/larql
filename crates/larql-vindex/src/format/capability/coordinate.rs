@@ -72,6 +72,11 @@ pub enum AbsenceKind {
     /// analysis-only browse slice has no `down` by design. Fix: none; use a
     /// profile that selects it.
     OmittedBySelection,
+    /// Regions exist, but none inside the required population. The bytes are
+    /// real and unreachable for *this* selection, which is a resolution fault
+    /// rather than a storage one. Fix: reconcile the selection's segment set
+    /// with what the bank actually holds.
+    PresentOutsidePopulation { found: Vec<u16>, required: Vec<u16> },
 }
 
 impl AbsenceKind {
@@ -88,8 +93,24 @@ impl AbsenceKind {
         match self {
             Self::AbsentEverywhere => "absent from every selected segment".into(),
             Self::OmittedBySelection => "omitted by the active selection".into(),
+            Self::PresentOutsidePopulation { found, required } => format!(
+                "present in segments {}, none of which are in the required set {}",
+                render(found),
+                render(required)
+            ),
         }
     }
+}
+
+fn render(segments: &[u16]) -> String {
+    if segments.is_empty() {
+        return "none".into();
+    }
+    segments
+        .iter()
+        .map(|s| s.to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 #[cfg(test)]
@@ -141,6 +162,20 @@ mod tests {
         assert!(AbsenceKind::AbsentEverywhere
             .describe()
             .contains("every selected segment"));
+    }
+
+    #[test]
+    fn regions_outside_the_population_are_a_resolution_fault_not_a_storage_one() {
+        // The bytes are real; this selection simply cannot reach them. That is
+        // a different repair from "extract the variant".
+        let a = AbsenceKind::PresentOutsidePopulation {
+            found: vec![7, 8],
+            required: vec![0, 1],
+        };
+        assert!(a.is_defect());
+        let s = a.describe();
+        assert!(s.contains("present in segments 7, 8"), "{s}");
+        assert!(s.contains("required set 0, 1"), "{s}");
     }
 
     #[test]

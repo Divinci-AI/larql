@@ -31,6 +31,7 @@ pub mod authority;
 pub mod compatibility;
 pub mod coordinate;
 pub mod kernel;
+pub mod operation;
 pub mod role;
 pub mod selection;
 pub mod traversal;
@@ -43,6 +44,9 @@ pub use authority::{
 pub use compatibility::{IncompatibilityShape, RoleSegmentCoverage, SegmentCompatibility};
 pub use coordinate::{AbsenceKind, RegionCoordinate};
 pub use kernel::{KernelId, KernelMaturity};
+pub use operation::{
+    Degradation, OperationAdmission, OperationCapability, OperationFailure, OperationPlan,
+};
 pub use role::{OperandAvailability, ReferenceSupport, RoleCapability};
 pub use selection::{BankSelection, SelectedRegion};
 pub use traversal::{

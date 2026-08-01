@@ -389,3 +389,63 @@ fn every_diagnosis_carries_the_full_coordinate() {
     assert!(s.contains("bank 0"), "{s}");
     assert!(s.contains("role down"), "{s}");
 }
+
+#[test]
+fn regions_outside_the_required_population_are_named_as_such() {
+    // The bytes exist in segments 7-8; this selection requires 0-1. That is a
+    // resolution fault, not a missing variant, and the repair differs.
+    let mut sel = selection(&[0, 1], &[(FUSED, &[0, 1])]);
+    for s in [7u16, 8] {
+        sel.regions
+            .insert((Some(s), DOWN), region(RegionFormat::Q6K));
+    }
+    let r = traverse_bank(LAYER, Programme::GatedMlpV1, &sel, &AllCodecs);
+    assert!(!r.is_executable());
+
+    let down = r
+        .closest_failure()
+        .unwrap()
+        .operands
+        .iter()
+        .find(|o| o.coordinate.role == DOWN)
+        .unwrap();
+    match &down.availability {
+        OperandAvailability::Absent(AbsenceKind::PresentOutsidePopulation { found, required }) => {
+            assert_eq!(found, &vec![7, 8]);
+            assert_eq!(required, &vec![0, 1]);
+        }
+        other => panic!("expected outside-population, got {other:?}"),
+    }
+}
+
+#[test]
+fn every_reference_execution_verdict_renders_distinguishably() {
+    let verdicts = [
+        ReferenceExecution::Executable,
+        ReferenceExecution::BlockedByOperands { roles: vec![DOWN] },
+        ReferenceExecution::BlockedByIncompatibleSegments,
+        ReferenceExecution::BlockedByIncompleteSegments,
+    ];
+    let rendered: Vec<String> = verdicts.iter().map(|v| v.describe()).collect();
+    for i in 0..rendered.len() {
+        for j in (i + 1)..rendered.len() {
+            assert_ne!(rendered[i], rendered[j], "{i} vs {j}");
+        }
+    }
+    assert!(rendered[0].contains("reference-executable"));
+    assert!(rendered[1].contains("down"));
+    assert!(verdicts[0].is_executable());
+    assert!(!verdicts[1].is_executable());
+}
+
+#[test]
+fn a_bank_with_no_usable_role_reports_every_blocking_role() {
+    let sel = selection(&[0], &[]);
+    let r = traverse_bank(LAYER, Programme::GatedMlpV1, &sel, &AllCodecs);
+    match &r.closest_failure().unwrap().reference_execution {
+        ReferenceExecution::BlockedByOperands { roles } => {
+            assert_eq!(roles.len(), 2, "{roles:?}");
+        }
+        other => panic!("expected operand block, got {other:?}"),
+    }
+}
