@@ -1196,8 +1196,8 @@ pub fn formats(as_json: bool) -> R {
     println!();
 
     println!(
-        "{:<22} {:>7} {:>8} {:>7} {:>8}",
-        "container", "levels", "exact", "bpw", "kernel"
+        "{:<22} {:>7} {:>8} {:>7} {:>12}",
+        "container", "levels", "exact", "bpw", "kernel reach"
     );
     for c in [
         Container::Mxfp4,
@@ -1207,12 +1207,20 @@ pub fn formats(as_json: bool) -> R {
         Container::Q8_0,
     ] {
         println!(
-            "{:<22} {:>7} {:>8} {:>7.4} {:>8}",
+            "{:<22} {:>7} {:>8} {:>7.4} {:>12}",
             c.label(),
             c.grid_levels().map_or("LUT".into(), |l| l.to_string()),
             if c.holds_fp4_exactly() { "yes" } else { "NO" },
             c.all_in_bits(),
-            if c.has_metal_kernel() { "yes" } else { "no" },
+            format!(
+                "{:?}{}",
+                c.kernel_maturity(),
+                if c.kernel_maturity().is_servable() {
+                    ""
+                } else {
+                    "*"
+                }
+            ),
         );
     }
     println!();
@@ -1220,7 +1228,9 @@ pub fn formats(as_json: bool) -> R {
         "  Q4_K is {} levels short — no scan or scale trick rescues it.",
         sf::affine_levels_required() - Container::Q4K.grid_levels().unwrap()
     );
-    println!("  Q6_K is the cheapest exact container with a kernel today.");
+    println!("  Q6_K is the cheapest exact container that can SERVE today.");
+    println!("  MXFP4 has Metal kernels (K1 standalone, K2 grouped) but is absent");
+    println!("  from QuantMatVec dispatch, so kernels != servable. (* = cannot serve)");
     println!("  Q5_K is exact but needs a kernel written AND ships more bytes");
     println!("  than native MXFP4 would — strictly dominated, never build it.");
     println!();

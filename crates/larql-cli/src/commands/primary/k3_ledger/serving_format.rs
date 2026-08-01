@@ -121,14 +121,46 @@ pub enum Container {
     Q8_0,
 }
 
-/// Whether a Metal matvec kernel exists for this container in-tree today.
+/// How far a container's Metal support actually reaches.
 ///
-/// Provenance: `QuantMatVec` dispatches Q4_K/Q4_KF/Q6_K/Q4_0/Q8_0; no `q5` or
-/// `mxfp4` matvec appears under `larql-compute-metal/src`. Re-grep before
-/// quoting — this is the one field here that can drift.
+/// "Has a kernel" was too coarse and produced a wrong claim: MXFP4 *does* have
+/// Metal kernels (`mxfp4_matvec`, plus the K2 grouped tournament arms) but is
+/// absent from `QuantMatVec`'s format dispatch, so it cannot serve. Ordered so
+/// that "cheapest exact container that can actually serve today" is expressible.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+pub enum KernelMaturity {
+    /// No Metal kernel at all.
+    None,
+    /// A standalone or diagnostic kernel exists.
+    Standalone,
+    /// A grouped-expert kernel exists (may still be a candidate, not a path).
+    Grouped,
+    /// Reachable through `QuantMatVec`'s format dispatch.
+    Dispatched,
+    /// Wired into production inference.
+    Production,
+}
+
+impl KernelMaturity {
+    /// Can this container serve a real forward pass today?
+    pub fn is_servable(self) -> bool {
+        self >= Self::Dispatched
+    }
+}
+
+/// Provenance, re-grepped 2026-08-01: `QuantMatVec` dispatches
+/// Q4_K/Q4_KF/Q6_K/Q4_0/Q8_0. `larql-compute-metal` additionally carries
+/// `shaders::mxfp4_matvec` (K1) and `shaders::mxfp4_grouped_experts` (K2, four
+/// tournament arms), neither reachable from the dispatch. No `q5` kernel exists.
 impl Container {
-    pub fn has_metal_kernel(self) -> bool {
-        matches!(self, Self::Q4K | Self::Q6K | Self::Q8_0)
+    pub fn kernel_maturity(self) -> KernelMaturity {
+        match self {
+            // K1 standalone + K2 grouped candidates, but no serving dispatch.
+            Self::Mxfp4 => KernelMaturity::Grouped,
+            Self::Q4K | Self::Q6K => KernelMaturity::Production,
+            Self::Q8_0 => KernelMaturity::Dispatched,
+            Self::Q5K => KernelMaturity::None,
+        }
     }
 
     /// Levels the container's dequant grid offers, or `None` for a LUT codec,
@@ -380,28 +412,40 @@ mod tests {
     }
 
     #[test]
-    fn q6k_is_the_cheapest_exact_container_with_a_kernel_today() {
-        // Why the current serving path is Q6_K, stated as a test rather than a
-        // preference.
+    fn q6k_is_the_cheapest_exact_container_that_can_actually_serve() {
+        // Why the current serving path is Q6_K. The filter is `is_servable`,
+        // not "a kernel exists" — MXFP4 has kernels and is cheaper but cannot
+        // serve, and conflating those produced a wrong claim once already.
         let cheapest = [
+            Container::Mxfp4,
             Container::Q4K,
             Container::Q5K,
             Container::Q6K,
             Container::Q8_0,
         ]
         .into_iter()
-        .filter(|c| c.holds_fp4_exactly() && c.has_metal_kernel())
+        .filter(|c| c.holds_fp4_exactly() && c.kernel_maturity().is_servable())
         .min_by(|a, b| a.all_in_bits().partial_cmp(&b.all_in_bits()).unwrap());
         assert_eq!(cheapest, Some(Container::Q6K));
     }
 
     #[test]
+    fn mxfp4_has_kernels_but_cannot_serve() {
+        // The corrected claim, pinned: kernels exist (K1 standalone, K2
+        // grouped) yet nothing routes a forward pass through them.
+        let m = Container::Mxfp4.kernel_maturity();
+        assert!(m >= KernelMaturity::Standalone, "K1 exists");
+        assert!(!m.is_servable(), "but it is not in QuantMatVec dispatch");
+        assert!(Container::Mxfp4.all_in_bits() < Container::Q6K.all_in_bits());
+    }
+
+    #[test]
     fn q5k_is_strictly_dominated_by_native_mxfp4() {
-        // Exact, but needs a kernel written AND ships more bytes than the format
-        // that same effort would deliver. Both arms must hold for "never build".
+        // Exact, but has NO kernel at all while MXFP4 already has two rungs
+        // built — so Q5_K costs strictly more work AND ships more bytes.
         assert!(Container::Q5K.holds_fp4_exactly());
-        assert!(!Container::Q5K.has_metal_kernel());
-        assert!(!Container::Mxfp4.has_metal_kernel());
+        assert_eq!(Container::Q5K.kernel_maturity(), KernelMaturity::None);
+        assert!(Container::Mxfp4.kernel_maturity() > KernelMaturity::None);
         assert!(Container::Q5K.all_in_bits() > Container::Mxfp4.all_in_bits());
     }
 
