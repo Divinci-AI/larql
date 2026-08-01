@@ -12,6 +12,11 @@
 //!   touch     — DEC-8.6 resident weight-touch ledger (pure, gated).
 //!   frontier  — DEC-8.7a dense-precision frontier, R4 ceiling (pure, gated).
 //!   block     — DEC-9.2 speculative block economics, R5/R6 (pure, gated).
+//!   kda_a_log — is A_log per-head or per-channel? Fails closed (pure).
+//!   kda_graph — which KDA projections share one input, for rotation (pure).
+//!   scenario  — the premises a `frontier` row is conditional on (pure).
+//!   serving_format — which containers hold MXFP4 exactly, by counting (pure).
+//!   symbol_census  — is there an exact VARIABLE-rate code below 4 bits (pure).
 //!   fetch     — HTTP range-GET geometry loading (I/O, excluded).
 //!   report    — human-readable rendering (I/O-adjacent, excluded).
 //!
@@ -26,13 +31,24 @@ pub mod classes;
 pub mod fetch;
 pub mod frontier;
 pub mod geometry;
+pub mod kda_a_log;
+pub mod kda_graph;
 mod report;
+pub mod scenario;
+pub mod serving_format;
+pub mod symbol_census;
 pub mod touch;
 pub mod transcode;
 
 pub use args::K3LedgerArgs;
 
 pub fn run(args: K3LedgerArgs) -> Result<(), Box<dyn std::error::Error>> {
+    // Decided by counting the source alphabet, not by reading the checkpoint —
+    // so it must not pay for geometry it never consults.
+    if matches!(args.cmd, args::K3LedgerCmd::Formats) {
+        return report::formats(args.json);
+    }
+
     let repo = fetch::Repo::new(&args.repo)?;
     eprintln!(
         "reading geometry from {} (headers only, no weights)",
@@ -52,8 +68,14 @@ pub fn run(args: K3LedgerArgs) -> Result<(), Box<dyn std::error::Error>> {
         args::K3LedgerCmd::Frontier(a) => report::frontier(&geom, &premises, a, args.json),
         args::K3LedgerCmd::Block(a) => report::block(&geom, &premises, a, args.json),
         args::K3LedgerCmd::Ceilings(a) => report::ceilings(&geom, a, args.json),
+        // Handled above, before geometry is fetched.
+        args::K3LedgerCmd::Formats => unreachable!(),
         args::K3LedgerCmd::TranscodeScan(a) => {
             report::transcode_scan(&repo, &args.kda_shard, a, args.json)
         }
+        args::K3LedgerCmd::SymbolCensus(a) => {
+            report::symbol_census(&repo, &args.kda_shard, a, args.json)
+        }
+        args::K3LedgerCmd::KdaGraph(a) => report::kda_graph(&repo, &args.kda_shard, a, args.json),
     }
 }

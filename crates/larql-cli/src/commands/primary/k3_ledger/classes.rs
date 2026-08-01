@@ -81,7 +81,9 @@ impl KernelClass {
             Self::AttnProjection => "q6k_matvec, Q6K, measured at K3 KDA 12288x7168",
             Self::GateUp => "q4k_ffn_gate_up_8sg 10240x2560, Q4K, Gemma shape",
             Self::Down => "q6k_matvec, Q6K, measured at K3 latent-up 7168x3584",
-            Self::RoutedExpert => "q6k_matvec ungrouped, K3 expert 3584x3072 (K3a grouped measures 0.89)",
+            Self::RoutedExpert => {
+                "q6k_matvec ungrouped, K3 expert 3584x3072 (K3a grouped measures 0.89)"
+            }
             Self::Unquantised => "f32_gemv lm_head 262Kx2560, f32, Gemma shape",
         }
     }
@@ -140,6 +142,10 @@ impl ClassRow {
         self.bytes() / (bw * 1e9 * self.eta())
     }
 }
+
+/// Efficiency the routed-expert class reaches once experts are put on the
+/// dispatch grid's y axis — MEASURED by K3a, and inside the large-shape band.
+pub const GROUPED_ROUTED_ETA: f64 = 0.89;
 
 /// MXFP4 all-in bits (codeword + e8m0 scale per 32).
 pub const MXFP4_BITS: f64 = 4.25;
@@ -270,7 +276,9 @@ pub enum Scenario {
 /// question is what a *combination* reaches, and whether the combination clears
 /// the target that any one of them misses.
 pub fn apply_all(rows: &[ClassRow], scenarios: &[Scenario]) -> Vec<ClassRow> {
-    scenarios.iter().fold(rows.to_vec(), |acc, s| apply(&acc, *s))
+    scenarios
+        .iter()
+        .fold(rows.to_vec(), |acc, s| apply(&acc, *s))
 }
 
 pub fn apply(rows: &[ClassRow], s: Scenario) -> Vec<ClassRow> {
@@ -374,7 +382,11 @@ mod tests {
             compose(apply(&rows, Scenario::LiftClass(c, 0.89)), BW_GB_S, 0.87).tok_s
         };
         let routed = ceiling(KernelClass::RoutedExpert);
-        for other in [KernelClass::AttnProjection, KernelClass::GateUp, KernelClass::Down] {
+        for other in [
+            KernelClass::AttnProjection,
+            KernelClass::GateUp,
+            KernelClass::Down,
+        ] {
             assert!(
                 routed > ceiling(other),
                 "lifting routed ({routed}) should beat lifting {:?} ({})",
@@ -408,17 +420,17 @@ mod tests {
             BW_GB_S,
             0.85,
         );
-        assert!(c.tok_s < 20.0, "dense-only ceiling {} should refuse 20", c.tok_s);
+        assert!(
+            c.tok_s < 20.0,
+            "dense-only ceiling {} should refuse 20",
+            c.tok_s
+        );
     }
 
     #[test]
     fn q6k_transcode_costs_bytes_and_therefore_throughput() {
         let mxfp4 = compose(base(), BW_GB_S, 0.85);
-        let q6k = compose(
-            census(&k3_reference(), Q6K_BITS, Q6K_BITS),
-            BW_GB_S,
-            0.85,
-        );
+        let q6k = compose(census(&k3_reference(), Q6K_BITS, Q6K_BITS), BW_GB_S, 0.85);
         assert!(q6k.total_bytes > mxfp4.total_bytes);
         assert!(q6k.tok_s < mxfp4.tok_s);
         approx(Q6K_BITS / MXFP4_BITS, 1.544, 0.01);

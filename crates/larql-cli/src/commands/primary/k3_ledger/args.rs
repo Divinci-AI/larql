@@ -56,6 +56,36 @@ pub enum K3LedgerCmd {
     TranscodeScan(TranscodeScanArgs),
     /// Composed per-class ceiling, and the R4 best case for each proposed lever.
     Ceilings(CeilingsArgs),
+    /// Which containers hold MXFP4 exactly, and at what width. Decided by
+    /// counting the source alphabet — takes no checkpoint and no network.
+    Formats,
+    /// Measured MXFP4 symbol distribution: is an exact VARIABLE-rate code below
+    /// 4 payload bits available? Reads real packed nibbles by range request.
+    SymbolCensus(SymbolCensusArgs),
+    /// Trace which KDA projections read the same hidden state, and what a shared
+    /// input rotation would have to be folded into. Reads the real tensor table.
+    KdaGraph(KdaGraphArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct KdaGraphArgs {
+    /// Tensor-name layer index to trace (0-indexed, as tensor names are).
+    #[arg(long, default_value_t = 49)]
+    pub layer: usize,
+}
+
+#[derive(Debug, Args)]
+pub struct SymbolCensusArgs {
+    /// Expert indices to sample from the KDA shard.
+    #[arg(long, num_args = 1.., default_values_t = [0usize, 1, 7])]
+    pub experts: Vec<usize>,
+    /// Rows read from each tensor. A row is one weight vector; tiles never
+    /// straddle one, so this bounds traffic without biasing the census.
+    #[arg(long, default_value_t = 256)]
+    pub rows: usize,
+    /// Tile sizes to report cardinality and local entropy at.
+    #[arg(long, num_args = 1.., default_values_t = [32usize, 64, 256, 512])]
+    pub blocks: Vec<usize>,
 }
 
 #[derive(Debug, Args)]

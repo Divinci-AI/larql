@@ -78,12 +78,42 @@ pub fn tensor_range(header: &Value, name: &str) -> Option<(u64, u64)> {
 
 /// Every `weight_scale` tensor in a shard, with its shape and byte range.
 pub fn scale_tensors(header: &Value) -> Vec<(String, Vec<u64>, u64, u64)> {
-    let Some(obj) = header.as_object() else { return Vec::new() };
+    let Some(obj) = header.as_object() else {
+        return Vec::new();
+    };
     let mut out: Vec<_> = obj
         .iter()
         .filter(|(k, _)| k.ends_with("weight_scale"))
         .filter_map(|(k, v)| {
-            let shape: Vec<u64> = v.get("shape")?.as_array()?.iter().filter_map(Value::as_u64).collect();
+            let shape: Vec<u64> = v
+                .get("shape")?
+                .as_array()?
+                .iter()
+                .filter_map(Value::as_u64)
+                .collect();
+            let (lo, hi) = tensor_range(header, k)?;
+            Some((k.clone(), shape, lo, hi))
+        })
+        .collect();
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
+/// Every routed-expert `weight_packed` tensor in a shard, with shape and range.
+pub fn packed_expert_tensors(header: &Value) -> Vec<(String, Vec<u64>, u64, u64)> {
+    let Some(obj) = header.as_object() else {
+        return Vec::new();
+    };
+    let mut out: Vec<_> = obj
+        .iter()
+        .filter(|(k, _)| k.ends_with("weight_packed") && k.contains(".experts."))
+        .filter_map(|(k, v)| {
+            let shape: Vec<u64> = v
+                .get("shape")?
+                .as_array()?
+                .iter()
+                .filter_map(Value::as_u64)
+                .collect();
             let (lo, hi) = tensor_range(header, k)?;
             Some((k.clone(), shape, lo, hi))
         })
@@ -112,7 +142,11 @@ impl Repo {
     ) -> Result<(Value, u64), Box<dyn std::error::Error>> {
         let prefix = self.range(shard, 0, SAFETENSORS_LEN_PREFIX - 1)?;
         let n = u64::from_le_bytes(prefix[..8].try_into()?);
-        let body = self.range(shard, SAFETENSORS_LEN_PREFIX, SAFETENSORS_LEN_PREFIX + n - 1)?;
+        let body = self.range(
+            shard,
+            SAFETENSORS_LEN_PREFIX,
+            SAFETENSORS_LEN_PREFIX + n - 1,
+        )?;
         Ok((serde_json::from_slice(&body)?, n))
     }
 }

@@ -245,7 +245,11 @@ mod tests {
         let scales = vec![100u8; GROUPS_PER_SUPERBLOCK];
         let s = scan_scales(&scales, GROUPS_PER_SUPERBLOCK);
         assert!(s.c1_spread_ok, "spread is zero here");
-        assert!(!s.c2_f16_ok, "d exponent {} should be out of range", s.d_exponent_min);
+        assert!(
+            !s.c2_f16_ok,
+            "d exponent {} should be out of range",
+            s.d_exponent_min
+        );
         assert!(!s.exact_possible());
     }
 
