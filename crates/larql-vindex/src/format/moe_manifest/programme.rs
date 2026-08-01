@@ -1,0 +1,307 @@
+//! Expert-programme registry (format spec §8.4).
+//!
+//! A programme names what an expert *computes*. Storage says nothing about it:
+//! LYRW files carry banks, entries and region schemas, and the manifest is the
+//! only binding of `bank_id → programme`. Two authorities for the same fact is
+//! a disagreement waiting to happen, so the binary deliberately has no opinion.
+//!
+//! Each programme declares the region roles it needs. That declaration is what
+//! capability checking (§11) traverses to answer "can this index serve this
+//! layer", which is why the requirement has to express **alternatives** rather
+//! than a flat set: `gate + up` and `gate_up_fused` are equally valid ways to
+//! satisfy the same programme, and an index is servable if it presents either.
+
+use crate::format::lyrw2::region_role::RegionRole;
+
+/// A registered expert programme.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Programme {
+    GatedMlpV1,
+    GatedMlpFusedFc1V1,
+    GptOssExpertV1,
+    SharedRoutedMlpV1,
+    LatentMoeV1,
+}
+
+/// Registry ids, frozen (§8.4). New programmes append; ids never move.
+const ID_GATED_MLP_V1: u16 = 0;
+const ID_GATED_MLP_FUSED_FC1_V1: u16 = 1;
+const ID_GPT_OSS_EXPERT_V1: u16 = 2;
+const ID_SHARED_ROUTED_MLP_V1: u16 = 3;
+const ID_LATENT_MOE_V1: u16 = 4;
+
+const NAME_GATED_MLP_V1: &str = "gated-mlp-v1";
+const NAME_GATED_MLP_FUSED_FC1_V1: &str = "gated-mlp-fused-fc1-v1";
+const NAME_GPT_OSS_EXPERT_V1: &str = "gpt-oss-expert-v1";
+const NAME_SHARED_ROUTED_MLP_V1: &str = "shared-routed-mlp-v1";
+const NAME_LATENT_MOE_V1: &str = "latent-moe-v1";
+
+/// Every registered programme, in id order.
+pub const ALL_PROGRAMMES: [Programme; 5] = [
+    Programme::GatedMlpV1,
+    Programme::GatedMlpFusedFc1V1,
+    Programme::GptOssExpertV1,
+    Programme::SharedRoutedMlpV1,
+    Programme::LatentMoeV1,
+];
+
+/// One acceptable way to satisfy a programme's operand needs.
+///
+/// A programme is satisfied when **any** of its alternatives is fully present.
+/// Modelling this as alternatives rather than a flat role set is what lets one
+/// manifest describe both fused and decomposed storage — the V2-1 acceptance
+/// requirement that the two "produce identical results under one manifest".
+pub type RoleAlternative = &'static [RegionRole];
+
+impl Programme {
+    pub fn from_id(id: u16) -> Option<Self> {
+        match id {
+            ID_GATED_MLP_V1 => Some(Self::GatedMlpV1),
+            ID_GATED_MLP_FUSED_FC1_V1 => Some(Self::GatedMlpFusedFc1V1),
+            ID_GPT_OSS_EXPERT_V1 => Some(Self::GptOssExpertV1),
+            ID_SHARED_ROUTED_MLP_V1 => Some(Self::SharedRoutedMlpV1),
+            ID_LATENT_MOE_V1 => Some(Self::LatentMoeV1),
+            _ => None,
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            NAME_GATED_MLP_V1 => Some(Self::GatedMlpV1),
+            NAME_GATED_MLP_FUSED_FC1_V1 => Some(Self::GatedMlpFusedFc1V1),
+            NAME_GPT_OSS_EXPERT_V1 => Some(Self::GptOssExpertV1),
+            NAME_SHARED_ROUTED_MLP_V1 => Some(Self::SharedRoutedMlpV1),
+            NAME_LATENT_MOE_V1 => Some(Self::LatentMoeV1),
+            _ => None,
+        }
+    }
+
+    pub const fn id(self) -> u16 {
+        match self {
+            Self::GatedMlpV1 => ID_GATED_MLP_V1,
+            Self::GatedMlpFusedFc1V1 => ID_GATED_MLP_FUSED_FC1_V1,
+            Self::GptOssExpertV1 => ID_GPT_OSS_EXPERT_V1,
+            Self::SharedRoutedMlpV1 => ID_SHARED_ROUTED_MLP_V1,
+            Self::LatentMoeV1 => ID_LATENT_MOE_V1,
+        }
+    }
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::GatedMlpV1 => NAME_GATED_MLP_V1,
+            Self::GatedMlpFusedFc1V1 => NAME_GATED_MLP_FUSED_FC1_V1,
+            Self::GptOssExpertV1 => NAME_GPT_OSS_EXPERT_V1,
+            Self::SharedRoutedMlpV1 => NAME_SHARED_ROUTED_MLP_V1,
+            Self::LatentMoeV1 => NAME_LATENT_MOE_V1,
+        }
+    }
+
+    /// Acceptable operand sets, most-preferred first.
+    ///
+    /// `gate_up_fused + down` is listed before `gate + up + down` where both
+    /// are legal, because a kernel that can take the fused form generally
+    /// prefers it — but presence, not preference, decides servability.
+    pub const fn role_alternatives(self) -> &'static [RoleAlternative] {
+        const FUSED: RoleAlternative = &[RegionRole::GateUpFused, RegionRole::Down];
+        const DECOMPOSED: RoleAlternative = &[RegionRole::Gate, RegionRole::Up, RegionRole::Down];
+        // GPT-OSS experts carry per-expert biases on both projections; without
+        // them the clamped-GLU-plus-residual programme is not reproducible.
+        const FUSED_WITH_BIAS: RoleAlternative =
+            &[RegionRole::GateUpFused, RegionRole::Down, RegionRole::Bias];
+        const DECOMPOSED_WITH_BIAS: RoleAlternative = &[
+            RegionRole::Gate,
+            RegionRole::Up,
+            RegionRole::Down,
+            RegionRole::Bias,
+        ];
+
+        match self {
+            // Fused storage is legal for any gated MLP — §6.5's fast-path
+            // contract accepts either shape.
+            Self::GatedMlpV1 | Self::SharedRoutedMlpV1 | Self::LatentMoeV1 => &[FUSED, DECOMPOSED],
+            // This programme *is* the fused variant; decomposed storage means
+            // the manifest should have named `gated-mlp-v1` instead.
+            Self::GatedMlpFusedFc1V1 => &[FUSED],
+            Self::GptOssExpertV1 => &[FUSED_WITH_BIAS, DECOMPOSED_WITH_BIAS],
+        }
+    }
+
+    /// Whether `present` satisfies this programme, and if so under which
+    /// alternative.
+    pub fn satisfied_by(self, present: &[RegionRole]) -> Option<RoleAlternative> {
+        self.role_alternatives()
+            .iter()
+            .copied()
+            .find(|alt| alt.iter().all(|role| present.contains(role)))
+    }
+
+    /// Roles missing from the *closest* alternative — the one needing fewest
+    /// additions. Empty when the programme is already satisfied.
+    ///
+    /// Reporting the closest alternative rather than the first matters for
+    /// diagnostics: an index holding `gate_up_fused` should be told it needs
+    /// `down`, not that it needs `gate`, `up` and `down`.
+    pub fn missing_roles(self, present: &[RegionRole]) -> Vec<RegionRole> {
+        if self.satisfied_by(present).is_some() {
+            return Vec::new();
+        }
+        self.role_alternatives()
+            .iter()
+            .map(|alt| {
+                alt.iter()
+                    .copied()
+                    .filter(|role| !present.contains(role))
+                    .collect::<Vec<_>>()
+            })
+            .min_by_key(|missing| missing.len())
+            .unwrap_or_default()
+    }
+
+    /// Whether the expert operates in a latent space rather than the residual
+    /// stream, and therefore needs the layer's pre/post transforms (§8.1).
+    pub const fn operates_in_latent_space(self) -> bool {
+        matches!(self, Self::LatentMoeV1)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const FUSED_PRESENT: [RegionRole; 2] = [RegionRole::GateUpFused, RegionRole::Down];
+    const DECOMPOSED_PRESENT: [RegionRole; 3] =
+        [RegionRole::Gate, RegionRole::Up, RegionRole::Down];
+
+    #[test]
+    fn ids_round_trip() {
+        for p in ALL_PROGRAMMES {
+            assert_eq!(Programme::from_id(p.id()), Some(p));
+        }
+    }
+
+    #[test]
+    fn names_round_trip() {
+        for p in ALL_PROGRAMMES {
+            assert_eq!(Programme::from_name(p.name()), Some(p));
+        }
+    }
+
+    #[test]
+    fn ids_are_dense_and_ordered() {
+        // §8.4 freezes these; a gap or reorder silently rebinds every manifest.
+        for (index, p) in ALL_PROGRAMMES.iter().enumerate() {
+            assert_eq!(p.id() as usize, index, "{}", p.name());
+        }
+    }
+
+    #[test]
+    fn an_unregistered_id_is_refused() {
+        assert_eq!(Programme::from_id(99), None);
+    }
+
+    #[test]
+    fn an_unregistered_name_is_refused() {
+        assert_eq!(Programme::from_name("mixtral-expert-v9"), None);
+    }
+
+    #[test]
+    fn every_programme_accepts_at_least_one_operand_set() {
+        for p in ALL_PROGRAMMES {
+            assert!(!p.role_alternatives().is_empty(), "{}", p.name());
+        }
+    }
+
+    #[test]
+    fn every_alternative_requires_down() {
+        // Dropping an expert's down yields no expert output at all, so no
+        // programme can be servable without it.
+        for p in ALL_PROGRAMMES {
+            for alt in p.role_alternatives() {
+                assert!(alt.contains(&RegionRole::Down), "{}", p.name());
+            }
+        }
+    }
+
+    #[test]
+    fn a_gated_mlp_accepts_fused_or_decomposed() {
+        let p = Programme::GatedMlpV1;
+        assert!(p.satisfied_by(&FUSED_PRESENT).is_some());
+        assert!(p.satisfied_by(&DECOMPOSED_PRESENT).is_some());
+    }
+
+    #[test]
+    fn the_fused_programme_refuses_decomposed_storage() {
+        // Naming `gated-mlp-fused-fc1-v1` over decomposed regions is a manifest
+        // error, not a storage one — `gated-mlp-v1` is the right name there.
+        let p = Programme::GatedMlpFusedFc1V1;
+        assert!(p.satisfied_by(&FUSED_PRESENT).is_some());
+        assert!(p.satisfied_by(&DECOMPOSED_PRESENT).is_none());
+    }
+
+    #[test]
+    fn gpt_oss_needs_bias() {
+        let p = Programme::GptOssExpertV1;
+        assert!(p.satisfied_by(&FUSED_PRESENT).is_none());
+        let with_bias = [RegionRole::GateUpFused, RegionRole::Down, RegionRole::Bias];
+        assert!(p.satisfied_by(&with_bias).is_some());
+    }
+
+    #[test]
+    fn missing_roles_is_empty_when_satisfied() {
+        assert!(Programme::GatedMlpV1
+            .missing_roles(&FUSED_PRESENT)
+            .is_empty());
+    }
+
+    #[test]
+    fn missing_roles_reports_the_closest_alternative() {
+        // Holding only gate_up_fused, the useful answer is "you need down",
+        // not "you need gate, up and down".
+        let present = [RegionRole::GateUpFused];
+        assert_eq!(
+            Programme::GatedMlpV1.missing_roles(&present),
+            vec![RegionRole::Down]
+        );
+    }
+
+    #[test]
+    fn missing_roles_reports_everything_when_nothing_is_present() {
+        let missing = Programme::GatedMlpV1.missing_roles(&[]);
+        assert_eq!(missing, vec![RegionRole::GateUpFused, RegionRole::Down]);
+    }
+
+    #[test]
+    fn a_browse_slice_satisfies_no_programme() {
+        // Gate-only regions are the §15.5 analysis-only slice: representable,
+        // never executable.
+        let gate_only = [RegionRole::Gate];
+        for p in ALL_PROGRAMMES {
+            assert!(p.satisfied_by(&gate_only).is_none(), "{}", p.name());
+            assert!(!p.missing_roles(&gate_only).is_empty(), "{}", p.name());
+        }
+    }
+
+    #[test]
+    fn only_the_latent_programme_needs_the_layer_transforms() {
+        for p in ALL_PROGRAMMES {
+            assert_eq!(
+                p.operates_in_latent_space(),
+                p == Programme::LatentMoeV1,
+                "{}",
+                p.name()
+            );
+        }
+    }
+
+    #[test]
+    fn extra_present_roles_do_not_prevent_satisfaction() {
+        // §6.5: presence of other roles never invalidates a file.
+        let extra = [
+            RegionRole::GateUpFused,
+            RegionRole::Down,
+            RegionRole::Scales,
+            RegionRole::Unknown(900),
+        ];
+        assert!(Programme::GatedMlpV1.satisfied_by(&extra).is_some());
+    }
+}

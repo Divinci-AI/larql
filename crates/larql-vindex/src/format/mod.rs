@@ -10,6 +10,7 @@ pub mod huggingface;
 pub mod le_floats;
 pub mod load;
 pub mod lyrw2;
+pub mod moe_manifest;
 pub mod quant;
 pub mod spec;
 pub mod weights;
