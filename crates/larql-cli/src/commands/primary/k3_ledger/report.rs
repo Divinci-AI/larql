@@ -580,6 +580,11 @@ pub fn ceilings(geom: &K3Geometry, a: &super::args::CeilingsArgs, as_json: bool)
         composed.seconds_per_token * 1e3
     );
     println!();
+    let central = classes::compose_at(&composed.rows, classes::BW_GB_S, classes::Bound::Central);
+    debug_assert!(
+        (central - composed.tok_s).abs() < 1e-9,
+        "Bound::Central must equal compose()"
+    );
     let lo = classes::compose_at(&composed.rows, classes::BW_GB_S, classes::Bound::Low);
     let hi = classes::compose_at(&composed.rows, classes::BW_GB_S, classes::Bound::High);
     println!("  COMPOSED ceiling {:.2} tok/s", composed.tok_s);
@@ -605,11 +610,12 @@ pub fn ceilings(geom: &K3Geometry, a: &super::args::CeilingsArgs, as_json: bool)
     ] {
         let m = c.efficiency();
         println!(
-            "    {:.3} +/-{:.4} [{:.2}-{:.2}] n={}  {:<28} {}{}{}",
+            "    {:.3} +/-{:.4} [{:.2}-{:.2} = {:.0}%] n={}  {:<28} {}{}{}",
             m.central,
             m.std_error,
             m.observed_low,
             m.observed_high,
+            100.0 * m.spread_fraction(),
             m.repeats,
             c.label(),
             c.provenance(),

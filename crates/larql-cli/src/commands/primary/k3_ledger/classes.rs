@@ -85,8 +85,6 @@ pub const MAX_RELATIVE_SE: f64 = 0.01;
 pub enum Regime {
     /// Distinct weight buffers per call, working set far beyond L2.
     ColdRotating,
-    /// Borrowed from a neighbouring shape rather than measured here.
-    Borrowed,
     /// Not a measurement at all — a modelling constant with no variance, such
     /// as unquantised f32 reaching the roofline by definition. Cannot swing, so
     /// it cannot select a bit-width, so the noise refusal does not apply.
@@ -175,7 +173,7 @@ impl KernelClass {
     pub fn provenance(self) -> &'static str {
         match self {
             Self::AttnProjection => "q6k_matvec, Q6K, measured at K3 KDA 12288x7168",
-            Self::GateUp => "q4k_ffn_gate_up_8sg 10240x2560, Q4K, Gemma shape",
+            Self::GateUp => "q6k_matvec, Q6K, measured at K3 shared expert 6144x7168",
             Self::Down => "q6k_matvec, Q6K, measured at K3 latent-up 7168x3584",
             Self::RoutedExpert => {
                 "q6k_matvec ungrouped, K3 expert 3584x3072 (K3a grouped measures 0.89)"
@@ -187,11 +185,11 @@ impl KernelClass {
     /// True while this class's eta is a borrowed proxy rather than a K3-shape,
     /// K3-format measurement.
     ///
-    /// Only `GateUp` still is: no `[6144, 7168]` shape was measured directly, so
-    /// it borrows the nearest large-shape q6k figure. Everything else now comes
-    /// from `diag_shape_census` at the real K3 geometry under Q6K.
+    /// Nothing is, since the control-gated campaign measured `[6144, 7168]`
+    /// directly. `GateUp` was the last borrowed figure; it now carries its own
+    /// number and fails on precision instead, which `is_decision_grade` reports.
     pub fn is_provisional(self) -> bool {
-        matches!(self, Self::GateUp)
+        false
     }
 
     /// Banked efficiency with its observed range.
