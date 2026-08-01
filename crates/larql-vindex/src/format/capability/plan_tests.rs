@@ -40,6 +40,7 @@ fn alternative(roles: &'static [RegionRole], fidelity: Fidelity) -> QualifiedAlt
     QualifiedAlternative {
         alternative: roles,
         regions: roles.iter().map(|r| region(0, *r, fidelity)).collect(),
+        components: Vec::new(),
     }
 }
 
@@ -214,6 +215,7 @@ fn the_best_alternative_is_the_one_whose_weakest_region_is_strongest() {
             region(0, RegionRole::Up, Fidelity::StructurallyApproximate),
             region(0, RegionRole::Down, Fidelity::SourceExact),
         ],
+        components: Vec::new(),
     };
     let uniform = alternative(FUSED, Fidelity::NumericallyApproximate);
     let choice = PlanChoice {

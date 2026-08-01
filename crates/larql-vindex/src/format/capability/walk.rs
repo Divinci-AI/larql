@@ -284,6 +284,7 @@ fn walk_routes_for(
         alternatives.push(QualifiedAlternative {
             alternative: gate_layout_for(access.mode),
             regions,
+            components: Vec::new(),
         });
     }
 

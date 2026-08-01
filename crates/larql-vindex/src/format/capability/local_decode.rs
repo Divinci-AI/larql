@@ -21,7 +21,7 @@
 
 use std::collections::BTreeMap;
 
-use super::component::{ComponentUsability, SelectedComponent, SelectedTensor};
+use super::component::{SelectedComponent, SelectedTensor};
 use super::coordinate::BankCoordinate;
 use super::decode_requirements::{DecodeRequirements, LocalDecodeRequest, Requirement};
 use super::operation::{OperationCapability, OperationFailure};
@@ -46,50 +46,79 @@ impl ResolvedDocumentSelection {
     }
 }
 
-/// Resolve one requirement, preserving every satisfied alternative.
+/// Why one candidate of a requirement could not be used.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CandidateFailure {
+    pub coordinate: String,
+    pub reason: String,
+}
+
+/// Every candidate outcome for one requirement.
 ///
-/// Returns the first satisfied candidate for the plan, plus a failure built
-/// from the *first declared* candidate when none succeed — declaration order
-/// decides only which failure is reported, never which success is used.
+/// Failed candidates are kept even when another succeeds. They are evidence:
+/// an operator debugging why a tied head was used instead of a dedicated one
+/// needs to see that the dedicated one was absent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequirementResolution {
+    pub purpose: &'static str,
+    pub usable: Vec<SelectedComponent>,
+    pub failed: Vec<CandidateFailure>,
+}
+
+impl RequirementResolution {
+    /// Diagnostic naming every candidate's own repair, not just the first.
+    ///
+    /// "lm_head unsatisfied" is useless; "dedicated head absent, embedding
+    /// reuse mismatched after transpose" tells an operator which to fix.
+    pub fn describe_failure(&self) -> String {
+        let candidates = self
+            .failed
+            .iter()
+            .map(|f| format!("{} → {}", f.coordinate, f.reason))
+            .collect::<Vec<_>>()
+            .join("; ");
+        format!("{} unsatisfied: {candidates}", self.purpose)
+    }
+}
+
+/// Evaluate every declared candidate, partitioning usable from failed.
+///
+/// Deliberately does **not** return on the first success. A document holding
+/// both a dedicated head and a usable embedding table has two valid routes,
+/// and collapsing to one here would settle the route — and therefore the
+/// authority and the kernel choice — before binding has seen the registry.
+/// That is the same collapse already fixed for expert alternatives.
 fn resolve_requirement(
     selection: &ResolvedDocumentSelection,
     requirement: &Requirement,
-) -> Result<SelectedComponent, OperationFailure> {
-    let mut first_failure: Option<OperationFailure> = None;
+) -> RequirementResolution {
+    let mut usable = Vec::new();
+    let mut failed = Vec::new();
 
     for candidate in requirement.candidates() {
         let key = candidate.coordinate.describe();
         let Some(tensor) = selection.tensor(&key) else {
-            first_failure.get_or_insert_with(|| OperationFailure::MissingDocumentInput {
-                what: requirement.purpose(),
+            failed.push(CandidateFailure {
+                coordinate: key,
+                reason: "absent from the selection".into(),
             });
             continue;
         };
         let usability = tensor.usability(candidate.contract.as_ref());
         if usability.is_usable() {
-            return Ok(SelectedComponent::ManifestTensor(tensor.clone()));
+            usable.push(SelectedComponent::ManifestTensor(tensor.clone()));
+        } else {
+            failed.push(CandidateFailure {
+                coordinate: key,
+                reason: usability.describe(),
+            });
         }
-        first_failure.get_or_insert_with(|| failure_for(requirement, &key, &usability));
     }
 
-    Err(
-        first_failure.unwrap_or(OperationFailure::MissingDocumentInput {
-            what: requirement.purpose(),
-        }),
-    )
-}
-
-fn failure_for(
-    requirement: &Requirement,
-    coordinate: &str,
-    usability: &ComponentUsability,
-) -> OperationFailure {
-    OperationFailure::InvalidSelection {
-        detail: format!(
-            "{} ({coordinate}): {}",
-            requirement.purpose(),
-            usability.describe()
-        ),
+    RequirementResolution {
+        purpose: requirement.purpose(),
+        usable,
+        failed,
     }
 }
 
@@ -100,46 +129,57 @@ pub fn infer_local_decode(
     _request: &LocalDecodeRequest,
 ) -> OperationCapability {
     let mut fixed_components = Vec::new();
+    let mut choices = Vec::new();
     let mut failures = Vec::new();
 
-    // ── Model-global requirements ──
-    for requirement in &requirements.fixed_components {
-        match resolve_requirement(selection, requirement) {
-            Ok(component) => fixed_components.push(component),
-            Err(f) => failures.push(f),
+    // Model-global first, then each layer's fixed path. Collected across every
+    // layer before returning, so one report can name layer 12's missing router
+    // and layer 19's unreadable norm together.
+    let every_requirement = requirements
+        .fixed_components
+        .iter()
+        .chain(requirements.layers.iter().flat_map(|l| l.fixed()));
+
+    for (index, requirement) in every_requirement.enumerate() {
+        let resolution = resolve_requirement(selection, requirement);
+        match resolution.usable.len() {
+            // Nothing satisfies it — report every candidate's own repair.
+            0 => failures.push(OperationFailure::InvalidSelection {
+                detail: resolution.describe_failure(),
+            }),
+            // Exactly one route: a fixed binding, nothing left to choose.
+            1 => fixed_components.push(resolution.usable[0].clone()),
+            // Several routes. Binding picks; traversal must not.
+            _ => choices.push(PlanChoice {
+                bank: BankCoordinate::new(u32::MAX, index as u16),
+                alternatives: resolution
+                    .usable
+                    .iter()
+                    .map(|c| QualifiedAlternative {
+                        alternative: &[],
+                        regions: Vec::new(),
+                        components: vec![c.clone()],
+                    })
+                    .collect(),
+            }),
         }
     }
 
-    // ── Per-layer fixed path ──
-    //
-    // Collected across every layer before returning, so one report can name
-    // layer 12's missing router and layer 19's unreadable norm together.
-    for layer in &requirements.layers {
-        for requirement in layer.fixed() {
-            match resolve_requirement(selection, requirement) {
-                Ok(component) => fixed_components.push(component),
-                Err(f) => failures.push(f),
-            }
-        }
-    }
-
-    // ── Expert banks, from traversal ──
-    let mut choices = Vec::new();
+    // Expert banks, from traversal.
     for bank in requirements.all_banks() {
         match selection.bank_reports.get(&bank) {
-            Some(report) if report.is_executable() => {
-                choices.push(PlanChoice {
-                    bank,
-                    alternatives: report
-                        .successful_alternatives()
-                        .iter()
-                        .map(|a| QualifiedAlternative {
-                            alternative: a.alternative,
-                            regions: Vec::new(),
-                        })
-                        .collect(),
-                });
-            }
+            Some(report) if report.is_executable() => choices.push(PlanChoice {
+                bank,
+                alternatives: report
+                    .successful_alternatives()
+                    .iter()
+                    .map(|a| QualifiedAlternative {
+                        alternative: a.alternative,
+                        regions: Vec::new(),
+                        components: Vec::new(),
+                    })
+                    .collect(),
+            }),
             Some(report) => {
                 let detail = report
                     .closest_failure()

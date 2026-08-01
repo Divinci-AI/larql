@@ -57,14 +57,22 @@ impl PlannedRegion {
 /// One way to satisfy a bank within a plan.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QualifiedAlternative {
+    /// Bank-region layout, empty for a component choice.
     pub alternative: RoleAlternative,
     pub regions: Vec<PlannedRegion>,
+    /// Manifest tensors, for a choice between component candidates such as a
+    /// dedicated versus tied LM head.
+    pub components: Vec<SelectedComponent>,
 }
 
 impl QualifiedAlternative {
-    /// Weakest fidelity among this alternative's regions.
+    /// Weakest fidelity across everything this alternative reads.
     pub fn weakest_fidelity(&self) -> Option<Fidelity> {
-        self.regions.iter().map(|r| r.fidelity).min()
+        self.regions
+            .iter()
+            .map(|r| r.fidelity)
+            .chain(self.components.iter().map(|c| c.fidelity()))
+            .min()
     }
 }
 
@@ -167,6 +175,7 @@ impl OperationPlan {
         for choice in &self.choices {
             if let Some(alt) = pick(choice) {
                 fidelities.extend(alt.regions.iter().map(|r| r.fidelity));
+                fidelities.extend(alt.components.iter().map(|c| c.fidelity()));
             }
         }
         DerivedAuthority::of(&AuthorityInputs {

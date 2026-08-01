@@ -164,7 +164,9 @@ fn a_complete_k3_shaped_layer_decodes() {
     let sel = selection(full_tensors(), bank_report(RegionFormat::Q6K, &AllCodecs));
     let c = infer(&sel);
     assert!(c.is_available(), "{}", c.admission.describe());
-    assert_eq!(c.routes[0].plan.choices.len(), 1);
+    // Two choice groups: the expert bank, and the lm_head requirement — both
+    // its candidates resolve here, so binding still has that decision.
+    assert_eq!(c.routes[0].plan.choices.len(), 2);
 }
 
 // ── The two decisive inverse cases ─────────────────────────────────────────
@@ -252,7 +254,7 @@ fn a_tied_lm_head_satisfies_the_requirement_through_the_embedding_tensor() {
 }
 
 #[test]
-fn losing_every_lm_head_candidate_fails_naming_the_purpose() {
+fn losing_every_lm_head_candidate_names_each_candidates_own_repair() {
     let neither: Vec<SelectedTensor> = full_tensors()
         .into_iter()
         .filter(|t| {
@@ -382,8 +384,85 @@ fn a_hybrid_schedule_needs_no_global_dense_field() {
 fn banks_are_one_choice_group_each_not_a_cartesian_product() {
     let sel = selection(full_tensors(), bank_report(RegionFormat::Q6K, &AllCodecs));
     let c = infer(&sel);
-    assert_eq!(c.routes.len(), 1);
-    assert_eq!(c.routes[0].plan.choices.len(), 1);
+    assert_eq!(c.routes.len(), 1, "one route, not a product of choices");
+    // One group per bank plus one per multi-candidate requirement — never a
+    // product across them.
+    let bank_groups = c.routes[0]
+        .plan
+        .choices
+        .iter()
+        .filter(|g| g.bank == BANK)
+        .count();
+    assert_eq!(bank_groups, 1);
+}
+
+#[test]
+fn both_lm_head_candidates_present_yields_a_choice_not_a_settled_binding() {
+    // The collapse this fix removes. A document holding a dedicated head AND
+    // a usable embedding table has two valid routes; returning the first would
+    // settle the route, and therefore the authority and the kernel choice,
+    // before binding has seen the registry.
+    let sel = selection(full_tensors(), bank_report(RegionFormat::Q6K, &AllCodecs));
+    let c = infer(&sel);
+    let component_choices: Vec<_> = c.routes[0]
+        .plan
+        .choices
+        .iter()
+        .filter(|g| g.bank != BANK)
+        .collect();
+    assert_eq!(component_choices.len(), 1, "the lm_head requirement");
+    assert_eq!(
+        component_choices[0].alternatives.len(),
+        2,
+        "both candidates preserved for binding to choose between"
+    );
+}
+
+#[test]
+fn one_usable_candidate_is_a_fixed_binding_not_a_one_way_choice() {
+    // With only one candidate resolvable there is nothing to decide, so it
+    // must not appear as a degenerate choice group. The tied alternative here
+    // names a tensor the document does not carry.
+    let mut requirements = k3_requirements();
+    requirements.fixed_components[2] = Requirement::AnyOf(vec![
+        super::decode_requirements::ComponentRequirement::new("lm_head", global("lm_head")),
+        super::decode_requirements::ComponentRequirement::new("lm_head", global("absent_tie")),
+    ]);
+
+    let sel = selection(full_tensors(), bank_report(RegionFormat::Q6K, &AllCodecs));
+    let c = infer_local_decode(&sel, &requirements, &LocalDecodeRequest::TokenIdsToLogits);
+    assert!(c.is_available(), "{}", c.admission.describe());
+    let component_choices = c.routes[0]
+        .plan
+        .choices
+        .iter()
+        .filter(|g| g.bank != BANK)
+        .count();
+    assert_eq!(
+        component_choices, 0,
+        "one candidate is a binding, not a choice"
+    );
+}
+
+#[test]
+fn a_failed_candidate_is_retained_as_evidence_when_another_succeeds() {
+    // An operator debugging why the tied head was used needs to see that the
+    // dedicated one was absent.
+    let tied_only: Vec<SelectedTensor> = full_tensors()
+        .into_iter()
+        .filter(|t| !t.coordinate.describe().contains("lm_head"))
+        .collect();
+    let sel = selection(tied_only, bank_report(RegionFormat::Q6K, &AllCodecs));
+    let c = infer(&sel);
+    assert!(c.is_available());
+    // One usable candidate → fixed binding, no choice group.
+    let component_choices = c.routes[0]
+        .plan
+        .choices
+        .iter()
+        .filter(|g| g.bank != BANK)
+        .count();
+    assert_eq!(component_choices, 0);
 }
 
 #[test]

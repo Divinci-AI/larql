@@ -28,6 +28,9 @@
 //! derived from that same profile.
 
 pub mod authority;
+pub mod binding;
+#[cfg(test)]
+mod binding_tests;
 pub mod compatibility;
 pub mod component;
 pub mod coordinate;
@@ -58,6 +61,10 @@ mod walk_tests;
 
 pub use authority::{
     derive_authority, AuthorityInputs, DerivedAuthority, Fidelity, StructuralChange,
+};
+pub use binding::{
+    physical_extents, total_bytes, ComponentBinding, ComponentView, PhysicalStorageId,
+    RepresentationIdentity,
 };
 pub use compatibility::{IncompatibilityShape, RoleSegmentCoverage, SegmentCompatibility};
 pub use component::{ComponentCoordinate, SelectedComponent, SelectedTensor, WeightClass};
