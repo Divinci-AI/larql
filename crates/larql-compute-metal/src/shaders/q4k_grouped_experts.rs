@@ -23,8 +23,8 @@ pub const ROWS_PER_TG: u64 = 4;
 pub const THREADS_PER_TG: u64 = 128;
 
 pub const SHADER: &str = r#"
-constant uint Q4KG_ROWS_PER_TG = 4;
-constant uint Q4KG_BLOCK_SIZE  = 144;
+constant uint Q4KGE_ROWS_PER_TG = 4;
+constant uint Q4KGE_BLOCK_SIZE  = 144;
 
 kernel void q4k_grouped_experts(
     device const uchar*  W4K     [[buffer(0)]],
@@ -39,11 +39,11 @@ kernel void q4k_grouped_experts(
     uint sg_id     [[simdgroup_index_in_threadgroup]])
 {
     const uint slot = tg_id.y;
-    uint row_idx = tg_id.x * Q4KG_ROWS_PER_TG + sg_id;
+    uint row_idx = tg_id.x * Q4KGE_ROWS_PER_TG + sg_id;
     if (row_idx >= N) return;
 
     const uint superblocks   = K / 256u;
-    const uint bytes_per_row = superblocks * Q4KG_BLOCK_SIZE;
+    const uint bytes_per_row = superblocks * Q4KGE_BLOCK_SIZE;
     device const uchar* row_w = W4K + offsets[slot] + row_idx * bytes_per_row;
     device const float* Xs = X + (ulong)slot * XSTRIDE;
 
@@ -62,7 +62,7 @@ kernel void q4k_grouped_experts(
     float acc = 0.0f;
 
     for (uint sb = ix; sb < superblocks; sb += 2u) {
-        device const uchar* block = row_w + sb * Q4KG_BLOCK_SIZE;
+        device const uchar* block = row_w + sb * Q4KGE_BLOCK_SIZE;
         ushort d_bits    = ushort(block[0]) | (ushort(block[1]) << 8u);
         ushort dmin_bits = ushort(block[2]) | (ushort(block[3]) << 8u);
         float d    = decode_f16_metal(d_bits);
