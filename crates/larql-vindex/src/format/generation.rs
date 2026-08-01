@@ -6,14 +6,23 @@
 //!
 //! | `index.json.version` | generation | layer format |
 //! | -------------------- | ---------- | ------------ |
+//! | 1                    | VINDEX2    | LYRW `format_version` 1 |
 //! | 2                    | VINDEX2    | LYRW `format_version` 1 |
 //! | 3                    | VINDEX3    | LYRW `format_version` 2 |
 //!
-//! The generation number **is** `index.json.version`, by construction. An
-//! earlier draft called the shipped generation "VINDEX1" while its
-//! `index.json.version` was already 2, which put a permanent off-by-one between
-//! the name and the discriminator — the single most likely way to mis-detect a
-//! directory. Both were renamed so the two numbers agree.
+//! The generation is named for its *current* `index.json.version`. An earlier
+//! draft called the shipped generation "VINDEX1" while its version was already
+//! 2, which put a permanent off-by-one between the name and the discriminator
+//! — the single most likely way to mis-detect a directory. Both were renamed
+//! so the two agree.
+//!
+//! **The mapping is not a bijection below 2.** `index.json.version` 1 is a
+//! *legacy schema of the same shipped generation*, not a pre-generation
+//! artifact: such indexes exist in the wild and the loader reads them by
+//! filling absent fields with defaults. Refusing them would break VINDEX2
+//! compatibility, which is the one thing dual-generation support exists to
+//! protect. This was caught by the E0 preservation matrix, which is why that
+//! matrix runs on every commit.
 //!
 //! The layer format keeps its own sequence and is deliberately *not* aligned to
 //! either: LYRW is a different artifact with a different lifetime, and its own
@@ -28,8 +37,15 @@ use std::path::Path;
 use crate::format::filenames::INDEX_JSON;
 use crate::VindexError;
 
-/// `index.json.version` for a VINDEX2 container — the shipped generation.
+/// Current `index.json.version` for a VINDEX2 container — what a fresh
+/// extraction of the shipped generation writes.
 pub const V2_INDEX_VERSION: u32 = 2;
+
+/// Oldest `index.json.version` still recognised as the shipped generation.
+///
+/// Version 1 predates several `index.json` fields and loads with defaults.
+/// It is the same container generation, not an older one.
+pub const V2_LEGACY_INDEX_VERSION: u32 = 1;
 /// `index.json.version` for a VINDEX3 container.
 pub const V3_INDEX_VERSION: u32 = 3;
 
@@ -72,11 +88,14 @@ impl ContainerGeneration {
     /// the version found and what this binary understands.
     pub fn from_index_version(found: u32) -> Result<Self, VindexError> {
         match found {
-            V2_INDEX_VERSION => Ok(Self::V2),
+            V2_LEGACY_INDEX_VERSION | V2_INDEX_VERSION => Ok(Self::V2),
             V3_INDEX_VERSION => Ok(Self::V3),
             other => Err(VindexError::UnknownContainerGeneration {
                 found: other,
-                supported: format!("{V2_INDEX_VERSION} (VINDEX2), {V3_INDEX_VERSION} (VINDEX3)"),
+                supported: format!(
+                    "{V2_LEGACY_INDEX_VERSION}-{V2_INDEX_VERSION} (VINDEX2), \
+                     {V3_INDEX_VERSION} (VINDEX3)"
+                ),
             }),
         }
     }
@@ -202,10 +221,20 @@ mod tests {
     }
 
     #[test]
-    fn index_version_one_is_not_a_container_generation() {
-        // index.json v1 predates the shipped format; it must not resolve to a
-        // generation just because the number is smaller.
-        assert!(ContainerGeneration::from_index_version(1).is_err());
+    fn the_legacy_index_schema_is_still_the_shipped_generation() {
+        // Caught by E0: version 1 indexes exist in the wild and load with
+        // defaults. Treating the version as a generation *identifier* rather
+        // than a generation *floor* refused them, breaking the compatibility
+        // dual-generation support exists to protect.
+        assert_eq!(
+            ContainerGeneration::from_index_version(V2_LEGACY_INDEX_VERSION).unwrap(),
+            ContainerGeneration::V2
+        );
+    }
+
+    #[test]
+    fn version_zero_is_not_a_container_generation() {
+        assert!(ContainerGeneration::from_index_version(0).is_err());
     }
 
     #[test]
