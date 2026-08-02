@@ -487,4 +487,81 @@ mod tests {
             ExpertKernel::IncumbentQ4kQ8k
         );
     }
+
+    // ── The wrapper, over a loaded model ───────────────────────────────────
+    //
+    // `run_layer` above is reachable from a `MoeLayerWeights` alone. These
+    // cover the part that is not: resolving one out of a `ModelWeights`, which
+    // needs the synthetic Gemma fixture. Its experts are BF16, which is the
+    // useful case here — the reference kernel decodes them and the Q4_K kernel
+    // must refuse them.
+
+    use crate::test_utils::{make_test_gemma4_moe_weights, GEMMA4_MOE_HIDDEN};
+    use larql_vindex::runtime::RefusalKind;
+
+    const MOE_LAYER: usize = 0;
+    /// Past the fixture's two layers, so `build_moe_weights` finds nothing.
+    const ABSENT_LAYER: usize = 99;
+
+    fn model_residual(rows: usize) -> Array2<f32> {
+        Array2::from_shape_fn((rows, GEMMA4_MOE_HIDDEN), |(r, c)| {
+            ((r * 7 + c) % 11) as f32 * 0.1 - 0.5
+        })
+    }
+
+    #[test]
+    fn the_bound_route_over_a_loaded_model_matches_the_in_process_route() {
+        // End to end through the wrapper: resolve the layer, bind its whole
+        // population, execute every position. The reference pairing, because
+        // the fixture stores BF16 experts.
+        let weights = make_test_gemma4_moe_weights();
+        let h = model_residual(3);
+        let bound = BoundMoeBackend::reference()
+            .forward_moe_seq(&weights, MOE_LAYER, &h, NORM_OFFSET, EPS)
+            .expect("the fixture binds and executes");
+        let incumbent = super::super::moe_backend::InProcessMoeBackend
+            .forward_moe_seq(&weights, MOE_LAYER, &h, NORM_OFFSET, EPS)
+            .expect("executes");
+
+        assert_eq!(bound.shape(), incumbent.shape());
+        let worst = bound
+            .iter()
+            .zip(incumbent.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        let scale = incumbent.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        // The reference sums in index order where the incumbent uses BLAS, so
+        // this is a summation-order band rather than a claim of bit-equality.
+        assert!(
+            scale > 0.0 && worst / scale <= 1e-3,
+            "diverged by {worst} of {scale}"
+        );
+    }
+
+    #[test]
+    fn the_production_pairing_refuses_a_bf16_store_by_format() {
+        // It reads Q4_K super-blocks. Reading BF16 bytes as super-blocks is
+        // exactly the silent substitution the format check exists to refuse.
+        let weights = make_test_gemma4_moe_weights();
+        let err = BoundMoeBackend::production()
+            .forward_moe_seq(&weights, MOE_LAYER, &model_residual(1), NORM_OFFSET, EPS)
+            .unwrap_err();
+        let MoeBackendError::Bound(inner) = err else {
+            panic!("a bound route must refuse as a bound route");
+        };
+        assert_eq!(inner.refusal(), RefusalKind::Unsupported, "{inner}");
+    }
+
+    #[test]
+    fn a_layer_with_no_expert_weights_contributes_zeros() {
+        // Matches the in-process path. A backend that errored here would
+        // change the model rather than the route.
+        let weights = make_test_gemma4_moe_weights();
+        let h = model_residual(2);
+        let out = BoundMoeBackend::production()
+            .forward_moe_seq(&weights, ABSENT_LAYER, &h, NORM_OFFSET, EPS)
+            .expect("an absent MoE layer is not an error");
+        assert_eq!(out.shape(), h.shape());
+        assert!(out.iter().all(|v| *v == 0.0));
+    }
 }

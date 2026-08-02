@@ -128,3 +128,107 @@ impl MoeExpertBackend for InProcessMoeBackend {
         "in-process"
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils::{make_test_gemma4_moe_weights, GEMMA4_MOE_HIDDEN};
+    use larql_compute::cpu::ops::moe::cpu_moe_forward;
+
+    const EPS: f32 = 1e-6;
+    const NORM_OFFSET: f32 = 0.0;
+    const MOE_LAYER: usize = 0;
+    /// Past the fixture's two layers, so `build_moe_weights` finds nothing.
+    const ABSENT_LAYER: usize = 99;
+
+    fn residual(rows: usize) -> Array2<f32> {
+        Array2::from_shape_fn((rows, GEMMA4_MOE_HIDDEN), |(r, c)| {
+            ((r * 7 + c) % 11) as f32 * 0.1 - 0.5
+        })
+    }
+
+    #[test]
+    fn the_in_process_backend_is_the_default_branch_relocated() {
+        // The property the seam rests on. If this diverged, routing the
+        // incumbent through the trait would be measuring the trait rather than
+        // relocating a call — and every comparison built on it would be wrong.
+        let weights = make_test_gemma4_moe_weights();
+        let h = residual(3);
+        let via_trait = InProcessMoeBackend
+            .forward_moe_seq(&weights, MOE_LAYER, &h, NORM_OFFSET, EPS)
+            .expect("the fixture executes");
+
+        let arch = &*weights.arch;
+        let moe = larql_compute::pipeline_layer::build_moe_weights(&weights, arch, MOE_LAYER)
+            .expect("the fixture has an MoE layer 0");
+        for pos in 0..h.nrows() {
+            let row: Vec<f32> = h.row(pos).to_vec();
+            let expected = cpu_moe_forward(&row, &moe, NORM_OFFSET, EPS);
+            assert_eq!(
+                via_trait.row(pos).to_vec(),
+                expected,
+                "position {pos} diverged"
+            );
+        }
+    }
+
+    #[test]
+    fn the_in_process_backend_produces_a_non_zero_contribution() {
+        // Guards the guard: an all-zero agreement would be two failures
+        // agreeing rather than a parity result.
+        let weights = make_test_gemma4_moe_weights();
+        let out = InProcessMoeBackend
+            .forward_moe_seq(&weights, MOE_LAYER, &residual(1), NORM_OFFSET, EPS)
+            .expect("executes");
+        assert!(out.iter().any(|v| v.abs() > f32::EPSILON));
+        assert!(out.iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn a_layer_with_no_expert_weights_contributes_zeros_rather_than_erroring() {
+        // The block loop adds this contribution unconditionally, so a backend
+        // that errored here would change the model rather than the route.
+        let weights = make_test_gemma4_moe_weights();
+        let h = residual(2);
+        let out = InProcessMoeBackend
+            .forward_moe_seq(&weights, ABSENT_LAYER, &h, NORM_OFFSET, EPS)
+            .expect("an absent MoE layer is not an error");
+        assert_eq!(out.shape(), h.shape());
+        assert!(out.iter().all(|v| *v == 0.0));
+    }
+
+    #[test]
+    fn every_route_names_itself_distinctly() {
+        // The name reaches an operator-facing dispatch-error line, so two
+        // routes sharing one would make the message unactionable.
+        let names = [
+            InProcessMoeBackend.name(),
+            crate::ffn::BoundMoeBackend::production().name(),
+        ];
+        assert_ne!(names[0], names[1]);
+        assert!(!names[0].is_empty());
+    }
+
+    #[test]
+    fn a_backend_error_names_the_route_that_refused() {
+        // The refusal keeps the structure the route gave it — a bound route's
+        // `ExecutionError` still carries `refusal()` after wrapping.
+        let inner = larql_vindex::runtime::ExecutionError::SelectedExpertNotResident {
+            expert: 90,
+            bank: "layer 5 bank 0".into(),
+            resident: 8,
+            population: 128,
+        };
+        let wrapped = MoeBackendError::from(inner.clone());
+        let text = wrapped.to_string();
+        assert!(text.contains("bound"), "{text}");
+        assert!(text.contains("not resident"), "{text}");
+        let MoeBackendError::Bound(recovered) = wrapped else {
+            panic!("wrapping lost the variant");
+        };
+        assert_eq!(
+            recovered.refusal(),
+            larql_vindex::runtime::RefusalKind::Residency
+        );
+    }
+}
