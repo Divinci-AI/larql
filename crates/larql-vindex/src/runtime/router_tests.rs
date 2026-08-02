@@ -1,9 +1,9 @@
 //! Colocated tests for `router`.
 
-use larql_compute::{MoeExpertScalePolicy, MoeTopKWeightPolicy};
+use larql_compute::MoeTopKWeightPolicy;
 
 use super::error::ExecutionError;
-use super::router::{BoundRouter, SelectedExpert};
+use super::router::{BoundExpertScaling, BoundRouter, RouterKernel, SelectedExpert};
 use super::test_support::{ascending, vector};
 
 const POPULATION: u32 = 4;
@@ -17,12 +17,13 @@ fn router(per_expert_scale: Option<&[f32]>) -> BoundRouter<'static> {
         weight: ascending(ROUTER, POPULATION, HIDDEN),
         top_k: TOP_K,
         selected_weight: MoeTopKWeightPolicy::RenormalizedSoftmax,
-        expert_scale: if per_expert_scale.is_some() {
-            MoeExpertScalePolicy::PerExpert
-        } else {
-            MoeExpertScalePolicy::None
+        scaling: match per_expert_scale {
+            Some(v) => BoundExpertScaling::PerExpert {
+                scales: vector(SCALE, v),
+            },
+            None => BoundExpertScaling::None,
         },
-        per_expert_scale: per_expert_scale.map(|v| vector(SCALE, v)),
+        kernel: RouterKernel::default(),
     }
 }
 
@@ -48,6 +49,64 @@ fn a_router_addressing_a_different_population_is_refused() {
     assert!(matches!(err, ExecutionError::DimensionMismatch { .. }));
 }
 
+// ── The scale is routing semantics, so a shard carries all of it ───────────
+
+#[test]
+fn a_scale_must_cover_the_addressable_population_not_the_resident_shard() {
+    // Expert 90's learned scale is part of what routing *means*, whether or
+    // not expert 90 lives here. Truncating the vector to the resident subset
+    // would make two shards of one model weight the same expert differently.
+    let addressable = POPULATION as usize;
+    let shard_size = 2;
+    let truncated = router(Some(&vec![1.0f32; shard_size]));
+    assert!(
+        truncated.validate(addressable, HIDDEN as usize).is_err(),
+        "a scale sized to the shard must be refused"
+    );
+    let full = router(Some(&vec![1.0f32; addressable]));
+    full.validate(addressable, HIDDEN as usize).unwrap();
+}
+
+#[test]
+fn a_non_finite_scale_is_refused_at_bind_time() {
+    // It would multiply a valid routing weight into a NaN that propagates
+    // through the reduction into the residual stream, surfacing as an
+    // inexplicable token rather than a bad operand.
+    let mut scales = vec![1.0f32; POPULATION as usize];
+    scales[2] = f32::NAN;
+    let err = router(Some(&scales))
+        .validate(POPULATION as usize, HIDDEN as usize)
+        .unwrap_err();
+    let ExecutionError::NonFiniteExpertScale { expert, .. } = err else {
+        panic!("expected a non-finite scale refusal, got {err}");
+    };
+    assert_eq!(expert, 2);
+}
+
+#[test]
+fn an_infinite_scale_is_refused_too() {
+    let mut scales = vec![1.0f32; POPULATION as usize];
+    scales[0] = f32::INFINITY;
+    assert!(matches!(
+        router(Some(&scales))
+            .validate(POPULATION as usize, HIDDEN as usize)
+            .unwrap_err(),
+        ExecutionError::NonFiniteExpertScale { expert: 0, .. }
+    ));
+}
+
+#[test]
+fn scaling_reports_the_incumbent_policy_it_corresponds_to() {
+    use larql_compute::MoeExpertScalePolicy;
+    assert_eq!(router(None).scaling.policy(), MoeExpertScalePolicy::None);
+    assert_eq!(
+        router(Some(&vec![1.0f32; POPULATION as usize]))
+            .scaling
+            .policy(),
+        MoeExpertScalePolicy::PerExpert
+    );
+}
+
 #[test]
 fn a_per_expert_scale_must_cover_the_whole_population() {
     // A short scale vector would silently leave the tail of the population
@@ -63,7 +122,7 @@ fn a_per_expert_scale_must_cover_the_whole_population() {
 
 #[test]
 fn a_router_without_a_scale_validates_without_one() {
-    assert!(router(None).per_expert_scale.is_none());
+    assert!(router(None).scaling.scales().is_none());
     router(None)
         .validate(POPULATION as usize, HIDDEN as usize)
         .unwrap();

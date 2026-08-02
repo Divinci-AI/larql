@@ -35,14 +35,14 @@ use crate::format::capability::component::ComponentContract;
 use crate::format::capability::coordinate::BankCoordinate;
 use crate::format::lyrw2::region_format::RegionFormat;
 use crate::format::lyrw2::region_role::RegionRole;
-use larql_compute::{Activation, MoeExpertScalePolicy, MoeTopKWeightPolicy};
+use larql_compute::{Activation, MoeTopKWeightPolicy};
 
 use super::super::bank::{BoundBankOperation, BoundExpert};
 use super::super::consts::{F32_BYTES, FUSED_PROJECTION_HALVES};
 use super::super::operation::BoundMoeOperation;
 use super::super::projection::BoundProjection;
 use super::super::reduction::BoundReduction;
-use super::super::router::BoundRouter;
+use super::super::router::{BoundExpertScaling, BoundRouter, RouterKernel};
 use super::super::tensor::BoundTensor;
 
 /// Catalogue variant these operands claim to come from.
@@ -204,8 +204,8 @@ impl SyntheticLayer {
                 ),
                 top_k: shape.top_k,
                 selected_weight: MoeTopKWeightPolicy::RenormalizedSoftmax,
-                expert_scale: MoeExpertScalePolicy::None,
-                per_expert_scale: None,
+                scaling: BoundExpertScaling::None,
+                kernel: RouterKernel::default(),
             },
             transforms: Vec::new(),
             banks: vec![BoundBankOperation {

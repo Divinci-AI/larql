@@ -5,14 +5,14 @@
 
 use crate::format::capability::coordinate::BankCoordinate;
 use crate::format::lyrw2::region_role::RegionRole;
-use larql_compute::{Activation, MoeExpertScalePolicy, MoeTopKWeightPolicy};
+use larql_compute::{Activation, MoeTopKWeightPolicy};
 
 use super::bank::{BoundBankOperation, BoundExpert};
 use super::error::ExecutionError;
 use super::operation::BoundMoeOperation;
 use super::projection::BoundProjection;
 use super::reduction::BoundReduction;
-use super::router::BoundRouter;
+use super::router::{BoundExpertScaling, BoundRouter, RouterKernel};
 use super::test_support::ascending;
 use super::transform::{BoundTransform, TransformStage};
 
@@ -49,8 +49,8 @@ fn router(hidden: u32) -> BoundRouter<'static> {
         weight: ascending(ROUTER, POPULATION, hidden),
         top_k: TOP_K,
         selected_weight: MoeTopKWeightPolicy::RenormalizedSoftmax,
-        expert_scale: MoeExpertScalePolicy::None,
-        per_expert_scale: None,
+        scaling: BoundExpertScaling::None,
+        kernel: RouterKernel::default(),
     }
 }
 

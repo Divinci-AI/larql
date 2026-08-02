@@ -72,6 +72,32 @@ pub enum ExecutionError {
     #[error("router score for expert {expert} is {value}, which is not a finite number")]
     NonFiniteRouterScore { expert: usize, value: f32 },
 
+    /// A learned per-expert scale is not a finite number.
+    ///
+    /// Multiplying a valid routing weight by it yields a NaN that propagates
+    /// through the reduction into the residual stream, where it surfaces as an
+    /// inexplicable token rather than as a bad operand.
+    #[error("{operand}: per-expert scale for expert {expert} is {value}, which is not finite")]
+    NonFiniteExpertScale {
+        expert: usize,
+        value: f32,
+        operand: String,
+    },
+
+    /// A bound kernel cannot take this operand's bytes as they are.
+    ///
+    /// Not a defect in the index and not a numerical problem: the kernel
+    /// requires a layout (contiguous row-major f32, say) that this operand
+    /// does not have. The repair is to bind a different kernel, never to
+    /// silently materialise a converted copy — that would make a parity
+    /// result a statement about the copy rather than about the binding.
+    #[error("the {kernel} kernel cannot take {operand} as bound: {reason}")]
+    KernelOperandUnsuitable {
+        kernel: &'static str,
+        operand: String,
+        reason: OperandUnsuitability,
+    },
+
     /// An expert id outside the router's address space.
     ///
     /// A catalogue fault: nothing could ever select this expert, so the router
@@ -104,6 +130,32 @@ pub enum ExecutionError {
         resident: usize,
         population: usize,
     },
+}
+
+/// Why a bound operand cannot be handed to a particular kernel.
+///
+/// Four causes, kept apart because they lead to different remedies: choose
+/// another kernel, bind another representation of the same component, or
+/// reject the index. Collapsing them into one message would leave the reader
+/// unable to tell which.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum OperandUnsuitability {
+    /// The stored encoding is not what the kernel reads.
+    /// Remedy: bind a different variant, or a kernel for this format.
+    #[error("stored as {found}, kernel reads {wanted}")]
+    ElementFormat { found: String, wanted: &'static str },
+    /// The operand is read through a view, so its bytes are not the operand.
+    /// Remedy: a kernel that understands the view, or a repacked variant.
+    #[error("read through a {view} view, kernel needs the bytes as stored")]
+    NonDirectView { view: String },
+    /// The base address does not meet the kernel's alignment.
+    /// Remedy: an aligned copy, or a kernel with no alignment requirement.
+    #[error("base address is not aligned for {wanted}")]
+    MisalignedBase { wanted: &'static str },
+    /// The region holds fewer elements than the declared shape.
+    /// Remedy: reject the index — this one is a defect.
+    #[error("shape declares {expected} elements, region provides {found}")]
+    Length { expected: usize, found: usize },
 }
 
 impl ExecutionError {

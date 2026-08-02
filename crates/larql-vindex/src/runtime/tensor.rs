@@ -27,7 +27,7 @@ use crate::format::lyrw2::region_format::RegionFormat;
 
 use super::axis::Axis;
 use super::consts::{BF16_BYTES, BF16_SHIFT, COL_DIM, F16_BYTES, F32_BYTES, MATRIX_RANK, ROW_DIM};
-use super::error::ExecutionError;
+use super::error::{ExecutionError, OperandUnsuitability};
 
 /// Resolved bytes, with the encoding and access pattern that read them.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -107,6 +107,48 @@ impl<'a> BoundTensor<'a> {
     #[cfg(test)]
     pub(crate) fn bytes_for_test(&self) -> &'a [u8] {
         self.bytes
+    }
+
+    /// This operand as a contiguous `f32` slice, if it genuinely is one.
+    ///
+    /// For binding an operand to a kernel that takes `&[f32]` in row-major
+    /// order — the incumbent's BLAS scoring, for instance — **without
+    /// reconstructing it**. A bridge that dequantised, repacked into an
+    /// incumbent-shaped temporary and then called the kernel could reach
+    /// numerical parity while proving nothing about the binding architecture.
+    /// This hands over the stored bytes or refuses.
+    ///
+    /// The error distinguishes format, view, alignment and length, because
+    /// each implies a different remedy: bind another variant, bind a
+    /// view-aware kernel, take an aligned copy, or reject the index. Only the
+    /// last is a defect.
+    pub fn as_f32_slice(&self) -> Result<&'a [f32], OperandUnsuitability> {
+        const WANTED: &str = "contiguous row-major f32";
+        if self.format != RegionFormat::F32 {
+            return Err(OperandUnsuitability::ElementFormat {
+                found: self.format.name(),
+                wanted: WANTED,
+            });
+        }
+        if self.view != ComponentView::Direct {
+            return Err(OperandUnsuitability::NonDirectView {
+                view: self.view.describe(),
+            });
+        }
+        // SAFETY: `align_to` is sound for any `T: Copy` with no invalid bit
+        // patterns, which `f32` satisfies. The empty-prefix check is what
+        // makes the result the *whole* slice rather than a shifted window.
+        let (prefix, values, _) = unsafe { self.bytes.align_to::<f32>() };
+        if !prefix.is_empty() {
+            return Err(OperandUnsuitability::MisalignedBase { wanted: WANTED });
+        }
+        if values.len() < self.len() {
+            return Err(OperandUnsuitability::Length {
+                expected: self.len(),
+                found: values.len(),
+            });
+        }
+        Ok(&values[..self.len()])
     }
 
     pub fn representation(&self) -> &RepresentationIdentity {

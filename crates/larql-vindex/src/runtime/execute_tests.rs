@@ -4,7 +4,8 @@
 //! latent route, the per-expert scale policy, the raw-softmax policy and the
 //! refusals — all reachable code that a direct f32 fixture never touches.
 
-use larql_compute::{MoeExpertScalePolicy, MoeTopKWeightPolicy};
+use super::router::BoundExpertScaling;
+use larql_compute::MoeTopKWeightPolicy;
 
 use super::execute::{execute, execute_traced, execute_with};
 use super::inputs::MoeInputs;
@@ -91,8 +92,9 @@ fn a_per_expert_scale_multiplies_after_renormalisation() {
     // straight back out, making the whole policy a no-op.
     let mut op = direct();
     let population = op.banks[0].experts.len();
-    op.router.expert_scale = MoeExpertScalePolicy::PerExpert;
-    op.router.per_expert_scale = Some(vector(SCALE, &vec![2.0f32; population]));
+    op.router.scaling = BoundExpertScaling::PerExpert {
+        scales: vector(SCALE, &vec![2.0f32; population]),
+    };
 
     let (_, scaled) = execute_traced(&op, MoeInputs::shared(&residual())).unwrap();
     let (_, plain) = execute_traced(&direct(), MoeInputs::shared(&residual())).unwrap();
@@ -102,11 +104,11 @@ fn a_per_expert_scale_multiplies_after_renormalisation() {
 }
 
 #[test]
-fn a_scale_vector_is_ignored_when_the_policy_does_not_ask_for_it() {
+fn unscaled_routing_leaves_the_renormalised_weights_summing_to_one() {
     let mut op = direct();
     let population = op.banks[0].experts.len();
-    op.router.expert_scale = MoeExpertScalePolicy::None;
-    op.router.per_expert_scale = Some(vector(SCALE, &vec![9.0f32; population]));
+    op.router.scaling = BoundExpertScaling::None;
+    let _ = population;
     let (_, trace) = execute_traced(&op, MoeInputs::shared(&residual())).unwrap();
     let total: f32 = trace.gate_weights().iter().sum();
     assert!((total - 1.0).abs() < 1e-5, "{total}");

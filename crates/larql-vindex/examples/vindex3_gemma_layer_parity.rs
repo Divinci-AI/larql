@@ -53,7 +53,7 @@
 //! ```
 
 use larql_compute::cpu::ops::moe::{
-    moe_expert_input, moe_route_from_router_input, moe_router_input,
+    moe_expert_input, moe_route_from_router_input, moe_router_input, moe_score_experts, moe_softmax,
 };
 use larql_compute::cpu::ops::q4_common::dequantize_q4_k;
 use larql_compute::pipeline_layer::build_moe_weights;
@@ -65,8 +65,8 @@ use larql_vindex::format::capability::coordinate::BankCoordinate;
 use larql_vindex::format::lyrw2::region_format::RegionFormat;
 use larql_vindex::format::lyrw2::region_role::RegionRole;
 use larql_vindex::runtime::{
-    execute_traced, BoundBankOperation, BoundExpert, BoundMoeOperation, BoundProjection,
-    BoundReduction, BoundRouter, BoundTensor, MoeInputs,
+    execute_traced, BoundBankOperation, BoundExpert, BoundExpertScaling, BoundMoeOperation,
+    BoundProjection, BoundReduction, BoundRouter, BoundTensor, MoeInputs, RouterKernel,
 };
 
 /// Tolerance for value comparisons. Not a pass/fail gate — the two paths use
@@ -291,6 +291,15 @@ fn main() -> Result<(), String> {
         .iter()
         .flat_map(|v| v.to_le_bytes())
         .collect();
+    // Gemma's routing policy is PerExpert, so the learned per-expert scale is
+    // part of the recipe. Omitting it left scores bit-identical and normalised
+    // weights 7e-4 apart — which the ladder localised to post-processing
+    // rather than to the scoring kernel it would otherwise have been blamed on.
+    let per_expert_scale_bytes: Vec<u8> = moe
+        .router_per_expert_scale
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect();
     let experts: Vec<BoundExpert<'_>> = buffers
         .iter()
         .map(|b| -> Result<BoundExpert<'_>, String> {
@@ -322,8 +331,19 @@ fn main() -> Result<(), String> {
             )?,
             top_k: moe.top_k,
             selected_weight: moe.routing_policy.selected_weight,
-            expert_scale: moe.routing_policy.expert_scale,
-            per_expert_scale: None,
+            scaling: if per_expert_scale_bytes.is_empty() {
+                BoundExpertScaling::None
+            } else {
+                BoundExpertScaling::PerExpert {
+                    scales: tensor(
+                        "router_per_expert_scale",
+                        &per_expert_scale_bytes,
+                        ComponentContract::vector(moe.num_experts as u32),
+                    )?,
+                }
+            },
+            // Rung 1: bind the production scoring kernel, not a lookalike.
+            kernel: RouterKernel::Incumbent,
         },
         transforms: Vec::new(),
         banks: vec![BoundBankOperation {
@@ -374,13 +394,99 @@ fn main() -> Result<(), String> {
         );
     }
 
-    println!("\n== values (tolerance {VALUE_TOLERANCE:.0e}) ==");
-    let weights_match = report("gate weights", &incumbent_weights, &trace.gate_weights());
+    // ── The failure ladder ─────────────────────────────────────────────────
+    //
+    // Rung by rung, so that agreement at the bottom cannot conceal
+    // compensating differences higher up. Renormalisation in particular can
+    // make two different score vectors produce identical final weights.
+    println!(
+        "\n== router ladder (kernel: {}) ==",
+        operation.router.kernel.name()
+    );
+
+    // 1. raw scores, straight from the incumbent's own functions
+    let mut incumbent_scores =
+        moe_score_experts(&router_in, moe.router_proj, moe.num_experts, hidden);
+    moe_softmax(&mut incumbent_scores);
+    let scores_identical = incumbent_scores == trace.router_scores;
+    println!(
+        "  1 raw scores           {}",
+        if scores_identical {
+            "BIT-IDENTICAL".to_string()
+        } else {
+            format!(
+                "max|Δ| = {:.3e}",
+                max_abs_diff(&incumbent_scores, &trace.router_scores)
+            )
+        }
+    );
+
+    // 2. ordered (id, score) pairs
+    let incumbent_pairs: Vec<(usize, f32)> = incumbent_ids
+        .iter()
+        .map(|&e| (e, incumbent_scores[e]))
+        .collect();
+    let vindex3_pairs: Vec<(usize, f32)> = trace
+        .selection
+        .iter()
+        .map(|s| (s.expert_id as usize, s.raw_score))
+        .collect();
+    let pairs_identical = incumbent_pairs == vindex3_pairs;
+    println!(
+        "  2 top-k id/score pairs {}",
+        if pairs_identical {
+            "BIT-IDENTICAL"
+        } else {
+            "DIFFER"
+        }
+    );
+
+    // 3. boundary margin
+    println!("  3 boundary margin      {:?}", trace.selection_margin);
+
+    // 4. pre-normalisation selected weights — the softmax probabilities
+    let pre_norm: Vec<f32> = incumbent_ids.iter().map(|&e| incumbent_scores[e]).collect();
+    let vindex3_pre_norm: Vec<f32> = trace.selection.iter().map(|s| s.raw_score).collect();
+    let pre_norm_identical = pre_norm == vindex3_pre_norm;
+    println!(
+        "  4 pre-norm weights     {}",
+        if pre_norm_identical {
+            "BIT-IDENTICAL"
+        } else {
+            "DIFFER"
+        }
+    );
+
+    // 5. normalised weights, after every policy
+    let final_identical = incumbent_weights == trace.gate_weights();
+    println!(
+        "  5 normalised weights   {}",
+        if final_identical {
+            "BIT-IDENTICAL".to_string()
+        } else {
+            format!(
+                "max|Δ| = {:.3e}",
+                max_abs_diff(&incumbent_weights, &trace.gate_weights())
+            )
+        }
+    );
+
+    let weights_match = report(
+        "gate weights (tolerance)",
+        &incumbent_weights,
+        &trace.gate_weights(),
+    );
+    let router_bit_identical =
+        scores_identical && pairs_identical && pre_norm_identical && final_identical;
 
     println!("\n== notes ==");
-    println!("  Router scoring differs in summation order (BLAS sgemv vs index order).");
-    println!("  Expert values differ by kernel: incumbent Q4_K x Q8_K integer dot,");
-    println!("  reference dequantised f32. Kernel binding is a later rung.");
+    if router_bit_identical {
+        println!("  Router rung CLOSED: the bound kernel reproduces production scoring exactly.");
+    } else {
+        println!("  Router rung open — see the first ladder step that differs.");
+    }
+    println!("  Expert values still differ by kernel: incumbent Q4_K x Q8_K integer dot,");
+    println!("  reference dequantised f32. That is rung 2.");
 
     if selection_matches && weights_match {
         println!("\nPARITY: selection identical, routing weights within tolerance.");

@@ -45,7 +45,7 @@ use std::hint::black_box;
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
-use larql_compute::{Activation, MoeExpertScalePolicy, MoeTopKWeightPolicy};
+use larql_compute::{Activation, MoeTopKWeightPolicy};
 use larql_vindex::format::capability::coordinate::BankCoordinate;
 use larql_vindex::format::capability::{
     binding::RepresentationIdentity, component::ComponentContract,
@@ -54,8 +54,9 @@ use larql_vindex::format::lyrw2::region_format::RegionFormat;
 use larql_vindex::format::lyrw2::region_role::RegionRole;
 use larql_vindex::runtime::MoeInputs;
 use larql_vindex::runtime::{
-    execute, execute_traced, BoundBankOperation, BoundExpert, BoundMoeOperation, BoundProjection,
-    BoundReduction, BoundRouter, BoundTensor, ProjectionArrangement,
+    execute, execute_traced, BoundBankOperation, BoundExpert, BoundExpertScaling,
+    BoundMoeOperation, BoundProjection, BoundReduction, BoundRouter, BoundTensor,
+    ProjectionArrangement, RouterKernel,
 };
 
 /// Populations spanning two orders of magnitude. 64× the experts should cost a
@@ -145,8 +146,8 @@ impl Operands {
                 weight: tensor("router", &self.router, population, HIDDEN),
                 top_k: TOP_K,
                 selected_weight: MoeTopKWeightPolicy::RenormalizedSoftmax,
-                expert_scale: MoeExpertScalePolicy::None,
-                per_expert_scale: None,
+                scaling: BoundExpertScaling::None,
+                kernel: RouterKernel::default(),
             },
             transforms: Vec::new(),
             banks: vec![BoundBankOperation {

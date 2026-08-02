@@ -17,10 +17,10 @@ use super::expert;
 use super::inputs::MoeInputs;
 use super::kernels::{dot, renormalize, softmax, top_k_with_margin};
 use super::operation::BoundMoeOperation;
-use super::router::{BoundRouter, SelectedExpert};
+use super::router::{BoundRouter, RouterKernel, SelectedExpert};
 use super::trace::{CollectedTrace, NoTrace, TraceSink};
 use super::transform::{apply_stage, TransformStage};
-use larql_compute::{MoeExpertScalePolicy, MoeTopKWeightPolicy};
+use larql_compute::MoeTopKWeightPolicy;
 
 /// Run the operation over one token's residual, returning its contribution.
 ///
@@ -105,6 +105,44 @@ pub fn execute_with<S: TraceSink>(
     Ok(delta)
 }
 
+/// Score the population with whichever kernel was bound.
+///
+/// The reference reads row by row through the operand's view, so it serves any
+/// layout. The incumbent kernel takes the bytes directly and refuses rather
+/// than accepting a reconstruction.
+fn score(router: &BoundRouter<'_>, input: &[f32]) -> Result<Vec<f32>, ExecutionError> {
+    match router.kernel {
+        RouterKernel::Reference => {
+            let mut scores = vec![0.0f32; router.population()];
+            let mut row = vec![0.0f32; router.hidden_dim()];
+            for (e, slot) in scores.iter_mut().enumerate() {
+                router.weight.row_into(e, &mut row)?;
+                *slot = dot(&row, input);
+            }
+            softmax(&mut scores);
+            Ok(scores)
+        }
+        RouterKernel::Incumbent => {
+            let weights = router.weight.as_f32_slice().map_err(|reason| {
+                ExecutionError::KernelOperandUnsuitable {
+                    kernel: RouterKernel::Incumbent.name(),
+                    operand: router.weight.describe(),
+                    reason,
+                }
+            })?;
+            // The incumbent's own functions, not a lookalike.
+            let mut scores = larql_compute::cpu::ops::moe::moe_score_experts(
+                input,
+                weights,
+                router.population(),
+                router.hidden_dim(),
+            );
+            larql_compute::cpu::ops::moe::moe_softmax(&mut scores);
+            Ok(scores)
+        }
+    }
+}
+
 /// Score the population, select top-k, and apply the weight policies.
 fn select<S: TraceSink>(
     router: &BoundRouter<'_>,
@@ -112,13 +150,7 @@ fn select<S: TraceSink>(
     population: usize,
     sink: &mut S,
 ) -> Result<Vec<SelectedExpert>, ExecutionError> {
-    let mut scores = vec![0.0f32; router.population()];
-    let mut row = vec![0.0f32; router.hidden_dim()];
-    for (e, slot) in scores.iter_mut().enumerate() {
-        router.weight.row_into(e, &mut row)?;
-        *slot = dot(&row, input);
-    }
-    softmax(&mut scores);
+    let scores = score(router, input)?;
     sink.router_scores(&scores);
 
     // Before ordering, not after. A non-finite score still takes a position
@@ -142,9 +174,9 @@ fn select<S: TraceSink>(
     // Per-expert scale multiplies *after* renormalisation, so the selected
     // weights need not sum to one afterwards. Applying it before would let
     // renormalisation divide the learned scale back out.
-    let per_expert = match (&router.per_expert_scale, router.expert_scale) {
-        (Some(scale), MoeExpertScalePolicy::PerExpert) => Some(scale.to_vec()?),
-        _ => None,
+    let per_expert = match router.scaling.scales() {
+        Some(scales) => Some(scales.to_vec()?),
+        None => None,
     };
 
     let mut selected = Vec::with_capacity(chosen.len());

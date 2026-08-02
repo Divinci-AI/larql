@@ -81,14 +81,14 @@ mod transform_tests;
 
 pub use axis::Axis;
 pub use bank::{BoundBankOperation, BoundExpert};
-pub use error::ExecutionError;
+pub use error::{ExecutionError, OperandUnsuitability};
 pub use execute::{execute, execute_traced, execute_with};
 pub use inputs::MoeInputs;
 pub use operation::BoundMoeOperation;
 pub use projection::{BoundProjection, ProjectionArrangement};
 pub use reduction::BoundReduction;
 pub use residency::{account, ExpertRegion, PageSpan, ResidencyAccount};
-pub use router::{BoundRouter, SelectedExpert};
+pub use router::{BoundExpertScaling, BoundRouter, RouterKernel, SelectedExpert};
 pub use tensor::BoundTensor;
 pub use trace::{CollectedTrace, ExpertOutput, NoTrace, TraceSink};
 pub use transform::{BoundTransform, TransformStage};
