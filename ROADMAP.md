@@ -407,18 +407,46 @@ the window fills, so a refusal *after* a close returns
 `standard` window already at capacity — append-then-evict leaves the row count
 unchanged while the oldest row is gone.
 
-*Follow-on found while closing it:* **`no-cache` and `apollo` never dispatch
-experts at all.** `no-cache` forwards through
-`larql_kv::generation::kv_prefill_run` and `apollo` through
-`larql_inference::forward::forward_from_layer`; neither consults
-`FfnBackend::forward_moe_full_layer`, so on a hybrid-MoE arch both run the
-dense half of every layer and there is no refusal to carry. This is a *larger*
-gap than the one just closed — a silently expert-free answer rather than a
-silently degraded one — and it is pinned as such in
-`strict_refusal/engines.rs::dense_only_engines_never_refuse_because_they_never_route`,
-which fails the moment either grows a dispatch path without being reclassified.
-Fixing it means giving those two forward paths a MoE hook, which is a change to
-`larql-inference`'s forward, not to the engines.
+**1b. `no-cache` and `apollo` — the dense-only forwards. CLOSED 2026-08-02.**
+Found while closing item 1: neither consulted `forward_moe_full_layer` at all,
+so on a hybrid-MoE arch both ran the dense half of every layer and returned an
+apparently valid answer. That is a *worse* failure than a degraded one — a
+different model wearing the same answer shape, undetectable downstream — so it
+was treated as a semantic disqualification rather than as missing propagation.
+The two needed different corrections because the seam is in a different place:
+
+```text
+no-cache   forwards through `kv_prefill_run`, which *takes* an FfnBackend
+           → gave it real dispatch. That helper is also the oracle the
+             dispatch ring is compared against, so an oracle that skipped the
+             expert half would have made every MoE parity comparison agree
+             about the wrong answer.
+apollo     forwards through `forward_from_layer` / `forward_raw_logits`, which
+           live in larql-compute *below* the FfnBackend seam and construct
+           their own dense `ViewFfn` — no caller-supplied backend can reach
+           them → refuses the architecture up front, `RefusalKind::Unsupported`
+             (operands fine, this executor cannot serve them, pick another).
+```
+
+Real dispatch stays preferable for apollo, and means threading an `FfnBackend`
+through `forward_layer_range` — a change to the forward, not to the engine.
+Until then it is not usable as an apparently conformant MoE engine, which is
+the point.
+
+Two more transactional bugs fell out, both of the kind only a refusal can
+expose. `no-cache` pushed the decode token onto its list *before* the
+re-forward could refuse, so a caller who fixed the cause and retried would
+have forwarded the same token twice — the exact double-append the contract
+exists to prevent; the token list is its entire continuation state, so the
+push is now undone on failure. And `kv_decode_step_run` appended each layer's
+K/V before the FFN could refuse, so the oracle itself is now transactional:
+truncate back to the entry lengths, or report `StateInvalidated` when the
+cache is windowed at capacity and eviction has already discarded a row.
+
+*Standing:* every `EngineKind` variant is now classified and gated —
+`RoutesExperts` (nine, sweeping prefill/decode × three kinds) or
+`NoExpertSeam` (apollo, refusing the architecture with an executing route, so
+the refusal provably comes from the engine and not the route).
 
 **2. Variant-selection refusal.** Closes V2-0 outright.
 `Vindex3Index::declares_profile` is a name check; §9.1 wants a profile that
