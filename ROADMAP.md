@@ -369,28 +369,56 @@ later diagnostic noise.
 Ordered by what unblocks what, not by size. Each item states the condition that
 closes it, so "done" is not a judgement call.
 
-**1. `layer_ffn_or_moe` — the other five engines.** PR #197 made strict refusal
-real for `StandardEngine` only. markov-rs, markov-rs-codec, turbo-quant,
-unlimited-context and boundary-per-layer still route through larql-kv's
-`layer_ffn_or_moe`, which logs a refusal and falls back — so a strict route
-through any of them degrades exactly as it did before. The mechanical half is
-widening the helper to `Result<Array2<f32>, BoxRefusal>` and threading it
-through ten call sites whose enclosing functions (`rs_prefill`,
-`rs_decode_step_inner`, `rs_prefill_codec`, `rs_decode_step_codec`,
-`rs_extend_from_checkpoint_backend`, `rs_extend_inplace`, turbo-quant's
-`prefill`/`decode_step_impl`, boundary-per-layer's two walk sites) return bare
-types today.
+**1. `layer_ffn_or_moe` — the other five engines. CLOSED 2026-08-02.**
+`layer_ffn_or_moe` returns `Result<Array2<f32>, BoxRefusal>`, all ten call
+sites propagate, and the gate in `larql-kv/tests/strict_refusal/engines.rs`
+runs **eight** expert-routing engines × prefill/decode × three `RefusalKind`s.
+The baseline tag may now say engine-wide.
 
-The half that is not mechanical: each of those engines holds its *own*
-continuation state — `RsStore`, the codec's store, window checkpoints — so each
-needs the rewind-or-invalidate decision `StandardEngine` now makes, and the
-answer differs per engine because what is canonical differs per engine. A
-residual-canonical engine may be able to rewind by discarding a residual row
-where a K/V-canonical one cannot.
+The rewind half came out better than the prediction. The prediction was that
+residual-canonical engines could rewind where K/V-canonical ones could not; the
+answer is that **all of them can**, by two different mechanisms, and
+`engine_state.rs` proves it in the strong form — the retried token is
+bit-identical to never having refused, for every one of the eight:
 
-*Closes when:* the 24-case gate in `larql-kv/tests/strict_refusal/` runs against
-every engine in `EngineKind`, not just `standard`. Until then the baseline tag
-must say "for `StandardEngine`" rather than "engine-wide".
+```text
+residual-canonical   markov-rs, markov-rs-codec, boundary-per-layer
+                     → the step writes `stored` only after the last fallible
+                       call; `hot_kv` is a droppable derivative, taken up
+                       front and left None on the error path
+K/V-canonical        standard, turbo-quant, unlimited-context
+                     → the cache grows before the FFN can refuse, so the step
+                       truncates its appends: `truncate_kv` on the handle,
+                       `CompressedLayer::truncate_rows` byte-exactly (rows are
+                       appended at fixed offsets and never re-encoded, so the
+                       codec is lossy against its *input*, not against what
+                       was stored), `truncate_kv_rows` on the window shadow
+```
+
+Two engines stopped taking their store by value (`store.take()` → `as_mut()`),
+which also removed a latent bug: any failure used to leave `self.store` as
+`None`, so the *next* call reported "decode_step called before prefill" — a
+dead engine wearing a misleading message.
+
+Exactly one case genuinely cannot rewind, and now says so:
+`unlimited-context` archives a window and saves its boundary checkpoint when
+the window fills, so a refusal *after* a close returns
+`EngineError::StateInvalidated` rather than a retryable refusal. Same for a
+`standard` window already at capacity — append-then-evict leaves the row count
+unchanged while the oldest row is gone.
+
+*Follow-on found while closing it:* **`no-cache` and `apollo` never dispatch
+experts at all.** `no-cache` forwards through
+`larql_kv::generation::kv_prefill_run` and `apollo` through
+`larql_inference::forward::forward_from_layer`; neither consults
+`FfnBackend::forward_moe_full_layer`, so on a hybrid-MoE arch both run the
+dense half of every layer and there is no refusal to carry. This is a *larger*
+gap than the one just closed — a silently expert-free answer rather than a
+silently degraded one — and it is pinned as such in
+`strict_refusal/engines.rs::dense_only_engines_never_refuse_because_they_never_route`,
+which fails the moment either grows a dispatch path without being reclassified.
+Fixing it means giving those two forward paths a MoE hook, which is a change to
+`larql-inference`'s forward, not to the engines.
 
 **2. Variant-selection refusal.** Closes V2-0 outright.
 `Vindex3Index::declares_profile` is a name check; §9.1 wants a profile that
