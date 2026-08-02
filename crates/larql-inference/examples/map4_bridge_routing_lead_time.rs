@@ -46,7 +46,6 @@ use larql_compute::pipeline_layer::build_moe_weights;
 use larql_compute::MoeLayerWeights;
 use larql_models::ModelWeights;
 
-const HOME_LAYERS: [usize; 3] = [10, 20, 29];
 const LEAD_TIMES: [usize; 5] = [1, 2, 4, 8, 16];
 const NUM_PROMPTS: usize = 8;
 
@@ -89,6 +88,13 @@ fn top_k_by_frequency(counts: &HashMap<usize, usize>, k: usize) -> Vec<usize> {
     v.into_iter().take(k).map(|(id, _)| id).collect()
 }
 
+/// Every layer the real architecture actually routes through MoE — not a
+/// hand-picked sample. Cheap to test all of them: this probe only runs
+/// router math on cached residuals, no forward pass.
+fn discover_moe_layers(weights: &ModelWeights, arch: &dyn larql_models::ModelArchitecture) -> Vec<usize> {
+    (0..weights.num_layers).filter(|&l| build_moe_weights(weights, arch, l).is_some()).collect()
+}
+
 fn main() {
     println!("=== MAP-4 bridge: does routing have usable lead time, and does it beat cheap baselines? ===");
     let vindex = match arg("--vindex") {
@@ -108,7 +114,9 @@ fn main() {
     let norm_offset = arch.norm_weight_offset();
     let eps = arch.norm_eps();
 
-    let sample_moe = build_moe_weights(&weights, arch, HOME_LAYERS[0]).expect("home layer must be MoE");
+    let home_layers = discover_moe_layers(&weights, arch);
+    println!("discovered {} real MoE layers out of {}: {home_layers:?}\n", home_layers.len(), weights.num_layers);
+    let sample_moe = build_moe_weights(&weights, arch, home_layers[0]).expect("discovered layer must be MoE");
     let top_k = sample_moe.top_k;
     let num_experts = sample_moe.num_experts;
     let chance_overlap = (top_k * top_k) as f64 / num_experts as f64;
@@ -117,7 +125,7 @@ fn main() {
     // moe weight structures, built once, reused across all prompts.
     let mut moe_at: HashMap<usize, MoeLayerWeights> = HashMap::new();
     let mut prev_of: HashMap<usize, usize> = HashMap::new();
-    for &l in &HOME_LAYERS {
+    for &l in &home_layers {
         moe_at.insert(l, build_moe_weights(&weights, arch, l).expect("home layer must be MoE"));
         if let Some(p) = nearest_earlier_moe_layer(&weights, l) {
             prev_of.insert(l, p);
@@ -128,7 +136,7 @@ fn main() {
     // ── Pass 1: real true routing (and previous-layer routing) per prompt ──
     // true_ids[layer][prompt] = that layer's real selected experts for that prompt.
     let mut true_ids: HashMap<usize, Vec<Vec<usize>>> = HashMap::new();
-    let mut layers_needed: Vec<usize> = HOME_LAYERS.to_vec();
+    let mut layers_needed: Vec<usize> = home_layers.clone();
     layers_needed.extend(prev_of.values().copied());
     layers_needed.sort_unstable();
     layers_needed.dedup();
@@ -146,9 +154,9 @@ fn main() {
 
     // ── Pass 2: stale-residual lead-time sweep (the original method) ──────
     println!("== stale-residual method (L's own router, fed L-k's residual) ==");
-    struct LeadCell { home_layer: usize, lead: usize, overlap: usize }
+    struct LeadCell { home_layer: usize, lead: usize, prompt: usize, overlap: usize, pred_ids: Vec<usize> }
     let mut lead_cells = Vec::new();
-    for &l in &HOME_LAYERS {
+    for &l in &home_layers {
         let moe = &moe_at[&l];
         for i in 0..NUM_PROMPTS {
             let dump_dir = format!("{dump_prefix}{i}");
@@ -159,7 +167,7 @@ fn main() {
                 let h_early = last_row(&cpu_layer_path(&dump_dir, l - k), hidden);
                 let pred_ids = route_at(moe, &h_early, norm_offset, eps);
                 let ov = overlap_count(&true_ids[&l][i], &pred_ids);
-                lead_cells.push(LeadCell { home_layer: l, lead: k, overlap: ov });
+                lead_cells.push(LeadCell { home_layer: l, lead: k, prompt: i, overlap: ov, pred_ids });
             }
         }
     }
@@ -170,7 +178,7 @@ fn main() {
         }
         let mean = matching.iter().map(|c| c.overlap as f64).sum::<f64>() / matching.len() as f64;
         print!("  lead {k:>2}: mean overlap {mean:.2}/{top_k}  (n={})  per-layer:", matching.len());
-        for &l in &HOME_LAYERS {
+        for &l in &home_layers {
             let per_layer: Vec<&LeadCell> = matching.iter().filter(|c| c.home_layer == l).copied().collect();
             if per_layer.is_empty() {
                 continue;
@@ -183,7 +191,7 @@ fn main() {
 
     // ── Pass 3: previous-route baseline (reuse L-1's OWN true selection) ──
     println!("\n== previous-route baseline (reuse the nearest earlier MoE layer's own true selection, no router substitution) ==");
-    for &l in &HOME_LAYERS {
+    for &l in &home_layers {
         let Some(&prev) = prev_of.get(&l) else { continue };
         let overlaps: Vec<usize> = (0..NUM_PROMPTS).map(|i| overlap_count(&true_ids[&l][i], &true_ids[&prev][i])).collect();
         let mean = overlaps.iter().sum::<usize>() as f64 / overlaps.len() as f64;
@@ -192,7 +200,9 @@ fn main() {
 
     // ── Pass 4: static popularity baseline (leave-one-out) ─────────────────
     println!("\n== static popularity baseline (top-{top_k} most frequent experts across the OTHER 7 prompts, leave-one-out) ==");
-    for &l in &HOME_LAYERS {
+    // (layer, held_out_prompt) -> that prompt's leave-one-out popularity set, reused in passes 5/6.
+    let mut pop_sets: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
+    for &l in &home_layers {
         let mut overlaps = Vec::with_capacity(NUM_PROMPTS);
         for held_out in 0..NUM_PROMPTS {
             let mut counts: HashMap<usize, usize> = HashMap::new();
@@ -206,9 +216,62 @@ fn main() {
             }
             let popular = top_k_by_frequency(&counts, top_k);
             overlaps.push(overlap_count(&true_ids[&l][held_out], &popular));
+            pop_sets.insert((l, held_out), popular);
         }
         let mean = overlaps.iter().sum::<usize>() as f64 / overlaps.len() as f64;
         println!("  L{l:>2}: mean overlap {mean:.2}/{top_k}  ({overlaps:?})");
+    }
+
+    // ── Pass 5: excess of stale-residual over popularity, at EVERY lead ────
+    // The single lead=1 comparison only checks whether the headline number
+    // survives its cheapest competitor. This checks whether ANY lead time
+    // beats popularity, and whether the gap (if any) itself decays with
+    // lead the way a real predictive signal should but a lead-independent
+    // popularity floor cannot.
+    println!("\n== excess of stale-residual over popularity, per layer x lead ==");
+    println!("  (positive = stale-residual beats the zero-cost popularity floor at that lead)");
+    for &l in &home_layers {
+        for &k in &LEAD_TIMES {
+            let cells: Vec<&LeadCell> = lead_cells.iter().filter(|c| c.home_layer == l && c.lead == k).collect();
+            if cells.is_empty() {
+                continue;
+            }
+            let stale_mean = cells.iter().map(|c| c.overlap as f64).sum::<f64>() / cells.len() as f64;
+            let pop_mean = cells.iter().map(|c| overlap_count(&true_ids[&l][c.prompt], &pop_sets[&(l, c.prompt)]) as f64).sum::<f64>() / cells.len() as f64;
+            println!("  L{l:>2} lead={k:>2}: stale={stale_mean:.2}  popularity={pop_mean:.2}  excess={:+.2}", stale_mean - pop_mean);
+        }
+    }
+
+    // ── Pass 6: union-under-budget (does stacking stale-residual ON TOP ──
+    // of popularity buy real extra coverage, for a real prefetch budget) ──
+    println!("\n== union(popularity, stale-residual) vs popularity alone, per layer x lead ==");
+    println!("  (reports achieved overlap AND the union's actual candidate-set size, since the union isn't free)");
+    for &l in &home_layers {
+        for &k in &LEAD_TIMES {
+            let cells: Vec<&LeadCell> = lead_cells.iter().filter(|c| c.home_layer == l && c.lead == k).collect();
+            if cells.is_empty() {
+                continue;
+            }
+            let mut union_overlaps = Vec::with_capacity(cells.len());
+            let mut union_sizes = Vec::with_capacity(cells.len());
+            let mut pop_overlaps = Vec::with_capacity(cells.len());
+            for c in &cells {
+                let pop = &pop_sets[&(l, c.prompt)];
+                let mut union: Vec<usize> = pop.iter().chain(c.pred_ids.iter()).copied().collect();
+                union.sort_unstable();
+                union.dedup();
+                union_sizes.push(union.len());
+                union_overlaps.push(overlap_count(&true_ids[&l][c.prompt], &union));
+                pop_overlaps.push(overlap_count(&true_ids[&l][c.prompt], pop));
+            }
+            let mean_union_ov = union_overlaps.iter().sum::<usize>() as f64 / union_overlaps.len() as f64;
+            let mean_union_sz = union_sizes.iter().sum::<usize>() as f64 / union_sizes.len() as f64;
+            let mean_pop_ov = pop_overlaps.iter().sum::<usize>() as f64 / pop_overlaps.len() as f64;
+            println!(
+                "  L{l:>2} lead={k:>2}: popularity-alone={mean_pop_ov:.2}/{top_k}  union={mean_union_ov:.2}/{mean_union_sz:.1} candidates  marginal-gain={:+.2}",
+                mean_union_ov - mean_pop_ov
+            );
+        }
     }
 
     println!(
@@ -216,6 +279,8 @@ fn main() {
          If the stale-residual method's lead=1 overlap is not clearly ABOVE both the previous-route\n\
          and static-popularity baselines, the earlier finding is explained by routing being generically\n\
          'sticky' or popularity-skewed, not by this probe doing real prediction. Compare the lead=1 row\n\
-         above against both baseline rows directly, per layer."
+         above against both baseline rows directly, per layer. Passes 5-6 extend this across every lead\n\
+         time and check whether stacking the stale-residual method on top of popularity (rather than\n\
+         picking one) buys real coverage for its added candidate-set cost."
     );
 }
