@@ -8,6 +8,7 @@ members = [
     "crates/larql-core",
     "crates/larql-vindex",
     "crates/larql-vindex-spec",
+    "crates/larql-execution",
     "crates/larql-factory",
     "crates/larql-inference",
     "crates/larql-kv",

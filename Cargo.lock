@@ -2217,6 +2217,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "larql-execution"
+version = "0.1.0"
+
+[[package]]
 name = "larql-factory"
 version = "0.1.0"
 dependencies = [
@@ -2465,6 +2469,7 @@ dependencies = [
  "larql-compute",
  "larql-compute-metal",
  "larql-core",
+ "larql-execution",
  "larql-inference",
  "larql-kv",
  "larql-models",

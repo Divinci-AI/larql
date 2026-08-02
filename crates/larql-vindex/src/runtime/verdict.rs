@@ -27,52 +27,13 @@
 
 use super::error::ExecutionError;
 
-/// Why an execution refused to produce a comparable answer at all.
+/// The response a refusal requires — re-exported from `larql-execution`.
 ///
-/// Three kinds because three different people act on them: the operator who
-/// must fetch an operand, the engineer who must write a kernel, and whoever
-/// produced an index that is wrong.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum RefusalKind {
-    /// The route is correct and the operand is simply not here.
-    ///
-    /// **Not a parity failure.** The routing decision was right, the expert
-    /// exists in the model, and a shard that does not hold it is behaving
-    /// exactly as designed. Counting these as mismatches would make a sweep's
-    /// headline number a measurement of slice coverage rather than of
-    /// execution.
-    Residency,
-    /// The binding is well-formed and no bound kernel serves it.
-    ///
-    /// A valid representation with a valid semantic view can still have no
-    /// admissible kernel — a transposed quantised region, an activation this
-    /// kernel does not implement. That is an honest admission failure, not a
-    /// malformed region, and the repair is a kernel or another stored variant.
-    /// Never a quiet reinterpretation of the bytes.
-    Unsupported,
-    /// The binding itself is wrong: extent, geometry, scale or contract.
-    ///
-    /// The only kind that means someone should reject the index.
-    BindingDefect,
-}
-
-impl RefusalKind {
-    pub const ALL: [Self; 3] = [Self::Residency, Self::Unsupported, Self::BindingDefect];
-
-    pub const fn name(self) -> &'static str {
-        match self {
-            Self::Residency => "residency",
-            Self::Unsupported => "unsupported",
-            Self::BindingDefect => "binding_defect",
-        }
-    }
-}
-
-impl std::fmt::Display for RefusalKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.name())
-    }
-}
+/// It moved there when `FfnBackend`'s error channel needed to name it:
+/// `FfnBackend` lives in `larql-compute`, which sits *below* this crate, so the
+/// vocabulary could not stay here and still cross that boundary. Re-exported so
+/// existing `runtime::RefusalKind` paths keep working.
+pub use larql_execution::RefusalKind;
 
 impl ExecutionError {
     /// Which kind of refusal this is, for a sweep that must not report a

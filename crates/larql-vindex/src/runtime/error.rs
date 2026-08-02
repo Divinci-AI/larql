@@ -204,3 +204,17 @@ impl ExecutionError {
         }
     }
 }
+
+/// Carries this error's response category across a crate boundary.
+///
+/// `larql-compute` owns `FfnBackend` and sits below this crate, so it cannot
+/// name `ExecutionError` — but it can name `dyn ExecutionRefusal`. The concrete
+/// diagnosis stays here, with its expert ids, bank coordinates and axes; only
+/// the one thing an engine must switch on crosses.
+impl larql_execution::ExecutionRefusal for ExecutionError {
+    fn kind(&self) -> larql_execution::RefusalKind {
+        // Delegates rather than re-matching: two exhaustive matches over the
+        // same variants is exactly how a classification drifts.
+        self.refusal()
+    }
+}
