@@ -1482,7 +1482,10 @@ mod tests {
         let ffn = NullFfn;
         let mut engine = MarkovResidualEngine::new(None);
         let err = engine.prefill(&weights, &ffn, &[]).unwrap_err();
-        assert_eq!(err, larql_inference::kv_engine::EngineError::EmptyPrompt);
+        assert!(matches!(
+            err,
+            larql_inference::kv_engine::EngineError::EmptyPrompt
+        ));
     }
 
     #[test]
@@ -1513,7 +1516,10 @@ mod tests {
         let err = engine
             .prefill_quant(&weights, &ffn, &index, &[], &*backend)
             .unwrap_err();
-        assert_eq!(err, larql_inference::kv_engine::EngineError::EmptyPrompt);
+        assert!(matches!(
+            err,
+            larql_inference::kv_engine::EngineError::EmptyPrompt
+        ));
     }
 
     #[test]
@@ -1545,7 +1551,10 @@ mod tests {
         let err = engine
             .prefill_via_executor(&weights, &executor, &ffn, &[])
             .unwrap_err();
-        assert_eq!(err, larql_inference::kv_engine::EngineError::EmptyPrompt);
+        assert!(matches!(
+            err,
+            larql_inference::kv_engine::EngineError::EmptyPrompt
+        ));
     }
 
     #[test]
@@ -1561,7 +1570,10 @@ mod tests {
         let err = engine
             .prefill_quant_via_executor(&weights, &executor, &ffn, &index, &[])
             .unwrap_err();
-        assert_eq!(err, larql_inference::kv_engine::EngineError::EmptyPrompt);
+        assert!(matches!(
+            err,
+            larql_inference::kv_engine::EngineError::EmptyPrompt
+        ));
     }
 
     #[test]

@@ -95,6 +95,15 @@ pub struct StandardEngine {
     /// `WeightsView::with_scratch` over it). Empty on the dense path. Keeps
     /// `weights` immutable so the engine can hold `Arc<ModelWeights>`.
     dequant_scratch: larql_inference::DequantScratch,
+    /// Set when a failed decode step left K/V that could not be rewound,
+    /// carrying the rendered cause. While set, decode entry points refuse
+    /// with [`EngineError::InvariantViolation`] rather than compute from a
+    /// cache that describes no token sequence.
+    ///
+    /// Cleared by a successful prefill, which replaces the cache outright —
+    /// so re-prefilling is the documented way back, and the engine is never
+    /// permanently dead.
+    invalidated: Option<String>,
 }
 
 impl StandardEngine {
@@ -110,6 +119,7 @@ impl StandardEngine {
             abs_position: 0,
             backend: BackendSlot::Sync(backend),
             dequant_scratch: larql_inference::DequantScratch::new(),
+            invalidated: None,
         }
     }
 
@@ -128,6 +138,7 @@ impl StandardEngine {
             abs_position: 0,
             backend: BackendSlot::Async(backend),
             dequant_scratch: larql_inference::DequantScratch::new(),
+            invalidated: None,
         }
     }
 
@@ -147,6 +158,12 @@ impl StandardEngine {
     /// Shared prefill body — both `prefill` (index=None) and
     /// `prefill_quant` (index=Some) route through here. Matches on the
     /// `BackendSlot` to pick sync vs async dispatch.
+    ///
+    /// This is the engine's policy point for the dispatch ring's three
+    /// outcomes: a refusal terminates as
+    /// [`EngineError::Execution`] and no hidden state is produced; a
+    /// declining backend stays [`EngineError::BackendFailure`], exactly
+    /// as the bare `None` it replaced.
     fn do_prefill(
         &mut self,
         weights: &ModelWeights,
@@ -158,9 +175,10 @@ impl StandardEngine {
         let (hidden, handles) = match &self.backend {
             BackendSlot::Sync(b) => {
                 kv_prefill_via_dispatch(b.as_ref(), view, ffn, token_ids, self.window_size, index)
+                    .map_err(EngineError::Execution)?
                     .ok_or_else(|| EngineError::BackendFailure {
-                    details: "kv_prefill_via_dispatch returned None".into(),
-                })?
+                        details: "kv_prefill_via_dispatch returned None".into(),
+                    })?
             }
             BackendSlot::Async(b) => kv_prefill_via_dispatch_async(
                 b.as_ref(),
@@ -170,12 +188,16 @@ impl StandardEngine {
                 self.window_size,
                 index,
             )
+            .map_err(EngineError::Execution)?
             .ok_or_else(|| EngineError::BackendFailure {
                 details: "kv_prefill_via_dispatch_async returned None".into(),
             })?,
         };
         self.handles = Some(handles);
         self.prefill_mode = Some(PrefillDispatchMode::PerLayer);
+        // A completed prefill replaces the cache outright, so whatever an
+        // earlier failed step left behind is gone with it.
+        self.invalidated = None;
         self.abs_position = token_ids.len();
         Ok(hidden)
     }
@@ -191,7 +213,7 @@ impl StandardEngine {
         weights: &ModelWeights,
         ffn: &dyn FfnBackend,
         initial_hidden: &Array2<f32>,
-    ) -> Option<Array2<f32>> {
+    ) -> Result<Array2<f32>, EngineError> {
         let view = larql_inference::WeightsView::with_scratch(weights, &self.dequant_scratch);
         // `token_ids: None` — MM hidden rows (vision/audio) have no 1:1
         // token identities, so PLE inputs cannot be derived here. PLE
@@ -206,7 +228,7 @@ impl StandardEngine {
                 None,
                 self.window_size,
                 None,
-            )?,
+            ),
             BackendSlot::Async(b) => kv_prefill_from_hidden_via_dispatch_async(
                 b.as_ref(),
                 view,
@@ -215,10 +237,19 @@ impl StandardEngine {
                 None,
                 self.window_size,
                 None,
-            )?,
-        };
+            ),
+        }
+        .map_err(EngineError::Execution)?
+        .ok_or_else(|| EngineError::BackendFailure {
+            details: "do_prefill_from_hidden returned None (empty hidden input or \
+                      backend dispatch failure)"
+                .into(),
+        })?;
         self.handles = Some(handles);
         self.prefill_mode = Some(PrefillDispatchMode::PerLayer);
+        // A completed prefill replaces the cache outright, so whatever an
+        // earlier failed step left behind is gone with it.
+        self.invalidated = None;
         // Critical: position pointer must be derived from the hidden
         // row count, NOT from any token count — the input may contain
         // vision rows that aren't tokens. Decode-loop correctness
@@ -226,11 +257,29 @@ impl StandardEngine {
         // continuation. Pinned by the StandardEngine entry-point
         // agreement test in this file's tests module.
         self.abs_position = initial_hidden.nrows();
-        Some(hidden)
+        Ok(hidden)
     }
 
     /// Shared decode-step body — both `decode_step` (index=None) and
     /// `decode_step_quant` (index=Some) route through here.
+    ///
+    /// Same policy point as [`Self::do_prefill`]: a refusal terminates as
+    /// [`EngineError::Execution`] and no hidden state escapes.
+    ///
+    /// **Transactional.** A decode step mutates the cache before it can
+    /// know whether it will finish: each layer's attention appends the new
+    /// token's K/V, and only then does the FFN get the chance to refuse. A
+    /// step that does not complete therefore rewinds every handle to the
+    /// length it had on entry, so a caller that fixes the refusal's cause
+    /// can drive the same token through the same engine.
+    ///
+    /// When the rewind cannot be trusted — see [`Self::rewind_is_sound`] —
+    /// the error is wrapped as [`EngineError::StateInvalidated`] and the
+    /// engine records it, so every later decode refuses instead of
+    /// computing from a cache that describes no token sequence. `prefill`
+    /// clears the condition, because it replaces the cache outright.
+    ///
+    /// `abs_position` advances only on success, on every path.
     fn do_decode_step(
         &mut self,
         weights: &ModelWeights,
@@ -238,43 +287,105 @@ impl StandardEngine {
         token_id: u32,
         index: Option<&larql_inference::larql_vindex::VectorIndex>,
     ) -> Result<Array2<f32>, EngineError> {
+        if let Some(what) = &self.invalidated {
+            return Err(EngineError::InvariantViolation {
+                what: format!("decode_step called on an invalidated engine: {what}"),
+            });
+        }
         let view = larql_inference::WeightsView::with_scratch(weights, &self.dequant_scratch);
+        let window = self.window_size;
+        let abs_position = self.abs_position;
+        let backend = &self.backend;
         let handles = self
             .handles
             .as_mut()
             .ok_or_else(|| EngineError::InvariantViolation {
                 what: "decode_step called before prefill (handles missing)".into(),
             })?;
-        let hidden = match &self.backend {
+
+        // Snapshot before the first append. Recorded per layer rather than
+        // assumed to be uniform: nothing in the trait promises every layer
+        // caches the same number of rows, and a wrong assumption here would
+        // rewind to a length no layer ever had.
+        let entry_lengths: Vec<usize> = handles.iter().map(|h| h.cached_len()).collect();
+        let rewindable = Self::rewind_is_sound(window, &entry_lengths);
+
+        let outcome = match backend {
             BackendSlot::Sync(b) => kv_decode_step_via_dispatch(
                 b.as_ref(),
                 view,
                 ffn,
                 handles,
                 token_id,
-                self.abs_position,
-                self.window_size,
+                abs_position,
+                window,
                 index,
-            )
-            .ok_or_else(|| EngineError::BackendFailure {
-                details: "kv_decode_step_via_dispatch returned None".into(),
-            })?,
+            ),
             BackendSlot::Async(b) => kv_decode_step_via_dispatch_async(
                 b.as_ref(),
                 view,
                 ffn,
                 handles,
                 token_id,
-                self.abs_position,
-                self.window_size,
+                abs_position,
+                window,
                 index,
-            )
-            .ok_or_else(|| EngineError::BackendFailure {
-                details: "kv_decode_step_via_dispatch_async returned None".into(),
-            })?,
+            ),
         };
-        self.abs_position += 1;
-        Ok(hidden)
+
+        let failure = match outcome {
+            Ok(Some(hidden)) => {
+                self.abs_position += 1;
+                return Ok(hidden);
+            }
+            // A declining backend leaves the same half-applied step a refusal
+            // does, so it gets the same treatment. Distinguishing them here
+            // would make the cache's integrity depend on which of two
+            // unrelated things went wrong.
+            Ok(None) => EngineError::BackendFailure {
+                details: "decode step via dispatch returned None".into(),
+            },
+            Err(refusal) => EngineError::Execution(refusal),
+        };
+
+        let rewound = rewindable && Self::rewind(backend, handles, &entry_lengths);
+        if rewound {
+            return Err(failure);
+        }
+        let invalidated = failure.invalidating_engine_state();
+        self.invalidated = Some(invalidated.to_string());
+        Err(invalidated)
+    }
+
+    /// Whether rewinding a failed decode step would restore the exact cache
+    /// the step started from.
+    ///
+    /// Unbounded caches only ever append, so truncating to the recorded
+    /// length is exact. A windowed cache is different: a step that reaches
+    /// the window drops its oldest row to make room, and that row is gone.
+    /// Row *count* cannot see this — append-then-drop leaves it unchanged —
+    /// so the only sound test is whether every layer had room to spare
+    /// before the step began.
+    fn rewind_is_sound(window: Option<usize>, entry_lengths: &[usize]) -> bool {
+        match window {
+            None => true,
+            // `len < w` is "the step's own append still fits", i.e. it will not
+            // push the layer past `w` and trigger the evicting clip.
+            Some(w) => entry_lengths.iter().all(|&len| len < w),
+        }
+    }
+
+    /// Truncate every handle back to its recorded length. All-or-nothing:
+    /// one backend that cannot rewind makes the whole cache untrustworthy,
+    /// because the layers are only meaningful together.
+    fn rewind(backend: &BackendSlot, handles: &mut [KvHandle], entry_lengths: &[usize]) -> bool {
+        handles
+            .iter_mut()
+            .zip(entry_lengths)
+            .all(|(handle, &len)| match backend {
+                BackendSlot::Sync(b) => b.as_ref().truncate_kv(handle, len),
+                BackendSlot::Async(b) => b.as_ref().truncate_kv(handle, len),
+            })
     }
 }
 
@@ -330,11 +441,6 @@ impl KvEngine for StandardEngine {
         initial_hidden: &Array2<f32>,
     ) -> Result<Array2<f32>, EngineError> {
         self.do_prefill_from_hidden(weights, ffn, initial_hidden)
-            .ok_or_else(|| EngineError::BackendFailure {
-                details: "do_prefill_from_hidden returned None (empty hidden input or \
-                          backend dispatch failure)"
-                    .into(),
-            })
     }
 
     fn decode_step(
@@ -387,6 +493,8 @@ impl KvEngine for StandardEngine {
             self.handles = Some(vec![handle]);
             self.prefill_mode = Some(PrefillDispatchMode::Coarse);
             self.abs_position = token_ids.len();
+            // Same reasoning as the per-layer prefills: the cache is new.
+            self.invalidated = None;
             return Ok(hidden);
         }
         // Backend doesn't have a coarse path (e.g. f32 model, or
@@ -433,6 +541,14 @@ impl KvEngine for StandardEngine {
             .ok_or_else(|| EngineError::InvariantViolation {
                 what: "decode_step called before prefill (handles missing)".into(),
             })?;
+        // The coarse branch below bypasses `do_decode_step`, so it needs the
+        // invalidation guard in its own right — a guard that only covers the
+        // path that *sets* the flag protects the wrong half.
+        if let Some(what) = &self.invalidated {
+            return Err(EngineError::InvariantViolation {
+                what: format!("decode_step_quant called on an invalidated engine: {what}"),
+            });
+        }
         if mode == PrefillDispatchMode::Coarse {
             let handles = self
                 .handles
@@ -553,6 +669,42 @@ mod tests {
     use larql_inference::ffn::WeightFfn;
     use larql_inference::forward::hidden_to_raw_logits;
     use larql_inference::test_utils::make_test_weights;
+
+    // ── Rewind soundness ────────────────────────────────────────────────
+    //
+    // The predicate that decides whether a failed decode step can be undone.
+    // Tested directly because the interesting cases are boundary conditions on
+    // the window, and driving each of them through a real refusal would need a
+    // refusing route per case while proving the same three facts.
+
+    #[test]
+    fn an_unbounded_cache_is_always_rewindable() {
+        // Unbounded caches only append, so truncating to the recorded length
+        // restores the exact prior state whatever the lengths were.
+        assert!(StandardEngine::rewind_is_sound(None, &[0, 7, 4096]));
+        assert!(StandardEngine::rewind_is_sound(None, &[]));
+    }
+
+    #[test]
+    fn a_windowed_cache_is_rewindable_only_with_room_to_spare() {
+        const W: usize = 4;
+        // Every layer strictly below the window: the step's own append fits,
+        // so no eviction fires and the truncate is exact.
+        assert!(StandardEngine::rewind_is_sound(Some(W), &[0, 1, 3]));
+        // A layer *at* the window evicts to make room, and the evicted row is
+        // gone — length would come back while the contents had shifted.
+        assert!(!StandardEngine::rewind_is_sound(Some(W), &[3, 4]));
+        assert!(!StandardEngine::rewind_is_sound(Some(W), &[W]));
+    }
+
+    #[test]
+    fn one_unrewindable_layer_condemns_the_whole_step() {
+        // All-or-nothing: the layers are only meaningful together, so a single
+        // layer at the window makes the cache untrustworthy even if every
+        // other layer had room.
+        const W: usize = 8;
+        assert!(!StandardEngine::rewind_is_sound(Some(W), &[0, 0, 0, W, 0]));
+    }
 
     #[test]
     fn engine_name() {

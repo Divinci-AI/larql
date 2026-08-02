@@ -203,7 +203,8 @@ fn bench_helpers_sync_vs_async(c: &mut Criterion) {
                 None,
                 None,
             )
-            .unwrap();
+            .unwrap()
+            .expect("dispatch produced a result");
         });
     });
 
@@ -217,7 +218,8 @@ fn bench_helpers_sync_vs_async(c: &mut Criterion) {
                 None,
                 None,
             )
-            .unwrap();
+            .unwrap()
+            .expect("dispatch produced a result");
         });
     });
 
@@ -230,7 +232,8 @@ fn bench_helpers_sync_vs_async(c: &mut Criterion) {
             None,
             None,
         )
-        .unwrap();
+        .unwrap()
+        .expect("dispatch produced a result");
         let mut pos = prompt.len();
         b.iter(|| {
             let _ = kv_decode_step_via_dispatch(
@@ -256,7 +259,8 @@ fn bench_helpers_sync_vs_async(c: &mut Criterion) {
             None,
             None,
         )
-        .unwrap();
+        .unwrap()
+        .expect("dispatch produced a result");
         let mut pos = prompt.len();
         b.iter(|| {
             let _ = kv_decode_step_via_dispatch_async(

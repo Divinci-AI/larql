@@ -53,6 +53,20 @@ impl KvDispatch for CpuBackend {
         }
     }
 
+    fn truncate_kv(&self, handle: &mut KvHandle, len: usize) -> bool {
+        let h = cpu_handle_mut(handle);
+        // Growing only: `len` above the current row count would be asking
+        // this to invent rows, which is the one thing a rewind must not do.
+        if len > h.rows {
+            return false;
+        }
+        let kv_dim = h.kv_dim;
+        h.rows = len;
+        h.k_buf.truncate(len * kv_dim);
+        h.v_buf.truncate(len * kv_dim);
+        true
+    }
+
     fn read_kv_to_host(&self, handle: &KvHandle) -> Option<(Array2<f32>, Array2<f32>)> {
         cpu_handle(handle).to_shared()
     }

@@ -73,6 +73,25 @@ pub trait KvDispatch {
         unimplemented!("clip_kv not implemented for this backend")
     }
 
+    /// Drop cached rows past `len`, keeping the **first** `len` in order.
+    /// Returns whether the handle now holds exactly `len` rows.
+    ///
+    /// The inverse of an append: this rewinds a partially-applied decode
+    /// step so a caller that could not finish the token leaves the cache
+    /// describing the token sequence it described before. Distinct from
+    /// [`Self::clip_kv`], which keeps the *tail* to enforce a sliding
+    /// window — that one moves the cache forward, this one moves it back.
+    ///
+    /// The default answers `false` rather than panicking, because "this
+    /// backend cannot rewind" is a legitimate state that a caller must
+    /// handle (by invalidating the cache) rather than a programming
+    /// error. Returning `true` without having rewound is the one
+    /// unacceptable answer: it tells the caller a corrupt cache is sound.
+    fn truncate_kv(&self, handle: &mut KvHandle, len: usize) -> bool {
+        let _ = (handle, len);
+        false
+    }
+
     /// Read the full K/V back to host memory as a `(K, V)` pair.
     /// Blocking copy on GPU backends; identity on CPU. Should NOT be
     /// used in hot loops — it's the cross-backend escape hatch for

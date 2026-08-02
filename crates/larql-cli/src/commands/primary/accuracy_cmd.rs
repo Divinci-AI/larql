@@ -486,11 +486,19 @@ fn fmt_served_summary(matches: usize, served: usize, total: usize) -> String {
 
 /// Verbose-mode row marker. `✓` / `✗` for served rows (matching today's
 /// shape); `·` for skipped rows so the eye can scan the column for
-/// engine misses.
+/// engine misses; `!` for a row the *index* is responsible for.
+///
+/// The `!` exists because `ScoreOutcome::FailedBindingDefect` is not a
+/// coverage miss — it means the bound artifact violates its own contract,
+/// and a run full of them would otherwise read as a low served rate on a
+/// working index. Distinguishing it in the column is the cheapest place
+/// to notice that the thing to repair is the artifact.
 fn score_mark(outcome: ScoreOutcome, top1_match: Option<bool>) -> &'static str {
     match (outcome, top1_match) {
         (ScoreOutcome::Served, Some(true)) => "✓",
         (ScoreOutcome::Served, _) => "✗",
+        (ScoreOutcome::FailedBindingDefect, _) => "!",
+        (ScoreOutcome::FailedStateInvalidated, _) => "!",
         _ => "·",
     }
 }
@@ -567,6 +575,12 @@ mod tests {
         // kv-engine-retrieval-trait-split refactor; "internal error" generalised
         // into the typed BackendFailure / InvariantViolation split.
         assert_eq!(score_mark(ScoreOutcome::SkippedBackendFailure, None), "·");
+        // A refusal that more residency could rescue is an ordinary skip…
+        assert_eq!(score_mark(ScoreOutcome::SkippedExecutionRefused, None), "·");
+        // …but one that indicts the index must not look like one.
+        assert_eq!(score_mark(ScoreOutcome::FailedBindingDefect, None), "!");
+        // Nor must a row after which the engine stopped being trustworthy.
+        assert_eq!(score_mark(ScoreOutcome::FailedStateInvalidated, None), "!");
     }
 
     #[test]

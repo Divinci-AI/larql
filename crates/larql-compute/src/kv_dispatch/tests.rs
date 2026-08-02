@@ -240,6 +240,17 @@ fn default_clip_kv_panics() {
 }
 
 #[test]
+fn default_truncate_kv_declines_instead_of_panicking() {
+    // Unlike its siblings above, this default must *return* rather than
+    // panic: "this backend cannot rewind" is a state the caller handles by
+    // invalidating the cache, not a programming error. A panic here would
+    // turn an unported backend into a crash on every refused decode step.
+    let backend = StubKvBackend;
+    let mut handle = stub_kv_handle(0, 4);
+    assert!(!backend.truncate_kv(&mut handle, 0));
+}
+
+#[test]
 #[should_panic(expected = "compressed_kv_append not implemented")]
 fn default_compressed_kv_append_panics() {
     let backend = StubKvBackend;

@@ -961,7 +961,10 @@ mod tests {
             BoundaryPerLayerEngine::new(None, policy, weights.num_layers, &store).unwrap();
         let ffn = larql_inference::ffn::NullFfn;
         let err = engine.prefill(&weights, &ffn, &[]).unwrap_err();
-        assert_eq!(err, larql_inference::kv_engine::EngineError::EmptyPrompt);
+        assert!(matches!(
+            err,
+            larql_inference::kv_engine::EngineError::EmptyPrompt
+        ));
     }
 
     #[test]
@@ -978,7 +981,10 @@ mod tests {
         let err = engine
             .prefill_quant(&weights, &ffn, &index, &[], &*backend)
             .unwrap_err();
-        assert_eq!(err, larql_inference::kv_engine::EngineError::EmptyPrompt);
+        assert!(matches!(
+            err,
+            larql_inference::kv_engine::EngineError::EmptyPrompt
+        ));
     }
 
     #[test]
@@ -994,7 +1000,10 @@ mod tests {
         let err = engine
             .prefill_via_executor(&weights, &exec, &ffn, &[])
             .unwrap_err();
-        assert_eq!(err, larql_inference::kv_engine::EngineError::EmptyPrompt);
+        assert!(matches!(
+            err,
+            larql_inference::kv_engine::EngineError::EmptyPrompt
+        ));
     }
 
     #[test]
