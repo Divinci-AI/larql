@@ -269,6 +269,103 @@ accrete features while the MoE path (the actual bet) stays thin.
 
 ---
 
+## VINDEX3 — successor serving container (added 2026-08-02)
+
+**Thesis: the format boundary is the place to make sparse serving predictable.**
+VINDEX2 can *observe* which pages faulted; VINDEX3 can *state* what an operation
+will read before it runs. That is the difference between paging a multi-terabyte
+model and planning one.
+
+Spec: [`crates/larql-vindex/docs/vindex2-format-spec.md`](crates/larql-vindex/docs/vindex2-format-spec.md)
+(draft-2). Experimental programme: [`docs/vindex2-experiments.md`](docs/vindex2-experiments.md),
+registry programme `vindex2`. Generations are named so the number equals
+`index.json.version`: schemas 1–2 → VINDEX2, schema 3 → VINDEX3.
+
+**Coexistence, not migration.** One binary serves both generations, dispatched
+solely on `index.json.version`. VINDEX2 keeps its loader, its weight objects and
+its production behaviour untouched; VINDEX3 keeps its catalogue, profile, route
+and authority model until binding. The shared layer is execution and
+orchestration, never physical storage. **`extract` must keep defaulting to
+VINDEX2** until V2-1 acceptance passes — a silent default change would evaporate
+E0's premise.
+
+### Shipped
+
+| Commit | Milestone |
+|---|---|
+| `f13bf385` | Reference MoE execution — fixture A matches an independent oracle below 1e-6, fused and decomposed agreeing at every checkpoint |
+| `dd2017db` | Real Gemma semantic routing parity over real VINDEX2 bytes |
+| `f5dd256e` | Production router kernel bound — bit-identical routing ladder |
+
+Three properties established, each independently useful:
+
+1. **Bound reference execution is numerically correct** (fixture A vs oracle).
+2. **Resolution does not leak into decode** — 64× population costs ~1.9×, which
+   is the router term and nothing more.
+3. **The bound plan predicts its physical page working set exactly** — 200 pages
+   predicted, 200 resident, zero overshoot, 1.63% of a 192 MiB layer after one
+   token. Residency becomes computable rather than observable, which is what
+   placement, prefetch and remote transfer all need.
+
+Plus two defects fixed that were not VINDEX3's: `larql verify` rendered findings
+in `HashMap` order and so disagreed with itself between runs; the separate-tensor
+MoE extractor wrote no expert store.
+
+### The rung ladder to the first VINDEX3 Gemma token
+
+```text
+[x] rung 0   fixture A through the generic reference path
+[x] rung 0.5 real Gemma routing parity, VINDEX3 bound over VINDEX2 bytes
+[x] rung 1   production router kernel bound, bit-identical
+[ ] rung 2   production Q4_K x Q8_K expert kernel bound
+[ ] rung 3   full-layer residual delta parity
+[ ] rung 4   every MoE layer, then final logits
+[ ] rung 5   greedy token parity through normal `larql run` dispatch
+```
+
+Rung 2 begins with **Q8_K activation identity, checked before any expert runs** —
+a difference there contaminates all eight expert comparisons and makes every
+later diagnostic noise.
+
+### Standing method
+
+Established by repeated failure, not preference:
+
+- **Bind, never reconstruct.** A bridge that dequantises into an
+  incumbent-shaped temporary can reach numerical parity while proving nothing
+  about the binding architecture. `as_f32_slice()` hands over stored bytes or
+  refuses with a typed reason.
+- **Ladders, not end-to-end tolerances.** A single residual-delta tolerance
+  blends router accumulation order, softmax, renormalisation, activation
+  quantisation, integer rounding and reduction order; passing it establishes
+  nothing and failing it identifies nothing. The router ladder localised a
+  7e-4 disagreement to post-processing in one run — it was a missing bound
+  operand, not the BLAS-vs-index-order accumulation it would have been blamed on.
+- **Mutation-check every new test.** Several have passed for the wrong reason,
+  including one that could never have caught the bug it was named for.
+- **Suspect the instrument first.** This programme has produced roughly three
+  measurement defects per real code defect: a process-global allocation counter
+  under a parallel test runner, replay parameters defaulted instead of read from
+  the record, and a `\b` in a normaliser that BSD `sed` silently ignores.
+
+### Not discharged
+
+- **E0-FULL.** Decode rows and all 632 WALK ranking lines match; the remaining
+  12 rows need the prescribed baseline reconstruction (baseline binary at
+  `6eae5ea` → baseline extraction → current reader against that artifact).
+  Status stands at: E0-CI green, E0-FULL decode rows green, remaining rows not
+  discharged. A runner now exists (`scripts/e0-verify-goldens.sh`); before it,
+  the goldens were an assertion nobody made.
+- **OLMoE goldens** pin a decode panic that the separate-tensor MoE extractor fix
+  has since removed. They need a deliberate re-capture with the reason recorded.
+- **CLI generation dispatch** — `detect_generation` exists and is guarded by
+  E0-CI, but 15 call sites still assume VINDEX2.
+- **`extract --format vindex3`** — not needed until the container round-trip
+  rung, and doing it earlier would weaken the Gemma comparison by introducing
+  re-extraction as a second candidate cause.
+- **Mini-K3, Kimi-Linear, K3** — the conformance envelope beyond Gemma.
+
+---
 ## Query / Edit / Interpret — first-class functionality track (added 2026-05-28)
 
 **Thesis: the differentiated functionality is the database, not the tok/s.**

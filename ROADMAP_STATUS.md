@@ -4,17 +4,52 @@ Canonical rollup for the next execution slice. Keep the detailed design in
 `ROADMAP.md` and crate-local roadmaps; use this file to answer "what is active
 now?" without rereading every crate document.
 
-Last updated: 2026-08-01
+Last updated: 2026-08-02
 
-**Active slice: the DEC funnel** ([`docs/dec-funnel.md`](docs/dec-funnel.md) v0.5)
-— decoupled attention/weights serving, DEC-0 … DEC-7 plus the G-ladder (CUDA
-attention client), C-ladder (x86 kernels) and M-ladder (MTP/speculative decode).
+**Active slice: VINDEX3 execution binding**
+([`ROADMAP.md` § VINDEX3](ROADMAP.md), spec
+[`crates/larql-vindex/docs/vindex2-format-spec.md`](crates/larql-vindex/docs/vindex2-format-spec.md),
+programme [`docs/vindex2-experiments.md`](docs/vindex2-experiments.md)) — driving
+a real Gemma layer through a VINDEX3-bound operation until it is bit-identical
+to production, then propagating to the first VINDEX3-generated token. Rungs 0,
+0.5 and 1 are closed (`f13bf385`, `dd2017db`, `f5dd256e`); **rung 2 — binding the
+production Q4_K × Q8_K expert kernel — is next**, starting with Q8_K activation
+identity before any expert runs.
+
+**Previous slice: the DEC funnel** ([`docs/dec-funnel.md`](docs/dec-funnel.md)
+v0.5) — decoupled attention/weights serving, DEC-0 … DEC-7 plus the G-ladder
+(CUDA attention client), C-ladder (x86 kernels) and M-ladder (MTP/speculative
+decode). Not closed, and not superseded in substance: VINDEX3 is the storage and
+capability layer the DEC funnel's expert serving will bind to, so the two meet at
+`SelectedExpertNotResident` — the seam where a valid route with a missing local
+operand becomes a fetch rather than a defect.
+
 The V1–V4 aim-validation gate that previously governed this file is **closed**
 (V1 falsified dense + MoE, V2 confirmed, V3 locality poor); its table is retained
-below as resolved history. Registry programme `dec` on the experiments server is
-the system of record for stage results.
+below as resolved history. Registry programmes `dec` and `vindex2` on the
+experiments server are the system of record for stage results.
 
 ## Recently shipped (delta since last update)
+
+- **VINDEX3 routes a real Gemma layer bit-identically to production (2026-08-02).**
+  Three milestones, committed separately so a later disagreement cannot require
+  bisecting a combined patch. `f13bf385` — reference MoE execution: fixture A
+  matches an independent oracle below 1e-6, fused and decomposed storage
+  agreeing at every checkpoint, plus a residency probe showing the bound plan
+  predicts its resident page set **exactly** (200 predicted, 200 resident, zero
+  overshoot, 1.63% of a 192 MiB layer per token). `dd2017db` — real Gemma
+  routing parity over real VINDEX2 bytes, which forced three corrections that
+  were unreachable synthetically: Gemma's router input is *not* its expert input
+  (`MoeInputs::split`), a shard is a legitimate subset of the routing universe
+  (validate was refusing every expert-server slice), and Q4_K's padded
+  intermediate axis needs `physical shape ≠ semantic operand shape`
+  (`ComponentView::Slice`, 704 logical over 768 stored). `f5dd256e` — the
+  production router kernel bound: **all five ladder stages bit-identical** on
+  real weights and a real activation, with `BoundExpertScaling` making
+  policy-without-operand unrepresentable and `OperandUnsuitability` typing the
+  four kernel-refusal causes. Two unrelated defects fixed en route: `larql
+  verify` rendered findings in `HashMap` order and disagreed with itself between
+  runs, and the separate-tensor MoE extractor wrote no expert store.
 
 - **Sparse-FFN thesis closed on three of four routes; the ANN/HNSW programme closes with it (2026-08-01).** A vindex+WalkFFN review exit finding (HNSW's level-0 graph fragments beyond ~64 nodes, recall@10 → 0.16 at n=200) opened the question of whether repairing the graph was worth it. **R4 says no, and for a reason that closes more than HNSW.** [`walk-ffn-r4-zeroout.md`](docs/diagnoses/walk-ffn-r4-zeroout.md): supplying perfect routes for **free** — kernel-matched, parity ✓, paired/interleaved with a drift+dispersion sentinel, replicated twice on AC — the sparse path still runs at **0.837× dense at the accuracy-viable K=4096** and only wins at K=2048, which fails top-1. **No overlap between speed-viable and accuracy-viable.** The mechanism is the kernel, not the router: with routing free it captures only **23–40%** of its row-count reduction, and the capture fraction *rises* as fewer rows are dropped (23→34→40% against ceilings 5.00/2.50/1.67×) — the signature of fixed per-row overhead. Merely *tying* dense needs ~18.6% execution improvement with routing already free. So a cheaper approximation of gate-top-K was never the missing piece; exact gate-top-K already sits on the wrong frontier. **Scope, deliberately narrow:** this refutes a *compute*-side claim and does **not** close DEC-8.1 (read-side, different denominator, far milder retention) — what it kills there is the *mechanism*, since runtime scattered gather costs more than it saves once rows are in hand. **Then the other axis of the factorisation was tested** ([`moe-latent-axis-sparsity.md`](docs/diagnoses/moe-latent-axis-sparsity.md)): masking the *shared expert input* rather than the row population, where one channel decision removes a column from every active expert's gate AND up. The signal is real — magnitude vs random separates **9.7% vs 555%** bits/token at 50% retention — but **the headline was an artifact of larql's known-divergent OLMoE forward**, which called r=0.5 free where the HF reference says +9.66%. At the project's ≤0.5% shannon gate the viable retention is r≈0.875, **ideal ceiling 1.040×**. Static channel sets refuted per-layer (96.7% of layer-channel pairs token-dependent; a P≥0.8 static core covers 6.6% of the budget); blocked latent sparsity refuted per-layer against exact induced loss and a **random-permutation control** that turned an apparent 40% win into a null. Surviving: dynamic per-channel via an input-major packed kernel, unbuilt, re-priced from "1.18× for free" to "≤1.04× at the gate". **New standing rule R11** in [`dec-funnel.md`](docs/dec-funnel.md): *a structural reduction is a claim about a kernel, not about a matrix* — with the corollary that realisability is a property of **layout**, not of the mask. Instruments `scripts/moe_latent_reference_olmoe.py`, `scripts/moe_latent_block_partition.py`; artifacts under `bench/aim-validation/`.
 - **Extraction tensor-coverage audit — every source tensor now classified, and the third bucket is loud (2026-07-31).** §4.6's work-item 2, built and wired. `extract::coverage` classifies every checkpoint tensor as **recognised** (an architecture accessor names it), **dropped by a named rule**, or **unrecognised**; the `tensor_audit` stage runs *first* in `build_vindex_streaming`, so a checkpoint carrying tensors nothing can address fails in seconds rather than after a multi-minute extraction. Reports always, fatal under `LARQL_EXTRACT_STRICT=1`, which is now set in the `larql-vindex` CI workflow (verified first: all 132 streaming-extraction tests pass under it, so it can't break the build on day one). **The case for it was five silent drops in one week**, none caught automatically: 5 of 11 attention tensors, 3 of 8 MLP tensors, the `gate_walk` trait default silently returning `None`, `moe_intermediate_size()` defaulting to 0, and LayerNorm `β`. Validated on ten real checkpoints — Qwen3-30B-A3B (18,867 tensors), OLMoE (3,219), gpt-oss-20b, Gemma 3 4B (439 SigLIP tensors correctly classified `non-text-tower`) — all clean. **GPT-2 from HF safetensors: 1 of 160 recognised**; `gpt2.rs` matches the trait defaults only *after* the GGUF→HF normalisation, so a raw HF checkpoint is unaddressable (it fails late at embeddings rather than silently, but 159 tensors are unreachable). Design notes: it measures **naming, not consumption** — the necessary condition, and where all five drops actually lived; the hand-maintained accessor enumeration fails **noisy, never quiet** (a new accessor not wired in reports its tensors as unrecognised) and its pin test has already fired twice for real; and drop rules are documented as a decision, not a mute button — "if you don't know what a tensor is, it belongs in `unrecognised`". **Also fixed, found by the audit: LayerNorm `β` was dropped for GPT-2 and StarCoder2.** No accessor named a norm bias, so extraction never wrote one and `build_pipeline_layers` hardcoded `input_norm_bias: None` — while the Metal `layer_norm` shader implemented `+ bias` and always selected its no-bias variant. The CPU dense path got away with it by mangling the weight key, which is why raw-safetensors inference was right and every vindex-backed path silently lost the shift term of `γ·x̂ + β`. Now declared (three additive accessors, derived once from the weight key and gated on `NormType` so RMSNorm families correctly claim nothing), extracted, and resolved in the pipeline; the honest status is "the tensor flows end to end", not "the output is verified". Both weight writers also stopped hardcoding `"norm.weight"` and now use `arch.final_norm_key()` — they agreed with every reader only by coincidence. Coverage: larql-vindex 92.42%, larql-models 90.41%, larql-compute 95.76%, larql-compute-metal 96.78% all pass their per-file policy; `residual_diff/capture.rs` went 34%→50% (first-ever test of `cpu_prefill`) and **cannot reach 90% in Linux CI by construction** — ~250 of 408 lines need a Metal device, which is why it sits outside `include_globs`. Follow-ups tracked in [`ROADMAP.md`](ROADMAP.md) §"Extraction tensor-coverage audit + silent-drop follow-ups".
