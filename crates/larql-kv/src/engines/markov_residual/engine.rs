@@ -4,7 +4,8 @@ use larql_compute::ComputeBackend;
 use larql_vindex::VectorIndex;
 use ndarray::Array2;
 
-use super::compute::{rs_decode_step, rs_decode_step_profiled, rs_prefill};
+use super::prefill::rs_prefill;
+use super::step::{rs_decode_step, rs_decode_step_profiled};
 use super::store::RsStore;
 use super::walk::{ensure_attn_tensors_dequantised, rs_decode_step_walk, rs_prefill_walk};
 use crate::profiler::EngineProfiler;
@@ -98,6 +99,11 @@ pub(crate) fn check_residual_recompute_preconditions(
 impl MarkovResidualEngine {
     /// Shared body for `decode_step` / `decode_step_resident` — `index`
     /// reaches the attention step's Q4K-direct route when present.
+    /// The store is borrowed, never taken. A failed step therefore costs the
+    /// engine nothing but its droppable `hot_kv` derivative — see
+    /// [`super::step`]'s failure invariant — so a refusal is reported as
+    /// itself (`EngineError::Execution`, retryable) rather than as a dead
+    /// engine wearing the words "called before prefill".
     fn decode_step_impl(
         &mut self,
         weights: &ModelWeights,
@@ -105,40 +111,38 @@ impl MarkovResidualEngine {
         token_id: u32,
         index: Option<&larql_vindex::VectorIndex>,
     ) -> Result<Array2<f32>, EngineError> {
-        let rs = self
-            .store
-            .take()
+        let Self {
+            store,
+            backend,
+            profile,
+            profiling,
+            ..
+        } = self;
+        let rs = store
+            .as_mut()
             .ok_or_else(|| EngineError::InvariantViolation {
                 what: "decode_step called before prefill (store missing)".into(),
             })?;
-        let (hidden, new_rs) = if self.profiling {
+        if *profiling {
             rs_decode_step_profiled(
                 larql_inference::WeightsView::dense(weights),
                 token_id,
                 rs,
-                self.backend.as_ref(),
-                &mut self.profile,
+                backend.as_ref(),
+                profile,
                 Some(ffn),
                 index,
             )
-            .ok_or_else(|| EngineError::BackendFailure {
-                details: "rs_decode_step_profiled returned None".into(),
-            })?
         } else {
             rs_decode_step(
                 larql_inference::WeightsView::dense(weights),
                 token_id,
                 rs,
-                self.backend.as_ref(),
+                backend.as_ref(),
                 Some(ffn),
                 index,
             )
-            .ok_or_else(|| EngineError::BackendFailure {
-                details: "rs_decode_step returned None".into(),
-            })?
-        };
-        self.store = Some(new_rs);
-        Ok(hidden)
+        }
     }
 }
 
@@ -174,16 +178,17 @@ impl KvEngine for MarkovResidualEngine {
         if token_ids.is_empty() {
             return Err(EngineError::EmptyPrompt);
         }
+        // `?` before the assignment: a refused prefill must not replace the
+        // store an earlier one built. See `prefill`'s transactional contract.
         let result = rs_prefill(
             larql_inference::WeightsView::dense(weights),
             token_ids,
             self.window_size,
             self.backend.as_ref(),
             Some(ffn),
-        );
-        let hidden = result.hidden.clone();
+        )?;
         self.store = Some(result.store);
-        Ok(hidden)
+        Ok(result.hidden)
     }
 
     fn decode_step(

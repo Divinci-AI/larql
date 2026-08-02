@@ -5,12 +5,13 @@
 
 use larql_compute::ComputeBackend;
 use larql_vindex::VectorIndex;
-use ndarray::Array2;
+use ndarray::{s, Array2};
 
 use larql_inference::attention::{run_attention_block_decode_step_backend, SharedKV};
 use larql_inference::ffn::BackendFfn;
 use larql_inference::forward::ple::precompute_per_layer_inputs;
 use larql_inference::forward::{embed_tokens_pub, run_ffn};
+use larql_inference::kv_engine::EngineError;
 use larql_inference::model::ModelWeights;
 use larql_inference::vindex::{WalkFfn, WalkFfnConfig};
 
@@ -23,6 +24,36 @@ pub struct ExtendOutput {
     pub new_checkpoint: Vec<SharedKV>,
 }
 
+/// What an extend produced when the caller kept ownership of the K/V.
+///
+/// The cache itself is left in the caller's buffer rather than returned, so a
+/// step that fails partway can be rewound by whoever owns the window — see
+/// [`truncate_kv_rows`].
+pub struct ExtendStep {
+    /// Hidden state at the last processed token, shape (1, hidden).
+    pub last_hidden: Array2<f32>,
+    /// Per-layer last-row K,V ready to save as the next boundary checkpoint.
+    pub new_checkpoint: Vec<SharedKV>,
+}
+
+/// Truncate every layer's K/V back to `rows`, undoing an extend that stopped
+/// partway.
+///
+/// Needed because the owned-concat path *replaces* each layer's buffer with a
+/// longer one as it goes, and this path reads a prior by `shape()[0]` rather
+/// than by a counter — so a partially advanced cache would silently attend
+/// over a token whose step never completed.
+pub fn truncate_kv_rows(kv_cache: &mut [SharedKV], rows: usize) {
+    for (k, v) in kv_cache.iter_mut() {
+        if k.shape()[0] > rows {
+            *k = k.slice(s![..rows, ..]).to_owned();
+        }
+        if v.shape()[0] > rows {
+            *v = v.slice(s![..rows, ..]).to_owned();
+        }
+    }
+}
+
 /// Run the decoder forward over `token_ids` seeded with an optional prior K,V
 /// checkpoint at each layer. Matmuls route through `backend`.
 ///
@@ -32,43 +63,56 @@ pub fn rs_extend_from_checkpoint(
     token_ids: &[u32],
     prior_kv: Vec<SharedKV>,
     abs_start: usize,
-) -> Option<ExtendOutput> {
-    rs_extend_from_checkpoint_backend(
+) -> Result<ExtendOutput, EngineError> {
+    let mut kv_cache = prior_kv;
+    let step = rs_extend_from_checkpoint_backend(
         weights,
         token_ids,
-        prior_kv,
+        &mut kv_cache,
         abs_start,
         &larql_compute::CpuBackend,
         None,
         None,
-    )
+    )?;
+    Ok(ExtendOutput {
+        last_hidden: step.last_hidden,
+        kv_cache,
+        new_checkpoint: step.new_checkpoint,
+    })
 }
 
 /// Backend-dispatched variant of [`rs_extend_from_checkpoint`].
 ///
-/// Takes `prior_kv` by value so the per-token extend loop can mutate it
-/// in place. Cloning the prior K/V per step is O(window²) total over a
-/// full window — a real overhead on growing caches.
+/// Takes `kv_cache` by reference so the per-token extend loop can mutate it
+/// in place — cloning the prior K/V per step is O(window²) total over a full
+/// window, a real overhead on growing caches — and so that a caller who owns
+/// the window can rewind it after a failure. **On `Err` the cache is left
+/// partially advanced**: layers before the failing one hold the new row.
+/// [`truncate_kv_rows`] is how the owner undoes that.
 #[allow(clippy::too_many_arguments)]
 pub fn rs_extend_from_checkpoint_backend(
     weights: larql_inference::WeightsView,
     token_ids: &[u32],
-    prior_kv: Vec<SharedKV>,
+    kv_cache: &mut [SharedKV],
     abs_start: usize,
     backend: &dyn ComputeBackend,
     moe_ffn: Option<&dyn larql_inference::ffn::FfnBackend>,
     index: Option<&larql_vindex::VectorIndex>,
-) -> Option<ExtendOutput> {
+) -> Result<ExtendStep, EngineError> {
     let num_layers = weights.num_layers;
 
     if token_ids.is_empty() {
-        return None;
+        return Err(EngineError::EmptyPrompt);
     }
-    if prior_kv.len() != num_layers {
-        return None;
+    if kv_cache.len() != num_layers {
+        return Err(EngineError::InvariantViolation {
+            what: format!(
+                "prior K/V has {} layers, model has {num_layers}",
+                kv_cache.len()
+            ),
+        });
     }
 
-    let mut kv_cache: Vec<SharedKV> = prior_kv;
     let mut last_hidden: Option<Array2<f32>> = None;
 
     for (i, &token_id) in token_ids.iter().enumerate() {
@@ -94,21 +138,26 @@ pub fn rs_extend_from_checkpoint_backend(
                     abs_position,
                     Some(backend),
                     index.map(|v| v as &dyn larql_compute::KvIndex),
-                )?;
+                )
+                .ok_or_else(|| EngineError::BackendFailure {
+                    details: format!(
+                        "attention returned None during unlimited-context extend at layer {layer}"
+                    ),
+                })?;
 
             let bffn = BackendFfn {
                 weights: weights.canonical(),
                 backend,
             };
-            let h_out = crate::engines::layer_ffn_or_moe(
+            h = crate::engines::layer_ffn_or_moe(
                 weights.canonical(),
                 &h_post_attn,
                 layer,
                 &bffn,
                 moe_ffn,
                 ple_inputs.get(layer),
-            );
-            h = h_out;
+            )
+            .map_err(EngineError::Execution)?;
             *kv_slot = new_kv;
         }
 
@@ -125,9 +174,10 @@ pub fn rs_extend_from_checkpoint_backend(
         })
         .collect();
 
-    Some(ExtendOutput {
-        last_hidden: last_hidden?,
-        kv_cache,
+    Ok(ExtendStep {
+        last_hidden: last_hidden.ok_or_else(|| EngineError::BackendFailure {
+            details: "extend produced no hidden state".into(),
+        })?,
         new_checkpoint,
     })
 }
@@ -155,10 +205,16 @@ pub fn rs_extend_inplace(
     backend: &dyn ComputeBackend,
     moe_ffn: Option<&dyn larql_inference::ffn::FfnBackend>,
     index: Option<&larql_vindex::VectorIndex>,
-) -> Option<Array2<f32>> {
+) -> Result<Array2<f32>, EngineError> {
     let num_layers = weights.num_layers;
     if token_ids.is_empty() || kv_cache.len() != num_layers {
-        return None;
+        return Err(EngineError::InvariantViolation {
+            what: format!(
+                "in-place extend needs a non-empty chunk and {num_layers} K/V slots;                  got {} tokens and {} slots",
+                token_ids.len(),
+                kv_cache.len()
+            ),
+        });
     }
     let idx_kv: Option<&dyn larql_compute::KvIndex> =
         index.map(|v| v as &dyn larql_compute::KvIndex);
@@ -205,7 +261,15 @@ pub fn rs_extend_inplace(
                                 abs_position,
                                 Some(backend),
                                 idx_kv,
-                            )?;
+                            )
+                            .ok_or_else(|| {
+                                EngineError::BackendFailure {
+                                    details: format!(
+                                        "attention returned None during in-place extend \
+                                     at layer {layer}"
+                                    ),
+                                }
+                            })?;
                         *k_buf = new_kv.0;
                         *v_buf = new_kv.1;
                         hp
@@ -216,21 +280,23 @@ pub fn rs_extend_inplace(
                 weights: weights.canonical(),
                 backend,
             };
-            let h_out = crate::engines::layer_ffn_or_moe(
+            h = crate::engines::layer_ffn_or_moe(
                 weights.canonical(),
                 &h_post_attn,
                 layer,
                 &bffn,
                 moe_ffn,
                 ple_inputs.get(layer),
-            );
-            h = h_out;
+            )
+            .map_err(EngineError::Execution)?;
         }
 
         last_hidden = Some(h);
     }
 
-    last_hidden
+    last_hidden.ok_or_else(|| EngineError::BackendFailure {
+        details: "in-place extend produced no hidden state".into(),
+    })
 }
 
 /// CPU Q4K variant of [`rs_extend_from_checkpoint_backend`].
@@ -468,7 +534,10 @@ mod tests {
         let prior = empty_prior(&weights);
         let result =
             rs_extend_from_checkpoint(larql_inference::WeightsView::dense(&weights), &[], prior, 0);
-        assert!(result.is_none(), "empty token_ids should return None");
+        assert!(
+            matches!(result, Err(EngineError::EmptyPrompt)),
+            "an empty chunk is a caller-input error, not a backend failure"
+        );
     }
 
     #[test]
@@ -481,7 +550,10 @@ mod tests {
             Vec::new(),
             0,
         );
-        assert!(result.is_none(), "prior length mismatch should return None");
+        assert!(
+            matches!(result, Err(EngineError::InvariantViolation { .. })),
+            "a prior with the wrong layer count is a contract violation"
+        );
     }
 
     #[test]

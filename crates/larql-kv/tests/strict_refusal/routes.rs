@@ -97,3 +97,52 @@ impl MoeExpertBackend for ExecutingRoute {
         "executing-route"
     }
 }
+
+/// A route that serves one full pass over the layers, then refuses.
+///
+/// Models the case the other routes cannot: a shard that goes away *mid
+/// stream*, after the engine has already committed something irreversible.
+/// `unlimited-context` archives a window and saves its boundary checkpoint
+/// when the window fills, so "refuse on the first token" and "refuse on the
+/// second" are different questions — only the second can find the engine
+/// holding a stream it cannot complete.
+///
+/// A pass is counted by visits to layer zero, because that is the only chunk
+/// boundary visible from inside an `FfnBackend`.
+pub struct RefuseAfterFirstPass {
+    passes: std::cell::Cell<usize>,
+    inner: RefusingRoute,
+}
+
+impl RefuseAfterFirstPass {
+    pub fn new(kind: RefusalKind) -> Self {
+        Self {
+            passes: std::cell::Cell::new(0),
+            inner: RefusingRoute::new(kind),
+        }
+    }
+}
+
+impl MoeExpertBackend for RefuseAfterFirstPass {
+    fn forward_moe_seq(
+        &self,
+        weights: &ModelWeights,
+        layer: usize,
+        h: &Array2<f32>,
+        norm_offset: f32,
+        eps: f32,
+    ) -> Result<Array2<f32>, MoeBackendError> {
+        if layer == 0 {
+            self.passes.set(self.passes.get() + 1);
+        }
+        if self.passes.get() <= 1 {
+            return ExecutingRoute.forward_moe_seq(weights, layer, h, norm_offset, eps);
+        }
+        self.inner
+            .forward_moe_seq(weights, layer, h, norm_offset, eps)
+    }
+
+    fn name(&self) -> &'static str {
+        "refuse-after-first-pass"
+    }
+}

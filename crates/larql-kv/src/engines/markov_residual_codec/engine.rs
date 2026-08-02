@@ -6,7 +6,7 @@
 //! - this file: struct + construction + `KvEngine` trait glue
 //! - [`super::walk`] — CPU dense walk path
 //!   (`rs_prefill_codec_walk` / `rs_decode_step_codec_walk`)
-//! - [`super::compute`] — Q4K-native walk path
+//! - [`super::prefill`] / [`super::step`] — Q4K-native walk path
 //!   (`rs_prefill_codec` / `rs_decode_step_codec`)
 //! - [`super::dispatch`] — W1-GPU dispatch fast path with W10 mask
 //!   cascade
@@ -22,7 +22,8 @@ use ndarray::Array2;
 use crate::engines::markov_residual::engine::check_residual_recompute_preconditions;
 use crate::engines::markov_residual::ensure_attn_tensors_dequantised;
 use crate::engines::markov_residual_codec::codec::ColdResidualCodec;
-use crate::engines::markov_residual_codec::compute::{rs_decode_step_codec, rs_prefill_codec};
+use crate::engines::markov_residual_codec::prefill::rs_prefill_codec;
+use crate::engines::markov_residual_codec::step::rs_decode_step_codec;
 use crate::engines::markov_residual_codec::store::RsStoreCodec;
 use crate::engines::markov_residual_codec::walk::{
     rs_decode_step_codec_walk, rs_prefill_codec_walk,
@@ -96,6 +97,10 @@ impl MarkovResidualCodecEngine {
 
 impl MarkovResidualCodecEngine {
     /// Shared body for `decode_step` / `decode_step_resident`.
+    ///
+    /// The store is borrowed, never taken: a failed step leaves canonical
+    /// state exactly as it was (see [`super::step`]'s failure invariant), so a
+    /// refusal reports itself and the engine stays usable.
     fn decode_step_impl(
         &mut self,
         weights: &ModelWeights,
@@ -103,25 +108,21 @@ impl MarkovResidualCodecEngine {
         token_id: u32,
         index: Option<&larql_vindex::VectorIndex>,
     ) -> Result<Array2<f32>, EngineError> {
+        let backend = self.backend.as_ref();
         let rs = self
             .store
-            .take()
+            .as_mut()
             .ok_or_else(|| EngineError::InvariantViolation {
                 what: "decode_step called before prefill (store missing)".into(),
             })?;
-        let (hidden, new_rs) = rs_decode_step_codec(
+        rs_decode_step_codec(
             larql_inference::WeightsView::dense(weights),
             token_id,
             rs,
-            self.backend.as_ref(),
+            backend,
             Some(ffn),
             index,
         )
-        .ok_or_else(|| EngineError::BackendFailure {
-            details: "rs_decode_step_codec returned None".into(),
-        })?;
-        self.store = Some(new_rs);
-        Ok(hidden)
     }
 }
 
@@ -158,6 +159,8 @@ impl KvEngine for MarkovResidualCodecEngine {
         if token_ids.is_empty() {
             return Err(EngineError::EmptyPrompt);
         }
+        // `?` before the assignment: a refused prefill must not replace the
+        // store an earlier one built.
         let result = rs_prefill_codec(
             larql_inference::WeightsView::dense(weights),
             token_ids,
@@ -165,10 +168,9 @@ impl KvEngine for MarkovResidualCodecEngine {
             self.codec,
             self.backend.as_ref(),
             Some(ffn),
-        );
-        let hidden = result.hidden.clone();
+        )?;
         self.store = Some(result.store);
-        Ok(hidden)
+        Ok(result.hidden)
     }
 
     fn decode_step(

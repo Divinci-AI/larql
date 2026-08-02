@@ -21,6 +21,11 @@
 //! supported workflow if a refused step mutated nothing — so a decode either
 //! rewinds what it appended, or says it could not and refuses to continue.
 //!
+//! Those two sweep `StandardEngine`. The other axis is the engine itself:
+//! [`engines`] runs the gate against every `EngineKind`, and [`engine_state`]
+//! runs the outcome questions against each one — because the rewind-or-
+//! invalidate answer differs by what each engine treats as canonical.
+//!
 //! ## Scope
 //!
 //! `prefill_quant` / `decode_step_quant` are deliberately absent: by contract
@@ -30,10 +35,19 @@
 //! through the same `do_prefill` / `do_decode_step` bodies — and is covered.
 //!
 //! The engines that route their FFN through `larql_kv::engines::layer_ffn_or_moe`
-//! rather than through the dispatch helpers (markov-rs, turbo-quant,
-//! unlimited-context, boundary-per-layer) are **not** covered here, because
-//! that copy still swallows. Widening it is the next ring.
+//! rather than through the dispatch helpers (markov-rs, markov-rs-codec,
+//! turbo-quant, unlimited-context, boundary-per-layer) are covered by
+//! [`engines`] and [`engine_state`]: that helper carries the refusal too now.
+//!
+//! `no-cache` and `apollo` are **not** covered, and not because they pass —
+//! neither consults the MoE hook at all, so on a hybrid-MoE arch they answer
+//! with dense-only layers and there is no refusal to carry. See
+//! [`engines`]'s header; that gap is larger than this one and is pinned
+//! rather than papered over.
 
+mod engine_state;
+mod engines;
+mod engines_gate;
 mod entry;
 mod gate;
 mod outcomes;

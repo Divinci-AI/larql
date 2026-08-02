@@ -170,9 +170,6 @@ impl BoundaryPerLayerEngine {
             token_id,
             index,
         )
-        .ok_or_else(|| EngineError::BackendFailure {
-            details: "walk::run_decode returned None".into(),
-        })
     }
 }
 
@@ -219,10 +216,7 @@ impl KvEngine for BoundaryPerLayerEngine {
             &self.policy,
             self.window_size,
             token_ids,
-        )
-        .ok_or_else(|| EngineError::BackendFailure {
-            details: "walk::run_prefill returned None".into(),
-        })?;
+        )?;
         self.store = Some(store);
         Ok(hidden)
     }

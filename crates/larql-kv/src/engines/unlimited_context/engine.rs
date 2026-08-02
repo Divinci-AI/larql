@@ -23,7 +23,7 @@ use serde::Serialize;
 use super::checkpoint_store::CheckpointStore;
 use super::extend::{
     empty_prior, rs_extend_from_checkpoint_backend, rs_extend_from_checkpoint_quant,
-    rs_extend_inplace,
+    rs_extend_inplace, truncate_kv_rows,
 };
 use super::token_archive::TokenArchive;
 use crate::engines::markov_residual::ensure_attn_tensors_dequantised;
@@ -151,7 +151,7 @@ impl UnlimitedContextEngine {
         weights: &ModelWeights,
         tokens: &[u32],
         moe_ffn: Option<&dyn larql_inference::ffn::FfnBackend>,
-    ) -> Option<()> {
+    ) -> Result<(), EngineError> {
         self.process_with_index(weights, tokens, moe_ffn, None)
     }
 
@@ -164,19 +164,32 @@ impl UnlimitedContextEngine {
         tokens: &[u32],
         moe_ffn: Option<&dyn larql_inference::ffn::FfnBackend>,
         index: Option<&larql_vindex::VectorIndex>,
-    ) -> Option<()> {
+    ) -> Result<(), EngineError> {
         let mut remaining = tokens;
+        // Closing a window archives its tokens and saves its checkpoint, and
+        // neither is undoable. `extend_current` rewinds the *current* window
+        // exactly, so a failure is retryable right up until the first close —
+        // after that the engine holds a stream it cannot complete, and must
+        // say so rather than let a caller retry into a duplicated window.
+        let mut closed_a_window = false;
         while !remaining.is_empty() {
             let free = self.window_size - self.current_window_tokens.len();
             let take = remaining.len().min(free);
             let (chunk, rest) = remaining.split_at(take);
-            self.extend_current(weights, chunk, moe_ffn, index)?;
+            if let Err(failure) = self.extend_current(weights, chunk, moe_ffn, index) {
+                return Err(if closed_a_window {
+                    failure.invalidating_engine_state()
+                } else {
+                    failure
+                });
+            }
             remaining = rest;
             if self.current_window_tokens.len() >= self.window_size {
                 self.close_window();
+                closed_a_window = true;
             }
         }
-        Some(())
+        Ok(())
     }
 
     /// Close any partial current window. Call before replay if the window hasn't filled.
@@ -200,27 +213,38 @@ impl UnlimitedContextEngine {
         moe_ffn: Option<&dyn larql_inference::ffn::FfnBackend>,
         index: Option<&larql_vindex::VectorIndex>,
         window_id: usize,
-    ) -> Option<(Vec<SharedKV>, usize)> {
-        let (tokens, abs_offset) = self.archive.retrieve(window_id)?;
+    ) -> Result<(Vec<SharedKV>, usize), EngineError> {
+        let (tokens, abs_offset) =
+            self.archive
+                .retrieve(window_id)
+                .ok_or_else(|| EngineError::RetrievalMiss {
+                    reason: format!("window {window_id} is not archived"),
+                })?;
 
         let prior = if window_id > 0 && self.checkpoints.contains(window_id - 1) {
-            let (ckpt, _) = self.checkpoints.load(window_id - 1)?;
+            let (ckpt, _) =
+                self.checkpoints
+                    .load(window_id - 1)
+                    .ok_or_else(|| EngineError::RetrievalMiss {
+                        reason: format!("checkpoint for window {} is missing", window_id - 1),
+                    })?;
             ckpt
         } else {
             empty_prior(weights)
         };
 
-        let out = rs_extend_from_checkpoint_backend(
+        let mut kv_cache = prior;
+        rs_extend_from_checkpoint_backend(
             larql_inference::WeightsView::dense(weights),
             tokens,
-            prior,
+            &mut kv_cache,
             abs_offset,
             self.backend.as_ref(),
             moe_ffn,
             index,
         )?;
         let abs_end = abs_offset + tokens.len() - 1;
-        Some((out.kv_cache, abs_end))
+        Ok((kv_cache, abs_end))
     }
 
     /// Total storage and context statistics.
@@ -349,16 +373,22 @@ impl UnlimitedContextEngine {
         chunk: &[u32],
         moe_ffn: Option<&dyn larql_inference::ffn::FfnBackend>,
         index: Option<&larql_vindex::VectorIndex>,
-    ) -> Option<()> {
+    ) -> Result<(), EngineError> {
         if chunk.is_empty() {
-            return Some(());
+            return Ok(());
         }
 
         // `prior_len` is the prior's LOGICAL row count — the window-KV counter
         // mid-window, the checkpoint's row count at a window start, or 0.
         let (mut prior, prior_len) = if self.current_window_tokens.is_empty() {
             if self.current_window_id > 0 && self.checkpoints.contains(self.current_window_id - 1) {
-                let (ckpt, _) = self.checkpoints.load(self.current_window_id - 1)?;
+                let id = self.current_window_id - 1;
+                let (ckpt, _) =
+                    self.checkpoints
+                        .load(id)
+                        .ok_or_else(|| EngineError::RetrievalMiss {
+                            reason: format!("checkpoint for window {id} is missing"),
+                        })?;
                 let len = ckpt.first().map_or(0, |(k, _)| k.shape()[0]);
                 (ckpt, len)
             } else {
@@ -366,7 +396,13 @@ impl UnlimitedContextEngine {
             }
         } else {
             // Mid-window the shadow MUST exist — see extend_current_quant.
-            (self.current_window_kv.take()?, self.current_window_kv_len)
+            let shadow =
+                self.current_window_kv
+                    .take()
+                    .ok_or_else(|| EngineError::InvariantViolation {
+                        what: "mid-window extend with no K/V shadow".into(),
+                    })?;
+            (shadow, self.current_window_kv_len)
         };
 
         let abs_start = self.abs_offset + self.current_window_tokens.len();
@@ -384,8 +420,16 @@ impl UnlimitedContextEngine {
             && crate::engines::markov_residual::compute::markov_inplace_kv_enabled()
             && larql_compute::options::q4k_direct_attn_enabled();
 
-        if use_inplace {
-            let last = rs_extend_inplace(
+        // Both arms restore the shadow on failure, which is what makes a
+        // refused chunk rewindable: `current_window_kv_len` and
+        // `current_window_tokens` are advanced only after the extend returns,
+        // so putting the buffers back at `prior_len` rows restores exactly the
+        // window this call started from.
+        let outcome = if use_inplace {
+            // The in-place path only ever writes past `prior_len`, which the
+            // counter never advanced past, so the logical window is already
+            // intact — nothing to truncate.
+            rs_extend_inplace(
                 larql_inference::WeightsView::dense(weights),
                 chunk,
                 &mut prior,
@@ -394,27 +438,43 @@ impl UnlimitedContextEngine {
                 self.backend.as_ref(),
                 moe_ffn,
                 index,
-            )?;
-            self.last_hidden = Some(last);
-            self.current_window_kv_len = prior_len + chunk.len();
-            self.current_window_kv = Some(prior);
+            )
+            .map(|last| (last, prior_len + chunk.len()))
         } else {
-            let out = rs_extend_from_checkpoint_backend(
+            rs_extend_from_checkpoint_backend(
                 larql_inference::WeightsView::dense(weights),
                 chunk,
-                prior,
+                &mut prior,
                 abs_start,
                 self.backend.as_ref(),
                 moe_ffn,
                 index,
-            )?;
-            self.last_hidden = Some(out.last_hidden);
-            // CPU walk path: narrow arrays, counter == shape[0].
-            self.current_window_kv_len = out.kv_cache.first().map_or(0, |(k, _)| k.shape()[0]);
-            self.current_window_kv = Some(out.kv_cache);
-        }
+            )
+            .map(|step| {
+                // CPU walk path: narrow arrays, counter == shape[0].
+                let rows = prior.first().map_or(0, |(k, _)| k.shape()[0]);
+                (step.last_hidden, rows)
+            })
+            .inspect_err(|_| {
+                // The owned-concat path replaces each layer's buffer as it
+                // goes and reads a prior by `shape()[0]`, so a half-advanced
+                // cache would attend over a token whose step never finished.
+                truncate_kv_rows(&mut prior, prior_len);
+            })
+        };
+
+        let (last_hidden, rows) = match outcome {
+            Ok(pair) => pair,
+            Err(failure) => {
+                self.current_window_kv = Some(prior);
+                return Err(failure);
+            }
+        };
+        self.last_hidden = Some(last_hidden);
+        self.current_window_kv_len = rows;
+        self.current_window_kv = Some(prior);
         self.current_window_tokens.extend_from_slice(chunk);
-        Some(())
+        Ok(())
     }
 
     pub(super) fn close_window(&mut self) {
@@ -529,10 +589,7 @@ impl KvEngine for UnlimitedContextEngine {
         if token_ids.is_empty() {
             return Err(EngineError::EmptyPrompt);
         }
-        self.process(weights, token_ids, Some(ffn))
-            .ok_or_else(|| EngineError::BackendFailure {
-                details: "process returned None during prefill".into(),
-            })?;
+        self.process(weights, token_ids, Some(ffn))?;
         self.last_hidden
             .clone()
             .ok_or_else(|| EngineError::BackendFailure {
@@ -546,10 +603,7 @@ impl KvEngine for UnlimitedContextEngine {
         ffn: &dyn FfnBackend,
         token_id: u32,
     ) -> Result<Array2<f32>, EngineError> {
-        self.process(weights, &[token_id], Some(ffn))
-            .ok_or_else(|| EngineError::BackendFailure {
-                details: "process returned None during decode_step".into(),
-            })?;
+        self.process(weights, &[token_id], Some(ffn))?;
         self.last_hidden
             .clone()
             .ok_or_else(|| EngineError::BackendFailure {
@@ -566,10 +620,7 @@ impl KvEngine for UnlimitedContextEngine {
         index: &larql_vindex::VectorIndex,
         token_id: u32,
     ) -> Result<Array2<f32>, EngineError> {
-        self.process_with_index(weights, &[token_id], Some(ffn), Some(index))
-            .ok_or_else(|| EngineError::BackendFailure {
-                details: "process returned None during decode_step".into(),
-            })?;
+        self.process_with_index(weights, &[token_id], Some(ffn), Some(index))?;
         self.last_hidden
             .clone()
             .ok_or_else(|| EngineError::BackendFailure {
@@ -1163,8 +1214,8 @@ mod tests {
         let engine = UnlimitedContextEngine::new(512);
         // No windows archived → any window_id returns None at the
         // `self.archive.retrieve(window_id)?` line.
-        assert!(engine.replay_window(&weights, None, None, 0).is_none());
-        assert!(engine.replay_window(&weights, None, None, 99).is_none());
+        assert!(engine.replay_window(&weights, None, None, 0).is_err());
+        assert!(engine.replay_window(&weights, None, None, 99).is_err());
     }
 
     #[test]
@@ -1187,7 +1238,7 @@ mod tests {
         // Replay the first archived window — exercises the
         // `rs_extend_from_checkpoint_backend` path (lines 132-138).
         let replay = engine.replay_window(&weights, None, None, 0);
-        assert!(replay.is_some(), "replay_window(0) should succeed");
+        assert!(replay.is_ok(), "replay_window(0) should succeed");
         let (kv, abs_end) = replay.unwrap();
         assert!(!kv.is_empty(), "replayed K/V cache should be non-empty");
         assert!(

@@ -2,7 +2,7 @@
 //!
 //! Mirrors `markov_residual/q4k.rs` with the cold tier routed through the
 //! codec. Used when the engine is asked to run on a compact (Q4K-walk)
-//! vindex — the dense `BackendFfn` path in [`super::compute`] cannot read
+//! vindex — the dense `BackendFfn` path in [`super::prefill`] cannot read
 //! `--compact` FFN weights. This module delegates FFN to `WalkFfn`
 //! (native Q4K matvec on the vindex's compact gate/up/down bytes) and
 //! passes `Some(index)` to `recompute_kv` so the K/V projections also
@@ -16,7 +16,7 @@ use larql_inference::vindex::{WalkFfn, WalkFfnConfig};
 use larql_vindex::VectorIndex;
 use ndarray::{s, Array2};
 
-use super::compute::RsPrefillResultCodec;
+use super::prefill::RsPrefillResultCodec;
 use crate::engines::markov_residual::recompute_kv;
 use crate::engines::markov_residual_codec::codec::ColdResidualCodec;
 use crate::engines::markov_residual_codec::store::{EncodedColdLayer, RsStoreCodec};
