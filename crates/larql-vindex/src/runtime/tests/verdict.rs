@@ -288,3 +288,39 @@ fn a_verdict_displays_as_its_name() {
     );
     assert_eq!(RefusalKind::BindingDefect.to_string(), "binding_defect");
 }
+
+// ── The classification crossing a crate boundary ───────────────────────────
+
+#[test]
+fn the_boundary_trait_reports_the_same_kind_as_the_inherent_method() {
+    // `ExecutionRefusal::kind` delegates to `refusal()` precisely so the two
+    // cannot disagree — but a delegation nothing calls is a delegation nobody
+    // has checked. This walks every variant through both.
+    use larql_execution::ExecutionRefusal;
+    for err in every_error() {
+        assert_eq!(
+            ExecutionRefusal::kind(&err),
+            err.refusal(),
+            "the boundary trait and the inherent method disagree for {err}"
+        );
+    }
+}
+
+#[test]
+fn a_boxed_execution_error_keeps_its_classification_and_its_detail() {
+    // The reason the trait exists: `larql-compute` cannot name `ExecutionError`
+    // but can name `dyn ExecutionRefusal`, and both levels must survive the
+    // crossing — the response category *and* the concrete diagnosis.
+    let boxed: larql_execution::BoxRefusal = Box::new(ExecutionError::SelectedExpertNotResident {
+        expert: 90,
+        bank: "layer 5 bank 0".into(),
+        resident: 8,
+        population: 128,
+    });
+    assert_eq!(boxed.kind(), RefusalKind::Residency);
+    assert!(!boxed.kind().indicts_the_artifact());
+    // The detail is still there, not flattened to the category.
+    let text = boxed.to_string();
+    assert!(text.contains("expert 90"), "{text}");
+    assert!(text.contains("8 of 128"), "{text}");
+}
