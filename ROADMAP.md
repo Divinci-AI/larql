@@ -364,6 +364,71 @@ Rung 2 begins with **Q8_K activation identity, checked before any expert runs** 
 a difference there contaminates all eight expert comparisons and makes every
 later diagnostic noise.
 
+### What's next (set 2026-08-02, after PR #197)
+
+Ordered by what unblocks what, not by size. Each item states the condition that
+closes it, so "done" is not a judgement call.
+
+**1. `layer_ffn_or_moe` — the other five engines.** PR #197 made strict refusal
+real for `StandardEngine` only. markov-rs, markov-rs-codec, turbo-quant,
+unlimited-context and boundary-per-layer still route through larql-kv's
+`layer_ffn_or_moe`, which logs a refusal and falls back — so a strict route
+through any of them degrades exactly as it did before. The mechanical half is
+widening the helper to `Result<Array2<f32>, BoxRefusal>` and threading it
+through ten call sites whose enclosing functions (`rs_prefill`,
+`rs_decode_step_inner`, `rs_prefill_codec`, `rs_decode_step_codec`,
+`rs_extend_from_checkpoint_backend`, `rs_extend_inplace`, turbo-quant's
+`prefill`/`decode_step_impl`, boundary-per-layer's two walk sites) return bare
+types today.
+
+The half that is not mechanical: each of those engines holds its *own*
+continuation state — `RsStore`, the codec's store, window checkpoints — so each
+needs the rewind-or-invalidate decision `StandardEngine` now makes, and the
+answer differs per engine because what is canonical differs per engine. A
+residual-canonical engine may be able to rewind by discarding a residual row
+where a K/V-canonical one cannot.
+
+*Closes when:* the 24-case gate in `larql-kv/tests/strict_refusal/` runs against
+every engine in `EngineKind`, not just `standard`. Until then the baseline tag
+must say "for `StandardEngine`" rather than "engine-wide".
+
+**2. Variant-selection refusal.** Closes V2-0 outright.
+`Vindex3Index::declares_profile` is a name check; §9.1 wants a profile that
+selects an absent variant to fail naming the region set, the requested variant
+and the variants physically present. Self-contained — no new execution path.
+
+**3. WALK/DESCRIBE parity.** Closes V2-1 except shared banks. Gate KNN over
+in-place bank regions must return identical top-K to a v1-style extracted
+`gate_vectors.bin` control on fixture A. This is the row that keeps "the model
+IS the database" true of VINDEX3 rather than only of VINDEX2.
+
+**4. A real Gemma layer as a VINDEX3 container** (container ladder c8/c9). The
+first real model that *is* a VINDEX3 container rather than one bound over
+VINDEX2 bytes. c8 is one layer; c9 is all of them, at which point `extract`
+gaining a VINDEX3 mode becomes a question rather than a violation.
+
+**Not on the critical path, but adjacent and cheap to start: the continuation-
+state intervention harness.** `larql-kv` already owns incremental decode with
+real K/V continuity, explicit next-token forcing, and a state-policy taxonomy
+that names exactly the question a persistence experiment asks — which parts of
+a continuation are carried by the emitted token, the residual, and the K/V
+history. What is missing is causal read/write access to that state during a
+decode step.
+
+PR #197 set the precedent for how that should look. `KvDispatch::truncate_kv`
+is a research/recovery capability declared on the trait, implemented on CPU,
+defaulting to *unsupported* rather than silently copying to host — which is the
+shape a `MutableKvView` / `KvIntervention` seam should follow, at the layer
+where attention appends and reads, never by exposing `KvHandle`'s
+representation.
+
+One trap is already known and should be inherited rather than rediscovered: a
+checkpoint that records cache *lengths* is not a checkpoint under a sliding
+window, because append-then-evict leaves the count unchanged while the oldest
+row is gone. `StandardEngine::rewind_is_sound` encodes that test; a fork API
+needs the same one or it will hand out silently wrong donor state under
+`markov-bounded`.
+
 ### Standing method
 
 Established by repeated failure, not preference:
