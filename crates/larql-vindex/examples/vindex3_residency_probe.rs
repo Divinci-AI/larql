@@ -48,6 +48,7 @@ mod probe {
     use larql_vindex::runtime::execute_traced;
     use larql_vindex::runtime::fixtures::synthetic::{SyntheticLayer, SyntheticShape};
     use larql_vindex::runtime::residency::{account, ExpertRegion};
+    use larql_vindex::runtime::MoeInputs;
 
     /// Defaults sized to be meaningful (hundreds of MB) without needing a
     /// special machine. Every one is overridable.
@@ -296,7 +297,8 @@ mod probe {
         // ── One token through the bound operation ──────────────────────────
         let operation = layer.bind(&mmap);
         operation.validate().expect("synthetic layer binds cleanly");
-        let (_, trace) = execute_traced(&operation, &layer.residual()).expect("layer executes");
+        let (_, trace) = execute_traced(&operation, MoeInputs::shared(&layer.residual()))
+            .expect("layer executes");
         let selected = trace.selected_ids();
 
         let after = resident_pages(&mmap, page);

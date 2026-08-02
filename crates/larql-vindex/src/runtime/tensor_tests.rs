@@ -224,6 +224,101 @@ fn a_vector_asserted_as_a_matrix_is_refused_as_a_kind_error_first() {
     ));
 }
 
+// ── Quantisation padding is not observable through the view ────────────────
+//
+// Gemma's Q4_K `down` region is stored `[hidden, 768]` — the logical 704
+// rounded up to a 256-multiple — while `gate_up` is unpadded. Binding the
+// stored width and slicing to the logical one is how VINDEX3 expresses
+// `physical shape != semantic operand shape` without rewriting the index,
+// materialising a cropped copy, or padding the activation in the generic
+// runtime.
+//
+// These use a poisoned tail: the padding columns hold values large enough
+// that any leak into a dot product would be unmistakable.
+
+/// Logical width, stored width, and a padding value that cannot hide.
+const LOGICAL_COLS: u32 = 4;
+const STORED_COLS: u32 = 6;
+const POISON: f32 = 1.0e9;
+
+/// `[2, 6]` where columns 4 and 5 are poison.
+fn poisoned_tail() -> BoundTensor<'static> {
+    let mut values = Vec::new();
+    for row in 0..2 {
+        for col in 0..STORED_COLS {
+            values.push(if col < LOGICAL_COLS {
+                (row * LOGICAL_COLS + col) as f32 + 1.0
+            } else {
+                POISON
+            });
+        }
+    }
+    let bytes: &'static [u8] = Box::leak(f32_bytes(&values).into_boxed_slice());
+    BoundTensor::new(
+        identity(),
+        bytes,
+        RegionFormat::F32,
+        ComponentContract::matrix(2, STORED_COLS),
+        ComponentView::Slice {
+            dim: 1,
+            start: 0,
+            len: LOGICAL_COLS,
+        },
+    )
+    .unwrap()
+}
+
+#[test]
+fn a_padded_tail_is_invisible_to_the_logical_view() {
+    let t = poisoned_tail();
+    assert_eq!(
+        t.cols(),
+        LOGICAL_COLS as usize,
+        "role sees the logical width"
+    );
+    for row in 0..t.rows() {
+        let values = t.row(row).unwrap();
+        assert_eq!(values.len(), LOGICAL_COLS as usize);
+        assert!(
+            values.iter().all(|v| v.abs() < POISON),
+            "row {row} observed padding: {values:?}"
+        );
+    }
+}
+
+#[test]
+fn the_logical_view_reads_the_right_values_not_merely_the_right_count() {
+    // A view that returned the correct *number* of elements from the wrong
+    // offsets would pass the test above.
+    let t = poisoned_tail();
+    assert_eq!(t.row(0).unwrap(), vec![1.0, 2.0, 3.0, 4.0]);
+    assert_eq!(t.row(1).unwrap(), vec![5.0, 6.0, 7.0, 8.0]);
+}
+
+#[test]
+fn the_padding_really_is_in_the_stored_bytes() {
+    // Guards the guard: if the fixture never wrote poison, every assertion
+    // above would pass against a tensor with nothing to leak.
+    let t = poisoned_tail();
+    let direct = BoundTensor::direct(
+        identity(),
+        t.bytes_for_test(),
+        RegionFormat::F32,
+        ComponentContract::matrix(2, STORED_COLS),
+    )
+    .unwrap();
+    assert_eq!(direct.row(0).unwrap()[LOGICAL_COLS as usize], POISON);
+}
+
+#[test]
+fn the_logical_width_is_what_a_shape_assertion_checks() {
+    // A kernel bound to this operand must be told the logical width, or it
+    // would read the padding as data.
+    let t = poisoned_tail();
+    t.require_matrix(2, LOGICAL_COLS as usize).unwrap();
+    assert!(t.require_matrix(2, STORED_COLS as usize).is_err());
+}
+
 #[test]
 fn a_bound_tensor_reports_its_provenance() {
     let t = matrix(ComponentView::Transpose);

@@ -55,19 +55,36 @@ impl<'a> BoundBankOperation<'a> {
         self.experts.len()
     }
 
-    /// The expert an id names, or a refusal.
+    /// The expert an id names, or a refusal naming where it was looked for.
     ///
-    /// Deliberately not `Option`: a selected-but-absent expert is never a
-    /// condition to handle locally, it is a binding fault that must reach the
-    /// caller intact.
-    pub fn expert(&self, expert_id: u32) -> Result<&BoundExpert<'a>, ExecutionError> {
+    /// Deliberately not `Option`. A selected-but-absent expert is never a
+    /// condition to handle locally: skipping it, or renormalising the
+    /// surviving weights around it, produces a token quietly missing part of
+    /// its FFN contribution and looks entirely reasonable. The request has to
+    /// reach the caller intact so that placement can satisfy it.
+    ///
+    /// `addressable` is the router's population, which is what makes the
+    /// report actionable — "expert 90 of 128, and this bank holds 8" says
+    /// *fetch it*, where "expert 90, bank holds 8" reads like corruption.
+    pub fn expert(
+        &self,
+        expert_id: u32,
+        addressable: usize,
+    ) -> Result<&BoundExpert<'a>, ExecutionError> {
         self.experts
             .iter()
             .find(|e| e.expert_id == expert_id)
-            .ok_or(ExecutionError::ExpertOutOfRange {
+            .ok_or_else(|| ExecutionError::SelectedExpertNotResident {
                 expert: expert_id,
-                population: self.population(),
+                bank: self.bank.describe(),
+                resident: self.population(),
+                population: addressable,
             })
+    }
+
+    /// Whether this bank holds the expert an id names.
+    pub fn holds(&self, expert_id: u32) -> bool {
+        self.experts.iter().any(|e| e.expert_id == expert_id)
     }
 
     /// Check every expert against the bank's declared shape.

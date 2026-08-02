@@ -146,13 +146,46 @@ fn a_bank_that_expects_the_residual_width_behind_a_latent_transform_is_refused()
 }
 
 #[test]
-fn a_router_that_addresses_a_different_population_is_refused() {
+fn a_bank_holding_only_part_of_the_population_is_valid() {
+    // Sharding. The router addresses the whole population; this bank carries a
+    // subset of it. An earlier `validate` demanded equality and would have
+    // refused every expert-server slice.
+    let mut op = direct();
+    op.banks[0].experts.truncate(2);
+    op.banks[0].experts[0].expert_id = 2;
+    op.banks[0].experts[1].expert_id = 3;
+    op.validate().expect("a shard is a legitimate operation");
+    assert!(!op.holds_full_population());
+}
+
+#[test]
+fn a_bank_holding_everything_reports_full_population() {
+    let op = direct();
+    op.validate().unwrap();
+    assert!(op.holds_full_population());
+}
+
+#[test]
+fn an_expert_the_router_cannot_address_is_refused() {
+    // The genuine fault the equality check was reaching for: an expert with an
+    // id past the router's rows can never be selected, so its presence means
+    // the router and the bank disagree about which population this is.
+    let mut op = direct();
+    op.banks[0].experts[0].expert_id = POPULATION + 5;
+    let err = op.validate().unwrap_err();
+    assert!(matches!(err, ExecutionError::ExpertOutOfRange { .. }));
+}
+
+#[test]
+fn a_router_addressing_more_experts_than_are_bound_is_valid() {
+    // Same shape as sharding, stated from the router's side.
     let mut op = direct();
     op.router = BoundRouter {
-        weight: ascending(ROUTER, POPULATION + 1, RESIDUAL),
+        weight: ascending(ROUTER, POPULATION + 4, RESIDUAL),
         ..op.router
     };
-    assert!(op.validate().is_err());
+    op.validate().unwrap();
+    assert!(!op.holds_full_population());
 }
 
 #[test]

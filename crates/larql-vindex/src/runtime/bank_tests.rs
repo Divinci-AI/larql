@@ -13,6 +13,8 @@ const LAYER: u32 = 7;
 const BANK_ID: u16 = 1;
 const INTERMEDIATE: u32 = 2;
 const HIDDEN: u32 = 3;
+/// The router's addressable population these banks live inside.
+const POPULATION: usize = 128;
 
 fn expert(expert_id: u32) -> BoundExpert<'static> {
     BoundExpert {
@@ -42,7 +44,7 @@ fn an_expert_is_found_by_its_id_not_its_position() {
     // Sparse ids are the normal case for a sharded bank: expert 40 may be the
     // first one this shard holds.
     let bank = bank(&[40, 41, 42]);
-    assert_eq!(bank.expert(41).unwrap().expert_id, 41);
+    assert_eq!(bank.expert(41, POPULATION).unwrap().expert_id, 41);
     assert_eq!(bank.population(), 3);
 }
 
@@ -50,12 +52,13 @@ fn an_expert_is_found_by_its_id_not_its_position() {
 fn a_selected_expert_the_bank_does_not_hold_is_refused_not_skipped() {
     // Skipping would drop a fraction of the FFN contribution and produce a
     // token that looks entirely reasonable.
-    let err = bank(&[0, 1]).expert(9).unwrap_err();
+    let err = bank(&[0, 1]).expert(9, POPULATION).unwrap_err();
     assert!(matches!(
         err,
-        ExecutionError::ExpertOutOfRange {
+        ExecutionError::SelectedExpertNotResident {
             expert: 9,
-            population: 2
+            resident: 2,
+            ..
         }
     ));
     assert!(err.to_string().contains('9'));
@@ -64,7 +67,7 @@ fn a_selected_expert_the_bank_does_not_hold_is_refused_not_skipped() {
 #[test]
 fn an_empty_bank_refuses_every_id() {
     assert_eq!(bank(&[]).population(), 0);
-    assert!(bank(&[]).expert(0).is_err());
+    assert!(bank(&[]).expert(0, POPULATION).is_err());
 }
 
 // ── Validation ─────────────────────────────────────────────────────────────

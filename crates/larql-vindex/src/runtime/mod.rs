@@ -39,6 +39,7 @@ pub mod error;
 pub mod execute;
 pub mod expert;
 pub mod fixtures;
+pub mod inputs;
 pub mod kernels;
 pub mod operation;
 pub mod projection;
@@ -54,9 +55,13 @@ mod bank_tests;
 #[cfg(test)]
 mod execute_tests;
 #[cfg(test)]
+mod inputs_tests;
+#[cfg(test)]
 mod kernels_tests;
 #[cfg(test)]
 mod operation_tests;
+#[cfg(test)]
+mod placement_tests;
 #[cfg(test)]
 mod projection_tests;
 #[cfg(test)]
@@ -78,6 +83,7 @@ pub use axis::Axis;
 pub use bank::{BoundBankOperation, BoundExpert};
 pub use error::ExecutionError;
 pub use execute::{execute, execute_traced, execute_with};
+pub use inputs::MoeInputs;
 pub use operation::BoundMoeOperation;
 pub use projection::{BoundProjection, ProjectionArrangement};
 pub use reduction::BoundReduction;

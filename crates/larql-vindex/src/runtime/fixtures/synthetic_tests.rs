@@ -5,6 +5,7 @@
 //! them would notice — a bench does not check its own answers.
 
 use super::super::execute::{execute, execute_traced};
+use super::super::inputs::MoeInputs;
 use super::synthetic::{SyntheticLayer, SyntheticShape};
 
 fn shape() -> SyntheticShape {
@@ -107,7 +108,11 @@ fn a_synthetic_layer_binds_to_a_valid_operation() {
 #[test]
 fn a_synthetic_layer_executes_to_finite_values() {
     let layer = SyntheticLayer::build(shape());
-    let out = execute(&layer.bind(&layer.bytes), &layer.residual()).unwrap();
+    let out = execute(
+        &layer.bind(&layer.bytes),
+        MoeInputs::shared(&layer.residual()),
+    )
+    .unwrap();
     assert_eq!(out.len(), shape().hidden);
     assert!(out.iter().all(|v| v.is_finite()), "{out:?}");
     assert!(
@@ -123,15 +128,23 @@ fn binding_over_a_copy_of_the_image_gives_the_same_answer() {
     let layer = SyntheticLayer::build(shape());
     let copy = layer.bytes.clone();
     assert_eq!(
-        execute(&layer.bind(&layer.bytes), &layer.residual()).unwrap(),
-        execute(&layer.bind(&copy), &layer.residual()).unwrap()
+        execute(
+            &layer.bind(&layer.bytes),
+            MoeInputs::shared(&layer.residual())
+        )
+        .unwrap(),
+        execute(&layer.bind(&copy), MoeInputs::shared(&layer.residual())).unwrap()
     );
 }
 
 #[test]
 fn routing_selects_exactly_top_k_experts() {
     let layer = SyntheticLayer::build(shape());
-    let (_, trace) = execute_traced(&layer.bind(&layer.bytes), &layer.residual()).unwrap();
+    let (_, trace) = execute_traced(
+        &layer.bind(&layer.bytes),
+        MoeInputs::shared(&layer.residual()),
+    )
+    .unwrap();
     assert_eq!(trace.selection.len(), shape().top_k);
     assert_eq!(trace.router_scores.len(), shape().population);
 }

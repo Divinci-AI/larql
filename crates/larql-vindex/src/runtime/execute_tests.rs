@@ -7,6 +7,7 @@
 use larql_compute::{MoeExpertScalePolicy, MoeTopKWeightPolicy};
 
 use super::execute::{execute, execute_traced, execute_with};
+use super::inputs::MoeInputs;
 use super::operation_tests::{direct, latent};
 use super::test_support::{ascending, vector};
 use super::trace::{CollectedTrace, NoTrace, TraceSink};
@@ -27,13 +28,13 @@ fn residual() -> Vec<f32> {
 fn a_latent_operation_returns_a_residual_width_delta() {
     // The point of the output transform: the banks run narrow, the delta
     // rejoins the residual at full width.
-    let out = execute(&latent(), &residual()).unwrap();
+    let out = execute(&latent(), MoeInputs::shared(&residual())).unwrap();
     assert_eq!(out.len(), RESIDUAL_WIDTH);
 }
 
 #[test]
 fn a_latent_operation_reduces_at_the_projected_width() {
-    let (out, trace) = execute_traced(&latent(), &residual()).unwrap();
+    let (out, trace) = execute_traced(&latent(), MoeInputs::shared(&residual())).unwrap();
     assert_eq!(trace.routed_input.len(), LATENT_WIDTH);
     assert_eq!(trace.reduced.len(), LATENT_WIDTH);
     assert_eq!(trace.residual_delta.len(), RESIDUAL_WIDTH);
@@ -43,20 +44,20 @@ fn a_latent_operation_reduces_at_the_projected_width() {
 #[test]
 fn a_latent_routed_input_is_not_the_residual() {
     // If the input transform were skipped, these would coincide.
-    let (_, trace) = execute_traced(&latent(), &residual()).unwrap();
+    let (_, trace) = execute_traced(&latent(), MoeInputs::shared(&residual())).unwrap();
     assert_ne!(trace.routed_input, residual());
 }
 
 #[test]
 fn a_direct_operation_routes_on_the_residual_itself() {
-    let (_, trace) = execute_traced(&direct(), &residual()).unwrap();
+    let (_, trace) = execute_traced(&direct(), MoeInputs::shared(&residual())).unwrap();
     assert_eq!(trace.routed_input, residual());
 }
 
 #[test]
 fn latent_and_direct_operations_both_execute_through_one_path() {
     for op in [direct(), latent()] {
-        let out = execute(&op, &residual()).unwrap();
+        let out = execute(&op, MoeInputs::shared(&residual())).unwrap();
         assert_eq!(out.len(), RESIDUAL_WIDTH);
         assert!(out.iter().all(|v| v.is_finite()), "{out:?}");
     }
@@ -68,7 +69,7 @@ fn latent_and_direct_operations_both_execute_through_one_path() {
 fn raw_softmax_leaves_the_selected_weights_unnormalised() {
     let mut op = direct();
     op.router.selected_weight = MoeTopKWeightPolicy::RawSoftmax;
-    let (_, trace) = execute_traced(&op, &residual()).unwrap();
+    let (_, trace) = execute_traced(&op, MoeInputs::shared(&residual())).unwrap();
     let total: f32 = trace.gate_weights().iter().sum();
     assert!(total < 1.0, "top-k of a larger population sums to {total}");
 }
@@ -78,8 +79,8 @@ fn renormalised_and_raw_softmax_select_the_same_experts() {
     // The policy changes the weights, never the selection.
     let mut raw = direct();
     raw.router.selected_weight = MoeTopKWeightPolicy::RawSoftmax;
-    let (_, raw_trace) = execute_traced(&raw, &residual()).unwrap();
-    let (_, renorm_trace) = execute_traced(&direct(), &residual()).unwrap();
+    let (_, raw_trace) = execute_traced(&raw, MoeInputs::shared(&residual())).unwrap();
+    let (_, renorm_trace) = execute_traced(&direct(), MoeInputs::shared(&residual())).unwrap();
     assert_eq!(raw_trace.selected_ids(), renorm_trace.selected_ids());
     assert_ne!(raw_trace.gate_weights(), renorm_trace.gate_weights());
 }
@@ -93,8 +94,8 @@ fn a_per_expert_scale_multiplies_after_renormalisation() {
     op.router.expert_scale = MoeExpertScalePolicy::PerExpert;
     op.router.per_expert_scale = Some(vector(SCALE, &vec![2.0f32; population]));
 
-    let (_, scaled) = execute_traced(&op, &residual()).unwrap();
-    let (_, plain) = execute_traced(&direct(), &residual()).unwrap();
+    let (_, scaled) = execute_traced(&op, MoeInputs::shared(&residual())).unwrap();
+    let (_, plain) = execute_traced(&direct(), MoeInputs::shared(&residual())).unwrap();
     let total: f32 = scaled.gate_weights().iter().sum();
     assert!((total - 2.0).abs() < 1e-5, "scaled weights sum to {total}");
     assert_eq!(scaled.selected_ids(), plain.selected_ids());
@@ -106,7 +107,7 @@ fn a_scale_vector_is_ignored_when_the_policy_does_not_ask_for_it() {
     let population = op.banks[0].experts.len();
     op.router.expert_scale = MoeExpertScalePolicy::None;
     op.router.per_expert_scale = Some(vector(SCALE, &vec![9.0f32; population]));
-    let (_, trace) = execute_traced(&op, &residual()).unwrap();
+    let (_, trace) = execute_traced(&op, MoeInputs::shared(&residual())).unwrap();
     let total: f32 = trace.gate_weights().iter().sum();
     assert!((total - 1.0).abs() < 1e-5, "{total}");
 }
@@ -117,7 +118,7 @@ fn a_scale_vector_is_ignored_when_the_policy_does_not_ask_for_it() {
 fn top_k_bounds_how_many_experts_run() {
     let mut op = direct();
     op.router.top_k = 1;
-    let (_, trace) = execute_traced(&op, &residual()).unwrap();
+    let (_, trace) = execute_traced(&op, MoeInputs::shared(&residual())).unwrap();
     assert_eq!(trace.selection.len(), 1);
     assert_eq!(trace.expert_outputs.len(), 1);
     assert!((trace.gate_weights()[0] - 1.0).abs() < 1e-6, "renormalised");
@@ -127,7 +128,7 @@ fn top_k_bounds_how_many_experts_run() {
 fn a_top_k_of_zero_selects_nothing_and_contributes_nothing() {
     let mut op = direct();
     op.router.top_k = 0;
-    let (out, trace) = execute_traced(&op, &residual()).unwrap();
+    let (out, trace) = execute_traced(&op, MoeInputs::shared(&residual())).unwrap();
     assert!(trace.selection.is_empty());
     assert_eq!(out, vec![0.0f32; RESIDUAL_WIDTH]);
 }
@@ -137,7 +138,7 @@ fn a_top_k_beyond_the_population_runs_every_expert() {
     let mut op = direct();
     let population = op.banks[0].experts.len();
     op.router.top_k = population + 5;
-    let (_, trace) = execute_traced(&op, &residual()).unwrap();
+    let (_, trace) = execute_traced(&op, MoeInputs::shared(&residual())).unwrap();
     assert_eq!(trace.selection.len(), population);
 }
 
@@ -145,8 +146,8 @@ fn a_top_k_beyond_the_population_runs_every_expert() {
 
 #[test]
 fn a_residual_of_the_wrong_width_is_refused() {
-    assert!(execute(&direct(), &[1.0, 2.0]).is_err());
-    assert!(execute(&latent(), &[1.0, 2.0]).is_err());
+    assert!(execute(&direct(), MoeInputs::shared(&[1.0, 2.0])).is_err());
+    assert!(execute(&latent(), MoeInputs::shared(&[1.0, 2.0])).is_err());
 }
 
 #[test]
@@ -157,7 +158,7 @@ fn a_router_selecting_an_expert_the_bank_lacks_is_refused() {
     op.banks[0].experts.truncate(1);
     op.banks[0].experts[0].expert_id = 0;
     op.router.top_k = op.router.population();
-    let err = execute(&op, &residual()).unwrap_err();
+    let err = execute(&op, MoeInputs::shared(&residual())).unwrap_err();
     assert!(err.to_string().contains("selected expert"), "{err}");
 }
 
@@ -173,7 +174,7 @@ fn an_output_transform_that_lands_off_the_residual_width_is_refused() {
         .expect("the latent operation binds an output stage");
     output_stage.weight = ascending(LATENT_OUT, (RESIDUAL_WIDTH - 1) as u32, LATENT_WIDTH as u32);
 
-    let err = execute(&op, &residual()).unwrap_err();
+    let err = execute(&op, MoeInputs::shared(&residual())).unwrap_err();
     let text = err.to_string();
     assert!(text.contains("operation output"), "{text}");
     assert!(text.contains(&RESIDUAL_WIDTH.to_string()), "{text}");
@@ -186,8 +187,8 @@ fn the_no_op_sink_and_the_collecting_sink_agree_on_the_result() {
     let op = latent();
     let mut none = NoTrace;
     let mut collected = CollectedTrace::default();
-    let a = execute_with(&op, &residual(), &mut none).unwrap();
-    let b = execute_with(&op, &residual(), &mut collected).unwrap();
+    let a = execute_with(&op, MoeInputs::shared(&residual()), &mut none).unwrap();
+    let b = execute_with(&op, MoeInputs::shared(&residual()), &mut collected).unwrap();
     assert_eq!(a, b);
     assert_eq!(b, collected.residual_delta);
 }
@@ -207,7 +208,7 @@ fn the_no_op_sink_accepts_every_checkpoint_without_recording() {
 
 #[test]
 fn a_collected_trace_looks_up_expert_outputs_by_id() {
-    let (_, trace) = execute_traced(&direct(), &residual()).unwrap();
+    let (_, trace) = execute_traced(&direct(), MoeInputs::shared(&residual())).unwrap();
     let first = trace.selected_ids()[0];
     assert!(trace.expert_output(first).is_some());
     assert!(trace.expert_output(u32::MAX).is_none());

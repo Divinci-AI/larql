@@ -68,8 +68,21 @@ impl BoundMoeOperation<'_> {
     /// Belongs to the load path. Binding calls it once; execution does not,
     /// because re-validating per token is exactly the resolution creep this
     /// object exists to prevent.
+    ///
+    /// # A bank need not hold the whole population
+    ///
+    /// An earlier version required `router.population() == bank.population()`.
+    /// That is wrong, and `bank.rs` already said so: a **sharded** bank holds a
+    /// subset, and expert 40 may be the first one a shard carries. Requiring
+    /// equality would have refused every sharded operation — including the
+    /// expert-server slices this format exists to serve.
+    ///
+    /// So the router is validated against its own addressable population, and
+    /// the bank is checked to lie inside it. An expert id the router cannot
+    /// address is the genuine fault, because nothing would ever select it.
     pub fn validate(&self) -> Result<(), ExecutionError> {
         let bank_input = self.bank_input_dim();
+        self.router.validate(self.router.population(), bank_input)?;
         for bank in &self.banks {
             if bank.hidden_dim != bank_input {
                 return Err(ExecutionError::DimensionMismatch {
@@ -80,9 +93,27 @@ impl BoundMoeOperation<'_> {
                 });
             }
             bank.validate()?;
-            self.router.validate(bank.population(), bank_input)?;
+            for expert in &bank.experts {
+                if expert.expert_id as usize >= self.router.population() {
+                    return Err(ExecutionError::ExpertOutOfRange {
+                        expert: expert.expert_id,
+                        population: self.router.population(),
+                    });
+                }
+            }
         }
         Ok(())
+    }
+
+    /// Whether the bound banks hold the router's whole addressable population.
+    ///
+    /// False for a shard. Distinct from validity: a shard is a legitimate
+    /// operation, it simply cannot serve every routing outcome, and a caller
+    /// that needs completeness must ask rather than assume.
+    pub fn holds_full_population(&self) -> bool {
+        self.banks
+            .iter()
+            .any(|b| b.population() == self.router.population())
     }
 
     pub fn describe(&self) -> String {

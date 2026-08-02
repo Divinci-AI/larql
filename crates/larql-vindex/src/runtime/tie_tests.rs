@@ -19,6 +19,7 @@
 
 use super::error::ExecutionError;
 use super::execute::execute_traced;
+use super::inputs::MoeInputs;
 use super::kernels::{top_k, top_k_with_margin};
 use super::operation_tests::direct;
 use super::test_support::matrix;
@@ -94,7 +95,7 @@ fn a_tie_decided_selection_is_flagged_in_the_trace() {
     let uniform = vec![0.25f32; population * hidden];
     op.router.weight = matrix(ROUTER, population as u32, hidden as u32, &uniform);
 
-    let (_, trace) = execute_traced(&op, &vec![0.1f32; hidden]).unwrap();
+    let (_, trace) = execute_traced(&op, MoeInputs::shared(&vec![0.1f32; hidden])).unwrap();
     assert!(
         trace.selection_was_decided_by_a_tie(),
         "margin was {:?}",
@@ -105,7 +106,11 @@ fn a_tie_decided_selection_is_flagged_in_the_trace() {
 
 #[test]
 fn an_ordinary_selection_is_not_flagged_as_a_tie() {
-    let (_, trace) = execute_traced(&direct(), &[0.4, -0.3, 0.9, 0.1, -0.7, 0.2]).unwrap();
+    let (_, trace) = execute_traced(
+        &direct(),
+        MoeInputs::shared(&[0.4, -0.3, 0.9, 0.1, -0.7, 0.2]),
+    )
+    .unwrap();
     assert!(!trace.selection_was_decided_by_a_tie());
     assert!(trace.selection_margin.unwrap() > 0.0);
 }
@@ -146,7 +151,7 @@ fn a_nan_router_score_is_refused_naming_the_expert() {
     values[hidden] = f32::NAN; // expert 1's first weight
     op.router.weight = matrix(ROUTER, population as u32, hidden as u32, &values);
 
-    let err = execute_traced(&op, &vec![0.5f32; hidden]).unwrap_err();
+    let err = execute_traced(&op, MoeInputs::shared(&vec![0.5f32; hidden])).unwrap_err();
     let ExecutionError::NonFiniteRouterScore { expert, value } = err else {
         panic!("expected a non-finite refusal, got {err}");
     };
@@ -164,7 +169,7 @@ fn an_infinite_router_weight_is_refused_rather_than_dominating_the_softmax() {
     op.router.weight = matrix(ROUTER, population as u32, hidden as u32, &values);
 
     // softmax(inf) yields NaN once the max-shift subtracts inf from inf.
-    let err = execute_traced(&op, &vec![0.5f32; hidden]).unwrap_err();
+    let err = execute_traced(&op, MoeInputs::shared(&vec![0.5f32; hidden])).unwrap_err();
     assert!(
         matches!(err, ExecutionError::NonFiniteRouterScore { .. }),
         "{err}"
@@ -173,6 +178,10 @@ fn an_infinite_router_weight_is_refused_rather_than_dominating_the_softmax() {
 
 #[test]
 fn finite_scores_are_never_refused() {
-    let (_, trace) = execute_traced(&direct(), &[0.4, -0.3, 0.9, 0.1, -0.7, 0.2]).unwrap();
+    let (_, trace) = execute_traced(
+        &direct(),
+        MoeInputs::shared(&[0.4, -0.3, 0.9, 0.1, -0.7, 0.2]),
+    )
+    .unwrap();
     assert!(trace.router_scores.iter().all(|s| s.is_finite()));
 }

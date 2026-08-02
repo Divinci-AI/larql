@@ -14,6 +14,7 @@ use super::axis::Axis;
 use super::consts::{OPERAND_OPERATION_OUTPUT, OPERAND_RESIDUAL};
 use super::error::ExecutionError;
 use super::expert;
+use super::inputs::MoeInputs;
 use super::kernels::{dot, renormalize, softmax, top_k_with_margin};
 use super::operation::BoundMoeOperation;
 use super::router::{BoundRouter, SelectedExpert};
@@ -28,45 +29,53 @@ use larql_compute::{MoeExpertScalePolicy, MoeTopKWeightPolicy};
 /// is a property of the surrounding block rather than of the MoE operation.
 pub fn execute(
     operation: &BoundMoeOperation<'_>,
-    residual: &[f32],
+    inputs: MoeInputs<'_>,
 ) -> Result<Vec<f32>, ExecutionError> {
-    execute_with(operation, residual, &mut NoTrace)
+    execute_with(operation, inputs, &mut NoTrace)
 }
 
 /// Run the operation and record every internal checkpoint.
 pub fn execute_traced(
     operation: &BoundMoeOperation<'_>,
-    residual: &[f32],
+    inputs: MoeInputs<'_>,
 ) -> Result<(Vec<f32>, CollectedTrace), ExecutionError> {
     let mut trace = CollectedTrace::default();
-    let out = execute_with(operation, residual, &mut trace)?;
+    let out = execute_with(operation, inputs, &mut trace)?;
     Ok((out, trace))
 }
 
 /// The single implementation. `sink` compiles away entirely for [`NoTrace`].
+///
+/// Routed-input transforms apply to `inputs.bank`. `inputs.router` is used as
+/// supplied, because the router's input is produced by the surrounding block's
+/// norms and scales, not by a projection this operation owns.
 pub fn execute_with<S: TraceSink>(
     operation: &BoundMoeOperation<'_>,
-    residual: &[f32],
+    inputs: MoeInputs<'_>,
     sink: &mut S,
 ) -> Result<Vec<f32>, ExecutionError> {
-    if residual.len() != operation.residual_dim {
+    if inputs.bank.len() != operation.residual_dim {
         return Err(ExecutionError::DimensionMismatch {
             operand: OPERAND_RESIDUAL.into(),
             axis: Axis::Width,
             expected: operation.residual_dim,
-            found: residual.len(),
+            found: inputs.bank.len(),
         });
     }
 
-    let bank_input = apply_stage(&operation.transforms, TransformStage::RoutedInput, residual)?;
+    let bank_input = apply_stage(
+        &operation.transforms,
+        TransformStage::RoutedInput,
+        inputs.bank,
+    )?;
     sink.routed_input(&bank_input);
 
     let mut reduced = vec![0.0f32; operation.bank_input_dim()];
     for bank in &operation.banks {
-        let selected = select(&operation.router, &bank_input, bank.population(), sink)?;
+        let selected = select(&operation.router, inputs.router, bank.population(), sink)?;
         for choice in &selected {
             let out = expert::forward(
-                bank.expert(choice.expert_id)?,
+                bank.expert(choice.expert_id, operation.router.population())?,
                 &bank_input,
                 bank.intermediate_dim,
                 bank.activation,

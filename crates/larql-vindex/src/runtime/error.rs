@@ -72,13 +72,38 @@ pub enum ExecutionError {
     #[error("router score for expert {expert} is {value}, which is not a finite number")]
     NonFiniteRouterScore { expert: usize, value: f32 },
 
-    /// Routing selected an expert the bank does not hold.
+    /// An expert id outside the router's address space.
     ///
-    /// A router and an expert bank that disagree about the population is a
-    /// binding fault, and one that would otherwise degrade into a silently
-    /// dropped expert and a plausible-looking output.
-    #[error("router selected expert {expert} but the bank holds {population}")]
+    /// A catalogue fault: nothing could ever select this expert, so the router
+    /// and the bank disagree about which population they are describing.
+    #[error("expert {expert} is outside the router's addressable population of {population}")]
     ExpertOutOfRange { expert: u32, population: usize },
+
+    /// Routing selected an expert this bank does not hold.
+    ///
+    /// **Not** a catalogue fault. The routing decision is correct and the
+    /// expert exists in the model; it is simply not resident here, which is
+    /// the normal condition for a shard. Distinct from
+    /// [`Self::ExpertOutOfRange`] because the repairs differ completely: that
+    /// one means the index is wrong, this one means the operand must be
+    /// fetched from wherever it lives.
+    ///
+    /// It must never degrade into skipping the expert, renormalising the
+    /// surviving weights, or substituting a neighbour. Each of those produces
+    /// a token missing part of its FFN contribution and looks entirely
+    /// reasonable. Remote placement will later satisfy this request without
+    /// changing router semantics — which is only possible if the request
+    /// reaches the caller intact.
+    #[error(
+        "routing selected expert {expert}, which is not resident in {bank} \
+         (this bank holds {resident} of {population} experts)"
+    )]
+    SelectedExpertNotResident {
+        expert: u32,
+        bank: String,
+        resident: usize,
+        population: usize,
+    },
 }
 
 impl ExecutionError {

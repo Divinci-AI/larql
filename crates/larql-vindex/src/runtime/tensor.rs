@@ -103,6 +103,12 @@ impl<'a> BoundTensor<'a> {
         )
     }
 
+    /// The stored bytes, for tests that must confirm what is *behind* a view.
+    #[cfg(test)]
+    pub(crate) fn bytes_for_test(&self) -> &'a [u8] {
+        self.bytes
+    }
+
     pub fn representation(&self) -> &RepresentationIdentity {
         &self.representation
     }

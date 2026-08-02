@@ -52,6 +52,7 @@ use larql_vindex::format::capability::{
 };
 use larql_vindex::format::lyrw2::region_format::RegionFormat;
 use larql_vindex::format::lyrw2::region_role::RegionRole;
+use larql_vindex::runtime::MoeInputs;
 use larql_vindex::runtime::{
     execute, execute_traced, BoundBankOperation, BoundExpert, BoundMoeOperation, BoundProjection,
     BoundReduction, BoundRouter, BoundTensor, ProjectionArrangement,
@@ -189,7 +190,9 @@ fn population_scaling(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::from_parameter(population),
             &population,
-            |b, _| b.iter(|| black_box(execute(&op, black_box(&input)).unwrap())),
+            |b, _| {
+                b.iter(|| black_box(execute(&op, MoeInputs::shared(black_box(&input))).unwrap()))
+            },
         );
     }
     group.finish();
@@ -203,7 +206,7 @@ fn arrangement_parity(c: &mut Criterion) {
         let op = operands.operation(arrangement);
         let input = residual();
         group.bench_function(BenchmarkId::from_parameter(arrangement.name()), |b| {
-            b.iter(|| black_box(execute(&op, black_box(&input)).unwrap()))
+            b.iter(|| black_box(execute(&op, MoeInputs::shared(black_box(&input))).unwrap()))
         });
     }
     group.finish();
@@ -216,10 +219,10 @@ fn trace_overhead(c: &mut Criterion) {
     let input = residual();
     let mut group = c.benchmark_group("vindex3/trace");
     group.bench_function("untraced", |b| {
-        b.iter(|| black_box(execute(&op, black_box(&input)).unwrap()))
+        b.iter(|| black_box(execute(&op, MoeInputs::shared(black_box(&input))).unwrap()))
     });
     group.bench_function("traced", |b| {
-        b.iter(|| black_box(execute_traced(&op, black_box(&input)).unwrap()))
+        b.iter(|| black_box(execute_traced(&op, MoeInputs::shared(black_box(&input))).unwrap()))
     });
     group.finish();
 }

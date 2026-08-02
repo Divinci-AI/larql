@@ -13,6 +13,7 @@
 use larql_vindex::runtime::execute_traced;
 use larql_vindex::runtime::fixtures::direct_moe::{input, DirectMoeFixture, POPULATION, TOP_K};
 use larql_vindex::runtime::fixtures::direct_moe_oracle::oracle;
+use larql_vindex::runtime::MoeInputs;
 use larql_vindex::runtime::{CollectedTrace, ProjectionArrangement};
 
 /// Column width for the numeric dumps.
@@ -67,8 +68,8 @@ fn main() {
             .expect("fixture A binds a consistent operation");
         println!("\n  bound: {}", operation.describe());
 
-        let (delta, trace) =
-            execute_traced(&operation, &residual).expect("fixture A executes cleanly");
+        let (delta, trace) = execute_traced(&operation, MoeInputs::shared(&residual))
+            .expect("fixture A executes cleanly");
         report(arrangement, &trace, &delta);
         runs.push((arrangement, delta, trace));
     }

@@ -26,6 +26,7 @@ use std::cell::Cell;
 
 use larql_vindex::runtime::execute;
 use larql_vindex::runtime::fixtures::synthetic::{SyntheticLayer, SyntheticShape};
+use larql_vindex::runtime::MoeInputs;
 
 thread_local! {
     /// Allocations on *this* thread.
@@ -81,14 +82,14 @@ fn allocations_per_token(layer: &SyntheticLayer) -> usize {
     let operation = layer.bind(&layer.bytes);
     let residual = layer.residual();
     // First-call effects are not what this measures.
-    execute(&operation, &residual).expect("synthetic layer executes");
+    execute(&operation, MoeInputs::shared(&residual)).expect("synthetic layer executes");
     measure(&layer.bind(&layer.bytes), &residual)
 }
 
 /// Allocations attributable to a single already-bound execution.
 fn measure(operation: &larql_vindex::runtime::BoundMoeOperation<'_>, residual: &[f32]) -> usize {
     let before = allocations();
-    let out = execute(operation, residual).expect("synthetic layer executes");
+    let out = execute(operation, MoeInputs::shared(residual)).expect("synthetic layer executes");
     let after = allocations();
     // Keep the result alive so its buffer is not freed inside the window.
     std::hint::black_box(&out);
@@ -187,7 +188,7 @@ fn repeated_tokens_allocate_identically() {
     let layer = SyntheticLayer::build(shape(32, 32, 24));
     let operation = layer.bind(&layer.bytes);
     let residual = layer.residual();
-    execute(&operation, &residual).expect("warm-up");
+    execute(&operation, MoeInputs::shared(&residual)).expect("warm-up");
 
     let first = measure(&operation, &residual);
     for token in 1..16 {

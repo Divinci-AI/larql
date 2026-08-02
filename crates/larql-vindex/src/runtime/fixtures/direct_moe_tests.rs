@@ -13,6 +13,7 @@
 //! ```
 
 use super::super::execute::{execute, execute_traced};
+use super::super::inputs::MoeInputs;
 use super::super::projection::{BoundProjection, ProjectionArrangement};
 use super::direct_moe::{input, up_at, DirectMoeFixture, HIDDEN, INTERMEDIATE, POPULATION, TOP_K};
 use super::direct_moe_oracle::oracle;
@@ -56,7 +57,7 @@ fn router_scores_match_the_oracle() {
     let fixture = DirectMoeFixture::new();
     let (_, trace) = execute_traced(
         &fixture.operation(ProjectionArrangement::Decomposed),
-        &input(),
+        MoeInputs::shared(&input()),
     )
     .unwrap();
     let expected = oracle(&input());
@@ -76,7 +77,7 @@ fn router_scores_are_a_distribution_over_the_whole_population() {
     let fixture = DirectMoeFixture::new();
     let (_, trace) = execute_traced(
         &fixture.operation(ProjectionArrangement::Decomposed),
-        &input(),
+        MoeInputs::shared(&input()),
     )
     .unwrap();
     let total: f32 = trace.router_scores.iter().sum();
@@ -88,7 +89,7 @@ fn selected_expert_ids_and_order_match_the_oracle() {
     let fixture = DirectMoeFixture::new();
     let (_, trace) = execute_traced(
         &fixture.operation(ProjectionArrangement::Decomposed),
-        &input(),
+        MoeInputs::shared(&input()),
     )
     .unwrap();
     let expected: Vec<u32> = oracle(&input())
@@ -108,7 +109,7 @@ fn selection_is_ordered_by_descending_score() {
     let fixture = DirectMoeFixture::new();
     let (_, trace) = execute_traced(
         &fixture.operation(ProjectionArrangement::Decomposed),
-        &input(),
+        MoeInputs::shared(&input()),
     )
     .unwrap();
     let raw: Vec<f32> = trace.selection.iter().map(|s| s.raw_score).collect();
@@ -120,7 +121,7 @@ fn gate_weights_match_the_oracle() {
     let fixture = DirectMoeFixture::new();
     let (_, trace) = execute_traced(
         &fixture.operation(ProjectionArrangement::Decomposed),
-        &input(),
+        MoeInputs::shared(&input()),
     )
     .unwrap();
     let expected: Vec<f32> = oracle(&input()).selected.iter().map(|(_, w)| *w).collect();
@@ -132,7 +133,7 @@ fn renormalisation_makes_the_selected_weights_sum_to_one() {
     let fixture = DirectMoeFixture::new();
     let (_, trace) = execute_traced(
         &fixture.operation(ProjectionArrangement::Decomposed),
-        &input(),
+        MoeInputs::shared(&input()),
     )
     .unwrap();
     let total: f32 = trace.gate_weights().iter().sum();
@@ -146,7 +147,7 @@ fn raw_scores_are_kept_alongside_renormalised_weights() {
     let fixture = DirectMoeFixture::new();
     let (_, trace) = execute_traced(
         &fixture.operation(ProjectionArrangement::Decomposed),
-        &input(),
+        MoeInputs::shared(&input()),
     )
     .unwrap();
     let raw_total: f32 = trace.selection.iter().map(|s| s.raw_score).sum();
@@ -161,7 +162,7 @@ fn per_expert_outputs_match_the_oracle() {
     let fixture = DirectMoeFixture::new();
     let (_, trace) = execute_traced(
         &fixture.operation(ProjectionArrangement::Decomposed),
-        &input(),
+        MoeInputs::shared(&input()),
     )
     .unwrap();
     let expected = oracle(&input());
@@ -180,7 +181,7 @@ fn the_weighted_reduction_matches_the_oracle() {
     let fixture = DirectMoeFixture::new();
     let (_, trace) = execute_traced(
         &fixture.operation(ProjectionArrangement::Decomposed),
-        &input(),
+        MoeInputs::shared(&input()),
     )
     .unwrap();
     assert_close(&trace.reduced, &oracle(&input()).reduced, "reduced");
@@ -191,7 +192,7 @@ fn the_residual_delta_matches_the_oracle() {
     let fixture = DirectMoeFixture::new();
     let output = execute(
         &fixture.operation(ProjectionArrangement::Decomposed),
-        &input(),
+        MoeInputs::shared(&input()),
     )
     .unwrap();
     assert_close(&output, &oracle(&input()).reduced, "residual delta");
@@ -204,7 +205,7 @@ fn a_direct_moe_delta_equals_its_reduction() {
     let fixture = DirectMoeFixture::new();
     let (output, trace) = execute_traced(
         &fixture.operation(ProjectionArrangement::Decomposed),
-        &input(),
+        MoeInputs::shared(&input()),
     )
     .unwrap();
     assert_eq!(trace.reduced, trace.residual_delta);
@@ -220,10 +221,14 @@ fn fused_and_decomposed_storage_produce_identical_output() {
     let fixture = DirectMoeFixture::new();
     let decomposed = execute(
         &fixture.operation(ProjectionArrangement::Decomposed),
-        &input(),
+        MoeInputs::shared(&input()),
     )
     .unwrap();
-    let fused = execute(&fixture.operation(ProjectionArrangement::Fused), &input()).unwrap();
+    let fused = execute(
+        &fixture.operation(ProjectionArrangement::Fused),
+        MoeInputs::shared(&input()),
+    )
+    .unwrap();
     assert_eq!(decomposed, fused, "arrangement changed the answer");
 }
 
@@ -233,11 +238,14 @@ fn fused_and_decomposed_agree_at_every_checkpoint() {
     let fixture = DirectMoeFixture::new();
     let (_, a) = execute_traced(
         &fixture.operation(ProjectionArrangement::Decomposed),
-        &input(),
+        MoeInputs::shared(&input()),
     )
     .unwrap();
-    let (_, b) =
-        execute_traced(&fixture.operation(ProjectionArrangement::Fused), &input()).unwrap();
+    let (_, b) = execute_traced(
+        &fixture.operation(ProjectionArrangement::Fused),
+        MoeInputs::shared(&input()),
+    )
+    .unwrap();
     assert_eq!(a, b);
 }
 
@@ -287,8 +295,8 @@ fn both_arrangements_report_the_same_dimensions() {
 fn tracing_does_not_change_the_result() {
     let fixture = DirectMoeFixture::new();
     let op = fixture.operation(ProjectionArrangement::Decomposed);
-    let plain = execute(&op, &input()).unwrap();
-    let (traced, _) = execute_traced(&op, &input()).unwrap();
+    let plain = execute(&op, MoeInputs::shared(&input())).unwrap();
+    let (traced, _) = execute_traced(&op, MoeInputs::shared(&input())).unwrap();
     assert_eq!(plain, traced);
 }
 
@@ -296,8 +304,8 @@ fn tracing_does_not_change_the_result() {
 fn execution_is_deterministic_across_runs() {
     let fixture = DirectMoeFixture::new();
     let op = fixture.operation(ProjectionArrangement::Fused);
-    let first = execute(&op, &input()).unwrap();
-    let second = execute(&op, &input()).unwrap();
+    let first = execute(&op, MoeInputs::shared(&input())).unwrap();
+    let second = execute(&op, MoeInputs::shared(&input())).unwrap();
     assert_eq!(first, second);
 }
 
@@ -308,7 +316,7 @@ fn a_residual_of_the_wrong_width_is_refused_naming_both_widths() {
     let fixture = DirectMoeFixture::new();
     let err = execute(
         &fixture.operation(ProjectionArrangement::Decomposed),
-        &[1.0, 2.0],
+        MoeInputs::shared(&[1.0, 2.0]),
     )
     .unwrap_err();
     let text = err.to_string();
