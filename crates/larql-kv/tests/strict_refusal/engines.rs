@@ -9,19 +9,27 @@
 //! ## Two populations, and the difference is not a detail
 //!
 //! ```text
-//! RoutesExperts   dispatches experts through the FFN hook → must refuse
-//! DenseOnly       has no MoE hook at all → cannot refuse
+//! RoutesExperts   dispatches experts through the FFN hook → must refuse a
+//!                 refusing route, and serve an executing one
+//! NoExpertSeam    has no FfnBackend seam in its forward at all → must refuse
+//!                 the *architecture*, before any route is consulted
 //! ```
 //!
-//! `no-cache` and `apollo` are `DenseOnly`, and that is a **finding, not a
-//! pass**. `no-cache` forwards through `larql_kv::generation::kv_prefill_run`
-//! and `apollo` through `larql_inference::forward::forward_from_layer`;
-//! neither consults `FfnBackend::forward_moe_full_layer`, so on a hybrid-MoE
-//! arch both run the dense half of every layer and never dispatch an expert.
-//! There is nothing for a refusal channel to carry, because nothing was
-//! routed. That is a larger gap than the one this PR closes — a silently
-//! expert-free answer, rather than a silently degraded one — and it is pinned
-//! below so it cannot be mistaken for coverage.
+//! The second population exists because "cannot dispatch experts" is not the
+//! same failure as "an expert was missing". An engine whose forward has no
+//! hook runs the dense half of every layer and returns an apparently valid
+//! answer — a *different model* wearing the same answer shape, which nothing
+//! downstream can detect. So those engines refuse the model up front, with
+//! `RefusalKind::Unsupported`: the operands are fine, this executor cannot
+//! serve them, pick another.
+//!
+//! `apollo` is the only member. Its forward (`forward_from_layer` /
+//! `forward_raw_logits`) lives in `larql-compute` *below* the `FfnBackend`
+//! seam and builds its own dense `ViewFfn`, so no caller-supplied backend can
+//! reach it; giving it real dispatch is a change to the forward, not to the
+//! engine. `no-cache` was in this population until
+//! `larql_kv::generation::kv_prefill_run` — which is also the oracle the
+//! dispatch ring is compared against — gained the hook.
 
 use larql_inference::ffn::MoeFfn;
 use larql_inference::kv_engine::EngineError;
@@ -57,9 +65,10 @@ pub enum Coverage {
     /// Reaches `FfnBackend::forward_moe_full_layer`, so a strict route can
     /// refuse through it and the refusal must terminate the operation.
     RoutesExperts,
-    /// Runs a dense-only forward. No expert is dispatched, so no refusal can
-    /// arise — see this module's header.
-    DenseOnly,
+    /// Has no `FfnBackend` seam in its forward, so it cannot dispatch
+    /// experts at all. Must refuse a hybrid-MoE architecture outright rather
+    /// than answer it densely — see this module's header.
+    NoExpertSeam,
 }
 
 pub struct EngineUnderTest {
@@ -136,18 +145,19 @@ pub const ALL: [EngineUnderTest; 9] = [
     },
     EngineUnderTest {
         label: "no-cache",
-        coverage: Coverage::DenseOnly,
+        coverage: Coverage::RoutesExperts,
         build: |_| EngineKind::NoCache,
     },
 ];
 
-/// Apollo, kept out of [`ALL`] because it cannot be driven without a
-/// boundary store — its `prefill` fails on state, never on routing, so it
-/// would answer a question the sweep is not asking. Classified here so the
-/// variant is still accounted for.
+/// Apollo, kept out of [`ALL`] because it cannot be driven without a boundary
+/// store — every other question the sweep asks would be answered by its state
+/// checks rather than by its routing. The architecture refusal below fires
+/// *before* those checks, which is the whole point: it costs nothing and
+/// mutates nothing.
 pub const APOLLO: EngineUnderTest = EngineUnderTest {
     label: "apollo",
-    coverage: Coverage::DenseOnly,
+    coverage: Coverage::NoExpertSeam,
     build: |_| EngineKind::Apollo {
         injection_layer: APOLLO_LAYER,
         inject_coefficient: APOLLO_COEFFICIENT,

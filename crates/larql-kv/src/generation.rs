@@ -38,6 +38,7 @@ use larql_inference::forward::ple::{apply_per_layer_embedding, precompute_per_la
 use larql_inference::forward::{
     embed_tokens_pub, hidden_to_raw_logits, logits_to_predictions_pub, run_ffn,
 };
+use larql_inference::kv_engine::EngineError;
 use larql_inference::ModelWeights;
 use ndarray::Array2;
 
@@ -442,9 +443,15 @@ where
 /// `prompt_ids`, populates a fresh [`KvCache`] (bounded if `window` is
 /// `Some`), and returns `(last_hidden_1xD, populated_cache)`.
 ///
-/// Returns `None` if the prompt is empty or if any layer's attention
-/// fails. This is the production K/V cache prefill loop, extracted so
-/// `KvEngine::prefill` impls can call it directly.
+/// This is the production K/V cache prefill loop, extracted so
+/// `KvEngine::prefill` impls can call it directly, and the oracle the
+/// dispatch ring is compared against — which is why it dispatches experts
+/// through [`crate::engines::layer_ffn_or_moe`] rather than running a dense
+/// FFN. An oracle that skipped the expert half would make every MoE parity
+/// comparison agree about the wrong answer.
+///
+/// Transactional: the cache is built into a local and returned only on
+/// success, so a refusal costs the caller nothing it already had.
 ///
 /// The caller applies `final_norm + lm_head` to the returned hidden
 /// state to get logits.
@@ -456,9 +463,9 @@ pub fn kv_prefill_run(
     window: Option<usize>,
     backend: Option<&dyn larql_compute::ComputeBackend>,
     hook: &mut dyn LayerHook,
-) -> Option<(Array2<f32>, KvCache)> {
+) -> Result<(Array2<f32>, KvCache), EngineError> {
     if prompt_ids.is_empty() {
-        return None;
+        return Err(EngineError::EmptyPrompt);
     }
     let num_layers = weights.num_layers;
     let mut cache = match window {
@@ -475,23 +482,32 @@ pub fn kv_prefill_run(
         hook.on_pre_layer(layer, &h);
 
         let (mut h_post_attn, k_rope, v) =
-            run_attention_with_kv_backend(weights, &h, layer, backend, None)?;
+            run_attention_with_kv_backend(weights, &h, layer, backend, None).ok_or_else(|| {
+                EngineError::BackendFailure {
+                    details: format!("attention returned None during prefill at layer {layer}"),
+                }
+            })?;
         cache.layers[layer] = Some((k_rope, v));
         cache.clip_layer(layer);
 
         hook.on_post_attention(layer, &mut h_post_attn);
 
-        let (h_post_ffn, _) = run_ffn(&weights, &h_post_attn, layer, ffn, false);
-        let mut h_out =
-            apply_per_layer_embedding(&weights, &h_post_ffn, layer, ple_inputs.get(layer));
-        apply_layer_scalar(&weights, &mut h_out, layer);
+        let mut h_out = crate::engines::layer_ffn_or_moe(
+            weights.canonical(),
+            &h_post_attn,
+            layer,
+            ffn,
+            Some(ffn),
+            ple_inputs.get(layer),
+        )
+        .map_err(EngineError::Execution)?;
 
         hook.on_post_layer(layer, &mut h_out);
         h = h_out;
     }
     cache.next_position = prompt_ids.len();
 
-    Some((last_row_as_2d(&h), cache))
+    Ok((last_row_as_2d(&h), cache))
 }
 
 /// Decode-step phase as a reusable building block: takes one new
@@ -500,9 +516,18 @@ pub fn kv_prefill_run(
 /// clip to window), and returns the new token's hidden state (shape
 /// `[1, hidden_dim]`).
 ///
-/// Returns `None` if any layer's attention fails. This is the
-/// production decode step extracted so `KvEngine::decode_step` impls
-/// can call it directly.
+/// This is the production decode step extracted so `KvEngine::decode_step`
+/// impls can call it directly, and — like [`kv_prefill_run`] — the oracle the
+/// dispatch ring is compared against, so it dispatches experts.
+///
+/// **Transactional.** Each layer's attention appends the new token's K/V
+/// before the FFN gets the chance to refuse, so a step that does not complete
+/// truncates every layer back to the length it had on entry. When the cache is
+/// windowed and already at its limit that truncation would be a lie —
+/// append-then-evict leaves the row count unchanged while the oldest row is
+/// gone — so the failure is reported as
+/// [`EngineError::StateInvalidated`] instead, and the caller must rebuild the
+/// cache rather than continue from it.
 #[allow(clippy::too_many_arguments)]
 pub fn kv_decode_step_run(
     weights: &ModelWeights,
@@ -511,7 +536,65 @@ pub fn kv_decode_step_run(
     token_id: u32,
     backend: Option<&dyn larql_compute::ComputeBackend>,
     hook: &mut dyn LayerHook,
-) -> Option<Array2<f32>> {
+) -> Result<Array2<f32>, EngineError> {
+    let entry_rows = cache_row_counts(cache);
+    let rewindable = decode_rewind_is_sound(cache, &entry_rows);
+    match decode_step_appending(weights, ffn, cache, token_id, backend, hook) {
+        Ok(hidden) => Ok(hidden),
+        Err(failure) if rewindable => {
+            rewind_cache(cache, &entry_rows);
+            Err(failure)
+        }
+        Err(failure) => Err(failure.invalidating_engine_state()),
+    }
+}
+
+/// Logical row count per layer, `None` for layers that share another's K/V.
+fn cache_row_counts(cache: &KvCache) -> Vec<Option<usize>> {
+    cache
+        .layers
+        .iter()
+        .map(|slot| slot.as_ref().map(|(k, _)| k.shape()[0]))
+        .collect()
+}
+
+/// Whether truncating back to `entry_rows` would restore the exact cache the
+/// step started from.
+///
+/// Unbounded caches only ever append, so truncation is exact. A windowed cache
+/// that reaches its limit drops its oldest row to make room, and that row is
+/// gone; row count cannot see it, so the only sound test is whether every
+/// layer had room to spare before the step began.
+fn decode_rewind_is_sound(cache: &KvCache, entry_rows: &[Option<usize>]) -> bool {
+    match cache.max_window {
+        None => true,
+        Some(w) => entry_rows.iter().flatten().all(|&rows| rows < w),
+    }
+}
+
+/// Truncate every layer back to its recorded length.
+fn rewind_cache(cache: &mut KvCache, entry_rows: &[Option<usize>]) {
+    for (slot, rows) in cache.layers.iter_mut().zip(entry_rows) {
+        let (Some((k, v)), Some(rows)) = (slot.as_mut(), rows) else {
+            continue;
+        };
+        if k.shape()[0] > *rows {
+            *k = k.slice(ndarray::s![..*rows, ..]).to_owned();
+            *v = v.slice(ndarray::s![..*rows, ..]).to_owned();
+        }
+    }
+}
+
+/// The body of a decode step, which appends to `cache` as it goes.
+#[allow(clippy::too_many_arguments)]
+fn decode_step_appending(
+    weights: &ModelWeights,
+    ffn: &dyn FfnBackend,
+    cache: &mut KvCache,
+    token_id: u32,
+    backend: Option<&dyn larql_compute::ComputeBackend>,
+    hook: &mut dyn LayerHook,
+) -> Result<Array2<f32>, EngineError> {
     let num_layers = weights.num_layers;
     let h_new = embed_tokens_pub(weights, &[token_id]);
     let abs_position = cache.next_position;
@@ -532,22 +615,30 @@ pub fn kv_decode_step_run(
             kv_entry,
             abs_position,
             backend,
-        )?;
+        )
+        .ok_or_else(|| EngineError::BackendFailure {
+            details: format!("attention returned None during decode at layer {layer}"),
+        })?;
         cache.layers[layer] = Some(new_kv);
         cache.clip_layer(layer);
 
         hook.on_post_attention(layer, &mut h_post_attn);
 
-        let (h_post_ffn, _) = run_ffn(weights, &h_post_attn, layer, ffn, false);
-        let mut h_out =
-            apply_per_layer_embedding(weights, &h_post_ffn, layer, ple_inputs.get(layer));
-        apply_layer_scalar(weights, &mut h_out, layer);
+        let mut h_out = crate::engines::layer_ffn_or_moe(
+            weights,
+            &h_post_attn,
+            layer,
+            ffn,
+            Some(ffn),
+            ple_inputs.get(layer),
+        )
+        .map_err(EngineError::Execution)?;
 
         hook.on_post_layer(layer, &mut h_out);
         h_step = h_out;
     }
     cache.next_position += 1;
-    Some(h_step)
+    Ok(h_step)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -575,8 +666,8 @@ fn generate_cached_hooked_inner(
         backend,
         hook,
     ) {
-        Some(t) => t,
-        None => return Vec::new(),
+        Ok(t) => t,
+        Err(_) => return Vec::new(),
     };
 
     let first = match argmax_next_token(weights, tokenizer, &last_hidden) {
@@ -597,8 +688,8 @@ fn generate_cached_hooked_inner(
     let mut current_id = first.0;
     for _step in 1..max_new_tokens {
         let h_step = match kv_decode_step_run(weights, ffn, &mut cache, current_id, backend, hook) {
-            Some(h) => h,
-            None => break,
+            Ok(h) => h,
+            Err(_) => break,
         };
         let (id, tok_str) = match argmax_next_token(weights, tokenizer, &h_step) {
             Some(t) => t,
@@ -831,6 +922,129 @@ mod tests {
     use larql_inference::ffn::WeightFfn;
     use larql_inference::test_utils::{make_test_tokenizer, make_test_weights};
 
+    // ── The oracle's decode transaction ──────────────────────────────────
+    //
+    // `kv_decode_step_run` appends each layer's K/V before the FFN gets the
+    // chance to refuse. These pin the two answers it can give about what that
+    // leaves behind — the same pair `StandardEngine` gives, because it is the
+    // same question about the same kind of state.
+
+    /// A route that refuses every layer, so the FFN half of the step fails
+    /// after attention has already appended.
+    struct AlwaysRefuses;
+
+    impl larql_inference::ffn::MoeExpertBackend for AlwaysRefuses {
+        fn forward_moe_seq(
+            &self,
+            _weights: &ModelWeights,
+            _layer: usize,
+            _h: &Array2<f32>,
+            _norm_offset: f32,
+            _eps: f32,
+        ) -> Result<Array2<f32>, larql_inference::ffn::MoeBackendError> {
+            Err(larql_inference::ffn::MoeBackendError::Bound(
+                larql_vindex::runtime::ExecutionError::ExpertOutOfRange {
+                    expert: 99,
+                    population: 8,
+                },
+            ))
+        }
+        fn name(&self) -> &'static str {
+            "always-refuses"
+        }
+    }
+
+    #[test]
+    fn a_refused_decode_truncates_the_cache_back_to_its_entry_length() {
+        let weights = larql_inference::test_utils::make_test_gemma4_moe_weights();
+        let clean = WeightFfn { weights: &weights };
+        let prompt = [0u32, 1, 2];
+        let (_, mut cache) = kv_prefill_run(
+            larql_inference::WeightsView::dense(&weights),
+            &clean,
+            &prompt,
+            None,
+            None,
+            &mut NoopHook,
+        )
+        .expect("clean prefill");
+        let before: Vec<Option<usize>> = super::cache_row_counts(&cache);
+        let position_before = cache.next_position;
+
+        let route = AlwaysRefuses;
+        let refusing = larql_inference::ffn::MoeFfn::strict(&weights, &route);
+        let err = kv_decode_step_run(&weights, &refusing, &mut cache, 3, None, &mut NoopHook)
+            .expect_err("a refused step must not produce a hidden state");
+        assert!(err.engine_state_is_retryable());
+        assert_eq!(
+            super::cache_row_counts(&cache),
+            before,
+            "the refused step must leave the cache exactly as it found it"
+        );
+        assert_eq!(
+            cache.next_position, position_before,
+            "position advances only on success"
+        );
+
+        // And the retried token computes what an untouched cache computes.
+        let retried = kv_decode_step_run(&weights, &clean, &mut cache, 3, None, &mut NoopHook)
+            .expect("the rewound cache must accept the retry");
+        let (_, mut reference) = kv_prefill_run(
+            larql_inference::WeightsView::dense(&weights),
+            &clean,
+            &prompt,
+            None,
+            None,
+            &mut NoopHook,
+        )
+        .expect("reference prefill");
+        let baseline = kv_decode_step_run(&weights, &clean, &mut reference, 3, None, &mut NoopHook)
+            .expect("reference decode");
+        assert_eq!(
+            retried.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            baseline.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            "a retry after a rewound refusal must be bit-identical to never having refused"
+        );
+    }
+
+    #[test]
+    fn a_refused_decode_on_a_full_window_reports_an_invalidated_cache() {
+        const WINDOW: usize = 2;
+        let weights = larql_inference::test_utils::make_test_gemma4_moe_weights();
+        let clean = WeightFfn { weights: &weights };
+        // Prompt longer than the window leaves every layer at the limit — the
+        // state in which the next append must evict, and eviction is not
+        // undoable by truncation.
+        let (_, mut cache) = kv_prefill_run(
+            larql_inference::WeightsView::dense(&weights),
+            &clean,
+            &[0u32, 1, 2],
+            Some(WINDOW),
+            None,
+            &mut NoopHook,
+        )
+        .expect("windowed prefill");
+
+        let route = AlwaysRefuses;
+        let refusing = larql_inference::ffn::MoeFfn::strict(&weights, &route);
+        let err = kv_decode_step_run(&weights, &refusing, &mut cache, 3, None, &mut NoopHook)
+            .expect_err("must refuse");
+        assert!(
+            matches!(
+                err,
+                larql_inference::kv_engine::EngineError::StateInvalidated { .. }
+            ),
+            "append-then-evict leaves the row count unchanged while the oldest row is \
+             gone, so this must not be reported as an ordinary refusal: {err:?}"
+        );
+        assert!(!err.engine_state_is_retryable());
+        // The classification still reaches whoever has to act on it.
+        assert_eq!(
+            err.refusal_kind(),
+            Some(larql_execution::RefusalKind::BindingDefect)
+        );
+    }
+
     #[test]
     fn generate_cached_returns_token_ids() {
         let weights = make_test_weights();
@@ -902,12 +1116,7 @@ mod tests {
                 None,
                 None,
                 &mut NoopHook,
-            )
-            .ok_or_else(|| {
-                larql_inference::kv_engine::EngineError::BackendFailure {
-                    details: "kv_prefill_run returned None".into(),
-                }
-            })?;
+            )?;
             self.cache = Some(cache);
             Ok(hidden)
         }
@@ -930,11 +1139,7 @@ mod tests {
                     what: "decode_step called before prefill".into(),
                 }
             })?;
-            kv_decode_step_run(weights, ffn, cache, token_id, None, &mut NoopHook).ok_or_else(
-                || larql_inference::kv_engine::EngineError::BackendFailure {
-                    details: "kv_decode_step_run returned None".into(),
-                },
-            )
+            kv_decode_step_run(weights, ffn, cache, token_id, None, &mut NoopHook)
         }
         // MM support: drive `generate_with_engine_from_hidden`. We can't
         // recover the original tokens from a pre-built hidden state, so the
@@ -964,12 +1169,7 @@ mod tests {
                 None,
                 None,
                 &mut NoopHook,
-            )
-            .ok_or_else(|| {
-                larql_inference::kv_engine::EngineError::BackendFailure {
-                    details: "kv_prefill_run returned None".into(),
-                }
-            })?;
+            )?;
             self.cache = Some(cache);
             Ok(hidden)
         }
@@ -1344,7 +1544,7 @@ mod tests {
 
         for step in 0..3 {
             let h_step = kv_decode_step_run(&weights, &ffn, &mut cache, 0u32, None, &mut NoopHook)
-                .unwrap_or_else(|| panic!("decode step {step} returned None"));
+                .unwrap_or_else(|e| panic!("decode step {step} failed: {e:?}"));
             assert_eq!(h_step.shape(), &[1, weights.hidden_size]);
             assert!(
                 h_step.iter().all(|v| v.is_finite()),

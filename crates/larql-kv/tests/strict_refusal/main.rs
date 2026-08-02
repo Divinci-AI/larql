@@ -37,13 +37,13 @@
 //! The engines that route their FFN through `larql_kv::engines::layer_ffn_or_moe`
 //! rather than through the dispatch helpers (markov-rs, markov-rs-codec,
 //! turbo-quant, unlimited-context, boundary-per-layer) are covered by
-//! [`engines`] and [`engine_state`]: that helper carries the refusal too now.
+//! [`engines_gate`] and [`engine_state`]: that helper carries the refusal too
+//! now. So does `larql_kv::generation::kv_prefill_run`, which is both
+//! `no-cache`'s forward and the oracle the dispatch ring is compared against.
 //!
-//! `no-cache` and `apollo` are **not** covered, and not because they pass —
-//! neither consults the MoE hook at all, so on a hybrid-MoE arch they answer
-//! with dense-only layers and there is no refusal to carry. See
-//! [`engines`]'s header; that gap is larger than this one and is pinned
-//! rather than papered over.
+//! `apollo` is the one engine that cannot dispatch experts at all — its
+//! forward runs below the `FfnBackend` seam — so it refuses the
+//! *architecture* rather than a route. See [`engines`]'s header.
 
 mod engine_state;
 mod engines;

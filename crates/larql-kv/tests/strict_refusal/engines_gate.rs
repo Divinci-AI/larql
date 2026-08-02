@@ -9,7 +9,6 @@
 use crate::engines::{drive, Coverage, Op, ALL, APOLLO};
 use larql_execution::RefusalKind;
 use larql_inference::ffn::MoeFfn;
-use larql_inference::kv_engine::EngineError;
 use larql_inference::test_utils::make_test_gemma4_moe_weights;
 
 use crate::routes::{ExecutingRoute, RefusingRoute};
@@ -97,43 +96,59 @@ fn an_executing_route_serves_in_every_expert_routing_engine() {
     }
 }
 
-/// The dense-only engines produce **no refusal at all**, and that is the
-/// gap — not the guarantee.
+/// An engine with no expert seam refuses the **architecture**, before any
+/// route is consulted.
 ///
-/// `no-cache` and `apollo` never consult the MoE hook, so on a hybrid-MoE
-/// arch they answer with dense-only layers and a strict policy has nothing
-/// to fire on. Pinned so the sweep above cannot be read as "every engine
-/// is covered": these two are excluded by evidence, with the evidence
-/// recorded. When either grows an expert-dispatch path it must move to
-/// `RoutesExperts` and this assertion will fail until it does.
+/// This is the correction for the worse failure. Such an engine used to run
+/// the dense half of every layer and return an apparently valid answer — a
+/// different model wearing the same answer shape, which nothing downstream
+/// could detect. `Unsupported` is the honest classification: the operands are
+/// present and well-formed, this executor has no bound kernel for them, and
+/// the response is to pick another.
+///
+/// Asserted with a route that *executes*, so the refusal cannot be coming
+/// from the route. It is the engine declining the model.
 #[test]
-fn dense_only_engines_never_refuse_because_they_never_route() {
+fn an_engine_with_no_expert_seam_refuses_the_architecture_itself() {
     let weights = make_test_gemma4_moe_weights();
-    let dense_only: Vec<_> = ALL
+    let no_seam: Vec<_> = ALL
         .iter()
-        .filter(|e| e.coverage == Coverage::DenseOnly)
+        .filter(|e| e.coverage == Coverage::NoExpertSeam)
         .chain(std::iter::once(&APOLLO))
         .collect();
 
-    for under_test in &dense_only {
-        let route = RefusingRoute::new(RefusalKind::Residency);
-        let ffn = MoeFfn::strict(&weights, &route);
-        let outcome = drive(under_test, Op::Prefill, &weights, &ffn);
-        assert!(
-            outcome
-                .as_ref()
-                .err()
-                .and_then(EngineError::refusal_kind)
-                .is_none(),
-            "{}: a dense-only engine cannot produce a refusal — if it now can, \
-             reclassify it as RoutesExperts and let the gate cover it",
-            under_test.label
-        );
-        assert!(
-            ffn.refusal().is_none(),
-            "{}: the route was never consulted, so nothing may be recorded",
-            under_test.label
-        );
+    let mut checked = 0usize;
+    for under_test in &no_seam {
+        let label = under_test.label;
+        for op in Op::ALL {
+            // An *executing* route, so the refusal cannot be coming from the
+            // route — it is the engine declining the model.
+            let ffn = MoeFfn::strict(&weights, &ExecutingRoute);
+            let err = match drive(under_test, op, &weights, &ffn) {
+                Ok(hidden) => panic!(
+                    "{label}/{op:?} returned Ok({:?}) — a forward with no expert seam \
+                     answered for a model whose weights declare routed experts",
+                    hidden.shape()
+                ),
+                Err(e) => e,
+            };
+            assert_eq!(
+                err.refusal_kind(),
+                Some(RefusalKind::Unsupported),
+                "{label}/{op:?}: the operands are fine and this executor cannot serve \
+                 them, which is exactly Unsupported; got {err:?}"
+            );
+            assert!(
+                err.engine_state_is_retryable(),
+                "{label}/{op:?}: refusing before any forward work mutates nothing"
+            );
+            assert!(
+                ffn.refusal().is_none(),
+                "{label}/{op:?}: the route was never consulted, so nothing may be recorded"
+            );
+            checked += 1;
+        }
     }
-    assert_eq!(dense_only.len(), 2, "dense-only population changed");
+    assert_eq!(no_seam.len(), 1, "no-expert-seam population changed");
+    assert_eq!(checked, no_seam.len() * Op::ALL.len(), "coverage shrank");
 }

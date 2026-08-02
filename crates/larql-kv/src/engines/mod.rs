@@ -53,11 +53,13 @@ mod layer_ffn;
 pub mod markov_residual;
 pub mod markov_residual_codec;
 pub mod no_cache;
+pub mod no_expert_route;
 pub mod standard;
 pub mod turbo_quant;
 pub mod unlimited_context;
 
 pub(crate) use layer_ffn::{apply_ple_and_layer_scalar, layer_ffn_or_moe};
+pub(crate) use no_expert_route::refuse_if_moe;
 
 /// Whether W10 mask cascade is active.
 ///
