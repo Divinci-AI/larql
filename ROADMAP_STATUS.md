@@ -33,13 +33,20 @@ the baseline, (3) Kimi Linear bring-up as the K3 adapter rehearsal (R2 of
 execute one K3 expert, (6) execute one latent MoE layer, (7) produce one exact
 K3 token, (8) establish the exact-format performance baseline, (9) only then
 return to MAP-scale physical prefetch policies informed by the above, (10)
-build the incremental decode/KV-cache instrumentation surface (needed to
-measure whether MAP-5's waypoint transplant is token-mediated or genuinely
-persists in hidden/cache state — no such instrument exists today) once it can
-serve both mechanistic research and runtime debugging, rather than as
-bespoke one-off scaffolding. Full experiment records, write-ups, and this
-same queue are on chuk-experiments programme `map` (see `map-5`, `map-6`,
-`map-3-4-bridge` for the individual next_action fields carrying this note).
+build the K/V intervention hook needed to measure whether MAP-5's waypoint
+transplant is token-mediated or genuinely persists in cache state — **scoped
+and verified against the real code, not a from-scratch build**: `larql-kv`
+already has genuine incremental decode (`StandardEngine::prefill`/
+`decode_step`, real per-step state) and 8 continuation-state policies behind
+one `KvEngine` dispatch; the actual gap is narrow — no hook anywhere exposes
+raw K/V during attention (`LayerHook` only ever sees the post-attention
+residual) — see [`crates/larql-kv/ROADMAP.md`](crates/larql-kv/ROADMAP.md)'s
+"MAP-5 persistence harness" entry for the verified scoping and a design
+sketch. Serve both mechanistic research and runtime debugging with it, don't
+build bespoke one-off scaffolding. Full experiment records, write-ups, and
+this same queue are on chuk-experiments programme `map` (see `map-5`,
+`map-6`, `map-3-4-bridge` for the individual next_action fields carrying
+this note).
 
 ## Recently shipped (delta since last update)
 

@@ -1,5 +1,107 @@
 # Roadmap — larql-kv
 
+## MAP-5 persistence harness — scoped and verified, not started (2026-08-02)
+
+A parallel mechanistic-interpretability thread (MAP-5/5b/5c, registry
+`map`, see `crates/larql-inference/examples/map5*.rs`) found that a
+late-layer residual can act as a compact, content-specific executable
+waypoint: splicing a donor prompt's residual into a recipient at one
+position/layer redirects the recipient's output to the donor's answer,
+with separate, measurably different depth thresholds for redirecting
+the immediate next token vs. sustaining a later branch under repeated
+re-injection. The open question — does this persist as genuine hidden
+state, or is it entirely mediated by which token gets emitted — could
+not be answered by MAP-5b's harness, because `trace_forward_full`/
+`patch_and_trace_with_ffn` (the activation-patching primitives it used)
+recompute the ENTIRE hidden state from raw token IDs on every call, with
+no persistent state threaded between generation steps. Testing genuine
+persistence needs a real incremental decode loop with actual K/V
+continuity across steps — which is most of what this crate already is.
+**Scoped here so the harness can be picked up once VINDEX3 lands**,
+without duplicating this crate's own state/execution machinery.
+
+**What already exists (verified against the current code, not assumed):**
+
+- `StandardEngine::prefill(weights, ffn, token_ids)` and
+  `::decode_step(weights, ffn, token_id)` (`engines/standard.rs`) are
+  genuine incremental decode: `token_id` is explicit per step, state
+  (`handles: Option<Vec<KvHandle>>`, `abs_position`) lives in `&mut
+  self` and persists across calls — not a recompute-from-scratch design.
+  This directly gives arm **C** (donor-token-only, no residual patch:
+  `engine.prefill(recipient)?; engine.decode_step(donor_token)?;`) and
+  arm **D** (residual patch, then force the recipient's own token into
+  the next step) as thin drivers, no new engine code.
+- `KvHandle` (`larql-compute::kv_dispatch::handles`) is real but
+  **opaque** — `cached_len()`/`kv_dim()`/`backend_name()`/`as_any()`
+  only, no per-row read or write. `StandardEngine` migrated OFF the old
+  `larql-kv::cache::KvCache` (with its `get_layer`/`set_layer`/
+  `clone_layer_from`/`clone_layer_position_range`) on 2026-05-16 per its
+  own module doc — that API is not reachable from the current handle-based
+  decode path. Earlier notes citing those methods as usable for this
+  harness were wrong; they exist, but on a representation `StandardEngine`
+  no longer touches.
+- `KvEngine` (`larql-inference::kv_engine`) has 8 implementors —
+  `StandardEngine`, `NoCacheEngine`, `UnlimitedContextEngine`,
+  `MarkovResidualEngine`, `MarkovResidualCodecEngine`, `TurboQuantEngine`,
+  `BoundaryPerLayerEngine`, `BoundaryKvEngine` (`ApolloEngine` implements
+  a separate `RetrievalEngine` trait, not this one) — a real, already-built
+  catalogue of different continuation-state policies (canonical K/V vs.
+  canonical residual with derivative K/V, etc., per `docs/state-policy.md`
+  §5's slotting table), reachable through one dispatch surface.
+- **Correction to an earlier framing**: `docs/state-policy.md`'s
+  `(canonical_state, derivative_state, correctness_contract)` triple is a
+  **draft proposal (v0.1)**, not an implemented framework — the doc's own
+  §7 states refactoring `KvEngine` to formalize it is explicitly a
+  non-goal for now. It's a good *descriptive* lens for reasoning about
+  the engines (and for interpreting this harness's own results), but it
+  is not code anyone can call today.
+- No hook anywhere lets a caller intercept or mutate raw K/V during
+  attention — confirmed by direct search (`before_attention`,
+  `before_append`, and any K/V-observing `LayerHook` method: zero
+  matches). `LayerHook::on_post_attention`/`on_post_layer`
+  (`larql-compute::forward::hooks`) only ever see the **residual**, after
+  attention has already run and consumed whatever K/V existed — this is
+  the one genuinely missing piece.
+
+**What's actually missing, precisely:** an intervention-capable bridge
+between an incremental engine's K/V state and the attention computation
+that creates/reads/appends it — nothing else needed for the six-arm
+design (see `map-5`'s chuk-experiments record for the arm definitions
+and how they map onto existing vs. new machinery). A rough shape, not a
+commitment:
+
+```rust
+// Proposed — does not exist yet. Lives in larql-compute (low-level
+// observation/mutation over the real attention/append path), surfaced
+// through a larql-inference hook type, orchestrated by an larql-kv
+// experimental driver (NOT folded into KvEngine itself — that trait
+// stays production-shaped: continuation state, advance, correctness
+// contract; a raw-K/V research hook doesn't belong on its signature).
+pub trait KvIntervention {
+    fn before_attention(&mut self, layer: usize, position: usize, cache: &mut dyn MutableKvView);
+    fn before_append(&mut self, layer: usize, position: usize, key: &mut [f32], value: &mut [f32]);
+}
+```
+
+`MutableKvView` would need to distinguish current-token K/V (about to be
+appended) from historical-cache K/V (already stored, read by this
+step's attention) from whole-layer transplant from position-range
+transplant from K-only/V-only mutation — conflating these makes any
+result hard to interpret. CPU implements it first; Metal/opaque
+whole-model-handle backends report unsupported rather than silently
+falling back to a CPU copy.
+
+**Do not build a parallel experimental decode loop.** The correct shape
+is an instrumented research mode bolted onto `StandardEngine`'s existing
+CPU path (selectively inspectable/forkable), with the fast/opaque
+production path left untouched — not a second engine competing with this
+crate's own state-policy catalogue.
+
+**Explicitly deferred pending VINDEX3** (see `ROADMAP_STATUS.md`'s
+2026-08-02 entry and chuk-experiments `map-5`'s `next_action`) — this
+section exists so the scoping work already done isn't lost, not as a
+signal to start now.
+
 ## Spin-barrier pool — CPU MoE decode caught llama.cpp (2026-06-13)
 
 After residency closed the byte-traffic gap (06-11/12), a `/usr/bin/sample` of
