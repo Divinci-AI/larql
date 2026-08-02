@@ -33,12 +33,15 @@ impl StepTimings {
     /// loop unreadable, and a mistimed stage silently misattributes the
     /// engine's cost.
     pub(super) fn measure<T>(enabled: bool, slot: &mut f64, f: impl FnOnce() -> T) -> T {
+        /// The profiler reports microseconds; `elapsed` gives seconds.
+        const MICROS_PER_SECOND: f64 = 1e6;
+
         if !enabled {
             return f();
         }
         let start = std::time::Instant::now();
         let out = f();
-        *slot += start.elapsed().as_secs_f64() * 1e6;
+        *slot += start.elapsed().as_secs_f64() * MICROS_PER_SECOND;
         out
     }
 }
