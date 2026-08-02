@@ -351,7 +351,9 @@ pub fn gate_only_segment_bytes() -> Vec<u8> {
     let plan = Lyrw2Plan::single_segment(FIXTURE_A_LAYER, bank, schemas);
     let mut writer = Lyrw2Writer::create(&path, plan).expect("create writer");
     for expert in 0..FIXTURE_A_EXPERTS {
-        writer.write_region(&as_bytes(&gate_f32(expert))).expect("gate");
+        writer
+            .write_region(&as_bytes(&gate_f32(expert)))
+            .expect("gate");
         writer.write_region(&as_bytes(&up_f32(expert))).expect("up");
     }
     writer.finish().expect("finish");

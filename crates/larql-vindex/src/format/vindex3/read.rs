@@ -168,8 +168,13 @@ mod tests {
     fn an_opened_container_reports_where_it_came_from_and_what_it_declares() {
         let (dir, c) = opened();
         assert_eq!(c.root(), dir.path());
-        assert_eq!(c.index().version, crate::format::generation::V3_CURRENT_SCHEMA);
-        assert!(c.index().declares_profile(crate::format::vindex3::PROFILE_EXACT));
+        assert_eq!(
+            c.index().version,
+            crate::format::generation::V3_CURRENT_SCHEMA
+        );
+        assert!(c
+            .index()
+            .declares_profile(crate::format::vindex3::PROFILE_EXACT));
         assert_eq!(c.manifest().layers.len(), 1);
     }
 
@@ -198,9 +203,10 @@ mod tests {
     fn a_declared_segment_that_is_absent_is_refused_naming_the_key() {
         let dir = tempdir().unwrap();
         write_container(dir.path(), &fixture_a_spec()).expect("write");
-        std::fs::remove_file(
-            crate::format::vindex3::segment_path(dir.path(), FIXTURE_A_SEGMENT_KEY),
-        )
+        std::fs::remove_file(crate::format::vindex3::segment_path(
+            dir.path(),
+            FIXTURE_A_SEGMENT_KEY,
+        ))
         .unwrap();
         let msg = match Vindex3Container::open(dir.path()) {
             Ok(_) => panic!("a container missing a declared segment must not open"),

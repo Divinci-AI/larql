@@ -233,7 +233,10 @@ mod tests {
     }
 
     /// Write a container from `spec` into a private dir and verify it.
-    fn verify_spec(tag: &str, spec: &crate::format::vindex3::ContainerSpec) -> Vec<ContainerDefect> {
+    fn verify_spec(
+        tag: &str,
+        spec: &crate::format::vindex3::ContainerSpec,
+    ) -> Vec<ContainerDefect> {
         let dir = std::env::temp_dir().join(format!("v3-verify-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         write_container(&dir, spec).expect("write");
@@ -265,8 +268,13 @@ mod tests {
         // alternative can be satisfied by. The defect must say `Down` rather
         // than "unsatisfied", or the reader has to diff the alternatives by
         // hand to learn what to add.
-        use crate::format::vindex3::test_support::{gate_only_segment_bytes, spec_with_segment_bytes};
-        let defects = verify_spec("noduown", &spec_with_segment_bytes(gate_only_segment_bytes()));
+        use crate::format::vindex3::test_support::{
+            gate_only_segment_bytes, spec_with_segment_bytes,
+        };
+        let defects = verify_spec(
+            "noduown",
+            &spec_with_segment_bytes(gate_only_segment_bytes()),
+        );
         let missing = defects
             .iter()
             .find_map(|d| match d {
