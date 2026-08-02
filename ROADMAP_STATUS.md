@@ -4,7 +4,7 @@ Canonical rollup for the next execution slice. Keep the detailed design in
 `ROADMAP.md` and crate-local roadmaps; use this file to answer "what is active
 now?" without rereading every crate document.
 
-Last updated: 2026-08-01
+Last updated: 2026-08-02
 
 **Active slice: the DEC funnel** ([`docs/dec-funnel.md`](docs/dec-funnel.md) v0.5)
 — decoupled attention/weights serving, DEC-0 … DEC-7 plus the G-ladder (CUDA
@@ -13,6 +13,33 @@ The V1–V4 aim-validation gate that previously governed this file is **closed**
 (V1 falsified dense + MoE, V2 confirmed, V3 locality poor); its table is retained
 below as resolved history. Registry programme `dec` on the experiments server is
 the system of record for stage results.
+
+**MAP mechanistic-interp programme (registry `map`) PAUSED after MAP-5c
+(2026-08-02)** — a parallel research track, not part of the DEC/K3 critical
+path, deliberately stopped at a coherent boundary rather than left mid-thread.
+Findings, in engineering-relevant form: MoE-routed operands are exact,
+content-addressed, and not fungible with capacity-matched substitutes (MAP-3);
+future routed-expert identity has only narrow, mostly-popularity-explained
+predictability (map-3-4-bridge); a late-layer residual can act as a compact,
+content-specific executable waypoint that a recipient's own remaining
+computation will convert into the donor's answer, with separate and provably
+different depth thresholds for redirecting the immediate token vs. sustaining
+a later branch under repeated re-injection (MAP-5/5b/5c). None of this blocks
+K3 execution — the open question is no longer conceptual, it is whether K3's
+actual tensor families import and execute correctly. Recommended queue before
+any further MAP work: (1) complete VINDEX3 verification, (2) merge and tag
+the baseline, (3) Kimi Linear bring-up as the K3 adapter rehearsal (R2 of
+[`docs/k3-funnel.md`](docs/k3-funnel.md)), (4) K3 census + import (R3), (5)
+execute one K3 expert, (6) execute one latent MoE layer, (7) produce one exact
+K3 token, (8) establish the exact-format performance baseline, (9) only then
+return to MAP-scale physical prefetch policies informed by the above, (10)
+build the incremental decode/KV-cache instrumentation surface (needed to
+measure whether MAP-5's waypoint transplant is token-mediated or genuinely
+persists in hidden/cache state — no such instrument exists today) once it can
+serve both mechanistic research and runtime debugging, rather than as
+bespoke one-off scaffolding. Full experiment records, write-ups, and this
+same queue are on chuk-experiments programme `map` (see `map-5`, `map-6`,
+`map-3-4-bridge` for the individual next_action fields carrying this note).
 
 ## Recently shipped (delta since last update)
 
