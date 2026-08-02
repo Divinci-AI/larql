@@ -51,6 +51,7 @@ pub mod router;
 pub mod tensor;
 pub mod trace;
 pub mod transform;
+pub mod verdict;
 
 #[cfg(test)]
 mod tests;
@@ -70,3 +71,4 @@ pub use router::{BoundExpertScaling, BoundRouter, RouterKernel, SelectedExpert};
 pub use tensor::BoundTensor;
 pub use trace::{CollectedTrace, ExpertOutput, NoTrace, TraceSink};
 pub use transform::{BoundTransform, TransformStage};
+pub use verdict::{RefusalKind, Verdict};
