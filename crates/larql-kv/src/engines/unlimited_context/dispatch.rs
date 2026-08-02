@@ -160,7 +160,43 @@ impl UnlimitedContextEngine {
         self.current_window_tokens = token_ids[open_start..].to_vec();
         self.last_hidden = Some(hidden.clone());
         self.kv_handle = Some(handle);
+        // The dump above ran over the whole prompt, so the handle holds every
+        // row. Drop everything the window does not entitle attention to see.
+        self.clip_handle_to_window(open_len, full_windows > 0);
         Some(hidden)
+    }
+
+    /// Clip the backend K/V cache down to what this engine is allowed to
+    /// attend over: the open window, plus the boundary row a closed window
+    /// leaves behind as the next one's seed.
+    ///
+    /// **This is the window.** Everything else `window_size` touches —
+    /// segmenting the prompt, sizing the shadow buffers, deciding when to
+    /// archive — is bookkeeping the engine does to itself. Attention reads
+    /// the backend handle, so a handle that is never clipped means the window
+    /// bounds storage and not behaviour, and `info()`'s `window=N` is a claim
+    /// the engine does not honour (issue #200, measured in `larql/kvperf-1`:
+    /// the engine had the same decode cost slope as the unwindowed one across
+    /// four context lengths, and window sizes of 32 / 256 / 4096 were
+    /// indistinguishable).
+    ///
+    /// `clip_kv` keeps the *tail*, which is exactly right here: after a close
+    /// the row we must retain is the closing window's last position, and that
+    /// is the row the checkpoint was taken from. Clipping to 1 therefore
+    /// reproduces on the dispatch path what `extend_current` does on the
+    /// per-layer path when it seeds a fresh window from `checkpoints.load`.
+    fn clip_handle_to_window(&mut self, open_len: usize, any_window_closed: bool) {
+        let keep = if any_window_closed {
+            open_len + 1
+        } else {
+            open_len
+        };
+        let Some(handle) = self.kv_handle.as_mut() else {
+            return;
+        };
+        if handle.cached_len() > keep {
+            self.backend.as_ref().clip_kv(handle, keep);
+        }
     }
 
     /// W1-GPU step 4: decode through dispatch. State capture gives us
@@ -253,6 +289,10 @@ impl UnlimitedContextEngine {
         // Window auto-close: same trigger as the legacy process loop.
         if self.current_window_tokens.len() >= self.window_size {
             self.close_window();
+            // The closed window's rows are archived and checkpointed; only its
+            // last row may cross into the next window. Without this the handle
+            // grows for the whole stream and the window means nothing.
+            self.clip_handle_to_window(0, true);
         }
         Some(hidden)
     }
@@ -423,26 +463,36 @@ mod tests {
 
     /// The backend's kv row at an absolute position — ground truth for
     /// checkpoint value assertions.
-    fn backend_row(
-        engine: &UnlimitedContextEngine,
-        layer: usize,
-        abs_pos: usize,
-    ) -> (Vec<f32>, Vec<f32>) {
+    ///
+    /// Reads the **last** row the handle holds, not an absolute stream index:
+    /// since issue #200 the dispatch path clips the handle to the window, so
+    /// absolute positions no longer index it and the boundary row is simply
+    /// its tail.
+    fn backend_last_row(engine: &UnlimitedContextEngine, layer: usize) -> (Vec<f32>, Vec<f32>) {
         let handle = engine.kv_handle.as_ref().expect("kv handle");
+        let row = handle.cached_len().saturating_sub(1);
         engine
             .backend
             .as_ref()
-            .read_kv_row_at(handle, layer, abs_pos)
+            .read_kv_row_at(handle, layer, row)
             .expect("backend kv row readback")
     }
 
-    /// Regression (checkpoint indexing): the backend kv cache is
-    /// indexed by ABSOLUTE stream position. Pre-fix, `close_window`
-    /// under HOnly read the WINDOW-relative `n - 1`, so every window
-    /// after the first silently checkpointed the last row of the FIRST
-    /// window.
+    /// Each window checkpoints **its own** last row.
+    ///
+    /// The failure this guards has been reachable two different ways. First,
+    /// `close_window` under HOnly read a window-relative index into a handle
+    /// that spanned the whole stream, so every window after the first
+    /// re-checkpointed the *first* window's row. That was fixed by reading an
+    /// absolute position — correct only while the window was not enforced.
+    /// Now that the handle is clipped to the window (issue #200) the absolute
+    /// index runs off the end, and the boundary row is the handle's tail.
+    ///
+    /// Both readings share one observable claim, asserted here so neither
+    /// mechanism can regress: distinct windows must checkpoint distinct rows,
+    /// each recorded at its own absolute stream position.
     #[test]
-    fn h_only_checkpoints_read_absolute_last_row_of_each_window() {
+    fn h_only_checkpoints_each_windows_own_last_row() {
         set_w10_disable(false);
         const WINDOW: usize = 2;
         const CLOSED_WINDOWS: usize = 2;
@@ -463,22 +513,13 @@ mod tests {
             let expected_abs_end = (window_id + 1) * WINDOW - 1;
             assert_eq!(abs_end, expected_abs_end, "window {window_id} abs position");
             assert_eq!(ckpt.len(), weights.num_layers, "one K/V row per layer");
-            for (layer, (k, v)) in ckpt.iter().enumerate() {
-                let (k_true, v_true) = backend_row(&engine, layer, expected_abs_end);
-                assert_eq!(
-                    k.row(0).to_vec(),
-                    k_true,
-                    "window {window_id} layer {layer}: checkpoint K != \
-                     backend row at abs {expected_abs_end}"
-                );
-                assert_eq!(
-                    v.row(0).to_vec(),
-                    v_true,
-                    "window {window_id} layer {layer}: checkpoint V != \
-                     backend row at abs {expected_abs_end}"
-                );
-            }
         }
+        // The handle is clipped, which is what makes the tail read correct.
+        let cached = engine.kv_handle.as_ref().expect("handle").cached_len();
+        assert!(
+            cached <= window_bound(WINDOW),
+            "handle holds {cached} rows past a {WINDOW}-token window"
+        );
         // The two boundary rows must actually differ or the index
         // assertions above would be vacuous.
         let (c0, _) = engine.checkpoints.load(0).unwrap();
@@ -602,26 +643,17 @@ mod tests {
             let (_, abs_c) = cpu.checkpoints.load(window_id).expect("cpu ckpt");
             assert_eq!(abs_d, abs_c, "window {window_id} checkpoint position");
         }
-        // Value assertion for the dispatch checkpoints: each equals the
-        // backend cache's row at the window's absolute boundary.
+        // Every window carries a full per-layer checkpoint, and the most
+        // recently closed one matches what the (clipped) handle still holds.
         for window_id in 0..TOTAL_WINDOWS {
-            let (ckpt, abs_end) = engine.checkpoints.load(window_id).unwrap();
+            let (ckpt, _) = engine.checkpoints.load(window_id).unwrap();
             assert_eq!(ckpt.len(), weights.num_layers);
-            for (layer, (k, v)) in ckpt.iter().enumerate() {
-                let (k_true, v_true) = backend_row(&engine, layer, abs_end);
-                assert_eq!(
-                    k.row(0).to_vec(),
-                    k_true,
-                    "window {window_id} layer {layer}: checkpoint K != \
-                     backend row at abs {abs_end}"
-                );
-                assert_eq!(
-                    v.row(0).to_vec(),
-                    v_true,
-                    "window {window_id} layer {layer}: checkpoint V != \
-                     backend row at abs {abs_end}"
-                );
-            }
+        }
+        let (last_ckpt, _) = engine.checkpoints.load(TOTAL_WINDOWS - 1).unwrap();
+        for (layer, (k, v)) in last_ckpt.iter().enumerate() {
+            let (k_true, v_true) = backend_last_row(&engine, layer);
+            assert_eq!(k.row(0).to_vec(), k_true, "layer {layer}: checkpoint K");
+            assert_eq!(v.row(0).to_vec(), v_true, "layer {layer}: checkpoint V");
         }
     }
 
@@ -641,5 +673,73 @@ mod tests {
         assert!(engine
             .try_prefill_via_dispatch(&weights, &index, &[0u32, 1])
             .is_none());
+    }
+
+    // ── The window must bound attention, not merely storage ──────────────
+    //
+    // Regression pins for the defect measured in `kvperf-1` (issue #200): the
+    // coarse dispatch trait carries no window parameter, so a windowed engine
+    // that appends to a backend handle and never clips it attends over the
+    // whole stream while `info()` reports `window=N`. That is a correctness
+    // failure first — the engine is not the engine it claims to be — and it
+    // showed up as this engine having the *same* decode cost slope as the
+    // unwindowed one across four context lengths.
+    //
+    // Row count is the right thing to assert: it is what attention reads, and
+    // it is observable without timing. The bound is `window_size + 1` because
+    // a closed window leaves its final row behind as the next window's
+    // boundary checkpoint — which is the engine's whole design.
+
+    /// Longest cache a correctly windowed engine may present to attention:
+    /// the open window, plus the boundary row carried in from the last close.
+    fn window_bound(window_size: usize) -> usize {
+        window_size + 1
+    }
+
+    #[test]
+    fn dispatch_prefill_clips_the_backend_cache_to_the_window() {
+        set_w10_disable(false);
+        const WINDOW: usize = 4;
+        const WINDOWS_WORTH: u32 = 5;
+        let (mut engine, weights, index) = fixture(WINDOW);
+        let prompt: Vec<u32> = (0..WINDOW as u32 * WINDOWS_WORTH).collect();
+
+        engine
+            .try_prefill_via_dispatch(&weights, &index, &prompt)
+            .expect("prefill");
+
+        let cached = engine.kv_handle.as_ref().expect("handle").cached_len();
+        assert!(
+            cached <= window_bound(WINDOW),
+            "a {WINDOW}-token window prefilled with {} tokens left {cached} rows in the \
+             backend cache — attention sees all of them, so the window bounds storage \
+             but not what the engine actually attends over",
+            prompt.len()
+        );
+    }
+
+    #[test]
+    fn dispatch_decode_keeps_the_backend_cache_within_the_window() {
+        set_w10_disable(false);
+        const WINDOW: usize = 4;
+        const DECODE_STEPS: u32 = 12;
+        let (mut engine, weights, index) = fixture(WINDOW);
+        engine
+            .try_prefill_via_dispatch(&weights, &index, &[0u32, 1, 2])
+            .expect("prefill");
+
+        // Enough steps to cross several window closes.
+        for tok in 3..3 + DECODE_STEPS {
+            engine
+                .decode_step_via_dispatch(&weights, &index, tok)
+                .expect("decode");
+            let cached = engine.kv_handle.as_ref().expect("handle").cached_len();
+            assert!(
+                cached <= window_bound(WINDOW),
+                "after token {tok} the backend cache holds {cached} rows, above the \
+                 {WINDOW}-token window — the cache grows without bound across window \
+                 closes"
+            );
+        }
     }
 }

@@ -485,10 +485,13 @@ impl UnlimitedContextEngine {
         // slice the engine-side shadow as before.
         let n = self.current_window_kv_len;
         let window_len = self.current_window_tokens.len();
-        // Absolute stream position of this window's last token. The
-        // backend kv cache behind `kv_handle` is indexed by absolute
-        // position (the handle spans the whole stream since prefill),
-        // while the engine-side shadow holds only this window's rows.
+        // Absolute stream position of this window's last token — the value
+        // recorded *with* the checkpoint, so a later replay knows where it
+        // sat. It is no longer an index into anything: the dispatch path now
+        // clips the backend handle to the window (issue #200), so the handle
+        // holds this window's rows and not the stream's. The row to read back
+        // is therefore its last one. Indexing the handle by absolute position
+        // was correct only while the window was not being enforced.
         let abs_end = self.abs_offset + window_len - 1;
         let last_kv: Vec<SharedKV> = match self.current_window_kv.take() {
             Some(kv) => {
@@ -507,17 +510,16 @@ impl UnlimitedContextEngine {
                 }
             }
             None => {
-                // No CPU shadow — engine ran under HOnly. Read the
-                // window's last K/V back from the backend's kv cache at
-                // the ABSOLUTE index `abs_end`; the window-relative
-                // `n - 1` would re-read a row of the first window on
-                // every window after it. If there is no handle or the
-                // backend lacks the readback affordance, fall through
-                // with an empty checkpoint: the tokens are still
-                // archived and the counters reset (a wedged window
-                // would otherwise spin `process()` forever), and the
-                // mismatched empty checkpoint surfaces as an extend
-                // error on the next window instead of silent loss.
+                // No CPU shadow — engine ran under HOnly. Read the window's
+                // last K/V back from the backend's kv cache. The handle is
+                // clipped to the window, so its final row *is* this window's
+                // last position; reading an absolute stream index here would
+                // now run off the end. If there is no handle or the backend
+                // lacks the readback affordance, fall through with an empty
+                // checkpoint: the tokens are still archived and the counters
+                // reset (a wedged window would otherwise spin `process()`
+                // forever), and the mismatched empty checkpoint surfaces as an
+                // extend error on the next window instead of silent loss.
                 if n == 0 {
                     Vec::new()
                 } else if let Some(handle) = self.kv_handle.as_ref() {
@@ -525,10 +527,14 @@ impl UnlimitedContextEngine {
                         n, window_len,
                         "HOnly window shadow counter out of sync with window tokens"
                     );
+                    // Window-relative: the clipped handle's last row.
+                    let last_row = handle.cached_len().saturating_sub(1);
                     let mut rows = Vec::new();
                     let mut layer = 0;
-                    while let Some((k_row, v_row)) =
-                        self.backend.as_ref().read_kv_row_at(handle, layer, abs_end)
+                    while let Some((k_row, v_row)) = self
+                        .backend
+                        .as_ref()
+                        .read_kv_row_at(handle, layer, last_row)
                     {
                         let kv_dim = k_row.len();
                         let k = Array2::from_shape_vec((1, kv_dim), k_row)

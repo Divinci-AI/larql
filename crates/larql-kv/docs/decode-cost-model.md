@@ -132,9 +132,12 @@ particular context lengths, not a persistent cost — the doubling-capacity
 buffers in `helpers::append_row` are the obvious suspect, but this is **not
 established** and the sample (8 steps) is small.
 
-## 5. Defect found: `unlimited-context` does not window its attention
+## 5. Defect found and fixed: `unlimited-context` did not window its attention
 
-`unlimited-context:window=N` reports `window=N` from `info()` and pays
+**Fixed 2026-08-03** — the diagnosis is kept in full because the reasoning is
+reusable and because the fix had to invert an earlier one.
+
+`unlimited-context:window=N` reported `window=N` from `info()` and paid
 full-context attention cost.
 
 Evidence:
@@ -163,16 +166,69 @@ Evidence:
 `StandardEngine` declines coarse when windowed. `UnlimitedContextEngine`,
 whose entire identity *is* the window, does not.
 
-This is a correctness finding before it is a performance one: on the dispatch
-path the engine is not the engine it reports being, its boundary checkpoints
-and archive are maintained but unused for attention, and any accuracy measured
-on that path is not the windowed engine's accuracy. The fix follows
-`StandardEngine`'s precedent — decline coarse when `window_size` is set, and
-take the per-layer path that enforces the window via `clip_kv` — at the cost
-of the speed the coarse path was giving it.
+This was a correctness finding before it was a performance one: on the dispatch
+path the engine was not the engine it reported being, its boundary checkpoints
+and archive were maintained but unused for attention, and any accuracy measured
+on that path was not the windowed engine's accuracy.
 
-**Not yet checked:** whether the same hazard reaches `boundary-per-layer` and
-the windowed `markov-rs` variants, which also have dispatch paths.
+The obvious fix was `StandardEngine`'s — decline the coarse path when windowed
+— but that would have cost this engine the fast path entirely, since it is
+*always* windowed. Clipping the handle keeps both.
+
+### The fix
+
+Two parts, at the layer each belongs to.
+
+`CpuBackend::clip_kv` only understood the per-layer `CpuKvHandle`, not the
+coarse `CpuQ4kCacheHandle` the dispatch path allocates — so a windowed engine
+on that path could not clip even if it tried (it panicked as a "foreign
+handle"). It now handles both shapes.
+
+`UnlimitedContextEngine` now clips the backend handle to the window: after
+prefill, down to the open window plus the boundary row; after each auto-close,
+down to the boundary row alone. `clip_kv` keeps the *tail*, which is exactly
+the row the checkpoint was taken from — so the dispatch path now reproduces
+what `extend_current` does on the per-layer path when it seeds a fresh window
+from `checkpoints.load`.
+
+One coupling had to move with it. `close_window` under HOnly read the boundary
+row back from the handle by **absolute** stream position — correct only while
+the handle spanned the stream, and itself a fix for an older bug where a
+window-relative read re-checkpointed the *first* window's row every time. With
+the handle clipped, absolute runs off the end and the boundary row is simply
+the tail. The two tests that pinned the absolute indexing now pin the claim
+both mechanisms share: distinct windows checkpoint distinct rows, each recorded
+at its own absolute position.
+
+### Verification
+
+The write-up's own prediction was that a correctly windowed engine shows a
+near-zero slope, and that this is both the fix and its test. Measured at
+`window=64`:
+
+| engine | ctx 60 | ctx 260 | ctx 1050 | slope |
+|---|---|---|---|---|
+| unlimited-context (fixed) | 4.63 ms | 5.21 ms | **5.01 ms** | **~0.4 µs** |
+| standard | 4.53 ms | 6.29 ms | 12.97 ms | 8.5 µs |
+
+Flat, and **2.6× faster than `standard`** at ctx=1050 — the saving the window
+was supposed to deliver all along. Pinned by two regression tests in
+`unlimited_context/dispatch.rs` that assert the backend cache never exceeds
+`window_size + 1` rows, through prefill and across repeated auto-closes.
+
+### The siblings are not defective
+
+`markov-rs:window=64` (slope 9.0 µs) and `boundary-per-layer:window=64` (24 µs)
+both track or exceed `standard`, but that is their contract, not a bug: they
+retain a **cold tier** and attend over the full history, so their window bounds
+hot-tier memory rather than attention. They are exact-under-contract engines.
+`unlimited-context` was the only one claiming to be lossy beyond its window,
+which is why it was the only one whose attention had to be bounded.
+
+Worth noting separately: windowed `boundary-per-layer` costs **2.2× `standard`**
+at ctx=1050 (28.4 ms vs 13.0) and 35% more prefill, because its per-layer
+encoded cold tier is decoded every step. That is a cost, not a defect, but it
+is large enough that the engine should not be reached for casually.
 
 ## 6. What this says about engine choice
 

@@ -40,7 +40,30 @@ impl KvDispatch for CpuBackend {
         h.append_row(k_row, v_row);
     }
 
+    /// Keep the tail `window_size` rows.
+    ///
+    /// Handles **both** cache shapes this backend allocates: the coarse
+    /// `CpuQ4kCacheHandle` (one handle for the whole model, a per-layer
+    /// `[rows, kv_dim]` pair inside) and the per-layer `CpuKvHandle`. Only the
+    /// second was handled before, so a windowed engine running on the coarse
+    /// path had its clip panic as a "foreign handle" — or, where the engine
+    /// never called clip at all, silently attended over its whole stream while
+    /// reporting a bounded window (issue #200).
     fn clip_kv(&self, handle: &mut KvHandle, window_size: usize) {
+        if let Some(coarse) = try_cpu_q4k_cache_mut(handle) {
+            for slot in coarse.cache.iter_mut() {
+                let Some((k, v)) = slot.as_mut() else {
+                    continue;
+                };
+                let rows = k.shape()[0];
+                if rows > window_size {
+                    let start = rows - window_size;
+                    *k = k.slice(ndarray::s![start.., ..]).to_owned();
+                    *v = v.slice(ndarray::s![start.., ..]).to_owned();
+                }
+            }
+            return;
+        }
         let h = cpu_handle_mut(handle);
         if h.rows > window_size {
             let start = h.rows - window_size;
