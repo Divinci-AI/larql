@@ -37,7 +37,8 @@ pub use local_moe::LocalMoeFfn;
 pub use moe_backend::{InProcessMoeBackend, MoeBackendError, MoeExpertBackend};
 pub use moe_bound::BoundMoeBackend;
 pub use moe_remote::{
-    MoeFfn, MoeRouterWeights, RemoteMoeBackend, RemoteMoeError, RemoteMoeFfn, ShardConfig,
+    MoeFfn, MoeRouterWeights, RecordedRefusal, RefusalPolicy, RemoteMoeBackend, RemoteMoeError,
+    RemoteMoeFfn, ShardConfig,
 };
 pub use remote::{
     decode_q8k_batch_response_entries, decode_single_response, encode_binary_request,

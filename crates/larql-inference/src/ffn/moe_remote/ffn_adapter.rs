@@ -71,10 +71,10 @@ impl<'a> RemoteMoeFfn<'a> {
     /// type-checks — the name is load-bearing at one CLI call site and in two
     /// roadmaps.
     fn general(&self) -> MoeFfn<'a> {
-        MoeFfn {
-            weights: self.weights,
-            moe: self.remote,
-        }
+        // Best-effort, because that is what this adapter has always been and
+        // its callers depend on: a shard that cannot be reached degrades rather
+        // than stops.
+        MoeFfn::best_effort(self.weights, self.remote)
     }
 }
 
@@ -102,6 +102,135 @@ const REMOTE_MOE_FFN_NAME: &str = "remote-moe";
 pub struct MoeFfn<'a> {
     pub weights: &'a ModelWeights,
     pub moe: &'a dyn crate::ffn::MoeExpertBackend,
+    /// Whether a refusing route is a diagnosis or a fallback.
+    policy: RefusalPolicy,
+    /// The first refusal seen, with the layer that produced it.
+    ///
+    /// A cell rather than a return value because `FfnBackend` has no error
+    /// channel — `forward_moe_full_layer` returns `Option<Array2<f32>>`, and
+    /// widening it would reach every engine. The refusal is therefore caught on
+    /// the way *in*, before `moe_ffn_block_cpu` handles it.
+    refusal: std::cell::RefCell<Option<RecordedRefusal>>,
+}
+
+/// What a refusing expert route means to the caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RefusalPolicy {
+    /// Log it, contribute zeros, return the dense half. The historical
+    /// behaviour, and the right one for best-effort remote inference where a
+    /// degraded continuation beats no continuation.
+    #[default]
+    BestEffort,
+    /// Record it, so the caller can refuse the output.
+    ///
+    /// A selected-but-absent expert must not silently become an FFN-skipping
+    /// approximation. Under this policy the block still returns its dense half —
+    /// the trait cannot say otherwise — but [`MoeFfn::refusal`] is set, and a
+    /// caller that accepts logits without checking it is accepting a
+    /// numerically wrong continuation that looks plausible.
+    Strict,
+}
+
+/// A refusal, with where it happened.
+#[derive(Debug, Clone)]
+pub struct RecordedRefusal {
+    pub layer: usize,
+    /// The refusal's own classification, preserved rather than flattened —
+    /// `Residency` means fetch the operand, and is not a defect.
+    pub kind: larql_vindex::runtime::RefusalKind,
+    pub message: String,
+}
+
+/// Wraps the route so a refusal is recorded before the block loop swallows it.
+struct RefusalRecorder<'a> {
+    inner: &'a dyn crate::ffn::MoeExpertBackend,
+    sink: &'a std::cell::RefCell<Option<RecordedRefusal>>,
+}
+
+impl crate::ffn::MoeExpertBackend for RefusalRecorder<'_> {
+    fn forward_moe_seq(
+        &self,
+        weights: &ModelWeights,
+        layer: usize,
+        h: &Array2<f32>,
+        norm_offset: f32,
+        eps: f32,
+    ) -> Result<Array2<f32>, crate::ffn::MoeBackendError> {
+        let out = self
+            .inner
+            .forward_moe_seq(weights, layer, h, norm_offset, eps);
+        if let Err(err) = &out {
+            let kind = match err {
+                crate::ffn::MoeBackendError::Bound(inner) => inner.refusal(),
+                // A remote dispatch failure is the operand not being here.
+                crate::ffn::MoeBackendError::Remote(_) => {
+                    larql_vindex::runtime::RefusalKind::Residency
+                }
+            };
+            // First only: the earliest refusal is the diagnosis, and later ones
+            // are usually the same cause repeating per layer.
+            let mut sink = self.sink.borrow_mut();
+            if sink.is_none() {
+                *sink = Some(RecordedRefusal {
+                    layer,
+                    kind,
+                    message: err.to_string(),
+                });
+            }
+        }
+        out
+    }
+
+    fn name(&self) -> &'static str {
+        self.inner.name()
+    }
+}
+
+impl<'a> MoeFfn<'a> {
+    /// Best-effort: a refusing route contributes zeros and the dense half is
+    /// returned. Historical behaviour, unchanged.
+    pub fn best_effort(
+        weights: &'a ModelWeights,
+        moe: &'a dyn crate::ffn::MoeExpertBackend,
+    ) -> Self {
+        Self {
+            weights,
+            moe,
+            policy: RefusalPolicy::BestEffort,
+            refusal: std::cell::RefCell::new(None),
+        }
+    }
+
+    /// Strict: a refusal is recorded and the caller must check [`Self::refusal`]
+    /// before accepting the output.
+    ///
+    /// Strictness is in the constructor rather than a field a caller can forget
+    /// to set, and the check is a method rather than a log line someone has to
+    /// read.
+    pub fn strict(weights: &'a ModelWeights, moe: &'a dyn crate::ffn::MoeExpertBackend) -> Self {
+        Self {
+            weights,
+            moe,
+            policy: RefusalPolicy::Strict,
+            refusal: std::cell::RefCell::new(None),
+        }
+    }
+
+    pub fn policy(&self) -> RefusalPolicy {
+        self.policy
+    }
+
+    /// The first refusal seen, if any. Always recorded; only *meaningful* as a
+    /// gate under [`RefusalPolicy::Strict`], where the caller is contracted to
+    /// consult it.
+    pub fn refusal(&self) -> Option<RecordedRefusal> {
+        self.refusal.borrow().clone()
+    }
+
+    /// Whether every layer so far executed its expert route.
+    pub fn all_experts_executed(&self) -> bool {
+        self.refusal.borrow().is_none()
+    }
 }
 
 impl FfnBackend for MoeFfn<'_> {
@@ -132,6 +261,10 @@ impl FfnBackend for MoeFfn<'_> {
         layer: usize,
         h_post_attn: &Array2<f32>,
     ) -> Option<Array2<f32>> {
+        let recorder = RefusalRecorder {
+            inner: self.moe,
+            sink: &self.refusal,
+        };
         Some(moe_ffn_block_cpu(
             self.weights,
             h_post_attn,
@@ -140,7 +273,7 @@ impl FfnBackend for MoeFfn<'_> {
                 weights: self.weights,
             },
             None,
-            Some(self.moe),
+            Some(&recorder),
         ))
     }
 }
@@ -203,10 +336,7 @@ mod tests {
             weights: &weights,
             remote: &remote,
         };
-        let general = MoeFfn {
-            weights: &weights,
-            moe: &remote,
-        };
+        let general = MoeFfn::best_effort(&weights, &remote);
         let h = Array2::<f32>::from_elem((2, weights.hidden_size), 0.1);
         assert_eq!(
             specific.forward_moe_full_layer(0, &h),
@@ -228,10 +358,7 @@ mod tests {
         // The fixture stores BF16 experts, so the reference pairing is the one
         // that executes; the production Q4_K pairing would refuse them.
         let bound = crate::ffn::BoundMoeBackend::reference();
-        let ffn = MoeFfn {
-            weights: &weights,
-            moe: &bound,
-        };
+        let ffn = MoeFfn::best_effort(&weights, &bound);
         let h = Array2::<f32>::from_elem((2, weights.hidden_size), 0.1);
         let out = ffn
             .forward_moe_full_layer(0, &h)
@@ -252,21 +379,106 @@ mod tests {
         let refusing = crate::ffn::BoundMoeBackend::production();
         let executing = crate::ffn::BoundMoeBackend::reference();
         let h = Array2::<f32>::from_elem((2, weights.hidden_size), 0.1);
-        let refused = MoeFfn {
-            weights: &weights,
-            moe: &refusing,
-        }
-        .forward_moe_full_layer(0, &h)
-        .expect("returns Some even when the route refused");
-        let executed = MoeFfn {
-            weights: &weights,
-            moe: &executing,
-        }
-        .forward_moe_full_layer(0, &h)
-        .expect("executes");
+        let refused = MoeFfn::best_effort(&weights, &refusing)
+            .forward_moe_full_layer(0, &h)
+            .expect("returns Some even when the route refused");
+        let executed = MoeFfn::best_effort(&weights, &executing)
+            .forward_moe_full_layer(0, &h)
+            .expect("executes");
         assert_ne!(
             refused, executed,
             "a refused expert route must not produce the same output as one that ran"
         );
+    }
+
+    // ── Strictness ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn a_strict_adapter_records_a_refusal_that_best_effort_would_swallow() {
+        // The behaviour that must not become the MAP-3A contract. Best-effort
+        // logs, contributes zeros and returns the dense half — a plausible but
+        // numerically wrong continuation. Strict records it so the caller can
+        // refuse the output.
+        let weights = make_test_gemma4_moe_weights();
+        // Q4_K kernels against the fixture's BF16 store: refused at bind.
+        let refusing = crate::ffn::BoundMoeBackend::production();
+        let h = Array2::<f32>::from_elem((2, weights.hidden_size), 0.1);
+
+        let lenient = MoeFfn::best_effort(&weights, &refusing);
+        let _ = lenient.forward_moe_full_layer(0, &h);
+
+        let strict = MoeFfn::strict(&weights, &refusing);
+        let _ = strict.forward_moe_full_layer(0, &h);
+
+        assert_eq!(strict.policy(), RefusalPolicy::Strict);
+        assert_eq!(lenient.policy(), RefusalPolicy::BestEffort);
+        let recorded = strict.refusal().expect("a refusal must be recorded");
+        assert_eq!(recorded.layer, 0);
+        assert_eq!(
+            recorded.kind,
+            larql_vindex::runtime::RefusalKind::Unsupported
+        );
+        assert!(!strict.all_experts_executed());
+    }
+
+    #[test]
+    fn an_executing_route_records_nothing() {
+        // The counter-case. If a refusal were recorded for a route that ran,
+        // the gate would reject every output and be quietly useless.
+        let weights = make_test_gemma4_moe_weights();
+        let executing = crate::ffn::BoundMoeBackend::reference();
+        let strict = MoeFfn::strict(&weights, &executing);
+        let h = Array2::<f32>::from_elem((2, weights.hidden_size), 0.1);
+        let _ = strict.forward_moe_full_layer(0, &h);
+        assert!(strict.refusal().is_none());
+        assert!(strict.all_experts_executed());
+    }
+
+    #[test]
+    fn the_refusal_keeps_its_classification_rather_than_a_flattened_message() {
+        // `Residency` means fetch the operand and is not a defect; `Unsupported`
+        // means write a kernel. A gate that only had a string could not tell a
+        // sharded deployment from a broken one.
+        let weights = make_test_gemma4_moe_weights();
+        let remote = RemoteMoeBackend::new_disconnected();
+        let strict = MoeFfn::strict(&weights, &remote);
+        let h = Array2::<f32>::from_elem((2, weights.hidden_size), 0.1);
+        let _ = strict.forward_moe_full_layer(0, &h);
+        if let Some(recorded) = strict.refusal() {
+            assert_eq!(
+                recorded.kind,
+                larql_vindex::runtime::RefusalKind::Residency,
+                "an unreachable shard is the operand not being here"
+            );
+            assert!(!recorded.message.is_empty());
+        }
+    }
+
+    #[test]
+    fn only_the_first_refusal_is_kept() {
+        // Later layers usually repeat the same cause, so the earliest one is
+        // the diagnosis. A sink that overwrote would report the last layer
+        // rather than the first — the same first-versus-causal confusion the
+        // divergence report exists to avoid.
+        let weights = make_test_gemma4_moe_weights();
+        let refusing = crate::ffn::BoundMoeBackend::production();
+        let strict = MoeFfn::strict(&weights, &refusing);
+        let h = Array2::<f32>::from_elem((2, weights.hidden_size), 0.1);
+        let _ = strict.forward_moe_full_layer(0, &h);
+        let _ = strict.forward_moe_full_layer(1, &h);
+        assert_eq!(strict.refusal().expect("recorded").layer, 0);
+    }
+
+    #[test]
+    fn the_remote_adapter_stays_best_effort() {
+        // Its callers depend on degrading rather than stopping when a shard is
+        // unreachable, so the generalisation must not have made it strict.
+        let weights = make_test_gemma4_moe_weights();
+        let remote = RemoteMoeBackend::new_disconnected();
+        let specific = RemoteMoeFfn {
+            weights: &weights,
+            remote: &remote,
+        };
+        assert_eq!(specific.general().policy(), RefusalPolicy::BestEffort);
     }
 }
