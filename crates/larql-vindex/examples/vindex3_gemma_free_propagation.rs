@@ -65,6 +65,10 @@ const SCALE_FLOOR: f32 = 1e-6;
 const DEFAULT_PROMPT: &str = "The capital of France is";
 const ARG_VINDEX: &str = "--vindex";
 const ARG_PROMPT: &str = "--prompt";
+/// Enough to record a margin between the argmax and its nearest rival.
+const TOP_K: usize = 5;
+/// Unscaled: this is a parity comparison, not a sampling run.
+const TEMPERATURE: f32 = 1.0;
 
 fn arg(name: &str) -> Option<String> {
     let args: Vec<String> = std::env::args().collect();
@@ -311,14 +315,88 @@ fn main() -> Result<(), String> {
 
     // ── Composition ────────────────────────────────────────────────────────
     println!("\n== final hidden state ==");
-    let composed = report_relative("free-propagated hidden", &incumbent_h, &bound_h);
+    let composed = report_relative("pre-final-norm hidden", &incumbent_h, &bound_h);
+
+    // ── The model's own endpoint ───────────────────────────────────────────
+    //
+    // Both boundaries go through production functions rather than a local
+    // reimplementation: `apply_norm` is the one `logits_to_predictions` calls,
+    // and the predictor is the one generation calls. A harness that rolled its
+    // own lm_head here would be comparing the harness.
+    println!("\n== endpoint ==");
+    let norm_offset = weights.arch.norm_weight_offset();
+    let final_key = weights.arch.final_norm_key();
+    let incumbent_normed =
+        larql_inference::forward::apply_norm(&weights, &incumbent_h, final_key, norm_offset);
+    let bound_normed =
+        larql_inference::forward::apply_norm(&weights, &bound_h, final_key, norm_offset);
+    let normed = report_relative("post-final-norm hidden", &incumbent_normed, &bound_normed);
+
+    let incumbent_pred = larql_inference::forward::predict::logits_to_predictions_pub(
+        &weights,
+        &incumbent_h,
+        &tokenizer,
+        TOP_K,
+        TEMPERATURE,
+    );
+    let bound_pred = larql_inference::forward::predict::logits_to_predictions_pub(
+        &weights,
+        &bound_h,
+        &tokenizer,
+        TOP_K,
+        TEMPERATURE,
+    );
+
+    let ids_match = incumbent_pred.token_ids == bound_pred.token_ids;
+    let scores_match = incumbent_pred.predictions == bound_pred.predictions;
+    println!(
+        "  {:<26} {}",
+        "top-k token ids",
+        if ids_match { "IDENTICAL" } else { "DIFFER" }
+    );
+    println!(
+        "  {:<26} {}",
+        "top-k scores",
+        if scores_match {
+            "BIT-IDENTICAL"
+        } else {
+            "DIFFER"
+        }
+    );
+
+    // The margin is recorded even though identical scores imply it. Later
+    // approximate and partially-resident runs need this same report shape, and
+    // a margin that only appears once something disagrees is a shape nobody can
+    // compare against.
+    let margin = |p: &larql_compute::forward::predict::PredictResult| -> f64 {
+        match (p.predictions.first(), p.predictions.get(1)) {
+            (Some((_, top)), Some((_, second))) => top - second,
+            _ => f64::INFINITY,
+        }
+    };
+    let argmax_match = incumbent_pred.token_ids.first() == bound_pred.token_ids.first();
+    println!(
+        "  {:<26} {:?} vs {:?}",
+        "argmax token",
+        incumbent_pred.predictions.first().map(|(t, _)| t),
+        bound_pred.predictions.first().map(|(t, _)| t)
+    );
+    println!(
+        "  {:<26} {:.6e} vs {:.6e}",
+        "argmax margin",
+        margin(&incumbent_pred),
+        margin(&bound_pred)
+    );
+
+    let endpoint = normed && ids_match && scores_match && argmax_match;
 
     println!("\n== notes ==");
     println!("  Attention, KV, the dense slab, the norms, PLE and the layer scalar are the same");
     println!("  code on both paths. Only the MoE route differs, so a divergence is the MoE path.");
-    if report.earliest_causal_operation.is_none() && composed {
+    if report.earliest_causal_operation.is_none() && composed && endpoint {
         println!("\nCOMPOSITION: every MoE ran on an identical input and produced an identical");
-        println!("contribution, and the free-propagated hidden states agree.");
+        println!("contribution; the free-propagated hidden states, the normed hidden states and");
+        println!("the model's own predictions all agree.");
         Ok(())
     } else {
         Err("composition not established — see the causal layer above".into())
