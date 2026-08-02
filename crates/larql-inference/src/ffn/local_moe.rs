@@ -77,8 +77,10 @@ impl<'a> FfnBackend for LocalMoeFfn<'a> {
         &self,
         layer: usize,
         h_post_attn: &Array2<f32>,
-    ) -> Option<Array2<f32>> {
-        Some(moe_ffn_block_cpu_with_index(
+    ) -> Result<Option<Array2<f32>>, larql_execution::BoxRefusal> {
+        // Local dispatch over resident weights: there is no operand this could
+        // fail to reach, so it never refuses.
+        Ok(Some(moe_ffn_block_cpu_with_index(
             self.weights,
             h_post_attn,
             layer,
@@ -88,7 +90,7 @@ impl<'a> FfnBackend for LocalMoeFfn<'a> {
             None,
             None,
             self.index,
-        ))
+        )))
     }
 }
 
@@ -113,6 +115,7 @@ mod tests {
         let h_post_attn = Array2::<f32>::from_elem((2, weights.hidden_size), 0.1);
         let out = ffn
             .forward_moe_full_layer(0, &h_post_attn)
+            .expect("executes")
             .expect("LocalMoeFfn always returns Some");
         assert_eq!(out.shape(), &[2, weights.hidden_size]);
         assert!(out.iter().all(|v| v.is_finite()));
@@ -153,8 +156,14 @@ mod tests {
             remote: &disconnected,
         };
         let h_post_attn = Array2::<f32>::from_elem((2, weights.hidden_size), 0.1);
-        let out_local = local.forward_moe_full_layer(0, &h_post_attn).unwrap();
-        let out_zero_experts = remote.forward_moe_full_layer(0, &h_post_attn).unwrap();
+        let out_local = local
+            .forward_moe_full_layer(0, &h_post_attn)
+            .unwrap()
+            .unwrap();
+        let out_zero_experts = remote
+            .forward_moe_full_layer(0, &h_post_attn)
+            .unwrap()
+            .unwrap();
         assert_eq!(out_local.shape(), out_zero_experts.shape());
         let max_abs_diff = out_local
             .iter()

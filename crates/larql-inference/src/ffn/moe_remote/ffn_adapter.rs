@@ -60,7 +60,7 @@ impl<'a> FfnBackend for RemoteMoeFfn<'a> {
         &self,
         layer: usize,
         h_post_attn: &Array2<f32>,
-    ) -> Option<Array2<f32>> {
+    ) -> Result<Option<Array2<f32>>, larql_execution::BoxRefusal> {
         self.general().forward_moe_full_layer(layer, h_post_attn)
     }
 }
@@ -132,13 +132,31 @@ pub enum RefusalPolicy {
 }
 
 /// A refusal, with where it happened.
+///
+/// An error in its own right, so it can cross `FfnBackend`'s boundary as a
+/// `BoxRefusal` while keeping both levels: the response category an engine
+/// switches on, and the concrete message the route produced.
 #[derive(Debug, Clone)]
 pub struct RecordedRefusal {
     pub layer: usize,
     /// The refusal's own classification, preserved rather than flattened —
     /// `Residency` means fetch the operand, and is not a defect.
-    pub kind: larql_vindex::runtime::RefusalKind,
+    pub kind: larql_execution::RefusalKind,
     pub message: String,
+}
+
+impl std::fmt::Display for RecordedRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "layer {}: {} ({})", self.layer, self.message, self.kind)
+    }
+}
+
+impl std::error::Error for RecordedRefusal {}
+
+impl larql_execution::ExecutionRefusal for RecordedRefusal {
+    fn kind(&self) -> larql_execution::RefusalKind {
+        self.kind
+    }
 }
 
 /// Wraps the route so a refusal is recorded before the block loop swallows it.
@@ -163,9 +181,7 @@ impl crate::ffn::MoeExpertBackend for RefusalRecorder<'_> {
             let kind = match err {
                 crate::ffn::MoeBackendError::Bound(inner) => inner.refusal(),
                 // A remote dispatch failure is the operand not being here.
-                crate::ffn::MoeBackendError::Remote(_) => {
-                    larql_vindex::runtime::RefusalKind::Residency
-                }
+                crate::ffn::MoeBackendError::Remote(_) => larql_execution::RefusalKind::Residency,
             };
             // First only: the earliest refusal is the diagnosis, and later ones
             // are usually the same cause repeating per layer.
@@ -260,12 +276,12 @@ impl FfnBackend for MoeFfn<'_> {
         &self,
         layer: usize,
         h_post_attn: &Array2<f32>,
-    ) -> Option<Array2<f32>> {
+    ) -> Result<Option<Array2<f32>>, larql_execution::BoxRefusal> {
         let recorder = RefusalRecorder {
             inner: self.moe,
             sink: &self.refusal,
         };
-        Some(moe_ffn_block_cpu(
+        let out = moe_ffn_block_cpu(
             self.weights,
             h_post_attn,
             layer,
@@ -274,7 +290,25 @@ impl FfnBackend for MoeFfn<'_> {
             },
             None,
             Some(&recorder),
-        ))
+        );
+        // `moe_ffn_block_cpu` has already logged the refusal and left the
+        // expert contribution at zero, so `out` is the dense half wearing the
+        // shape of an answer. Under `Strict` it must not escape — which is the
+        // difference between this and the audited contract it replaces, where
+        // the caller had to remember to ask.
+        //
+        // The dense half is computed and discarded on that path. It is an error
+        // path, and paying for it buys the guarantee that no caller can consume
+        // a partial layer.
+        match self.refusal.borrow().as_ref() {
+            Some(recorded) if self.policy == RefusalPolicy::Strict => {
+                Err(Box::new(recorded.clone()))
+            }
+            // Best-effort keeps its historical behaviour: degrade, having said
+            // so. Callers of the remote adapter depend on a shard outage
+            // degrading rather than stopping.
+            _ => Ok(Some(out)),
+        }
     }
 }
 
@@ -298,6 +332,7 @@ mod tests {
         let h_post_attn = Array2::<f32>::from_elem((2, weights.hidden_size), 0.1);
         let out = ffn
             .forward_moe_full_layer(0, &h_post_attn)
+            .expect("executes")
             .expect("RemoteMoeFfn always returns Some");
         assert_eq!(out.shape(), &[2, weights.hidden_size]);
         assert!(out.iter().all(|v| v.is_finite()));
@@ -339,8 +374,14 @@ mod tests {
         let general = MoeFfn::best_effort(&weights, &remote);
         let h = Array2::<f32>::from_elem((2, weights.hidden_size), 0.1);
         assert_eq!(
-            specific.forward_moe_full_layer(0, &h),
-            general.forward_moe_full_layer(0, &h)
+            specific
+                .forward_moe_full_layer(0, &h)
+                .expect("executes")
+                .expect("produces a layer"),
+            general
+                .forward_moe_full_layer(0, &h)
+                .expect("executes")
+                .expect("produces a layer")
         );
         assert_eq!(specific.forward(0, &h), general.forward(0, &h));
         // The name is the one thing that deliberately differs: the remote
@@ -362,6 +403,7 @@ mod tests {
         let h = Array2::<f32>::from_elem((2, weights.hidden_size), 0.1);
         let out = ffn
             .forward_moe_full_layer(0, &h)
+            .expect("executes")
             .expect("the adapter always returns Some");
         assert_eq!(out.shape(), &[2, weights.hidden_size]);
         assert!(out.iter().all(|v| v.is_finite()));
@@ -381,10 +423,12 @@ mod tests {
         let h = Array2::<f32>::from_elem((2, weights.hidden_size), 0.1);
         let refused = MoeFfn::best_effort(&weights, &refusing)
             .forward_moe_full_layer(0, &h)
+            .expect("executes")
             .expect("returns Some even when the route refused");
         let executed = MoeFfn::best_effort(&weights, &executing)
             .forward_moe_full_layer(0, &h)
-            .expect("executes");
+            .expect("executes")
+            .expect("produces a layer");
         assert_ne!(
             refused, executed,
             "a refused expert route must not produce the same output as one that ran"
@@ -447,7 +491,7 @@ mod tests {
         if let Some(recorded) = strict.refusal() {
             assert_eq!(
                 recorded.kind,
-                larql_vindex::runtime::RefusalKind::Residency,
+                larql_execution::RefusalKind::Residency,
                 "an unreachable shard is the operand not being here"
             );
             assert!(!recorded.message.is_empty());

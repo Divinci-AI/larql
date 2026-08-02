@@ -50,8 +50,20 @@ fn ffn_or_moe_layer(
     ple_input: Option<&Array2<f32>>,
 ) -> Array2<f32> {
     if weights.arch.is_hybrid_moe() {
-        if let Some(h_out) = ffn.forward_moe_full_layer(layer, h_post_attn) {
-            return h_out;
+        match ffn.forward_moe_full_layer(layer, h_post_attn) {
+            Ok(Some(h_out)) => return h_out,
+            // Not applicable: this backend does not serve the layer, and local
+            // dispatch below is the correct answer.
+            Ok(None) => {}
+            // Propagation stops here, because this function returns a bare
+            // array. The refusal is named rather than swallowed silently, but a
+            // caller still cannot refuse the token — widening this signature
+            // into the engines is the next ring, and until then a strict route
+            // reaching *this* path degrades like a best-effort one.
+            Err(refusal) => eprintln!(
+                "[ffn_or_moe_layer] layer {layer} refused ({}): {refusal} —                  falling back to local dispatch",
+                refusal.kind()
+            ),
         }
     }
     let (h_post_ffn, _) = run_ffn(&weights, h_post_attn, layer, ffn, false);

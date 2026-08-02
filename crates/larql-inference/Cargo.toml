@@ -22,6 +22,7 @@ larql-compute = { path = "../larql-compute" }
 larql-compute-metal = { path = "../larql-compute-metal", optional = true }
 larql-core = { path = "../larql-core" }
 larql-vindex = { path = "../larql-vindex" }
+larql-execution = { path = "../larql-execution" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

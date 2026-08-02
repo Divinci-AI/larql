@@ -131,7 +131,22 @@ pub(crate) fn layer_ffn_or_moe(
 ) -> ndarray::Array2<f32> {
     if weights.arch.is_hybrid_moe() {
         if let Some(mf) = moe_ffn {
-            if let Some(h_out) = mf.forward_moe_full_layer(layer, h_post_attn) {
+            // Propagation stops here: this function returns a bare array, so a
+            // refusal is named and the caller falls back rather than being able
+            // to refuse the token. Widening this into the engine step is the
+            // next ring; until then a strict route reaching this path degrades
+            // like a best-effort one.
+            let moe_out = match mf.forward_moe_full_layer(layer, h_post_attn) {
+                Ok(out) => out,
+                Err(refusal) => {
+                    eprintln!(
+                        "[ffn_or_moe_layer] layer {layer} refused ({}): {refusal}",
+                        refusal.kind()
+                    );
+                    None
+                }
+            };
+            if let Some(h_out) = moe_out {
                 // Returned as-is: `forward_moe_full_layer` is contracted to
                 // produce the FULL layer output. Every production impl routes
                 // through `moe_ffn_block_cpu(_with_index)`, which applies PLE
@@ -185,8 +200,8 @@ mod layer_ffn_or_moe_tests {
             &self,
             _layer: usize,
             h_post_attn: &Array2<f32>,
-        ) -> Option<Array2<f32>> {
-            Some(Array2::from_elem(h_post_attn.raw_dim(), 7.0))
+        ) -> Result<Option<Array2<f32>>, larql_execution::BoxRefusal> {
+            Ok(Some(Array2::from_elem(h_post_attn.raw_dim(), 7.0)))
         }
     }
 

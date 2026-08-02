@@ -105,7 +105,7 @@ mod router_tests {
         let weights = make_test_weights();
         let ffn = WeightFfn { weights: &weights };
         let h = larql_vindex::ndarray::Array2::<f32>::zeros((1, weights.hidden_size));
-        assert!(ffn.forward_moe_full_layer(0, &h).is_none());
+        assert!(ffn.forward_moe_full_layer(0, &h).is_ok_and(|o| o.is_none()));
     }
 
     #[test]
