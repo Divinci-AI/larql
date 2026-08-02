@@ -8,13 +8,27 @@ Last updated: 2026-08-02
 
 **Active slice: VINDEX3 execution binding**
 ([`ROADMAP.md` § VINDEX3](ROADMAP.md), spec
-[`crates/larql-vindex/docs/vindex2-format-spec.md`](crates/larql-vindex/docs/vindex2-format-spec.md),
-programme [`docs/vindex2-experiments.md`](docs/vindex2-experiments.md)) — driving
+[`crates/larql-vindex/docs/vindex3-format-spec.md`](crates/larql-vindex/docs/vindex3-format-spec.md),
+programme [`docs/vindex3-experiments.md`](docs/vindex3-experiments.md)) — driving
 a real Gemma layer through a VINDEX3-bound operation until it is bit-identical
 to production, then propagating to the first VINDEX3-generated token. Rungs 0,
 0.5 and 1 are closed (`f13bf385`, `dd2017db`, `f5dd256e`); **rung 2 — binding the
 production Q4_K × Q8_K expert kernel — is next**, starting with Q8_K activation
 identity before any expert runs.
+
+**The container half now exists too.** Until 2026-08-02 every VINDEX3 parity
+result bound its operands out of a VINDEX2 file, so what was proven was the
+executor and not the format — nothing could write a VINDEX3 container, and
+`ContainerGeneration::V3` appeared only in a detection test built from a JSON
+string. Conformance fixture A now round-trips end to end (write → detect →
+open → validate → bind → execute) **bit-identically**, fused and decomposed
+storage agree under one programme id, `verify` reports structural defects with
+`{layer, entry, role}` coordinates, and `show`/`verify` dispatch on generation
+without normalising either into the other. That closes the rows fixture A can
+carry on V2-0/V2-1; profile authority, variant-selection refusal, fixtures B–D
+and WALK/DESCRIBE parity remain open, so **`extract` still writes VINDEX2** and
+the ABI is not frozen. Honest ceiling: *executable VINDEX3 container proven on
+fixture A* — not "a real model runs from VINDEX3".
 
 **Previous slice: the DEC funnel** ([`docs/dec-funnel.md`](docs/dec-funnel.md)
 v0.5) — decoupled attention/weights serving, DEC-0 … DEC-7 plus the G-ladder

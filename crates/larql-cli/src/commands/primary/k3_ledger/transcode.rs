@@ -283,7 +283,7 @@ mod tests {
 
     #[test]
     fn merge_takes_the_worst_case_across_tensors() {
-        let good = scan_scales(&vec![127u8; GROUPS_PER_SUPERBLOCK], GROUPS_PER_SUPERBLOCK);
+        let good = scan_scales(&[127u8; GROUPS_PER_SUPERBLOCK], GROUPS_PER_SUPERBLOCK);
         let mut bad_scales = vec![120u8; GROUPS_PER_SUPERBLOCK];
         bad_scales[1] = 130;
         let bad = scan_scales(&bad_scales, GROUPS_PER_SUPERBLOCK);

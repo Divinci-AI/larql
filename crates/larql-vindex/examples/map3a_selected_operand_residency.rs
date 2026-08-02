@@ -129,13 +129,26 @@ fn sliced_tensor<'a>(
 
 /// Bind one real expert's Q4_K bytes straight from the vindex's own mmap —
 /// no dequantisation, no copy. Cheap enough to call for all 128 experts.
-fn build_expert<'a>(
-    moe: &MoeLayerWeights<'a>,
+/// The four correlated sizes every binding here needs.
+///
+/// Grouped rather than threaded positionally because `hidden`, `inter` and
+/// `inter_padded` are all bare `usize`: transposing two of them type-checks,
+/// binds, and produces a wrong operand that only shows up as a numeric
+/// divergence several rungs later.
+#[derive(Clone, Copy)]
+struct BankGeometry {
+    layer: usize,
     hidden: usize,
     inter: usize,
     inter_padded: usize,
+}
+
+fn build_expert<'a>(
+    moe: &MoeLayerWeights<'a>,
+    geom: BankGeometry,
     e: usize,
 ) -> Result<BoundExpert<'a>, String> {
+    let (hidden, inter, inter_padded) = (geom.hidden, geom.inter, geom.inter_padded);
     let gate_up_bytes = *moe
         .experts_gate_up
         .get(e)
@@ -165,13 +178,13 @@ fn build_expert<'a>(
 }
 
 fn bind_operation<'a>(
-    layer: usize,
-    hidden: usize,
+    geom: BankGeometry,
     moe: &MoeLayerWeights<'_>,
     router_bytes: &'a [u8],
     scale_bytes: &'a [u8],
     experts: Vec<BoundExpert<'a>>,
 ) -> Result<BoundMoeOperation<'a>, String> {
+    let (layer, hidden) = (geom.layer, geom.hidden);
     Ok(BoundMoeOperation {
         router: BoundRouter {
             weight: tensor(
@@ -211,20 +224,17 @@ fn bind_operation<'a>(
 }
 
 fn bank_of<'a>(
-    layer: usize,
-    hidden: usize,
+    geom: BankGeometry,
     moe: &MoeLayerWeights<'a>,
     router_bytes: &'a [u8],
     scale_bytes: &'a [u8],
-    inter: usize,
-    inter_padded: usize,
     ids: &[usize],
 ) -> Result<BoundMoeOperation<'a>, String> {
     let experts = ids
         .iter()
-        .map(|&e| build_expert(moe, hidden, inter, inter_padded, e))
+        .map(|&e| build_expert(moe, geom, e))
         .collect::<Result<_, _>>()?;
-    bind_operation(layer, hidden, moe, router_bytes, scale_bytes, experts)
+    bind_operation(geom, moe, router_bytes, scale_bytes, experts)
 }
 
 fn main() -> Result<(), String> {
@@ -250,6 +260,12 @@ fn main() -> Result<(), String> {
         .ok_or_else(|| format!("layer {layer} is not an MoE layer"))?;
     let inter = moe.intermediate_size;
     let inter_padded = moe.inter_padded();
+    let geom = BankGeometry {
+        layer,
+        hidden,
+        inter,
+        inter_padded,
+    };
     println!(
         "  shape   hidden {hidden}, {} experts, top-{}, intermediate {inter}",
         moe.num_experts, moe.top_k
@@ -284,26 +300,8 @@ fn main() -> Result<(), String> {
         incumbent_ids.len()
     );
     let full_ids: Vec<usize> = (0..moe.num_experts).collect();
-    let full_op = bank_of(
-        layer,
-        hidden,
-        &moe,
-        &router_bytes,
-        &scale_bytes,
-        inter,
-        inter_padded,
-        &full_ids,
-    )?;
-    let minimal_op = bank_of(
-        layer,
-        hidden,
-        &moe,
-        &router_bytes,
-        &scale_bytes,
-        inter,
-        inter_padded,
-        &incumbent_ids,
-    )?;
+    let full_op = bank_of(geom, &moe, &router_bytes, &scale_bytes, &full_ids)?;
+    let minimal_op = bank_of(geom, &moe, &router_bytes, &scale_bytes, &incumbent_ids)?;
     let full_out = execute(&full_op, inputs())
         .map_err(|e| format!("rung 1 full population should not error: {e}"))?;
     let minimal_out = execute(&minimal_op, inputs())
@@ -331,16 +329,7 @@ fn main() -> Result<(), String> {
         without_one.len(),
         incumbent_ids.len()
     );
-    let op_without_one = bank_of(
-        layer,
-        hidden,
-        &moe,
-        &router_bytes,
-        &scale_bytes,
-        inter,
-        inter_padded,
-        &without_one,
-    )?;
+    let op_without_one = bank_of(geom, &moe, &router_bytes, &scale_bytes, &without_one)?;
     let result2 = execute(&op_without_one, inputs());
     let rung2_pass = matches!(
         &result2,
@@ -365,16 +354,7 @@ fn main() -> Result<(), String> {
     let mut padded: Vec<usize> = without_one.clone();
     padded.push(substitute);
     println!("\n[rung 3] same removed expert {removed}, padded back to {} entries with unselected expert {substitute} — capacity restored, correct operand still absent", padded.len());
-    let op_padded = bank_of(
-        layer,
-        hidden,
-        &moe,
-        &router_bytes,
-        &scale_bytes,
-        inter,
-        inter_padded,
-        &padded,
-    )?;
+    let op_padded = bank_of(geom, &moe, &router_bytes, &scale_bytes, &padded)?;
     let result3 = execute(&op_padded, inputs());
     let rung3_pass = matches!(
         &result3,
@@ -394,16 +374,7 @@ fn main() -> Result<(), String> {
 
     // ── Rung 4: restore the exact missing expert — closes the loop ─────────
     println!("\n[rung 4] restore expert {removed} — must match rung 1's minimal output exactly");
-    let op_restored = bank_of(
-        layer,
-        hidden,
-        &moe,
-        &router_bytes,
-        &scale_bytes,
-        inter,
-        inter_padded,
-        &incumbent_ids,
-    )?;
+    let op_restored = bank_of(geom, &moe, &router_bytes, &scale_bytes, &incumbent_ids)?;
     let restored_out = execute(&op_restored, inputs())
         .map_err(|e| format!("rung 4 restored population should not error: {e}"))?;
     let rung4_pass = restored_out == minimal_out;

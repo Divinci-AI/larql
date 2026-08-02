@@ -147,6 +147,19 @@ fn on_ac_power() -> bool {
         .unwrap_or(false)
 }
 
+/// Whether the box is too busy to trust a bandwidth measurement.
+///
+/// Spelled through `partial_cmp` rather than `!(load < LOAD_LIMIT)` so the
+/// NaN case is a decision rather than an accident: a load average that could
+/// not be read must refuse the measurement, which is what the negated
+/// comparison did incidentally and this does on purpose.
+fn load_is_contended(load: f64) -> bool {
+    !matches!(
+        load.partial_cmp(&LOAD_LIMIT),
+        Some(std::cmp::Ordering::Less)
+    )
+}
+
 fn load_average() -> f64 {
     std::process::Command::new("sysctl")
         .args(["-n", "vm.loadavg"])
@@ -310,14 +323,14 @@ fn main() {
     // ── Refuse to emit a bad number ──────────────────────────────────
     let ac = on_ac_power();
     let load = load_average();
-    let dirty = !ac || !(load < LOAD_LIMIT);
+    let dirty = !ac || load_is_contended(load);
     if dirty {
         eprintln!("REFUSING TO MEASURE:");
         if !ac {
             eprintln!("  - not on AC power (throttled; sparse-vs-dense is exactly the");
             eprintln!("    bandwidth/compute tradeoff throttling distorts)");
         }
-        if !(load < LOAD_LIMIT) {
+        if load_is_contended(load) {
             eprintln!("  - 1-min load average {load:.2} exceeds {LOAD_LIMIT:.1} (contended box)");
         }
         if !allow_dirty {

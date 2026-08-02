@@ -3,8 +3,8 @@
 **Version:** 1.0-draft-1
 **Date:** 2026-08-01
 **Status:** Pre-registered. Decision rules and promotion gates are fixed here before any arm runs.
-**Companion:** [`vindex2-format-spec.md`](../crates/larql-vindex/docs/vindex2-format-spec.md)
-**Registry programme:** `vindex2` (chuk-experiments)
+**Companion:** [`vindex3-format-spec.md`](../crates/larql-vindex/docs/vindex3-format-spec.md)
+**Registry programme:** `vindex2` (chuk-experiments) — kept at `vindex2` deliberately: arms are already recorded under that key, and re-keying a pre-registered programme would orphan its results. The gate ids `V2-x` below are external identifiers for the same reason. The *format* is VINDEX3; see the note at the top of the companion spec.
 **Discipline:** DEC-style — every arm has a registered prior, a numeric gate, and a named negative outcome. A result that fails its gate closes its thread; it does not get re-argued.
 
 ---
@@ -139,6 +139,50 @@ Real K3 routing/activation captures across prose, code, agent/tool use, long-con
 ---
 
 ## 2. Gates
+
+### Result log — fixture A container (2026-08-02)
+
+The first VINDEX3 container to exist on disk. Recorded here rather than in the
+spec because it is evidence, not specification.
+
+```text
+write_container        index.json schema 3 + moe_manifest.json + LYRW v2 bank
+detect_generation      V3, from the written directory (not a JSON literal)
+Vindex3Container::open manifest parsed and validated, storage keys resolved
+region round-trip      every gate/up/down region byte-for-byte
+bind + execute         BIT-IDENTICAL to the same weights held in memory
+fused vs decomposed    BIT-IDENTICAL under one programme id (gated-mlp-v1)
+verify                 structural, defects carry {layer, entry, role}
+CLI                    show/verify dispatch on generation; v3 defect → exit 1
+```
+
+Rows now discharged:
+
+| Gate | Row | Status |
+| ---- | --- | ------ |
+| V2-0 | indexes inspectable without loading weights | closed |
+| V2-0 | unknown `programme_id` fails cleanly | closed (`MoeManifest::parse`) |
+| V2-0 | missing regions diagnosed with coordinates | closed — `ContainerDefect::MissingRegion` carries `{layer, bank, role, segment}` plus entry |
+| V2-0 | generation boundary enforced both ways | closed |
+| V2-0 | a profile dropping a component cannot exceed derived authority | closed — by *pre-existing* tests in `capability/authority.rs` (`weakening_any_region_never_raises_authority` and four siblings), not by the container work |
+| V2-0 | variant-selection refusal (select only present variants) | **open** — needs the profile/variant machinery wired to the container; `Vindex3Index::declares_profile` is only the name check |
+| V2-1 | native oracle vs container output exact | closed (fixture A) |
+| V2-1 | fused vs decomposed identical under one manifest | closed |
+| V2-1 | expert counts and top-K not hard-coded | closed — (8,2), (32,4), (5,1) through one code path, each read from its own container |
+| V2-1 | shared banks not hard-coded | **open**, and *blocked*: `BoundMoeOperation::banks` documents unrouted shared banks as arriving with the Mini-K3 rung, so there is no execution path to test against |
+| V2-1 | WALK/DESCRIBE parity | **open** |
+
+Two corrections worth carrying forward, both from getting it wrong first:
+
+- **`gated-mlp-v1` admits both layouts** (`role_alternatives → [FUSED,
+  DECOMPOSED]`). It is not "the decomposed programme"; `gated-mlp-fused-fc1-v1`
+  is the one that narrows to fused only. So the parity arm is *one programme
+  admitting two renderings*, which is the stronger property and the one K3
+  needs.
+- **Storage fidelity and execution fidelity need separate assertions.** A
+  single execution test can pass while the writer stored the wrong bytes, if
+  the reader makes a compensating mistake. The region round-trip test exists to
+  make that impossible.
 
 ### V2-0 — Format skeleton
 

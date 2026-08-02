@@ -276,8 +276,8 @@ VINDEX2 can *observe* which pages faulted; VINDEX3 can *state* what an operation
 will read before it runs. That is the difference between paging a multi-terabyte
 model and planning one.
 
-Spec: [`crates/larql-vindex/docs/vindex2-format-spec.md`](crates/larql-vindex/docs/vindex2-format-spec.md)
-(draft-2). Experimental programme: [`docs/vindex2-experiments.md`](docs/vindex2-experiments.md),
+Spec: [`crates/larql-vindex/docs/vindex3-format-spec.md`](crates/larql-vindex/docs/vindex3-format-spec.md)
+(draft-2). Experimental programme: [`docs/vindex3-experiments.md`](docs/vindex3-experiments.md),
 registry programme `vindex2`. Generations are named so the number equals
 `index.json.version`: schemas 1–2 → VINDEX2, schema 3 → VINDEX3.
 
@@ -296,6 +296,7 @@ E0's premise.
 | `f13bf385` | Reference MoE execution — fixture A matches an independent oracle below 1e-6, fused and decomposed agreeing at every checkpoint |
 | `dd2017db` | Real Gemma semantic routing parity over real VINDEX2 bytes |
 | `f5dd256e` | Production router kernel bound — bit-identical routing ladder |
+| *(pending)* | **The container itself** — fixture A written to disk as `index.json` schema 3 + `moe_manifest.json` + a LYRW v2 bank, opened, bound and executed bit-identically; `show`/`verify` dispatch on generation |
 
 Three properties established, each independently useful:
 
@@ -310,6 +311,42 @@ Three properties established, each independently useful:
 Plus two defects fixed that were not VINDEX3's: `larql verify` rendered findings
 in `HashMap` order and so disagreed with itself between runs; the separate-tensor
 MoE extractor wrote no expert store.
+
+### Two ladders, deliberately separate
+
+VINDEX3 has an **execution** half and a **container** half, and they were built
+in that order. Every parity result before the container existed bound its
+operands out of a VINDEX2 file — so what was proven was the executor, not the
+format:
+
+```text
+proven first   the VINDEX3 executor, fed VINDEX2 operands, matches production
+proven second  a VINDEX3 container can be written, opened, bound and executed
+```
+
+Keeping the ladders apart matters because a green execution ladder says nothing
+about whether a VINDEX3 *file* exists, and for a long time none did.
+
+```text
+container ladder
+[x] c0  write index.json schema 3 + moe_manifest.json + LYRW v2 bank
+[x] c1  detect_generation reports V3 from a real directory, not a JSON literal
+[x] c2  open, validate the manifest, resolve storage keys to files
+[x] c3  bind from container-resolved regions and execute — bit-identical
+[x] c4  fused and decomposed storage agree under one programme id
+[x] c5  structural verify with {layer, entry, role} defects; CLI dual-generation
+[ ] c6  fixtures B–D (GPT-OSS, Inkling, Mini-K3) — proves nothing is hard-coded
+[ ] c7  WALK/DESCRIBE parity over in-place bank regions
+[ ] c8  a real Gemma MoE layer written as a VINDEX3 container
+[ ] c9  every Gemma layer — the first real model that *is* a VINDEX3 container
+```
+
+Gate status, stated precisely: **V2-0 and V2-1 are closed for the rows fixture
+A can carry**, not in full. Outstanding on V2-0 are profile-authority
+derivation and variant-selection refusal; on V2-1, the "not hard-coded" row
+(needs fixtures differing on expert count, top-K and shared banks) and
+WALK/DESCRIBE parity. `extract` therefore still defaults to VINDEX2, and must
+until those close.
 
 ### The rung ladder to the first VINDEX3 Gemma token
 

@@ -1,11 +1,31 @@
 # Vindex Format Specification — VINDEX3
 
-**Version:** 2.0-draft-2
+**Version:** 3.0-draft-2
 **Date:** 2026-08-01 (draft-2: three binary-layout corrections + two clarifications from the first lyrw2 implementation — §6.2, §6.4, §6.3, §6.5; recorded per pre-freeze amendment rule)
-**Status:** Draft — pre-registration. No byte is frozen until the V2-0..V2-2 gates in the companion experiments document pass.
+**Status:** Draft — pre-registration. No byte is frozen until the V2-0..V2-2 gates in the companion experiments document pass. **A first container now exists**: conformance fixture A round-trips through `format::vindex3` (write → detect → open → validate → bind → execute) bit-identically, and both the fused and decomposed FC1 renderings satisfy the same programme id. That closes the rows fixture A can carry on V2-0 and V2-1; profile-authority derivation, variant-selection refusal, the not-hard-coded row (fixtures B–D) and WALK/DESCRIBE parity remain open, so the ABI is **not** frozen and `extract` still writes VINDEX2.
 **Predecessor:** [format-spec.md v0.4](format-spec.md) (VINDEX2)
-**Companion:** [`vindex2-experiments.md`](../../../docs/vindex2-experiments.md) (pre-registered experimental programme), [Conformance v1](conformance-v1.md), [Operations](operations-spec.md), [Ecosystem](ecosystem-spec.md), [LQL](../../../docs/lql-guide.md)
+
+**Companion:** [`vindex3-experiments.md`](../../../docs/vindex3-experiments.md) (pre-registered experimental programme), [Conformance v1](conformance-v1.md), [Operations](operations-spec.md), [Ecosystem](ecosystem-spec.md), [LQL](../../../docs/lql-guide.md)
 **Implementation target:** `larql-vindex` crate (Rust)
+
+> **A note on the number 2 appearing throughout.** This document specifies
+> **VINDEX3**, and its own version is therefore `3.x`. Three things nearby keep
+> a `2` on purpose and are not typos:
+>
+> | name | why it stays |
+> |---|---|
+> | `V2-0`…`V2-4` gates | pre-registered identifiers with results already recorded against them; renaming would orphan the lineage |
+> | registry programme `vindex2` | same — it is an external key in chuk-experiments |
+> | `lyrw2` / `FORMAT_VERSION = 2` | the *bank* format's own version, on a different axis: a VINDEX2 container holds LYRW v1 files, a VINDEX3 container holds LYRW v2 files (see `format::generation`) |
+>
+> Only the container is versioned 3. An on-disk `index.json` carrying
+> `"version": 2` is a **VINDEX2** file — the predecessor above, not a draft of
+> this one.
+>
+> Real VINDEX3 containers now exist for conformance fixture A
+> (`format::vindex3`), so the format is no longer validated only through
+> VINDEX2-sourced operands. Real *models* are still VINDEX2: `extract` does not
+> emit VINDEX3 and will not until the outstanding V2-0/V2-1 rows close.
 
 ---
 
@@ -104,7 +124,7 @@ No sixth class. Everything else — hot sets, expert retention, cache sizing, pr
 ## 5. Directory layout
 
 ```
-model.vindex2/
+model.vindex/
 │
 ├── index.json                # SOLE ROOT AUTHORITY (§12): version, identity, provenance,
 │                             # checksums, class map, segment lists, references to everything below
@@ -259,7 +279,7 @@ LYRW v2 owes **no binary compatibility** to the §5.12 `layers/*.weights` files.
 Consequences:
 
 - **No synthesis adapter.** A LYRW v2 reader never opens a v1 layer file, and vice versa. Each container generation's loader reads its own layer format, end of story.
-- **No in-place upgrade** of multi-hundred-GB indexes. Migration is `checkpoint → vindex2 extractor`, or optionally `vindex1 → vindex2 importer` — a standalone tool, not a loader feature.
+- **No in-place upgrade** of multi-hundred-GB indexes. Migration is `checkpoint → VINDEX3 extractor`, or optionally `VINDEX2 → VINDEX3 importer` — a standalone tool, not a loader feature.
 - **Design freedom.** The bank-level region-schema table (§6.4), explicit value/scale pairing, and segment descriptors are all clean-sheet choices that a v1-compat shim would have contaminated. The `LYRW` magic and `format_version=2` are retained purely as self-description and forensics — a v1 reader that encounters a v2 file fails fast on the version field with a precise "requires VINDEX3 loader" error, never a parse error.
 
 The compatibility obligation that **does** bind is one level up: larql must support VINDEX2 and VINDEX3 side by side (§12.1).
@@ -509,7 +529,7 @@ The binding obligation is not between the two on-disk formats (there is none —
 
   A generation is *named* for the schema it currently writes, not for the only schema it can read. Treating the version as a generation identifier rather than a generation floor refuses every legacy-schema index in existence — which E0 caught in practice, not in review. Unified dispatch routes schema 1 to the VINDEX2 loader; the VINDEX3 loader still refuses it by name.
 - **One entry point.** `Vindex::open(path)` returns the generation-appropriate handle behind a common trait; `larql run / serve / verify / slice / publish / pull` all accept either generation. Generation-specific verbs (e.g. profile selection) error precisely on a v1 index rather than silently no-op.
-- **No cross-loading, no silent conversion.** The v1 loader path is frozen-but-maintained: it never opens v2 directories, never gains v2 features, and v2 code never re-implements v1 parsing. Conversion is only ever the explicit `vindex1 → vindex2` importer.
+- **No cross-loading, no silent conversion.** The VINDEX2 loader path is frozen-but-maintained: it never opens VINDEX3 directories, never gains VINDEX3 features, and VINDEX3 code never re-implements VINDEX2 parsing. Conversion is only ever the explicit `VINDEX2 → VINDEX3` importer.
 - **Hub and distribution.** `larql publish` stamps the container generation into the hub artifact metadata; `larql pull` selects the reader from that stamp and refuses a generation the installed binary lacks — before downloading terabytes, not after.
 - **Wire protocols are generation-agnostic.** The expert-RPC and FFN-dispatch wire contracts carry activations and results, not container bytes; a grid may therefore mix v1 and v2 shards. A shard's container generation is a local concern of that shard's loader.
 - **Support policy.** VINDEX2 remains fully supported for read/verify/serve/publish/pull. New extractions default to VINDEX3 once the ABI freezes **and** the E0 preservation matrix passes; v1 extraction remains available until then and is deprecated (not removed) after.

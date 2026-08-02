@@ -260,10 +260,10 @@ impl ClassRow {
 /// dispatch grid's y axis — MEASURED by K3a, and inside the large-shape band.
 pub const GROUPED_ROUTED_ETA: f64 = 0.89;
 
-/// MXFP4 all-in bits (codeword + e8m0 scale per 32).
-pub const MXFP4_BITS: f64 = 4.25;
-/// Q6_K all-in bits (210 bytes per 256 weights).
-pub const Q6K_BITS: f64 = 210.0 * 8.0 / 256.0;
+// All-in bits per container are NOT restated here. `Container::all_in_bits`
+// derives them from block geometry and is the single authority; a second copy
+// carrying the same literals is how the two drift apart, and the ledger's whole
+// claim is that its numbers are derived rather than typed.
 
 /// The per-class census for a K3 image at a given format.
 ///
@@ -517,9 +517,11 @@ pub fn apply(rows: &[ClassRow], s: Scenario) -> Vec<ClassRow> {
 mod tests {
     use super::*;
     use crate::commands::primary::k3_ledger::geometry::k3_reference;
+    use crate::commands::primary::k3_ledger::serving_format::Container;
 
     fn base() -> Vec<ClassRow> {
-        census(&k3_reference(), MXFP4_BITS, MXFP4_BITS)
+        let bits = Container::Mxfp4.all_in_bits();
+        census(&k3_reference(), bits, bits)
     }
 
     fn approx(a: f64, b: f64, tol: f64) {
@@ -631,10 +633,11 @@ mod tests {
     #[test]
     fn q6k_transcode_costs_bytes_and_therefore_throughput() {
         let mxfp4 = compose(base(), BW_GB_S, 0.85);
-        let q6k = compose(census(&k3_reference(), Q6K_BITS, Q6K_BITS), BW_GB_S, 0.85);
+        let q6k_bits = Container::Q6K.all_in_bits();
+        let q6k = compose(census(&k3_reference(), q6k_bits, q6k_bits), BW_GB_S, 0.85);
         assert!(q6k.total_bytes > mxfp4.total_bytes);
         assert!(q6k.tok_s < mxfp4.tok_s);
-        approx(Q6K_BITS / MXFP4_BITS, 1.544, 0.01);
+        approx(q6k_bits / Container::Mxfp4.all_in_bits(), 1.544, 0.01);
     }
 
     #[test]

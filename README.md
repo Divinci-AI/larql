@@ -376,6 +376,15 @@ gemma3-4b.vindex/
   feature_labels.json      # Probe-confirmed labels
 ```
 
+**Container generations.** `index.json`'s `version` is the sole discriminator —
+schemas 1–2 are **VINDEX2** (what `extract` writes, and what every published
+vindex is today), schema 3 is **VINDEX3**, the successor container for sparse
+models. One binary reads both; `larql show` and `larql verify` dispatch on the
+version and describe each generation in its own terms rather than flattening
+one into the other. VINDEX3 is still draft — the ABI is not frozen and
+`extract` does not emit it yet — so in practice everything below is VINDEX2.
+See [`crates/larql-vindex/docs/vindex3-format-spec.md`](crates/larql-vindex/docs/vindex3-format-spec.md).
+
 Three extraction levels:
 
 | Level | CLI Flag | LQL Syntax | Size (f16) | Enables |

@@ -155,7 +155,7 @@ fn tensor_bytes(entry: &Value) -> u64 {
     entry
         .get("data_offsets")
         .and_then(|o| o.as_array())
-        .and_then(|a| Some(a.get(1)?.as_u64()? - a.get(0)?.as_u64()?))
+        .and_then(|a| Some(a.get(1)?.as_u64()? - a.first()?.as_u64()?))
         .unwrap_or(0)
 }
 

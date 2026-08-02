@@ -2,7 +2,7 @@
 //!
 //! # Scope, stated honestly
 //!
-//! The full E0 matrix (`docs/vindex2-experiments.md`) covers loading,
+//! The full E0 matrix (`docs/vindex3-experiments.md`) covers loading,
 //! verification, WALK, slicing, full decode, layer and expert sharding, and
 //! publish/pull round-trips against real indexes. Those rows need multi-GB
 //! checkpoints and cannot run in CI; they run locally against the committed

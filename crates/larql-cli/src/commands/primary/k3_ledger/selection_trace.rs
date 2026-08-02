@@ -26,6 +26,14 @@ pub enum SelectionUnit {
     /// An MoE expert (DEC-8.4).
     Expert,
     /// An FFN feature row inside one expert (DEC-8.1).
+    ///
+    /// Nothing constructs this yet — only the expert path is wired, so
+    /// `from_routing_pool` always labels `Expert`. Kept rather than deleted
+    /// because the unit is the thing that stops an expert distribution being
+    /// read as a feature one, and a DEC-8.1 export arriving with no way to
+    /// name its own bank is exactly the substitution this enum exists to
+    /// prevent. Pinned by `every_selection_unit_serialises_under_a_distinct_name`.
+    #[allow(dead_code)]
     Feature,
     /// Unlabelled — the estimators do not care, but an export should.
     Symbol,
@@ -422,5 +430,22 @@ mod tests {
             (t.sessions(), t.steps(), t.width(), t.alphabet()),
             (2, 2, 2, 4)
         );
+    }
+
+    #[test]
+    fn every_selection_unit_serialises_under_a_distinct_name() {
+        // The names reach exported files, and the whole point of the enum is
+        // that a reader can tell an expert distribution from a feature one.
+        // Two units sharing a name would silently permit the substitution.
+        let units = [
+            SelectionUnit::Expert,
+            SelectionUnit::Feature,
+            SelectionUnit::Symbol,
+        ];
+        let mut names: Vec<&str> = units.iter().map(|u| u.as_str()).collect();
+        let count = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), count, "unit names must be distinct");
     }
 }

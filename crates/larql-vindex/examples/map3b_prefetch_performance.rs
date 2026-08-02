@@ -477,7 +477,10 @@ mod probe {
             .collect::<Result<_, _>>()?;
         println!("  random control: {} unselected experts {unselected:?} (same count as routed, so same predicted byte total)\n", unselected.len());
 
-        let full_ranges = vec![0..mmap_bytes.len()];
+        // Built through `once` rather than a one-element literal: `vec![0..n]`
+        // and `[0..n]` both read like a typo for `vec![0; n]`, and clippy says
+        // so. One range covering the whole map is genuinely what this wants.
+        let full_ranges: Vec<Range<usize>> = std::iter::once(0..mmap_bytes.len()).collect();
 
         println!("== conditions ==");
         let conditions: [(&'static str, &[Range<usize>]); 4] = [
