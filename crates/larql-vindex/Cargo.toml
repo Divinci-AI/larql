@@ -76,6 +76,10 @@ mockito = "1.7"
 serial_test = "3.2"
 
 [[bench]]
+name = "vindex3_bound_execute"
+harness = false
+
+[[bench]]
 name = "vindex_ops"
 harness = false
 
