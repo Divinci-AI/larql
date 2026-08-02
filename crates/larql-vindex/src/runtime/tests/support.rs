@@ -9,10 +9,38 @@ use crate::format::capability::binding::RepresentationIdentity;
 use crate::format::capability::component::ComponentContract;
 use crate::format::lyrw2::region_format::RegionFormat;
 
-use super::tensor::BoundTensor;
+use crate::runtime::tensor::BoundTensor;
 
 /// Variant these test operands claim to come from.
 pub const TEST_VARIANT: &str = "test";
+
+/// Q4_K super-block geometry, read from the same constants the quantiser and
+/// the kernels use. Spelling `256` and `144` here would let a test keep passing
+/// against a layout the runtime no longer has.
+pub const Q4K_BLOCK_ELEMS: usize = larql_models::quant::ggml::Q4_K_BLOCK_ELEMS;
+pub const Q4K_BLOCK_BYTES: usize = larql_models::quant::ggml::Q4_K_BLOCK_BYTES;
+
+/// Small, distinct, in-range values for a quantised fixture.
+///
+/// Q4_K stores 4-bit values against a per-sub-block scale, so a fixture whose
+/// values span many orders of magnitude round-trips badly and makes a test
+/// about *binding* look like a test about precision. This ramp stays inside
+/// one comfortable scale.
+fn ramp(len: usize, seed: usize) -> Vec<f32> {
+    (0..len)
+        .map(|i| ((i + seed) % 19) as f32 * 0.01 - 0.09)
+        .collect()
+}
+
+/// Q4_K bytes for a `rows × cols` matrix. `cols` must be a whole number of
+/// super-blocks, which is what every real k-quant row is.
+pub fn q4k_bytes(rows: usize, cols: usize, seed: usize) -> Vec<u8> {
+    assert!(
+        cols.is_multiple_of(Q4K_BLOCK_ELEMS),
+        "a Q4_K row is a whole number of {Q4K_BLOCK_ELEMS}-element blocks, not {cols}"
+    );
+    larql_compute::cpu::ops::q4_common::quantize_q4_k(&ramp(rows * cols, seed))
+}
 
 fn bind(region_set: &str, values: &[f32], contract: ComponentContract) -> BoundTensor<'static> {
     let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();

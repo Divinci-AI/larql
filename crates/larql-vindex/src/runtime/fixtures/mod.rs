@@ -23,6 +23,4 @@ pub mod direct_moe_oracle;
 pub mod synthetic;
 
 #[cfg(test)]
-mod direct_moe_tests;
-#[cfg(test)]
-mod synthetic_tests;
+mod tests;

@@ -13,6 +13,7 @@ use crate::format::capability::coordinate::BankCoordinate;
 use larql_compute::Activation;
 
 use super::error::ExecutionError;
+use super::expert_kernel::ExpertKernel;
 use super::projection::BoundProjection;
 use super::tensor::BoundTensor;
 
@@ -48,6 +49,14 @@ pub struct BoundBankOperation<'a> {
     /// width for a bank sitting behind routed-input/output transforms.
     pub hidden_dim: usize,
     pub activation: Activation,
+    /// Which kernel runs this bank's experts.
+    ///
+    /// A bank property rather than an expert one, because the kernel's
+    /// per-token state is shared across the bank: the incumbent quantises the
+    /// bank input to Q8_K once and every selected expert reads that one
+    /// activation. Two experts of one bank on two kernels would not be a
+    /// binding this runtime can express, and that is the correct restriction.
+    pub kernel: ExpertKernel,
 }
 
 impl<'a> BoundBankOperation<'a> {
@@ -87,21 +96,35 @@ impl<'a> BoundBankOperation<'a> {
         self.experts.iter().any(|e| e.expert_id == expert_id)
     }
 
-    /// Check every expert against the bank's declared shape.
+    /// Check every expert against the bank's declared shape, and against what
+    /// the bound kernel can take.
+    ///
+    /// Both, in that order. The shape check is what the operation means; the
+    /// kernel check is what this particular implementation of it can be handed.
+    /// A correctly-shaped expert the bound kernel cannot read is a binding
+    /// fault, and finding it here rather than mid-token is the whole reason
+    /// the kernel is a bound property.
     pub fn validate(&self) -> Result<(), ExecutionError> {
         for expert in &self.experts {
             expert.validate(self.intermediate_dim, self.hidden_dim)?;
+            self.kernel.validate_operands(
+                expert,
+                self.intermediate_dim,
+                self.hidden_dim,
+                self.activation,
+            )?;
         }
         Ok(())
     }
 
     pub fn describe(&self) -> String {
         format!(
-            "{} — {} experts, {}×{}",
+            "{} — {} experts, {}×{}, {} kernel",
             self.bank.describe(),
             self.population(),
             self.intermediate_dim,
-            self.hidden_dim
+            self.hidden_dim,
+            self.kernel.name()
         )
     }
 }

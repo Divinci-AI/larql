@@ -4,7 +4,7 @@
 //! reports confidently. These pin the boundary behaviour the probe's headline
 //! number depends on.
 
-use super::residency::{account, ExpertRegion, PageSpan, ResidencyAccount};
+use crate::runtime::residency::{account, ExpertRegion, PageSpan, ResidencyAccount};
 
 const PAGE: usize = 4_096;
 

@@ -55,7 +55,7 @@ use larql_vindex::format::lyrw2::region_role::RegionRole;
 use larql_vindex::runtime::MoeInputs;
 use larql_vindex::runtime::{
     execute, execute_traced, BoundBankOperation, BoundExpert, BoundExpertScaling,
-    BoundMoeOperation, BoundProjection, BoundReduction, BoundRouter, BoundTensor,
+    BoundMoeOperation, BoundProjection, BoundReduction, BoundRouter, BoundTensor, ExpertKernel,
     ProjectionArrangement, RouterKernel,
 };
 
@@ -156,6 +156,7 @@ impl Operands {
                 intermediate_dim: INTERMEDIATE,
                 hidden_dim: HIDDEN,
                 activation: Activation::Silu,
+                kernel: ExpertKernel::default(),
             }],
             reduction: BoundReduction::WeightedSum,
             residual_dim: HIDDEN,

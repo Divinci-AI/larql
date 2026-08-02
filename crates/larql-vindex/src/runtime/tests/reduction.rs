@@ -1,8 +1,8 @@
 //! Colocated tests for `reduction`.
 
-use super::axis::Axis;
-use super::error::ExecutionError;
-use super::reduction::BoundReduction;
+use crate::runtime::axis::Axis;
+use crate::runtime::error::ExecutionError;
+use crate::runtime::reduction::BoundReduction;
 
 #[test]
 fn a_weighted_sum_accumulates_scaled_contributions() {

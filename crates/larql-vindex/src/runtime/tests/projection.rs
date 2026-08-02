@@ -6,9 +6,9 @@
 
 use crate::format::lyrw2::region_role::RegionRole;
 
-use super::error::ExecutionError;
-use super::projection::{BoundProjection, ProjectionArrangement};
-use super::test_support::{matrix, TEST_VARIANT};
+use super::support::{matrix, TEST_VARIANT};
+use crate::runtime::error::ExecutionError;
+use crate::runtime::projection::{BoundProjection, ProjectionArrangement};
 
 const INTERMEDIATE: u32 = 2;
 const HIDDEN: u32 = 3;

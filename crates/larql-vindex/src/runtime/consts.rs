@@ -32,3 +32,15 @@ pub const BF16_BYTES: usize = 2;
 
 /// Where the mantissa of a bf16 value sits once widened to f32.
 pub const BF16_SHIFT: u32 = 16;
+
+/// Operand layouts a kernel can ask for, named once so a refusal and the
+/// check that produced it cannot describe the requirement differently.
+pub const WANTED_ROW_MAJOR_F32: &str = "contiguous row-major f32";
+pub const WANTED_FUSED_PROJECTION: &str = "one fused gate+up region";
+
+/// Stand-in when a refusal names a codec this binary has no name for.
+pub const UNREGISTERED_CODEC: &str = "a registered block codec";
+
+/// Extents a block-alignment refusal can be about.
+pub const EXTENT_STORED_ROW: &str = "stored row";
+pub const EXTENT_KERNEL_INPUT: &str = "kernel input";

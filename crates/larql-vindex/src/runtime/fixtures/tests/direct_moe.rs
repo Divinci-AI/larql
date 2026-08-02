@@ -12,11 +12,13 @@
 //! residual_delta   the transform stages
 //! ```
 
-use super::super::execute::{execute, execute_traced};
-use super::super::inputs::MoeInputs;
-use super::super::projection::{BoundProjection, ProjectionArrangement};
-use super::direct_moe::{input, up_at, DirectMoeFixture, HIDDEN, INTERMEDIATE, POPULATION, TOP_K};
-use super::direct_moe_oracle::oracle;
+use crate::runtime::execute::{execute, execute_traced};
+use crate::runtime::fixtures::direct_moe::{
+    input, up_at, DirectMoeFixture, HIDDEN, INTERMEDIATE, POPULATION, TOP_K,
+};
+use crate::runtime::fixtures::direct_moe_oracle::oracle;
+use crate::runtime::inputs::MoeInputs;
+use crate::runtime::projection::{BoundProjection, ProjectionArrangement};
 
 /// Reference and oracle run the same arithmetic in the same order, so they
 /// agree to well within this. It is a float-comparison guard, not a tolerance

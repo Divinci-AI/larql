@@ -5,9 +5,9 @@
 //! routed_output → residual`), and leaving it untested until then would mean
 //! discovering its faults mixed in with K3 router semantics.
 
-use super::error::ExecutionError;
-use super::test_support::{ascending, matrix};
-use super::transform::{apply_stage, BoundTransform, TransformStage};
+use super::support::{ascending, matrix};
+use crate::runtime::error::ExecutionError;
+use crate::runtime::transform::{apply_stage, BoundTransform, TransformStage};
 
 const ROUTED_IN: &str = "latent_in";
 const ROUTED_OUT: &str = "latent_out";

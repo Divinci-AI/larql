@@ -7,14 +7,15 @@ use crate::format::capability::coordinate::BankCoordinate;
 use crate::format::lyrw2::region_role::RegionRole;
 use larql_compute::{Activation, MoeTopKWeightPolicy};
 
-use super::bank::{BoundBankOperation, BoundExpert};
-use super::error::ExecutionError;
-use super::operation::BoundMoeOperation;
-use super::projection::BoundProjection;
-use super::reduction::BoundReduction;
-use super::router::{BoundExpertScaling, BoundRouter, RouterKernel};
-use super::test_support::ascending;
-use super::transform::{BoundTransform, TransformStage};
+use super::support::ascending;
+use crate::runtime::bank::{BoundBankOperation, BoundExpert};
+use crate::runtime::error::ExecutionError;
+use crate::runtime::expert_kernel::ExpertKernel;
+use crate::runtime::operation::BoundMoeOperation;
+use crate::runtime::projection::BoundProjection;
+use crate::runtime::reduction::BoundReduction;
+use crate::runtime::router::{BoundExpertScaling, BoundRouter, RouterKernel};
+use crate::runtime::transform::{BoundTransform, TransformStage};
 
 const RESIDUAL: u32 = 6;
 const LATENT: u32 = 3;
@@ -41,6 +42,7 @@ fn bank(hidden: u32) -> BoundBankOperation<'static> {
         intermediate_dim: INTERMEDIATE as usize,
         hidden_dim: hidden as usize,
         activation: Activation::Silu,
+        kernel: ExpertKernel::default(),
     }
 }
 

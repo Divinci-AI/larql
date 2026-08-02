@@ -32,12 +32,14 @@
 //! is the implementation that says what the answer should be; production
 //! routes bind to `larql-compute` kernels and are checked against it.
 
+pub mod addressing;
 pub mod axis;
 pub mod bank;
 pub mod consts;
 pub mod error;
 pub mod execute;
 pub mod expert;
+pub mod expert_kernel;
 pub mod fixtures;
 pub mod inputs;
 pub mod kernels;
@@ -51,38 +53,14 @@ pub mod trace;
 pub mod transform;
 
 #[cfg(test)]
-mod bank_tests;
-#[cfg(test)]
-mod execute_tests;
-#[cfg(test)]
-mod inputs_tests;
-#[cfg(test)]
-mod kernels_tests;
-#[cfg(test)]
-mod operation_tests;
-#[cfg(test)]
-mod placement_tests;
-#[cfg(test)]
-mod projection_tests;
-#[cfg(test)]
-mod reduction_tests;
-#[cfg(test)]
-mod residency_tests;
-#[cfg(test)]
-mod router_tests;
-#[cfg(test)]
-mod tensor_tests;
-#[cfg(test)]
-mod test_support;
-#[cfg(test)]
-mod tie_tests;
-#[cfg(test)]
-mod transform_tests;
+mod tests;
 
+pub use addressing::{Addressing, BlockOperand};
 pub use axis::Axis;
 pub use bank::{BoundBankOperation, BoundExpert};
 pub use error::{ExecutionError, OperandUnsuitability};
 pub use execute::{execute, execute_traced, execute_with};
+pub use expert_kernel::ExpertKernel;
 pub use inputs::MoeInputs;
 pub use operation::BoundMoeOperation;
 pub use projection::{BoundProjection, ProjectionArrangement};

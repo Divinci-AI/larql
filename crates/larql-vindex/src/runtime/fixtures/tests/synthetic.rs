@@ -4,9 +4,9 @@
 //! is wrong they all measure something other than what they claim, and none of
 //! them would notice — a bench does not check its own answers.
 
-use super::super::execute::{execute, execute_traced};
-use super::super::inputs::MoeInputs;
-use super::synthetic::{SyntheticLayer, SyntheticShape};
+use crate::runtime::execute::{execute, execute_traced};
+use crate::runtime::fixtures::synthetic::{SyntheticLayer, SyntheticShape};
+use crate::runtime::inputs::MoeInputs;
 
 fn shape() -> SyntheticShape {
     SyntheticShape {
@@ -162,7 +162,7 @@ fn different_populations_produce_different_images() {
 
 #[test]
 fn the_weight_generator_is_deterministic_and_varies_by_seed() {
-    use super::synthetic::weight;
+    use crate::runtime::fixtures::synthetic::weight;
     assert_eq!(weight(1, 7), weight(1, 7));
     assert_ne!(weight(1, 7), weight(2, 7));
     assert_ne!(weight(1, 7), weight(1, 8));

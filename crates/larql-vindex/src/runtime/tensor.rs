@@ -25,8 +25,12 @@ use crate::format::capability::binding::{ComponentView, RepresentationIdentity};
 use crate::format::capability::component::{ComponentContract, TensorKind};
 use crate::format::lyrw2::region_format::RegionFormat;
 
+use super::addressing::{Addressing, BlockOperand};
 use super::axis::Axis;
-use super::consts::{BF16_BYTES, BF16_SHIFT, COL_DIM, F16_BYTES, F32_BYTES, MATRIX_RANK, ROW_DIM};
+use super::consts::{
+    BF16_SHIFT, COL_DIM, EXTENT_STORED_ROW, MATRIX_RANK, ROW_DIM, UNREGISTERED_CODEC,
+    WANTED_ROW_MAJOR_F32,
+};
 use super::error::{ExecutionError, OperandUnsuitability};
 
 /// Resolved bytes, with the encoding and access pattern that read them.
@@ -42,8 +46,8 @@ pub struct BoundTensor<'a> {
     /// Shape the operation sees, after `view`.
     role: ComponentContract,
     view: ComponentView,
-    /// Bytes per element under `format`. Resolved once, at bind time.
-    stride: usize,
+    /// How `format`'s bytes map to elements. Resolved once, at bind time.
+    addressing: Addressing,
 }
 
 impl<'a> BoundTensor<'a> {
@@ -67,8 +71,9 @@ impl<'a> BoundTensor<'a> {
                 operand: operand.clone(),
             })?;
         let elements: usize = storage.shape.iter().map(|d| *d as usize).product();
-        let stride = element_bytes(format, &operand)?;
-        let needed = elements * stride;
+        let addressing = Addressing::of(format)
+            .ok_or_else(|| ExecutionError::unsupported_format(format, operand.clone()))?;
+        let needed = addressing.region_bytes(elements);
         if bytes.len() < needed {
             return Err(ExecutionError::ShortRegion {
                 operand,
@@ -83,7 +88,7 @@ impl<'a> BoundTensor<'a> {
             storage,
             role,
             view,
-            stride,
+            addressing,
         })
     }
 
@@ -123,11 +128,10 @@ impl<'a> BoundTensor<'a> {
     /// view-aware kernel, take an aligned copy, or reject the index. Only the
     /// last is a defect.
     pub fn as_f32_slice(&self) -> Result<&'a [f32], OperandUnsuitability> {
-        const WANTED: &str = "contiguous row-major f32";
         if self.format != RegionFormat::F32 {
             return Err(OperandUnsuitability::ElementFormat {
                 found: self.format.name(),
-                wanted: WANTED,
+                wanted: WANTED_ROW_MAJOR_F32,
             });
         }
         if self.view != ComponentView::Direct {
@@ -140,7 +144,9 @@ impl<'a> BoundTensor<'a> {
         // makes the result the *whole* slice rather than a shifted window.
         let (prefix, values, _) = unsafe { self.bytes.align_to::<f32>() };
         if !prefix.is_empty() {
-            return Err(OperandUnsuitability::MisalignedBase { wanted: WANTED });
+            return Err(OperandUnsuitability::MisalignedBase {
+                wanted: WANTED_ROW_MAJOR_F32,
+            });
         }
         if values.len() < self.len() {
             return Err(OperandUnsuitability::Length {
@@ -149,6 +155,90 @@ impl<'a> BoundTensor<'a> {
             });
         }
         Ok(&values[..self.len()])
+    }
+
+    /// This operand's super-blocks, as stored, for a block-native kernel.
+    ///
+    /// The blocked counterpart to [`Self::as_f32_slice`], and the same
+    /// contract: hand over the region's own bytes or refuse. A bridge that
+    /// dequantised, requantised or repacked into a kernel-shaped temporary
+    /// could reach identical numbers while proving nothing about the binding.
+    ///
+    /// # A column-prefix slice is honoured, not refused
+    ///
+    /// Unlike the f32 handover, this accepts `Slice { dim: 1, start: 0, .. }`.
+    /// That view is not an obstacle here — it is exactly the information a
+    /// block-native kernel needs and cannot recover from the bytes. Gemma's
+    /// `down` is stored `[hidden, 768]` and means `[hidden, 704]`; the kernel
+    /// must read 768-wide rows while the operation means 704, so
+    /// [`BlockOperand`] carries both. Requiring `Direct` would have forced
+    /// either a second binding of the same bytes or a lie about the stored
+    /// extent.
+    ///
+    /// A row-dimension slice or a transpose *is* refused: neither is a
+    /// contiguous run of whole rows, so the bytes are not the operand.
+    pub fn as_blocks(
+        &self,
+        wanted: RegionFormat,
+    ) -> Result<BlockOperand<'a>, OperandUnsuitability> {
+        let wanted_name = wanted.registered_name().unwrap_or(UNREGISTERED_CODEC);
+        if self.format != wanted {
+            return Err(OperandUnsuitability::ElementFormat {
+                found: self.format.name(),
+                wanted: wanted_name,
+            });
+        }
+        let (block_elems, block_bytes) = match self.addressing {
+            Addressing::Blocked { elements, bytes } => (elements, bytes),
+            Addressing::Scalar { .. } => {
+                return Err(OperandUnsuitability::ElementFormat {
+                    found: self.format.name(),
+                    wanted: wanted_name,
+                })
+            }
+        };
+        let honoured = match &self.view {
+            ComponentView::Direct => true,
+            // A prefix of every row: the stored rows are untouched and still
+            // contiguous, so the bytes remain the operand.
+            ComponentView::Slice { dim, start, .. } => *dim == COL_DIM && *start == 0,
+            ComponentView::Transpose => false,
+        };
+        if !honoured {
+            return Err(OperandUnsuitability::NonDirectView {
+                view: self.view.describe(),
+            });
+        }
+
+        let storage_cols = self.storage_cols();
+        if !storage_cols.is_multiple_of(block_elems) {
+            return Err(OperandUnsuitability::BlockAlignment {
+                extent: EXTENT_STORED_ROW,
+                found: storage_cols,
+                block: block_elems,
+            });
+        }
+        let rows = self.rows();
+        let row_bytes = (storage_cols / block_elems) * block_bytes;
+        let needed = rows * row_bytes;
+        // No length refusal here, because there is no shape that reaches this
+        // line and fails it. Binding sized the whole region against
+        // `rows × storage_cols` elements, and the block-aligned stored row
+        // extent checked just above makes per-row sizing equal that exactly.
+        // The assertion records the reasoning; re-checking it at every handover
+        // would suggest a case the reader should be able to imagine.
+        debug_assert!(
+            self.bytes.len() >= needed,
+            "{}: binding sized this region below its {rows} × {row_bytes} rows",
+            self.describe()
+        );
+        Ok(BlockOperand {
+            bytes: &self.bytes[..needed],
+            rows,
+            storage_cols,
+            role_cols: self.cols(),
+            row_bytes,
+        })
     }
 
     pub fn representation(&self) -> &RepresentationIdentity {
@@ -263,10 +353,7 @@ impl<'a> BoundTensor<'a> {
     /// The whole point of the view: every caller indexes as the role, and the
     /// physical arrangement is resolved here once.
     fn storage_index(&self, row: usize, col: usize) -> Result<usize, ExecutionError> {
-        let storage_cols = match self.storage.kind {
-            TensorKind::Matrix => self.storage.shape.get(COL_DIM).copied().unwrap_or(0) as usize,
-            TensorKind::Vector => 1,
-        };
+        let storage_cols = self.storage_cols();
         Ok(match &self.view {
             ComponentView::Direct => row * storage_cols + col,
             ComponentView::Transpose => col * storage_cols + row,
@@ -286,14 +373,33 @@ impl<'a> BoundTensor<'a> {
         })
     }
 
+    /// Columns in the stored arrangement, before any view.
+    fn storage_cols(&self) -> usize {
+        match self.storage.kind {
+            TensorKind::Matrix => self.storage.shape.get(COL_DIM).copied().unwrap_or(0) as usize,
+            TensorKind::Vector => 1,
+        }
+    }
+
     /// Decode a single stored element.
     ///
-    /// `stride` is resolved at bind time rather than here. Recomputing it per
+    /// Addressing is resolved at bind time rather than here. Recomputing it per
     /// element also meant building the operand name per element — a `String`
     /// allocation on every scalar read, which dominated the reference decoder
     /// and had nothing to do with decoding.
+    ///
+    /// A block-packed region has no per-element slot to read, so it is refused
+    /// here rather than indexed with an invented stride. That refusal is the
+    /// reference decoder's stated scope, not a defect in the bytes: a
+    /// quantised region is a missing kernel, and [`Self::as_blocks`] is how
+    /// one is given it.
     fn decode_at(&self, index: usize) -> Result<f32, ExecutionError> {
-        let stride = self.stride;
+        let Addressing::Scalar { bytes: stride } = self.addressing else {
+            return Err(ExecutionError::unsupported_format(
+                self.format,
+                self.describe(),
+            ));
+        };
         let at = index * stride;
         let raw = self
             .bytes
@@ -314,14 +420,4 @@ impl<'a> BoundTensor<'a> {
             other => return Err(ExecutionError::unsupported_format(other, self.describe())),
         })
     }
-}
-
-/// Bytes per element, or a refusal naming the encoding.
-fn element_bytes(format: RegionFormat, operand: &str) -> Result<usize, ExecutionError> {
-    Ok(match format {
-        RegionFormat::F32 => F32_BYTES,
-        RegionFormat::F16 => F16_BYTES,
-        RegionFormat::BF16 => BF16_BYTES,
-        other => return Err(ExecutionError::unsupported_format(other, operand)),
-    })
 }

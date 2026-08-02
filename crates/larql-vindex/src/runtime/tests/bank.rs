@@ -4,10 +4,11 @@ use crate::format::capability::coordinate::BankCoordinate;
 use crate::format::lyrw2::region_role::RegionRole;
 use larql_compute::Activation;
 
-use super::bank::{BoundBankOperation, BoundExpert};
-use super::error::ExecutionError;
-use super::projection::BoundProjection;
-use super::test_support::ascending;
+use super::support::ascending;
+use crate::runtime::bank::{BoundBankOperation, BoundExpert};
+use crate::runtime::error::ExecutionError;
+use crate::runtime::expert_kernel::ExpertKernel;
+use crate::runtime::projection::BoundProjection;
 
 const LAYER: u32 = 7;
 const BANK_ID: u16 = 1;
@@ -34,6 +35,7 @@ fn bank(ids: &[u32]) -> BoundBankOperation<'static> {
         intermediate_dim: INTERMEDIATE as usize,
         hidden_dim: HIDDEN as usize,
         activation: Activation::Silu,
+        kernel: ExpertKernel::default(),
     }
 }
 

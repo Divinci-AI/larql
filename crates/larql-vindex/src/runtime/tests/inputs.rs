@@ -5,9 +5,9 @@
 //! operation would have scored on the expert input, selected different experts,
 //! and produced a wrong answer with no shape error anywhere.
 
-use super::execute::{execute, execute_traced};
-use super::inputs::MoeInputs;
-use super::operation_tests::direct;
+use super::operation::direct;
+use crate::runtime::execute::{execute, execute_traced};
+use crate::runtime::inputs::MoeInputs;
 
 const RESIDUAL_WIDTH: usize = 6;
 
@@ -71,8 +71,8 @@ fn inputs_describe_which_shape_they_are() {
 /// the selection did not, which proves nothing about routing. A one-hot router
 /// makes the selection readable by hand: top-k over the input's own largest
 /// components.
-fn selection_follows_input() -> super::operation::BoundMoeOperation<'static> {
-    use super::test_support::matrix;
+fn selection_follows_input() -> crate::runtime::operation::BoundMoeOperation<'static> {
+    use super::support::matrix;
     let mut op = direct();
     let population = op.banks[0].experts.len();
     let hidden = op.residual_dim;

@@ -2,9 +2,9 @@
 
 use larql_compute::MoeTopKWeightPolicy;
 
-use super::error::ExecutionError;
-use super::router::{BoundExpertScaling, BoundRouter, RouterKernel, SelectedExpert};
-use super::test_support::{ascending, vector};
+use super::support::{ascending, vector};
+use crate::runtime::error::ExecutionError;
+use crate::runtime::router::{BoundExpertScaling, BoundRouter, RouterKernel, SelectedExpert};
 
 const POPULATION: u32 = 4;
 const HIDDEN: u32 = 3;
@@ -147,4 +147,25 @@ fn a_selected_expert_keeps_both_its_weights() {
     assert_eq!(s.expert_id, 3);
     assert_ne!(s.weight, s.raw_score);
     assert_eq!(s, s);
+}
+
+#[test]
+fn each_router_kernel_has_a_distinct_name_and_the_reference_is_the_default() {
+    // The names reach operator-facing refusals — `KernelOperandUnsuitable`
+    // reports which kernel declined an operand — so two kernels sharing one
+    // would make a report unactionable.
+    assert_eq!(RouterKernel::default(), RouterKernel::Reference);
+    assert_ne!(
+        RouterKernel::Reference.name(),
+        RouterKernel::Incumbent.name()
+    );
+}
+
+#[test]
+fn each_scaling_policy_has_a_distinct_name() {
+    assert_eq!(BoundExpertScaling::None.name(), "none");
+    assert_ne!(
+        router(Some(&[1.0, 1.0, 1.0, 1.0])).scaling.name(),
+        BoundExpertScaling::None.name()
+    );
 }

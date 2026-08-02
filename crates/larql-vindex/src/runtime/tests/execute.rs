@@ -4,20 +4,48 @@
 //! latent route, the per-expert scale policy, the raw-softmax policy and the
 //! refusals — all reachable code that a direct f32 fixture never touches.
 
-use super::router::BoundExpertScaling;
+use crate::format::capability::binding::{ComponentView, RepresentationIdentity};
+use crate::format::capability::component::ComponentContract;
+use crate::format::lyrw2::region_format::RegionFormat;
+use crate::runtime::router::{BoundExpertScaling, RouterKernel};
 use larql_compute::MoeTopKWeightPolicy;
 
-use super::execute::{execute, execute_traced, execute_with};
-use super::inputs::MoeInputs;
-use super::operation_tests::{direct, latent};
-use super::test_support::{ascending, vector};
-use super::trace::{CollectedTrace, NoTrace, TraceSink};
-use super::transform::TransformStage;
+use super::operation::{direct, latent};
+use super::support::{ascending, vector, TEST_VARIANT};
+use crate::runtime::error::{ExecutionError, OperandUnsuitability};
+use crate::runtime::execute::{execute, execute_traced, execute_with};
+use crate::runtime::inputs::MoeInputs;
+use crate::runtime::tensor::BoundTensor;
+use crate::runtime::trace::{CollectedTrace, NoTrace, TraceSink};
+use crate::runtime::transform::TransformStage;
 
 const RESIDUAL_WIDTH: usize = 6;
 const LATENT_WIDTH: usize = 3;
 const SCALE: &str = "router_scale";
+const ROUTER: &str = "router";
+/// BLAS `sgemv` and an index-order f32 sum reach the same value by different
+/// summation orders, so scores agree closely rather than exactly.
+const SCORE_TOLERANCE: f32 = 1e-6;
 const LATENT_OUT: &str = "latent_out";
+
+/// The router's own weights, bound through a transpose: the role still sees
+/// `[population, residual]`, but the bytes are stored the other way round.
+fn transposed_router() -> BoundTensor<'static> {
+    const POPULATION: usize = 4;
+    let values: Vec<f32> = (0..POPULATION * RESIDUAL_WIDTH)
+        .map(|i| (i + 1) as f32)
+        .collect();
+    let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let leaked: &'static [u8] = Box::leak(bytes.into_boxed_slice());
+    BoundTensor::new(
+        RepresentationIdentity::new(ROUTER, TEST_VARIANT),
+        leaked,
+        RegionFormat::F32,
+        ComponentContract::matrix(RESIDUAL_WIDTH as u32, POPULATION as u32),
+        ComponentView::Transpose,
+    )
+    .expect("a transposed router is a legitimate binding")
+}
 
 fn residual() -> Vec<f32> {
     vec![0.4, -0.3, 0.9, 0.1, -0.7, 0.2]
@@ -224,4 +252,51 @@ fn the_latent_stages_are_the_only_transforms_bound() {
         stages,
         vec![TransformStage::RoutedInput, TransformStage::RoutedOutput]
     );
+}
+
+// ── The bound router kernel ────────────────────────────────────────────────
+
+#[test]
+fn the_incumbent_router_kernel_scores_the_same_population_as_the_reference() {
+    // Rung 1's claim, at unit scale and without a checkpoint. The two kernels
+    // sum in different orders — BLAS `sgemv` against index-order f32 — so this
+    // asserts the *selection*, which is discrete, and reports the weights.
+    let mut op = direct();
+    let (_, reference) = execute_traced(&op, MoeInputs::shared(&residual())).unwrap();
+
+    op.router.kernel = RouterKernel::Incumbent;
+    let (_, incumbent) = execute_traced(&op, MoeInputs::shared(&residual())).unwrap();
+
+    assert_eq!(reference.selected_ids(), incumbent.selected_ids());
+    assert_eq!(reference.router_scores.len(), incumbent.router_scores.len());
+    let worst = reference
+        .router_scores
+        .iter()
+        .zip(&incumbent.router_scores)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f32, f32::max);
+    assert!(worst <= SCORE_TOLERANCE, "scores differ by {worst}");
+}
+
+#[test]
+fn the_incumbent_router_kernel_refuses_an_operand_it_cannot_read_as_stored() {
+    // It takes contiguous row-major f32. A transposed router operand is a
+    // legitimate binding the reference serves and this kernel cannot, so the
+    // refusal names the view rather than silently repacking.
+    let mut op = direct();
+    op.router.kernel = RouterKernel::Incumbent;
+    op.router.weight = transposed_router();
+
+    let err = execute(&op, MoeInputs::shared(&residual())).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ExecutionError::KernelOperandUnsuitable {
+                reason: OperandUnsuitability::NonDirectView { .. },
+                ..
+            }
+        ),
+        "{err}"
+    );
+    assert!(err.to_string().contains("incumbent"), "{err}");
 }

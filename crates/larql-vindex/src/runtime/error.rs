@@ -98,6 +98,23 @@ pub enum ExecutionError {
         reason: OperandUnsuitability,
     },
 
+    /// A bound kernel does not implement the activation the bank declares.
+    ///
+    /// Distinct from an operand refusal because no rebinding of the *bytes*
+    /// fixes it — the kernel computes a different function than the model
+    /// specifies, and the only repairs are a different kernel or a corrected
+    /// recipe.
+    ///
+    /// It exists because the failure is otherwise invisible. The incumbent
+    /// Q4_K kernel branches on one activation and falls through to SiLU for
+    /// the rest, so a bank bound with `ReLU` would run SiLU, return finite
+    /// plausible values, and signal nothing at all.
+    #[error("the {kernel} kernel does not implement the {activation} activation")]
+    KernelActivationUnsupported {
+        kernel: &'static str,
+        activation: String,
+    },
+
     /// An expert id outside the router's address space.
     ///
     /// A catalogue fault: nothing could ever select this expert, so the router
@@ -134,10 +151,12 @@ pub enum ExecutionError {
 
 /// Why a bound operand cannot be handed to a particular kernel.
 ///
-/// Four causes, kept apart because they lead to different remedies: choose
-/// another kernel, bind another representation of the same component, or
-/// reject the index. Collapsing them into one message would leave the reader
-/// unable to tell which.
+/// Kept apart because they lead to different remedies: choose another kernel,
+/// bind another representation of the same component, repack, or reject the
+/// index. Collapsing them into one message would leave the reader unable to
+/// tell which. A new variant earns its place by having a remedy none of the
+/// existing ones implies — not by describing a new *place* the same remedy
+/// applies.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum OperandUnsuitability {
     /// The stored encoding is not what the kernel reads.
@@ -152,6 +171,24 @@ pub enum OperandUnsuitability {
     /// Remedy: an aligned copy, or a kernel with no alignment requirement.
     #[error("base address is not aligned for {wanted}")]
     MisalignedBase { wanted: &'static str },
+    /// A block-packed operand's rows are not whole super-blocks, so the
+    /// kernel — which decodes a block at a time and cannot stop inside one —
+    /// has no row stride to read at.
+    /// Remedy: a repacked region, or pad the extent to a block boundary.
+    #[error("{extent} of {found} is not a whole number of {block}-element blocks")]
+    BlockAlignment {
+        extent: &'static str,
+        found: usize,
+        block: usize,
+    },
+    /// The component is stored in a different arrangement from the one the
+    /// kernel's entry point takes — a decomposed pair where it takes one
+    /// fused slab, say.
+    /// Remedy: bind the arrangement this kernel takes, or a kernel for this
+    /// arrangement. Never re-stitch the regions: that would make the parity
+    /// result a statement about the stitching.
+    #[error("stored as {found}, kernel takes {wanted}")]
+    Arrangement { found: String, wanted: &'static str },
     /// The region holds fewer elements than the declared shape.
     /// Remedy: reject the index — this one is a defect.
     #[error("shape declares {expected} elements, region provides {found}")]

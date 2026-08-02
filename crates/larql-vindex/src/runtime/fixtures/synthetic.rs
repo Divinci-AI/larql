@@ -39,6 +39,7 @@ use larql_compute::{Activation, MoeTopKWeightPolicy};
 
 use super::super::bank::{BoundBankOperation, BoundExpert};
 use super::super::consts::{F32_BYTES, FUSED_PROJECTION_HALVES};
+use super::super::expert_kernel::ExpertKernel;
 use super::super::operation::BoundMoeOperation;
 use super::super::projection::BoundProjection;
 use super::super::reduction::BoundReduction;
@@ -214,6 +215,7 @@ impl SyntheticLayer {
                 intermediate_dim: shape.intermediate,
                 hidden_dim: shape.hidden,
                 activation: Activation::Silu,
+                kernel: ExpertKernel::default(),
             }],
             reduction: BoundReduction::WeightedSum,
             residual_dim: shape.hidden,

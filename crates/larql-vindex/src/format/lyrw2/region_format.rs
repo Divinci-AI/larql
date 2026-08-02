@@ -64,20 +64,34 @@ impl RegionFormat {
         matches!(self, Self::F32 | Self::F16)
     }
 
+    /// A borrowed name for the registered codecs; `None` for [`Self::Unknown`],
+    /// whose name carries its tag and so cannot be static.
+    ///
+    /// Exists because a kernel refusal names the format it *wanted*, and a
+    /// refusal is a `&'static str` field — the alternative was a second,
+    /// hand-written spelling of every codec name at each call site.
+    /// [`Self::name`] delegates here so the two cannot drift.
+    pub const fn registered_name(self) -> Option<&'static str> {
+        Some(match self {
+            Self::F32 => "f32",
+            Self::F16 => "f16",
+            Self::BF16 => "bf16",
+            Self::Q4_0 => "q4_0",
+            Self::Q4K => "q4_k",
+            Self::Q6K => "q6_k",
+            Self::Q8_0 => "q8_0",
+            Self::Fp4Larql => "fp4_larql",
+            Self::Mxfp4 => "mxfp4",
+            Self::Nvfp4 => "nvfp4",
+            Self::Mxfp8 => "mxfp8",
+            Self::Unknown(_) => return None,
+        })
+    }
+
     pub fn name(self) -> String {
-        match self {
-            Self::F32 => "f32".into(),
-            Self::F16 => "f16".into(),
-            Self::BF16 => "bf16".into(),
-            Self::Q4_0 => "q4_0".into(),
-            Self::Q4K => "q4_k".into(),
-            Self::Q6K => "q6_k".into(),
-            Self::Q8_0 => "q8_0".into(),
-            Self::Fp4Larql => "fp4_larql".into(),
-            Self::Mxfp4 => "mxfp4".into(),
-            Self::Nvfp4 => "nvfp4".into(),
-            Self::Mxfp8 => "mxfp8".into(),
-            Self::Unknown(tag) => format!("format_{tag}"),
+        match self.registered_name() {
+            Some(name) => name.into(),
+            None => format!("format_{}", self.as_u16()),
         }
     }
 }

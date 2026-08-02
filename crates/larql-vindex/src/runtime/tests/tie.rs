@@ -17,12 +17,12 @@
 //! selection-policy difference in minutes rather than mistaken for a weight
 //! decoding fault.
 
-use super::error::ExecutionError;
-use super::execute::execute_traced;
-use super::inputs::MoeInputs;
-use super::kernels::{top_k, top_k_with_margin};
-use super::operation_tests::direct;
-use super::test_support::matrix;
+use super::operation::direct;
+use super::support::matrix;
+use crate::runtime::error::ExecutionError;
+use crate::runtime::execute::execute_traced;
+use crate::runtime::inputs::MoeInputs;
+use crate::runtime::kernels::{top_k, top_k_with_margin};
 
 const ROUTER: &str = "router";
 

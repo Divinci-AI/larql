@@ -11,12 +11,12 @@
 //! has to survive to the caller so that placement can satisfy it; remote
 //! fetching will later answer exactly this without touching router semantics.
 
-use super::execute::{execute, execute_traced};
-use super::inputs::MoeInputs;
-use super::operation::BoundMoeOperation;
-use super::operation_tests::direct;
-use super::test_support::matrix;
-use super::ExecutionError;
+use super::operation::direct;
+use super::support::matrix;
+use crate::runtime::execute::{execute, execute_traced};
+use crate::runtime::inputs::MoeInputs;
+use crate::runtime::operation::BoundMoeOperation;
+use crate::runtime::ExecutionError;
 
 const ROUTER: &str = "router";
 
@@ -94,7 +94,7 @@ fn the_report_names_the_layer_and_bank_it_looked_in() {
     // A whole-model run has many banks; "expert 3 is missing" without saying
     // from where sends the reader hunting.
     let mut op = shard();
-    op.banks[0].bank = super::super::format::capability::coordinate::BankCoordinate::new(17, 2);
+    op.banks[0].bank = crate::format::capability::coordinate::BankCoordinate::new(17, 2);
     let input = vec![0.0, 0.0, 0.0, 5.0, 0.0, 0.0];
     let text = execute(&op, MoeInputs::shared(&input))
         .unwrap_err()

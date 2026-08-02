@@ -2,7 +2,7 @@
 
 use larql_compute::Activation;
 
-use super::kernels::{activate, dot, renormalize, softmax, top_k};
+use crate::runtime::kernels::{activate, dot, renormalize, softmax, top_k};
 
 #[test]
 fn a_dot_product_contracts_two_vectors() {

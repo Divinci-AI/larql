@@ -21,6 +21,7 @@ use larql_compute::{Activation, MoeTopKWeightPolicy};
 
 use super::super::bank::{BoundBankOperation, BoundExpert};
 use super::super::consts::FUSED_PROJECTION_HALVES;
+use super::super::expert_kernel::ExpertKernel;
 use super::super::operation::BoundMoeOperation;
 use super::super::projection::{BoundProjection, ProjectionArrangement};
 use super::super::reduction::BoundReduction;
@@ -169,6 +170,7 @@ impl DirectMoeFixture {
                 intermediate_dim: INTERMEDIATE,
                 hidden_dim: HIDDEN,
                 activation: ACTIVATION,
+                kernel: ExpertKernel::default(),
             }],
             reduction: BoundReduction::WeightedSum,
             residual_dim: HIDDEN,

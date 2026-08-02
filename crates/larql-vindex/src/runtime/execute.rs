@@ -13,7 +13,7 @@
 use super::axis::Axis;
 use super::consts::{OPERAND_OPERATION_OUTPUT, OPERAND_RESIDUAL};
 use super::error::ExecutionError;
-use super::expert;
+use super::expert_kernel::BankKernel;
 use super::inputs::MoeInputs;
 use super::kernels::{dot, renormalize, softmax, top_k_with_margin};
 use super::operation::BoundMoeOperation;
@@ -73,13 +73,14 @@ pub fn execute_with<S: TraceSink>(
     let mut reduced = vec![0.0f32; operation.bank_input_dim()];
     for bank in &operation.banks {
         let selected = select(&operation.router, inputs.router, bank.population(), sink)?;
+        // Opened before the expert loop, not inside it. The incumbent kernel
+        // quantises the bank input to Q8_K once and shares it across the
+        // bank's selected experts; quantising per expert would be binding a
+        // differently-shaped call than production makes.
+        let mut kernel = BankKernel::open(bank, &bank_input)?;
         for choice in &selected {
-            let out = expert::forward(
-                bank.expert(choice.expert_id, operation.router.population())?,
-                &bank_input,
-                bank.intermediate_dim,
-                bank.activation,
-            )?;
+            let expert = bank.expert(choice.expert_id, operation.router.population())?;
+            let out = kernel.run(expert, bank, &bank_input)?;
             sink.expert_output(choice.expert_id, &out);
             operation
                 .reduction
