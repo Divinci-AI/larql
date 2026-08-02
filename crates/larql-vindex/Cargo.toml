@@ -66,6 +66,9 @@ gpu = ["dep:larql-compute-metal"]
 
 [dev-dependencies]
 larql-inference = { path = "../larql-inference" }
+# The KvEngine decode path, for the teacher-forced / free-running decode
+# parity harness. Dev-only: nothing in the library depends on the engine layer.
+larql-kv = { path = "../larql-kv" }
 criterion = "0.5"
 tempfile = "3"
 # HTTP mocking for the publish trio (lfs / remote / upload).
