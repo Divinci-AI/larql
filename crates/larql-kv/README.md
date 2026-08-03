@@ -59,7 +59,7 @@ five variants — `EmptyPrompt`, `BackendUnavailable`,
 `RetrievalMiss { reason }`, `InvariantViolation { what }`,
 `BackendFailure { details }` — and the typed error replaces the
 historical `Option<T>` that collapsed all five into a silent
-`None`. See the 2026-05-24 entry in [`ROADMAP.md`](ROADMAP.md).
+`None`. See the 2026-05-24 entry in [`CHANGELOG.md`](CHANGELOG.md).
 
 ## Full engine catalog
 
@@ -88,8 +88,8 @@ cascade).** Three derivative-K/V engines (`markov_residual`,
 with engine-side memory shadows fully eliminated on Metal. See
 [`PERFORMANCE.md`](PERFORMANCE.md) for per-token cost decomposition,
 the `state_capture` / `state_materialise` / `state_append` timer
-cascade, and the bench protocol. ROADMAP "Closed (recent)" has the
-milestone history.
+cascade, and the bench protocol. [`CHANGELOG.md`](CHANGELOG.md) has
+the milestone history.
 
 ### W10 — state-bridge mask cascade (default-on since 2026-05-21)
 
