@@ -137,6 +137,12 @@ config-injection refactor.
 
 ## Open work
 
+> **Below all of these:** the decode attention K/V layout. Every cached engine
+> shares one marginal cost per context token because they all land in that
+> kernel, so a head-major layout would move all six at once — see
+> [`larql-compute/ROADMAP.md`](../larql-compute/ROADMAP.md) "head-major K/V
+> layout" and [`docs/decode-cost-model.md`](docs/decode-cost-model.md) §4.
+
 ### P0 — codebase-health frontier (audit 2026-06-14)
 
 A whole-codebase review (engine faithfulness audit + clippy/coverage sweep)

@@ -36,6 +36,51 @@ From the whole-codebase review ([`docs/audits/codebase-review-2026-05-28.md`](..
   forward: `fc1 → GELU-tanh → fc2` with bias on both layers. No spatial
   pooling — Granite's encoder output has the correct token count per tile.
 
+## Open: head-major K/V layout for decode attention
+
+**The single highest-leverage change the `kvperf-1` data points at**, because
+it sits *below* every KV engine rather than inside one. All six cached engines
+share one marginal cost per context token (7.72-8.30 µs, a 7.5% spread across
+six mechanisms that could hardly be more different) — they all end up in this
+kernel, and it runs at roughly 44% of attainable memory bandwidth. See
+[`larql-kv/docs/decode-cost-model.md`](../larql-kv/docs/decode-cost-model.md) §4.
+
+Today K/V is `[L, num_kv * head_dim]` — head-**minor**:
+
+```text
+each head's gemv reads head_dim floats with a num_kv * head_dim stride
+with GQA, the `reps` query heads sharing a KV head each stream it again
+```
+
+On qwen3-0.6b that is a 512 B window with a 4096 B stride, read twice
+(`reps = 2`). **Hypothesis (untested):** `[kv_head][L][head_dim]` makes each
+head's read contiguous *and* lets the sharing q-heads share one pass, roughly
+halving the O(context) term that dominates every engine.
+
+A bench exists — `benches/decode_attention_layout.rs` — comparing four layouts
+doing identical arithmetic, so any difference is memory behaviour. It includes
+a `head_major_spin` variant specifically so the parallel primitive is not
+confounded with the layout (production uses the spin pool; a rayon candidate
+would otherwise be compared on two axes at once).
+
+**Measurement protocol, because this one has already bitten:** an earlier
+version timed one layer against one reused K/V buffer. At L=1024 that is 8.4 MB
+— cache-resident — and it clocked 90 µs against the ~301 µs the end-to-end
+slope implies, reporting essentially the roofline. It was measuring a regime
+decode never runs in, **and the layout ranking inverted between that regime and
+the real one.** Each iteration now walks a full stack of distinct per-layer K/V
+buffers, as one decode step does.
+
+Two further conditions before believing a result:
+
+- **AC power.** On battery macOS throttles enough to invent or erase this
+  effect, and criterion runs the variants sequentially — deepening throttle
+  mid-run penalises later variants and corrupts the *ranking*, which is the
+  entire output.
+- **A drift control.** Measure `head_minor` twice, first and last. If those
+  two disagree the machine moved under the run and the ordering is not
+  trustworthy regardless of what it says.
+
 ## Open: compute modularity and model-agnostic cleanup
 
 **Status**: Started 2026-05-08.
