@@ -127,6 +127,42 @@ architectures. Don't conflate them — the CLI's historical `--kv-cache
 markov-bounded` flag maps to `Standard { window_size: Some(N) }`, **not**
 `MarkovResidual`. Use the spec's table in §5 when in doubt.
 
+### Windowed engines and the fused path
+
+A window means two promises at once: attend at most `N` positions, and
+hold at most that much K/V. Until 2026-08 the only way to keep both was
+to leave the backend's fused (coarse) path for the generic per-layer
+route — and on Metal every per-layer dispatch method delegates to the
+CPU, so a windowed engine ran its whole forward on the host while the
+bench row still said `[metal (GPU)]`. On Gemma 3 4B Q4K that cost ~9x,
+for a window that should make attention *cheaper*.
+
+Windowed engines now stay on the fused path. The window is requested via
+`coarse_prefill_windowed` / `coarse_decode_step_windowed`, which **fail
+closed**: a backend that cannot bound both attention and K/V answers
+`None` and the engine falls back to per-layer, exactly as before. Both
+`CpuBackend` and `MetalBackend` implement them.
+
+Two caveats worth knowing:
+
+- **A prompt longer than the window still takes the per-layer path.** The
+  fused prefill has no per-query-position masking, so accepting would
+  attend the whole prompt while advertising a bound.
+- **Metal holds up to 2x the window** between compactions. Attention is
+  still bounded at the window every step (the kernel attends
+  `[T - window, T)`); the surplus rows are resident but never read.
+  Compacting every step would memmove the window per token.
+
+Measured on Gemma 3 4B Q4K, Metal, 80 decode steps at `window=8`:
+
+| | latency | hot K/V |
+|---|---|---|
+| unwindowed | 12.06 ms | 23.6 MB |
+| `window=8` | **11.61 ms** | **2.4 MB** |
+
+The same config cost 115.44 ms before. A bench row reports which shape
+it actually took — `[coarse]` or `[per-layer->host]`.
+
 ## Usage
 
 ```rust

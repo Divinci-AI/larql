@@ -20,10 +20,10 @@
 //!
 //! ```text
 //! larql bench gemma3-4b-q4k --engine standard
-//! larql bench gemma3-4b-q4k --engine standard:window=1024
+//! larql bench gemma3-4b-q4k --engine standard:window=1024   # keeps the fused path
 //! larql bench gemma3-4b-q4k --engine no-cache
 //! larql bench gemma3-4b-q4k --engine markov-rs:window=512
-//! larql bench gemma3-4b-q4k --engine unlimited-context:window=256
+//! larql bench gemma3-4b-q4k --engine windowed-checkpoint:window=256
 //! larql bench gemma3-4b-q4k --engine turbo-quant:bits=3
 //! larql bench gemma3-4b-q4k --engine apollo:layer=25,coef=8.0
 //! ```
@@ -32,29 +32,53 @@
 //!
 //! ## Architecture notes
 //!
-//! - **Metal Q4K coarse path** (`prefill_quant` / `decode_step_quant`): when a
-//!   Q4K VectorIndex and a Metal backend are available AND the engine is
-//!   unwindowed, dispatch goes through the Metal `decode_token` full pipeline.
-//!   The engine's own state policy is NOT engaged on this path — the K/V lives
-//!   in the backend's cache behind a sentinel handle, so `standard`,
-//!   `markov-rs`, `markov-rs-codec` and `boundary-per-layer` all execute the
-//!   same kernels and measure within ~0.5% of each other. Ranking those four
-//!   against one another on this path measures nothing.
+//! - **Coarse (fused) path** (`prefill_quant` / `decode_step_quant`): taken
+//!   when a Q4K VectorIndex is present and the backend accepts the engine's
+//!   window. Metal routes through its `decode_token` full pipeline; CPU
+//!   through `cached_prefill_q4k` / `cached_decode_step_q4k`.
 //!
-//!   The engine path does beat the reference `larql-metal` row, but the reason
+//!   The engine's own state policy is NOT engaged here — the K/V lives in the
+//!   backend behind a sentinel handle (Metal) or a whole-model handle (CPU),
+//!   so `standard`, `markov-rs`, `markov-rs-codec` and `boundary-per-layer`
+//!   execute the same kernels and measure within ~0.5% of each other.
+//!   **Ranking those four against one another on this path measures nothing.**
+//!
+//!   The engine rows do beat the reference `larql-metal` row, but the reason
 //!   is the KNN lm_head (~1.9ms) replacing a full vocab matmul (~6.6ms), not
-//!   the K/V mechanism. An earlier version of this note credited the engines
-//!   with a ~93-95 vs 76 tok/s win; that gap was inflated because the bench
-//!   timed only the forward and left lm_head outside the timer. Both are now
-//!   inside it, and the row note carries the `fwd=` / `head=` split.
+//!   the K/V mechanism. An earlier note credited the engines with a ~93-95 vs
+//!   76 tok/s win; that gap was inflated because the bench timed only the
+//!   forward and left lm_head outside the timer. Both are inside it now, and
+//!   the row note carries the `fwd=` / `head=` split.
 //!
-//! - **Per-layer path** (any windowed config, or an arch that declines coarse):
-//!   `MetalBackend`'s `KvDispatch` impl delegates every per-layer method
-//!   (`attention_step`, `attention_step_windowed`, `append_kv`, `clip_kv`, …)
-//!   to `CpuBackend`. A windowed engine therefore runs CPU attention while the
-//!   bench still labels the row `[metal (GPU)]`, and costs ~1.7-3x the coarse
-//!   path despite attending over fewer keys. See the WINDOW GATE comment in
-//!   [`standard`]`::prefill_quant`.
+//! - **Windowed engines keep the coarse path** (since 2026-08). A window is
+//!   requested through `coarse_prefill_windowed` / `coarse_decode_step_windowed`,
+//!   which fail closed: a backend that cannot bound BOTH attention and K/V
+//!   answers `None` and the engine falls back to per-layer. Both `CpuBackend`
+//!   and `MetalBackend` implement them.
+//!
+//!   Each bounds attention and memory by different means, because neither
+//!   mechanism does both jobs. CPU trims the cache to `w - 1` before each step
+//!   (cheap — the cache is host arrays). Metal clamps the attention span every
+//!   step via the layer window, and compacts its K/V buffers only once
+//!   occupancy reaches 2x the window, so the memmove is O(1) amortised rather
+//!   than O(window) per token; the surplus resident rows are never read
+//!   because the kernel attends `[T - window, T)`.
+//!
+//!   Both decline a prompt LONGER than the window: the fused prefill has no
+//!   per-query-position masking, so accepting would attend the whole prompt
+//!   while the engine advertises a bound. That case still takes per-layer.
+//!
+//!   Measured on Gemma 3 4B Q4K, Metal, 80 steps at `window=8`: 11.61ms /
+//!   2.4MB against 12.06ms / 23.6MB unwindowed. Before this, the same config
+//!   cost 115.44ms.
+//!
+//! - **Per-layer path** (a prompt longer than the window, or an arch that
+//!   declines coarse): `MetalBackend`'s `KvDispatch` impl delegates every
+//!   per-layer method (`attention_step`, `attention_step_windowed`,
+//!   `append_kv`, `clip_kv`, …) to `CpuBackend`. An engine on this path runs
+//!   CPU attention **and** CPU FFN while the bench labels the row
+//!   `[metal (GPU)]` — worth ~9x on Gemma 3 4B. The row's dispatch note says
+//!   `[per-layer->host]` when that is what happened.
 //!
 //! - **CPU fallback**: when Metal is unavailable, engines fall back to a CPU
 //!   path using dequantised attention tensors (lazily inserted into the
