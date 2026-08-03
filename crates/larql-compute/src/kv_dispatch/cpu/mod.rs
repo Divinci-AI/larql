@@ -29,5 +29,7 @@ mod dispatch;
 mod handles;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod windowed_coarse_tests;
 
 pub use handles::{CpuKvHandle, CpuQ4kCacheHandle, CpuResidualHandle};

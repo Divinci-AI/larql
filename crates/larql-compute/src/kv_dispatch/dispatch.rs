@@ -333,6 +333,56 @@ pub trait KvDispatch {
         None
     }
 
+    /// Coarse prefill under an **engine-requested sliding window** — a
+    /// window the caller imposes across every layer, distinct from the
+    /// architecture's own per-layer SWA (which backends read from the
+    /// arch and this composes with, narrowest wins).
+    ///
+    /// A windowed engine promises two things: it attends at most `window`
+    /// positions, AND it holds at most that much K/V. The window-less
+    /// `coarse_prefill` can honour neither, so a windowed engine had to
+    /// decline the fused path entirely and take the generic per-layer
+    /// route — which on a host-delegating backend runs the whole forward
+    /// on the CPU, costing ~2.4x. This is the entry point that lets a
+    /// backend keep the fused path *and* the window.
+    ///
+    /// **Fail closed.** The default supports only `window: None`, and
+    /// answers `None` when a real window is requested — "this backend
+    /// cannot bound what you asked me to bound", which the engine reads
+    /// as "take the per-layer path", exactly today's behaviour. A
+    /// backend that returns `Some` for a windowed request is asserting
+    /// it enforced BOTH halves of the contract.
+    fn coarse_prefill_windowed(
+        &self,
+        weights: &ModelWeights,
+        token_ids: &[u32],
+        index: Option<&dyn crate::KvIndex>,
+        window: Option<usize>,
+    ) -> Option<(Array2<f32>, KvHandle)> {
+        match window {
+            None => self.coarse_prefill(weights, token_ids, index),
+            Some(_) => None,
+        }
+    }
+
+    /// One coarse decode step under an engine-requested sliding window.
+    /// Same contract and same fail-closed default as
+    /// [`Self::coarse_prefill_windowed`].
+    fn coarse_decode_step_windowed(
+        &self,
+        weights: &ModelWeights,
+        token_id: u32,
+        index: Option<&dyn crate::KvIndex>,
+        handle: &mut KvHandle,
+        abs_position: usize,
+        window: Option<usize>,
+    ) -> Option<Array2<f32>> {
+        match window {
+            None => self.coarse_decode_step(weights, token_id, index, handle, abs_position),
+            Some(_) => None,
+        }
+    }
+
     /// Coarse prefill **with per-layer state capture** — same fast
     /// path as [`Self::coarse_prefill`] but also populates `state`
     /// (when `Some`) with per-layer h_in (residual entering each

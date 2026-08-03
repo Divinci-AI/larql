@@ -484,24 +484,34 @@ impl KvEngine for StandardEngine {
         // 3 4B vs ~0.4 tok/s through per-layer dispatch). Quant-agnostic:
         // the backend inspects `index` to pick the right kernel.
         //
-        // WINDOW GATE: the coarse trait surface (`coarse_prefill` /
-        // `coarse_decode_step`) has no window parameter, so the coarse
-        // path always attends over the FULL context. A windowed engine
-        // (`window_size: Some(N)`, the `markov-bounded` flag combo)
-        // must therefore decline coarse and take the per-layer path,
-        // whose dispatch enforces the window via `clip_kv` — otherwise
-        // the same CLI flag gives windowed behaviour on one backend and
-        // full-context on another while `info()` reports `window=N`.
-        // Correctness over speed; threading a window through the coarse
-        // trait (5 methods × CPU + Metal impls + fused kernels) is the
-        // eventual fast path if windowed quant becomes hot.
-        let coarse = if self.window_size.is_none() {
-            match &self.backend {
-                BackendSlot::Sync(b) => b.as_ref().coarse_prefill(weights, token_ids, Some(index)),
-                BackendSlot::Async(b) => b.as_ref().coarse_prefill(weights, token_ids, Some(index)),
-            }
-        } else {
-            None
+        // WINDOW: ask the backend to honour this engine's window on the
+        // fused path. `coarse_*_windowed` fails closed — a backend that
+        // cannot bound BOTH attention and K/V to `window_size` answers
+        // `None`, and we fall through to the per-layer path below, which
+        // enforces the window via `clip_kv`.
+        //
+        // That decline is the current answer on every backend, so this
+        // is behaviour-preserving today. It replaces a blanket
+        // `window_size.is_none()` gate: the reason a windowed engine
+        // leaves the fast path is now the backend's own capability
+        // answer rather than a rule stated here, so a backend that
+        // implements the window starts getting the fused path without
+        // this engine changing. That matters — on a host-delegating
+        // backend the per-layer route runs the whole forward on the CPU
+        // and costs ~2.4x, while the window makes attention *cheaper*.
+        let coarse = match &self.backend {
+            BackendSlot::Sync(b) => b.as_ref().coarse_prefill_windowed(
+                weights,
+                token_ids,
+                Some(index),
+                self.window_size,
+            ),
+            BackendSlot::Async(b) => b.as_ref().coarse_prefill_windowed(
+                weights,
+                token_ids,
+                Some(index),
+                self.window_size,
+            ),
         };
         if let Some((hidden, handle)) = coarse {
             // Store as a single-element handles vec — the `KvHandle`
@@ -575,20 +585,25 @@ impl KvEngine for StandardEngine {
             // Invariant: Coarse mode stores exactly one whole-model
             // handle (set together with the mode in `prefill_quant`).
             let handle = &mut handles[0];
+            // Windowed variant, matching the prefill that minted this
+            // handle: a sequence that reached the fused path under a
+            // window must keep decoding under it.
             let coarse = match &self.backend {
-                BackendSlot::Sync(b) => b.as_ref().coarse_decode_step(
+                BackendSlot::Sync(b) => b.as_ref().coarse_decode_step_windowed(
                     weights,
                     token_id,
                     Some(index),
                     handle,
                     self.abs_position,
+                    self.window_size,
                 ),
-                BackendSlot::Async(b) => b.as_ref().coarse_decode_step(
+                BackendSlot::Async(b) => b.as_ref().coarse_decode_step_windowed(
                     weights,
                     token_id,
                     Some(index),
                     handle,
                     self.abs_position,
+                    self.window_size,
                 ),
             };
             return match coarse {
@@ -1692,13 +1707,24 @@ mod tests {
     // garbage on exactly the archs that decline coarse. Post-fix the
     // fallback substitutes a `WalkFfn` built from the vindex; this test
     // bit-compares against an explicitly-constructed `WalkFfn` driven
-    // through the same internals. A window larger than the whole run
-    // forces the per-layer path without any clipping effect.
+    // through the same internals.
 
-    /// Window larger than prompt + all decode steps — forces the
-    /// per-layer quant path (coarse is declined when windowed) while
-    /// keeping `clip_kv` a no-op, so this isolates the FFN routing.
-    const NO_CLIP_WINDOW: usize = 64;
+    /// Window NARROWER than the prompt, so the backend declines the
+    /// fused path and both engines run the per-layer quant walk this
+    /// test is about.
+    ///
+    /// It used to be a window *wider* than the whole run, on the premise
+    /// that "coarse is declined whenever windowed". That premise is gone:
+    /// a backend now accepts a window it can honour, and a window wider
+    /// than the prompt is trivially honourable — so engine A took the
+    /// fused path while the reference stayed per-layer and the two
+    /// legitimately disagreed. Narrower-than-prompt is the property that
+    /// actually forces per-layer now.
+    ///
+    /// The window then clips, but it clips BOTH engines identically
+    /// (same `window_size`, same `do_prefill` internals), so the FFN
+    /// routing this test isolates is unaffected.
+    const FORCE_PER_LAYER_WINDOW: usize = 2;
 
     #[test]
     fn quant_fallback_with_null_ffn_matches_explicit_walk_ffn_reference() {
@@ -1712,13 +1738,22 @@ mod tests {
 
         // Engine A: public quant entry points with NullFfn.
         let ffn = NullFfn;
-        let mut engine_a = StandardEngine::new(Some(NO_CLIP_WINDOW));
+        let mut engine_a = StandardEngine::new(Some(FORCE_PER_LAYER_WINDOW));
         let h_a = engine_a
             .prefill_quant(&weights, &ffn, &index, &prompt, &*backend)
             .expect("engine A prefill_quant");
+        // Pin the premise: this test is about the PER-LAYER fallback, so
+        // it is only meaningful if engine A actually took it. Without
+        // this, a future widening of what the fused path accepts would
+        // make the comparison silently test nothing.
+        assert_eq!(
+            engine_a.dispatch_path(),
+            Some(larql_inference::kv_engine::DispatchPath::PerLayer),
+            "engine A must be on the per-layer path for this comparison to mean anything"
+        );
 
         // Engine B: same internals, explicit WalkFfn.
-        let mut engine_b = StandardEngine::new(Some(NO_CLIP_WINDOW));
+        let mut engine_b = StandardEngine::new(Some(FORCE_PER_LAYER_WINDOW));
         larql_inference::vindex::ensure_attn_tensors_dequantised(
             &mut engine_b.dequant_scratch,
             &weights,

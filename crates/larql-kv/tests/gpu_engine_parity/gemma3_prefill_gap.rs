@@ -31,34 +31,47 @@ const MAX_PROMPT_LEN: usize = 6;
 ///
 /// What is established:
 ///
-/// - **Arch-specific, not shape-specific.** The identical comparison on
-///   the SWA-free `tinymodel` fixture — same dims, same prompts, same
-///   code — agrees to 1.6e-7 at every length.
+/// - **Not a production defect.** The same comparison on a real Gemma 3
+///   4B Q4K vindex agrees to 4.0e-7 across prompt lengths 1-20 with zero
+///   argmax mismatches (`examples/gemma_prefill_parity.rs`), and
+///   `larql run` emits identical text on both backends. Whatever this
+///   is, it does not reach a real checkpoint.
+/// - **Arch-specific.** The identical comparison on the SWA-free
+///   `tinymodel` fixture — same dims, same prompts, same code — agrees
+///   to 1.6e-7 at every length.
+/// - **Shape-gated, not window-gated.** Giving the Gemma fixture a real
+///   512 window (`make_test_q4k_weights_rope_scaled`) diverges just as
+///   far (5.5e-1), so the `sliding_window = 0` sentinel is not the
+///   cause. The surviving difference is dimensional: this fixture is
+///   `head_dim = 64, hidden = 256`, the real model is
+///   `head_dim = 256, hidden = 2560`.
 /// - **Batched-prefill-specific.** `standard` reaches Metal through
 ///   `coarse_prefill` → `fused_prefill` (one batched pass) and is the
 ///   only engine that diverges. `markov-rs` and friends go through
 ///   `coarse_prefill_with_state`, which drives the same model
-///   token-by-token, and match the CPU to ~1e-7. So Metal disagrees with
+///   token-by-token, and match the CPU to ~1e-7. Metal disagrees with
 ///   *itself*, which rules out a CPU-side reference error.
+/// - **Intra-layer.** A single-layer model already diverges (3.4e-1),
+///   and the error compounds with depth (2 layers 4.2e-1, 3 layers
+///   4.9e-1) rather than originating across layers.
 /// - **Position-dependent.** A single-token prefill agrees; the gap
 ///   appears as soon as there are two positions to relate.
-/// - **Not reproducing in production.** `larql run` on qwen3-0.6b
-///   (non-Gemma) emits byte-identical text on both backends across 24
-///   tokens, and Gemma 3 4B generates coherent text on Metal.
 ///
-/// What is NOT established: the cause. The remaining candidates are the
-/// Gemma-3-specific stages a batched prefill kernel handles differently
-/// from a per-token path — post-attention / post-FFN norms, QK-norm, and
-/// the GeluTanh activation. Narrowing it needs a per-layer state dump
-/// from the batched kernel, which `fused_prefill` does not currently
-/// expose (only `coarse_prefill_with_state` does, and that is the path
-/// that already agrees).
+/// Putting those together: a Gemma-specific stage in Metal's batched
+/// prefill — QK-norm and the post-attention / post-FFN norms are what
+/// this fixture has and `tinymodel` does not — carries a shape
+/// assumption that `head_dim = 64` violates and `head_dim = 256`
+/// satisfies. The defect is that the kernel returns wrong data on such a
+/// shape instead of declining it, which is a robustness bug rather than
+/// a correctness one for shipped models.
 ///
-/// Until then, cross-backend numeric parity is asserted on the SWA-free
-/// fixture (see [`super::numeric`]) and a real Gemma-3 Q4K vindex is the
-/// missing piece for judging production impact.
+/// The practical consequence, and the reason this stays recorded: the
+/// synthetic Gemma-3 fixture **cannot be used for cross-backend numeric
+/// parity**. [`super::numeric`] uses `tinymodel` for that and keeps the
+/// Gemma fixture for the structural assertions only.
+
 #[test]
-#[ignore = "open defect: Metal batched prefill vs CPU on Gemma-3 arch; run with --ignored to measure"]
+#[ignore = "records a Metal batched-prefill shape bug that does NOT reach real models; run with --ignored to measure"]
 fn metal_batched_prefill_diverges_on_gemma3_arch() {
     let weights = make_test_q4k_weights();
     let index = make_test_q4k_vindex(&weights);

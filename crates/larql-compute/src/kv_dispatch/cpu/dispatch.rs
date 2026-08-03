@@ -261,6 +261,67 @@ impl KvDispatch for CpuBackend {
         Some((h, handle))
     }
 
+    /// Coarse prefill under an engine-requested window.
+    ///
+    /// Accepts the window only when it **cannot bind during the prompt**
+    /// (`token_ids.len() <= window`). That is the production shape — a
+    /// prompt inside the window, then decode sliding — and it lets the
+    /// engine keep the fused path for it.
+    ///
+    /// A prompt longer than the window would need per-query-position
+    /// masking inside `predict_kquant_prefill_with_state`, which this
+    /// entry point does not thread; rather than silently attend the full
+    /// prompt while the engine advertises a window, it declines and the
+    /// engine falls back to the per-layer path. Fail closed: a wrong
+    /// answer at full speed is worse than a right one at 2.4x.
+    fn coarse_prefill_windowed(
+        &self,
+        weights: &ModelWeights,
+        token_ids: &[u32],
+        index: Option<&dyn crate::KvIndex>,
+        window: Option<usize>,
+    ) -> Option<(Array2<f32>, KvHandle)> {
+        if let Some(w) = window {
+            if token_ids.len() > w {
+                return None;
+            }
+        }
+        self.coarse_prefill_with_state(weights, token_ids, index, None)
+    }
+
+    /// Coarse decode under an engine-requested window.
+    ///
+    /// The cache rows are absolute stream positions carrying their own
+    /// RoPE, and softmax over keys is order-independent, so a sliding
+    /// window is exactly "drop the oldest rows". Trimming to `w - 1`
+    /// *before* the step leaves room for the row this step appends, so
+    /// the cache holds at most `w` rows afterwards — bounding attention
+    /// and K/V together, which is the whole contract a windowed engine
+    /// advertises.
+    fn coarse_decode_step_windowed(
+        &self,
+        weights: &ModelWeights,
+        token_id: u32,
+        index: Option<&dyn crate::KvIndex>,
+        handle: &mut KvHandle,
+        abs_position: usize,
+        window: Option<usize>,
+    ) -> Option<Array2<f32>> {
+        if let Some(w) = window {
+            if w == 0 {
+                return None;
+            }
+            // Decline a handle this backend did not mint before mutating
+            // anything — `clip_kv` would panic on a foreign one.
+            try_cpu_q4k_cache_mut(handle)?;
+            // Reuse the existing clip rather than a second trim: `clip_kv`
+            // already keeps the tail of both cache shapes, and two copies
+            // of "drop the oldest rows" is how they drift apart.
+            self.clip_kv(handle, w - 1);
+        }
+        self.coarse_decode_step(weights, token_id, index, handle, abs_position)
+    }
+
     fn coarse_decode_step(
         &self,
         weights: &ModelWeights,
