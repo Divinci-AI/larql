@@ -2,7 +2,7 @@
 //!
 //! Defines the abstract surface that the autoregressive decode loop
 //! dispatches against. Concrete engine implementations (MarkovResidual,
-//! UnlimitedContext, TurboQuant, Apollo, Standard, NoCache) live in
+//! WindowedCheckpoint, TurboQuant, Apollo, Standard, NoCache) live in
 //! `larql-kv` and `impl larql_inference::KvEngine` against this trait.
 //!
 //! The trait deliberately lives in `larql-inference` rather than

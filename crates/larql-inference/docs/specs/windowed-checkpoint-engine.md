@@ -1,4 +1,4 @@
-# UnlimitedContextEngine — Specification
+# WindowedCheckpointEngine — Specification
 
 **Status:** ✅ Shipped. W1-GPU step 4 wired + bench-validated
 2026-05-17: 28 → 56.0 tok/s on Metal (window=256, Gemma 3 4B,
@@ -22,7 +22,7 @@ M3 Max, 50-token decode). W10 HOnly default-on (2026-05-21):
 
 ## 1. Purpose
 
-`UnlimitedContextEngine` provides effectively-unlimited decoding
+`WindowedCheckpointEngine` provides effectively-unlimited decoding
 context with bounded current memory — by checkpointing the K/V
 state at fixed window boundaries (`window_size` tokens) and
 archiving the prompt token IDs, then reconstructing any prior
@@ -35,7 +35,7 @@ of checkpoints + token archive and accept the cost of re-prefill
 when accessing earlier windows.
 
 The engine is **not** a sliding-window cache. Sliding window drops
-old tokens; `unlimited_context` keeps them in the cold tier and can
+old tokens; `windowed_checkpoint` keeps them in the cold tier and can
 replay them on demand.
 
 ---
@@ -137,11 +137,11 @@ their window.
 
 | Concern | Location |
 |---|---|
-| Engine struct + `KvEngine` impl | `crates/larql-kv/src/engines/unlimited_context/engine.rs` |
-| Checkpoint storage | `engines/unlimited_context/checkpoint_store.rs` |
-| Token archive | `engines/unlimited_context/token_archive.rs` |
-| Per-token K/V extension | `engines/unlimited_context/extend.rs::rs_extend_from_checkpoint_*` |
-| W1-GPU dispatch helpers | `engines/unlimited_context/engine.rs::try_prefill_via_dispatch` + `decode_step_via_dispatch` |
+| Engine struct + `KvEngine` impl | `crates/larql-kv/src/engines/windowed_checkpoint/engine.rs` |
+| Checkpoint storage | `engines/windowed_checkpoint/checkpoint_store.rs` |
+| Token archive | `engines/windowed_checkpoint/token_archive.rs` |
+| Per-token K/V extension | `engines/windowed_checkpoint/extend.rs::rs_extend_from_checkpoint_*` |
+| W1-GPU dispatch helpers | `engines/windowed_checkpoint/engine.rs::try_prefill_via_dispatch` + `decode_step_via_dispatch` |
 
 ---
 
@@ -151,10 +151,10 @@ their window.
   reconstructs the *whole window* from the prior checkpoint;
   there's no API to extract K/V at a single sub-window position.
 - **Compression of the cold tier.** That's `markov_residual_codec`
-  / `boundary_per_layer`. `unlimited_context` keeps cold
+  / `boundary_per_layer`. `windowed_checkpoint` keeps cold
   checkpoints as raw f32 K/V (one row × kv_dim × 4 B per layer per
   window).
-- **Cross-session resume.** `unlimited_context`'s archive lives
+- **Cross-session resume.** `windowed_checkpoint`'s archive lives
   in-process; for persisted resume use `boundary_kv` (which emits
   `larql-boundary` frames to disk).
 
@@ -167,7 +167,7 @@ their window.
   last frame. Cleaner alternative for "bounded memory at fused
   speed" since it explicitly composes with `standard` rather than
   maintaining a shadow K/V store. Should be benchmarked against
-  W1-GPU'd `unlimited_context` once both are wired.
+  W1-GPU'd `windowed_checkpoint` once both are wired.
 - **Page-aligned KV slabs.** The current `CheckpointStore` uses
   owned `Vec<f32>` per layer per checkpoint; a hugepage-backed slab
   would cut allocation churn during 370K-token replays.

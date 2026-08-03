@@ -22,7 +22,7 @@ use crate::PerLayerDecodeState;
 /// - `markov_residual_codec`: same as `markov_residual`; on
 ///   window-overflow the evicted rows get codec-encoded into
 ///   `cold_encoded[l]`.
-/// - `unlimited_context`: `k_new_per_layer[l]` / `v_new_per_layer[l]`
+/// - `windowed_checkpoint`: `k_new_per_layer[l]` / `v_new_per_layer[l]`
 ///   are appended to the per-layer K/V cache; `h_in_per_layer` is
 ///   unused but populated for API uniformity (cheap blit).
 /// - `turbo_quant`: `k_new_per_layer[l]` / `v_new_per_layer[l]`
@@ -255,7 +255,7 @@ pub trait KvDispatch {
     // without changing this trait surface.
     //
     // Engines that DO need per-layer control (MarkovResidual,
-    // UnlimitedContext, TurboQuant — recompute, checkpoint, codec
+    // WindowedCheckpoint, TurboQuant — recompute, checkpoint, codec
     // mechanisms) continue to use the per-layer `attention_prefill` /
     // `attention_step` intents.
     //
@@ -309,7 +309,7 @@ pub trait KvDispatch {
     /// shape `[seq_len, hidden]` and each entry in
     /// `state.k_new_per_layer` / `v_new_per_layer` has shape
     /// `[seq_len, kv_dim_for_layer]`. Engines (markov_residual,
-    /// unlimited_context, turbo_quant) read these to seed their
+    /// windowed_checkpoint, turbo_quant) read these to seed their
     /// state policy without re-running prefill on CPU.
     ///
     /// Default impl delegates to [`Self::coarse_prefill`] and leaves
@@ -335,7 +335,7 @@ pub trait KvDispatch {
     ///
     /// Engines that need per-layer state to enforce their state
     /// policy — `markov_residual` (stores h_in per layer),
-    /// `turbo_quant` (compresses per-layer K/V), `unlimited_context`
+    /// `turbo_quant` (compresses per-layer K/V), `windowed_checkpoint`
     /// (snapshots K/V at window boundaries) — pass `Some(&mut state)`
     /// to extract per-layer state without re-running compute on CPU.
     ///
@@ -390,7 +390,7 @@ pub trait KvDispatch {
     /// cache. Returns `(k_row, v_row)` as flat `Vec<f32>` of length
     /// `kv_dim_for_layer`. Used by engines running under
     /// [`crate::StateDumpMask::HOnly`] that need to snapshot specific
-    /// K/V positions on demand (e.g. `UnlimitedContextEngine`'s
+    /// K/V positions on demand (e.g. `WindowedCheckpointEngine`'s
     /// `close_window` checkpoint emission).
     ///
     /// Default returns `None` — backends without an internal kv cache

@@ -301,7 +301,7 @@ impl KvDispatch for CpuBackend {
     /// coarse Q4K cache handle. The cache rows are indexed by absolute
     /// stream position (prefill row 0 onward), matching the trait
     /// contract engines rely on for boundary-checkpoint readback
-    /// (`UnlimitedContextEngine::close_window` under HOnly). Returns
+    /// (`WindowedCheckpointEngine::close_window` under HOnly). Returns
     /// `None` for foreign handle shapes (per-layer `CpuKvHandle` has no
     /// cross-layer cache) and for out-of-range `layer`/`pos`.
     fn read_kv_row_at(

@@ -100,7 +100,7 @@ pub fn predict_kquant_prefill(
 /// `state` is `Some`, populates per-layer `h_in` ([seq_len, hidden]),
 /// `k_new` ([seq_len, kv_dim]), `v_new` ([seq_len, kv_dim]) for every
 /// position in the prompt — engines (markov_residual,
-/// unlimited_context, turbo_quant) use this to seed their state policy
+/// windowed_checkpoint, turbo_quant) use this to seed their state policy
 /// from a single prefill pass without a follow-up CPU re-walk. When
 /// `state` is `None`, bit-identical to [`predict_kquant_prefill`].
 pub fn predict_kquant_prefill_with_state(
@@ -573,7 +573,7 @@ fn vec_to_2d_row(v: Vec<f32>) -> Array2<f32> {
 /// signature stays format-agnostic.
 ///
 /// Used by `StandardEngine`'s coarse path and by research engines
-/// (`MarkovResidual`, `UnlimitedContext`, `TurboQuant`) that want the
+/// (`MarkovResidual`, `WindowedCheckpoint`, `TurboQuant`) that want the
 /// production decode kernel without inheriting the per-layer dispatch
 /// trait's cached-K/V shape.
 ///

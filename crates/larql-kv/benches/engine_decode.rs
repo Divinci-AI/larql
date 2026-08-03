@@ -39,7 +39,7 @@ fn all_engines() -> Vec<(&'static str, EngineKind)> {
         ),
         (
             "unlimited-context",
-            EngineKind::UnlimitedContext { window_size: 4 },
+            EngineKind::WindowedCheckpoint { window_size: 4 },
         ),
         ("turbo-quant-4bit", EngineKind::TurboQuant { bits: 4 }),
         (

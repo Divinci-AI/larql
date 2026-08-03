@@ -867,7 +867,7 @@ mod tests {
     // forward to the inner `StandardEngine` (threading `index` → Q4K-direct) and
     // emit a boundary frame identically to the plain path. The `make_test_q4k_*`
     // fixtures carry Q4K attn slices, so the CPU dequant fallback runs (the same
-    // fixtures `resident_identity_tests` and `unlimited_context`'s quant tests
+    // fixtures `resident_identity_tests` and `windowed_checkpoint`'s quant tests
     // use). chunk_tokens=2 + a 2-token prefill lands on a boundary, exercising
     // the frame-emit branch on each.
 

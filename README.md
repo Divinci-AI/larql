@@ -473,7 +473,7 @@ delta on Metal, which the per-engine bench numbers confirm.
 | `markov-rs` | residual stream | derivative | exact logits under arch contract | **98.0** |
 | `markov-rs-codec` | compressed residuals | derivative | bounded KL | **98.1** |
 | `boundary-per-layer` | per-layer codec residuals | derivative | bounded KL per-layer | **98.7** |
-| `unlimited-context` | KV (within window) + checkpoints | derivative | exact within window | 94.2 |
+| `windowed-checkpoint` | KV (within window) + checkpoints | derivative | exact within window | 94.2 |
 | `turbo-quant` | quantised K/V | canonical (destructive) | bounded KL | 85.0 |
 | `boundary-kv` | K/V + boundary frames | canonical | exact logits | composes `standard` |
 | `apollo` | boundary retrieval store | n/a (retrieval) | task-level | orthogonal |

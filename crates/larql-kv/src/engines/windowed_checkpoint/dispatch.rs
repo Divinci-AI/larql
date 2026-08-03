@@ -1,4 +1,4 @@
-//! W1-GPU dispatch path for `UnlimitedContextEngine`.
+//! W1-GPU dispatch path for `WindowedCheckpointEngine`.
 //!
 //! Routes prefill + decode through the backend's
 //! `coarse_prefill_with_state` / `coarse_decode_step_with_state_masked`
@@ -30,9 +30,9 @@ use larql_inference::PerLayerDecodeState;
 use larql_vindex::VectorIndex;
 use ndarray::{s, Array2};
 
-use crate::engines::unlimited_context::engine::UnlimitedContextEngine;
+use crate::engines::windowed_checkpoint::engine::WindowedCheckpointEngine;
 
-impl UnlimitedContextEngine {
+impl WindowedCheckpointEngine {
     /// W1-GPU step 4: prefill via `coarse_prefill_with_state`. The
     /// per-layer K/V dump is unpacked into pre-allocated
     /// `[window_size, kv_dim]` buffers so subsequent decode steps
@@ -300,7 +300,7 @@ impl UnlimitedContextEngine {
 
 #[cfg(test)]
 mod tests {
-    //! Coverage for the W1-GPU dispatch path. `UnlimitedContextEngine`
+    //! Coverage for the W1-GPU dispatch path. `WindowedCheckpointEngine`
     //! takes a non-optional `window_size: usize`; W10 mask cascade is
     //! gated on whether `current_window_kv` is dropped. Tests pin the
     //! cascade state via [`crate::engines::set_w10_disabled_override`]
@@ -311,12 +311,12 @@ mod tests {
     use larql_inference::test_utils::{make_test_q4k_vindex, make_test_q4k_weights};
 
     use super::*;
-    use crate::engines::unlimited_context::engine::UnlimitedContextEngine;
+    use crate::engines::windowed_checkpoint::engine::WindowedCheckpointEngine;
 
-    fn fixture(window_size: usize) -> (UnlimitedContextEngine, ModelWeights, VectorIndex) {
+    fn fixture(window_size: usize) -> (WindowedCheckpointEngine, ModelWeights, VectorIndex) {
         let weights = make_test_q4k_weights();
         let index = make_test_q4k_vindex(&weights);
-        let engine = UnlimitedContextEngine::with_backend(window_size, cpu_engine_backend());
+        let engine = WindowedCheckpointEngine::with_backend(window_size, cpu_engine_backend());
         (engine, weights, index)
     }
 
@@ -334,7 +334,7 @@ mod tests {
             weights.num_layers,
             weights.hidden_size,
         );
-        let mut engine = UnlimitedContextEngine::with_backend(4, cpu_engine_backend());
+        let mut engine = WindowedCheckpointEngine::with_backend(4, cpu_engine_backend());
         let w = weights;
         assert!(engine
             .try_prefill_via_dispatch(&w, &empty_index, &[0u32, 1])
@@ -468,7 +468,7 @@ mod tests {
     /// since issue #200 the dispatch path clips the handle to the window, so
     /// absolute positions no longer index it and the boundary row is simply
     /// its tail.
-    fn backend_last_row(engine: &UnlimitedContextEngine, layer: usize) -> (Vec<f32>, Vec<f32>) {
+    fn backend_last_row(engine: &WindowedCheckpointEngine, layer: usize) -> (Vec<f32>, Vec<f32>) {
         let handle = engine.kv_handle.as_ref().expect("kv handle");
         let row = handle.cached_len().saturating_sub(1);
         engine
@@ -621,7 +621,7 @@ mod tests {
         // BOOKKEEPING is compared — checkpoint values legitimately
         // diverge (full-history vs checkpoint+window attention; see the
         // module doc).
-        let mut cpu = UnlimitedContextEngine::new(WINDOW);
+        let mut cpu = WindowedCheckpointEngine::new(WINDOW);
         cpu.process(&weights, &PROMPT, None).expect("cpu prefill");
         cpu.process(&weights, &[NEXT_TOKEN], None)
             .expect("cpu decode");

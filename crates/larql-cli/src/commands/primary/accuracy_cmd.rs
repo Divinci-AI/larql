@@ -44,7 +44,7 @@ pub struct AccuracyArgs {
     pub model: String,
 
     /// Comma-separated KV engine specs (same syntax as `larql bench --engine`).
-    /// Default: `standard,markov-rs,unlimited-context,turbo-quant,apollo`.
+    /// Default: `standard,markov-rs,windowed-checkpoint,turbo-quant,apollo`.
     ///
     /// Apollo is in the default set as of this slice — its store-miss
     /// rows surface as `SkippedRetrievalMiss` outcomes with a visible
@@ -55,7 +55,7 @@ pub struct AccuracyArgs {
     /// unable to serve, not silently dropped or mis-attributed.
     #[arg(
         long,
-        default_value = "standard,markov-rs,unlimited-context,turbo-quant,apollo"
+        default_value = "standard,markov-rs,windowed-checkpoint,turbo-quant,apollo"
     )]
     pub engines: String,
 

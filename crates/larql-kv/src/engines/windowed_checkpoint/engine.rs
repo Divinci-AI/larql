@@ -1,4 +1,4 @@
-//! `UnlimitedContextEngine` — window-based KV cache with boundary-checkpoint replay.
+//! `WindowedCheckpointEngine` — window-based KV cache with boundary-checkpoint replay.
 //!
 //! Window lifecycle:
 //!   1. `process(tokens)` — extends the active window's K,V via
@@ -59,7 +59,7 @@ impl EngineStats {
 
 // ─── Engine ──────────────────────────────────────────────────────────────────
 
-pub struct UnlimitedContextEngine {
+pub struct WindowedCheckpointEngine {
     pub window_size: usize,
     pub checkpoints: CheckpointStore,
     pub archive: TokenArchive,
@@ -106,7 +106,7 @@ pub struct UnlimitedContextEngine {
 /// rejected at construction. `window_size == 1` is legal.
 const MIN_WINDOW_SIZE: usize = 1;
 
-impl UnlimitedContextEngine {
+impl WindowedCheckpointEngine {
     /// # Panics
     ///
     /// Panics if `window_size < MIN_WINDOW_SIZE` (i.e. zero).
@@ -120,7 +120,7 @@ impl UnlimitedContextEngine {
     pub fn with_backend(window_size: usize, backend: Box<dyn EngineBackend>) -> Self {
         assert!(
             window_size >= MIN_WINDOW_SIZE,
-            "UnlimitedContextEngine window_size must be >= {MIN_WINDOW_SIZE}, got {window_size}"
+            "WindowedCheckpointEngine window_size must be >= {MIN_WINDOW_SIZE}, got {window_size}"
         );
         Self {
             window_size,
@@ -564,16 +564,16 @@ impl UnlimitedContextEngine {
     }
 }
 
-impl KvEngine for UnlimitedContextEngine {
+impl KvEngine for WindowedCheckpointEngine {
     fn name(&self) -> &str {
-        "unlimited-context"
+        "windowed-checkpoint"
     }
 
     fn info(&self) -> EngineInfo {
         let mem =
             self.checkpoints.total_bytes() + self.archive.total_bytes() + self.current_kv_bytes();
         EngineInfo {
-            name: "unlimited-context".into(),
+            name: "windowed-checkpoint".into(),
             description: format!(
                 "window-boundary KV checkpoints + token replay \
                  (windows={}, tokens={}, mem={:.1}MB)",
@@ -652,7 +652,7 @@ impl KvEngine for UnlimitedContextEngine {
         }
         Some(
             self.profile
-                .summary("unlimited-context", self.backend.name()),
+                .summary("windowed-checkpoint", self.backend.name()),
         )
     }
 
@@ -786,7 +786,7 @@ impl KvEngine for UnlimitedContextEngine {
 
 // ── Executor-driven window extension ─────────────────────────────────────────
 
-impl UnlimitedContextEngine {
+impl WindowedCheckpointEngine {
     /// Executor-aware analogue of `process_quant`: feeds tokens into the
     /// current window, auto-closes on fill, drives per-layer compute
     /// through `executor` instead of constructing a local `WalkFfn`.
@@ -895,7 +895,7 @@ mod tests {
 
     #[test]
     fn new_engine_is_empty() {
-        let eng = UnlimitedContextEngine::new(512);
+        let eng = WindowedCheckpointEngine::new(512);
         assert_eq!(eng.window_size, 512);
         assert_eq!(eng.archive.len(), 0);
         assert_eq!(eng.checkpoints.len(), 0);
@@ -905,28 +905,28 @@ mod tests {
 
     #[test]
     fn engine_info_backend_is_cpu() {
-        let eng = UnlimitedContextEngine::new(256);
+        let eng = WindowedCheckpointEngine::new(256);
         let info = eng.info();
-        assert_eq!(info.name, "unlimited-context");
+        assert_eq!(info.name, "windowed-checkpoint");
         assert!(
             info.backend.starts_with("cpu"),
             "expected cpu backend, got {:?}",
             info.backend
         );
         assert_eq!(info.config, "window=256");
-        assert!(info.summary().contains("unlimited-context"));
+        assert!(info.summary().contains("windowed-checkpoint"));
         assert!(info.summary().contains("cpu"));
     }
 
     #[test]
     fn engine_info_config_contains_window_size() {
-        let eng = UnlimitedContextEngine::new(1024);
+        let eng = WindowedCheckpointEngine::new(1024);
         assert!(eng.info().config.contains("1024"));
     }
 
     #[test]
     fn window_tokens_and_cold_bytes_start_zero() {
-        let eng = UnlimitedContextEngine::new(512);
+        let eng = WindowedCheckpointEngine::new(512);
         assert_eq!(eng.window_tokens(), 0);
         assert_eq!(eng.cold_bytes(), 0);
     }
@@ -939,7 +939,7 @@ mod tests {
         use larql_inference::test_utils::make_test_weights;
         let weights = make_test_weights();
         let ffn = WeightFfn { weights: &weights };
-        let mut engine = UnlimitedContextEngine::new(512);
+        let mut engine = WindowedCheckpointEngine::new(512);
         let h = engine
             .prefill(&weights, &ffn, &[0u32, 1, 2])
             .expect("prefill failed");
@@ -956,7 +956,7 @@ mod tests {
         use larql_inference::test_utils::make_test_weights;
         let weights = make_test_weights();
         let ffn = WeightFfn { weights: &weights };
-        let mut engine = UnlimitedContextEngine::new(512);
+        let mut engine = WindowedCheckpointEngine::new(512);
         engine.prefill(&weights, &ffn, &[0u32]).expect("prefill");
         let h = engine.decode_step(&weights, &ffn, 1).expect("decode_step");
         assert_eq!(h.shape(), &[1, weights.hidden_size]);
@@ -968,7 +968,7 @@ mod tests {
         use larql_inference::test_utils::make_test_weights;
         let weights = make_test_weights();
         let window_size = 3usize;
-        let mut engine = UnlimitedContextEngine::new(window_size);
+        let mut engine = WindowedCheckpointEngine::new(window_size);
 
         // Feed exactly window_size tokens → triggers close
         for tok in 0..window_size as u32 {
@@ -993,7 +993,7 @@ mod tests {
     fn two_full_windows_archives_two() {
         use larql_inference::test_utils::make_test_weights;
         let weights = make_test_weights();
-        let mut engine = UnlimitedContextEngine::new(2);
+        let mut engine = WindowedCheckpointEngine::new(2);
 
         // 4 tokens = 2 complete windows
         for tok in 0u32..4 {
@@ -1007,7 +1007,7 @@ mod tests {
     fn partial_window_after_process() {
         use larql_inference::test_utils::make_test_weights;
         let weights = make_test_weights();
-        let mut engine = UnlimitedContextEngine::new(4);
+        let mut engine = WindowedCheckpointEngine::new(4);
 
         // 3 tokens < window_size=4 → no close
         engine
@@ -1021,7 +1021,7 @@ mod tests {
     fn flush_closes_partial_window() {
         use larql_inference::test_utils::make_test_weights;
         let weights = make_test_weights();
-        let mut engine = UnlimitedContextEngine::new(4);
+        let mut engine = WindowedCheckpointEngine::new(4);
         engine.process(&weights, &[0u32, 1], None).expect("process");
         assert_eq!(engine.archive.len(), 0);
         engine.flush();
@@ -1032,7 +1032,7 @@ mod tests {
     fn cold_bytes_grow_after_window_close() {
         use larql_inference::test_utils::make_test_weights;
         let weights = make_test_weights();
-        let mut engine = UnlimitedContextEngine::new(2);
+        let mut engine = WindowedCheckpointEngine::new(2);
         assert_eq!(engine.cold_bytes(), 0);
         engine.process(&weights, &[0u32, 1], None).expect("process"); // closes window
         assert!(
@@ -1047,7 +1047,7 @@ mod tests {
         use larql_inference::test_utils::make_test_weights;
         let weights = make_test_weights();
         let ffn = WeightFfn { weights: &weights };
-        let mut engine = UnlimitedContextEngine::new(512);
+        let mut engine = WindowedCheckpointEngine::new(512);
         assert_eq!(engine.memory_bytes(), 0);
         engine
             .prefill(&weights, &ffn, &[0u32, 1, 2])
@@ -1056,13 +1056,13 @@ mod tests {
     }
 
     #[test]
-    fn logits_from_unlimited_context_are_finite() {
+    fn logits_from_windowed_checkpoint_are_finite() {
         use larql_inference::ffn::WeightFfn;
         use larql_inference::forward::hidden_to_raw_logits;
         use larql_inference::test_utils::make_test_weights;
         let weights = make_test_weights();
         let ffn = WeightFfn { weights: &weights };
-        let mut engine = UnlimitedContextEngine::new(512);
+        let mut engine = WindowedCheckpointEngine::new(512);
         let h = engine.prefill(&weights, &ffn, &[0u32, 1]).expect("prefill");
         let logits = hidden_to_raw_logits(&weights, &h);
         assert!(
@@ -1086,7 +1086,7 @@ mod tests {
         let index = make_test_q4k_vindex(&weights);
         let backend = larql_compute::cpu_backend();
         let ffn = NullFfn;
-        let mut engine = UnlimitedContextEngine::new(512);
+        let mut engine = WindowedCheckpointEngine::new(512);
         let h = engine
             .prefill_quant(&weights, &ffn, &index, &[0u32, 1, 2], &*backend)
             .expect("prefill_quant Q4K cpu fallback");
@@ -1101,7 +1101,7 @@ mod tests {
         let index = make_test_q4k_vindex(&weights);
         let backend = larql_compute::cpu_backend();
         let ffn = NullFfn;
-        let mut engine = UnlimitedContextEngine::new(512);
+        let mut engine = WindowedCheckpointEngine::new(512);
         engine
             .prefill_quant(&weights, &ffn, &index, &[0u32, 1], &*backend)
             .expect("prefill_quant");
@@ -1139,7 +1139,7 @@ mod tests {
                 "LARQL_MARKOV_INPLACE_KV",
                 Some(if inplace { "1" } else { "0" }),
             );
-            let mut engine = UnlimitedContextEngine::new(512);
+            let mut engine = WindowedCheckpointEngine::new(512);
             engine
                 .prefill(&weights, &ffn, &[0u32, 1, 2])
                 .expect("prefill");
@@ -1170,7 +1170,7 @@ mod tests {
         let index = make_test_q4k_vindex(&weights);
         let backend = larql_compute::cpu_backend();
         let ffn = NullFfn;
-        let mut engine = UnlimitedContextEngine::new(512);
+        let mut engine = WindowedCheckpointEngine::new(512);
         // No prefill → decode falls through fast-path checks and returns None
         // (or some empty hidden) without panicking.
         let _ = engine.decode_step_quant(&weights, &ffn, &index, 0, &*backend);
@@ -1184,7 +1184,7 @@ mod tests {
         use larql_inference::test_utils::make_test_weights;
         let weights = make_test_weights();
         let ffn = WeightFfn { weights: &weights };
-        let mut engine = UnlimitedContextEngine::new(512);
+        let mut engine = WindowedCheckpointEngine::new(512);
         engine
             .prefill(&weights, &ffn, &[0u32, 1, 2])
             .expect("prefill");
@@ -1200,7 +1200,7 @@ mod tests {
     #[test]
     fn engine_stats_with_empty_engine_handles_zero_division() {
         let weights = larql_inference::test_utils::make_test_weights();
-        let engine = UnlimitedContextEngine::new(512);
+        let engine = WindowedCheckpointEngine::new(512);
         let stats = engine.stats(&weights);
         // No prefill → all counters zero, compression ratio short-circuits
         // to 0.0 (no division by zero).
@@ -1217,7 +1217,7 @@ mod tests {
     #[test]
     fn replay_window_returns_none_for_missing_window() {
         let weights = larql_inference::test_utils::make_test_weights();
-        let engine = UnlimitedContextEngine::new(512);
+        let engine = WindowedCheckpointEngine::new(512);
         // No windows archived → any window_id returns None at the
         // `self.archive.retrieve(window_id)?` line.
         assert!(engine.replay_window(&weights, None, None, 0).is_err());
@@ -1231,7 +1231,7 @@ mod tests {
         let weights = make_test_weights();
         let ffn = WeightFfn { weights: &weights };
         // window=2; prefill 4 tokens → archives at least 1 window.
-        let mut engine = UnlimitedContextEngine::new(2);
+        let mut engine = WindowedCheckpointEngine::new(2);
         engine
             .prefill(&weights, &ffn, &[0u32, 1, 2, 3])
             .expect("prefill 4 tokens");
@@ -1265,7 +1265,7 @@ mod tests {
         let backend = larql_compute::cpu_backend();
         let executor = LocalWalkExecutor::new(&*backend);
         let ffn = NullFfn;
-        let mut engine = UnlimitedContextEngine::new(512);
+        let mut engine = WindowedCheckpointEngine::new(512);
         let h = engine
             .prefill_quant_via_executor(&weights, &executor, &ffn, &index, &[0u32, 1, 2])
             .expect("executor prefill");
@@ -1283,7 +1283,7 @@ mod tests {
         let backend = larql_compute::cpu_backend();
         let executor = LocalWalkExecutor::new(&*backend);
         let ffn = NullFfn;
-        let mut engine = UnlimitedContextEngine::new(512);
+        let mut engine = WindowedCheckpointEngine::new(512);
         engine
             .prefill_quant_via_executor(&weights, &executor, &ffn, &index, &[0u32, 1])
             .expect("prefill");
@@ -1304,7 +1304,7 @@ mod tests {
         let index = larql_inference::test_utils::make_test_vindex(&weights);
         let backend = larql_compute::cpu_backend();
         let ffn = NullFfn;
-        let mut engine = UnlimitedContextEngine::new(512).with_profiling(true);
+        let mut engine = WindowedCheckpointEngine::new(512).with_profiling(true);
         engine
             .prefill_quant(&weights, &ffn, &index, &[0u32, 1], &*backend)
             .expect("prefill");
@@ -1313,8 +1313,8 @@ mod tests {
             .expect("decode");
         let summary = engine
             .stage_summary()
-            .expect("unlimited_context profiler should populate summary");
-        assert_eq!(summary.engine, "unlimited-context");
+            .expect("windowed_checkpoint profiler should populate summary");
+        assert_eq!(summary.engine, "windowed-checkpoint");
         assert!(summary.steps >= 1);
         assert!(summary.avg_attention_us > 0.0);
         assert!(summary.avg_ffn_us > 0.0);
@@ -1352,7 +1352,7 @@ mod tests {
             calls: std::sync::atomic::AtomicUsize::new(0),
             hidden: weights.hidden_size,
         };
-        let mut engine = UnlimitedContextEngine::new(512);
+        let mut engine = WindowedCheckpointEngine::new(512);
         engine
             .prefill_quant_via_executor(&weights, &executor, &ffn, &index, &[0u32, 1, 2])
             .expect("prefill via executor");
@@ -1375,14 +1375,14 @@ mod tests {
     #[test]
     #[should_panic(expected = "window_size must be >= 1")]
     fn zero_window_size_is_rejected_at_construction() {
-        let _ = UnlimitedContextEngine::new(0);
+        let _ = WindowedCheckpointEngine::new(0);
     }
 
     #[test]
     fn window_size_one_is_legal() {
         use larql_inference::test_utils::make_test_weights;
         let weights = make_test_weights();
-        let mut engine = UnlimitedContextEngine::new(1);
+        let mut engine = WindowedCheckpointEngine::new(1);
         engine.process(&weights, &[0u32, 1], None).expect("process");
         assert_eq!(
             engine.archive.len(),
@@ -1400,7 +1400,7 @@ mod tests {
     /// close with zero free slots.
     #[test]
     fn close_window_without_shadow_or_handle_recovers_bookkeeping() {
-        let mut engine = UnlimitedContextEngine::new(2);
+        let mut engine = WindowedCheckpointEngine::new(2);
         engine.current_window_tokens = vec![7, 8];
         engine.current_window_kv = None;
         engine.current_window_kv_len = 2;
@@ -1429,7 +1429,7 @@ mod tests {
         use larql_inference::test_utils::make_test_weights;
         let weights = make_test_weights();
         let ffn = WeightFfn { weights: &weights };
-        let mut engine = UnlimitedContextEngine::new(8);
+        let mut engine = WindowedCheckpointEngine::new(8);
         engine
             .prefill(&weights, &ffn, &[0u32, 1, 2])
             .expect("prefill");
@@ -1450,7 +1450,7 @@ mod tests {
         let index = make_test_q4k_vindex(&weights);
         let backend = larql_compute::cpu_backend();
         let ffn = NullFfn;
-        let mut engine = UnlimitedContextEngine::new(512);
+        let mut engine = WindowedCheckpointEngine::new(512);
         engine
             .prefill_quant(&weights, &ffn, &index, &[0u32, 1], &*backend)
             .expect("prefill");
@@ -1478,7 +1478,7 @@ mod tests {
         // window=2, 4 tokens → triggers two window-close cycles via
         // `process_via_executor`. Exercises the prior-checkpoint-load
         // branch in `extend_current_via_executor`.
-        let mut engine = UnlimitedContextEngine::new(2);
+        let mut engine = WindowedCheckpointEngine::new(2);
         engine
             .prefill_quant_via_executor(&weights, &executor, &ffn, &index, &[0u32, 1, 2, 3])
             .expect("prefill 4 tokens through executor");

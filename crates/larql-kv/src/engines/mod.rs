@@ -12,7 +12,7 @@
 //! | [`standard`] | Production K/V tensor cache (default) | O(seq) f32 K/V | exact — the reference |
 //! | [`no_cache`] | Full re-forward per step | O(seq) token IDs | exact — correctness fallback |
 //! | [`markov_residual`] | Residual-stream replacement | ~171 MB | exact (KL=0.0) under contract |
-//! | [`unlimited_context`] | Per-window K/V checkpoints | ~193 MB | exact within window |
+//! | [`windowed_checkpoint`] | Per-window K/V checkpoints | ~193 MB | exact within window |
 //! | [`turbo_quant`] | WHT + Lloyd-Max 3/4-bit codec | ~12.7 GB | per-row cos≈0.9954 (4-bit, 2026-07-30) |
 //! | [`apollo`] | Boundary store + residual injection | ~11 MB | task accuracy |
 //!
@@ -56,7 +56,7 @@ pub mod no_cache;
 pub mod no_expert_route;
 pub mod standard;
 pub mod turbo_quant;
-pub mod unlimited_context;
+pub mod windowed_checkpoint;
 
 pub(crate) use layer_ffn::{apply_ple_and_layer_scalar, layer_ffn_or_moe};
 pub(crate) use no_expert_route::refuse_if_moe;
@@ -74,7 +74,7 @@ pub(crate) use no_expert_route::refuse_if_moe;
 /// it's now a no-op since the cascade is on by default.
 ///
 /// Used by the per-engine `dispatch.rs` modules
-/// (markov_residual, markov_residual_codec, unlimited_context,
+/// (markov_residual, markov_residual_codec, windowed_checkpoint,
 /// boundary_per_layer). Engines that treat K/V as canonical state
 /// (turbo_quant) don't call this — their dispatch path stays on
 /// Full mask regardless.

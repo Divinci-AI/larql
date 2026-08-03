@@ -402,7 +402,7 @@ impl KvDispatch for MetalBackend {
     ) -> Option<(Vec<f32>, Vec<f32>)> {
         // W10 Phase B: read a single position's K/V back from the Metal
         // kv cache. Used by engines running under HOnly that need to
-        // snapshot a specific position on demand (e.g. unlimited_context's
+        // snapshot a specific position on demand (e.g. windowed_checkpoint's
         // close_window). Small (~kv_dim * 4 B per K and V) so cheap vs
         // an end-of-window snapshot of the whole window.
         let cache_guard = self.kv_cache.lock().ok()?;

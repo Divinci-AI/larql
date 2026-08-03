@@ -55,7 +55,7 @@ Linear fit over the four context points, dense model:
 | boundary-per-layer | 8.12 | 0.996 | 4.35 ms | 8.74 |
 | markov-rs-codec | 8.20 | 0.999 | 4.25 ms | 8.37 |
 | standard | 8.23 | 1.000 | 4.18 ms | 8.35 |
-| unlimited-context (w=256) | 8.30 | 0.999 | 4.26 ms | 8.78 |
+| windowed-checkpoint (w=256) | 8.30 | 0.999 | 4.26 ms | 8.78 |
 | no-cache | 11581 | 0.996 | — | 11584 |
 
 **Every cached engine has the same marginal cost per context token** — 7.72 to
@@ -132,12 +132,12 @@ particular context lengths, not a persistent cost — the doubling-capacity
 buffers in `helpers::append_row` are the obvious suspect, but this is **not
 established** and the sample (8 steps) is small.
 
-## 5. Defect found and fixed: `unlimited-context` did not window its attention
+## 5. Defect found and fixed: `windowed-checkpoint` did not window its attention
 
 **Fixed 2026-08-03** — the diagnosis is kept in full because the reasoning is
 reusable and because the fix had to invert an earlier one.
 
-`unlimited-context:window=N` reported `window=N` from `info()` and paid
+`windowed-checkpoint:window=N` reported `window=N` from `info()` and paid
 full-context attention cost.
 
 Evidence:
@@ -151,7 +151,7 @@ Evidence:
 4. `decode_step_via_dispatch` calls `coarse_decode_step_with_state_masked`,
    whose trait signature has **no window parameter**, against
    `self.kv_handle` — a backend cache spanning the whole stream — and
-   `unlimited_context/dispatch.rs` never clips that handle. `window_size` is
+   `windowed_checkpoint/dispatch.rs` never clips that handle. `window_size` is
    used only to segment the prompt into archived windows and to size the
    engine-side shadow.
 5. `StandardEngine::prefill_quant` documents this exact hazard and guards
@@ -163,7 +163,7 @@ Evidence:
    > gives windowed behaviour on one backend and full-context on another
    > while `info()` reports `window=N`.
 
-`StandardEngine` declines coarse when windowed. `UnlimitedContextEngine`,
+`StandardEngine` declines coarse when windowed. `WindowedCheckpointEngine`,
 whose entire identity *is* the window, does not.
 
 This was a correctness finding before it was a performance one: on the dispatch
@@ -184,7 +184,7 @@ coarse `CpuQ4kCacheHandle` the dispatch path allocates — so a windowed engine
 on that path could not clip even if it tried (it panicked as a "foreign
 handle"). It now handles both shapes.
 
-`UnlimitedContextEngine` now clips the backend handle to the window: after
+`WindowedCheckpointEngine` now clips the backend handle to the window: after
 prefill, down to the open window plus the boundary row; after each auto-close,
 down to the boundary row alone. `clip_kv` keeps the *tail*, which is exactly
 the row the checkpoint was taken from — so the dispatch path now reproduces
@@ -208,12 +208,12 @@ near-zero slope, and that this is both the fix and its test. Measured at
 
 | engine | ctx 60 | ctx 260 | ctx 1050 | slope |
 |---|---|---|---|---|
-| unlimited-context (fixed) | 4.63 ms | 5.21 ms | **5.01 ms** | **~0.4 µs** |
+| windowed-checkpoint (fixed) | 4.63 ms | 5.21 ms | **5.01 ms** | **~0.4 µs** |
 | standard | 4.53 ms | 6.29 ms | 12.97 ms | 8.5 µs |
 
 Flat, and **2.6× faster than `standard`** at ctx=1050 — the saving the window
 was supposed to deliver all along. Pinned by two regression tests in
-`unlimited_context/dispatch.rs` that assert the backend cache never exceeds
+`windowed_checkpoint/dispatch.rs` that assert the backend cache never exceeds
 `window_size + 1` rows, through prefill and across repeated auto-closes.
 
 ### The siblings are not defective
@@ -222,7 +222,7 @@ was supposed to deliver all along. Pinned by two regression tests in
 both track or exceed `standard`, but that is their contract, not a bug: they
 retain a **cold tier** and attend over the full history, so their window bounds
 hot-tier memory rather than attention. They are exact-under-contract engines.
-`unlimited-context` was the only one claiming to be lossy beyond its window,
+`windowed-checkpoint` was the only one claiming to be lossy beyond its window,
 which is why it was the only one whose attention had to be bounded.
 
 Worth noting separately: windowed `boundary-per-layer` costs **2.2× `standard`**
@@ -242,7 +242,7 @@ never                           no-cache, outside correctness debugging
 
 The uncomfortable summary is that on CPU **none of the K/V representations
 currently buys decode throughput**. They buy memory (turbo-quant 8×,
-markov-rs's residual store, unlimited-context's checkpoints) and they differ
+markov-rs's residual store, windowed-checkpoint's checkpoints) and they differ
 in accuracy contract. The shared bottleneck is one layer below all of them, in
 how the attention kernel streams K/V — which is where optimisation effort
 should go.
@@ -250,7 +250,7 @@ should go.
 ## 7. Gaps in the instrument
 
 - `EngineProfiler` covers four of nine engines (markov-rs, markov-rs-codec,
-  turbo-quant, unlimited-context). `standard`, `no-cache`, `boundary-kv`,
+  turbo-quant, windowed-checkpoint). `standard`, `no-cache`, `boundary-kv`,
   `boundary-per-layer` and `apollo` have no per-stage split, so their costs
   are inferred from slope rather than attributed. `bench --profile` says
   "markov-rs only for now" and in practice prints the *reference* forward's

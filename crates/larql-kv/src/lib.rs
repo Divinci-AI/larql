@@ -34,12 +34,12 @@ pub use engines::markov_residual_codec;
 pub use engines::no_cache;
 pub use engines::standard;
 pub use engines::turbo_quant;
-pub use engines::unlimited_context;
+pub use engines::windowed_checkpoint;
 
 pub use engines::markov_residual::MarkovResidualEngine;
 pub use engines::no_cache::NoCacheEngine;
 pub use engines::standard::StandardEngine;
-pub use engines::unlimited_context::UnlimitedContextEngine;
+pub use engines::windowed_checkpoint::WindowedCheckpointEngine;
 
 // ─── Trait surface re-exported from larql-inference ──────────────────────────
 //
@@ -72,7 +72,7 @@ pub enum EngineKind {
     MarkovResidual {
         window_size: Option<usize>,
     },
-    UnlimitedContext {
+    WindowedCheckpoint {
         window_size: usize,
     },
     TurboQuant {
@@ -125,7 +125,7 @@ impl EngineKind {
     /// no-cache
     /// markov-rs
     /// markov-rs:window=1024
-    /// unlimited-context:window=256
+    /// windowed-checkpoint:window=256
     /// turbo-quant:bits=3
     /// tq4
     /// apollo:layer=25,coef=8.0,top_k=12,bos=2
@@ -169,11 +169,20 @@ impl EngineKind {
                 let window_size = params.get("window").and_then(|v| v.parse().ok());
                 Some(EngineKind::MarkovResidual { window_size })
             }
-            "unlimited" | "unlimited-context" | "unlimited_context" => {
-                Some(EngineKind::UnlimitedContext {
-                    window_size: get_usize("window", 512),
-                })
-            }
+            // `unlimited-context` and friends are the pre-2026-08-03 names,
+            // kept so existing scripts and baselines keep parsing. The engine
+            // was renamed because the old name described a capability
+            // (arbitrarily long streams via archive + replay) while reading as
+            // a claim about attention — which is exactly the confusion that
+            // let issue #200 hide: it reported `window=N` and attended over
+            // everything.
+            "windowed-checkpoint"
+            | "windowed_checkpoint"
+            | "unlimited"
+            | "unlimited-context"
+            | "unlimited_context" => Some(EngineKind::WindowedCheckpoint {
+                window_size: get_usize("window", 512),
+            }),
             "turbo-quant" | "turbo_quant" | "turboquant" | "tq4" => Some(EngineKind::TurboQuant {
                 bits: get_usize("bits", 4) as u8,
             }),
@@ -278,7 +287,7 @@ impl EngineKind {
             EngineKind::Standard { .. } => "standard",
             EngineKind::NoCache => "no-cache",
             EngineKind::MarkovResidual { .. } => "markov-rs",
-            EngineKind::UnlimitedContext { .. } => "unlimited-context",
+            EngineKind::WindowedCheckpoint { .. } => "windowed-checkpoint",
             EngineKind::TurboQuant { .. } => "turbo-quant",
             EngineKind::Apollo { .. } => "apollo",
             EngineKind::BoundaryKv { .. } => "boundary-kv",
@@ -307,7 +316,7 @@ impl EngineKind {
             "no-cache",
             "markov-rs",
             "markov-rs-codec",
-            "unlimited-context",
+            "windowed-checkpoint",
             "turbo-quant",
             "apollo",
             "boundary-kv",
@@ -324,7 +333,7 @@ impl EngineKind {
     ///
     /// Returns [`AnyEngine`] — the dispatch enum that wraps either a
     /// [`KvEngine`] (per-token K/V cache engines: standard, no_cache,
-    /// markov_residual, markov_residual_codec, unlimited_context,
+    /// markov_residual, markov_residual_codec, windowed_checkpoint,
     /// turbo_quant, boundary_kv, boundary_per_layer) or a
     /// [`RetrievalEngine`] (Apollo, future Mode 5). Callers branch
     /// once on the enum variant and stay in the variant-specific code
@@ -355,8 +364,8 @@ impl EngineKind {
                 markov_residual::MarkovResidualEngine::with_backend(window_size, backend)
                     .with_profiling(profiling),
             )),
-            EngineKind::UnlimitedContext { window_size } => AnyEngine::Kv(Box::new(
-                unlimited_context::UnlimitedContextEngine::with_backend(window_size, backend)
+            EngineKind::WindowedCheckpoint { window_size } => AnyEngine::Kv(Box::new(
+                windowed_checkpoint::WindowedCheckpointEngine::with_backend(window_size, backend)
                     .with_profiling(profiling),
             )),
             EngineKind::TurboQuant { bits } => AnyEngine::Kv(Box::new(
@@ -452,11 +461,17 @@ mod tests {
                 "failed to parse {name:?}"
             );
         }
-        for name in &["unlimited", "unlimited-context", "unlimited_context"] {
+        for name in &[
+            "windowed-checkpoint",
+            "windowed_checkpoint",
+            "unlimited",
+            "unlimited-context",
+            "unlimited_context",
+        ] {
             assert!(
                 matches!(
                     EngineKind::from_name(name),
-                    Some(EngineKind::UnlimitedContext { .. })
+                    Some(EngineKind::WindowedCheckpoint { .. })
                 ),
                 "failed to parse {name:?}"
             );
@@ -500,8 +515,8 @@ mod tests {
             other => panic!("expected MarkovResidual{{window=1024}}, got {other:?}"),
         }
         match EngineKind::from_name("unlimited-context:window=256") {
-            Some(EngineKind::UnlimitedContext { window_size: 256 }) => {}
-            other => panic!("expected UnlimitedContext{{window=256}}, got {other:?}"),
+            Some(EngineKind::WindowedCheckpoint { window_size: 256 }) => {}
+            other => panic!("expected WindowedCheckpoint{{window=256}}, got {other:?}"),
         }
         match EngineKind::from_name("turbo-quant:bits=3") {
             Some(EngineKind::TurboQuant { bits: 3 }) => {}
@@ -763,7 +778,7 @@ mod compliance_tests {
             EngineKind::MarkovResidual {
                 window_size: Some(32),
             },
-            EngineKind::UnlimitedContext { window_size: 64 },
+            EngineKind::WindowedCheckpoint { window_size: 64 },
             EngineKind::TurboQuant { bits: 4 },
             EngineKind::TurboQuant { bits: 3 },
             EngineKind::Apollo {
@@ -796,7 +811,7 @@ mod compliance_tests {
             "no-cache",
             "markov-rs",
             "markov-rs",
-            "unlimited-context",
+            "windowed-checkpoint",
             "turbo-quant",
             "turbo-quant",
             "apollo",
@@ -861,7 +876,7 @@ mod compliance_tests {
     #[test]
     fn from_name_unknown_param_ignored_defaults_apply() {
         match EngineKind::from_name("unlimited-context:unknown=42") {
-            Some(EngineKind::UnlimitedContext { window_size: 512 }) => {}
+            Some(EngineKind::WindowedCheckpoint { window_size: 512 }) => {}
             other => panic!("unknown param should use default, got {other:?}"),
         }
     }
@@ -930,7 +945,11 @@ mod compliance_tests {
             ("no-cache", "no-cache"),
             ("none", "no-cache"),
             ("markov-rs", "markov-rs"),
-            ("unlimited-context", "unlimited-context"),
+            ("windowed-checkpoint", "windowed-checkpoint"),
+            // Pre-rename spellings still parse, and normalise to the new
+            // canonical name rather than echoing themselves back.
+            ("unlimited-context", "windowed-checkpoint"),
+            ("unlimited", "windowed-checkpoint"),
             ("turbo-quant", "turbo-quant"),
             ("tq3", "turbo-quant"),
             ("apollo", "apollo"),

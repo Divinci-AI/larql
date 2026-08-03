@@ -148,7 +148,7 @@ fn exact_engines_match_legacy_on_ple_arch() {
 const UNLIMITED_CONTEXT_ACCUM_ORDER_REL_TOL: f32 = 1e-5;
 
 #[test]
-fn unlimited_context_matches_legacy_within_accum_order_on_ple_arch() {
+fn windowed_checkpoint_matches_legacy_within_accum_order_on_ple_arch() {
     let weights = make_synthetic_e2b_like_weights();
     let (h_ref, decode_ref) = legacy_reference(&weights);
     let spec = format!("unlimited-context:window={NO_EVICTION_WINDOW}");

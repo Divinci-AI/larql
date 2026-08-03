@@ -1,4 +1,4 @@
-//! Pure helpers for the KV-engine bench path (markov-rs, unlimited-context).
+//! Pure helpers for the KV-engine bench path (markov-rs, windowed-checkpoint).
 //! The I/O-bound bench loops live in `engine_runtime.rs`; this file owns:
 //!   * `argmax_token` — greedy next-token pick
 //!   * `format_engine_label` — engine info → label string (with / without Q4K)

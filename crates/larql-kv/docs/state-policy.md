@@ -47,7 +47,7 @@ Discarding it loses the conversation. The known kinds:
 | Tokens (raw input ids) | `NoCacheEngine` |
 | Residual streams | `MarkovResidualEngine` |
 | Boundary residuals | `Apollo`, `BoundaryKvEngine` checkpoint frames |
-| KV tensors | `StandardEngine`, `UnlimitedContextEngine` (within window) |
+| KV tensors | `StandardEngine`, `WindowedCheckpointEngine` (within window) |
 | Compressed residual packets | `MarkovResidualCodecEngine` (cold tier), `BoundaryPerLayerEngine` |
 
 This list is *open*. New canonical kinds may appear (e.g. a
@@ -157,7 +157,7 @@ hot path; the engine simply doesn't shadow it.
 |---|---|---|---:|
 | `MarkovResidualEngine` | residual stream | `hot_kv`; (`rs.stored` too when `window=None`) | 106.8 (None) |
 | `MarkovResidualCodecEngine` | codec residuals | same | 98.5 (None) |
-| `UnlimitedContextEngine` | KV within window | `current_window_kv` (CPU shadow of the Metal cache) | 92.8 (HOnly) |
+| `WindowedCheckpointEngine` | KV within window | `current_window_kv` (CPU shadow of the Metal cache) | 92.8 (HOnly) |
 | `TurboQuantEngine` | compressed K/V (destructive) | nothing — K/V IS canonical | — |
 | `StandardEngine` | KV tensors | n/a — backend-managed already | (reference, ~100) |
 
@@ -213,7 +213,7 @@ Each accessor's purpose:
   contract is conditional on architecture, a static fact.
 - **`memory_accounting`** — `hot_bytes()` + `cold_bytes()` split,
   attributed to canonical vs derivative. Required to surface
-  things like the `UnlimitedContextEngine` window-shadow
+  things like the `WindowedCheckpointEngine` window-shadow
   double-count (engine carries 15.7 MB shadow at window=256 while
   the backend keeps the full K/V — both should appear).
 - **`execution_requirements`** — what does the engine *need* from
@@ -235,7 +235,7 @@ The engines in `larql-kv` today, classified under the triple:
 | `MarkovResidualCodecEngine` | codec-encoded residuals | hot KV | `bounded_KL(ε)` — ε stated per codec |
 | `BoundaryKvEngine` | KV tensors + chunk frames | — | `exact_logits` |
 | `BoundaryPerLayerEngine` | per-layer codec policy over residuals | hot KV | `bounded_KL(ε_l)` per-layer; calibrated |
-| `UnlimitedContextEngine` | KV tensors (within window) + per-window checkpoints + token archive | — | `exact_logits` within window |
+| `WindowedCheckpointEngine` | KV tensors (within window) + per-window checkpoints + token archive | — | `exact_logits` within window |
 | `TurboQuantEngine` | quantised KV (in-place) | — | `codec_bounded_state` — per-row round-trip cos ≈ 0.9954 at 4-bit (Gaussian simulation, 2026-07-30); output KL observed, not bounded |
 | `Apollo` | boundary retrieval / residual injection store | — | `task_level_retrieval` |
 

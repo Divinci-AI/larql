@@ -461,7 +461,7 @@ pub fn rs_extend_from_checkpoint_quant(
     }
 
     if let (Some(prof), Some(t_step)) = (profiler.as_mut(), t_step) {
-        // unlimited_context appends K/V incrementally → no `recompute_*`
+        // windowed_checkpoint appends K/V incrementally → no `recompute_*`
         // stages fire. embed/attention/ffn/decode_total carry the
         // attribution; recompute_cold/hot stay at zero (and the print
         // logic shows them only when non-zero).

@@ -426,7 +426,7 @@ fn coarse_decode_step_returns_none_without_index() {
 
 /// `read_kv_row_at` on the coarse Q4K handle returns the row at the
 /// requested ABSOLUTE position, value-equal to the per-position K/V the
-/// state dump captured — the contract `UnlimitedContextEngine`'s
+/// state dump captured — the contract `WindowedCheckpointEngine`'s
 /// boundary-checkpoint readback depends on.
 #[test]
 fn read_kv_row_at_returns_absolute_rows_matching_state_dump() {

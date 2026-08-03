@@ -187,11 +187,11 @@ fn a_refused_prefill_leaves_an_earlier_prefill_intact() {
 /// rather than a retryable refusal, and a caller told "recoverable" does not
 /// re-drive it into a duplicated window.
 #[test]
-fn unlimited_context_invalidates_once_a_window_has_closed() {
+fn windowed_checkpoint_invalidates_once_a_window_has_closed() {
     /// One token per window, so the prompt below closes windows as it goes.
     const WINDOW: usize = 1;
     let weights = make_test_gemma4_moe_weights();
-    let kind = EngineKind::UnlimitedContext {
+    let kind = EngineKind::WindowedCheckpoint {
         window_size: WINDOW,
     };
     let mut engine = kind.build(larql_inference::cpu_engine_backend());

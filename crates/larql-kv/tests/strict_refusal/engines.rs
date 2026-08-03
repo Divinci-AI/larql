@@ -122,7 +122,7 @@ pub const ALL: [EngineUnderTest; 9] = [
     EngineUnderTest {
         label: "unlimited-context",
         coverage: Coverage::RoutesExperts,
-        build: |_| EngineKind::UnlimitedContext {
+        build: |_| EngineKind::WindowedCheckpoint {
             window_size: WINDOW,
         },
     },

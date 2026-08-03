@@ -59,7 +59,7 @@ f32 attention. **Fixed:**
   `larql_compute::attention::run_attention_block_decode_step_auto` — makes
   the same q4k-direct-vs-f32 per-layer choice as
   `CpuBackend::attention_step`, for callers that own `SharedKV` caches.
-- `markov-rs`, `markov-rs-codec`, `turbo-quant`, `unlimited-context`,
+- `markov-rs`, `markov-rs-codec`, `turbo-quant`, `windowed-checkpoint`,
   `boundary_per_layer` now override `decode_step_resident` and thread the
   vindex down their walk loops to `_auto`. `boundary-kv` forwards both
   resident methods to its inner `StandardEngine` (was silently dropping to
@@ -161,7 +161,7 @@ f32 attention. **Fixed:**
     purpose) is untouched. `hot_kv` is excluded from `memory_bytes` (droppable
     derivative, matches markov). Engine-level in-place-vs-owned-concat A/B (q4k on)
     bit-identical; f32-gated debug `hot_kv ≈ recompute_kv` assert.
-  - **unlimited_context** — its CPU window walk (`extend.rs`) passed the whole
+  - **windowed_checkpoint** — its CPU window walk (`extend.rs`) passed the whole
     window K/V by value → backend re-concats `[n+1]` per layer per step (its own
     doc admitted "O(window²) total"). Added `rs_extend_inplace` (appends into the
     window's doubling-capacity buffer, attends over views), wired into
@@ -201,7 +201,7 @@ Q4K, Metal, M3 Max):
 | `standard` (fused) | 100.3 | 64.1 | 300 ms | — |
 | `markov-rs` | 88.9 | **58.7** | 265 ms | -8.4% |
 | `markov-rs-codec` | 88.8 | **57.2** | 270 ms | -10.8% |
-| `unlimited-context` | 86.4 | 57.4 | 256 ms | -10.4% |
+| `windowed-checkpoint` | 86.4 | 57.4 | 256 ms | -10.4% |
 | `turbo-quant` (4-bit, 10-tok) | 37.7 | — | — | codec-bound |
 
 All cached-state engines now cluster within ~10% of `standard`'s
@@ -225,7 +225,7 @@ entirely (W10 — engine-side state lives on GPU until window-close).
   [`CHANGELOG.md`](CHANGELOG.md).
 - **Seven engines shipped** as of 2026-05-17:
   - Original four: `standard`, `no_cache`, `markov_residual`,
-    `unlimited_context`, `turbo_quant`, `apollo`.
+    `windowed_checkpoint`, `turbo_quant`, `apollo`.
   - Three new: `boundary_kv`, `markov_residual_codec`, `boundary_per_layer`.
     Specs in `crates/larql-inference/docs/specs/`:
     [boundary-kv-engine.md](../larql-inference/docs/specs/boundary-kv-engine.md),
@@ -257,7 +257,7 @@ Substantive refactors landed; specs reflect the new boundaries.
 - **`metal_fused_prefill` / `metal_fused_decode_step`** → `fused_prefill`
   / `fused_decode_step`. The "metal" was a lie — `CpuBackend` implements
   `prefill_q4` and `decode_token` via its C Q4 kernel and also takes the
-  fused path on `--cpu`. The aliases in `unlimited_context::engine`
+  fused path on `--cpu`. The aliases in `windowed_checkpoint::engine`
   (`quant_prefill_metal`, `quant_decode_token`) follow.
 - **`KvEngine::prefill_q4k` / `decode_step_q4k`** → `prefill_quant` /
   `decode_step_quant`. The `_q4k` suffix baked one format into the trait
@@ -308,7 +308,7 @@ Metal calls `larql_inference::vindex::fused_prefill`.
 | `boundary_kv` | Delegates to `standard` + emits boundary frames | n/a | n/a | ≈104 | 0 MB |
 | `markov_residual` | Per-layer walk via `rs_prefill_walk` | ✅ | ✅ counter test | 3.6 | 6.0 MB |
 | `markov_residual_codec` | Per-layer walk via `rs_prefill_codec_walk` (bf16 cold) | ✅ | ✅ counter test | 4.3 | 6.0 MB |
-| `unlimited_context` | Windowed checkpoint extension via `process_q4k` | ✅ | ✅ counter test | 25.6 | 4.8 MB |
+| `windowed_checkpoint` | Windowed checkpoint extension via `process_q4k` | ✅ | ✅ counter test | 25.6 | 4.8 MB |
 | `turbo_quant` | Per-layer WHT + Lloyd-Max compression cycle | ✅ | ✅ counter test | 3.9 | 0.6 MB |
 | `boundary_per_layer` | Per-layer walk with per-layer codec policy | ✅ (dense) | ✅ counter test | — | matches markov_residual_codec |
 | `apollo` | Whole-forward through `forward_layer_range` (boundary prefix + perturb) | ✅ | ✅ counter test | requires store | scales with store |
@@ -325,7 +325,7 @@ lines, 61/61 files at ≥90%, 0 debt baselines in
 | File | Pre | Post |
 |---|---:|---:|
 | `engines/markov_residual/compute.rs` | 86.85% | **95.30%** |
-| `engines/unlimited_context/dispatch.rs` | 59.09% | **97.24%** |
+| `engines/windowed_checkpoint/dispatch.rs` | 59.09% | **97.24%** |
 | `engines/markov_residual/dispatch.rs` | 77.51% | **96.78%** |
 | `engines/markov_residual_codec/dispatch.rs` | 80.68% | **97.72%** |
 | `engines/turbo_quant/dispatch.rs` | 9.35% | **97.85%** |
@@ -573,7 +573,7 @@ full-recompute `predict_kquant_hidden*` path with **no KV cache**. CPU
 full-recompute fix that closed #146, 2026-05-28).
 
 Goal: make the engine layer MoE-aware so CPU MoE decode is KV-cached and
-**engine-selectable** (standard / unlimited_context / markov* / turbo_quant /
+**engine-selectable** (standard / windowed_checkpoint / markov* / turbo_quant /
 apollo all apply their mechanism to MoE models, not just dense).
 
 Subtasks:
@@ -640,7 +640,7 @@ it FAILS at L5 if the prefill-RoPE fix is reverted.
 | **markov_residual** | per-layer `compute.rs` `run_ffn` → `layer_ffn_or_moe` | ✅ | "Paris", **3.1 tok/s** |
 | **boundary_per_layer** | per-layer `walk::run_prefill`/`run_decode` (larql-kv) → `layer_ffn_or_moe` | ✅ | "Paris", **3.1 tok/s** |
 | **boundary_kv** | wraps `StandardEngine` + compressed-residual boundary frames | ✅ | "Paris", **2.9 tok/s** |
-| **unlimited_context** | per-layer `rs_extend_from_checkpoint_backend` → `layer_ffn_or_moe` | ✅ | "Paris", **1.7 tok/s** |
+| **windowed_checkpoint** | per-layer `rs_extend_from_checkpoint_backend` → `layer_ffn_or_moe` | ✅ | "Paris", **1.7 tok/s** |
 | no_cache | legacy `kv_prefill_run` full re-forward | ✗ (by design) | full re-forward per step; not sensible for remote experts |
 | apollo | local re-forward (`forward_from_layer`) | ✗ (by design) | crystal re-forward *multiplies* per-step expert round-trips |
 
@@ -679,11 +679,11 @@ lands as **true — all seven within ~2.6× and network-bound** — `standard` t
 
 **Best engine for remote MoE:** `standard` for throughput; `boundary_kv` for
 wire-efficient cold-context residual frames; `markov`/`turbo`/`boundary_per_layer`
-for compressed KV memory at near-standard speed; `unlimited_context` for
+for compressed KV memory at near-standard speed; `windowed_checkpoint` for
 long-context windowed KV (slowest, bounded memory). `no_cache` / `apollo` are not a
 fit (re-forward multiplies round-trips).
 
-**Resolved (2026-06-13):** `unlimited_context::replay_window` now takes
+**Resolved (2026-06-13):** `windowed_checkpoint::replay_window` now takes
 `moe_ffn` + `index` and threads them to `rs_extend_from_checkpoint_backend`
 (matching the live-window `extend_current` path), so an evicted MoE window
 replays with experts instead of silently falling back to dense FFN. It is a
@@ -765,7 +765,7 @@ decode):
 | Engine | tok/s | Hot state | Per-step cmd_bufs (Metal) | Per-step compute model |
 |---|---:|---:|---:|---|
 | `standard` (fused) | 104 | 0 MB (backend-owned) | 1 | one fused kernel, all 34 layers, append-1-row K/V |
-| `unlimited_context` | 25.6 | 4.8 MB | ~103 | per-layer attn+ffn, append-1-row K/V (same compute as standard, different dispatch) |
+| `windowed_checkpoint` | 25.6 | 4.8 MB | ~103 | per-layer attn+ffn, append-1-row K/V (same compute as standard, different dispatch) |
 | `markov_residual_codec` | 4.3 | 6.0 MB | ~103 | per-layer attn+ffn + **recompute K/V from `window_size` residuals every step** |
 | `turbo_quant` (4-bit) | 3.9 | 0.6 MB | ~103 | per-layer attn+ffn + **decompress prior K/V + re-encode updated K/V every step** (CPU codec in inner loop) |
 | `markov_residual` | 3.6 | 6.0 MB | ~103 | same as codec; no codec overhead on bench (cold tier never fired in 20-step run) |
@@ -780,7 +780,7 @@ decode):
 | Engine | CPU tok/s | GPU (Metal) tok/s | Where the gap lives |
 |---|---:|---:|---|
 | `standard` (coarse_prefill control) | 28.2 | 102.7 | GPU's fused fast path is 3.6× the CPU C kernel. |
-| `unlimited_context` | 28.1 | 28.4 | **At parity** — no per-layer overhead either side. |
+| `windowed_checkpoint` | 28.1 | 28.4 | **At parity** — no per-layer overhead either side. |
 | `markov_residual_codec` | 26.6 | 27.5 | **At parity** (post-W2). |
 | `markov_residual` | 26.5 | 26.8 | **At parity** (post-W2). |
 | `turbo_quant` (4-bit) | 19.4 | 19.6 | **At parity** — codec overhead dominates on both. |
@@ -818,7 +818,7 @@ use Metal at all — there's nothing to batch yet.
 
 W2 landed: caching the hot K/V projection across decode steps
 moved both markov_residual engines from ~5 to ~27 tok/s — they now
-sit on the same curve as `unlimited_context` (which already cached
+sit on the same curve as `windowed_checkpoint` (which already cached
 K/V incrementally), within 1.5 tok/s of each other. The
 `recompute_kv` stage no longer fires; FFN+attention dominate
 exactly like every other cached-K/V engine. **The hot K/V state
@@ -827,11 +827,11 @@ costs ~10.8MB vs 5.3MB pre-W2** (trade memory for speed; still
 
 Reading the table: percentages are *of the engine's own per-step total*,
 not vs standard. The three cached-K/V engines (markov-rs, codec,
-unlimited-context) now cluster around 27-28 tok/s, all showing the
+windowed-checkpoint) now cluster around 27-28 tok/s, all showing the
 same FFN-heavy decode profile. The remaining ~4× gap to standard
 is per-layer Metal dispatch overhead — W1's target.
 
-**`unlimited_context` — 28.4 tok/s, 35 ms/tok. Per-layer attn + ffn
+**`windowed_checkpoint` — 28.4 tok/s, 35 ms/tok. Per-layer attn + ffn
 dominates; no recompute waste.** Compute model is identical to
 standard's (append-1-row K/V per layer). 74% of the step is FFN, 25%
 is attention. The 4× gap to standard is **per-layer Metal command-
@@ -846,7 +846,7 @@ projected ~80-100 tok/s.**
 **`markov_residual` / `markov_residual_codec` — 26.8 / 27.5 tok/s,
 ~37 ms/tok. W2 LANDED.** The hot K/V cache eliminates the 80% recompute
 overhead measured pre-W2; both engines now sit on the same curve as
-`unlimited_context` while preserving the residual-stream contract
+`windowed_checkpoint` while preserving the residual-stream contract
 (drop `hot_kv` and the next step recomputes from `stored` — the
 fallback path is still there for the via_executor path that doesn't
 yet capture K/V). The W2 design preserves the engine identity: K/V is
@@ -863,14 +863,14 @@ cold tier.
 is ~25% of the budget, not the bottleneck.** This is a real surprise:
 the pre-profile guess was "codec encode/decode is the inner-loop
 killer." Measured: codec is ~25% (9.4% decode + 15.5% encode), FFN is
-53%, attention is 20%. Turbo_quant is much closer to unlimited_context
+53%, attention is 20%. Turbo_quant is much closer to windowed_checkpoint
 (28.4 tok/s) than to markov_residual (~5 tok/s) — the engine works.
 The codec is a fixed overhead per layer per step, not a quadratic
 blow-up. **Workstream W3 (incremental encode of the new row only)
 still applies — it would cut the 15.5% encode share roughly in half —
 but the bigger lever is W1 (dispatch batching), since FFN dominates
 the per-step budget and is the same per-layer-Metal bottleneck as on
-unlimited_context.** W4 (SIMD WHT) is now lower-priority than originally
+windowed_checkpoint.** W4 (SIMD WHT) is now lower-priority than originally
 estimated; codec is fast enough that vectorising it shaves single-digit
 percent.
 
@@ -889,8 +889,8 @@ correctness-baseline only.
 
 | ID | Workstream | Engines | Expected gain | Risk |
 |---|---|---|---|---|
-| W1-GPU | **Route per-layer Q/K/V/O and FFN matvecs through Metal.** Today's `attention_decode_step_native` and `ffn_decode_step_native` ignore the backend param and run rayon CPU matvec — that's why all four per-layer engines hit ~27 tok/s on both `--backends cpu` AND `--backends metal`. The GPU is not involved at all. Workstream: make these helpers actually dispatch to `MetalBackend`'s per-layer quant matvec kernels (the ones `fused_prefill` already uses internally). **GPU only.** | unlimited_context, markov_residual, markov_residual_codec, turbo_quant | Unknown — first deliverable is the measurement. Ceiling ranges from ~40 tok/s (submit overhead dominates) to ~80 tok/s (matches standard's GPU advantage). | Per-layer Metal submit cost (50-100µs each × ~6 per layer × 34 layers = ~10-20ms/token) is the open question. May need to batch within a layer (Q+K+V in one buffer, attn separately, etc.) to amortize. CPU is at parity already; no W1-CPU. |
-| W2 | **Persistent hot K/V cache in markov_residual.** The engine contract says "K/V derived from residuals" — it does **not** say "recomputed every step." Cache hot K/V across steps; append-1-row on new residual; only recompute fully on cold-tier eviction (rare). Cold-tier compression remains the engine's selling point. | markov_residual, markov_residual_codec | ~20-30×; engine becomes "unlimited_context with compressed-residual cold tier" | Need to verify residual store still reflects "what we'd recompute from" — i.e., consistency check that cached K/V matches a fresh recompute under same residuals. Add a debug assertion mode. |
+| W1-GPU | **Route per-layer Q/K/V/O and FFN matvecs through Metal.** Today's `attention_decode_step_native` and `ffn_decode_step_native` ignore the backend param and run rayon CPU matvec — that's why all four per-layer engines hit ~27 tok/s on both `--backends cpu` AND `--backends metal`. The GPU is not involved at all. Workstream: make these helpers actually dispatch to `MetalBackend`'s per-layer quant matvec kernels (the ones `fused_prefill` already uses internally). **GPU only.** | windowed_checkpoint, markov_residual, markov_residual_codec, turbo_quant | Unknown — first deliverable is the measurement. Ceiling ranges from ~40 tok/s (submit overhead dominates) to ~80 tok/s (matches standard's GPU advantage). | Per-layer Metal submit cost (50-100µs each × ~6 per layer × 34 layers = ~10-20ms/token) is the open question. May need to batch within a layer (Q+K+V in one buffer, attn separately, etc.) to amortize. CPU is at parity already; no W1-CPU. |
+| W2 | **Persistent hot K/V cache in markov_residual.** The engine contract says "K/V derived from residuals" — it does **not** say "recomputed every step." Cache hot K/V across steps; append-1-row on new residual; only recompute fully on cold-tier eviction (rare). Cold-tier compression remains the engine's selling point. | markov_residual, markov_residual_codec | ~20-30×; engine becomes "windowed_checkpoint with compressed-residual cold tier" | Need to verify residual store still reflects "what we'd recompute from" — i.e., consistency check that cached K/V matches a fresh recompute under same residuals. Add a debug assertion mode. |
 | W3 | **Incremental TurboQuant encode (append-only).** Only encode the new K/V row each step; keep prior compressed bytes untouched. Decompress only the new row's neighbourhood for attention scores (or the whole layer if simpler). | turbo_quant | ~10× at long context | Re-encoding for in-place updates is the slow path. Need to define when (if ever) the full layer needs re-encoding. |
 | W4 | **TurboQuant SIMD WHT + Lloyd-Max.** Already on P1; promote to P0 once W3 lands so the per-row codec cost is the only remaining work. NEON on Apple Silicon, AVX2 on x86_64. | turbo_quant | 2-4× on the codec step | Mostly mechanical; landing W3 first means each step touches less data, making SIMD's batch budget go further. |
 | W5 | **Apollo K/V cache across decode steps.** Cache the K/V for layers `crystal..num_layers` between steps; append-1-row per step instead of re-forwarding. Reduces per-step cost from O(N) to O(1) in generated length. | apollo | linear → constant per-step | Apollo's vec_inject perturbation fires at `injection_layer`; verify the perturbation interacts correctly with cached K/V (it should — perturbation is residual-additive, not K/V-overwriting). Needs an apollo store fixture in tree to bench. |
@@ -903,12 +903,12 @@ Recommended order (revised 2026-05-17 night after W7 produced
 measured numbers — replaces the earlier guess-driven sequence):
 
 1. **W7 — DONE.** Profiler wired across markov_residual,
-   markov_residual_codec, unlimited_context, turbo_quant. Each
+   markov_residual_codec, windowed_checkpoint, turbo_quant. Each
    engine's `--profile` output produces a per-stage attribution.
    See the measured table above.
 2. **W2 — DONE.** Hot K/V cache landed on `markov_residual` and
    `markov_residual_codec`. Both moved from ~5 tok/s to ~27 tok/s
-   (5.5-5.7×) and now sit on the same curve as `unlimited_context`.
+   (5.5-5.7×) and now sit on the same curve as `windowed_checkpoint`.
    Engine contract preserved: K/V still derivable from residuals,
    just not re-derived every step. Hot K/V state grew from 5.3MB
    to 10.8MB; that's the speed/memory trade. Bit-parity tests
@@ -950,7 +950,7 @@ measured numbers — replaces the earlier guess-driven sequence):
   make per-layer fast, not to skip it.
 - **Not removing engine contracts.** Markov-rs's residual store
   must still be re-deriveable; turbo_quant's K/V must still be
-  compressed; unlimited_context's checkpoints must still emit at
+  compressed; windowed_checkpoint's checkpoints must still emit at
   window boundaries. Optimizations are within the contract.
 - **Not optimising no_cache.** It's a correctness baseline; O(N²)
   is the design.
@@ -969,7 +969,7 @@ silently:
     a non-empty prompt.
   - `markov_residual_codec`: same; plus `cold_bytes() > 0` after
     overflow.
-  - `unlimited_context`: `archive.len() > 0` after at least
+  - `windowed_checkpoint`: `archive.len() > 0` after at least
     `window_size` tokens.
   - `turbo_quant`: `layers.len() == num_layers` after prefill.
   - `apollo`: `context_tokens.len() > 0` after prefill.
@@ -1016,7 +1016,7 @@ in expected ROI order.
   matching CPU-side shadow type for `CpuBackend` which has no
   on-GPU state.** Pre-req: stable `MetalBackend`-side KV cache
   invariants (which Step 9 already established).
-- **W8.2 → `unlimited_context` CPU walk fallback.** The legacy CPU
+- **W8.2 → `windowed_checkpoint` CPU walk fallback.** The legacy CPU
   walk path (`process_via_executor` at engine.rs:~720) still uses
   the per-step `Array2::zeros((s_old+1, dim))` pattern. Not on the
   hot path for the bench (dispatch path is the default), but a
@@ -1099,11 +1099,11 @@ disagreeing semantics instead of two.
    variants) return type changes from `Option<T>` to
    `Result<T, EngineError>`. **All eight `KvEngine` impls touched** —
    `standard`, `no_cache`, `markov_residual`, `markov_residual_codec`,
-   `unlimited_context`, `turbo_quant`, `boundary_kv`,
+   `windowed_checkpoint`, `turbo_quant`, `boundary_kv`,
    `boundary_per_layer` — not just the one that motivated the
    refactor. The translation is mechanical: validated on three
    structurally-distinct samples (`markov_residual` for arch
-   preconditions, `unlimited_context` for window boundaries,
+   preconditions, `windowed_checkpoint` for window boundaries,
    `boundary_per_layer` for calibration stores); every `None`-return
    in those engines maps cleanly to `InternalError(...)`. The
    remaining five are variations on already-validated patterns
@@ -1157,7 +1157,7 @@ disagreeing semantics instead of two.
    trait-extraction PR reviewer's first design call.
 
 3. **Extensibility note — the four-variant enum is not a permanent
-   ceiling.** Currently-invisible failure modes — `unlimited_context`'s
+   ceiling.** Currently-invisible failure modes — `windowed_checkpoint`'s
    "request crossed an uncheckpointed window boundary" (collapsed
    into generic `process()` None today), `boundary_per_layer`'s
    "calibration record missing for policy fingerprint" (a
@@ -1252,7 +1252,7 @@ were implementation).
   measurement → policy generation → end-to-end KL validation) is not in
   tree. Per spec Phase 1 of
   [boundary-per-layer-engine.md](../larql-inference/docs/specs/boundary-per-layer-engine.md).
-- **Page-aligned KV slabs for `unlimited_context`.** The current
+- **Page-aligned KV slabs for `windowed_checkpoint`.** The current
   `CheckpointStore` uses owned `Vec<f32>` per layer per checkpoint; a
   hugepage-backed slab would cut allocation churn and improve thermal
   steadiness during 370K-token replays.
@@ -1368,7 +1368,7 @@ were implementation).
   `bench/engine_runtime.rs`) is resolved at the type level.
 
   **Trait surface:** all 8 `KvEngine` impls (`standard`, `no_cache`,
-  `markov_residual`, `markov_residual_codec`, `unlimited_context`,
+  `markov_residual`, `markov_residual_codec`, `windowed_checkpoint`,
   `turbo_quant`, `boundary_kv`, `boundary_per_layer`) return
   `Result<Array2<f32>, EngineError>` on `prefill` / `decode_step` /
   `*_quant` / `*_via_executor`. Apollo moves to the new
@@ -1443,7 +1443,7 @@ were implementation).
   lines, 61/61 files at ≥90%, 0 debt baselines remaining.
 
   Files lifted (pre → post): `turbo_quant/dispatch` 9.35→97.85%,
-  `boundary_per_layer/dispatch` 7.95→93.57%, `unlimited_context/dispatch`
+  `boundary_per_layer/dispatch` 7.95→93.57%, `windowed_checkpoint/dispatch`
   59.09→97.24%, `markov_residual/dispatch` 77.51→96.78%,
   `markov_residual_codec/dispatch` 80.68→97.72%,
   `markov_residual/compute` 86.85→95.30%.
@@ -1565,7 +1565,7 @@ were implementation).
 
 - **2026-05-18 — W8.2 (doubling-capacity K/V in `markov_residual` +
   `markov_residual_codec`) LANDED: 2.4× decode speedup at 1000 tokens.**
-  Lifted the W8 pre-allocation pattern from `unlimited_context` to the
+  Lifted the W8 pre-allocation pattern from `windowed_checkpoint` to the
   two unbounded-window engines. Since `max_window=None` rules out a
   fixed pre-alloc, both stores now use a doubling-capacity strategy
   via three private helpers in each engine:
@@ -1595,7 +1595,7 @@ were implementation).
   - **1000-tok**:
     - `markov-rs`: 24.8 → **58.7 tok/s (+137%)**
     - `markov-rs-codec`: 25.7 → **57.2 tok/s (+123%)**
-    - `unlimited-context`: 49.5 → **57.4 tok/s (+16%)** (variance
+    - `windowed-checkpoint`: 49.5 → **57.4 tok/s (+16%)** (variance
       recovery from previous run + sympathy from the codepath audit)
     - `standard` unchanged at 64.1 (untouched)
   - **50-tok**:
@@ -1631,7 +1631,7 @@ were implementation).
   5 prefill tokens):
   - `markov-rs` prefill: 2757 → **254 ms** (10.9×)
   - `markov-rs-codec` prefill: 2564 → **249 ms** (10.3×)
-  - `unlimited-context` prefill: 2760 → **256 ms** (10.8×)
+  - `windowed-checkpoint` prefill: 2760 → **256 ms** (10.8×)
   - `turbo-quant` prefill: 2750 → **334 ms** (8.2×)
 
   Predicted ~45× (5 × 12 ms decode time) didn't materialise because
@@ -1642,14 +1642,14 @@ were implementation).
   Metal-kernel surgery.
 
   Decode steady-state also moved (W8 + Step 9 compound):
-  - `unlimited-context`: 82.7 → **89.2 tok/s** (fastest cached-state
+  - `windowed-checkpoint`: 82.7 → **89.2 tok/s** (fastest cached-state
     engine; within 10% of `standard`'s 99.2 ceiling)
   - `markov-rs`: 75.3 → 77.1 tok/s
   - `markov-rs-codec`: 79.0 → 77.5 tok/s
 
-- **2026-05-18 — W8 (pre-allocated K/V buffer in `unlimited_context`)
+- **2026-05-18 — W8 (pre-allocated K/V buffer in `windowed_checkpoint`)
   LANDED: 58% of decode-CPU alloc churn removed.**
-  samply flamegraph on `unlimited_context:window=1024 --tokens 1000`
+  samply flamegraph on `windowed_checkpoint:window=1024 --tokens 1000`
   (post-W7) surfaced an unexpected hot path: 21% `__bzero` + 19%
   `ndarray::zip_mut_with_same_shape` + 18% `madvise` = **58.5% of
   main-thread CPU** spent on `Array2::<f32>::zeros((n+1, kv_dim))` +
@@ -1667,9 +1667,9 @@ were implementation).
   counter defensively from the returned narrow-array shape.
 
   Bench (Gemma 3 4B Q4K, Metal, M3 Max):
-  - 50-tok: `unlimited-context:window=256` 82.7 → **86.6 tok/s
+  - 50-tok: `windowed-checkpoint:window=256` 82.7 → **86.6 tok/s
     (+4.7%)** vs `standard`'s 99.4 (gap closed ~50%)
-  - 1000-tok: `unlimited-context:window=1024` 17.39 ms vs `standard`'s
+  - 1000-tok: `windowed-checkpoint:window=1024` 17.39 ms vs `standard`'s
     15.74 ms → 1.65 ms gap (vs pre-W8 estimated 5-10 ms slope from
     `Array2::zeros((n+1, …))` growing linearly with `n`)
 
@@ -1679,7 +1679,7 @@ were implementation).
   irreducible), `synthesize_lm_head_kquant` (prefill — separate
   ~2.5 s regression flagged elsewhere), and generic `Map::fold`.
 
-  The optimisation is engine-local (`larql-kv/src/engines/unlimited_context/engine.rs`)
+  The optimisation is engine-local (`larql-kv/src/engines/windowed_checkpoint/engine.rs`)
   with no surface change. Same pattern can be lifted to
   `markov_residual` / `markov_residual_codec` / `turbo_quant` once
   their state-policy shape is clarified — they use the same
@@ -1705,7 +1705,7 @@ were implementation).
   - `standard` (control, no state_dump): 105.9 → 99.4 tok/s (noise)
   - `markov-rs`: 58.0 → **75.3 tok/s (+30%)**
   - `markov-rs-codec`: 58.4 → **79.0 tok/s (+35%)**
-  - `unlimited-context` (window=256): 56.0 → **82.7 tok/s (+48%)**
+  - `windowed-checkpoint` (window=256): 56.0 → **82.7 tok/s (+48%)**
   - `turbo-quant` (4-bit, 10-tok bench): 33.0 → **37.7 tok/s (+14%)**
 
   Engine-cost decomposition post-W7: ~10 ms Metal kernel compute +
@@ -1719,11 +1719,11 @@ were implementation).
     → 0× regression confirmed.
   - `turbo_quant`'s codec inner loop is the dominant per-token cost;
     the saved 1.7 ms commit overhead is a smaller fraction.
-  - The `unlimited_context` +48% win reflects its lighter post-
+  - The `windowed_checkpoint` +48% win reflects its lighter post-
     kernel CPU work (just append to `current_window_kv`); engines
     with heavier post-kernel work see smaller relative gains.
 
-- **2026-05-17 night — W1-GPU steps 4 + 6 LANDED: unlimited_context +
+- **2026-05-17 night — W1-GPU steps 4 + 6 LANDED: windowed_checkpoint +
   turbo_quant now route through dispatch on Metal.**
   Same pattern as steps 5: each engine gains `try_prefill_via_dispatch`
   / `decode_step_via_dispatch` helpers that read per-layer captured
@@ -1733,7 +1733,7 @@ were implementation).
     and decompress→append→recompress (decode). Bench: **19.6 →
     33.0 tok/s (+68%)** on Metal. Memory stays at 0.6 MB hot
     (compression intact).
-  - **unlimited_context**: state.k_new/v_new appends to
+  - **windowed_checkpoint**: state.k_new/v_new appends to
     `current_window_kv` per layer; window auto-close at
     `window_size` tokens fires the legacy `close_window` checkpoint
     emit. Bench: **28 → 56.0 tok/s on Metal (+98%)** at
@@ -1743,7 +1743,7 @@ were implementation).
 
   Engine memory note: with W1-GPU active, the backend's internal K/V
   cache grows unboundedly alongside each engine's shadow state. This
-  defeats the memory benefit of `unlimited_context` /
+  defeats the memory benefit of `windowed_checkpoint` /
   `markov_residual_codec` at long contexts. Follow-up: expose a
   `KvHandle::evict_oldest(n)` API on `KvDispatch` so engines can
   bound the backend cache to match their window.
@@ -1851,7 +1851,7 @@ were implementation).
   `cold_kv` is invalidated on overflow so the next step recomputes
   against the codec-decoded residual. Bench: `markov_residual`
   4.7 → 26.8 tok/s (5.7×); `markov_residual_codec` 5.0 → 27.5 tok/s
-  (5.5×). Both now sit on the `unlimited_context` curve. Engine
+  (5.5×). Both now sit on the `windowed_checkpoint` curve. Engine
   contract preserved — drop `hot_kv` and the next step recomputes
   from `stored` (via_executor path takes this fallback). Hot-state
   memory grew from 5.3 → 10.8 MB; still ~50× smaller than
@@ -1862,7 +1862,7 @@ were implementation).
   path.** `EngineProfiler` now populates from `rs_decode_step_walk`
   (markov_residual), `rs_decode_step_codec_walk`
   (markov_residual_codec), `rs_extend_from_checkpoint_quant`
-  (unlimited_context), and `decode_step_quant_cpu` (turbo_quant).
+  (windowed_checkpoint), and `decode_step_quant_cpu` (turbo_quant).
   Each engine's `stage_summary()` returns `Some(...)` when
   `with_profiling(true)` is set. `larql bench --profile --engine
   <name>` now produces a per-stage attribution table per engine.
@@ -1877,8 +1877,8 @@ were implementation).
   (`prefill_q4k` → `prefill_quant`, `has_q4` →
   `supports_quant(format)`, `q4k` → `kquant` storage) missed the
   per-engine implementation wrappers:
-  `unlimited_context::process_q4k`,
-  `unlimited_context::extend_current_q4k`,
+  `windowed_checkpoint::process_q4k`,
+  `windowed_checkpoint::extend_current_q4k`,
   `extend::rs_extend_from_checkpoint_q4k`,
   `turbo_quant::decode_step_q4k_cpu` /
   `turbo_quant::prefill_kquant_cpu`. All renamed to `_quant` since
@@ -1886,7 +1886,7 @@ were implementation).
   specifically.
 - **2026-05-17 night — Fused-bypass strip: engines are now engines.**
   Every per-layer engine (`markov_residual`, `markov_residual_codec`,
-  `unlimited_context`, `turbo_quant`) had a hidden
+  `windowed_checkpoint`, `turbo_quant`) had a hidden
   `if let Some(h) = fused_prefill(...) { return Some(h); }` short-
   circuit at the top of `prefill_quant` / `decode_step_quant`. The
   short-circuit meant `--engine markov-rs` on Metal silently ran
@@ -1896,19 +1896,19 @@ were implementation).
   short-circuit; deleted dead `metal_prefill_done` + `force_walk`
   fields and `with_force_walk` builders; dropped the pub(crate)
   `fused_prefill`/`fused_decode_step` re-exports from
-  `unlimited_context::engine` (only `StandardEngine::coarse_prefill`
+  `windowed_checkpoint::engine` (only `StandardEngine::coarse_prefill`
   uses the underlying `larql_inference::vindex::fused_prefill` now,
   via `ComputeBackend::coarse_prefill`). `StandardEngine` remains the
   default engine and the only home of the fused fast path. Bench now
   reports honest numbers: standard 104 tok/s, markov-rs 3.6, codec
-  4.3, unlimited-context 25.6, turbo-quant 3.9 — every per-layer
+  4.3, windowed-checkpoint 25.6, turbo-quant 3.9 — every per-layer
   engine reports non-zero `hot=` memory because their state
   structures actually materialise. The 25-30× standard-vs-per-layer
   gap is the new optimization frontier; previously it was invisible
   because every engine was running the same kernel under different
   labels.
 - **2026-05-17 evening — Phase-2 migration completed for the remaining
-  three engines.** `unlimited_context`, `turbo_quant`, and `apollo` all
+  three engines.** `windowed_checkpoint`, `turbo_quant`, and `apollo` all
   override `*_via_executor` methods and honor the caller-supplied
   `FfnBackend`. `CountingFfn` stub tests prove per-(token, layer)
   dispatch through the caller's backend. Same push cleared every
@@ -1944,7 +1944,7 @@ were implementation).
 - **2026-05-17 — `metal_fused_*` → `fused_*` rename.** The "metal"
   prefix was a lie: `CpuBackend` implements `prefill_q4` and
   `decode_token` via its C Q4 kernel. Aliases in
-  `unlimited_context::engine` follow.
+  `windowed_checkpoint::engine` follow.
 - **2026-05-17 — `BoundaryKvEngine`, `MarkovResidualCodecEngine`,
   `BoundaryPerLayerEngine` shipped.** All three new engines have
   contracts in `crates/larql-inference/docs/specs/`. Per-file coverage
