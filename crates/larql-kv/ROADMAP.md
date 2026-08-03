@@ -1,5 +1,77 @@
 # Roadmap — larql-kv
 
+## Windowed engines keep the fused path; the bench measures a whole token (2026-08-04)
+
+Started as "check the engines benchmark correctly" and the instrument was the
+first finding.
+
+**The bench was not measuring a token.** The engine harness stopped its timer
+before `pick_next`, while the reference rows included lm_head — both landing in
+the same tok/s column, so every engine read 2-3x faster than production for
+free. The CPU run made it exact: the engine's whole measured step (4.12 ms)
+equalled the reference's *forward stage alone* (4.109 ms). Both halves are
+inside the step now, prefill included (the reference's `prefill_ms` encloses its
+first `lm_head_predict`), and each row carries a `fwd=` / `head=` split.
+
+**Memory had two undercounts.** Metal's coarse pipeline keeps K/V behind a
+sentinel handle, so engines reported 0 bytes owned; and the CPU whole-model
+handle was measured with the per-layer formula — a 28x undercount that printed
+as "13x vs std-kv" for an engine doing no compression. Backends now report what
+they hold (`backend_resident_kv_bytes`), whole-model handles report every layer
+(`KvHandleInner::resident_bytes`), and no ratio is invented when nothing was
+measured.
+
+**Rows say which path they took.** `DispatchPath` plus the backend's
+`per_layer_is_host_delegated` answer, so `[coarse]` and `[per-layer→host]` are
+visible. That matters because on Metal *every* per-layer dispatch method
+delegates to `CpuBackend` — a windowed engine ran its whole forward on the host
+under a `[metal (GPU)]` label.
+
+**Per-layer SWA on the CPU attention path.** It had none, while the Metal
+pipeline spec carried a window, so a Gemma-class model attended full history on
+layers the architecture declares sliding. Both now resolve through one rule,
+`effective_attention_window_for_layer`; a layer declaring itself sliding without
+a width is answered "no window" deliberately rather than by an `unwrap_or(0)`
+that meant two different things in two places.
+
+**Windowed engines keep the fused path.** A window promises bounded attention
+*and* bounded K/V; the coarse surface had neither, so windowed engines fell to
+per-layer — 9.4x on Gemma 3 4B. Added `coarse_prefill_windowed` /
+`coarse_decode_step_windowed`, fail-closed so a backend that cannot bound both
+declines and nothing regresses. CPU trims the cache before each step; Metal
+clamps the attention span every step and compacts at 2x the window so the
+memmove is O(1) amortised. Metal, 80 steps at `window=8`: **11.61 ms / 2.4 MB**
+against 12.06 ms / 23.6 MB unwindowed, from 115.44 ms before.
+
+That needed a prerequisite: `LayerKVCache::current_len` was answering both "rows
+stored" and "stream position". They agree only while nothing is evicted, so
+compaction would have rewound RoPE on every later token. Split into
+`abs_position` and `current_len`.
+
+**First GPU-path tests in this crate** (`tests/gpu_engine_parity`). Every prior
+test, bench and pin built engines with `cpu_engine_backend()`, and the `gpu`
+feature gates only a dependency — the test count was identical with and without
+it. Criterion covered 7 of 9 engines and timed apollo's `RetrievalMiss` as a
+250x win; the roster is pinned now.
+
+**A cross-backend divergence closed, after two wrong diagnoses.** Metal's
+batched prefill disagreed with the CPU by 23-43% on the Gemma-3 fixture. Blamed
+first on per-layer SWA (wrong — no window resolves on that fixture), then on a
+`head_dim` shape assumption (wrong, and asserted without testing — a sweep over
+head_dim ∈ {32…512} diverged at every shape including the real model's 256).
+The cause was the fixture declaring Gemma-3's QK-norm keys and never populating
+the weights, so the two backends disagreed about a declared-but-absent weight.
+Real checkpoints always carry them, which is why a real Gemma 3 4B agreed to
+4.0e-7 throughout. Fixture fixed; `make_test_q4k_weights_with_dims` added,
+because every Q4K fixture was pinned to `head_dim = 64` and shape sensitivity
+was untestable by construction.
+
+**Open:** `standard:window=N` still declines the fused path when the *prompt*
+exceeds the window — the fused prefill has no per-query-position masking. Metal
+holds up to 2x the window resident between compactions (attention is still
+bounded at the window).
+
+
 ## Spin-barrier pool — CPU MoE decode caught llama.cpp (2026-06-13)
 
 After residency closed the byte-traffic gap (06-11/12), a `/usr/bin/sample` of

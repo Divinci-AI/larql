@@ -179,6 +179,17 @@ Evidence:
 `StandardEngine` declines coarse when windowed. `WindowedCheckpointEngine`,
 whose entire identity *is* the window, does not.
 
+> **Superseded 2026-08-04.** The quoted guard no longer exists. Declining the
+> fused path was always the expensive half of this fix — on a host-delegating
+> backend the per-layer route runs the whole forward on the CPU, measured at
+> ~9x on Gemma 3 4B — so the trait grew the window instead:
+> `coarse_prefill_windowed` / `coarse_decode_step_windowed`, which fail closed
+> when a backend cannot bound both attention and K/V. `StandardEngine` now asks
+> rather than declines, and both `CpuBackend` and `MetalBackend` answer. The
+> correctness reasoning below stands unchanged — an engine must not report a
+> window it does not enforce; only the remedy moved from "refuse the fast path"
+> to "make the fast path honour it".
+
 This was a correctness finding before it was a performance one: on the dispatch
 path the engine was not the engine it reported being, its boundary checkpoints
 and archive were maintained but unused for attention, and any accuracy measured
