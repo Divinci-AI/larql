@@ -2218,6 +2218,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "larql-demos"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "blas-src",
+ "larql-boundary",
+ "larql-compute",
+ "larql-core",
+ "larql-inference",
+ "larql-kv",
+ "larql-lql",
+ "larql-models",
+ "larql-router-protocol",
+ "larql-server",
+ "larql-vindex",
+ "ndarray",
+ "openblas-src",
+ "safetensors",
+ "serde",
+ "serde_json",
+ "tokenizers",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tower",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "larql-execution"
 version = "0.1.0"
 

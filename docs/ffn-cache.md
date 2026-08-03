@@ -71,7 +71,7 @@ This means:
 - An INSERT session → cache bypassed for layers that have overrides; active for layers without
 - The override check is per-layer, not per-session, so a session that only patches L10 still gets cache hits at L0–L9 and L11–L33
 
-This is validated in `examples/ffn_cache_demo.rs` (Scenario 3) and is the correct behaviour: correctness over hit rate for live-patched layers.
+This is validated in `crates/larql-demos/examples/inference/ffn_cache_demo.rs` (Scenario 3) and is the correct behaviour: correctness over hit rate for live-patched layers.
 
 ---
 

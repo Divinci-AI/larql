@@ -110,10 +110,6 @@ name = "decode_vs_prefill"
 required-features = ["gpu"]
 
 [[example]]
-name = "residual_diff"
-required-features = ["gpu"]
-
-[[example]]
 name = "stage_bisect"
 required-features = ["gpu"]
 

@@ -83,11 +83,11 @@ jobs:
 
       - name: Run examples
         run: |
-          cargo run -p larql-core --example edge_demo
-          cargo run -p larql-core --example graph_demo
-          cargo run -p larql-core --example algorithm_demo
-          cargo run -p larql-core --example filter_demo
-          cargo run -p larql-core --example serialization_demo
+          cargo run -p larql-demos --example edge_demo
+          cargo run -p larql-demos --example graph_demo
+          cargo run -p larql-demos --example algorithm_demo
+          cargo run -p larql-demos --example filter_demo
+          cargo run -p larql-demos --example serialization_demo
 
   coverage:
     name: coverage · ubuntu

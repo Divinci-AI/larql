@@ -72,8 +72,8 @@ jobs:
 
       - name: Run examples
         run: |
-          cargo run -p larql-boundary --example encode_decode
-          cargo run -p larql-boundary --example gate_decision
+          cargo run -p larql-demos --example encode_decode
+          cargo run -p larql-demos --example gate_decision
 
   coverage:
     name: coverage · ubuntu

@@ -56,5 +56,3 @@ rand_distr = "0.4"
 name = "engine_decode"
 harness = false
 
-[[example]]
-name = "engine_ladder"
