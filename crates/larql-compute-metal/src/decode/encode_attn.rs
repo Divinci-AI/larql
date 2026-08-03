@@ -113,7 +113,11 @@ impl MetalBackend {
         } else {
             layer_head_dim
         };
-        let window_size = attn_spec.sliding_window as u32;
+        // Narrower of the architecture's per-layer SWA and any window the
+        // engine imposed on this sequence. The kernel attends
+        // `[T - window_size, T)`, so this both bounds attention and lets
+        // the cache hold more rows than the window between compactions.
+        let window_size = self.effective_window_for(attn_spec.sliding_window as u32);
 
         // Env flags governing kernel-level fusion. Cached at backend
         // startup (see `metal::flags::DecodeFlags`) so the decode hot

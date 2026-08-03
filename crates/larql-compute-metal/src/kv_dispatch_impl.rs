@@ -398,6 +398,65 @@ impl KvDispatch for MetalBackend {
         Some(hidden)
     }
 
+    /// Coarse prefill under an engine window.
+    ///
+    /// Accepts only a prompt that fits inside the window, matching the
+    /// CPU rule: the fused prefill has no per-query-position masking, so
+    /// a longer prompt would attend in full while the engine advertises
+    /// a bound. Declining sends the engine to the per-layer path, which
+    /// is correct — just slower.
+    fn coarse_prefill_windowed(
+        &self,
+        weights: &ModelWeights,
+        token_ids: &[u32],
+        index: Option<&dyn larql_compute::KvIndex>,
+        window: Option<usize>,
+    ) -> Option<(Array2<f32>, KvHandle)> {
+        if let Some(w) = window {
+            if w == 0 || token_ids.len() > w {
+                return None;
+            }
+        }
+        self.set_engine_window(window);
+        self.coarse_prefill(weights, token_ids, index)
+    }
+
+    /// Coarse decode under an engine window.
+    ///
+    /// Two mechanisms, because one cannot do both jobs:
+    ///
+    /// - **Attention** is bounded by `window` every step, via the layer
+    ///   spec's window (see `effective_window_for`). The kernel attends
+    ///   `[T - window, T)`, so extra resident rows are simply not read.
+    /// - **Memory** is bounded by compaction, run only when occupancy
+    ///   reaches `COMPACTION_SLACK x window`. Compacting every step would
+    ///   memmove the whole window per token; amortised it is O(1) per
+    ///   token, at the cost of holding up to that multiple of the window.
+    ///
+    /// Doing only the compaction would let attention read up to the slack
+    /// multiple of the window between compactions; doing only the span
+    /// clamp would never reclaim memory. Both, or neither contract holds.
+    fn coarse_decode_step_windowed(
+        &self,
+        weights: &ModelWeights,
+        token_id: u32,
+        index: Option<&dyn larql_compute::KvIndex>,
+        handle: &mut KvHandle,
+        abs_position: usize,
+        window: Option<usize>,
+    ) -> Option<Array2<f32>> {
+        let Some(w) = window else {
+            self.set_engine_window(None);
+            return self.coarse_decode_step(weights, token_id, index, handle, abs_position);
+        };
+        if w == 0 {
+            return None;
+        }
+        self.set_engine_window(Some(w));
+        self.compact_kv_to_window(w);
+        self.coarse_decode_step(weights, token_id, index, handle, abs_position)
+    }
+
     fn per_layer_is_host_delegated(&self) -> bool {
         // Every per-layer method above forwards to `CPU`. Only the
         // `coarse_*` family runs Metal kernels. Until the per-layer
@@ -834,5 +893,157 @@ mod tests {
             larql_compute::StateDumpMask::Full,
         );
         assert!(result.is_none());
+    }
+}
+
+/// Occupancy multiple of the window at which compaction runs.
+///
+/// Compaction memmoves the surviving rows, so running it every step
+/// would cost O(window) per token. Letting occupancy reach this multiple
+/// before reclaiming makes it O(1) amortised, and the attention span
+/// clamp means the extra resident rows are never read.
+const COMPACTION_SLACK: usize = 2;
+
+impl MetalBackend {
+    /// Reclaim K/V above `COMPACTION_SLACK x window` rows, per layer.
+    ///
+    /// Safe to call every step: it is a no-op until occupancy actually
+    /// reaches the slack bound. Eviction lowers occupancy only —
+    /// `abs_position` keeps climbing, so RoPE does not rewind (see
+    /// `LayerKVCache::evict_to_window`).
+    pub(crate) fn compact_kv_to_window(&self, window: usize) {
+        if window == 0 {
+            return;
+        }
+        let trigger = window.saturating_mul(COMPACTION_SLACK);
+        let Ok(mut guard) = self.kv_cache.lock() else {
+            return;
+        };
+        let Some(cache) = guard.as_mut() else {
+            return;
+        };
+        for layer in cache.layers.iter_mut() {
+            if layer.current_len >= trigger {
+                layer.evict_to_window(window);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod windowed_coarse_tests {
+    use super::*;
+    use crate::MetalBackend;
+
+    fn backend() -> MetalBackend {
+        MetalBackend::new().expect("Metal device available on test host")
+    }
+
+    /// The narrower of the two windows wins, and `0` means unbounded on
+    /// both sides — the same sentinel the kernel uses, so no translation.
+    #[test]
+    fn effective_window_takes_the_narrower_of_arch_and_engine() {
+        let b = backend();
+
+        b.set_engine_window(None);
+        assert_eq!(b.effective_window_for(0), 0, "both unbounded");
+        assert_eq!(b.effective_window_for(1024), 1024, "arch window survives");
+
+        b.set_engine_window(Some(256));
+        assert_eq!(
+            b.effective_window_for(0),
+            256,
+            "engine bounds a global layer"
+        );
+        assert_eq!(
+            b.effective_window_for(1024),
+            256,
+            "engine is narrower than the arch's sliding layer"
+        );
+        assert_eq!(
+            b.effective_window_for(128),
+            128,
+            "arch is narrower than the engine's request"
+        );
+
+        b.set_engine_window(None);
+        assert_eq!(
+            b.effective_window_for(1024),
+            1024,
+            "clearing restores the arch"
+        );
+    }
+
+    /// A prompt longer than the window is declined — the fused prefill
+    /// has no per-query masking, so accepting would attend in full while
+    /// the engine advertises a bound.
+    #[test]
+    fn prefill_declines_a_prompt_longer_than_the_window() {
+        let b = backend();
+        let weights = larql_models::test_fixtures::make_test_q4k_weights();
+        assert!(b
+            .coarse_prefill_windowed(&weights, &[0u32, 1, 2, 3], None, Some(2))
+            .is_none());
+        assert!(
+            b.coarse_prefill_windowed(&weights, &[0u32, 1, 2, 3], None, Some(0))
+                .is_none(),
+            "a zero window is refused, not treated as unbounded"
+        );
+    }
+
+    /// Compaction is a no-op below the slack bound and reclaims above it,
+    /// without ever moving the stream position.
+    #[test]
+    fn compaction_reclaims_only_past_the_slack_bound() {
+        let b = backend();
+        let window = 4usize;
+        {
+            let mut guard = b.kv_cache.lock().expect("kv cache lock");
+            *guard = Some(crate::ops::kv_cache::KVCache::new(&b.bufs, 1, 64, 2, 4));
+            let layer = &mut guard.as_mut().unwrap().layers[0];
+            for _ in 0..(window * COMPACTION_SLACK - 1) {
+                layer.advance_one();
+            }
+        }
+        b.compact_kv_to_window(window);
+        {
+            let guard = b.kv_cache.lock().unwrap();
+            let layer = &guard.as_ref().unwrap().layers[0];
+            assert_eq!(
+                layer.current_len,
+                window * COMPACTION_SLACK - 1,
+                "below the slack bound nothing should move"
+            );
+        }
+
+        {
+            let mut guard = b.kv_cache.lock().unwrap();
+            guard.as_mut().unwrap().layers[0].advance_one();
+        }
+        b.compact_kv_to_window(window);
+        {
+            let guard = b.kv_cache.lock().unwrap();
+            let layer = &guard.as_ref().unwrap().layers[0];
+            assert_eq!(layer.current_len, window, "reclaimed to the window");
+            assert_eq!(
+                layer.abs_position,
+                window * COMPACTION_SLACK,
+                "compaction must never rewind the stream position"
+            );
+        }
+    }
+
+    /// A zero window compacts nothing rather than emptying the cache.
+    #[test]
+    fn a_zero_window_compacts_nothing() {
+        let b = backend();
+        {
+            let mut guard = b.kv_cache.lock().expect("kv cache lock");
+            *guard = Some(crate::ops::kv_cache::KVCache::new(&b.bufs, 1, 64, 2, 4));
+            guard.as_mut().unwrap().layers[0].advance_one();
+        }
+        b.compact_kv_to_window(0);
+        let guard = b.kv_cache.lock().unwrap();
+        assert_eq!(guard.as_ref().unwrap().layers[0].current_len, 1);
     }
 }
