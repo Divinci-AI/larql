@@ -635,7 +635,15 @@ impl KvEngine for WindowedCheckpointEngine {
     }
 
     fn memory_bytes(&self) -> usize {
-        self.checkpoints.total_bytes() + self.archive.total_bytes() + self.current_kv_bytes()
+        // The last term covers the coarse dispatch path, where the live
+        // window's K/V is held by the backend rather than in
+        // `current_window_kv` — without it the hot tier reads as 0.0MB
+        // and the ratio against a standard cache becomes unbounded.
+        self.checkpoints.total_bytes()
+            + self.archive.total_bytes()
+            + self.current_kv_bytes()
+            + self.kv_handle.as_ref().map_or(0, |h| h.resident_bytes())
+            + self.backend.backend_resident_kv_bytes()
     }
 
     fn window_tokens(&self) -> usize {
@@ -644,6 +652,18 @@ impl KvEngine for WindowedCheckpointEngine {
 
     fn cold_bytes(&self) -> usize {
         self.checkpoints.total_bytes() + self.archive.total_bytes()
+    }
+
+    fn dispatch_path(&self) -> Option<larql_inference::kv_engine::DispatchPath> {
+        use larql_inference::kv_engine::DispatchPath;
+        // `kv_handle` marks the coarse W1-GPU path; `current_window_kv`
+        // is the per-layer shadow this engine keeps when it walks
+        // layer-by-layer. Neither = nothing prefilled yet.
+        match (self.kv_handle.is_some(), self.current_window_kv.is_some()) {
+            (true, _) => Some(DispatchPath::Coarse),
+            (false, true) => Some(DispatchPath::PerLayer),
+            (false, false) => None,
+        }
     }
 
     fn stage_summary(&self) -> Option<crate::DecodeStageSummary> {

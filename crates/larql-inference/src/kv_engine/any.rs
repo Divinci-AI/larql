@@ -72,6 +72,16 @@ impl AnyEngine {
         }
     }
 
+    /// Dispatch shape the current sequence committed to. Retrieval
+    /// engines have no coarse/per-layer split — they re-forward — so
+    /// they report `None`.
+    pub fn dispatch_path(&self) -> Option<super::DispatchPath> {
+        match self {
+            Self::Kv(e) => e.dispatch_path(),
+            Self::Retrieval(_) => None,
+        }
+    }
+
     pub fn is_kv(&self) -> bool {
         matches!(self, Self::Kv(_))
     }
@@ -242,6 +252,30 @@ impl AnyEngine {
 mod tests {
     use super::*;
     use crate::kv_engine::test_stubs::{DefaultsOnlyEngine, StubRetrievalEngine};
+
+    #[test]
+    fn dispatch_path_forwards_for_kv_and_is_none_for_retrieval() {
+        // KV engines answer from their own recorded shape (the default
+        // trait impl is `None` until a prefill picks one). Retrieval
+        // engines re-forward instead of holding a K/V cache, so they have
+        // no coarse/per-layer split to report and must not invent one.
+        let kv = AnyEngine::Kv(Box::new(DefaultsOnlyEngine {
+            prefill_calls: 0,
+            decode_calls: 0,
+        }));
+        assert_eq!(kv.dispatch_path(), None);
+
+        let retrieval = AnyEngine::Retrieval(Box::new(StubRetrievalEngine {
+            prefill_calls: 0,
+            decode_calls: 0,
+            last_token: None,
+        }));
+        assert_eq!(
+            retrieval.dispatch_path(),
+            None,
+            "a retrieval engine has no dispatch shape to report"
+        );
+    }
 
     #[test]
     fn any_engine_delegates_uniform_methods_to_inner() {

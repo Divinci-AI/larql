@@ -243,7 +243,12 @@ impl KvEngine for BoundaryPerLayerEngine {
     }
 
     fn memory_bytes(&self) -> usize {
+        // Store + whichever off-engine home holds the K/V on the coarse
+        // path: the handle (CPU whole-model cache) or the backend itself
+        // (Metal sentinel handle). Mutually exclusive, so summing is safe.
         self.store.as_ref().map_or(0, |s| s.memory_bytes())
+            + self.kv_handle.as_ref().map_or(0, |h| h.resident_bytes())
+            + self.backend.backend_resident_kv_bytes()
     }
 
     fn window_tokens(&self) -> usize {
@@ -252,6 +257,17 @@ impl KvEngine for BoundaryPerLayerEngine {
 
     fn cold_bytes(&self) -> usize {
         self.store.as_ref().map_or(0, |s| s.cold_bytes())
+    }
+
+    fn dispatch_path(&self) -> Option<larql_inference::kv_engine::DispatchPath> {
+        use larql_inference::kv_engine::DispatchPath;
+        // `kv_handle` = the W1-GPU fused path; cleared on fallback to
+        // the dense walk. `store` marks that a prefill has happened.
+        match (self.kv_handle.is_some(), self.store.is_some()) {
+            (true, _) => Some(DispatchPath::Coarse),
+            (false, true) => Some(DispatchPath::PerLayer),
+            (false, false) => None,
+        }
     }
 
     // ── Q4K path ─────────────────────────────────────────────────────────

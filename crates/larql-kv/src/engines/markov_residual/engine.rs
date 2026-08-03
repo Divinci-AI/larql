@@ -59,8 +59,19 @@ impl MarkovResidualEngine {
         self
     }
 
+    /// Residual store + any K/V held on this engine's behalf elsewhere.
+    ///
+    /// On the W1-GPU path the store stays empty and the K/V lives outside
+    /// the engine, so the store alone reports 0 — which reads as "costs
+    /// nothing" rather than "measured somewhere else". It can be in
+    /// either of two places depending on backend, and they are mutually
+    /// exclusive: inside the `kv_handle` (CPU's whole-model Q4K cache) or
+    /// inside the backend itself (Metal, whose handle is a sentinel and
+    /// whose `backend_resident_kv_bytes` is the only way to see it).
     pub fn total_memory_bytes(&self) -> usize {
         self.store.as_ref().map_or(0, |s| s.memory_bytes())
+            + self.kv_handle.as_ref().map_or(0, |h| h.resident_bytes())
+            + self.backend.backend_resident_kv_bytes()
     }
 }
 
@@ -224,6 +235,18 @@ impl KvEngine for MarkovResidualEngine {
 
     fn cold_bytes(&self) -> usize {
         self.store.as_ref().map_or(0, |s| s.cold_bytes())
+    }
+
+    fn dispatch_path(&self) -> Option<larql_inference::kv_engine::DispatchPath> {
+        use larql_inference::kv_engine::DispatchPath;
+        // `kv_handle` is stashed only by the W1-GPU coarse prefill, and
+        // cleared when that path is abandoned; `store` exists after any
+        // successful prefill. Neither set = no prefill yet.
+        match (self.kv_handle.is_some(), self.store.is_some()) {
+            (true, _) => Some(DispatchPath::Coarse),
+            (false, true) => Some(DispatchPath::PerLayer),
+            (false, false) => None,
+        }
     }
 
     fn stage_summary(&self) -> Option<DecodeStageSummary> {

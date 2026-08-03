@@ -324,6 +324,46 @@ impl EngineKind {
         ]
     }
 
+    /// Specs the criterion microbenchmark (`benches/engine_decode.rs`)
+    /// runs, parameterised where a bare name would not build something
+    /// meaningful. Single source of truth so the bench cannot silently
+    /// drift behind the engine roster — pinned by
+    /// `bench_specs_cover_every_benchable_engine`.
+    ///
+    /// **Apollo is deliberately absent.** It is a [`RetrievalEngine`]
+    /// whose `prefill` fails closed with `RetrievalMiss` unless a
+    /// boundary store is attached, and the synthetic fixture has none.
+    /// Benching it there timed the error return, not the engine: it
+    /// reported ~65 ns against ~16 µs for `standard`, reading as a 250x
+    /// win in the criterion report. A meaningful Apollo number needs a
+    /// real store, which belongs in the CLI bench, not here.
+    pub fn bench_specs() -> &'static [&'static str] {
+        &[
+            "standard",
+            "standard:window=4",
+            "no-cache",
+            "markov-rs",
+            "markov-rs:window=4",
+            "markov-rs-codec",
+            "windowed-checkpoint:window=4",
+            "turbo-quant:bits=4",
+            "turbo-quant:bits=3",
+            "boundary-kv:chunk_tokens=4",
+            "boundary-per-layer:layers=2",
+        ]
+    }
+
+    /// Engines that [`Self::bench_specs`] intentionally omits, with the
+    /// reason. Keeping the exclusion explicit means a new engine can't
+    /// be dropped from the bench by simply never being added.
+    pub fn bench_excluded_names() -> &'static [(&'static str, &'static str)] {
+        &[(
+            "apollo",
+            "needs an attached boundary store; without one prefill returns \
+             RetrievalMiss and the bench would time the error path",
+        )]
+    }
+
     /// Build a boxed engine, dispatching compute through `backend`.
     pub fn build(self, backend: Box<dyn larql_inference::EngineBackend>) -> AnyEngine {
         self.build_with_profiling(backend, false)
@@ -934,6 +974,60 @@ mod compliance_tests {
             one_of_each.len(),
             "supported_names and the variant set are out of sync"
         );
+    }
+
+    /// The criterion bench must cover every engine that can be benched
+    /// on the synthetic fixture. It previously listed 7 of 9 — the three
+    /// engines this PR touches most (`markov-rs-codec`, `boundary-kv`,
+    /// `boundary-per-layer`) had no microbenchmark at all, and nothing
+    /// failed when they were added. Now an engine is either in
+    /// `bench_specs` or explicitly in `bench_excluded_names` with a
+    /// reason; there is no third, silent option.
+    #[test]
+    fn bench_specs_cover_every_benchable_engine() {
+        let excluded: Vec<&str> = EngineKind::bench_excluded_names()
+            .iter()
+            .map(|(n, _)| *n)
+            .collect();
+
+        let benched: Vec<&'static str> = EngineKind::bench_specs()
+            .iter()
+            .map(|s| {
+                EngineKind::from_name(s)
+                    .unwrap_or_else(|| panic!("bench_specs entry {s:?} no longer parses"))
+                    .display_name()
+            })
+            .collect();
+
+        for name in EngineKind::supported_names() {
+            if excluded.contains(name) {
+                assert!(
+                    !benched.contains(name),
+                    "{name:?} is listed as excluded but also appears in bench_specs"
+                );
+                continue;
+            }
+            assert!(
+                benched.contains(name),
+                "engine {name:?} has no criterion bench arm — add a spec to \
+                 EngineKind::bench_specs, or name it in bench_excluded_names \
+                 with the reason it cannot be benched"
+            );
+        }
+    }
+
+    #[test]
+    fn bench_excluded_names_carry_a_reason_and_are_real_engines() {
+        for (name, reason) in EngineKind::bench_excluded_names() {
+            assert!(
+                EngineKind::supported_names().contains(name),
+                "bench_excluded_names lists {name:?}, which is not a supported engine"
+            );
+            assert!(
+                reason.len() > 20,
+                "exclusion of {name:?} needs a real reason, got {reason:?}"
+            );
+        }
     }
 
     #[test]

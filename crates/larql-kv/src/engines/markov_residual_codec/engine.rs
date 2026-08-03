@@ -82,8 +82,13 @@ impl MarkovResidualCodecEngine {
         self.codec
     }
 
+    /// Residual store + backend-resident K/V — see
+    /// [`super::super::markov_residual::MarkovResidualEngine::total_memory_bytes`]
+    /// for why the backend term is needed on the W1-GPU path.
     pub fn total_memory_bytes(&self) -> usize {
         self.store.as_ref().map_or(0, |s| s.memory_bytes())
+            + self.kv_handle.as_ref().map_or(0, |h| h.resident_bytes())
+            + self.backend.backend_resident_kv_bytes()
     }
 }
 
@@ -204,6 +209,17 @@ impl KvEngine for MarkovResidualCodecEngine {
 
     fn cold_bytes(&self) -> usize {
         self.store.as_ref().map_or(0, |s| s.cold_bytes())
+    }
+
+    fn dispatch_path(&self) -> Option<larql_inference::kv_engine::DispatchPath> {
+        use larql_inference::kv_engine::DispatchPath;
+        // Same rule as `markov_residual`: `kv_handle` marks the W1-GPU
+        // coarse path, `store` marks "prefill happened at all".
+        match (self.kv_handle.is_some(), self.store.is_some()) {
+            (true, _) => Some(DispatchPath::Coarse),
+            (false, true) => Some(DispatchPath::PerLayer),
+            (false, false) => None,
+        }
     }
 
     fn prefill_quant(

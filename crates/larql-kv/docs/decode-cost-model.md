@@ -82,8 +82,21 @@ CPU fwd     5.26 ms  →  16.06 ms      +10.9 µs / ctx-token
 lm_head is a large **fixed** cost, and the whole of the context dependence
 lives in the forward — i.e. attention over K/V. At short context lm_head is
 59% of the step; by ctx=1050 it is 31%. Engines that swap the full vocab
-matmul for a KNN lm_head win a flat ~7 ms and nothing else; that win does not
+matmul for a KNN lm_head win a flat ~5 ms and nothing else; that win does not
 scale with context and is invisible in the slope.
+
+> **Measurement note (added after this fit).** The intercepts in §3 are
+> **forward-only**: at the time of the sweep the engine harness stopped its
+> timer before `pick_next`, so lm_head sat outside the measured step while the
+> reference row included it. That is why the engine intercepts (4.18-5.30 ms)
+> sit close to the reference's *forward* stage (5.26 ms) rather than to its
+> full step (~12.8 ms). The slopes are unaffected — lm_head is constant in
+> context, so it cancels out of a marginal fit, and §3's conclusion stands
+> unchanged. The absolute intercepts and any engine-vs-reference tok/s
+> comparison from that era do not: they omit ~5-7 ms of real per-token work.
+> The harness now times the whole token and reports the `fwd=` / `head=`
+> split per row, so a re-run of this sweep will show intercepts roughly one
+> lm_head higher. Re-fitting is not required to trust §3.
 
 ### The K/V read is at ~44% of attainable bandwidth
 

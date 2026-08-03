@@ -46,6 +46,7 @@ pub(super) mod grid_lan_runtime;
 pub(super) mod local;
 pub(super) mod local_moe_runtime;
 pub(super) mod local_runtime;
+pub(super) mod notes;
 pub(super) mod ollama;
 pub(super) mod output;
 pub(super) mod remote_ffn;

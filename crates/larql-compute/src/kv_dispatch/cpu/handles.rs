@@ -230,6 +230,22 @@ impl KvHandleInner for CpuQ4kCacheHandle {
         "cpu-q4k"
     }
 
+    /// One handle, every layer — so sum the layers instead of taking the
+    /// trait default's single-layer estimate. `cached_len`/`kv_dim` above
+    /// deliberately report layer-0's shape (the dispatch surface asks for
+    /// "the" cache geometry), and multiplying those alone undercounted a
+    /// 28-layer model's K/V by 28×.
+    fn resident_bytes(&self) -> usize {
+        self.cache
+            .iter()
+            .filter_map(|o| o.as_ref())
+            .map(|(k, v)| {
+                (k.shape()[0] * k.shape()[1] + v.shape()[0] * v.shape()[1])
+                    * std::mem::size_of::<f32>()
+            })
+            .sum()
+    }
+
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
@@ -251,3 +267,7 @@ pub(super) fn try_cpu_q4k_cache_mut(h: &mut KvHandle) -> Option<&mut CpuQ4kCache
         .as_any_mut()
         .downcast_mut::<CpuQ4kCacheHandle>()
 }
+
+#[cfg(test)]
+#[path = "handles_resident_tests.rs"]
+mod resident_bytes_tests;

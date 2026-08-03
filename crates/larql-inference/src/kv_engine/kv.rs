@@ -1,7 +1,7 @@
 //! [`KvEngine`] — the interface the autoregressive decode loop dispatches
 //! against.
 
-use super::{DecodeStageSummary, EngineError, EngineInfo};
+use super::{DecodeStageSummary, DispatchPath, EngineError, EngineInfo};
 use crate::ffn::FfnBackend;
 use crate::ModelWeights;
 use ndarray::Array2;
@@ -105,6 +105,19 @@ pub trait KvEngine: Send {
 
     /// Per-stage timing summary. Returns `None` if profiling was not enabled.
     fn stage_summary(&self) -> Option<DecodeStageSummary> {
+        None
+    }
+
+    /// Which dispatch shape this engine committed the current sequence
+    /// to — see [`DispatchPath`]. `None` before prefill, and for engines
+    /// that only ever have one shape.
+    ///
+    /// Reported so diagnostics can distinguish a fused whole-model run
+    /// from a per-layer one. The two differ by more than a constant: on
+    /// a backend that delegates the per-layer surface to the host, the
+    /// per-layer shape runs attention and FFN on the CPU regardless of
+    /// which backend the caller selected.
+    fn dispatch_path(&self) -> Option<DispatchPath> {
         None
     }
 

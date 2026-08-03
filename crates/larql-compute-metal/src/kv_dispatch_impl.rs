@@ -28,6 +28,10 @@ use larql_models::ModelWeights;
 /// Zero-sized type; const-construction is free.
 const CPU: CpuBackend = CpuBackend;
 
+/// K and V — the two cached tensors every attention layer stores per
+/// position. Named so the K/V sizing arithmetic doesn't read as a bare 2.
+const KV_TENSORS_PER_LAYER: usize = 2;
+
 impl KvDispatch for MetalBackend {
     fn alloc_kv_buffer(&self, layer: usize, max_tokens: usize, kv_dim: usize) -> KvHandle {
         // Handles are CPU-resident at Step 4. When real Metal kernels land
@@ -392,6 +396,41 @@ impl KvDispatch for MetalBackend {
             }
         }
         Some(hidden)
+    }
+
+    fn per_layer_is_host_delegated(&self) -> bool {
+        // Every per-layer method above forwards to `CPU`. Only the
+        // `coarse_*` family runs Metal kernels. Until the per-layer
+        // surface has native implementations this must stay `true`, or
+        // diagnostics will keep reporting CPU work as GPU work.
+        true
+    }
+
+    fn backend_resident_kv_bytes(&self) -> usize {
+        // The coarse pipeline's K/V lives here, not in the handle
+        // (`MetalCoarseHandle` is a sentinel), so an engine that only
+        // measures its handles reports zero on this path. Count the
+        // populated prefix of each layer — `current_len`, not `max_seq`:
+        // the buffers are preallocated to the context ceiling and
+        // charging an engine for capacity it has not filled would
+        // overstate every short-context run.
+        let Ok(guard) = self.kv_cache.lock() else {
+            return 0;
+        };
+        let Some(cache) = guard.as_ref() else {
+            return 0;
+        };
+        cache
+            .layers
+            .iter()
+            .map(|l| {
+                l.current_len
+                    * l.num_kv_heads
+                    * l.head_dim
+                    * KV_TENSORS_PER_LAYER
+                    * std::mem::size_of::<f32>()
+            })
+            .sum()
     }
 
     fn read_kv_row_at(

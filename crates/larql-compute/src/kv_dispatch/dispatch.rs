@@ -101,6 +101,39 @@ pub trait KvDispatch {
         None
     }
 
+    /// Bytes of K/V this backend holds in its own storage, i.e. K/V that
+    /// is NOT reachable by measuring the [`KvHandle`]s an engine owns.
+    ///
+    /// Backends whose fused pipelines keep the cache internally hand out
+    /// a sentinel handle that measures zero (Metal's coarse whole-model
+    /// handle is the live example). An engine summing its handles then
+    /// reports no K/V at all, which reads as "this engine is free" in a
+    /// memory comparison when the truth is "its K/V lives one layer
+    /// down". Engines add this to their own accounting so the two
+    /// dispatch shapes are comparable.
+    ///
+    /// Default 0 = every byte this backend holds is reachable through a
+    /// handle, so adding it would double-count.
+    fn backend_resident_kv_bytes(&self) -> usize {
+        0
+    }
+
+    /// Whether this backend implements the **per-layer** surface
+    /// (`attention_step`, `attention_prefill`, `append_kv`, …) by
+    /// forwarding to the host CPU rather than running native kernels.
+    ///
+    /// `MetalBackend` answers `true`: only its `coarse_*` family is
+    /// GPU-resident, so an engine that declines the coarse path runs its
+    /// whole forward on the CPU while callers still believe they
+    /// selected a GPU backend. Diagnostics need to be able to say that
+    /// out loud; without it a windowed engine reports `[metal (GPU)]`
+    /// over a pure-CPU measurement.
+    ///
+    /// Default `false` — a backend is assumed to mean what it says.
+    fn per_layer_is_host_delegated(&self) -> bool {
+        false
+    }
+
     // ── Attention primitives ────────────────────────────────────────
 
     /// Run one decode-step attention: Q (one row, pre-projection

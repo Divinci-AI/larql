@@ -32,11 +32,29 @@
 //!
 //! ## Architecture notes
 //!
-//! - **Metal Q4K path** (`prefill_quant` / `decode_step_quant`): all four engines
-//!   use the Metal `decode_token` full pipeline when a Q4K VectorIndex and a
-//!   Metal backend are available. This gives 93-95 tok/s — matching or exceeding
-//!   the standard larql-metal path (76 tok/s) because the engine bench uses
-//!   faster Metal lm_head KNN rather than a full vocab matmul.
+//! - **Metal Q4K coarse path** (`prefill_quant` / `decode_step_quant`): when a
+//!   Q4K VectorIndex and a Metal backend are available AND the engine is
+//!   unwindowed, dispatch goes through the Metal `decode_token` full pipeline.
+//!   The engine's own state policy is NOT engaged on this path — the K/V lives
+//!   in the backend's cache behind a sentinel handle, so `standard`,
+//!   `markov-rs`, `markov-rs-codec` and `boundary-per-layer` all execute the
+//!   same kernels and measure within ~0.5% of each other. Ranking those four
+//!   against one another on this path measures nothing.
+//!
+//!   The engine path does beat the reference `larql-metal` row, but the reason
+//!   is the KNN lm_head (~1.9ms) replacing a full vocab matmul (~6.6ms), not
+//!   the K/V mechanism. An earlier version of this note credited the engines
+//!   with a ~93-95 vs 76 tok/s win; that gap was inflated because the bench
+//!   timed only the forward and left lm_head outside the timer. Both are now
+//!   inside it, and the row note carries the `fwd=` / `head=` split.
+//!
+//! - **Per-layer path** (any windowed config, or an arch that declines coarse):
+//!   `MetalBackend`'s `KvDispatch` impl delegates every per-layer method
+//!   (`attention_step`, `attention_step_windowed`, `append_kv`, `clip_kv`, …)
+//!   to `CpuBackend`. A windowed engine therefore runs CPU attention while the
+//!   bench still labels the row `[metal (GPU)]`, and costs ~1.7-3x the coarse
+//!   path despite attending over fewer keys. See the WINDOW GATE comment in
+//!   [`standard`]`::prefill_quant`.
 //!
 //! - **CPU fallback**: when Metal is unavailable, engines fall back to a CPU
 //!   path using dequantised attention tensors (lazily inserted into the

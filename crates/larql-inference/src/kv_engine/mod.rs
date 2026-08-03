@@ -22,6 +22,7 @@
 //! siblings keep resolving as they did when this was one file.
 
 mod any;
+mod dispatch_path;
 mod error;
 mod info;
 mod kv;
@@ -31,6 +32,7 @@ mod stages;
 mod test_stubs;
 
 pub use any::AnyEngine;
+pub use dispatch_path::DispatchPath;
 pub use error::EngineError;
 pub use info::EngineInfo;
 pub use kv::KvEngine;

@@ -143,16 +143,32 @@ impl StandardEngine {
     }
 
     fn cache_memory_bytes(&self) -> usize {
-        let Some(handles) = self.handles.as_ref() else {
-            return 0;
-        };
-        handles
-            .iter()
-            .map(|h| {
-                // 2 × f32 per cached row (K + V), kv_dim wide.
-                h.cached_len() * h.kv_dim() * 2 * std::mem::size_of::<f32>()
+        // Two homes, never both: per-layer dispatch puts the K/V in the
+        // handles this engine owns; the coarse path hands back a sentinel
+        // handle and keeps the cache inside the backend. Summing both is
+        // safe — a backend that answers `backend_resident_kv_bytes` with
+        // a non-zero figure is by contract reporting K/V that no handle
+        // can see, so there is nothing to double-count.
+        let handle_bytes: usize = self
+            .handles
+            .as_ref()
+            .map(|handles| {
+                // `resident_bytes` (not the per-layer formula) so a
+                // whole-model handle reports all its layers, not one.
+                handles.iter().map(|h| h.resident_bytes()).sum()
             })
-            .sum()
+            .unwrap_or(0);
+        handle_bytes + self.backend_resident_kv_bytes()
+    }
+
+    /// K/V the backend holds internally (Metal's coarse pipeline). Zero
+    /// for the async slot: `AsyncComputeBackend` carries no `KvDispatch`,
+    /// and no async backend currently owns a cache of its own.
+    fn backend_resident_kv_bytes(&self) -> usize {
+        match &self.backend {
+            BackendSlot::Sync(b) => b.as_ref().backend_resident_kv_bytes(),
+            BackendSlot::Async(_) => 0,
+        }
     }
 
     /// Shared prefill body — both `prefill` (index=None) and
@@ -660,6 +676,16 @@ impl KvEngine for StandardEngine {
         // tensors are the state. Sliding-window evictions drop data
         // entirely; nothing is moved to cold.
         0
+    }
+
+    fn dispatch_path(&self) -> Option<larql_inference::kv_engine::DispatchPath> {
+        use larql_inference::kv_engine::DispatchPath;
+        // `prefill_mode` is the authority (see its declaration): handle
+        // count cannot distinguish a coarse handle from a 1-layer model.
+        self.prefill_mode.map(|mode| match mode {
+            PrefillDispatchMode::Coarse => DispatchPath::Coarse,
+            PrefillDispatchMode::PerLayer => DispatchPath::PerLayer,
+        })
     }
 }
 
@@ -1247,6 +1273,73 @@ mod tests {
     // `coarse_prefill_records_coarse_mode_and_decodes_coarse`); the
     // per-layer dequant fallback is exercised by the windowed tests
     // further down (windowed engines decline coarse by design).
+
+    // ── dispatch_path reporting ───────────────────────────────────────────
+
+    #[test]
+    fn dispatch_path_is_none_before_prefill() {
+        // Nothing has chosen a shape yet — reporting one would be a guess.
+        assert_eq!(StandardEngine::new(None).dispatch_path(), None);
+        assert_eq!(StandardEngine::new(Some(4)).dispatch_path(), None);
+    }
+
+    #[test]
+    fn dispatch_path_reports_coarse_when_the_backend_took_the_fused_path() {
+        use larql_inference::ffn::NullFfn;
+        use larql_inference::test_utils::{make_test_q4k_vindex, make_test_q4k_weights};
+        let weights = make_test_q4k_weights();
+        let index = make_test_q4k_vindex(&weights);
+        let backend = larql_compute::cpu_backend();
+        let mut engine = StandardEngine::new(None);
+        engine
+            .prefill_quant(&weights, &NullFfn, &index, &[0u32, 1, 2], &*backend)
+            .expect("prefill_quant");
+        assert_eq!(
+            engine.dispatch_path(),
+            Some(larql_inference::kv_engine::DispatchPath::Coarse),
+            "unwindowed Q4K prefill takes the coarse path on CpuBackend"
+        );
+    }
+
+    /// The window gate's observable consequence. A windowed engine MUST
+    /// decline coarse (the coarse surface has no window parameter, so
+    /// taking it would silently attend the full context while `info()`
+    /// advertised `window=N`). Pinning the reported shape means a future
+    /// change that lets a windowed config onto the fused path fails here
+    /// rather than quietly returning full-context answers.
+    #[test]
+    fn windowed_engine_never_reports_coarse() {
+        use larql_inference::ffn::NullFfn;
+        use larql_inference::test_utils::{make_test_q4k_vindex, make_test_q4k_weights};
+        let weights = make_test_q4k_weights();
+        let index = make_test_q4k_vindex(&weights);
+        let backend = larql_compute::cpu_backend();
+        let mut engine = StandardEngine::new(Some(2));
+        engine
+            .prefill_quant(&weights, &NullFfn, &index, &[0u32, 1, 2], &*backend)
+            .expect("windowed prefill_quant");
+        assert_eq!(
+            engine.dispatch_path(),
+            Some(larql_inference::kv_engine::DispatchPath::PerLayer),
+            "a windowed engine must decline the window-less coarse surface"
+        );
+    }
+
+    #[test]
+    fn dense_prefill_reports_per_layer() {
+        use larql_inference::ffn::WeightFfn;
+        use larql_inference::test_utils::make_test_weights;
+        let weights = make_test_weights();
+        let mut engine = StandardEngine::new(None);
+        engine
+            .prefill(&weights, &WeightFfn { weights: &weights }, &[0u32, 1, 2])
+            .expect("dense prefill");
+        assert_eq!(
+            engine.dispatch_path(),
+            Some(larql_inference::kv_engine::DispatchPath::PerLayer),
+            "the dense (no-vindex) path is per-layer by construction"
+        );
+    }
 
     #[test]
     fn prefill_quant_cpu_fallback_runs_via_dequant() {
