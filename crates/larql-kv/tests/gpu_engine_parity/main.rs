@@ -24,8 +24,8 @@
 //!   contract that decides whether it may take the fused path at all.
 //! - [`backend`] — what the backend reports about itself, plus the dense
 //!   (no-vindex) forward through a non-CPU backend.
-//! - [`gemma3_prefill_gap`] — an ignored reproducer for the one place the
-//!   backends genuinely disagree today.
+//! - [`gemma3_prefill_gap`] — regression guard for a cross-backend
+//!   divergence on the Gemma-3 arch, and for the fixture defect behind it.
 //!
 //! Run the GPU form with:
 //!

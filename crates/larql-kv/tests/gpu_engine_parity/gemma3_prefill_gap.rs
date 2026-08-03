@@ -1,93 +1,68 @@
-//! The one place the two backends genuinely disagree today.
+//! Regression guard for a cross-backend divergence on the Gemma-3 arch.
 //!
-//! **This is not the sliding-window gap.** It was first attributed to
-//! per-layer SWA, and that attribution was wrong: on this fixture
-//! `effective_attention_window_for_layer` resolves to `None` for every
-//! layer on *both* backends (the arch declares its layers sliding but
-//! supplies no width), so no window is applied on either side and the
-//! divergence is unchanged by the CPU SWA implementation. Recorded here
-//! so the next reader doesn't re-derive the same dead end.
+//! **History, because the diagnosis was wrong twice before it was right.**
+//! Metal's batched prefill used to disagree with both the CPU and Metal's
+//! own iterative path by 23-43% on the Gemma-3 fixture, growing with
+//! depth, absent at one token, and not reproducing on a real Gemma 3 4B.
+//!
+//! It was first attributed to per-layer sliding-window attention. Wrong:
+//! the fixture resolves to no window on either backend. It was then
+//! attributed to a `head_dim` shape assumption, on the reasoning that
+//! shape was the only surviving difference from the real model. Also
+//! wrong, and that one was never tested — a sweep across
+//! `head_dim ∈ {32, 64, 128, 256, 512}` diverged at *every* shape,
+//! including the real model's 256.
+//!
+//! The cause was the fixture: it declared Gemma-3's QK-norm keys and
+//! never populated the weights. Every consumer that resolves the weight
+//! got `None`, and the two backends did not agree on what a
+//! declared-but-absent QK-norm weight means. Real checkpoints always
+//! carry those weights, which is why nothing shipped was ever affected.
+//!
+//! The fixture now supplies them (`larql-models::test_fixtures`), and
+//! this file pins the agreement so neither half can regress: not the
+//! fixture back to an impossible architecture, and not a backend into
+//! disagreeing about the stage.
 
 use larql_inference::ffn::NullFfn;
 use larql_inference::test_utils::{make_test_q4k_vindex, make_test_q4k_weights};
 
-use super::support::{build, relative_l2};
+use super::support::{build, relative_l2, PREFILL_TOL};
 
-/// Longest prompt swept by the reproducer.
+/// Longest prompt swept. The divergence appeared from two positions on,
+/// so anything past one token exercises it.
 const MAX_PROMPT_LEN: usize = 6;
 
-/// Metal's **batched** prefill disagrees with everything else on the
-/// Gemma-3 fixture. **Ignored** because it documents an open defect
-/// rather than guarding a fixed behaviour; run with `--ignored` to
-/// measure the current size.
-///
-/// ```text
-/// prompt len 1  → relative L2 9.9e-7   (agrees)
-/// prompt len 2  → relative L2 4.4e-1
-/// prompt len 3  → relative L2 2.3e-1
-/// prompt len 4  → relative L2 4.2e-1
-/// prompt len 6  → relative L2 4.1e-1
-/// ```
-///
-/// What is established:
-///
-/// - **Not a production defect.** The same comparison on a real Gemma 3
-///   4B Q4K vindex agrees to 4.0e-7 across prompt lengths 1-20 with zero
-///   argmax mismatches (`examples/gemma_prefill_parity.rs`), and
-///   `larql run` emits identical text on both backends. Whatever this
-///   is, it does not reach a real checkpoint.
-/// - **Arch-specific.** The identical comparison on the SWA-free
-///   `tinymodel` fixture — same dims, same prompts, same code — agrees
-///   to 1.6e-7 at every length.
-/// - **Shape-gated, not window-gated.** Giving the Gemma fixture a real
-///   512 window (`make_test_q4k_weights_rope_scaled`) diverges just as
-///   far (5.5e-1), so the `sliding_window = 0` sentinel is not the
-///   cause. The surviving difference is dimensional: this fixture is
-///   `head_dim = 64, hidden = 256`, the real model is
-///   `head_dim = 256, hidden = 2560`.
-/// - **Batched-prefill-specific.** `standard` reaches Metal through
-///   `coarse_prefill` → `fused_prefill` (one batched pass) and is the
-///   only engine that diverges. `markov-rs` and friends go through
-///   `coarse_prefill_with_state`, which drives the same model
-///   token-by-token, and match the CPU to ~1e-7. Metal disagrees with
-///   *itself*, which rules out a CPU-side reference error.
-/// - **Intra-layer.** A single-layer model already diverges (3.4e-1),
-///   and the error compounds with depth (2 layers 4.2e-1, 3 layers
-///   4.9e-1) rather than originating across layers.
-/// - **Position-dependent.** A single-token prefill agrees; the gap
-///   appears as soon as there are two positions to relate.
-///
-/// Putting those together: a Gemma-specific stage in Metal's batched
-/// prefill — QK-norm and the post-attention / post-FFN norms are what
-/// this fixture has and `tinymodel` does not — carries a shape
-/// assumption that `head_dim = 64` violates and `head_dim = 256`
-/// satisfies. The defect is that the kernel returns wrong data on such a
-/// shape instead of declining it, which is a robustness bug rather than
-/// a correctness one for shipped models.
-///
-/// The practical consequence, and the reason this stays recorded: the
-/// synthetic Gemma-3 fixture **cannot be used for cross-backend numeric
-/// parity**. [`super::numeric`] uses `tinymodel` for that and keeps the
-/// Gemma fixture for the structural assertions only.
-
+/// The fixture must actually carry the architecture it claims. A
+/// Gemma-3 fixture without QK-norm weights is not a Gemma-3 fixture, and
+/// its absence is what let two backends disagree unnoticed.
 #[test]
-#[ignore = "records a Metal batched-prefill shape bug that does NOT reach real models; run with --ignored to measure"]
-fn metal_batched_prefill_diverges_on_gemma3_arch() {
+fn the_gemma3_fixture_carries_the_qk_norm_weights_it_declares() {
+    let weights = make_test_q4k_weights();
+    let arch = &*weights.arch;
+    for layer in 0..weights.num_layers {
+        for (label, key) in [
+            ("q_norm", arch.attn_q_norm_key(layer)),
+            ("k_norm", arch.attn_k_norm_key(layer)),
+        ] {
+            let Some(key) = key else {
+                panic!("layer {layer}: Gemma-3 must declare a {label} key");
+            };
+            assert!(
+                weights.vectors.contains_key(&key),
+                "layer {layer}: {label} is declared as {key:?} but absent — the \
+                 fixture is claiming an architecture it does not carry"
+            );
+        }
+    }
+}
+
+/// Metal's batched prefill and the CPU must agree on the Gemma-3 arch at
+/// every prompt length. This is the comparison that used to fail.
+#[test]
+fn metal_batched_prefill_agrees_with_cpu_on_gemma3_arch() {
     let weights = make_test_q4k_weights();
     let index = make_test_q4k_vindex(&weights);
-
-    // Pin the premise this reproducer rests on: no window is in play, so
-    // whatever this is, it is not the sliding-window path.
-    assert!(
-        weights.arch.is_sliding_window_layer(0),
-        "fixture no longer declares sliding layers — re-check the premise"
-    );
-    assert_eq!(
-        weights.arch.sliding_window_size(),
-        None,
-        "fixture now declares a window width; this reproducer assumed none, \
-         and the SWA path would now be a live variable here"
-    );
 
     for n in 1..=MAX_PROMPT_LEN {
         let prompt: Vec<u32> = (0..n as u32).collect();
@@ -111,6 +86,11 @@ fn metal_batched_prefill_diverges_on_gemma3_arch() {
                 &*larql_compute::cpu_backend(),
             )
             .expect("cpu prefill");
-        eprintln!("prompt len {n}: relative L2 {:.4e}", relative_l2(&hg, &hc));
+        let rel = relative_l2(&hg, &hc);
+        assert!(
+            rel < PREFILL_TOL,
+            "prompt len {n}: backends diverged by relative L2 {rel:.3e} — this is \
+             the regression this file exists to catch (it used to read ~4e-1)"
+        );
     }
 }

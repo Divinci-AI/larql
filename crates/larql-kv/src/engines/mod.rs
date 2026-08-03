@@ -80,6 +80,14 @@
 //!   `[metal (GPU)]` — worth ~9x on Gemma 3 4B. The row's dispatch note says
 //!   `[per-layer->host]` when that is what happened.
 //!
+//! - **Cross-backend parity**: Metal and CPU agree to ~5e-7 relative L2 on
+//!   prefill, and per-step decode differs by a stable ~3e-3 that does not
+//!   compound (two Q4K kernels rounding differently). Pinned by
+//!   `tests/gpu_engine_parity`. A divergence on the Gemma-3 arch that was
+//!   open through 2026-08 turned out to be a test fixture declaring
+//!   QK-norm without supplying the weights — real checkpoints always
+//!   carry them, so nothing shipped was affected.
+//!
 //! - **CPU fallback**: when Metal is unavailable, engines fall back to a CPU
 //!   path using dequantised attention tensors (lazily inserted into the
 //!   engine-owned `dequant_scratch`) and `WalkFfn` for Q4K FFN.

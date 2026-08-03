@@ -20,13 +20,12 @@ const DECODE_STEPS: u32 = 10;
 /// is expected. A real divergence — wrong K/V rows, a shifted RoPE
 /// position, a dropped window — moves the state far more than this.
 ///
-/// Uses the `tinymodel` fixture deliberately. The Gemma-3 fixture cannot
-/// carry a cross-backend numeric comparison today because Metal's
-/// batched prefill diverges from both the CPU and Metal's own iterative
-/// path on that architecture — an open defect, reproduced and bounded in
-/// [`super::gemma3_prefill_gap`]. Everything structural is still
-/// asserted against the Gemma-3 fixture; only the float comparison
-/// moves.
+/// Uses the `tinymodel` fixture for the sweep across engines, and
+/// [`super::gemma3_prefill_gap`] covers the Gemma-3 arch separately. The
+/// Gemma fixture was excluded here while a cross-backend divergence was
+/// open on it; that turned out to be the fixture declaring QK-norm
+/// without supplying the weights, is fixed, and is now pinned by a
+/// regression test rather than worked around.
 #[test]
 fn gpu_and_cpu_backends_agree_on_hidden_state() {
     let weights = make_test_q4k_weights_silu();
