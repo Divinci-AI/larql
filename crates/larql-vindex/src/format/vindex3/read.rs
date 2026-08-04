@@ -8,6 +8,9 @@
 //! slices and the shapes they were declared with, and the runtime binds them.
 //! Keeping the two apart is what lets the same executor serve operands from
 //! either generation without knowing which it got.
+//!
+//! `open` resolves generation, index, manifest and then **every declared
+//! profile** (§9.1) before reading a segment byte.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -45,9 +48,6 @@ impl Vindex3Container {
     pub fn open(root: &Path) -> Result<Self, VindexError> {
         match detect_generation(root)? {
             ContainerGeneration::V3 => {}
-            // The crate already has a variant for exactly this refusal, and
-            // reusing it keeps the message identical wherever the boundary is
-            // crossed — §12.1 asks for a precise refusal, not a bespoke one.
             ContainerGeneration::V2 => {
                 return Err(VindexError::WrongContainerGeneration {
                     found: "VINDEX2",
@@ -62,10 +62,10 @@ impl Vindex3Container {
 
         let manifest_raw = std::fs::read_to_string(root.join(&index.moe_manifest))
             .map_err(|e| contextual_io(&index.moe_manifest, e))?;
-        // `MoeManifest::parse` both deserialises and refuses a manifest whose
-        // defects would only surface at bind time — unknown programme, duplicate
-        // layer, malformed router.
         let manifest = MoeManifest::parse(&manifest_raw)?;
+
+        super::profile::resolve_all(&index)
+            .map_err(|e| VindexError::Parse(format!("{INDEX_JSON}: {e}")))?;
 
         let mut segments = HashMap::new();
         for key in index.segments.keys() {
@@ -93,6 +93,18 @@ impl Vindex3Container {
 
     pub fn manifest(&self) -> &MoeManifest {
         &self.manifest
+    }
+
+    /// Resolve a profile to the variants it will execute (§9.1).
+    ///
+    /// `open` already proved every declared profile resolves, so the only
+    /// failure a caller can still see here is asking for a profile this
+    /// container does not declare.
+    pub fn select_profile(
+        &self,
+        name: &str,
+    ) -> Result<super::profile::ResolvedProfile<'_>, super::profile::ProfileSelectionError> {
+        self.index.select_profile(name)
     }
 
     /// The manifest entry for `layer`, or `None` if that layer is dense.
@@ -185,6 +197,128 @@ mod tests {
         // rather than erroring.
         let (_dir, c) = opened();
         assert!(c.layer(FIXTURE_A_LAYER + 99).is_none());
+    }
+
+    // ── §9.1 variant selection, enforced at open ────────────────────────
+
+    /// Rewrite the container's `index.json` through a mutation, so a test can
+    /// stage an index a writer would never produce — which is exactly the
+    /// class of container a load-time gate exists to refuse.
+    fn repack_index(root: &Path, mutate: &dyn Fn(&mut Vindex3Index)) {
+        let path = root.join(INDEX_JSON);
+        let mut index: Vindex3Index =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        mutate(&mut index);
+        std::fs::write(&path, serde_json::to_string_pretty(&index).unwrap()).unwrap();
+    }
+
+    fn variants_with(baseline: &str, present: &str) -> crate::format::vindex3::RegionSetVariants {
+        use crate::format::capability::authority::Fidelity;
+        use crate::format::vindex3::{RegionSetVariants, StoredVariant};
+        RegionSetVariants {
+            baseline: baseline.to_string(),
+            variants: std::collections::BTreeMap::from([(
+                present.to_string(),
+                StoredVariant::new("routed/layer_000", Fidelity::SourceEquivalent),
+            )]),
+        }
+    }
+
+    #[test]
+    fn a_profile_selecting_an_absent_variant_is_refused_at_open() {
+        let dir = tempdir().unwrap();
+        write_container(dir.path(), &fixture_a_spec()).expect("write");
+        repack_index(dir.path(), &|index: &mut Vindex3Index| {
+            index.variants = crate::format::vindex3::VariantCatalogue::new().with_set(
+                "layer.0.routed.gate_up",
+                variants_with("exact-q6k", "exact-q6k"),
+            );
+            index.profiles.push(
+                crate::format::vindex3::Profile::new("routed-mxfp4")
+                    .selecting("layer.0.routed.gate_up", "native-mxfp4"),
+            );
+        });
+
+        let msg = Vindex3Container::open(dir.path())
+            .err()
+            .expect("a profile selecting a variant nobody extracted must not open")
+            .to_string();
+        // The three things §9.1 requires a refusal to name.
+        assert!(msg.contains("layer.0.routed.gate_up"), "region set: {msg}");
+        assert!(msg.contains("native-mxfp4"), "requested variant: {msg}");
+        assert!(msg.contains("exact-q6k"), "variants present: {msg}");
+        assert!(msg.contains("routed-mxfp4"), "the profile at fault: {msg}");
+    }
+
+    #[test]
+    fn the_refusal_happens_before_any_segment_byte_is_read() {
+        // The load-order claim, tested the only way it can be: delete every
+        // segment file. If the profile gate ran first the error names the
+        // variant; if the segment read ran first it names a missing file.
+        let dir = tempdir().unwrap();
+        write_container(dir.path(), &fixture_a_spec()).expect("write");
+        repack_index(dir.path(), &|index: &mut Vindex3Index| {
+            index.variants = crate::format::vindex3::VariantCatalogue::new().with_set(
+                "layer.0.routed.gate_up",
+                variants_with("exact-q6k", "exact-q6k"),
+            );
+            index.profiles.push(
+                crate::format::vindex3::Profile::new("routed-mxfp4")
+                    .selecting("layer.0.routed.gate_up", "native-mxfp4"),
+            );
+        });
+        std::fs::remove_file(segment_path(dir.path(), FIXTURE_A_SEGMENT_KEY)).unwrap();
+
+        let msg = Vindex3Container::open(dir.path())
+            .err()
+            .expect("must not open")
+            .to_string();
+        assert!(
+            msg.contains("native-mxfp4"),
+            "the variant gate must fire before the segment read: {msg}"
+        );
+    }
+
+    #[test]
+    fn a_baseline_that_was_never_extracted_is_refused_at_open() {
+        let dir = tempdir().unwrap();
+        write_container(dir.path(), &fixture_a_spec()).expect("write");
+        repack_index(dir.path(), &|index: &mut Vindex3Index| {
+            index.variants = crate::format::vindex3::VariantCatalogue::new().with_set(
+                "layer.0.routed.gate_up",
+                variants_with("native-mxfp4", "exact-q6k"),
+            );
+        });
+        let msg = Vindex3Container::open(dir.path())
+            .err()
+            .expect("an unservable baseline must not open")
+            .to_string();
+        assert!(msg.contains("native-mxfp4"), "{msg}");
+        assert!(msg.contains("exact-q6k"), "{msg}");
+    }
+
+    #[test]
+    fn a_container_with_no_packs_opens_and_selects_its_only_profile() {
+        // The shape every container written so far has: no catalogue at all.
+        // An absent catalogue must mean "no packs", never "unchecked".
+        let (_dir, c) = opened();
+        assert!(c.index().variants.is_empty());
+        let resolved = c
+            .select_profile(crate::format::vindex3::PROFILE_EXACT)
+            .expect("the canonical profile always resolves");
+        assert!(resolved.is_empty());
+    }
+
+    #[test]
+    fn asking_for_a_profile_the_container_does_not_declare_names_the_ones_it_does() {
+        let (_dir, c) = opened();
+        let err = c.select_profile("browse").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("browse"), "{msg}");
+        assert!(
+            msg.contains(crate::format::vindex3::PROFILE_EXACT),
+            "must name what IS declared: {msg}"
+        );
     }
 
     #[test]

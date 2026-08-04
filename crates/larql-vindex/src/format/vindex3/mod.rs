@@ -37,14 +37,18 @@
 //! would look for it. Regions are placed exactly as their producer wrote them.
 
 pub mod index;
+pub mod profile;
 pub mod read;
 /// Conformance fixture A, public so integration tests and future gate arms can
 /// build a real container without duplicating its frozen dimensions.
 pub mod test_support;
+pub mod variants;
 pub mod verify;
 pub mod write;
 
 pub use index::{Vindex3Index, PROFILE_EXACT};
+pub use profile::{Profile, ProfileSelectionError, ResolvedProfile};
 pub use read::Vindex3Container;
+pub use variants::{RegionSetVariants, StoredVariant, VariantCatalogue, VariantDefect};
 pub use verify::ContainerDefect;
 pub use write::{segment_path, write_container, ContainerSpec, SegmentSource, MOE_MANIFEST_JSON};

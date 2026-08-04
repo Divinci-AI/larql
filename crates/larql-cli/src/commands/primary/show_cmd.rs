@@ -63,8 +63,38 @@ fn show_v3(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
     println!("Layers:     {}", index.num_layers);
     println!("Hidden:     {}", index.hidden_size);
     println!("Family:     {}", index.family);
-    println!("Profiles:   {}", index.profiles.join(", "));
+    println!("Profiles:   {}", index.profile_names().join(", "));
     println!("Manifest:   {}", index.moe_manifest);
+
+    // §9.1: show what each profile actually selects, not just that it exists.
+    // A container that carries alternative packs is exactly the one where
+    // "which bytes does this profile run" stops being obvious.
+    if !index.variants.is_empty() {
+        println!("\nVariants:");
+        for region_set in index.variants.region_sets() {
+            let set = index
+                .variants
+                .get(&region_set)
+                .expect("region_sets() lists catalogued keys");
+            println!(
+                "  {region_set}: {} (baseline {})",
+                set.present().join(", "),
+                set.baseline
+            );
+        }
+        for name in index.profile_names() {
+            // `open` proved every declared profile resolves.
+            let resolved = container.select_profile(name)?;
+            println!("\nProfile '{name}' selects:");
+            for (region_set, stored) in resolved.entries() {
+                println!(
+                    "  {region_set} -> {} [{}]",
+                    stored.storage,
+                    stored.fidelity.name()
+                );
+            }
+        }
+    }
 
     println!("\nMoE layers:");
     for layer in &container.manifest().layers {
