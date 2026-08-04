@@ -921,7 +921,7 @@ pinned layers skip PCIe transfers and the gradient steepens.
 | [PERFORMANCE.md](PERFORMANCE.md) | Benchmark data, scaling projections, compute integration |
 | [ROADMAP.md](ROADMAP.md) | Active P0/P1/P2 work + parked / won't-fix |
 | [CHANGELOG.md](CHANGELOG.md) | Reverse-chronological history of shipped work |
-| [docs/vindex-format.md](docs/vindex-format.md) | File format specification, directory layout, manifest schemas |
+| [docs/vindex-format.md](docs/format-spec.md) | File format specification, directory layout, manifest schemas |
 | [docs/compute-integration.md](docs/compute-integration.md) | How vindex stores data and compute consumes it |
 | [docs/adr/001](docs/adr/001-weights-as-database.md) | Transformer weights as queryable database |
 | [docs/adr/002](docs/adr/002-quantization-strategy.md) | Ollama-compatible Q4_K/Q6_K quantization |
