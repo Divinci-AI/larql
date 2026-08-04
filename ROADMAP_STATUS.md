@@ -4,31 +4,63 @@ Canonical rollup for the next execution slice. Keep the detailed design in
 `ROADMAP.md` and crate-local roadmaps; use this file to answer "what is active
 now?" without rereading every crate document.
 
-Last updated: 2026-08-02
+Last updated: 2026-08-04
 
-**Active slice: VINDEX3 execution binding**
+**Active slice: VINDEX3 container + execution binding**
 ([`ROADMAP.md` § VINDEX3](ROADMAP.md), spec
 [`crates/larql-vindex/docs/vindex3-format-spec.md`](crates/larql-vindex/docs/vindex3-format-spec.md),
-programme [`docs/vindex3-experiments.md`](docs/vindex3-experiments.md)) — driving
-a real Gemma layer through a VINDEX3-bound operation until it is bit-identical
-to production, then propagating to the first VINDEX3-generated token. Rungs 0,
-0.5 and 1 are closed (`f13bf385`, `dd2017db`, `f5dd256e`); **rung 2 — binding the
-production Q4_K × Q8_K expert kernel — is next**, starting with Q8_K activation
-identity before any expert runs.
+programme [`docs/vindex3-experiments.md`](docs/vindex3-experiments.md)).
 
-**The container half now exists too.** Until 2026-08-02 every VINDEX3 parity
-result bound its operands out of a VINDEX2 file, so what was proven was the
-executor and not the format — nothing could write a VINDEX3 container, and
-`ContainerGeneration::V3` appeared only in a detection test built from a JSON
-string. Conformance fixture A now round-trips end to end (write → detect →
-open → validate → bind → execute) **bit-identically**, fused and decomposed
-storage agree under one programme id, `verify` reports structural defects with
-`{layer, entry, role}` coordinates, and `show`/`verify` dispatch on generation
-without normalising either into the other. That closes the rows fixture A can
-carry on V2-0/V2-1; profile authority, variant-selection refusal, fixtures B–D
-and WALK/DESCRIBE parity remain open, so **`extract` still writes VINDEX2** and
-the ABI is not frozen. Honest ceiling: *executable VINDEX3 container proven on
-fixture A* — not "a real model runs from VINDEX3".
+**Read this first: `extract` writes VINDEX2, and has no VINDEX3 path at all.**
+Not "defaults to" — there is no flag and no branch; `index.json.version` is
+hardcoded to 2. Every published vindex, and every vindex on any disk today, is
+VINDEX2. `larql show` / `verify` can *read* a VINDEX3 container, and
+`format::vindex3::import` can *build* one, but nothing in the extraction path
+emits one. §12.1 gates the flip on two things that have not happened: the ABI
+freezing, **and** the E0 preservation matrix passing.
+
+**What is actually proven (2026-08-04).**
+
+```text
+executor      a real Gemma MoE layer executes bit-identically to production,
+              with its operands bound out of VINDEX2 bytes          (closed)
+container     fixture A round-trips write -> detect -> open -> validate ->
+              bind -> execute, bit-identically                      (closed)
+import (c8)   one real Gemma layer written as a VINDEX3 container,
+              256/256 regions byte-identical to its VINDEX2 source  (closed)
+```
+
+Measured for c8 on `gemma4-26b-a4b.vindex`, layer 0: hidden 2816, 128 experts,
+top-8, intermediate 704 semantic over 768 stored, a 421 MB container that
+reopens, verifies clean and reports `VINDEX3 (index.json schema 3)`.
+
+**Honest ceiling: a real Gemma *layer* is a VINDEX3 container, and a VINDEX3
+container executes on fixture A.** Those are two results, not one — the
+execution comparison still runs over VINDEX2 bytes. What c8 adds is that those
+are demonstrably the same bytes, which is what lets the execution result carry
+across. Nobody has run a real model *from* VINDEX3 end to end.
+
+**Open, in order:**
+
+1. **WALK/DESCRIBE parity** — closes V2-1 except shared banks (themselves
+   blocked on the Mini-K3 rung, which has no execution path to test against).
+   Gate KNN over in-place bank regions must return identical top-K to a
+   v1-style extracted `gate_vectors.bin` control on fixture A. This is the row
+   that keeps "the model IS the database" true of VINDEX3 and not only VINDEX2.
+2. **c9 — all layers, not one.** c8's importer already does the work; c9 is a
+   loop plus a size question (layer 0 alone is 421 MB; 30 layers is ~12 GB).
+   At c9, `extract` gaining a VINDEX3 mode becomes a question rather than a
+   violation.
+3. **Fixtures B–D and profile authority** — the remaining V2-0/V2-1 rows.
+4. **Then, and only then:** ABI freeze + E0 preservation matrix, after which
+   new extractions can default to VINDEX3 and v1 extraction is deprecated (not
+   removed).
+
+Closed on this branch: variant-selection refusal (§9.1 — a profile selecting an
+absent variant is refused at open, before a byte is read), engine-wide strict
+refusal, and the MoE manifest defect vocabulary, which was fully built, fully
+tested and had no production caller until `MoeManifest::parse` was made to
+enforce it.
 
 **Previous slice: the DEC funnel** ([`docs/dec-funnel.md`](docs/dec-funnel.md)
 v0.5) — decoupled attention/weights serving, DEC-0 … DEC-7 plus the G-ladder

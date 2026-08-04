@@ -381,8 +381,15 @@ schemas 1–2 are **VINDEX2** (what `extract` writes, and what every published
 vindex is today), schema 3 is **VINDEX3**, the successor container for sparse
 models. One binary reads both; `larql show` and `larql verify` dispatch on the
 version and describe each generation in its own terms rather than flattening
-one into the other. VINDEX3 is still draft — the ABI is not frozen and
-`extract` does not emit it yet — so in practice everything below is VINDEX2.
+one into the other.
+
+**VINDEX3 is draft, and `extract` has no VINDEX3 path at all** — not a
+non-default one; `index.json.version` is hardcoded to 2. Everything below, and
+every vindex on disk or published today, is VINDEX2. A VINDEX3 container can
+be *read* (`larql show`, `larql verify`) and *built* from a loaded model
+(`format::vindex3::import`, one MoE layer, byte-identical to its source), but
+nothing emits one from extraction. New extractions default to VINDEX3 only
+once the ABI freezes **and** the E0 preservation matrix passes (§12.1).
 See [`crates/larql-vindex/docs/vindex3-format-spec.md`](crates/larql-vindex/docs/vindex3-format-spec.md).
 
 Three extraction levels:

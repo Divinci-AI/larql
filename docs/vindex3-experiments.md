@@ -171,6 +171,8 @@ Rows now discharged:
 | V2-1 | expert counts and top-K not hard-coded | closed — (8,2), (32,4), (5,1) through one code path, each read from its own container |
 | V2-1 | shared banks not hard-coded | **open**, and *blocked*: `BoundMoeOperation::banks` documents unrouted shared banks as arriving with the Mini-K3 rung, so there is no execution path to test against |
 | V2-1 | WALK/DESCRIBE parity | **open** |
+| c8 | a real model layer written as a VINDEX3 container | closed 2026-08-04 — `format::vindex3::import` copies regions verbatim (no transcode, requantise or repack, so a downstream bit-identity claim is about the format and not about a reshape being self-consistent). Measured on `gemma4-26b-a4b.vindex` layer 0: hidden 2816, 128 experts, top-8, 704 semantic over 768 stored; 421 MB container reopens, verifies clean, **256/256 regions byte-identical** to the VINDEX2 source. Driver: `examples/vindex3_import_gemma_layer.rs`. **Ceiling:** a round-trip result, not an execution one — execution parity still runs over VINDEX2 bytes; c8's contribution is that those are demonstrably the same bytes. |
+| c9 | *all* layers as a VINDEX3 container | **open** — c8's importer already does the work; c9 is a loop plus a size question (layer 0 alone is 421 MB). At c9, `extract` gaining a VINDEX3 mode becomes a question rather than a violation. |
 
 Two corrections worth carrying forward, both from getting it wrong first:
 
