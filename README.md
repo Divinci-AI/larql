@@ -376,6 +376,22 @@ gemma3-4b.vindex/
   feature_labels.json      # Probe-confirmed labels
 ```
 
+**Container generations.** `index.json`'s `version` is the sole discriminator —
+schemas 1–2 are **VINDEX2** (what `extract` writes, and what every published
+vindex is today), schema 3 is **VINDEX3**, the successor container for sparse
+models. One binary reads both; `larql show` and `larql verify` dispatch on the
+version and describe each generation in its own terms rather than flattening
+one into the other.
+
+**VINDEX3 is draft, and `extract` has no VINDEX3 path at all** — not a
+non-default one; `index.json.version` is hardcoded to 2. Everything below, and
+every vindex on disk or published today, is VINDEX2. A VINDEX3 container can
+be *read* (`larql show`, `larql verify`) and *built* from a loaded model
+(`format::vindex3::import`, one MoE layer, byte-identical to its source), but
+nothing emits one from extraction. New extractions default to VINDEX3 only
+once the ABI freezes **and** the E0 preservation matrix passes (§12.1).
+See [`crates/larql-vindex/docs/vindex3-format-spec.md`](crates/larql-vindex/docs/vindex3-format-spec.md).
+
 Three extraction levels:
 
 | Level | CLI Flag | LQL Syntax | Size (f16) | Enables |
@@ -464,7 +480,7 @@ delta on Metal, which the per-engine bench numbers confirm.
 | `markov-rs` | residual stream | derivative | exact logits under arch contract | **98.0** |
 | `markov-rs-codec` | compressed residuals | derivative | bounded KL | **98.1** |
 | `boundary-per-layer` | per-layer codec residuals | derivative | bounded KL per-layer | **98.7** |
-| `unlimited-context` | KV (within window) + checkpoints | derivative | exact within window | 94.2 |
+| `windowed-checkpoint` | KV (within window) + checkpoints | derivative | exact within window | 94.2 |
 | `turbo-quant` | quantised K/V | canonical (destructive) | bounded KL | 85.0 |
 | `boundary-kv` | K/V + boundary frames | canonical | exact logits | composes `standard` |
 | `apollo` | boundary retrieval store | n/a (retrieval) | task-level | orthogonal |

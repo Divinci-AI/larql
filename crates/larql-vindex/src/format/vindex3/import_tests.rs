@@ -1,0 +1,242 @@
+//! Tests for the c8 importer.
+//!
+//! The gate that matters is the last one: a container the importer built must
+//! hand back **the same bytes** the source held, per expert, per role. That is
+//! what makes a downstream execution comparison meaningful — if the importer
+//! were free to reshape on the way in, bit-identity downstream would only
+//! prove the reshape was self-consistent.
+
+use super::*;
+use crate::format::lyrw2::read::Lyrw2Reader;
+use crate::format::vindex3::read::Vindex3Container;
+use crate::format::vindex3::write::write_container;
+use tempfile::tempdir;
+
+const HIDDEN: u32 = 8;
+const STORED_INTER: u32 = 12;
+const SEMANTIC_INTER: u32 = 10;
+const EXPERTS: usize = 3;
+const TOP_K: u32 = 2;
+
+/// Distinct, position-dependent bytes so a wrong offset cannot pass.
+fn gate_up_bytes(expert: usize) -> Vec<u8> {
+    let n = (STORED_INTER * 2 * HIDDEN) as usize * 4;
+    (0..n).map(|i| (expert * 31 + i) as u8).collect()
+}
+
+fn down_bytes(expert: usize) -> Vec<u8> {
+    let n = (HIDDEN * STORED_INTER) as usize * 4;
+    (0..n).map(|i| (expert * 17 + i + 7) as u8).collect()
+}
+
+struct Owned {
+    gate_up: Vec<Vec<u8>>,
+    down: Vec<Vec<u8>>,
+}
+
+fn owned() -> Owned {
+    Owned {
+        gate_up: (0..EXPERTS).map(gate_up_bytes).collect(),
+        down: (0..EXPERTS).map(down_bytes).collect(),
+    }
+}
+
+fn source(o: &Owned) -> MoeLayerSource<'_> {
+    MoeLayerSource {
+        layer: 0,
+        experts_gate_up: o.gate_up.iter().map(|v| v.as_slice()).collect(),
+        experts_down: o.down.iter().map(|v| v.as_slice()).collect(),
+        format: RegionFormat::F32,
+        hidden_size: HIDDEN,
+        stored_intermediate: STORED_INTER,
+        semantic_intermediate: SEMANTIC_INTER,
+        top_k: TOP_K,
+    }
+}
+
+// ── The verbatim guarantee ───────────────────────────────────────────────
+
+#[test]
+fn every_region_round_trips_byte_for_byte_through_a_written_container() {
+    // The c8 gate. Import → write → open → read back, comparing each expert's
+    // gate_up and down against the source slice it came from.
+    let o = owned();
+    let src = source(&o);
+    let staging = tempdir().unwrap();
+    let spec = import_one_layer(
+        &src,
+        "gemma-fixture",
+        "gemma",
+        1,
+        &staging.path().join("seg.lyrw"),
+    )
+    .expect("import");
+
+    let root = tempdir().unwrap();
+    write_container(root.path(), &spec).expect("write container");
+    let container = Vindex3Container::open(root.path()).expect("open");
+
+    let key = routed_storage_key(0);
+    let reader = container.segment(&key).expect("segment parses");
+    for expert in 0..EXPERTS as u32 {
+        let gu = reader
+            .region_bytes(0, expert, RegionRole::GateUpFused)
+            .expect("resolve gate_up")
+            .expect("gate_up present");
+        assert_eq!(
+            gu,
+            o.gate_up[expert as usize].as_slice(),
+            "expert {expert}: gate_up came back changed"
+        );
+        let dn = reader
+            .region_bytes(0, expert, RegionRole::Down)
+            .expect("resolve down")
+            .expect("down present");
+        assert_eq!(
+            dn,
+            o.down[expert as usize].as_slice(),
+            "expert {expert}: down came back changed"
+        );
+    }
+}
+
+#[test]
+fn experts_are_not_transposed_with_each_other() {
+    // A single off-by-one in entry ordering would still round-trip *some*
+    // bytes; this pins that expert e gets expert e's, which the distinct
+    // per-expert seeds above make detectable.
+    let o = owned();
+    let staging = tempdir().unwrap();
+    let bytes =
+        segment_bytes_for_layer(&source(&o), &staging.path().join("s.lyrw")).expect("segment");
+    let reader = Lyrw2Reader::parse(&bytes).expect("parse");
+    for expert in 0..EXPERTS as u32 {
+        let gu = reader
+            .region_bytes(0, expert, RegionRole::GateUpFused)
+            .unwrap()
+            .unwrap();
+        assert_eq!(gu[0], (expert as usize * 31) as u8, "expert {expert} seed");
+    }
+}
+
+// ── What the container declares ──────────────────────────────────────────
+
+#[test]
+fn the_manifest_records_the_semantic_width_not_the_stored_one() {
+    // Gemma pads the intermediate axis. The bank descriptor carries the stored
+    // extent because that is what the bytes contain; `expert_dims` carries the
+    // semantic width because that is what the operation means. Collapsing the
+    // two is the `physical shape != semantic operand shape` bug the Gemma
+    // routing-parity work already had to fix once.
+    let o = owned();
+    let staging = tempdir().unwrap();
+    let spec = import_one_layer(&source(&o), "m", "gemma", 1, &staging.path().join("s.lyrw"))
+        .expect("import");
+    let dims = spec.manifest.layers[0]
+        .routed_bank
+        .expert_dims
+        .expect("expert dims");
+    assert_eq!(dims.intermediate, SEMANTIC_INTER);
+
+    let reader = Lyrw2Reader::parse(&spec.segments[0].bytes).expect("parse");
+    assert_eq!(
+        reader.banks()[0].intermediate_dim,
+        STORED_INTER,
+        "the bank must carry the stored extent"
+    );
+}
+
+#[test]
+fn the_imported_container_declares_one_routed_bank_under_gated_mlp() {
+    let o = owned();
+    let staging = tempdir().unwrap();
+    let spec = import_one_layer(&source(&o), "m", "gemma", 1, &staging.path().join("s.lyrw"))
+        .expect("import");
+    let layer = &spec.manifest.layers[0];
+    assert_eq!(layer.routed_bank.programme, GATED_MLP_PROGRAMME);
+    assert_eq!(layer.routed_bank.experts, EXPERTS as u32);
+    assert!(
+        layer.routed_bank.resolve_programme().is_some(),
+        "the declared programme must resolve, or nothing can bind it"
+    );
+    assert_eq!(spec.segments.len(), 1);
+    assert_eq!(spec.segments[0].key, routed_storage_key(0));
+}
+
+#[test]
+fn an_imported_container_is_bindable() {
+    // The whole point: `verify` must find no structural defect in a container
+    // this module produced, or the import is describing something unusable.
+    let o = owned();
+    let staging = tempdir().unwrap();
+    let spec = import_one_layer(&source(&o), "m", "gemma", 1, &staging.path().join("s.lyrw"))
+        .expect("import");
+    let root = tempdir().unwrap();
+    write_container(root.path(), &spec).expect("write");
+    let container = Vindex3Container::open(root.path()).expect("open");
+    assert_eq!(container.verify(), Vec::new(), "imported container defects");
+}
+
+// ── Refusals, before any byte is written ─────────────────────────────────
+
+#[test]
+fn a_source_with_no_experts_is_refused() {
+    let o = Owned {
+        gate_up: vec![],
+        down: vec![],
+    };
+    let staging = tempdir().unwrap();
+    let err = segment_bytes_for_layer(&source(&o), &staging.path().join("s.lyrw"))
+        .expect_err("an empty bank must not import");
+    assert!(format!("{err}").contains("no experts"), "{err}");
+}
+
+#[test]
+fn mismatched_gate_up_and_down_counts_are_refused() {
+    let mut o = owned();
+    o.down.pop();
+    let staging = tempdir().unwrap();
+    let err = segment_bytes_for_layer(&source(&o), &staging.path().join("s.lyrw"))
+        .expect_err("every expert needs both regions");
+    assert!(
+        format!("{err}").contains("every expert needs both"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_ragged_expert_layout_is_refused_naming_the_expert() {
+    // A source whose experts disagree on size would otherwise be baked into a
+    // container that fails at bind with nothing pointing back here.
+    let mut o = owned();
+    o.gate_up[1].truncate(8);
+    let staging = tempdir().unwrap();
+    let err = segment_bytes_for_layer(&source(&o), &staging.path().join("s.lyrw"))
+        .expect_err("ragged experts must not import");
+    let msg = format!("{err}");
+    assert!(msg.contains("expert 1"), "must name the odd expert: {msg}");
+}
+
+#[test]
+fn a_top_k_larger_than_the_bank_is_refused() {
+    let o = owned();
+    let mut src = source(&o);
+    src.top_k = EXPERTS as u32 + 1;
+    let staging = tempdir().unwrap();
+    let err = segment_bytes_for_layer(&src, &staging.path().join("s.lyrw"))
+        .expect_err("top_k must be selectable");
+    assert!(format!("{err}").contains("not selectable"), "{err}");
+}
+
+#[test]
+fn a_semantic_width_wider_than_the_stored_one_is_refused() {
+    // A view narrows the stored extent; it cannot invent columns. Accepting
+    // this would produce a container whose kernel reads past its own bytes.
+    let o = owned();
+    let mut src = source(&o);
+    src.semantic_intermediate = STORED_INTER + 1;
+    let staging = tempdir().unwrap();
+    let err = segment_bytes_for_layer(&src, &staging.path().join("s.lyrw"))
+        .expect_err("a widening view must not import");
+    assert!(format!("{err}").contains("exceeds the stored"), "{err}");
+}

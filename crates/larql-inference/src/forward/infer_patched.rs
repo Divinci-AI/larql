@@ -240,9 +240,15 @@ pub fn infer_patched_q4k(
     let walk_ffn = WalkFfn::new_unlimited_with_trace(weights_ref, gate_index);
 
     let start = std::time::Instant::now();
+    // `WalkFfn` serves every layer locally and leaves `forward_moe_full_layer`
+    // at the trait default (`Ok(None)`), so it has no way to refuse. Asserting
+    // that here keeps the impossibility auditable: if a refusing backend is
+    // ever threaded through this path it fails loudly instead of answering
+    // with a token the route declined to compute.
     let PredictResult {
         predictions: raw, ..
-    } = predict_kquant_with_ffn(weights, tokenizer, token_ids, top_k, index, &walk_ffn);
+    } = predict_kquant_with_ffn(weights, tokenizer, token_ids, top_k, index, &walk_ffn)
+        .expect("WalkFfn cannot refuse a layer; a refusal here needs a real error channel");
     let walk_ms = start.elapsed().as_secs_f64() * 1000.0;
 
     let residuals = walk_ffn.take_residuals();
@@ -301,6 +307,8 @@ pub fn infer_patched_q4k_early_exit(
             fired = Some(ovr);
             Some(preds)
         };
+        // See `infer_patched_q4k`: `WalkFfn` leaves `forward_moe_full_layer` at
+        // the trait default, so it cannot refuse. Loud if that ever changes.
         (predictions, exited) = predict_kquant_with_ffn_early_exit(
             weights,
             tokenizer,
@@ -310,7 +318,8 @@ pub fn infer_patched_q4k_early_exit(
             &walk_ffn,
             stop,
             &mut on_stop,
-        );
+        )
+        .expect("WalkFfn cannot refuse a layer; a refusal here needs a real error channel");
     }
     let walk_ms = start.elapsed().as_secs_f64() * 1000.0;
     let residuals = walk_ffn.take_residuals();

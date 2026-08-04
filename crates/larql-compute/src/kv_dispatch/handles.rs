@@ -41,6 +41,13 @@ impl KvHandle {
         self.inner.backend_name()
     }
 
+    /// Total K/V bytes held by this handle, across every layer it covers.
+    /// Engines sum this over their handles rather than re-deriving it from
+    /// `cached_len × kv_dim`, which is only right for per-layer handles.
+    pub fn resident_bytes(&self) -> usize {
+        self.inner.resident_bytes()
+    }
+
     /// Downcast access for backend implementations. Engines never call
     /// this; only the backend that allocated the handle should.
     pub fn as_inner(&self) -> &dyn KvHandleInner {
@@ -61,9 +68,26 @@ pub trait KvHandleInner: Send + Sync + std::any::Any {
     fn cached_len(&self) -> usize;
     fn kv_dim(&self) -> usize;
     fn backend_name(&self) -> &'static str;
+
+    /// Total K/V bytes this handle holds, across **every layer it covers**.
+    ///
+    /// The default is one layer's worth — correct for the per-layer
+    /// dispatch handles, where an engine owns one handle per layer and
+    /// sums them. Whole-model handles (one handle, all layers) MUST
+    /// override: applying the per-layer formula to them undercounts by
+    /// a factor of `num_layers`, which in the bench read as a large
+    /// compression win for engines that were doing no compression at all.
+    fn resident_bytes(&self) -> usize {
+        self.cached_len() * self.kv_dim() * KV_TENSORS_PER_LAYER * std::mem::size_of::<f32>()
+    }
+
     fn as_any(&self) -> &dyn std::any::Any;
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
 }
+
+/// K and V — the two tensors cached per position, per layer. Named so
+/// the sizing arithmetic doesn't read as a bare `2` between dimensions.
+pub const KV_TENSORS_PER_LAYER: usize = 2;
 
 /// Opaque handle to a residual upload (used by `apollo` for boundary
 /// residuals). Same pattern as [`KvHandle`].

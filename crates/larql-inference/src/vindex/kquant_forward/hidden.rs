@@ -18,7 +18,7 @@ pub fn predict_kquant_hidden(
     weights: &ModelWeights,
     token_ids: &[u32],
     index: &VectorIndex,
-    moe_remote: Option<&crate::ffn::RemoteMoeBackend>,
+    moe: Option<&dyn crate::ffn::MoeExpertBackend>,
 ) -> Array2<f32> {
     let num_layers = weights.num_layers;
     let mut scratch = larql_models::DequantScratch::new();
@@ -56,7 +56,7 @@ pub fn predict_kquant_hidden(
                 &ffn_backend,
                 ple_inputs.get(layer),
                 shared_kv,
-                moe_remote,
+                moe,
             ) {
                 h = h_new;
                 if let Some(kv) = kv_out {
@@ -135,7 +135,7 @@ fn run_moe_layer_cpu(
     ffn: &dyn crate::ffn::FfnBackend,
     ple_input: Option<&Array2<f32>>,
     shared_kv: Option<&SharedKV>,
-    moe_remote: Option<&crate::ffn::RemoteMoeBackend>,
+    moe: Option<&dyn crate::ffn::MoeExpertBackend>,
 ) -> Option<(Array2<f32>, Option<SharedKV>)> {
     let (h_post_attn, kv_out) = if let Some(shared) = shared_kv {
         let (h_pa, _, _) =
@@ -153,14 +153,14 @@ fn run_moe_layer_cpu(
         layer,
         ffn,
         ple_input,
-        moe_remote,
+        moe,
     );
     Some((h_out, kv_out))
 }
 
 /// CPU MoE FFN block for one hybrid-MoE layer, given the **post-attention**
 /// hidden state. Computes the dense FFN contribution (`h1`), the expert
-/// contribution (`h2` — remote via `moe_remote` when set, else local
+/// contribution (`h2` — via `moe` when a route is bound, else local
 /// `cpu_moe_forward`), combines + outer-norms, and applies PLE +
 /// layer-scalar. Returns the full layer output (the new residual).
 ///
@@ -179,17 +179,9 @@ pub fn moe_ffn_block_cpu(
     layer: usize,
     ffn: &dyn crate::ffn::FfnBackend,
     ple_input: Option<&Array2<f32>>,
-    moe_remote: Option<&crate::ffn::RemoteMoeBackend>,
+    moe: Option<&dyn crate::ffn::MoeExpertBackend>,
 ) -> Array2<f32> {
-    moe_ffn_block_cpu_with_index(
-        weights,
-        h_post_attn,
-        layer,
-        ffn,
-        ple_input,
-        moe_remote,
-        None,
-    )
+    moe_ffn_block_cpu_with_index(weights, h_post_attn, layer, ffn, ple_input, moe, None)
 }
 
 /// `LARQL_Q4K_DIRECT_FFN=1` routes the hybrid-MoE *dense slab* through the
@@ -214,7 +206,7 @@ pub fn moe_ffn_block_cpu_with_index(
     layer: usize,
     ffn: &dyn crate::ffn::FfnBackend,
     ple_input: Option<&Array2<f32>>,
-    moe_remote: Option<&crate::ffn::RemoteMoeBackend>,
+    moe: Option<&dyn crate::ffn::MoeExpertBackend>,
     index: Option<&larql_vindex::VectorIndex>,
 ) -> Array2<f32> {
     let arch = &*weights.arch;
@@ -263,15 +255,19 @@ pub fn moe_ffn_block_cpu_with_index(
     let seq_len = h_post_attn.nrows();
     let mut h2 = Array2::<f32>::zeros((seq_len, hidden));
 
-    if let Some(remote) = moe_remote {
-        if let Some(router) = build_moe_router_weights(weights, arch, layer) {
-            let _t_expert = std::time::Instant::now();
-            let out = remote.forward_moe_seq(layer, h_post_attn, &router, norm_offset, eps);
-            crate::decode_stages::record_expert(_t_expert.elapsed().as_nanos());
-            match out {
-                Ok(out) => h2 = out,
-                Err(e) => eprintln!("[moe_ffn_block_cpu] remote dispatch error L{layer}: {e}"),
-            }
+    if let Some(backend) = moe {
+        // Every non-default route goes through one call. Which route it is —
+        // remote shards, a VINDEX3 bound plan — is the backend's business, and
+        // the block loop's only job is to place the contribution.
+        let _t_expert = std::time::Instant::now();
+        let out = backend.forward_moe_seq(weights, layer, h_post_attn, norm_offset, eps);
+        crate::decode_stages::record_expert(_t_expert.elapsed().as_nanos());
+        match out {
+            Ok(out) => h2 = out,
+            Err(e) => eprintln!(
+                "[moe_ffn_block_cpu] {} dispatch error L{layer}: {e}",
+                backend.name()
+            ),
         }
     } else {
         // Local experts count toward the expert stage too (`LARQL_DECODE_STAGES`)

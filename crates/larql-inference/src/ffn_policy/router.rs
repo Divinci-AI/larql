@@ -100,7 +100,7 @@ impl<'a> FfnBackend for BoundFfnRouter<'a> {
         &self,
         layer: usize,
         h_post_attn: &Array2<f32>,
-    ) -> Option<Array2<f32>> {
+    ) -> Result<Option<Array2<f32>>, larql_execution::BoxRefusal> {
         self.get(layer).forward_moe_full_layer(layer, h_post_attn)
     }
 }
@@ -446,9 +446,9 @@ mod tests {
         let x = Array2::<f32>::zeros((1, weights.hidden_size));
         let result = (&router as &dyn FfnBackend).forward_moe_full_layer(0, &x);
         assert!(
-            result.is_none(),
-            "v0 backends don't implement moe_full_layer; \
-             router delegation must preserve the None default"
+            matches!(result, Ok(None)),
+            "v0 backends don't implement moe_full_layer; router delegation must \
+             preserve the not-applicable default, not turn it into a refusal"
         );
     }
 

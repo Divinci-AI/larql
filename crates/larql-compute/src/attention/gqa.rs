@@ -42,7 +42,7 @@ pub fn gqa_attention_with_weights(
     sinks: Option<&[f32]>,
 ) -> (Array2<f32>, Option<AttentionWeights>) {
     let (out, last, _) = gqa_attention_capture(
-        q, k, v, num_q, head_dim, reps, scale, seq_len, capture, false, softcap, sinks,
+        q, k, v, num_q, head_dim, reps, scale, seq_len, capture, false, softcap, sinks, None,
     );
     (out, last)
 }
@@ -65,12 +65,44 @@ pub fn gqa_attention_with_all_weights(
     sinks: Option<&[f32]>,
 ) -> (Array2<f32>, AttentionAllWeights) {
     let (out, _, all) = gqa_attention_capture(
-        q, k, v, num_q, head_dim, reps, scale, seq_len, false, true, softcap, sinks,
+        q, k, v, num_q, head_dim, reps, scale, seq_len, false, true, softcap, sinks, None,
     );
     (
         out,
         all.expect("all-position attention capture requested but missing"),
     )
+}
+
+/// GQA with causal masking **and a per-layer sliding window**.
+///
+/// `window = None` is exactly [`gqa_attention`] — same code path, same
+/// bits. `Some(w)` restricts every query to the most recent `w` keys,
+/// which is what an architecture's sliding-attention layers actually
+/// attend (Gemma 2/3, Mistral, …).
+///
+/// Resolve `window` through
+/// [`crate::forward_overrides::effective_attention_window_for_layer`]
+/// rather than reading the architecture directly — that helper is the
+/// shared rule the Metal pipeline spec uses too, so the two backends
+/// cannot disagree about which layers are windowed.
+#[allow(clippy::too_many_arguments)]
+pub fn gqa_attention_windowed(
+    q: &Array2<f32>,
+    k: &Array2<f32>,
+    v: &Array2<f32>,
+    num_q: usize,
+    head_dim: usize,
+    reps: usize,
+    scale: f64,
+    seq_len: usize,
+    softcap: Option<f32>,
+    sinks: Option<&[f32]>,
+    window: Option<usize>,
+) -> Array2<f32> {
+    let (out, _, _) = gqa_attention_capture(
+        q, k, v, num_q, head_dim, reps, scale, seq_len, false, false, softcap, sinks, window,
+    );
+    out
 }
 
 /// Capture every query-position attention distribution using only the first
@@ -130,8 +162,23 @@ pub fn gqa_reduced_qk_all_weights(
     }
 }
 
+/// First key position a query at `causal_len - 1` may attend under a
+/// sliding window. `None` (or a window at least as wide as the causal
+/// prefix) keeps everything, so the windowed path is bit-identical to
+/// the full-attention one until the window actually binds.
+#[inline]
+fn window_start(causal_len: usize, window: Option<usize>) -> usize {
+    match window {
+        Some(w) => causal_len.saturating_sub(w),
+        None => 0,
+    }
+}
+
+/// Shared body for every causal-GQA entry point. `pub(crate)` so the
+/// per-layer prefill seam in [`super::block`] can pass a sliding
+/// `window` without another public overload per capture mode.
 #[allow(clippy::too_many_arguments)]
-fn gqa_attention_capture(
+pub(crate) fn gqa_attention_capture(
     q: &Array2<f32>,
     k: &Array2<f32>,
     v: &Array2<f32>,
@@ -144,6 +191,7 @@ fn gqa_attention_capture(
     capture_all: bool,
     softcap: Option<f32>,
     sinks: Option<&[f32]>,
+    window: Option<usize>,
 ) -> (
     Array2<f32>,
     Option<AttentionWeights>,
@@ -179,12 +227,17 @@ fn gqa_attention_capture(
 
         for qi in 0..seq_len {
             let causal_len = qi + 1;
+            // Sliding-window start for this query. `None` keeps the full
+            // causal prefix; `Some(w)` keeps only the most recent `w`
+            // keys, which is what a sliding-attention layer attends.
+            let start = window_start(causal_len, window);
+            let span = causal_len - start;
 
             let q_row = q.slice(ndarray::s![qi, q_off..q_off + head_dim]);
-            let k_block = k.slice(ndarray::s![0..causal_len, kv_off..kv_off + head_dim]);
+            let k_block = k.slice(ndarray::s![start..causal_len, kv_off..kv_off + head_dim]);
             let raw_scores = k_block.dot(&q_row);
 
-            for i in 0..causal_len {
+            for i in 0..span {
                 let mut s = raw_scores[i] * scale_f32;
                 if let Some(cap) = softcap {
                     s = (s / cap).tanh() * cap;
@@ -192,21 +245,24 @@ fn gqa_attention_capture(
                 scores_buf[i] = s;
             }
 
-            super::softmax::softmax_in_place(&mut scores_buf[..causal_len], sink);
+            super::softmax::softmax_in_place(&mut scores_buf[..span], sink);
 
+            // Captured weights are indexed by absolute key position, so
+            // the windowed run writes its `span` values at `start..`,
+            // leaving masked-out positions at zero.
             if capture_last && qi == last_pos {
                 let mut captured = vec![0.0f32; seq_len];
-                captured[..causal_len].copy_from_slice(&scores_buf[..causal_len]);
+                captured[start..causal_len].copy_from_slice(&scores_buf[..span]);
                 captured_heads.push(captured);
             }
             if capture_all {
                 let mut captured = vec![0.0f32; seq_len];
-                captured[..causal_len].copy_from_slice(&scores_buf[..causal_len]);
+                captured[start..causal_len].copy_from_slice(&scores_buf[..span]);
                 captured_positions.push(captured);
             }
 
-            let v_block = v.slice(ndarray::s![0..causal_len, kv_off..kv_off + head_dim]);
-            let scores_view = ndarray::ArrayView1::from(&scores_buf[..causal_len]);
+            let v_block = v.slice(ndarray::s![start..causal_len, kv_off..kv_off + head_dim]);
+            let scores_view = ndarray::ArrayView1::from(&scores_buf[..span]);
             let weighted_v = v_block.t().dot(&scores_view);
 
             for d in 0..head_dim {

@@ -15,6 +15,8 @@
 
 pub mod graph_backend;
 pub mod local_moe;
+pub mod moe_backend;
+pub mod moe_bound;
 pub mod moe_remote;
 pub mod remote;
 pub mod sparse;
@@ -32,8 +34,11 @@ pub use larql_compute::ffn::{
 // ── Re-exports ──
 
 pub use local_moe::LocalMoeFfn;
+pub use moe_backend::{InProcessMoeBackend, MoeBackendError, MoeExpertBackend};
+pub use moe_bound::BoundMoeBackend;
 pub use moe_remote::{
-    MoeRouterWeights, RemoteMoeBackend, RemoteMoeError, RemoteMoeFfn, ShardConfig,
+    MoeFfn, MoeRouterWeights, RecordedRefusal, RefusalPolicy, RemoteMoeBackend, RemoteMoeError,
+    RemoteMoeFfn, ShardConfig,
 };
 pub use remote::{
     decode_q8k_batch_response_entries, decode_single_response, encode_binary_request,
@@ -100,7 +105,7 @@ mod router_tests {
         let weights = make_test_weights();
         let ffn = WeightFfn { weights: &weights };
         let h = larql_vindex::ndarray::Array2::<f32>::zeros((1, weights.hidden_size));
-        assert!(ffn.forward_moe_full_layer(0, &h).is_none());
+        assert!(ffn.forward_moe_full_layer(0, &h).is_ok_and(|o| o.is_none()));
     }
 
     #[test]

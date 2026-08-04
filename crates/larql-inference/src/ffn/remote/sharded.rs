@@ -307,9 +307,13 @@ impl FfnBackend for LayerShardedBackend {
         &self,
         layer: usize,
         h_post_attn: &Array2<f32>,
-    ) -> Option<Array2<f32>> {
-        self.shard_for(layer)?
-            .forward_moe_full_layer(layer, h_post_attn)
+    ) -> Result<Option<Array2<f32>>, larql_execution::BoxRefusal> {
+        // No shard owns this layer: not applicable, not a refusal. The caller
+        // dispatches locally and its result is still correct.
+        let Some(shard) = self.shard_for(layer) else {
+            return Ok(None);
+        };
+        shard.forward_moe_full_layer(layer, h_post_attn)
     }
 
     fn name(&self) -> &str {
@@ -403,7 +407,9 @@ mod tests {
             "a zero delta from an unowned layer must be marked unobserved, \
              never a fabricated activation tensor"
         );
-        assert!(be.forward_moe_full_layer(0, &x).is_none());
+        // No shard owns the layer: not applicable, and specifically not a
+        // refusal — the caller must still be free to dispatch locally.
+        assert!(matches!(be.forward_moe_full_layer(0, &x), Ok(None)));
     }
 
     #[test]

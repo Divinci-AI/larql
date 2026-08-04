@@ -12,6 +12,7 @@ use crate::format::filenames::{
     has_kquant_lm_head, resolve_interleaved_kquant, DOWN_META_BIN, DOWN_META_JSONL, EMBEDDINGS_BIN,
     GATE_VECTORS_BIN, INDEX_JSON, LM_HEAD_BIN, TOKENIZER_JSON,
 };
+use crate::format::generation::{detect_generation, ContainerGeneration};
 use crate::index::storage::ffn_store::FFN_COMPONENTS_PER_LAYER;
 use crate::index::{IndexLoadCallbacks, VectorIndex};
 
@@ -412,8 +413,23 @@ pub fn load_vindex_tokenizer(dir: &Path) -> Result<tokenizers::Tokenizer, Vindex
     tokenizers::Tokenizer::from_file(&path).map_err(|e| VindexError::Parse(e.to_string()))
 }
 
-/// Load the vindex config.
+/// Load the VINDEX2 config.
+///
+/// Refuses any other container generation by name (spec §12.1). Without this
+/// check a VINDEX3 directory deserialises into `VindexConfig` on the strength
+/// of its shared field names, and the v1 loader proceeds against a layout whose
+/// weights live somewhere else entirely — a served model with wrong weights
+/// rather than an error.
 pub fn load_vindex_config(dir: &Path) -> Result<VindexConfig, VindexError> {
+    detect_generation(dir)?.require(ContainerGeneration::V2)?;
+    load_vindex_config_unchecked(dir)
+}
+
+/// Parse `index.json` as a v1 config without the generation gate.
+///
+/// For callers that have already established the generation — notably the
+/// generation-dispatching open path, which must not pay for a second read.
+pub fn load_vindex_config_unchecked(dir: &Path) -> Result<VindexConfig, VindexError> {
     let text = std::fs::read_to_string(dir.join(INDEX_JSON))?;
     serde_json::from_str(&text).map_err(|e| VindexError::Parse(e.to_string()))
 }

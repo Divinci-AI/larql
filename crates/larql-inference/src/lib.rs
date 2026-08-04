@@ -306,7 +306,7 @@ pub mod prelude {
 /// `KvEngine`, `EngineInfo`, and `DecodeStageSummary` are defined in
 /// this crate's [`kv_engine`](crate::kv_engine) module and re-exported
 /// at the crate root. Concrete engine implementations
-/// (`MarkovResidualEngine`, `UnlimitedContextEngine`, `StandardEngine`,
+/// (`MarkovResidualEngine`, `WindowedCheckpointEngine`, `StandardEngine`,
 /// `NoCacheEngine`, `TurboQuantEngine`, `ApolloEngine`) plus
 /// `EngineKind` and accuracy helpers (`compare_hidden`,
 /// `cosine_similarity`, `kl_divergence`, …) live in the `larql-kv`

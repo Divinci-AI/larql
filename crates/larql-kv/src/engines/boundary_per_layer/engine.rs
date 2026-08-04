@@ -170,9 +170,6 @@ impl BoundaryPerLayerEngine {
             token_id,
             index,
         )
-        .ok_or_else(|| EngineError::BackendFailure {
-            details: "walk::run_decode returned None".into(),
-        })
     }
 }
 
@@ -219,10 +216,7 @@ impl KvEngine for BoundaryPerLayerEngine {
             &self.policy,
             self.window_size,
             token_ids,
-        )
-        .ok_or_else(|| EngineError::BackendFailure {
-            details: "walk::run_prefill returned None".into(),
-        })?;
+        )?;
         self.store = Some(store);
         Ok(hidden)
     }
@@ -249,7 +243,12 @@ impl KvEngine for BoundaryPerLayerEngine {
     }
 
     fn memory_bytes(&self) -> usize {
+        // Store + whichever off-engine home holds the K/V on the coarse
+        // path: the handle (CPU whole-model cache) or the backend itself
+        // (Metal sentinel handle). Mutually exclusive, so summing is safe.
         self.store.as_ref().map_or(0, |s| s.memory_bytes())
+            + self.kv_handle.as_ref().map_or(0, |h| h.resident_bytes())
+            + self.backend.backend_resident_kv_bytes()
     }
 
     fn window_tokens(&self) -> usize {
@@ -258,6 +257,17 @@ impl KvEngine for BoundaryPerLayerEngine {
 
     fn cold_bytes(&self) -> usize {
         self.store.as_ref().map_or(0, |s| s.cold_bytes())
+    }
+
+    fn dispatch_path(&self) -> Option<larql_inference::kv_engine::DispatchPath> {
+        use larql_inference::kv_engine::DispatchPath;
+        // `kv_handle` = the W1-GPU fused path; cleared on fallback to
+        // the dense walk. `store` marks that a prefill has happened.
+        match (self.kv_handle.is_some(), self.store.is_some()) {
+            (true, _) => Some(DispatchPath::Coarse),
+            (false, true) => Some(DispatchPath::PerLayer),
+            (false, false) => None,
+        }
     }
 
     // ── Q4K path ─────────────────────────────────────────────────────────
@@ -961,7 +971,10 @@ mod tests {
             BoundaryPerLayerEngine::new(None, policy, weights.num_layers, &store).unwrap();
         let ffn = larql_inference::ffn::NullFfn;
         let err = engine.prefill(&weights, &ffn, &[]).unwrap_err();
-        assert_eq!(err, larql_inference::kv_engine::EngineError::EmptyPrompt);
+        assert!(matches!(
+            err,
+            larql_inference::kv_engine::EngineError::EmptyPrompt
+        ));
     }
 
     #[test]
@@ -978,7 +991,10 @@ mod tests {
         let err = engine
             .prefill_quant(&weights, &ffn, &index, &[], &*backend)
             .unwrap_err();
-        assert_eq!(err, larql_inference::kv_engine::EngineError::EmptyPrompt);
+        assert!(matches!(
+            err,
+            larql_inference::kv_engine::EngineError::EmptyPrompt
+        ));
     }
 
     #[test]
@@ -994,7 +1010,10 @@ mod tests {
         let err = engine
             .prefill_via_executor(&weights, &exec, &ffn, &[])
             .unwrap_err();
-        assert_eq!(err, larql_inference::kv_engine::EngineError::EmptyPrompt);
+        assert!(matches!(
+            err,
+            larql_inference::kv_engine::EngineError::EmptyPrompt
+        ));
     }
 
     #[test]

@@ -36,6 +36,7 @@ pub mod index;
 pub mod kv_index_impl;
 pub mod patch;
 pub mod quant;
+pub mod runtime;
 pub mod trie;
 pub mod walker;
 // Back-compat alias — the top-level lifecycle dir was renamed

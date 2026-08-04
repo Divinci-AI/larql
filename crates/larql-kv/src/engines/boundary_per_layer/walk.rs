@@ -14,6 +14,7 @@ use larql_inference::attention::{run_attention_with_kv_backend, SharedKV};
 use larql_inference::ffn::FfnBackend;
 use larql_inference::forward::embed_tokens_pub;
 use larql_inference::forward::ple::precompute_per_layer_inputs;
+use larql_inference::kv_engine::EngineError;
 use ndarray::{s, Array2};
 
 use crate::engines::boundary_per_layer::cold_tier::{
@@ -25,6 +26,9 @@ use crate::engines::markov_residual::recompute_kv;
 
 /// Run a full prefill through the dense walk. Returns
 /// `(last_hidden, new_store)` — caller owns the store.
+///
+/// Transactional: the store is built into locals and handed back only on
+/// success, so a refusal leaves an engine's existing store untouched.
 pub(super) fn run_prefill(
     weights: larql_inference::WeightsView,
     ffn: &dyn FfnBackend,
@@ -32,7 +36,7 @@ pub(super) fn run_prefill(
     policy: &BoundaryLayerPolicy,
     window_size: Option<usize>,
     token_ids: &[u32],
-) -> Option<(Array2<f32>, RsStorePerLayer)> {
+) -> Result<(Array2<f32>, RsStorePerLayer), EngineError> {
     let num_layers = weights.num_layers;
     let seq_len = token_ids.len();
     let mut h = embed_tokens_pub(&weights, token_ids);
@@ -43,17 +47,21 @@ pub(super) fn run_prefill(
 
     for layer in 0..num_layers {
         stored.push(h.clone());
-        let (h_post_attn, _k, _v) =
-            run_attention_with_kv_backend(weights, &h, layer, be, None).expect("attention failed");
-        let h_out = crate::engines::layer_ffn_or_moe(
+        let (h_post_attn, _k, _v) = run_attention_with_kv_backend(weights, &h, layer, be, None)
+            .ok_or_else(|| EngineError::BackendFailure {
+                details: format!(
+                    "attention returned None during boundary-per-layer prefill at layer {layer}"
+                ),
+            })?;
+        h = crate::engines::layer_ffn_or_moe(
             weights.canonical(),
             &h_post_attn,
             layer,
             ffn,
             Some(ffn),
             ple_inputs.get(layer),
-        );
-        h = h_out;
+        )
+        .map_err(EngineError::Execution)?;
     }
 
     let mut rs = RsStorePerLayer {
@@ -78,7 +86,9 @@ pub(super) fn run_prefill(
             let codec = policy.codec_for(layer);
             let decoded_overflow = roundtrip(overflow, codec);
             let (k, v) = recompute_kv(weights, &decoded_overflow, layer, 0, backend, None)
-                .expect("cold K/V pre-computation failed");
+                .ok_or_else(|| EngineError::BackendFailure {
+                    details: format!("cold K/V pre-computation returned None at layer {layer}"),
+                })?;
             cold_kv.push((k, v));
             let mut enc = PerLayerEncodedColdLayer::empty(codec, weights.hidden_size);
             enc.append(overflow);
@@ -89,13 +99,24 @@ pub(super) fn run_prefill(
         rs.cold_abs_start = 0;
     }
 
-    Some((last_row(&h), rs))
+    Ok((last_row(&h), rs))
+}
+
+/// A backend stage that declined, as a typed engine failure.
+///
+/// Named once so every decline in the decode walk reads the same and points
+/// at the layer — a bare `None` here used to reach the engine as one
+/// undifferentiated "run_decode returned None".
+fn declined(stage: &str, layer: usize) -> EngineError {
+    EngineError::BackendFailure {
+        details: format!("{stage} returned None during boundary-per-layer decode at layer {layer}"),
+    }
 }
 
 /// Run one decode step through the dense walk, mutating `rs` in place.
 ///
 /// Failure invariant (the reason `rs` is `&mut` and not by-value): on any
-/// `None` return, the canonical state — `stored`, the cold tiers, and
+/// `Err` return, the canonical state — `stored`, the cold tiers, and
 /// `next_position` — is untouched, and `rs.hot_kv` is left `None`. The
 /// hot-K/V cache is a droppable derivative of `stored` (see
 /// `RsStorePerLayer::hot_kv`), so a transient backend failure costs one
@@ -109,7 +130,7 @@ pub(super) fn run_decode(
     rs: &mut RsStorePerLayer,
     token_id: u32,
     index: Option<&larql_vindex::VectorIndex>,
-) -> Option<Array2<f32>> {
+) -> Result<Array2<f32>, EngineError> {
     let num_layers = weights.num_layers;
     let abs_position = rs.next_position;
     let mut h_new = embed_tokens_pub(&weights, &[token_id]);
@@ -216,7 +237,8 @@ pub(super) fn run_decode(
                             abs_position,
                             Some(backend),
                             idx_kv,
-                        )?;
+                        )
+                        .ok_or_else(|| declined("attention", layer))?;
                     *k_buf = new_kv.0;
                     *v_buf = new_kv.1;
                     h
@@ -230,7 +252,8 @@ pub(super) fn run_decode(
             let (k_full, v_full) = if let Some(cold_kv) = &rs.cold_kv {
                 let (k_cold, v_cold) = &cold_kv[layer];
                 let (k_hot, v_hot) =
-                    recompute_kv(weights, h_hot, layer, hot_abs_start, backend, None)?;
+                    recompute_kv(weights, h_hot, layer, hot_abs_start, backend, None)
+                        .ok_or_else(|| declined("hot K/V recompute", layer))?;
                 let c = k_cold.shape()[0];
                 let kv_dim = k_cold.shape()[1];
                 let mut k_combined = Array2::<f32>::zeros((c + s_hot, kv_dim));
@@ -261,7 +284,8 @@ pub(super) fn run_decode(
                 } else {
                     (h_hot.clone(), hot_abs_start)
                 };
-                recompute_kv(weights, &h_full, layer, full_abs_start, backend, None)?
+                recompute_kv(weights, &h_full, layer, full_abs_start, backend, None)
+                    .ok_or_else(|| declined("cold K/V recompute", layer))?
             };
 
             let (h_post_attn, new_kv) =
@@ -273,22 +297,23 @@ pub(super) fn run_decode(
                     abs_position,
                     Some(backend),
                     idx_kv,
-                )?;
+                )
+                .ok_or_else(|| declined("attention", layer))?;
             if cache_eligible {
                 step_new_kv.push(new_kv);
             }
             h_post_attn
         };
 
-        let h_out = crate::engines::layer_ffn_or_moe(
+        h_new = crate::engines::layer_ffn_or_moe(
             weights.canonical(),
             &h_post_attn,
             layer,
             ffn,
             Some(ffn),
             ple_inputs.get(layer),
-        );
-        h_new = h_out;
+        )
+        .map_err(EngineError::Execution)?;
     }
 
     // Amortised O(m) per-row append via ndarray::Array2::push_row.
@@ -356,7 +381,7 @@ pub(super) fn run_decode(
         }
     }
 
-    Some(last_row(&h_new))
+    Ok(last_row(&h_new))
 }
 
 #[cfg(test)]

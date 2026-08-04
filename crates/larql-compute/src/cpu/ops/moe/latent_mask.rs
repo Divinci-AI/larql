@@ -505,4 +505,119 @@ mod tests {
             assert!(!(r > 0.0 && r < 1.0), "r={r} must not enable the probe");
         }
     }
+
+    // ── Stats accumulation ──────────────────────────────────────────────
+    //
+    // `STATS`/`COSTATS` are process-global, and `set_env_override` is
+    // thread-local, so a parallel test cannot own them exclusively. These
+    // assert *structure* — the file was written, it parses, our layer is in
+    // it with a non-zero count — rather than exact totals, which another
+    // test's accumulation would perturb.
+
+    struct EnvGuard;
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            options::clear_fast_path_overrides();
+        }
+    }
+
+    fn tmp(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join("latent-mask-tests");
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join(format!("{name}-{}", std::process::id()))
+    }
+
+    #[test]
+    fn stats_are_not_collected_unless_a_path_is_named() {
+        // The hot path must stay free: no env, no lock, no allocation.
+        let _g = EnvGuard;
+        options::clear_fast_path_overrides();
+        // Nothing to assert but that it does not panic and does not write.
+        record_stats(0, &[true, false, true]);
+        dump_stats();
+    }
+
+    #[test]
+    fn recorded_survivals_reach_the_dumped_file() {
+        let _g = EnvGuard;
+        let path = tmp("stats.txt");
+        let _ = std::fs::remove_file(&path);
+        options::set_env_override(ENV_LATENT_STATS, Some(path.to_str().unwrap()));
+
+        // A layer index no other test uses, so our row is identifiable.
+        const LAYER: usize = 41;
+        record_stats(LAYER, &[true, false, true, false]);
+        record_stats(LAYER, &[true, false, false, true]);
+        dump_stats();
+
+        let body = std::fs::read_to_string(&path).expect("dump_stats must write the file");
+        // `layer chan count` triples; channel 0 survived both calls.
+        let ours: Vec<&str> = body
+            .lines()
+            .filter(|l| l.starts_with(&format!("{LAYER} ")))
+            .collect();
+        assert!(!ours.is_empty(), "our layer must appear: {body:.200}");
+        let chan0 = ours
+            .iter()
+            .find(|l| l.starts_with(&format!("{LAYER} 0 ")))
+            .expect("channel 0 row");
+        let count: u64 = chan0.split_whitespace().nth(2).unwrap().parse().unwrap();
+        assert!(count >= 2, "channel 0 survived twice, got {count}");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_short_row_grows_to_fit_a_wider_mask() {
+        // Layers are discovered as they are first recorded, and a later call
+        // may carry more channels than the first — resizing must preserve the
+        // counts already accumulated rather than reallocating them away.
+        let _g = EnvGuard;
+        let path = tmp("grow.txt");
+        let _ = std::fs::remove_file(&path);
+        options::set_env_override(ENV_LATENT_STATS, Some(path.to_str().unwrap()));
+
+        const LAYER: usize = 43;
+        record_stats(LAYER, &[true, true]);
+        record_stats(LAYER, &[true, false, true, true]);
+        dump_stats();
+
+        let body = std::fs::read_to_string(&path).expect("file");
+        let row0 = body
+            .lines()
+            .find(|l| l.starts_with(&format!("{LAYER} 0 ")))
+            .expect("channel 0");
+        let c0: u64 = row0.split_whitespace().nth(2).unwrap().parse().unwrap();
+        assert!(c0 >= 2, "channel 0 survived both calls, got {c0}");
+        assert!(
+            body.lines().any(|l| l.starts_with(&format!("{LAYER} 3 "))),
+            "the widened row must reach channel 3"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn costats_need_their_own_switch_and_write_a_square_matrix() {
+        let _g = EnvGuard;
+        let stats = tmp("co-stats.txt");
+        let co = tmp("co-pairs.bin");
+        let _ = std::fs::remove_file(&stats);
+        let _ = std::fs::remove_file(&co);
+        options::set_env_override(ENV_LATENT_STATS, Some(stats.to_str().unwrap()));
+        options::set_env_override(ENV_LATENT_COSTATS, Some(co.to_str().unwrap()));
+
+        // Sampled 1-in-N, so drive enough calls that at least one lands.
+        for _ in 0..(COSTATS_SAMPLE_EVERY * 2 + 1) {
+            record_stats(45, &[true, false, true, false]);
+        }
+        dump_stats();
+
+        let bytes = std::fs::read(&co).expect("costats file");
+        assert!(
+            !bytes.is_empty(),
+            "a sampled call must have filled the matrix"
+        );
+        assert_eq!(bytes.len() % 4, 0, "u32 counts, little-endian");
+        let _ = std::fs::remove_file(&stats);
+        let _ = std::fs::remove_file(&co);
+    }
 }

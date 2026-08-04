@@ -2,7 +2,7 @@ use ndarray::Array2;
 
 use crate::attention::SharedKV;
 
-use super::gqa_step::gqa_attention_decode_step;
+use super::gqa_step::gqa_attention_decode_step_windowed;
 use super::q4k_direct::run_attention_block_decode_step_q4k_direct;
 
 /// Decode-step attention with optional GPU-accelerated projections
@@ -152,7 +152,10 @@ pub fn run_attention_block_decode_step_backend(
     };
 
     let softcap = arch.attn_logit_softcapping();
-    let attn_out = gqa_attention_decode_step(
+    // Per-layer sliding window from the shared rule; `None` leaves
+    // this bit-identical to the unwindowed step.
+    let window = crate::forward_overrides::effective_attention_window_for_layer(arch, layer);
+    let attn_out = gqa_attention_decode_step_windowed(
         &q_rope,
         &k_concat,
         &v_concat,
@@ -167,6 +170,7 @@ pub fn run_attention_block_decode_step_backend(
             num_q,
             layer,
         ),
+        window,
     );
 
     let mut attn_projected = dot_proj_gpu(&attn_out, w_o, backend);

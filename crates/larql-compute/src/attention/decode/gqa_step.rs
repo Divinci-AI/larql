@@ -4,6 +4,55 @@ use crate::attention::SharedKV;
 
 use super::dispatch::run_attention_block_decode_step_backend;
 
+/// GQA decode step **with a per-layer sliding window**.
+///
+/// The decode query sits at the newest position, so a window is just the
+/// tail of the cache: keep the last `w` rows of K/V and run the ordinary
+/// step over them. Slicing beats masking here — the masked-out keys are
+/// never read, so a windowed layer gets cheaper rather than merely
+/// producing a different answer.
+///
+/// `window = None`, or a window at least as wide as the cache, is
+/// bit-identical to [`gqa_attention_decode_step`]: the slice is the whole
+/// array and no arithmetic changes.
+///
+/// Resolve `window` through
+/// [`crate::forward_overrides::effective_attention_window_for_layer`] so
+/// the CPU path and the Metal pipeline spec share one rule.
+#[allow(clippy::too_many_arguments)]
+pub fn gqa_attention_decode_step_windowed<S1, S2>(
+    q_new: &Array2<f32>,
+    k_full: &ndarray::ArrayBase<S1, ndarray::Ix2>,
+    v_full: &ndarray::ArrayBase<S2, ndarray::Ix2>,
+    num_q: usize,
+    head_dim: usize,
+    reps: usize,
+    scale: f64,
+    softcap: Option<f32>,
+    sinks: Option<&[f32]>,
+    window: Option<usize>,
+) -> Array2<f32>
+where
+    S1: ndarray::Data<Elem = f32> + Sync,
+    S2: ndarray::Data<Elem = f32> + Sync,
+{
+    let total_len = k_full.shape()[0];
+    let start = match window {
+        Some(w) => total_len.saturating_sub(w),
+        None => 0,
+    };
+    if start == 0 {
+        return gqa_attention_decode_step(
+            q_new, k_full, v_full, num_q, head_dim, reps, scale, softcap, sinks,
+        );
+    }
+    let k_win = k_full.slice(ndarray::s![start.., ..]);
+    let v_win = v_full.slice(ndarray::s![start.., ..]);
+    gqa_attention_decode_step(
+        q_new, &k_win, &v_win, num_q, head_dim, reps, scale, softcap, sinks,
+    )
+}
+
 /// GQA attention for a single decode step.
 ///
 /// `q_new`: `[1, num_q * head_dim]` — Q for the new token only.

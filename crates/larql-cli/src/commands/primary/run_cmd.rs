@@ -38,7 +38,7 @@ use crate::commands::primary::cache;
 /// | `none` | `NoCache` |
 ///
 /// New callers should prefer `--engine SPEC` / `LARQL_KV_ENGINE` instead
-/// — they accept the full engine catalog (MarkovResidual, UnlimitedContext,
+/// — they accept the full engine catalog (MarkovResidual, WindowedCheckpoint,
 /// TurboQuant, Apollo) not just the three legacy cache strategies.
 /// See `crates/larql-inference/docs/specs/kv-engine-unification.md` §6.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -100,7 +100,7 @@ pub struct RunArgs {
     ///
     /// Each value maps to an `EngineKind` internally (see `KvCacheKind`
     /// docs). For the full engine catalog (MarkovResidual,
-    /// UnlimitedContext, TurboQuant, Apollo), use `--engine` instead.
+    /// WindowedCheckpoint, TurboQuant, Apollo), use `--engine` instead.
     #[arg(long, default_value = "standard", value_parser = parse_kv_cache)]
     pub kv_cache: KvCacheKind,
 
@@ -116,7 +116,7 @@ pub struct RunArgs {
     ///   standard:window=1024        — sliding-window K/V
     ///   no-cache                    — full re-forward per step (O(N²))
     ///   markov-rs[:window=N]        — residual-stream replacement
-    ///   unlimited-context:window=N  — per-window K/V checkpoints
+    ///   windowed-checkpoint:window=N  — per-window K/V checkpoints
     ///   turbo-quant[:bits=3|4]      — WHT + Lloyd-Max codec
     ///   apollo:layer=N,coef=F,top_k=K,bos=B — boundary-residual injection (bench-only)
     ///
@@ -568,7 +568,7 @@ fn run_with_moe_shards(
     // `ffn` trait (where `RemoteMoeFfn` hooks the experts): `standard` and
     // `boundary_kv` (which wraps a StandardEngine and adds compressed-residual
     // boundary frames — same dispatch, wire-efficient cold-context). The
-    // compression engines (markov_residual / turbo_quant / unlimited_context /
+    // compression engines (markov_residual / turbo_quant / windowed_checkpoint /
     // boundary_per_layer) route FFN through the backend's fused coarse path, and
     // apollo/no_cache re-forward — none have a remote-expert hook, so they'd
     // silently drop experts. Reject them clearly.
@@ -579,7 +579,7 @@ fn run_with_moe_shards(
             kind,
             larql_kv::EngineKind::Standard { .. }
                 | larql_kv::EngineKind::BoundaryKv { .. }
-                | larql_kv::EngineKind::UnlimitedContext { .. }
+                | larql_kv::EngineKind::WindowedCheckpoint { .. }
                 | larql_kv::EngineKind::MarkovResidual { .. }
                 | larql_kv::EngineKind::MarkovResidualCodec { .. }
                 | larql_kv::EngineKind::TurboQuant { .. }
@@ -587,7 +587,7 @@ fn run_with_moe_shards(
         ) {
             return Err(format!(
                 "`--engine {}` is not supported with remote MoE (--moe-shards). Supported: \
-                 standard, boundary, unlimited-context, markov-rs, markov-residual-codec, \
+                 standard, boundary, windowed-checkpoint, markov-rs, markov-residual-codec, \
                  turbo-quant, boundary-per-layer (they dispatch FFN per-layer through the ffn \
                  trait where experts hook in). `no-cache` / `apollo` re-forward and would \
                  multiply expert round-trips. See larql-kv ROADMAP §\"MoE-aware KV engines (C1)\".",

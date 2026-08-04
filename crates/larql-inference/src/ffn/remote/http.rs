@@ -582,7 +582,7 @@ impl FfnBackend for RemoteWalkBackend {
         &self,
         layer: usize,
         h_post_attn: &Array2<f32>,
-    ) -> Option<Array2<f32>> {
+    ) -> Result<Option<Array2<f32>>, larql_execution::BoxRefusal> {
         let seq_len = h_post_attn.nrows();
         let hidden = h_post_attn.ncols();
         let residual: Vec<f32> = h_post_attn.iter().copied().collect();
@@ -594,20 +594,32 @@ impl FfnBackend for RemoteWalkBackend {
             "moe_layer": true,
         });
         let url = format!("{}{WALK_FFN_PATH}", self.config.base_url);
-        let resp = self.client.post(&url).json(&body).send().ok()?;
+        // Every failure here stays `Ok(None)` — "fall back to local dispatch" —
+        // which is exactly what it meant before the error channel existed.
+        // A transport failure is an execution *attempt* failure, often
+        // retryable, and it is not this layer's place to decide it has become a
+        // semantic refusal. Promoting these to `Err` would change the remote
+        // walk path's behaviour under the cover of a signature migration.
+        let Ok(resp) = self.client.post(&url).json(&body).send() else {
+            return Ok(None);
+        };
         if !resp.status().is_success() {
-            return None;
+            return Ok(None);
         }
-        let v: serde_json::Value = resp.json().ok()?;
-        let floats = v["output"]
-            .as_array()?
+        let Ok(v) = resp.json::<serde_json::Value>() else {
+            return Ok(None);
+        };
+        let Some(entries) = v["output"].as_array() else {
+            return Ok(None);
+        };
+        let floats = entries
             .iter()
             .filter_map(|x| x.as_f64().map(|f| f as f32))
             .collect::<Vec<f32>>();
         if floats.len() != seq_len * hidden {
-            return None;
+            return Ok(None);
         }
-        Array2::from_shape_vec((seq_len, hidden), floats).ok()
+        Ok(Array2::from_shape_vec((seq_len, hidden), floats).ok())
     }
 
     fn name(&self) -> &str {

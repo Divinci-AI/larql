@@ -54,11 +54,11 @@ larql-core-bench:
 	cargo bench -p larql-core --bench graph
 
 larql-core-examples:
-	cargo run -p larql-core --example edge_demo
-	cargo run -p larql-core --example graph_demo
-	cargo run -p larql-core --example algorithm_demo
-	cargo run -p larql-core --example filter_demo
-	cargo run -p larql-core --example serialization_demo
+	cargo run -p larql-demos --example edge_demo
+	cargo run -p larql-demos --example graph_demo
+	cargo run -p larql-demos --example algorithm_demo
+	cargo run -p larql-demos --example filter_demo
+	cargo run -p larql-demos --example serialization_demo
 
 larql-core-coverage:
 	@if ! command -v cargo-llvm-cov >/dev/null 2>&1; then \
@@ -536,8 +536,8 @@ larql-boundary-bench-test:
 	cargo test -p larql-boundary --benches
 
 larql-boundary-examples:
-	cargo run -p larql-boundary --example encode_decode
-	cargo run -p larql-boundary --example gate_decision
+	cargo run -p larql-demos --example encode_decode
+	cargo run -p larql-demos --example gate_decision
 	cargo run -p larql-boundary --example accuracy
 
 larql-boundary-coverage:
