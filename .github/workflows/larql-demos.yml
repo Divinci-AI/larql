@@ -46,6 +46,14 @@ jobs:
         with:
           components: clippy, rustfmt
 
+      # protoc on PATH satisfies the `cfg(windows)` no-op in
+      # `larql-router-protocol`'s build.rs. `larql-demos` depends on
+      # `larql-router-protocol` directly for the server demos.
+      - name: Install protoc (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: choco install protoc -y --no-progress
+
       - name: Cache cargo registry + build artefacts
         uses: actions/cache@v6
         with:
