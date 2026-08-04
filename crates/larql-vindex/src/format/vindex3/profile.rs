@@ -32,13 +32,57 @@ use super::variants::{StoredVariant, VariantCatalogue, VariantDefect};
 pub const PROFILE_EXACT: &str = "exact";
 
 /// A named selection over the variant catalogue.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// # Reads a bare name as well as an object
+///
+/// A profile used to serialise as just its name (`"profiles": ["exact"]`).
+/// Containers written that way still load, deserialising to a profile that
+/// selects nothing — which is exactly what a bare name meant.
+///
+/// This matters because the schema version cannot catch it: both spellings are
+/// schema 3, so §12.1's version dispatch sees no disagreement and the failure
+/// surfaces as `invalid type: map, expected a string` from deep inside serde,
+/// naming neither the field nor the container. The generation discriminator
+/// guards *between* generations; nothing guards within one, and the VINDEX3
+/// ABI is explicitly not frozen yet.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Profile {
     pub name: String,
     /// Region set → variant name. Absent means "take the baseline", so this is
     /// empty for a profile that wants everything canonical.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub selects: BTreeMap<String, String>,
+}
+
+impl<'de> Deserialize<'de> for Profile {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        /// The object form, with the same field defaults the derive gave it.
+        #[derive(Deserialize)]
+        struct AsObject {
+            name: String,
+            #[serde(default)]
+            selects: BTreeMap<String, String>,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Either {
+            /// Pre-selection spelling: the profile was only ever a name.
+            Name(String),
+            Object(AsObject),
+        }
+
+        Ok(match Either::deserialize(d)? {
+            Either::Name(name) => Profile {
+                name,
+                selects: BTreeMap::new(),
+            },
+            Either::Object(o) => Profile {
+                name: o.name,
+                selects: o.selects,
+            },
+        })
+    }
 }
 
 impl Profile {

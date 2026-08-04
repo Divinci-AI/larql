@@ -193,3 +193,36 @@ fn a_profile_without_selects_still_deserialises() {
     let p: Profile = serde_json::from_str(r#"{"name":"exact"}"#).unwrap();
     assert_eq!(p, Profile::exact());
 }
+
+// ── Reading the pre-selection spelling ──────────────────────────────────
+
+#[test]
+fn a_bare_profile_name_still_deserialises() {
+    // `"profiles": ["exact"]` is how every container written before profiles
+    // could select was spelled. Both are schema 3, so version dispatch cannot
+    // tell them apart — this is the only thing that keeps them readable.
+    let p: Profile = serde_json::from_str(r#""exact""#).unwrap();
+    assert_eq!(p, Profile::exact());
+    assert!(p.selects.is_empty(), "a bare name selects nothing");
+}
+
+#[test]
+fn a_list_mixing_both_spellings_loads() {
+    let list: Vec<Profile> = serde_json::from_str(
+        r#"["exact", {"name":"routed-mxfp4","selects":{"layer.12.routed.gate_up":"native-mxfp4"}}]"#,
+    )
+    .unwrap();
+    assert_eq!(list.len(), 2);
+    assert_eq!(list[0], Profile::exact());
+    assert_eq!(list[1].name, "routed-mxfp4");
+    assert_eq!(list[1].selects.len(), 1);
+}
+
+#[test]
+fn the_object_form_still_round_trips() {
+    // The compatibility path must not cost the real one: writing stays the
+    // object form, and reading it back must be unchanged.
+    let before = Profile::new("routed-mxfp4").selecting(GATE_UP, MXFP4);
+    let after: Profile = serde_json::from_str(&serde_json::to_string(&before).unwrap()).unwrap();
+    assert_eq!(before, after);
+}
