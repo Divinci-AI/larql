@@ -62,6 +62,8 @@ impl Vindex3Container {
 
         let manifest_raw = std::fs::read_to_string(root.join(&index.moe_manifest))
             .map_err(|e| contextual_io(&index.moe_manifest, e))?;
+        // Deserialises *and* refuses a manifest that is not well formed —
+        // duplicate layer, unsupported schema version, router without scores.
         let manifest = MoeManifest::parse(&manifest_raw)?;
 
         super::profile::resolve_all(&index)

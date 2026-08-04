@@ -206,3 +206,81 @@ fn json_missing_a_required_field_is_refused() {
     // `layers` is not optional; a manifest without it is not an empty manifest.
     assert!(MoeManifest::parse(r#"{"schema_version": 1}"#).is_err());
 }
+
+// ── parse refuses, parse_unchecked describes ────────────────────────────
+//
+// The defect vocabulary below was fully built and fully tested but had **no
+// production caller**: `parse` only deserialised, while a comment on the
+// container's open path asserted it refused a malformed manifest. These pin
+// the two halves apart so the claim and the code cannot drift again.
+
+#[test]
+fn parse_accepts_a_well_formed_manifest() {
+    let m = MoeManifest::new(vec![layer_at(0, "gated-mlp-v1")]);
+    let json = serde_json::to_string(&m).unwrap();
+    assert_eq!(MoeManifest::parse(&json).unwrap(), m);
+}
+
+#[test]
+fn parse_refuses_a_duplicate_layer_naming_it() {
+    let m = MoeManifest::new(vec![
+        layer_at(0, "gated-mlp-v1"),
+        layer_at(0, "gated-mlp-v1"),
+    ]);
+    let json = serde_json::to_string(&m).unwrap();
+    let err = MoeManifest::parse(&json).expect_err("a duplicate layer must not parse");
+    assert!(
+        format!("{err}").contains("declared more than once"),
+        "{err}"
+    );
+}
+
+#[test]
+fn parse_refuses_a_manifest_from_a_newer_schema() {
+    // The §12.1 rule applied to the manifest, not just index.json: a document
+    // this binary cannot interpret is refused by name rather than read with
+    // this binary's field assumptions.
+    let mut m = MoeManifest::new(vec![layer_at(0, "gated-mlp-v1")]);
+    m.schema_version = MOE_MANIFEST_SCHEMA_VERSION + 1;
+    let json = serde_json::to_string(&m).unwrap();
+    let err = MoeManifest::parse(&json).expect_err("a future schema must not parse");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains(&(MOE_MANIFEST_SCHEMA_VERSION + 1).to_string()),
+        "{msg}"
+    );
+}
+
+#[test]
+fn parse_reports_every_defect_not_the_first() {
+    let mut m = MoeManifest::new(vec![
+        layer_at(0, "gated-mlp-v1"),
+        layer_at(0, "gated-mlp-v1"),
+    ]);
+    m.layers[1].layer = 1;
+    m.layers[0].routed_bank.storage = String::new();
+    m.layers[1].routed_bank.storage = String::new();
+    let json = serde_json::to_string(&m).unwrap();
+    let err = MoeManifest::parse(&json).expect_err("two broken layers must not parse");
+    let msg = format!("{err}");
+    assert!(
+        msg.matches("layer").count() >= 2,
+        "one pass must name both: {msg}"
+    );
+}
+
+#[test]
+fn parse_unchecked_still_yields_a_broken_manifest_to_describe() {
+    // `larql verify`'s job is to report what is wrong with a container, which
+    // it cannot do if loading refuses first.
+    let m = MoeManifest::new(vec![
+        layer_at(0, "gated-mlp-v1"),
+        layer_at(0, "gated-mlp-v1"),
+    ]);
+    let json = serde_json::to_string(&m).unwrap();
+    let loaded = MoeManifest::parse_unchecked(&json).expect("unchecked load must succeed");
+    assert!(matches!(
+        loaded.defects().as_slice(),
+        [ManifestDefect::DuplicateLayer { layer: 0 }]
+    ));
+}

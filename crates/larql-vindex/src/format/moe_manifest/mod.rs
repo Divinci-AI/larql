@@ -63,7 +63,43 @@ impl MoeManifest {
         }
     }
 
+    /// Deserialise **and refuse** a manifest that is not well formed.
+    ///
+    /// Both halves matter. Deserialisation only proves the JSON has the right
+    /// shape; [`Self::defects`] is what proves the document means anything —
+    /// that no layer is declared twice, that a router has scores, that a
+    /// selection fits its bank. Those are the failures that would otherwise
+    /// surface far downstream as a confusing bind error, with nothing pointing
+    /// back at the manifest that caused them.
+    ///
+    /// The schema version is part of it: a manifest from a newer schema is
+    /// refused by name rather than read with this binary's field assumptions,
+    /// which is the same rule §12.1 applies to `index.json`.
+    ///
+    /// Reports every defect, so one repair pass clears them all.
     pub fn parse(json: &str) -> Result<Self, crate::VindexError> {
+        let manifest: Self =
+            serde_json::from_str(json).map_err(|e| crate::VindexError::Parse(e.to_string()))?;
+        let defects = manifest.defects();
+        if !defects.is_empty() {
+            return Err(crate::VindexError::Parse(format!(
+                "MoE manifest is not well formed: {}",
+                defects
+                    .iter()
+                    .map(|d| d.to_string())
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            )));
+        }
+        Ok(manifest)
+    }
+
+    /// Deserialise without checking well-formedness.
+    ///
+    /// For tools that must *describe* a broken manifest rather than refuse it
+    /// — `larql verify` reporting what is wrong with one is the case that
+    /// needs it. Serving paths take [`Self::parse`].
+    pub fn parse_unchecked(json: &str) -> Result<Self, crate::VindexError> {
         serde_json::from_str(json).map_err(|e| crate::VindexError::Parse(e.to_string()))
     }
 

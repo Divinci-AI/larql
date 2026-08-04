@@ -204,32 +204,26 @@ mod tests {
     }
 
     #[test]
-    fn an_unimplemented_programme_is_named_rather_than_guessed() {
+    fn an_unimplemented_programme_is_refused_at_open_not_left_to_verify() {
+        // This test used to accept either outcome — open refusing, or open
+        // tolerating and verify catching it. That is what let a false comment
+        // survive: `parse` did not in fact refuse, and nothing failed. Assert
+        // the guarantee we actually want, so the weaker one cannot come back.
         let mut spec = fixture_a_spec();
         spec.manifest.layers[0].routed_bank.programme = "no-such-programme-v9".into();
-        // `MoeManifest::parse` refuses this at open time, which is the
-        // stronger guarantee: it never reaches verification.
         let dir = std::env::temp_dir().join(format!("vindex3-badprog-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         write_container(&dir, &spec).expect("write");
         let opened = Vindex3Container::open(&dir);
         let _ = std::fs::remove_dir_all(&dir);
-        match opened {
-            Ok(c) => {
-                // If open tolerates it, verify must not.
-                let defects = c.verify();
-                assert!(
-                    defects
-                        .iter()
-                        .any(|d| matches!(d, ContainerDefect::UnknownProgramme { .. })),
-                    "an unknown programme must be reported, got {defects:?}"
-                );
-            }
-            Err(e) => assert!(
-                format!("{e}").contains("no-such-programme-v9"),
-                "the refusal must name the programme: {e}"
-            ),
-        }
+
+        let err = opened
+            .err()
+            .expect("a manifest naming an unimplemented programme must not open");
+        assert!(
+            format!("{err}").contains("no-such-programme-v9"),
+            "the refusal must name the programme: {err}"
+        );
     }
 
     /// Write a container from `spec` into a private dir and verify it.
