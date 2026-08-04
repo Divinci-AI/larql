@@ -689,6 +689,8 @@ fn run_predict_q4k_remote(
     );
 
     let start = Instant::now();
+    // A refusal from the shards ends the command. Printing predictions built
+    // without the layer that refused would report a walk the model never ran.
     let result = larql_inference::vindex::predict_kquant_with_ffn(
         weights,
         tokenizer,
@@ -696,7 +698,8 @@ fn run_predict_q4k_remote(
         args.predict_top_k,
         &index,
         &remote,
-    );
+    )
+    .map_err(|refusal| format!("remote FFN refused ({}): {refusal}", refusal.kind()))?;
     let elapsed = start.elapsed();
 
     print_predictions("walk (q4k + ffn remote)", &result.predictions, verbose);

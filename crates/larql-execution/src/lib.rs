@@ -78,8 +78,8 @@ impl RefusalKind {
     /// Every kind, so a consumer sweeping them cannot silently narrow.
     pub const ALL: [Self; 3] = [Self::Residency, Self::Unsupported, Self::BindingDefect];
 
-    /// Snake case, matching the sibling  names it is printed beside
-    /// (, ) — one table, one convention.
+    /// Snake case, matching the sibling outcome names it is printed beside
+    /// (`ok`, `declined`) — one table, one convention.
     pub const fn name(self) -> &'static str {
         match self {
             Self::Residency => "residency",
