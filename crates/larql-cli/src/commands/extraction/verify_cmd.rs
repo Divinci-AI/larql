@@ -84,7 +84,9 @@ pub fn run(args: VerifyArgs) -> Result<(), Box<dyn std::error::Error>> {
 /// and folding it in would make routine verification cost a forward pass.
 fn verify_v3(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("Verifying: {} (VINDEX3, structural)", path.display());
-    let container = larql_vindex::format::vindex3::Vindex3Container::open(path)?;
+    // Verify reports what is wrong, which it cannot do with a manifest it
+    // refused to load — the defects printed below are the output.
+    let container = larql_vindex::format::vindex3::Vindex3Container::open_unchecked(path)?;
 
     println!(
         "  index.json ......... OK (schema {})",

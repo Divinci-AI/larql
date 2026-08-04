@@ -39,6 +39,15 @@ pub struct Vindex3Container {
     segments: HashMap<String, Vec<u8>>,
 }
 
+/// Whether opening refuses a malformed manifest or loads it to be described.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ManifestPolicy {
+    /// Serving: a manifest that is not well formed cannot be bound.
+    Refuse,
+    /// Diagnosis: load it anyway so a tool can say what is wrong with it.
+    Describe,
+}
+
 impl Vindex3Container {
     /// Open `root`, refusing anything that is not a VINDEX3 container.
     ///
@@ -46,6 +55,23 @@ impl Vindex3Container {
     /// name rather than producing a confusing parse failure three fields into
     /// a schema it was never written against (spec §12.1).
     pub fn open(root: &Path) -> Result<Self, VindexError> {
+        Self::open_with(root, ManifestPolicy::Refuse)
+    }
+
+    /// Open without refusing a manifest that is not well formed.
+    ///
+    /// For tools whose job is to *describe* a broken container rather than
+    /// serve it: `larql verify` cannot report what is wrong with a manifest it
+    /// refused to load. Serving paths take [`Self::open`].
+    ///
+    /// The generation, the index and the profiles are still checked — those
+    /// are what make the directory a VINDEX3 container at all, and a tool that
+    /// skipped them would be describing something it had not identified.
+    pub fn open_unchecked(root: &Path) -> Result<Self, VindexError> {
+        Self::open_with(root, ManifestPolicy::Describe)
+    }
+
+    fn open_with(root: &Path, manifest_policy: ManifestPolicy) -> Result<Self, VindexError> {
         match detect_generation(root)? {
             ContainerGeneration::V3 => {}
             ContainerGeneration::V2 => {
@@ -64,7 +90,10 @@ impl Vindex3Container {
             .map_err(|e| contextual_io(&index.moe_manifest, e))?;
         // Deserialises *and* refuses a manifest that is not well formed —
         // duplicate layer, unsupported schema version, router without scores.
-        let manifest = MoeManifest::parse(&manifest_raw)?;
+        let manifest = match manifest_policy {
+            ManifestPolicy::Refuse => MoeManifest::parse(&manifest_raw)?,
+            ManifestPolicy::Describe => MoeManifest::parse_unchecked(&manifest_raw)?,
+        };
 
         super::profile::resolve_all(&index)
             .map_err(|e| VindexError::Parse(format!("{INDEX_JSON}: {e}")))?;

@@ -226,6 +226,36 @@ mod tests {
         );
     }
 
+    #[test]
+    fn an_unimplemented_programme_is_describable_even_though_open_refuses_it() {
+        // The two halves of the same guarantee. `open` refuses the container
+        // so it can never be served; `open_unchecked` still loads it so
+        // `larql verify` can say *why*. Without the second, the refusal is
+        // correct and unactionable — and `ContainerDefect::UnknownProgramme`
+        // becomes unreachable, which is how this arm lost its coverage.
+        let mut spec = fixture_a_spec();
+        spec.manifest.layers[0].routed_bank.programme = "no-such-programme-v9".into();
+        let dir = std::env::temp_dir().join(format!("vindex3-describe-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        write_container(&dir, &spec).expect("write");
+
+        let refused = Vindex3Container::open(&dir);
+        let described = Vindex3Container::open_unchecked(&dir);
+        let defects = described.as_ref().map(|c| c.verify());
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(refused.is_err(), "serving must refuse it");
+        let defects = defects.expect("describing must still load it");
+        assert!(
+            defects.iter().any(|d| matches!(
+                d,
+                ContainerDefect::UnknownProgramme { programme, .. }
+                    if programme == "no-such-programme-v9"
+            )),
+            "verify must name the programme: {defects:?}"
+        );
+    }
+
     /// Write a container from `spec` into a private dir and verify it.
     fn verify_spec(
         tag: &str,
