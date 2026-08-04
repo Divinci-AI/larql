@@ -448,10 +448,20 @@ cache is windowed at capacity and eviction has already discarded a row.
 `NoExpertSeam` (apollo, refusing the architecture with an executing route, so
 the refusal provably comes from the engine and not the route).
 
-**2. Variant-selection refusal.** Closes V2-0 outright.
-`Vindex3Index::declares_profile` is a name check; §9.1 wants a profile that
-selects an absent variant to fail naming the region set, the requested variant
-and the variants physically present. Self-contained — no new execution path.
+**2. Variant-selection refusal. CLOSED 2026-08-04.** `index.variants`
+catalogues each region set's present variants and its baseline; a `Profile`
+selects per region set, and `select_profile` refuses an absent one naming the
+region set, the request and what is present. `Vindex3Container::open` resolves
+**every** declared profile between the index parse and the segment reads —
+pinned by deleting the segment files and asserting the error still names the
+variant, since a late gate would name a missing file instead.
+`declares_profile` stays, documented as a name check only.
+
+*Ceiling:* the refusal is real; **steering is not exercised end to end.** No
+writer emits a multi-variant container yet (`ContainerSpec` has no variant
+field) and `BankRef.storage` still names storage directly, so a selection does
+not yet change which bytes the runtime binds. That wiring belongs with the
+first real pack — the natural companion to item 4.
 
 **3. WALK/DESCRIBE parity.** Closes V2-1 except shared banks. Gate KNN over
 in-place bank regions must return identical top-K to a v1-style extracted
