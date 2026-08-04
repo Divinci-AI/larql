@@ -189,8 +189,18 @@ mod tests {
         let mut sorted = ALL;
         sorted.sort();
         assert_eq!(sorted, ALL);
+        // Every adjacent link, named. `Ord` is derived, so the lattice is the
+        // *declaration order* — and the fold is a `min` over it. A variant
+        // moved one place would silently invert an authority comparison, and
+        // `sorted == ALL` alone cannot catch that, because reordering the enum
+        // and this list together keeps it passing. In particular
+        // source-equivalent (lossless re-encoding) must outrank
+        // numerically-approximate (lossy), which is the pair most easily read
+        // the wrong way round.
         assert!(Fidelity::SourceExact > Fidelity::SourceEquivalent);
+        assert!(Fidelity::SourceEquivalent > Fidelity::NumericallyApproximate);
         assert!(Fidelity::NumericallyApproximate > Fidelity::StructurallyApproximate);
+        assert!(Fidelity::StructurallyApproximate > Fidelity::AnalysisOnly);
     }
 
     #[test]
