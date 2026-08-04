@@ -468,10 +468,27 @@ in-place bank regions must return identical top-K to a v1-style extracted
 `gate_vectors.bin` control on fixture A. This is the row that keeps "the model
 IS the database" true of VINDEX3 rather than only of VINDEX2.
 
-**4. A real Gemma layer as a VINDEX3 container** (container ladder c8/c9). The
-first real model that *is* a VINDEX3 container rather than one bound over
-VINDEX2 bytes. c8 is one layer; c9 is all of them, at which point `extract`
-gaining a VINDEX3 mode becomes a question rather than a violation.
+**4. A real Gemma layer as a VINDEX3 container** (container ladder c8/c9).
+**c8 CLOSED 2026-08-04**, c9 open. `format/vindex3/import.rs` imports one real
+MoE layer verbatim — no transcode, no requantise, no repack — and
+`examples/vindex3_import_gemma_layer.rs` drives it end to end.
+
+Measured on `gemma4-26b-a4b.vindex` (the same index the parity rungs use),
+layer 0: hidden 2816, **128 experts, top-8, intermediate 704 semantic over 768
+stored**, written as a 421 MB VINDEX3 container that reopens from disk,
+verifies with no structural defects, and returns **256 of 256 regions
+byte-identical** to the VINDEX2 source. `larql show` reports it as
+`VINDEX3 (index.json schema 3) ... bindable (no defects)`.
+
+*Ceiling.* This licenses "these regions survive the round trip unchanged and
+the container is bindable". It does **not** license "Gemma runs from VINDEX3":
+the execution comparison is `vindex3_gemma_layer_parity`'s and still runs over
+VINDEX2 bytes — what c8 adds is that those are demonstrably the same bytes.
+
+c9 is all layers, at which point `extract` gaining a VINDEX3 mode becomes a
+question rather than a violation. `extract` writes VINDEX2 today and has no V3
+path at all (§12.1 gates the flip on the ABI freezing *and* the E0
+preservation matrix passing).
 
 **Not on the critical path, but adjacent and cheap to start: the continuation-
 state intervention harness.** `larql-kv` already owns incremental decode with
