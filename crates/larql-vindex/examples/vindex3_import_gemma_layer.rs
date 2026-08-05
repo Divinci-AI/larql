@@ -88,7 +88,9 @@ fn main() -> Result<(), String> {
         experts_down: moe.experts_down.clone(),
         format: region_format_for(moe.expert_data_format)?,
         hidden_size: hidden,
-        stored_intermediate: stored,
+        // gate_up is never padded; only down is. See `MoeLayerSource`.
+        gate_up_stored_intermediate: semantic,
+        down_stored_intermediate: stored,
         semantic_intermediate: semantic,
         top_k: moe.top_k as u32,
     };
@@ -162,20 +164,11 @@ fn main() -> Result<(), String> {
 
 /// Map the source's quantisation to the region format that describes it.
 ///
-/// Refuses rather than guesses: a format this container cannot name is one a
-/// reader could not interpret, and silently labelling it something else is the
-/// transcode this whole module exists to avoid.
+/// Thin wrapper over the importer's own mapping so both drivers agree by
+/// construction — two copies of this table could drift, and a drift here is a
+/// mislabelled region rather than a visible error.
 fn region_format_for(
     q: larql_compute::QuantFormat,
 ) -> Result<larql_vindex::format::lyrw2::region_format::RegionFormat, String> {
-    use larql_compute::QuantFormat;
-    use larql_vindex::format::lyrw2::region_format::RegionFormat;
-    match q {
-        QuantFormat::Q4_K => Ok(RegionFormat::Q4K),
-        QuantFormat::F32 => Ok(RegionFormat::F32),
-        other => Err(format!(
-            "expert format {other:?} has no VINDEX3 region format yet — import \
-             would have to transcode, which the container forbids"
-        )),
-    }
+    larql_vindex::format::vindex3::import::region_format_for(q).map_err(|e| e.to_string())
 }

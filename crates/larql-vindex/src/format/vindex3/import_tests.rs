@@ -19,8 +19,12 @@ const EXPERTS: usize = 3;
 const TOP_K: u32 = 2;
 
 /// Distinct, position-dependent bytes so a wrong offset cannot pass.
+///
+/// Sized at the **semantic** width: gate_up is never padded (only down is), so
+/// a fixture padding both equally could not distinguish a correct importer
+/// from one that describes gate_up using down's stored width.
 fn gate_up_bytes(expert: usize) -> Vec<u8> {
-    let n = (STORED_INTER * 2 * HIDDEN) as usize * 4;
+    let n = (SEMANTIC_INTER * 2 * HIDDEN) as usize * 4;
     (0..n).map(|i| (expert * 31 + i) as u8).collect()
 }
 
@@ -48,7 +52,8 @@ fn source(o: &Owned) -> MoeLayerSource<'_> {
         experts_down: o.down.iter().map(|v| v.as_slice()).collect(),
         format: RegionFormat::F32,
         hidden_size: HIDDEN,
-        stored_intermediate: STORED_INTER,
+        gate_up_stored_intermediate: SEMANTIC_INTER,
+        down_stored_intermediate: STORED_INTER,
         semantic_intermediate: SEMANTIC_INTER,
         top_k: TOP_K,
     }
@@ -238,5 +243,67 @@ fn a_semantic_width_wider_than_the_stored_one_is_refused() {
     let staging = tempdir().unwrap();
     let err = segment_bytes_for_layer(&src, &staging.path().join("s.lyrw"))
         .expect_err("a widening view must not import");
-    assert!(format!("{err}").contains("exceeds the stored"), "{err}");
+    let msg = format!("{err}");
+    // The refusal names which region it is too wide for, because the two
+    // regions carry different stored widths and "the stored one" is ambiguous.
+    assert!(msg.contains("exceeds the"), "{msg}");
+    assert!(
+        msg.contains("gate_up") || msg.contains("down"),
+        "the refusal must name the region whose stored width was exceeded: {msg}"
+    );
+}
+
+#[test]
+fn each_region_is_declared_at_its_own_stored_width() {
+    // The defect this pins: `gate_up` and `down` do not share a stored width.
+    // gate_up is `[2 x inter, hidden]` and never padded; down is
+    // `[hidden, inter]` with inter padded to the next super-block. Describing
+    // both with down's width over-declares gate_up by the padding — and
+    // nothing downstream catches it, because regions are copied verbatim (so
+    // the declared shape never enters the byte length) and `verify` checks
+    // structure rather than shape-against-length.
+    let o = owned();
+    let src = source(&o);
+    assert_ne!(
+        src.gate_up_stored_intermediate, src.down_stored_intermediate,
+        "the fixture must exercise the asymmetry or this test proves nothing"
+    );
+
+    let staging = tempdir().unwrap();
+    let path = staging.path().join("s.lyrw");
+    let bytes = segment_bytes_for_layer(&src, &path).unwrap();
+    let reader = Lyrw2Reader::parse(&bytes).unwrap();
+
+    let schemas = reader.schemas_for(0).expect("bank 0 has schemas");
+    let gate_up = schemas
+        .iter()
+        .find(|s| s.role == RegionRole::GateUpFused)
+        .expect("a gate_up schema");
+    let down = schemas
+        .iter()
+        .find(|s| s.role == RegionRole::Down)
+        .expect("a down schema");
+
+    assert_eq!(
+        gate_up.rows,
+        SEMANTIC_INTER * 2,
+        "gate_up must be declared at its own (unpadded) width"
+    );
+    assert_eq!(gate_up.cols, HIDDEN);
+    assert_eq!(down.rows, HIDDEN);
+    assert_eq!(
+        down.cols, STORED_INTER,
+        "down must be declared at its own (padded) width"
+    );
+
+    // And the declaration must match what is actually there.
+    let region = reader
+        .region_bytes(0, 0, RegionRole::GateUpFused)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        region.len(),
+        (gate_up.rows * gate_up.cols) as usize * 4,
+        "declared gate_up shape does not account for the region's bytes"
+    );
 }

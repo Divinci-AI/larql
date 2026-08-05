@@ -73,10 +73,21 @@ pub struct MoeLayerSource<'a> {
     pub format: RegionFormat,
     /// Residual width entering the layer.
     pub hidden_size: u32,
-    /// Per-expert intermediate width, as **stored** — Gemma pads this, and the
-    /// padded extent is what the bytes actually contain. The semantic width is
-    /// a view over it, recorded by the manifest's `expert_dims`, not here.
-    pub stored_intermediate: u32,
+    /// Intermediate width as stored in the **gate/up** region.
+    ///
+    /// Separate from [`Self::down_stored_intermediate`] because the two are
+    /// genuinely different on Gemma, and describing them with one number
+    /// over-declares the gate/up region. `gate_up` is `[2 × inter, hidden]`
+    /// and is *never* padded — `hidden` is already a 256-multiple, so Q4_K
+    /// quantises it cleanly — while `down` is `[hidden, inter]` with `inter`
+    /// padded up to the next super-block (704 → 768 on `gemma4-26b-a4b`).
+    /// See `larql_compute::cpu::ops::moe::forward`, which states both.
+    pub gate_up_stored_intermediate: u32,
+    /// Intermediate width as stored in the **down** region, padding included.
+    ///
+    /// This is the extent a kernel contracts over, so it is also the bank
+    /// descriptor's `intermediate_dim`.
+    pub down_stored_intermediate: u32,
     /// Semantic intermediate width the operation means.
     pub semantic_intermediate: u32,
     /// Experts activated per token.
@@ -108,12 +119,17 @@ impl MoeLayerSource<'_> {
                 self.num_experts()
             ));
         }
-        if self.semantic_intermediate > self.stored_intermediate {
-            return refuse(format!(
-                "semantic intermediate {} exceeds the stored {} — a view can \
-                 narrow the stored extent, never widen it",
-                self.semantic_intermediate, self.stored_intermediate
-            ));
+        for (which, stored) in [
+            ("gate_up", self.gate_up_stored_intermediate),
+            ("down", self.down_stored_intermediate),
+        ] {
+            if self.semantic_intermediate > stored {
+                return refuse(format!(
+                    "semantic intermediate {} exceeds the {which} region's stored \
+                     {stored} — a view can narrow the stored extent, never widen it",
+                    self.semantic_intermediate
+                ));
+            }
         }
         // Ragged expert slices mean the source's own layout is inconsistent;
         // importing them would bake that into a container that then fails at
@@ -138,15 +154,24 @@ impl MoeLayerSource<'_> {
     }
 }
 
-/// Write `source`'s regions into one LYRW v2 segment, verbatim.
+/// Write `source`'s regions into one LYRW v2 segment file at `dest`, verbatim.
 ///
-/// `staging` is where the writer builds the file; the bytes are read back and
-/// returned, so the caller decides where the container finally lives.
-pub fn segment_bytes_for_layer(
+/// The bytes are streamed region by region and never held whole, so peak memory
+/// is one expert's slice regardless of how large the layer is. That matters at
+/// c9: a 26B layer is ~421 MB, and materialising thirty of them to describe a
+/// model would cost more RAM than loading the model did.
+///
+/// Parent directories are created — a segment key is a *path* (`routed/…`),
+/// composed rather than globbed (§12.1), so its directory is part of the key's
+/// meaning rather than something the caller should have to anticipate.
+pub fn write_segment_file(
     source: &MoeLayerSource<'_>,
-    staging: &std::path::Path,
-) -> Result<Vec<u8>, VindexError> {
+    dest: &std::path::Path,
+) -> Result<(), VindexError> {
     source.check()?;
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent).map_err(VindexError::Io)?;
+    }
     let experts = source.num_experts();
 
     let bank = BankDescriptor {
@@ -154,21 +179,26 @@ pub fn segment_bytes_for_layer(
         kind: BankKind::Routed,
         num_entries: experts,
         input_dim: source.hidden_size,
-        intermediate_dim: source.stored_intermediate,
+        intermediate_dim: source.down_stored_intermediate,
         output_dim: source.hidden_size,
         region_schema_count: REGIONS_PER_EXPERT,
         browse: BrowseMode::None,
     };
 
-    // Shapes are the **stored** ones. `gate_up` is one fused range of
-    // 2 x intermediate rows; `down` contracts the intermediate back to hidden.
+    // Shapes are the **stored** ones, and the two regions do not share a
+    // stored width. `gate_up` is one fused range of 2 x its own intermediate
+    // rows; `down` contracts its own (padded) intermediate back to hidden.
+    // Using one number for both over-declares gate_up by the padding, which
+    // nothing downstream would catch: regions are copied verbatim, so the
+    // declared shape never enters the byte length, and `verify` checks
+    // structure rather than shape-against-length.
     let schemas = vec![
         RegionSchema::unpaired(
             SCHEMA_GATE_UP,
             RegionRole::GateUpFused,
             source.format,
             Packing::RowMajor,
-            source.stored_intermediate * 2,
+            source.gate_up_stored_intermediate * 2,
             source.hidden_size,
         ),
         RegionSchema::unpaired(
@@ -177,12 +207,12 @@ pub fn segment_bytes_for_layer(
             source.format,
             Packing::RowMajor,
             source.hidden_size,
-            source.stored_intermediate,
+            source.down_stored_intermediate,
         ),
     ];
 
     let plan = Lyrw2Plan::single_segment(source.layer, bank, schemas);
-    let mut writer = Lyrw2Writer::create(staging, plan)
+    let mut writer = Lyrw2Writer::create(dest, plan)
         .map_err(|e| VindexError::Parse(format!("create LYRW v2 writer: {e}")))?;
 
     // Entry order is (expert, then schema), matching the plan's declaration.
@@ -196,8 +226,20 @@ pub fn segment_bytes_for_layer(
     }
     writer
         .finish()
-        .map_err(|e| VindexError::Parse(format!("finish LYRW v2 segment: {e}")))?;
+        .map_err(|e| VindexError::Parse(format!("finish LYRW v2 segment: {e}")))
+}
 
+/// Write `source`'s regions into one LYRW v2 segment, verbatim, and return them.
+///
+/// `staging` is where the writer builds the file; the bytes are read back and
+/// returned, so the caller decides where the container finally lives. This is
+/// the one-layer (c8) shape — it costs a full copy of the layer in RAM, which
+/// is why [`write_segment_file`] exists for the all-layer path.
+pub fn segment_bytes_for_layer(
+    source: &MoeLayerSource<'_>,
+    staging: &std::path::Path,
+) -> Result<Vec<u8>, VindexError> {
+    write_segment_file(source, staging)?;
     std::fs::read(staging).map_err(VindexError::Io)
 }
 
@@ -273,6 +315,24 @@ pub fn import_one_layer(
 /// Segment key for a routed layer. Composed, never globbed (§12.1).
 pub fn routed_storage_key(layer: u32) -> String {
     format!("routed/layer_{layer:03}")
+}
+
+/// Map a source's expert quantisation to the region format that describes it.
+///
+/// Refuses rather than guesses. A format this container cannot name is one a
+/// reader could not interpret, and labelling it as something else would be the
+/// silent transcode this module exists to prevent — the failure would surface
+/// as wrong numbers at execution, not as an error at import.
+pub fn region_format_for(q: larql_compute::QuantFormat) -> Result<RegionFormat, VindexError> {
+    use larql_compute::QuantFormat;
+    match q {
+        QuantFormat::Q4_K => Ok(RegionFormat::Q4K),
+        QuantFormat::F32 => Ok(RegionFormat::F32),
+        other => Err(VindexError::Parse(format!(
+            "expert format {other:?} has no VINDEX3 region format yet — import \
+             would have to transcode, which the container forbids"
+        ))),
+    }
 }
 
 #[cfg(test)]
