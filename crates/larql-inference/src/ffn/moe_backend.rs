@@ -54,6 +54,71 @@ pub enum MoeBackendError {
     Remote(#[from] RemoteMoeError),
     #[error("bound expert execution failed: {0}")]
     Bound(#[from] larql_vindex::runtime::ExecutionError),
+    /// A routed operand could not be sourced from its VINDEX3 container.
+    ///
+    /// Distinct from [`Self::Bound`]: that is the executor rejecting operands
+    /// it was given, this is not having them. Collapsing the two would report
+    /// a missing bank as a kernel failure and send the reader to the wrong
+    /// half of the system. Reaching this at generation time is itself a bug —
+    /// composition is validated when the container is opened — so the message
+    /// names the layer and expert rather than assuming a retry.
+    #[error("routed container operand unavailable: {0}")]
+    Container(String),
+}
+
+/// What an operation does when a MoE route refuses.
+///
+/// This is a property of the **operation**, not of the backend. The same
+/// backend is legitimately used both to generate (where a failed layer must
+/// abort) and to probe (where a refusal is the measurement). A backend cannot
+/// distinguish those callers, so asking it would bake operation policy into an
+/// operand provider — and would imply a false taxonomy in which some backends'
+/// failures are tolerable. They are not: a remote shard failing mid-generation
+/// and contributing zero is exactly as invalid as a missing container region.
+///
+/// The default for anything that produces a continuation, a score, a parity
+/// number or a benchmark is [`Self::Fatal`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MoeFailurePolicy {
+    /// Abort the operation. No token, score or measurement is produced from a
+    /// forward pass in which any expert contribution was not computed.
+    Fatal,
+    /// Record the refusal and continue with an incomplete result.
+    ///
+    /// Analysis-only. A caller selecting this is declaring that it *intends*
+    /// to inspect partial execution and will report the incompleteness; it may
+    /// not present the outcome as an ordinary model continuation.
+    RecordRefusal,
+}
+
+/// A route plus the policy the calling operation applies to its refusals.
+///
+/// Paired rather than passed separately so a caller cannot supply a backend
+/// and forget to state what a failure means — the omission that let a failed
+/// layer contribute silent zeros for as long as this branch has existed.
+#[derive(Clone, Copy)]
+pub struct MoeRoute<'a> {
+    pub backend: &'a dyn MoeExpertBackend,
+    pub policy: MoeFailurePolicy,
+}
+
+impl<'a> MoeRoute<'a> {
+    /// A route whose failures abort the operation. The correct choice for
+    /// generation, scoring, parity and benchmarking.
+    pub fn fatal(backend: &'a dyn MoeExpertBackend) -> Self {
+        Self {
+            backend,
+            policy: MoeFailurePolicy::Fatal,
+        }
+    }
+
+    /// A route whose failures are recorded and tolerated. Analysis only.
+    pub fn recording(backend: &'a dyn MoeExpertBackend) -> Self {
+        Self {
+            backend,
+            policy: MoeFailurePolicy::RecordRefusal,
+        }
+    }
 }
 
 /// A route that computes one hybrid-MoE layer's expert contribution.

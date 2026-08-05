@@ -182,6 +182,12 @@ impl crate::ffn::MoeExpertBackend for RefusalRecorder<'_> {
                 crate::ffn::MoeBackendError::Bound(inner) => inner.refusal(),
                 // A remote dispatch failure is the operand not being here.
                 crate::ffn::MoeBackendError::Remote(_) => larql_execution::RefusalKind::Residency,
+                // So is a routed region missing from its container — same
+                // diagnosis, different distance: the bytes this layer needs
+                // are not reachable, rather than reachable and rejected.
+                crate::ffn::MoeBackendError::Container(_) => {
+                    larql_execution::RefusalKind::Residency
+                }
             };
             // First only: the earliest refusal is the diagnosis, and later ones
             // are usually the same cause repeating per layer.
@@ -289,8 +295,14 @@ impl FfnBackend for MoeFfn<'_> {
                 weights: self.weights,
             },
             None,
-            Some(&recorder),
-        );
+            // Recording, because this adapter has its own `RefusalPolicy` one
+            // level up: it needs the refusal *captured* so `Strict` can turn it
+            // into an error and `BestEffort` can degrade having said so.
+            // Making the block itself fatal here would bypass that decision.
+            Some(crate::ffn::MoeRoute::recording(&recorder)),
+        )
+        // Unreachable: `recording` never propagates out of the block.
+        .expect("RecordRefusal never returns Err");
         // `moe_ffn_block_cpu` has already logged the refusal and left the
         // expert contribution at zero, so `out` is the dense half wearing the
         // shape of an answer. Under `Strict` it must not escape — which is the

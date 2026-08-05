@@ -80,17 +80,23 @@ impl<'a> FfnBackend for LocalMoeFfn<'a> {
     ) -> Result<Option<Array2<f32>>, larql_execution::BoxRefusal> {
         // Local dispatch over resident weights: there is no operand this could
         // fail to reach, so it never refuses.
-        Ok(Some(moe_ffn_block_cpu_with_index(
-            self.weights,
-            h_post_attn,
-            layer,
-            &WeightFfn {
-                weights: self.weights,
-            },
-            None,
-            None,
-            self.index,
-        )))
+        Ok(Some(
+            moe_ffn_block_cpu_with_index(
+                self.weights,
+                h_post_attn,
+                layer,
+                &WeightFfn {
+                    weights: self.weights,
+                },
+                None,
+                None,
+                self.index,
+            )
+            // No route is bound, so the refusal branch is unreachable rather than
+            // ignored — stated so a future caller that *does* bind one here has to
+            // decide what a failure means instead of inheriting silence.
+            .expect("no MoE route is bound, so no refusal is reachable"),
+        ))
     }
 }
 

@@ -17,6 +17,7 @@ pub mod graph_backend;
 pub mod local_moe;
 pub mod moe_backend;
 pub mod moe_bound;
+pub mod moe_container;
 pub mod moe_remote;
 pub mod remote;
 pub mod sparse;
@@ -34,8 +35,11 @@ pub use larql_compute::ffn::{
 // ── Re-exports ──
 
 pub use local_moe::LocalMoeFfn;
-pub use moe_backend::{InProcessMoeBackend, MoeBackendError, MoeExpertBackend};
+pub use moe_backend::{
+    InProcessMoeBackend, MoeBackendError, MoeExpertBackend, MoeFailurePolicy, MoeRoute,
+};
 pub use moe_bound::BoundMoeBackend;
+pub use moe_container::{CompositionError, ContainerRoutedBackend};
 pub use moe_remote::{
     MoeFfn, MoeRouterWeights, RecordedRefusal, RefusalPolicy, RemoteMoeBackend, RemoteMoeError,
     RemoteMoeFfn, ShardConfig,

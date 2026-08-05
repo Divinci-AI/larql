@@ -19,8 +19,12 @@ const EXPERTS: usize = 3;
 const TOP_K: u32 = 2;
 
 /// Distinct, position-dependent bytes so a wrong offset cannot pass.
+///
+/// Sized at the **semantic** width: gate_up is never padded (only down is), so
+/// a fixture padding both equally could not distinguish a correct importer
+/// from one that describes gate_up using down's stored width.
 fn gate_up_bytes(expert: usize) -> Vec<u8> {
-    let n = (STORED_INTER * 2 * HIDDEN) as usize * 4;
+    let n = (SEMANTIC_INTER * 2 * HIDDEN) as usize * 4;
     (0..n).map(|i| (expert * 31 + i) as u8).collect()
 }
 
@@ -48,7 +52,8 @@ fn source(o: &Owned) -> MoeLayerSource<'_> {
         experts_down: o.down.iter().map(|v| v.as_slice()).collect(),
         format: RegionFormat::F32,
         hidden_size: HIDDEN,
-        stored_intermediate: STORED_INTER,
+        gate_up_stored_intermediate: SEMANTIC_INTER,
+        down_stored_intermediate: STORED_INTER,
         semantic_intermediate: SEMANTIC_INTER,
         top_k: TOP_K,
     }
@@ -238,5 +243,136 @@ fn a_semantic_width_wider_than_the_stored_one_is_refused() {
     let staging = tempdir().unwrap();
     let err = segment_bytes_for_layer(&src, &staging.path().join("s.lyrw"))
         .expect_err("a widening view must not import");
-    assert!(format!("{err}").contains("exceeds the stored"), "{err}");
+    let msg = format!("{err}");
+    // The refusal names which region it is too wide for, because the two
+    // regions carry different stored widths and "the stored one" is ambiguous.
+    assert!(msg.contains("exceeds the"), "{msg}");
+    assert!(
+        msg.contains("gate_up") || msg.contains("down"),
+        "the refusal must name the region whose stored width was exceeded: {msg}"
+    );
+}
+
+#[test]
+fn each_region_is_declared_at_its_own_stored_width() {
+    // The defect this pins: `gate_up` and `down` do not share a stored width.
+    // gate_up is `[2 x inter, hidden]` and never padded; down is
+    // `[hidden, inter]` with inter padded to the next super-block. Describing
+    // both with down's width over-declares gate_up by the padding — and
+    // nothing downstream catches it, because regions are copied verbatim (so
+    // the declared shape never enters the byte length) and `verify` checks
+    // structure rather than shape-against-length.
+    let o = owned();
+    let src = source(&o);
+    assert_ne!(
+        src.gate_up_stored_intermediate, src.down_stored_intermediate,
+        "the fixture must exercise the asymmetry or this test proves nothing"
+    );
+
+    let staging = tempdir().unwrap();
+    let path = staging.path().join("s.lyrw");
+    let bytes = segment_bytes_for_layer(&src, &path).unwrap();
+    let reader = Lyrw2Reader::parse(&bytes).unwrap();
+
+    let schemas = reader.schemas_for(0).expect("bank 0 has schemas");
+    let gate_up = schemas
+        .iter()
+        .find(|s| s.role == RegionRole::GateUpFused)
+        .expect("a gate_up schema");
+    let down = schemas
+        .iter()
+        .find(|s| s.role == RegionRole::Down)
+        .expect("a down schema");
+
+    assert_eq!(
+        gate_up.rows,
+        SEMANTIC_INTER * 2,
+        "gate_up must be declared at its own (unpadded) width"
+    );
+    assert_eq!(gate_up.cols, HIDDEN);
+    assert_eq!(down.rows, HIDDEN);
+    assert_eq!(
+        down.cols, STORED_INTER,
+        "down must be declared at its own (padded) width"
+    );
+
+    // And the declaration must match what is actually there.
+    let region = reader
+        .region_bytes(0, 0, RegionRole::GateUpFused)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        region.len(),
+        (gate_up.rows * gate_up.cols) as usize * 4,
+        "declared gate_up shape does not account for the region's bytes"
+    );
+}
+
+// ── Format naming ────────────────────────────────────────────────────────
+
+#[test]
+fn a_representable_expert_format_maps_to_its_region_format() {
+    use larql_compute::QuantFormat;
+    assert_eq!(
+        region_format_for(QuantFormat::Q4_K).unwrap(),
+        RegionFormat::Q4K
+    );
+    assert_eq!(
+        region_format_for(QuantFormat::F32).unwrap(),
+        RegionFormat::F32
+    );
+}
+
+#[test]
+fn an_unrepresentable_expert_format_is_refused_not_relabelled() {
+    // The whole importer exists to avoid silent conversion, so a format the
+    // container cannot name must stop the import rather than be written under
+    // a neighbouring tag. Mislabelling here would surface as wrong numbers at
+    // execution, with nothing pointing back to the import.
+    use larql_compute::QuantFormat;
+    for unnameable in [QuantFormat::Q6_K, QuantFormat::BF16, QuantFormat::Q8_0] {
+        let err = region_format_for(unnameable)
+            .expect_err("a format with no VINDEX3 region format must be refused");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("no VINDEX3 region format") && msg.contains("transcode"),
+            "the refusal must say why it cannot proceed, got: {msg}"
+        );
+    }
+}
+
+// ── Per-region width refusals ────────────────────────────────────────────
+
+#[test]
+fn a_semantic_width_wider_than_the_down_region_is_refused_naming_down() {
+    // The gate_up arm is checked first, so a source that only violates the
+    // down width is the one that proves the second arm is reachable — and
+    // that the message names the region rather than saying "the stored one".
+    let o = owned();
+    let mut src = source(&o);
+    src.gate_up_stored_intermediate = STORED_INTER * 2;
+    src.down_stored_intermediate = SEMANTIC_INTER - 1;
+    let staging = tempdir().unwrap();
+    let err = segment_bytes_for_layer(&src, &staging.path().join("s.lyrw"))
+        .expect_err("a view wider than the down region must not import");
+    let msg = format!("{err}");
+    assert!(msg.contains("down"), "must name the down region: {msg}");
+}
+
+// ── Segment placement ────────────────────────────────────────────────────
+
+#[test]
+fn writing_a_segment_creates_the_directories_its_key_implies() {
+    // A storage key is a path (`routed/layer_000`), composed rather than
+    // globbed, so its directory is part of the key's meaning — the c9 builder
+    // relies on that instead of pre-creating a tree it would have to keep in
+    // step with the key format.
+    let o = owned();
+    let src = source(&o);
+    let root = tempdir().unwrap();
+    let nested = root.path().join("routed").join("deeper").join("s.lyrw");
+    assert!(!nested.parent().unwrap().exists());
+
+    write_segment_file(&src, &nested).unwrap();
+    assert!(nested.exists(), "segment file was not placed at its key");
 }

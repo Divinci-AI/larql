@@ -44,6 +44,13 @@ impl VectorIndex {
         callbacks: &mut dyn IndexLoadCallbacks,
         layer_range: Option<(usize, usize)>,
     ) -> Result<Self, VindexError> {
+        // Same gate, same reason as `load_vindex_config`: this builds the v1
+        // vector index over a v1 layout, and a VINDEX3 directory reaching it
+        // would be read against weights that live somewhere else entirely.
+        // `larql serve` enters here via `bootstrap`, so an ungated parse would
+        // put the mis-detection on the serving path rather than the CLI's.
+        detect_generation(dir)?.require(ContainerGeneration::V2)?;
+
         // Read config
         let config_path = dir.join(INDEX_JSON);
         let config_text = std::fs::read_to_string(&config_path)?;
@@ -384,7 +391,18 @@ fn synthesize_gate_from_q4k(
 }
 
 /// Load embeddings from a .vindex directory.
+///
+/// Gated on the generation for the reason [`load_vindex_config`] states, and
+/// with more urgency: this is the **first** thing the walk/run path touches
+/// (`walk_cmd` reads embeddings before it reads the config), so an ungated
+/// parse here is the one that decides whether a VINDEX3 directory is refused
+/// by name or wanders into the v1 layout. It refused only by luck — VINDEX3's
+/// `index.json` happens to omit `intermediate_size`, so serde rejected it with
+/// a field-level message that names nothing about generations. Any
+/// `#[serde(default)]` added for schema-1 compatibility would have opened it
+/// silently, which is exactly the failure this check exists to prevent.
 pub fn load_vindex_embeddings(dir: &Path) -> Result<(Array2<f32>, f32), VindexError> {
+    detect_generation(dir)?.require(ContainerGeneration::V2)?;
     let config_text = std::fs::read_to_string(dir.join(INDEX_JSON))?;
     let config: VindexConfig =
         serde_json::from_str(&config_text).map_err(|e| VindexError::Parse(e.to_string()))?;
@@ -520,6 +538,70 @@ mod tests {
         assert_eq!(cfg.hidden_size, 8);
         assert_eq!(cfg.model, "test/unit");
         assert_eq!(cfg.family, "llama");
+    }
+
+    /// A VINDEX3 `index.json` carrying **every** field `VindexConfig` needs.
+    ///
+    /// The real one omits `intermediate_size`, which is the only reason the
+    /// ungated v1 entry points refused it — an accident of field overlap, not
+    /// a decision. This fixture removes that accident so the test measures the
+    /// generation gate itself. Without the gate, these parse cleanly and the
+    /// v1 loader proceeds against a layout whose weights are not there.
+    fn write_v3_index_json_that_would_parse_as_v1(dir: &Path) {
+        let json = serde_json::json!({
+            "version": 3,
+            "model": "test/v3",
+            "family": "gemma4",
+            "num_layers": 2,
+            "hidden_size": 8,
+            "intermediate_size": 4,
+            "vocab_size": 16,
+            "embed_scale": 1.0,
+            "layers": [],
+            "down_top_k": 5,
+            "has_model_weights": false,
+            "extract_level": "browse",
+            "dtype": "f32",
+            "quant": "none",
+            "moe_manifest": "moe_manifest.json",
+            "segments": { "routed/layer_000": 1 }
+        });
+        std::fs::write(dir.join("index.json"), json.to_string()).unwrap();
+    }
+
+    #[test]
+    fn every_v1_entry_point_refuses_a_v3_container_by_generation() {
+        // The regression this guards: each of these reads `index.json` for
+        // itself, and `walk_cmd` reaches `load_vindex_embeddings` *before* the
+        // gated `load_vindex_config`. If any one of them loses its gate, a
+        // VINDEX3 directory is served against v1 offsets rather than refused.
+        let dir = TempDir::new().unwrap();
+        write_v3_index_json_that_would_parse_as_v1(dir.path());
+
+        for (entry, err) in [
+            ("load_vindex_config", load_vindex_config(dir.path()).err()),
+            (
+                "load_vindex_embeddings",
+                load_vindex_embeddings(dir.path()).err(),
+            ),
+            (
+                "load_vindex_with_range",
+                VectorIndex::load_vindex_with_range(
+                    dir.path(),
+                    &mut crate::SilentLoadCallbacks,
+                    None,
+                )
+                .err(),
+            ),
+        ] {
+            let err = err.unwrap_or_else(|| panic!("{entry} accepted a VINDEX3 container"));
+            let msg = err.to_string();
+            assert!(
+                msg.contains("VINDEX3") || msg.contains("VINDEX2 loader"),
+                "{entry} refused for the wrong reason — the message must name \
+                 the generation, not a missing field. Got: {msg}"
+            );
+        }
     }
 
     #[test]

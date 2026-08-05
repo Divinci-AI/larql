@@ -137,6 +137,19 @@ pub struct RunArgs {
     #[arg(long, value_name = "URL")]
     pub ffn: Option<String>,
 
+    /// Serve the routed expert banks from a VINDEX3 container, keeping the
+    /// rest of the model (tokenizer, config, embeddings, attention, norms,
+    /// routers, dense/shared FFN, LM head) from the VINDEX2 `MODEL` argument.
+    ///
+    /// Exactly one operand source is replaced — spec §4 classes 4 and 5 —
+    /// so a comparison against the same prompt without this flag is a
+    /// statement about the routed bytes and nothing else.
+    ///
+    /// Never falls back: if the container cannot serve every routed layer the
+    /// model needs, the run is refused before the prompt is encoded.
+    #[arg(long, value_name = "DIR")]
+    pub routed_from: Option<String>,
+
     /// HTTP timeout in seconds for --ffn.
     #[arg(long, default_value = "60")]
     pub ffn_timeout_secs: u64,
@@ -306,6 +319,14 @@ pub fn run(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or(false)
     {
         return run_bitnet(&vindex_path, &args);
+    }
+
+    if let Some(ref routed_dir) = args.routed_from {
+        let prompt = args
+            .prompt
+            .as_deref()
+            .ok_or("--routed-from requires a prompt argument (chat mode not yet supported)")?;
+        return run_with_routed_container(&vindex_path, routed_dir, prompt, args.max_tokens);
     }
 
     if let Some(ref ffn_url) = args.ffn {
@@ -758,6 +779,8 @@ fn run_with_moe_shards(
                 );
             }
             let started = std::time::Instant::now();
+            // Fatal by policy: a shard failure aborts the run rather than
+            // finishing the sentence from a model missing an expert layer.
             let toks = generate_kquant_cpu_remote(
                 &mut weights,
                 &tokenizer,
@@ -765,7 +788,8 @@ fn run_with_moe_shards(
                 max_tokens,
                 &index,
                 &remote,
-            );
+            )
+            .map_err(|e| format!("remote MoE dispatch failed, generation aborted: {e}"))?;
             let total_ms = started.elapsed().as_secs_f64() * 1000.0;
             let strings: Vec<String> = toks.into_iter().map(|(s, _)| s).collect();
             let n = strings.len();
@@ -884,6 +908,82 @@ fn run_with_moe_shards(
             if num_shards == 1 { "" } else { "s" }
         );
     }
+    Ok(())
+}
+
+/// `--routed-from DIR` — routed expert banks served from a VINDEX3 container.
+///
+/// The composition, precisely:
+///
+/// ```text
+/// VINDEX2 model   tokenizer, config, embeddings, attention, norms,
+///                 routers, dense/shared FFN, LM head
+/// VINDEX3 dir     routed gate/up and routed down banks  (spec §4 classes 4-5)
+/// ```
+///
+/// Everything but the routed banks is read exactly as an ordinary run reads
+/// it, so the same prompt without the flag is a controlled comparison: the
+/// only variable is where the expert bytes came from.
+///
+/// This is a *composed* run, not a VINDEX3 model. A container holding only
+/// routed banks has no tokenizer and no spine; `larql run <vindex3-dir>` is
+/// still correctly refused. Container completeness is a separate rung.
+fn run_with_routed_container(
+    vindex_path: &std::path::Path,
+    routed_dir: &str,
+    prompt: &str,
+    max_tokens: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let routed_path = std::path::Path::new(routed_dir);
+
+    let mut cb = larql_vindex::SilentLoadCallbacks;
+    let mut weights = larql_vindex::load_model_weights_kquant(vindex_path, &mut cb)
+        .map_err(|e| format!("failed to load spine weights: {e}"))?;
+    let tokenizer = larql_vindex::load_vindex_tokenizer(vindex_path)
+        .map_err(|e| format!("failed to load tokenizer: {e}"))?;
+    let mut index = larql_vindex::VectorIndex::load_vindex(vindex_path, &mut cb)
+        .map_err(|e| format!("failed to load vindex: {e}"))?;
+    index
+        .load_attn_kquant(vindex_path)
+        .map_err(|e| format!("failed to load attn Q4K: {e}"))?;
+    index
+        .load_interleaved_kquant(vindex_path)
+        .map_err(|e| format!("failed to load interleaved Q4K: {e}"))?;
+    let _ = index.load_lm_head_kquant(vindex_path);
+
+    // Compose *before* the prompt is encoded. Every shape, count and region is
+    // checked here, so a mismatch is reported against two named artifacts
+    // rather than surfacing as a wrong number seventeen layers into a forward
+    // pass that has already printed part of an answer.
+    let routed = larql_inference::ffn::ContainerRoutedBackend::open(routed_path, &weights, true)
+        .map_err(|e| format!("--routed-from refused: {e}"))?;
+    eprintln!("{}", routed.describe(vindex_path));
+
+    let wrapped_prompt =
+        larql_inference::chat::render_user_prompt(vindex_path, weights.arch.family(), prompt)?;
+    let prompt_ids = larql_inference::encode_prompt(&tokenizer, &*weights.arch, &wrapped_prompt)
+        .map_err(|e| format!("failed to tokenise prompt: {e}"))?;
+
+    let started = std::time::Instant::now();
+    let toks = larql_inference::vindex::generate_kquant_cpu_routed(
+        &mut weights,
+        &tokenizer,
+        &prompt_ids,
+        max_tokens,
+        &index,
+        &routed,
+    )
+    .map_err(|e| format!("routed container dispatch failed, generation aborted: {e}"))?;
+    let total_ms = started.elapsed().as_secs_f64() * 1000.0;
+
+    let text: String = toks.iter().map(|(t, _)| t.as_str()).collect();
+    println!("{text}");
+    let n = toks.len();
+    eprintln!(
+        "\n  {n} token(s) in {:.0} ms ({:.0} ms/token)",
+        total_ms,
+        if n == 0 { 0.0 } else { total_ms / n as f64 }
+    );
     Ok(())
 }
 
