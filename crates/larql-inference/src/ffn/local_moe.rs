@@ -90,7 +90,11 @@ impl<'a> FfnBackend for LocalMoeFfn<'a> {
             None,
             None,
             self.index,
-        )))
+        )
+        // No route is bound, so the refusal branch is unreachable rather than
+        // ignored — stated so a future caller that *does* bind one here has to
+        // decide what a failure means instead of inheriting silence.
+        .expect("no MoE route is bound, so no refusal is reachable")))
     }
 }
 
