@@ -153,6 +153,14 @@ pub fn build_moe_router_weights<'a>(
     })
 }
 
+/// What one MoE layer produced: the new residual, plus any K/V worth caching.
+///
+/// The outer `Option` is an **absence** — attention had nothing to run for this
+/// layer — while the `Result` around it is a **failure**, a refused expert
+/// route. Keeping them distinct is the point: collapsing "nothing to do" into
+/// "something went wrong" is how a missing operand becomes a zeroed layer.
+type MoeLayerOutcome = Option<(Array2<f32>, Option<SharedKV>)>;
+
 /// CPU forward for one hybrid-MoE layer (Gemma 4 26B A4B).
 fn run_moe_layer_cpu(
     weights: larql_models::WeightsView,
@@ -162,7 +170,7 @@ fn run_moe_layer_cpu(
     ple_input: Option<&Array2<f32>>,
     shared_kv: Option<&SharedKV>,
     moe: Option<crate::ffn::MoeRoute<'_>>,
-) -> Result<Option<(Array2<f32>, Option<SharedKV>)>, crate::ffn::MoeBackendError> {
+) -> Result<MoeLayerOutcome, crate::ffn::MoeBackendError> {
     // Attention returning `None` means this layer has nothing to run — an
     // absence, not a failure, so it stays `Ok(None)` and is distinct from a
     // refused expert route.

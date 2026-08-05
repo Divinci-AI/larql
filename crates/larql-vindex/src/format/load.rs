@@ -582,7 +582,7 @@ mod tests {
             ("load_vindex_config", load_vindex_config(dir.path()).err()),
             (
                 "load_vindex_embeddings",
-                load_vindex_embeddings(dir.path()).err().map(|e| e),
+                load_vindex_embeddings(dir.path()).err(),
             ),
             (
                 "load_vindex_with_range",
