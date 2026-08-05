@@ -111,7 +111,12 @@ fn main() -> Result<(), String> {
     }
     let total = builder.bytes_written();
     builder
-        .finish(weights.arch.family(), weights.arch.family(), hidden as usize, num_layers)
+        .finish(
+            weights.arch.family(),
+            weights.arch.family(),
+            hidden as usize,
+            num_layers,
+        )
         .map_err(|e| format!("finish: {e}"))?;
 
     println!(
@@ -151,7 +156,10 @@ fn main() -> Result<(), String> {
 
         for expert in 0..moe.num_experts as u32 {
             for (role, expected) in [
-                (RegionRole::GateUpFused, moe.experts_gate_up[expert as usize]),
+                (
+                    RegionRole::GateUpFused,
+                    moe.experts_gate_up[expert as usize],
+                ),
                 (RegionRole::Down, moe.experts_down[expert as usize]),
             ] {
                 let got = reader

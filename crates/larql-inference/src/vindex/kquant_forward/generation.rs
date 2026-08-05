@@ -79,7 +79,9 @@ pub fn generate_kquant_cpu_remote(
     index: &VectorIndex,
     moe_remote: &crate::ffn::RemoteMoeBackend,
 ) -> Result<Vec<(String, u32)>, crate::ffn::MoeBackendError> {
-    generate_kquant_cpu_routed(weights, tokenizer, prompt_ids, max_tokens, index, moe_remote)
+    generate_kquant_cpu_routed(
+        weights, tokenizer, prompt_ids, max_tokens, index, moe_remote,
+    )
 }
 
 /// Greedy generation with the expert half served by any bound route.

@@ -307,3 +307,72 @@ fn each_region_is_declared_at_its_own_stored_width() {
         "declared gate_up shape does not account for the region's bytes"
     );
 }
+
+// ── Format naming ────────────────────────────────────────────────────────
+
+#[test]
+fn a_representable_expert_format_maps_to_its_region_format() {
+    use larql_compute::QuantFormat;
+    assert_eq!(
+        region_format_for(QuantFormat::Q4_K).unwrap(),
+        RegionFormat::Q4K
+    );
+    assert_eq!(
+        region_format_for(QuantFormat::F32).unwrap(),
+        RegionFormat::F32
+    );
+}
+
+#[test]
+fn an_unrepresentable_expert_format_is_refused_not_relabelled() {
+    // The whole importer exists to avoid silent conversion, so a format the
+    // container cannot name must stop the import rather than be written under
+    // a neighbouring tag. Mislabelling here would surface as wrong numbers at
+    // execution, with nothing pointing back to the import.
+    use larql_compute::QuantFormat;
+    for unnameable in [QuantFormat::Q6_K, QuantFormat::BF16, QuantFormat::Q8_0] {
+        let err = region_format_for(unnameable)
+            .expect_err("a format with no VINDEX3 region format must be refused");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("no VINDEX3 region format") && msg.contains("transcode"),
+            "the refusal must say why it cannot proceed, got: {msg}"
+        );
+    }
+}
+
+// ── Per-region width refusals ────────────────────────────────────────────
+
+#[test]
+fn a_semantic_width_wider_than_the_down_region_is_refused_naming_down() {
+    // The gate_up arm is checked first, so a source that only violates the
+    // down width is the one that proves the second arm is reachable — and
+    // that the message names the region rather than saying "the stored one".
+    let o = owned();
+    let mut src = source(&o);
+    src.gate_up_stored_intermediate = STORED_INTER * 2;
+    src.down_stored_intermediate = SEMANTIC_INTER - 1;
+    let staging = tempdir().unwrap();
+    let err = segment_bytes_for_layer(&src, &staging.path().join("s.lyrw"))
+        .expect_err("a view wider than the down region must not import");
+    let msg = format!("{err}");
+    assert!(msg.contains("down"), "must name the down region: {msg}");
+}
+
+// ── Segment placement ────────────────────────────────────────────────────
+
+#[test]
+fn writing_a_segment_creates_the_directories_its_key_implies() {
+    // A storage key is a path (`routed/layer_000`), composed rather than
+    // globbed, so its directory is part of the key's meaning — the c9 builder
+    // relies on that instead of pre-creating a tree it would have to keep in
+    // step with the key format.
+    let o = owned();
+    let src = source(&o);
+    let root = tempdir().unwrap();
+    let nested = root.path().join("routed").join("deeper").join("s.lyrw");
+    assert!(!nested.parent().unwrap().exists());
+
+    write_segment_file(&src, &nested).unwrap();
+    assert!(nested.exists(), "segment file was not placed at its key");
+}

@@ -123,15 +123,9 @@ fn main() -> Result<(), String> {
 
             larql_inference::decode_stages::reset();
             let started = std::time::Instant::now();
-            let out = generate_kquant_cpu_routed(
-                &mut weights,
-                &tokenizer,
-                &ids,
-                tokens,
-                &index,
-                backend,
-            )
-            .map_err(|e| format!("{label} arm: {e}"))?;
+            let out =
+                generate_kquant_cpu_routed(&mut weights, &tokenizer, &ids, tokens, &index, backend)
+                    .map_err(|e| format!("{label} arm: {e}"))?;
             let wall_ms = started.elapsed().as_secs_f64() * 1000.0;
             let (attn_ms, dense_ms, expert_ms, lmhead_ms) =
                 larql_inference::decode_stages::snapshot_ms();
@@ -144,7 +138,11 @@ fn main() -> Result<(), String> {
                 lmhead_ms,
                 tokens: out.len().max(1),
             };
-            let tag = if round == 0 { " (warm-up, discarded)" } else { "" };
+            let tag = if round == 0 {
+                " (warm-up, discarded)"
+            } else {
+                ""
+            };
             println!(
                 "  round {round} {label:8}  {:8.0} ms  ({:7.0} ms/token){tag}",
                 s.wall_ms,
@@ -211,7 +209,8 @@ fn main() -> Result<(), String> {
     // for a minority of the time and invite the reader to divide the rest
     // among them.
     for (label, s) in [("vindex2", c), ("vindex3", k)] {
-        let accounted = per(s, s.attn_ms) + per(s, s.dense_ms) + per(s, s.expert_ms) + per(s, s.lmhead_ms);
+        let accounted =
+            per(s, s.attn_ms) + per(s, s.dense_ms) + per(s, s.expert_ms) + per(s, s.lmhead_ms);
         let wall = per(s, s.wall_ms);
         println!(
             "  {label:<10} unaccounted {:>8.0} ms/token ({:.0}% of wall — not in any stage counter)",

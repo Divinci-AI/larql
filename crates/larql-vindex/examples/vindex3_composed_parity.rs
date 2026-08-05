@@ -49,9 +49,7 @@ fn main() -> Result<(), String> {
     let v3 = args
         .next()
         .ok_or("usage: vindex3_composed_parity <vindex2-dir> <vindex3-dir> [prompt]")?;
-    let prompt = args
-        .next()
-        .unwrap_or_else(|| DEFAULT_PROMPT.to_string());
+    let prompt = args.next().unwrap_or_else(|| DEFAULT_PROMPT.to_string());
 
     let v2_path = std::path::Path::new(&v2);
     let v3_path = std::path::Path::new(&v3);
@@ -79,8 +77,9 @@ fn main() -> Result<(), String> {
     // Wrap exactly as `larql run` does. Scoring the raw string instead would
     // teacher-force a token sequence the deployed path never sees, and a parity
     // result on inputs nobody serves is a weaker claim than it appears.
-    let wrapped = larql_inference::chat::render_user_prompt(v2_path, weights.arch.family(), &prompt)
-        .map_err(|e| format!("render prompt: {e}"))?;
+    let wrapped =
+        larql_inference::chat::render_user_prompt(v2_path, weights.arch.family(), &prompt)
+            .map_err(|e| format!("render prompt: {e}"))?;
     let ids = larql_inference::encode_prompt(&tokenizer, &*weights.arch, &wrapped)
         .map_err(|e| format!("tokenise: {e}"))?;
     println!("  {} token(s) teacher-forced\n", ids.len());
@@ -98,8 +97,9 @@ fn main() -> Result<(), String> {
     )
     .map_err(|e| format!("control run: {e}"))?;
 
-    let test = predict_kquant_hidden_checked(&weights, &ids, &index, Some(MoeRoute::fatal(&routed)))
-        .map_err(|e| format!("container run: {e}"))?;
+    let test =
+        predict_kquant_hidden_checked(&weights, &ids, &index, Some(MoeRoute::fatal(&routed)))
+            .map_err(|e| format!("container run: {e}"))?;
 
     if control.shape() != test.shape() {
         return Err(format!(
@@ -157,8 +157,12 @@ fn main() -> Result<(), String> {
     println!("  max |difference|  {logit_max_abs:e}");
     println!(
         "  top-1             control {top_control} ({:?}), container {top_test} ({:?})",
-        tokenizer.decode(&[top_control as u32], true).unwrap_or_default(),
-        tokenizer.decode(&[top_test as u32], true).unwrap_or_default()
+        tokenizer
+            .decode(&[top_control as u32], true)
+            .unwrap_or_default(),
+        tokenizer
+            .decode(&[top_test as u32], true)
+            .unwrap_or_default()
     );
 
     if identical != total || max_abs != 0.0 || logit_max_abs != 0.0 {
