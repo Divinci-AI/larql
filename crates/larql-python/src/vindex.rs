@@ -156,7 +156,7 @@ fn is_content_token(tok: &str) -> bool {
 
 // ── PyDescribeEdge ──
 
-#[pyclass(name = "DescribeEdge")]
+#[pyclass(name = "DescribeEdge", from_py_object)]
 #[derive(Clone)]
 pub struct PyDescribeEdge {
     #[pyo3(get)]
@@ -190,7 +190,7 @@ impl PyDescribeEdge {
 
 // ── PyRelation ──
 
-#[pyclass(name = "Relation")]
+#[pyclass(name = "Relation", from_py_object)]
 #[derive(Clone)]
 pub struct PyRelation {
     #[pyo3(get)]
@@ -215,7 +215,7 @@ impl PyRelation {
 
 // ── PyFeatureMeta ──
 
-#[pyclass(name = "FeatureMeta")]
+#[pyclass(name = "FeatureMeta", from_py_object)]
 #[derive(Clone)]
 pub struct PyFeatureMeta {
     inner: FeatureMeta,
@@ -261,7 +261,7 @@ impl PyFeatureMeta {
 
 // ── PyWalkHit ──
 
-#[pyclass(name = "WalkHit")]
+#[pyclass(name = "WalkHit", from_py_object)]
 #[derive(Clone)]
 pub struct PyWalkHit {
     inner_layer: usize,

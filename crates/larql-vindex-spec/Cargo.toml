@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+rust-version.workspace = true
 description = "Public contract for the vindex on-disk format: Rust types, JSON Schema, validation thresholds. Zero larql-* deps."
 keywords = ["vindex", "spec", "schema", "manifest"]
 categories = ["data-structures", "encoding"]
