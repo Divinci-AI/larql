@@ -55,13 +55,32 @@ pub trait FfnBackend {
 
     /// For hybrid MoE layers: receive `h_post_attn` (post-attention,
     /// pre-FFN, unnormalized) and return the full layer output `h_out`.
-    /// Returns `None` to fall back to local dispatch.
+    ///
+    /// The three outcomes are deliberately distinct, and conflating any two of
+    /// them is how a missing operand becomes a plausible wrong answer:
+    ///
+    /// ```text
+    /// Ok(Some(h_out))   the layer executed
+    /// Ok(None)          this backend does not serve this layer; fall back
+    /// Err(refusal)      a required operation could not execute
+    /// ```
+    ///
+    /// `Ok(None)` must never be used to report a refusal. It means *not
+    /// applicable* — the caller is free to run its own dispatch and the result
+    /// is still correct. `Err` means a routed operation was required and did
+    /// not happen, so any output the caller assembles is incomplete. A backend
+    /// that returned `Ok(None)` on failure would put the caller back where the
+    /// error channel was added to rescue it from.
+    ///
+    /// What to *do* about an `Err` is the caller's policy, not the backend's:
+    /// a strict engine propagates it, a best-effort one may log and degrade
+    /// explicitly. The backend's job is to report what happened.
     fn forward_moe_full_layer(
         &self,
         _layer: usize,
         _h_post_attn: &Array2<f32>,
-    ) -> Option<Array2<f32>> {
-        None
+    ) -> Result<Option<Array2<f32>>, larql_execution::BoxRefusal> {
+        Ok(None)
     }
 }
 
@@ -231,7 +250,9 @@ mod tests {
         }
         let ffn = StubFfn;
         let h = Array2::<f32>::zeros((1, 4));
-        assert!(ffn.forward_moe_full_layer(0, &h).is_none());
+        // The default is "not applicable", not a refusal — a backend that serves
+        // no MoE layer must let the caller dispatch locally rather than fail it.
+        assert!(matches!(ffn.forward_moe_full_layer(0, &h), Ok(None)));
         // Exercise the stub's required-method surface so the coverage
         // report reflects the trait-shape footprint, not just the
         // default-method probes.

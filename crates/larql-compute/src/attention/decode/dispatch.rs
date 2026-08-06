@@ -2,9 +2,8 @@ use ndarray::Array2;
 
 use crate::attention::SharedKV;
 
-use super::gqa_step::gqa_attention_decode_step_in_span;
+use super::gqa_step::gqa_attention_decode_step_windowed;
 use super::q4k_direct::run_attention_block_decode_step_q4k_direct;
-use crate::attention::span::AttentionSpan;
 
 /// Decode-step attention with optional GPU-accelerated projections
 /// (Q/K/V/O matmuls route through `ComputeBackend::matmul_transb` when
@@ -23,7 +22,7 @@ pub fn run_attention_block_decode_step_backend(
 ) -> Option<(Array2<f32>, SharedKV)> {
     use crate::dot_proj_gpu;
     use crate::forward::add_bias;
-    use crate::residual::{rms_norm_heads_no_weight, rms_norm_qk_for_arch};
+    use crate::residual::{rms_norm_heads, rms_norm_heads_no_weight};
 
     let arch = &*weights.arch;
     let head_dim = arch.head_dim_for_layer(layer);
@@ -65,13 +64,15 @@ pub fn run_attention_block_decode_step_backend(
         .attn_q_norm_key(layer)
         .and_then(|k| weights.vectors.get(&k))
     {
-        Some(norm_w) => rms_norm_qk_for_arch(&q_full, norm_w, num_q, head_dim, qk_norm_off, arch),
+        Some(norm_w) => rms_norm_heads(&q_full, norm_w, num_q, head_dim, qk_norm_off),
         None => q_full,
     };
     let layer_rope_base = crate::forward_overrides::effective_rope_base_for_layer(arch, layer);
     let rotary_frac = arch.rotary_fraction_for_layer(layer);
     let pos_divisor =
         crate::forward_overrides::effective_rope_position_divisor_for_layer(arch, layer);
+    // M1: honour every scaling family (llama3 / YaRN / linear), not just
+    // llama3 — the same resolver the Metal pipeline spec reads.
     let rope_scaling = crate::forward_overrides::effective_rope_freq_scaling(arch);
     let q_rope = crate::attention::rope::apply_rope_partial_at_full(
         &q_normed,
@@ -114,9 +115,7 @@ pub fn run_attention_block_decode_step_backend(
         .attn_k_norm_key(layer)
         .and_then(|k| weights.vectors.get(&k))
     {
-        Some(norm_w) => {
-            rms_norm_qk_for_arch(&k_full_new, norm_w, num_kv, head_dim, qk_norm_off, arch)
-        }
+        Some(norm_w) => rms_norm_heads(&k_full_new, norm_w, num_kv, head_dim, qk_norm_off),
         None => k_full_new,
     };
     let k_new_rope = crate::attention::rope::apply_rope_partial_at_full(
@@ -155,14 +154,10 @@ pub fn run_attention_block_decode_step_backend(
     };
 
     let softcap = arch.attn_logit_softcapping();
-    // Same span rule as prefill (`attention/block.rs`), resolved from the same
-    // two accessors. Decode dropping different keys than prefill for the same
-    // absolute position is the divergence a KV cache hides best.
-    let span = AttentionSpan::for_layer(
-        arch.is_sliding_window_layer(layer),
-        arch.sliding_window_size(),
-    );
-    let attn_out = gqa_attention_decode_step_in_span(
+    // Per-layer sliding window from the shared rule; `None` leaves
+    // this bit-identical to the unwindowed step.
+    let window = crate::forward_overrides::effective_attention_window_for_layer(arch, layer);
+    let attn_out = gqa_attention_decode_step_windowed(
         &q_rope,
         &k_concat,
         &v_concat,
@@ -177,7 +172,7 @@ pub fn run_attention_block_decode_step_backend(
             num_q,
             layer,
         ),
-        span,
+        window,
     );
 
     let mut attn_projected = dot_proj_gpu(&attn_out, w_o, backend);

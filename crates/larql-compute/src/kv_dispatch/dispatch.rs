@@ -22,7 +22,7 @@ use crate::PerLayerDecodeState;
 /// - `markov_residual_codec`: same as `markov_residual`; on
 ///   window-overflow the evicted rows get codec-encoded into
 ///   `cold_encoded[l]`.
-/// - `unlimited_context`: `k_new_per_layer[l]` / `v_new_per_layer[l]`
+/// - `windowed_checkpoint`: `k_new_per_layer[l]` / `v_new_per_layer[l]`
 ///   are appended to the per-layer K/V cache; `h_in_per_layer` is
 ///   unused but populated for API uniformity (cheap blit).
 /// - `turbo_quant`: `k_new_per_layer[l]` / `v_new_per_layer[l]`
@@ -73,6 +73,25 @@ pub trait KvDispatch {
         unimplemented!("clip_kv not implemented for this backend")
     }
 
+    /// Drop cached rows past `len`, keeping the **first** `len` in order.
+    /// Returns whether the handle now holds exactly `len` rows.
+    ///
+    /// The inverse of an append: this rewinds a partially-applied decode
+    /// step so a caller that could not finish the token leaves the cache
+    /// describing the token sequence it described before. Distinct from
+    /// [`Self::clip_kv`], which keeps the *tail* to enforce a sliding
+    /// window — that one moves the cache forward, this one moves it back.
+    ///
+    /// The default answers `false` rather than panicking, because "this
+    /// backend cannot rewind" is a legitimate state that a caller must
+    /// handle (by invalidating the cache) rather than a programming
+    /// error. Returning `true` without having rewound is the one
+    /// unacceptable answer: it tells the caller a corrupt cache is sound.
+    fn truncate_kv(&self, handle: &mut KvHandle, len: usize) -> bool {
+        let _ = (handle, len);
+        false
+    }
+
     /// Read the full K/V back to host memory as a `(K, V)` pair.
     /// Blocking copy on GPU backends; identity on CPU. Should NOT be
     /// used in hot loops — it's the cross-backend escape hatch for
@@ -80,6 +99,39 @@ pub trait KvDispatch {
     fn read_kv_to_host(&self, handle: &KvHandle) -> Option<(Array2<f32>, Array2<f32>)> {
         let _ = handle;
         None
+    }
+
+    /// Bytes of K/V this backend holds in its own storage, i.e. K/V that
+    /// is NOT reachable by measuring the [`KvHandle`]s an engine owns.
+    ///
+    /// Backends whose fused pipelines keep the cache internally hand out
+    /// a sentinel handle that measures zero (Metal's coarse whole-model
+    /// handle is the live example). An engine summing its handles then
+    /// reports no K/V at all, which reads as "this engine is free" in a
+    /// memory comparison when the truth is "its K/V lives one layer
+    /// down". Engines add this to their own accounting so the two
+    /// dispatch shapes are comparable.
+    ///
+    /// Default 0 = every byte this backend holds is reachable through a
+    /// handle, so adding it would double-count.
+    fn backend_resident_kv_bytes(&self) -> usize {
+        0
+    }
+
+    /// Whether this backend implements the **per-layer** surface
+    /// (`attention_step`, `attention_prefill`, `append_kv`, …) by
+    /// forwarding to the host CPU rather than running native kernels.
+    ///
+    /// `MetalBackend` answers `true`: only its `coarse_*` family is
+    /// GPU-resident, so an engine that declines the coarse path runs its
+    /// whole forward on the CPU while callers still believe they
+    /// selected a GPU backend. Diagnostics need to be able to say that
+    /// out loud; without it a windowed engine reports `[metal (GPU)]`
+    /// over a pure-CPU measurement.
+    ///
+    /// Default `false` — a backend is assumed to mean what it says.
+    fn per_layer_is_host_delegated(&self) -> bool {
+        false
     }
 
     // ── Attention primitives ────────────────────────────────────────
@@ -236,7 +288,7 @@ pub trait KvDispatch {
     // without changing this trait surface.
     //
     // Engines that DO need per-layer control (MarkovResidual,
-    // UnlimitedContext, TurboQuant — recompute, checkpoint, codec
+    // WindowedCheckpoint, TurboQuant — recompute, checkpoint, codec
     // mechanisms) continue to use the per-layer `attention_prefill` /
     // `attention_step` intents.
     //
@@ -281,6 +333,56 @@ pub trait KvDispatch {
         None
     }
 
+    /// Coarse prefill under an **engine-requested sliding window** — a
+    /// window the caller imposes across every layer, distinct from the
+    /// architecture's own per-layer SWA (which backends read from the
+    /// arch and this composes with, narrowest wins).
+    ///
+    /// A windowed engine promises two things: it attends at most `window`
+    /// positions, AND it holds at most that much K/V. The window-less
+    /// `coarse_prefill` can honour neither, so a windowed engine had to
+    /// decline the fused path entirely and take the generic per-layer
+    /// route — which on a host-delegating backend runs the whole forward
+    /// on the CPU, costing ~2.4x. This is the entry point that lets a
+    /// backend keep the fused path *and* the window.
+    ///
+    /// **Fail closed.** The default supports only `window: None`, and
+    /// answers `None` when a real window is requested — "this backend
+    /// cannot bound what you asked me to bound", which the engine reads
+    /// as "take the per-layer path", exactly today's behaviour. A
+    /// backend that returns `Some` for a windowed request is asserting
+    /// it enforced BOTH halves of the contract.
+    fn coarse_prefill_windowed(
+        &self,
+        weights: &ModelWeights,
+        token_ids: &[u32],
+        index: Option<&dyn crate::KvIndex>,
+        window: Option<usize>,
+    ) -> Option<(Array2<f32>, KvHandle)> {
+        match window {
+            None => self.coarse_prefill(weights, token_ids, index),
+            Some(_) => None,
+        }
+    }
+
+    /// One coarse decode step under an engine-requested sliding window.
+    /// Same contract and same fail-closed default as
+    /// [`Self::coarse_prefill_windowed`].
+    fn coarse_decode_step_windowed(
+        &self,
+        weights: &ModelWeights,
+        token_id: u32,
+        index: Option<&dyn crate::KvIndex>,
+        handle: &mut KvHandle,
+        abs_position: usize,
+        window: Option<usize>,
+    ) -> Option<Array2<f32>> {
+        match window {
+            None => self.coarse_decode_step(weights, token_id, index, handle, abs_position),
+            Some(_) => None,
+        }
+    }
+
     /// Coarse prefill **with per-layer state capture** — same fast
     /// path as [`Self::coarse_prefill`] but also populates `state`
     /// (when `Some`) with per-layer h_in (residual entering each
@@ -290,7 +392,7 @@ pub trait KvDispatch {
     /// shape `[seq_len, hidden]` and each entry in
     /// `state.k_new_per_layer` / `v_new_per_layer` has shape
     /// `[seq_len, kv_dim_for_layer]`. Engines (markov_residual,
-    /// unlimited_context, turbo_quant) read these to seed their
+    /// windowed_checkpoint, turbo_quant) read these to seed their
     /// state policy without re-running prefill on CPU.
     ///
     /// Default impl delegates to [`Self::coarse_prefill`] and leaves
@@ -316,7 +418,7 @@ pub trait KvDispatch {
     ///
     /// Engines that need per-layer state to enforce their state
     /// policy — `markov_residual` (stores h_in per layer),
-    /// `turbo_quant` (compresses per-layer K/V), `unlimited_context`
+    /// `turbo_quant` (compresses per-layer K/V), `windowed_checkpoint`
     /// (snapshots K/V at window boundaries) — pass `Some(&mut state)`
     /// to extract per-layer state without re-running compute on CPU.
     ///
@@ -371,7 +473,7 @@ pub trait KvDispatch {
     /// cache. Returns `(k_row, v_row)` as flat `Vec<f32>` of length
     /// `kv_dim_for_layer`. Used by engines running under
     /// [`crate::StateDumpMask::HOnly`] that need to snapshot specific
-    /// K/V positions on demand (e.g. `UnlimitedContextEngine`'s
+    /// K/V positions on demand (e.g. `WindowedCheckpointEngine`'s
     /// `close_window` checkpoint emission).
     ///
     /// Default returns `None` — backends without an internal kv cache

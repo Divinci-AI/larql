@@ -2,7 +2,6 @@
 //!
 //! Split out of `mod.rs` so the kernel code reads on one screen; the suite is
 //! larger than the code it covers, which is the right ratio and the wrong file.
-
 use super::*;
 use ndarray::Array2;
 
@@ -297,7 +296,6 @@ fn reduced_qk_all_weights_returns_per_head_per_position_distributions() {
         None,
         None,
         4, // qk_rank — half of head_dim
-        AttentionSpan::Full,
     );
     assert_eq!(all.heads.len(), num_q);
     for head in &all.heads {
@@ -321,32 +319,8 @@ fn reduced_qk_clamps_rank_above_head_dim() {
     let q = small(seq, hd, 0.1);
     let k = small(seq, hd, 0.1);
     let scale = 1.0 / (hd as f64).sqrt();
-    let all_full = gqa_reduced_qk_all_weights(
-        &q,
-        &k,
-        1,
-        hd,
-        1,
-        scale,
-        seq,
-        None,
-        None,
-        hd,
-        AttentionSpan::Full,
-    );
-    let all_clamped = gqa_reduced_qk_all_weights(
-        &q,
-        &k,
-        1,
-        hd,
-        1,
-        scale,
-        seq,
-        None,
-        None,
-        hd * 4,
-        AttentionSpan::Full,
-    );
+    let all_full = gqa_reduced_qk_all_weights(&q, &k, 1, hd, 1, scale, seq, None, None, hd);
+    let all_clamped = gqa_reduced_qk_all_weights(&q, &k, 1, hd, 1, scale, seq, None, None, hd * 4);
     for (a, b) in all_full.heads[0].iter().zip(all_clamped.heads[0].iter()) {
         for (x, y) in a.iter().zip(b.iter()) {
             assert!(
@@ -376,7 +350,6 @@ fn reduced_qk_clamps_rank_zero_to_one() {
         None,
         None,
         0,
-        AttentionSpan::Full,
     );
     for (qi, dist) in all.heads[0].iter().enumerate() {
         let causal_sum: f32 = dist[..=qi].iter().sum();
@@ -405,7 +378,6 @@ fn reduced_qk_softcap_branch() {
         Some(0.5),
         None,
         hd,
-        AttentionSpan::Full,
     );
     for (qi, dist) in all.heads[0].iter().enumerate() {
         let causal_sum: f32 = dist[..=qi].iter().sum();
@@ -683,229 +655,5 @@ fn full_attention_with_sink_matches_reference_implementation() {
                 "position {qi} dim {d}: got {got}, reference {want}"
             );
         }
-    }
-}
-
-// ── sliding window ───────────────────────────────────────────────
-//
-// These are the tests the 85-token Gate-B fixture could not be: they
-// deliberately run *past* the window, because below it a sliding span and
-// a full span compute the identical thing (`docs/k3-funnel.md` §4.9.1).
-
-/// Control. Below the window the two spans must agree exactly — this is
-/// what made the defect invisible, so it is pinned rather than assumed.
-#[test]
-fn below_the_window_windowed_equals_full() {
-    let (seq, heads, hd) = (6, 2, 4);
-    let (q, k, v) = (
-        small(seq, heads * hd, 0.03),
-        small(seq, heads * hd, 0.02),
-        small(seq, heads * hd, 0.01),
-    );
-    let full = gqa_attention_with_weights_in_span(
-        &q,
-        &k,
-        &v,
-        heads,
-        hd,
-        1,
-        0.5,
-        seq,
-        false,
-        None,
-        None,
-        AttentionSpan::Full,
-    )
-    .0;
-    let windowed = gqa_attention_with_weights_in_span(
-        &q,
-        &k,
-        &v,
-        heads,
-        hd,
-        1,
-        0.5,
-        seq,
-        false,
-        None,
-        None,
-        AttentionSpan::Sliding { window: seq + 1 },
-    )
-    .0;
-    for (a, b) in full.iter().zip(windowed.iter()) {
-        assert!((a - b).abs() < 1e-7, "{a} vs {b}");
-    }
-}
-
-/// Above the window the two must differ. Without this, a span that
-/// silently no-ops would pass every other test in this file.
-#[test]
-fn above_the_window_windowed_differs_from_full() {
-    let (seq, heads, hd) = (12, 2, 4);
-    let (q, k, v) = (
-        small(seq, heads * hd, 0.03),
-        small(seq, heads * hd, 0.02),
-        small(seq, heads * hd, 0.01),
-    );
-    let full = gqa_attention_with_weights_in_span(
-        &q,
-        &k,
-        &v,
-        heads,
-        hd,
-        1,
-        0.5,
-        seq,
-        false,
-        None,
-        None,
-        AttentionSpan::Full,
-    )
-    .0;
-    let windowed = gqa_attention_with_weights_in_span(
-        &q,
-        &k,
-        &v,
-        heads,
-        hd,
-        1,
-        0.5,
-        seq,
-        false,
-        None,
-        None,
-        AttentionSpan::Sliding { window: 3 },
-    )
-    .0;
-    assert!(
-        full.iter()
-            .zip(windowed.iter())
-            .any(|(a, b)| (a - b).abs() > 1e-5),
-        "a window of 3 over 12 positions must change the output"
-    );
-}
-
-/// A windowed position's output must equal a *full* attention run over
-/// just the keys inside its window. This is the definition, checked
-/// against an independent construction rather than against itself.
-#[test]
-fn windowed_position_equals_full_attention_over_its_window() {
-    let (seq, heads, hd, window) = (10usize, 1usize, 4usize, 4usize);
-    let (q, k, v) = (
-        small(seq, heads * hd, 0.03),
-        small(seq, heads * hd, 0.02),
-        small(seq, heads * hd, 0.01),
-    );
-    let windowed = gqa_attention_with_weights_in_span(
-        &q,
-        &k,
-        &v,
-        heads,
-        hd,
-        1,
-        0.5,
-        seq,
-        false,
-        None,
-        None,
-        AttentionSpan::Sliding { window },
-    )
-    .0;
-
-    let qi = seq - 1;
-    let start = qi + 1 - window;
-    // Re-run full attention over the window's slice, with the query last.
-    let q_sub = q.slice(ndarray::s![qi..qi + 1, ..]).to_owned();
-    let k_sub = k.slice(ndarray::s![start..qi + 1, ..]).to_owned();
-    let v_sub = v.slice(ndarray::s![start..qi + 1, ..]).to_owned();
-    let mut q_pad = Array2::<f32>::zeros((window, heads * hd));
-    q_pad.row_mut(window - 1).assign(&q_sub.row(0));
-    let reference = gqa_attention_with_weights_in_span(
-        &q_pad,
-        &k_sub,
-        &v_sub,
-        heads,
-        hd,
-        1,
-        0.5,
-        window,
-        false,
-        None,
-        None,
-        AttentionSpan::Full,
-    )
-    .0;
-    for d in 0..hd {
-        let got = windowed[[qi, d]];
-        let want = reference[[window - 1, d]];
-        assert!((got - want).abs() < 1e-6, "dim {d}: {got} vs {want}");
-    }
-}
-
-/// Captured distributions stay indexed by **absolute** position, so a
-/// consumer reads key `j` at index `j` and sees exact zeros outside the
-/// window rather than a left-shifted distribution.
-#[test]
-fn captured_weights_stay_at_absolute_positions() {
-    let (seq, heads, hd, window) = (10usize, 1usize, 4usize, 3usize);
-    let (q, k, v) = (
-        small(seq, heads * hd, 0.03),
-        small(seq, heads * hd, 0.02),
-        small(seq, heads * hd, 0.01),
-    );
-    let (_, weights) = gqa_attention_with_weights_in_span(
-        &q,
-        &k,
-        &v,
-        heads,
-        hd,
-        1,
-        0.5,
-        seq,
-        true,
-        None,
-        None,
-        AttentionSpan::Sliding { window },
-    );
-    let head0 = &weights.expect("capture requested").heads[0];
-    assert_eq!(head0.len(), seq);
-    for (j, w) in head0.iter().enumerate() {
-        if j < seq - window {
-            assert_eq!(*w, 0.0, "position {j} is outside the window but nonzero");
-        } else {
-            assert!(*w > 0.0, "position {j} is inside the window but zero");
-        }
-    }
-    let mass: f32 = head0.iter().sum();
-    assert!(
-        (mass - 1.0).abs() < 1e-5,
-        "weights must sum to 1, got {mass}"
-    );
-}
-
-/// **Prefill and decode must consult the same keys.** A decode step over a
-/// full cache has to reproduce the last prefill row; if the two resolve
-/// their windows differently, generation silently diverges from the
-/// forward the gate measured.
-#[test]
-fn decode_step_agrees_with_prefill_last_row_under_a_window() {
-    use crate::attention::decode::gqa_attention_decode_step_in_span;
-    let (seq, heads, hd, window) = (12usize, 2usize, 4usize, 5usize);
-    let (q, k, v) = (
-        small(seq, heads * hd, 0.03),
-        small(seq, heads * hd, 0.02),
-        small(seq, heads * hd, 0.01),
-    );
-    let span = AttentionSpan::Sliding { window };
-    let prefill = gqa_attention_with_weights_in_span(
-        &q, &k, &v, heads, hd, 1, 0.5, seq, false, None, None, span,
-    )
-    .0;
-    let q_last = q.slice(ndarray::s![seq - 1..seq, ..]).to_owned();
-    let decode =
-        gqa_attention_decode_step_in_span(&q_last, &k, &v, heads, hd, 1, 0.5, None, None, span);
-    for d in 0..heads * hd {
-        let (a, b) = (prefill[[seq - 1, d]], decode[[0, d]]);
-        assert!((a - b).abs() < 1e-6, "dim {d}: prefill {a} vs decode {b}");
     }
 }

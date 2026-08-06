@@ -11,7 +11,8 @@ use larql_compute::ComputeBackend;
 use larql_vindex::VectorIndex;
 use ndarray::Array2;
 
-use super::compute::{last_row, recompute_kv, RsPrefillResult};
+use super::compute::{last_row, recompute_kv};
+use super::prefill::RsPrefillResult;
 use super::store::RsStore;
 use crate::profiler::EngineProfiler;
 use larql_inference::attention::run_attention_with_kv_backend;

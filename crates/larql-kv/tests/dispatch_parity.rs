@@ -63,7 +63,8 @@ fn prefill_via_dispatch_matches_legacy_kv_prefill_run() {
         None,
         None,
     )
-    .expect("prefill");
+    .expect("prefill")
+    .expect("dispatch produced a result");
     let (h_legacy, _cache) = kv_prefill_run(
         larql_inference::WeightsView::dense(&weights),
         &ffn,
@@ -96,7 +97,8 @@ fn prefill_via_dispatch_windowed_matches_legacy() {
         window,
         None,
     )
-    .expect("prefill");
+    .expect("prefill")
+    .expect("dispatch produced a result");
     let (h_legacy, _cache) = kv_prefill_run(
         larql_inference::WeightsView::dense(&weights),
         &ffn,
@@ -128,7 +130,8 @@ fn decode_step_via_dispatch_matches_legacy_kv_decode_step_run() {
         None,
         None,
     )
-    .unwrap();
+    .unwrap()
+    .expect("dispatch produced a result");
     let (_, mut cache) = kv_prefill_run(
         larql_inference::WeightsView::dense(&weights),
         &ffn,
@@ -152,7 +155,8 @@ fn decode_step_via_dispatch_matches_legacy_kv_decode_step_run() {
         None,
         None,
     )
-    .expect("decode step trait");
+    .expect("decode step trait")
+    .expect("dispatch produced a result");
 
     let h_legacy = kv_decode_step_run(
         &weights,
@@ -185,7 +189,8 @@ fn multi_step_decode_via_dispatch_matches_legacy() {
         None,
         None,
     )
-    .unwrap();
+    .unwrap()
+    .expect("dispatch produced a result");
     let (_, mut cache) = kv_prefill_run(
         larql_inference::WeightsView::dense(&weights),
         &ffn,
@@ -209,7 +214,8 @@ fn multi_step_decode_via_dispatch_matches_legacy() {
             None,
             None,
         )
-        .expect("decode trait");
+        .expect("decode trait")
+        .expect("dispatch produced a result");
         let h_legacy = kv_decode_step_run(
             &weights,
             &ffn,
@@ -250,7 +256,8 @@ fn prefill_and_decode_via_dispatch_match_legacy_on_ple_arch() {
         None,
         None,
     )
-    .expect("PLE prefill dispatch");
+    .expect("PLE prefill dispatch")
+    .expect("dispatch produced a result");
     let (h_legacy, mut cache) = kv_prefill_run(
         larql_inference::WeightsView::dense(&weights),
         &ffn,
@@ -275,7 +282,8 @@ fn prefill_and_decode_via_dispatch_match_legacy_on_ple_arch() {
             None,
             None,
         )
-        .expect("PLE decode dispatch");
+        .expect("PLE decode dispatch")
+        .expect("dispatch produced a result");
         let h_legacy = kv_decode_step_run(
             &weights,
             &ffn,
@@ -304,7 +312,8 @@ fn prefill_and_decode_via_dispatch_async_match_legacy_on_ple_arch() {
         None,
         None,
     )
-    .expect("PLE prefill async dispatch");
+    .expect("PLE prefill async dispatch")
+    .expect("dispatch produced a result");
     let (h_legacy, mut cache) = kv_prefill_run(
         larql_inference::WeightsView::dense(&weights),
         &ffn,
@@ -329,7 +338,8 @@ fn prefill_and_decode_via_dispatch_async_match_legacy_on_ple_arch() {
             None,
             None,
         )
-        .expect("PLE decode async dispatch");
+        .expect("PLE decode async dispatch")
+        .expect("dispatch produced a result");
         let h_legacy = kv_decode_step_run(
             &weights,
             &ffn,

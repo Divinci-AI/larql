@@ -91,6 +91,16 @@ pub struct MetalBackend {
     //  `FfnKernels` (the `ffn` field).)
     /// KV cache for decode mode — initialized on first decode_token call.
     pub(crate) kv_cache: std::sync::Mutex<Option<ops::kv_cache::KVCache>>,
+    /// Engine-requested sliding window for the sequence currently being
+    /// decoded, or `NO_ENGINE_WINDOW` when unwindowed.
+    ///
+    /// Distinct from the architecture's own per-layer SWA, which comes
+    /// from the layer spec; the effective window is the narrower of the
+    /// two. Carried on the backend rather than threaded through
+    /// `build_arch_params` because it belongs to the *sequence*, not the
+    /// architecture — every call site that builds a layer spec would
+    /// otherwise have to learn about a caller's decode policy.
+    pub(crate) engine_window: std::sync::atomic::AtomicUsize,
     /// Pre-allocated MoE scratch for `decode_token_q4k_moe` — keyed
     /// by `(top_k, hidden, intermediate_size)`. Reused across decode
     /// calls so the ~15 buffer allocations (~120ms on Gemma 4 26B-A4B,
@@ -271,6 +281,7 @@ impl MetalBackend {
             attention,
             ffn,
             kv_cache: std::sync::Mutex::new(None),
+            engine_window: std::sync::atomic::AtomicUsize::new(NO_ENGINE_WINDOW),
             moe_scratch: std::sync::Mutex::new(None),
             ple_inputs: std::sync::Mutex::new(None),
             f32_gemv_pipeline,
@@ -409,6 +420,42 @@ impl PleInputBuffer {
         ((position * self.num_layers + layer) * self.ple_dim * 4) as u64
     }
 }
+
+impl MetalBackend {
+    /// Set the engine-requested window for the sequence being decoded.
+    /// `None` clears it. See [`MetalBackend::effective_window_for`].
+    pub(crate) fn set_engine_window(&self, window: Option<usize>) {
+        self.engine_window.store(
+            window.unwrap_or(NO_ENGINE_WINDOW),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
+    /// Narrow a layer's architectural window by the engine's, if any.
+    ///
+    /// Both use `0` for "unbounded", so this is a min over the non-zero
+    /// values. The narrower wins: an engine promising a 256-token window
+    /// must not attend further just because the architecture allows
+    /// 1024, and a sliding layer must not attend further just because
+    /// the engine is unwindowed.
+    pub(crate) fn effective_window_for(&self, arch_window: u32) -> u32 {
+        let engine = self
+            .engine_window
+            .load(std::sync::atomic::Ordering::Relaxed) as u32;
+        match (arch_window, engine) {
+            (0, e) => e,
+            (a, 0) => a,
+            (a, e) => a.min(e),
+        }
+    }
+}
+
+/// `engine_window` value meaning "no engine-imposed window".
+///
+/// Zero is the same sentinel the kernel uses for `window_size`, so the
+/// backend-side and shader-side notions of "unbounded" agree without a
+/// translation step.
+pub(crate) const NO_ENGINE_WINDOW: usize = 0;
 
 #[cfg(test)]
 mod tests {

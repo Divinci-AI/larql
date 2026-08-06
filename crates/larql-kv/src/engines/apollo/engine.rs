@@ -387,13 +387,30 @@ impl ApolloEngine {
 // `FfnBackend` dispatch (forward goes through `forward_from_layer` /
 // `forward_raw_logits` directly), and its `None` returns map to
 // `RetrievalMiss` rather than the per-layer backend failures of
-// `KvEngine`. Construction sites build it as
+// `KvEngine`.
+//
+// That missing dispatch is why both entry points refuse a hybrid-MoE
+// architecture outright (see `APOLLO_HAS_NO_FFN_SEAM`) rather than serving it
+// a dense-only forward that would answer for a different model. Construction sites build it as
 // [`larql_inference::AnyEngine::Retrieval`] so the harness branches
 // once at the top of the autoregressive loop.
 
+/// Why Apollo cannot dispatch experts, for the refusal it owes a MoE model.
+///
+/// Structural, not an omission: `forward_from_layer` / `forward_raw_logits`
+/// live in `larql-compute` *below* the `FfnBackend` seam and construct their
+/// own `ViewFfn` over the dense weights, so no caller-supplied backend — and
+/// therefore no bound expert route — can reach them. Giving Apollo real
+/// dispatch means threading an `FfnBackend` through `forward_layer_range`,
+/// which is a change to the forward, not to this engine.
+const APOLLO_ENGINE_NAME: &str = "apollo";
+
+const APOLLO_HAS_NO_FFN_SEAM: &str =
+    "its forward runs below the FfnBackend seam and builds its own dense FFN";
+
 impl RetrievalEngine for ApolloEngine {
     fn name(&self) -> &str {
-        "apollo"
+        APOLLO_ENGINE_NAME
     }
 
     fn info(&self) -> EngineInfo {
@@ -438,6 +455,7 @@ impl RetrievalEngine for ApolloEngine {
         if token_ids.is_empty() {
             return Err(EngineError::EmptyPrompt);
         }
+        crate::engines::refuse_if_moe(APOLLO_ENGINE_NAME, APOLLO_HAS_NO_FFN_SEAM, weights)?;
         let store = self
             .store
             .as_ref()
@@ -498,6 +516,7 @@ impl RetrievalEngine for ApolloEngine {
         weights: &ModelWeights,
         token_id: u32,
     ) -> Result<Array2<f32>, EngineError> {
+        crate::engines::refuse_if_moe(APOLLO_ENGINE_NAME, APOLLO_HAS_NO_FFN_SEAM, weights)?;
         self.context_tokens.push(token_id);
         let delta =
             self.injection_delta

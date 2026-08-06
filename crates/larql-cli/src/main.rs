@@ -317,6 +317,7 @@ struct ChatArgs {
     /// Route FFN to a remote larql-server.
     #[arg(long, value_name = "URL")]
     ffn: Option<String>,
+    routed_from: Option<String>,
 
     /// HTTP timeout in seconds for --ffn.
     #[arg(long, default_value = "60")]
@@ -338,6 +339,7 @@ impl From<ChatArgs> for run_cmd::RunArgs {
             context_window: 0,
             engine: None,
             ffn: c.ffn,
+            routed_from: c.routed_from,
             ffn_timeout_secs: c.ffn_timeout_secs,
             metal: false,
             verbose: c.verbose,

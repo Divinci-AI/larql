@@ -34,7 +34,7 @@ use larql_models::ModelWeights;
 use ndarray::Array2;
 
 use crate::attention::{
-    decode::{gqa_attention_decode_step, run_attention_block_decode_step_backend},
+    decode::{gqa_attention_decode_step_windowed, run_attention_block_decode_step_backend},
     rope::apply_rope_partial_at_full,
     run_attention_with_kv_backend,
 };
@@ -103,7 +103,7 @@ pub fn predict_kquant_prefill(
 /// `state` is `Some`, populates per-layer `h_in` ([seq_len, hidden]),
 /// `k_new` ([seq_len, kv_dim]), `v_new` ([seq_len, kv_dim]) for every
 /// position in the prompt — engines (markov_residual,
-/// unlimited_context, turbo_quant) use this to seed their state policy
+/// windowed_checkpoint, turbo_quant) use this to seed their state policy
 /// from a single prefill pass without a follow-up CPU re-walk. When
 /// `state` is `None`, bit-identical to [`predict_kquant_prefill`].
 pub fn predict_kquant_prefill_with_state(
@@ -576,7 +576,7 @@ fn vec_to_2d_row(v: Vec<f32>) -> Array2<f32> {
 /// signature stays format-agnostic.
 ///
 /// Used by `StandardEngine`'s coarse path and by research engines
-/// (`MarkovResidual`, `UnlimitedContext`, `TurboQuant`) that want the
+/// (`MarkovResidual`, `WindowedCheckpoint`, `TurboQuant`) that want the
 /// production decode kernel without inheriting the per-layer dispatch
 /// trait's cached-K/V shape.
 ///
@@ -741,7 +741,12 @@ pub fn attention_decode_step_native(
     };
 
     let softcap = arch.attn_logit_softcapping();
-    let attn_out = gqa_attention_decode_step(
+    // Per-layer sliding window, same shared rule the Metal spec uses.
+    // This is the CPU coarse Q4K decode — the path `standard` takes on
+    // CpuBackend — so without it a Gemma-class model attends full history
+    // here while Metal masks.
+    let window = crate::forward_overrides::effective_attention_window_for_layer(arch, layer);
+    let attn_out = gqa_attention_decode_step_windowed(
         &q_rope,
         &k_concat,
         &v_concat,
@@ -756,6 +761,7 @@ pub fn attention_decode_step_native(
             num_q,
             layer,
         ),
+        window,
     );
     let attn_out_row: &[f32] = attn_out.row(0).to_slice().or_else(|| attn_out.as_slice())?;
 

@@ -132,6 +132,14 @@ pub enum KernelMaturity {
     /// No Metal kernel at all.
     None,
     /// A standalone or diagnostic kernel exists.
+    ///
+    /// No container sits here today — MXFP4, the one that would, has already
+    /// reached `Grouped`. The rung is kept because it is what separates "a
+    /// kernel exists" from "a kernel serves", and collapsing the ladder back
+    /// towards the coarse "has a kernel" question is precisely what produced
+    /// the wrong MXFP4 claim recorded above. Ordering is pinned by
+    /// `kernel_maturity_ladder_ascends_and_servability_splits_it_once`.
+    #[allow(dead_code)]
     Standalone,
     /// A grouped-expert kernel exists (may still be a candidate, not a path).
     Grouped,
@@ -538,5 +546,28 @@ mod tests {
             .map(ServingFormat::all_in_bits)
             .collect();
         assert!(bits.windows(2).all(|p| p[0] <= p[1]), "{bits:?}");
+    }
+
+    #[test]
+    fn kernel_maturity_ladder_ascends_and_servability_splits_it_once() {
+        // `is_servable` is a threshold on the ordering, so the ordering is the
+        // load-bearing part: a rung inserted out of order would silently move
+        // the servable boundary without touching `is_servable` itself.
+        let ladder = [
+            KernelMaturity::None,
+            KernelMaturity::Standalone,
+            KernelMaturity::Grouped,
+            KernelMaturity::Dispatched,
+            KernelMaturity::Production,
+        ];
+        assert!(
+            ladder.windows(2).all(|p| p[0] < p[1]),
+            "the ladder must be declared in ascending maturity: {ladder:?}"
+        );
+        let servable: Vec<bool> = ladder.iter().map(|m| m.is_servable()).collect();
+        // Monotone: once servable, always servable further up the ladder.
+        assert!(servable.windows(2).all(|p| p[0] <= p[1]), "{servable:?}");
+        assert!(!KernelMaturity::Standalone.is_servable());
+        assert!(KernelMaturity::Dispatched.is_servable());
     }
 }

@@ -14,12 +14,38 @@ use super::tensors::{insert_q4k_layer_tensors, remove_layer_tensors};
 /// Compute the final hidden state for `token_ids` against a Q4_K/Q6_K
 /// vindex, dequantising attn + FFN one layer at a time. Returns the
 /// `[seq_len, hidden]` array; caller owns the lm_head step.
+/// Analysis-mode forward: a refusing MoE route is recorded, not fatal.
+///
+/// Kept at this signature because the overwhelming majority of its callers
+/// pass `None`, where no refusal is reachable at all. Any caller that *does*
+/// pass a backend and produces a continuation, a score, a parity number or a
+/// benchmark must use [`predict_kquant_hidden_checked`] with
+/// [`crate::ffn::MoeFailurePolicy::Fatal`] instead — under `RecordRefusal` a
+/// failed layer contributes zeros and the result is analysis-only.
 pub fn predict_kquant_hidden(
     weights: &ModelWeights,
     token_ids: &[u32],
     index: &VectorIndex,
-    moe_remote: Option<&crate::ffn::RemoteMoeBackend>,
+    moe: Option<&dyn crate::ffn::MoeExpertBackend>,
 ) -> Array2<f32> {
+    let route = moe.map(crate::ffn::MoeRoute::recording);
+    predict_kquant_hidden_checked(weights, token_ids, index, route)
+        // `RecordRefusal` never propagates an error out of the block, so this
+        // is unreachable rather than swallowed. Stated as an expectation so a
+        // future policy change cannot turn it back into a silent zero.
+        .expect("RecordRefusal never returns Err")
+}
+
+/// Forward pass whose MoE refusals are governed by the caller's policy.
+///
+/// This is the form every operation that produces a result about the model
+/// should use: it returns the refusal rather than folding it into the tensor.
+pub fn predict_kquant_hidden_checked(
+    weights: &ModelWeights,
+    token_ids: &[u32],
+    index: &VectorIndex,
+    moe: Option<crate::ffn::MoeRoute<'_>>,
+) -> Result<Array2<f32>, crate::ffn::MoeBackendError> {
     let num_layers = weights.num_layers;
     let mut scratch = larql_models::DequantScratch::new();
     let mut h = embed_tokens_pub(weights, token_ids);
@@ -56,8 +82,8 @@ pub fn predict_kquant_hidden(
                 &ffn_backend,
                 ple_inputs.get(layer),
                 shared_kv,
-                moe_remote,
-            ) {
+                moe,
+            )? {
                 h = h_new;
                 if let Some(kv) = kv_out {
                     kv_cache.insert(layer, kv);
@@ -90,7 +116,7 @@ pub fn predict_kquant_hidden(
         }
     }
 
-    h
+    Ok(h)
 }
 
 /// Build `MoeRouterWeights` for a single layer from the model's vector store.
@@ -127,6 +153,14 @@ pub fn build_moe_router_weights<'a>(
     })
 }
 
+/// What one MoE layer produced: the new residual, plus any K/V worth caching.
+///
+/// The outer `Option` is an **absence** — attention had nothing to run for this
+/// layer — while the `Result` around it is a **failure**, a refused expert
+/// route. Keeping them distinct is the point: collapsing "nothing to do" into
+/// "something went wrong" is how a missing operand becomes a zeroed layer.
+type MoeLayerOutcome = Option<(Array2<f32>, Option<SharedKV>)>;
+
 /// CPU forward for one hybrid-MoE layer (Gemma 4 26B A4B).
 fn run_moe_layer_cpu(
     weights: larql_models::WeightsView,
@@ -135,15 +169,24 @@ fn run_moe_layer_cpu(
     ffn: &dyn crate::ffn::FfnBackend,
     ple_input: Option<&Array2<f32>>,
     shared_kv: Option<&SharedKV>,
-    moe_remote: Option<&crate::ffn::RemoteMoeBackend>,
-) -> Option<(Array2<f32>, Option<SharedKV>)> {
+    moe: Option<crate::ffn::MoeRoute<'_>>,
+) -> Result<MoeLayerOutcome, crate::ffn::MoeBackendError> {
+    // Attention returning `None` means this layer has nothing to run — an
+    // absence, not a failure, so it stays `Ok(None)` and is distinct from a
+    // refused expert route.
     let (h_post_attn, kv_out) = if let Some(shared) = shared_kv {
-        let (h_pa, _, _) =
-            crate::attention::run_attention_block_shared(weights, h, layer, false, Some(shared))?;
+        let Some((h_pa, _, _)) =
+            crate::attention::run_attention_block_shared(weights, h, layer, false, Some(shared))
+        else {
+            return Ok(None);
+        };
         (h_pa, None)
     } else {
-        let (h_pa, _, _, k_rope, v_final) =
-            crate::attention::run_attention_block_with_kv_out(weights, h, layer, false, None)?;
+        let Some((h_pa, _, _, k_rope, v_final)) =
+            crate::attention::run_attention_block_with_kv_out(weights, h, layer, false, None)
+        else {
+            return Ok(None);
+        };
         (h_pa, Some((k_rope, v_final)))
     };
 
@@ -153,14 +196,14 @@ fn run_moe_layer_cpu(
         layer,
         ffn,
         ple_input,
-        moe_remote,
-    );
-    Some((h_out, kv_out))
+        moe,
+    )?;
+    Ok(Some((h_out, kv_out)))
 }
 
 /// CPU MoE FFN block for one hybrid-MoE layer, given the **post-attention**
 /// hidden state. Computes the dense FFN contribution (`h1`), the expert
-/// contribution (`h2` — remote via `moe_remote` when set, else local
+/// contribution (`h2` — via `moe` when a route is bound, else local
 /// `cpu_moe_forward`), combines + outer-norms, and applies PLE +
 /// layer-scalar. Returns the full layer output (the new residual).
 ///
@@ -179,17 +222,9 @@ pub fn moe_ffn_block_cpu(
     layer: usize,
     ffn: &dyn crate::ffn::FfnBackend,
     ple_input: Option<&Array2<f32>>,
-    moe_remote: Option<&crate::ffn::RemoteMoeBackend>,
-) -> Array2<f32> {
-    moe_ffn_block_cpu_with_index(
-        weights,
-        h_post_attn,
-        layer,
-        ffn,
-        ple_input,
-        moe_remote,
-        None,
-    )
+    moe: Option<crate::ffn::MoeRoute<'_>>,
+) -> Result<Array2<f32>, crate::ffn::MoeBackendError> {
+    moe_ffn_block_cpu_with_index(weights, h_post_attn, layer, ffn, ple_input, moe, None)
 }
 
 /// `LARQL_Q4K_DIRECT_FFN=1` routes the hybrid-MoE *dense slab* through the
@@ -214,9 +249,9 @@ pub fn moe_ffn_block_cpu_with_index(
     layer: usize,
     ffn: &dyn crate::ffn::FfnBackend,
     ple_input: Option<&Array2<f32>>,
-    moe_remote: Option<&crate::ffn::RemoteMoeBackend>,
+    moe: Option<crate::ffn::MoeRoute<'_>>,
     index: Option<&larql_vindex::VectorIndex>,
-) -> Array2<f32> {
+) -> Result<Array2<f32>, crate::ffn::MoeBackendError> {
     let arch = &*weights.arch;
     let norm_offset = arch.norm_weight_offset();
     let eps = arch.norm_eps();
@@ -263,15 +298,34 @@ pub fn moe_ffn_block_cpu_with_index(
     let seq_len = h_post_attn.nrows();
     let mut h2 = Array2::<f32>::zeros((seq_len, hidden));
 
-    if let Some(remote) = moe_remote {
-        if let Some(router) = build_moe_router_weights(weights, arch, layer) {
-            let _t_expert = std::time::Instant::now();
-            let out = remote.forward_moe_seq(layer, h_post_attn, &router, norm_offset, eps);
-            crate::decode_stages::record_expert(_t_expert.elapsed().as_nanos());
-            match out {
-                Ok(out) => h2 = out,
-                Err(e) => eprintln!("[moe_ffn_block_cpu] remote dispatch error L{layer}: {e}"),
-            }
+    if let Some(route) = moe {
+        // Every non-default route goes through one call. Which route it is —
+        // remote shards, a VINDEX3 bound plan — is the backend's business, and
+        // the block loop's only job is to place the contribution.
+        let _t_expert = std::time::Instant::now();
+        let out = route
+            .backend
+            .forward_moe_seq(weights, layer, h_post_attn, norm_offset, eps);
+        crate::decode_stages::record_expert(_t_expert.elapsed().as_nanos());
+        match out {
+            Ok(out) => h2 = out,
+            // The failure is the caller's to interpret. This branch used to
+            // print and continue unconditionally, which left `h2` at zeros —
+            // so a broken layer produced a fluent continuation from a model
+            // with that layer's entire expert contribution removed, and the
+            // only trace was a line on stderr.
+            Err(e) => match route.policy {
+                crate::ffn::MoeFailurePolicy::Fatal => return Err(e),
+                crate::ffn::MoeFailurePolicy::RecordRefusal => {
+                    // Analysis-only: `h2` stays zero and the caller has
+                    // declared it will report the incompleteness.
+                    eprintln!(
+                        "[moe_ffn_block_cpu] {} refused L{layer} (analysis mode, \
+                         expert contribution omitted): {e}",
+                        route.backend.name()
+                    );
+                }
+            },
         }
     } else {
         // Local experts count toward the expert stage too (`LARQL_DECODE_STAGES`)
@@ -300,7 +354,7 @@ pub fn moe_ffn_block_cpu_with_index(
             let mut h_ple =
                 crate::forward::ple::apply_per_layer_embedding(weights, &out, layer, ple_input);
             crate::forward::layer::apply_layer_scalar(weights, &mut h_ple, layer);
-            return h_ple;
+            return Ok(h_ple);
         } else {
             // Pure MoE with no expert weights would otherwise fall through to
             // `h_post_ffn_dense`, which here *is* `h_post_attn` — an identity
@@ -368,7 +422,7 @@ pub fn moe_ffn_block_cpu_with_index(
         }
     }
 
-    h_out
+    Ok(h_out)
 }
 
 #[cfg(test)]

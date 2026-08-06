@@ -1474,3 +1474,332 @@ mirroring the OpenAI Python SDK shape. Pairs with **F10** (OpenAI compat) so
 the SDK is a thin wrapper over the OpenAI client.
 
 ---
+
+
+## Completed
+
+### 2026-05-02 — F0 closed + N0 slices 1 + 2 (OpenAI compat: models + embeddings + completions + chat completions)
+
+**F0 closed.** `larql run output/gemma4-26b-a4b-q4k.vindex "The capital
+of France is" --max-tokens 5` (no `--moe-shards`, no `--metal`) returns
+**"Paris."** Local in-process CPU MoE on the per-layer Q4_K hybrid-MoE
+vindex now produces the correct answer; the M-CPU kernel work shared
+the code path with the 2026-04-30 server-side fix, so the local route
+inherited correctness for free. Marked closed under P0 Active.
+
+**N0 slice 1 + slice 2** — four OpenAI-compatible endpoints landed
+end-to-end on `larql-server`, live-validated against
+`output/gemma3-4b-q4k-streaming.vindex`:
+
+| Endpoint | Slice | Notes |
+|---|---|---|
+| `GET /v1/models` | 1 | OpenAI `{object: "list", data: [{id, object: "model", created, owned_by: "larql", ...}]}`. Larql-specific extras (`path`, `features`, `loaded`) preserved. |
+| `POST /v1/embeddings` | 1 | All four `input` variants (`string`, `string[]`, `int[]`, `int[][]`). Mean-pooled static-embedding lookup. `encoding_format: "base64"` returns 400 (follow-up). |
+| `POST /v1/completions` | 1 | Non-streaming; un-KV-cached generation loop. `stream=true` and `n>1` return 400. |
+| `POST /v1/chat/completions` | 2 | Multi-turn chat with chat-template auto-detection (Gemma / Llama / ChatML / Mistral / Plain) from `arch.family()`. Same generation path as `/v1/completions`. `tools` / `tool_choice` / `response_format: json_*` / `stream=true` / `n>1` return 400 with clear messages. |
+
+Implementation surface: ~1600 LOC across three new files
+(`src/routes/openai_embeddings.rs`, `src/routes/openai_completions.rs`,
+`src/routes/openai_chat.rs`) + reshape of `src/routes/models.rs` + 4
+routes wired into both single-model and multi-model routers + 23 unit
+tests + 19 integration tests + new live `crates/larql-demos/examples/server/openai_demo.rs`
+walkthrough that boots the server in-process via
+`tower::ServiceExt::oneshot` and exercises every endpoint.
+
+Live smoke (`gemma3-4b-q4k-streaming.vindex`, port 18081):
+- `/v1/models` → OpenAI shape with `gemma-3-4b-it`, `created`, `owned_by`, larql extras.
+- `/v1/embeddings input="France"` → 2560-dim pooled vector + correct usage block.
+- `/v1/completions max_tokens=5` → wire-correct response (`cmpl-...`,
+  `text_completion`, `usage`).
+- `/v1/chat/completions max_tokens=8` with system + user → wire-correct
+  response (`chatcmpl-...`, `chat.completion`, `choices[0].message.{role:
+  "assistant", content}`, `usage`). Output content quality on the
+  un-KV-cached path is poor (degenerate greedy on un-trained
+  base-decode-without-template); wire is what's verified here.
+
+**Tests** — full sweep:
+- `cargo test -p larql-server --lib`: 154 lib tests
+- 14 integration files: 392 integration tests
+- Total: ~546 tests, 0 failures
+- `cargo clippy -p larql-server --tests --no-deps -- -D warnings`: clean
+- `cargo fmt -p larql-server -- --check`: clean
+
+**Open follow-ups** (per-item in N0 sub-headers above):
+- **Slice 3 (N0.1 SSE)** — `text/event-stream` for both
+  `/v1/completions` and `/v1/chat/completions`. Bundles with Q1.10
+  (stream.rs reduction) since both touch the same streaming
+  state-machine shape.
+- **Slice 4 (N0.6)** — constrained decoding for `tools` / `tool_choice`
+  / `response_format: json_schema` via JSON schema → GBNF mask.
+- **Slice 5 (N0.3)** — `/v1/responses` Responses API, pairs with N1
+  stateful sessions.
+- **N0.2-fast (shipped 2026-05-02)** — KV-cached generation path now
+  live for both `/v1/completions` and `/v1/chat/completions`.
+  `LoadedModel.weights` migrated from `OnceLock<ModelWeights>` to
+  `OnceLock<RwLock<ModelWeights>>`; OpenAI handlers acquire a write
+  guard via `lock_weights_for_gen()` and call
+  `larql_inference::layer_graph::generate{,_streaming}` which auto-
+  dispatches f16 vindexes to the fused KV-cached path and Q4_K +
+  CPU vindexes to the per-step `predict_q4k` fallback. Output on
+  Gemma 3 4B: "The capital of France is" → " Paris.\n\nParis is"
+  (was " is is is is" pre-fix). Multi-turn chat template rendering
+  moved into `larql_inference::prompt::ChatTemplate::render_messages`,
+  shrinking the openai handlers further. `bootstrap.rs` now mirrors
+  `larql_inference::open_inference_vindex` by loading
+  `attn_weights_q4k.bin` + `interleaved_q4k.bin` for inference-capable
+  vindexes (without these the Q4_K decode panics).
+- **base64 encoding** for `/v1/embeddings` — small follow-up.
+- **N0-router** — OpenAI surface on `larql-router` (grid front);
+  tracked under "Router-side OpenAI surface" in P1.
+
+### 2026-05-01 (continued) — Q1 code-quality cleanup (9 of 10 items)
+
+The Q1 audit catalogue from earlier the same day, executed in a follow-on
+session. All public APIs preserved; existing test surface unchanged.
+Q1.10 (stream.rs WebSocket state machine) deferred until N0.1 (OpenAI
+Chat Completions SSE) forces a similar shape.
+
+| Item | Outcome |
+|---|---|
+| **Q1.1** Split `routes/expert.rs` (1044 LOC, 6 concerns) | New `routes/expert/{mod,single,batch_legacy,layer_batch,cpu,metal,warmup}.rs` directory. mod.rs (90 LOC) re-exports the historical public surface (`run_expert`, `run_experts_cpu_batch`, `run_experts_metal_batch`, `warmup_*`, `handle_*`); each sibling file is ~100-225 LOC with one clear concern. `metal.rs` is `#[cfg(all(feature = "metal-experts", target_os = "macos"))]`-gated so non-Metal builds compile clean. |
+| **Q1.2** Centralise env-var flags into `src/env_flags.rs` | New module with one `pub const` per `LARQL_*` name + cached presence accessors backed by `std::sync::OnceLock` (process-wide, not TLS — env vars don't change at runtime). Replaced 12 raw `std::env::var(...)` call sites in `routes/expert/*` and `grpc_expert.rs`; removed two ad-hoc `thread_local! { static HTTP_TIMING ... }` blocks. README env-var table now references the same names that show up in `env_flags::*`. |
+| **Q1.3 + Q1.9** Shared `wire::has_content_type` | New `src/wire.rs` with `has_content_type(headers, expected) -> bool` (uses `contains` so parameterised types like `application/json; charset=utf-8` match). Replaced 4 inline header-detection patterns in `routes/walk_ffn.rs`, `routes/embed.rs` (×2), `routes/expert/batch_legacy.rs`. 4 unit tests cover exact-match, parameterised, mismatch, and missing-header cases. |
+| **Q1.4** Body-size limit constants | `REQUEST_BODY_LIMIT_BYTES = 64 MB` and `REQUEST_BODY_LIMIT_LARGE_BYTES = 256 MB` in `src/http.rs`. Replaced 3 bare literals; `EXPERT_BATCH_BODY_LIMIT` in `routes/mod.rs` now references the same const. |
+| **Q1.5** `JSON_CONTENT_TYPE` const | Added to `src/http.rs` next to `BINARY_FFN_CONTENT_TYPE`. Replaced 3 bare `"application/json"` literals across walk_ffn / embed / expert. |
+| **Q1.6** Typed `DEFAULT_*` consts | `DEFAULT_PORT`, `DEFAULT_HOST`, `DEFAULT_HNSW_EF_SEARCH`, `DEFAULT_MAX_CONCURRENT`, `DEFAULT_DESCRIBE_CACHE_TTL_SECS`, `DEFAULT_LOG_LEVEL`, `DEFAULT_SESSION_TTL_SECS`, etc. Moved into `bootstrap.rs` (alongside the new `Cli` struct from Q1.8); `clap` now uses `default_value_t = ...`. `SessionManager::new` references the same `DEFAULT_SESSION_TTL_SECS` instead of re-encoding `3600`. |
+| **Q1.7** `announce.rs` reconnect/heartbeat consts | `RECONNECT_INITIAL_BACKOFF` / `RECONNECT_MAX_BACKOFF` / `HEARTBEAT_INTERVAL` lifted to module consts; the previous `Duration::from_secs(1) / 60 / 10` magic numbers are gone. |
+| **Q1.8** Reduce `main.rs::main` (656 LOC → 26 LOC) | Moved `Cli` struct + `pub async fn serve(cli: Cli)` into `bootstrap.rs`. `main.rs` is now: parse Cli, install tracing, call `bootstrap::serve(cli).await`. Boot orchestration (vindex loading, warmups, listener+TLS+UDS, gRPC, grid announce) is callable from anywhere that wants to drive the server without going through `clap::Parser::parse_from`. |
+| **Q1.10** stream.rs reduction | **Deferred** — see P1: Active. Bundling with N0.1 SSE infrastructure when that lands. |
+| Tests | 126 → **131 lib tests** (4 new for `wire::has_content_type`, 1 for `env_flags::names_are_larql_prefixed_and_unique`); 37 integration tests unchanged; ~580 tests across lib + integration, 0 failures. |
+| Clippy | `cargo clippy -p larql-server --tests --no-deps -- -D warnings` clean. |
+| `cargo fmt -p larql-server -- --check` | Clean. |
+
+LOC delta (per-file):
+
+| File | Before | After |
+|---|---|---|
+| `main.rs` | 656 | **26** |
+| `bootstrap.rs` | 464 | 1073 (Cli + serve moved in) |
+| `routes/expert.rs` | 1044 | (deleted) |
+| `routes/expert/mod.rs` | — | 90 |
+| `routes/expert/single.rs` | — | 155 |
+| `routes/expert/batch_legacy.rs` | — | 105 |
+| `routes/expert/layer_batch.rs` | — | 226 |
+| `routes/expert/cpu.rs` | — | 195 |
+| `routes/expert/metal.rs` | — | 204 |
+| `routes/expert/warmup.rs` | — | 140 |
+| `env_flags.rs` (new) | — | 122 |
+| `wire.rs` (new) | — | 64 |
+
+The bulk of the `bootstrap.rs` size growth is the Cli struct (~200 LOC of
+clap doc-comments + `#[arg]` attributes) and the `serve` function body
+that used to live in `main`. The orchestration is unchanged; only its
+location moved.
+
+### 2026-05-01 — HTTP CPU-path optimisations + UDS transport + layer-batch wire
+
+End-to-end ~17.7 → ~19.7 tok/s on Gemma 4 26B-A4B (M3 Max, single local
+gRPC shard, 100-token poem). Per-call HTTP overhead dropped from ~660 µs
+to ~460 µs on gRPC streaming, ~510 µs on UDS, ~660 µs on TCP HTTP (now
+with TCP_NODELAY). All optimisations preserve bit-exact semantics
+(verified by output equivalence on the same prompts).
+
+| Item | Outcome |
+|---|---|
+| **`POST /v1/experts/layer-batch`** new endpoint | One residual + K (expert_id, weight) pairs → one router-weighted-sum response. Replaces the K-residual-copies legacy `/v1/expert/batch` for the common-case `forward_moe`. Saves ~2.6 MB/token of redundant wire data + K-1 redundant `pre_experts_norm` + Q8_K quants on the server. |
+| **`POST /v1/experts/layer-batch-f16`** new endpoint | f16 variant — halves wire bytes (5.5 KB request + response). Opt-in via `LARQL_MOE_WIRE_F16=1` for LAN deployments. f16 conversion CPU cost (~9 µs/call) cancels the wire saving on loopback; expected +3-5% gain on 1 Gbps Ethernet. |
+| **Unix Domain Socket transport** (`--uds-path`, `unix://` URL) | Hand-rolled HTTP/1.1 over `UnixStream` (no new dep). Saves ~150 µs/call on loopback (~3% end-to-end). Persistent stream behind a `Mutex`, lazy reconnect on disconnect. Same wire format as TCP HTTP, so f16 + layer-batch semantics carry through unchanged. |
+| **TCP_NODELAY on accepted connections** | `axum::serve::ListenerExt::tap_io` hook calls `set_nodelay(true)` per accept. Defensive against tail-packet stalls (40-200 ms on Linux/BSD delayed ACK) on real LAN; within noise on loopback. |
+| **gRPC SPLIT default-on for gRPC shards** | Streaming fire/collect overlap now default for `grpc://` shards. Reliably ~12% steady-state win on M3 Max loopback (re-measured 19.5 vs 17.7 tok/s, alternating-cooled). The historical "20 → 4 tok/s catastrophic regression" warning predates the Metal MoE accuracy fix and the predispatch refactor; under thermal pressure both unary + SPLIT regress similarly, but stable-state SPLIT wins. Set `LARQL_MOE_NO_SPLIT=1` to opt out. |
+| Per-call timing instrumentation | `LARQL_HTTP_TIMING=1` (server: decode / spawn_overhead / compute / encode µs; client: encode / send_total / recv_body / decode µs). `LARQL_MOE_TIMING=1` (per-token: per-layer route+fire / collect / server compute estimate / network estimate). Used for the diagnostic round that found `__powisf2` libcall in the f16 decode hot path (now bit-manipulated). |
+| Test suite restored | 7+ test files had `LoadedModel { ... }` literals missing the `unit_filter` field added recently — all 9 LoadedModel literal sites in tests/ + tests/common/ patched. Test count went from 119 lib-only (broken integration tests) to **494 total across lib + 14 integration test files, all green**. |
+| README + docs updated | `README.md` rewrite: new headline mentioning MoE grid as first-class use case, full env-var reference table, refreshed CLI Options with `--uds-path`/`--units`, rewritten "Remote MoE shard topology" recipe with current numbers, new `/v1/experts/layer-batch[-f16]` API section, accurate Crate Structure (28 source files vs the 16 the doc previously listed). `docs/server-spec.md`: §4.5 Remote MoE Expert Endpoints added, §13.4 dropped "planned" status, §10.2 fly.io references `F-FLY`. |
+| `bench_expert_server` re-validated | Refreshed numbers in the Live perf snapshot section above. `cpu_moe_forward` floor 0.10 → 0.37 ms (the 0.10 was a buggy measurement on empty buffers — see prior compute ROADMAP). `forward_moe` warm 1.91 → 0.80 ms. 30-layer sweep 56 → 24.8 ms. RSS unchanged at ~10.5 GB. |
+
+Tried-but-reverted (kept in source for future hardware where the trade
+may flip):
+- `tokio::task::block_in_place` instead of `spawn_blocking` — server-side
+  faster (no transition cost) but tokio kept spawning replacement OS
+  workers when every request blocked, regressing sweep ~0.3 ms.
+- f16 wire as default — within noise on loopback (CPU conversion cancels
+  wire saving); kept as opt-in for LAN.
+
+### 2026-05-01 (continued) — larql-server review pass
+
+Same calendar day, separate session. Audit + fixes across the entire
+larql-server crate to land a clean baseline alongside the perf work.
+
+| Item | Outcome |
+|---|---|
+| Test suite restored | 7+ stale `LoadedModel` test fixtures + 1 stale `PatchOp` example fixture missing recently-added struct fields. All 9 LoadedModel literal sites + 1 PatchOp site patched. **Test count went 119 lib-only → 501 across lib + 14 integration files; all green.** |
+| `bench_expert_server` extended | New `--uds` and `--wire f32\|f16` flags. Spawns server bound to both TCP and UDS so the bench can A/B per-call cost. Confirmed UDS gives ~10% loopback win (0.82 → 0.74 ms `forward_moe` warm); f16 is a clear LOSS on loopback (1.05 ms — CPU conversion dominates) but expected to win on LAN. |
+| README rewrite | Added env-var reference table, `/v1/experts/layer-batch[-f16]` API section, "Remote MoE shard topology" recipe with current numbers, accurate Crate Structure (28 source files vs the 16 the doc previously listed), "What's coming" section pointing to N0..N6 + F-FLY. ~880 → ~1110 LOC. |
+| `docs/server-spec.md` updated | §3 CLI flags get `--uds-path` / `--units` / `--warmup-walk-ffn` / env-var section. New §4.5 Remote MoE Expert Endpoints (full layer-batch + f16 + transport coverage). §13.4 dropped "planned" status. §10.2 fly.io references `F-FLY`. |
+| ROADMAP additions | New "Great new functionality" section (N0..N6) at the top — N0 is OpenAI API compatibility (chat completions + completions + responses + embeddings + models), highest-leverage item. F-FLY at top of P0: Active. F0 status updated (server path correct, local in-process TBD). Q1 (code-quality review) added at P1 with 10 sub-items targeting modularity + magic literals. |
+| `cargo clippy -p larql-server --tests --no-deps -- -D warnings` | Was failing on 6 errors (manual `is_multiple_of`, `let_unit_value`, dead env-var unpacks, `path_used` unused initial assignment). All fixed. Server-only clippy now clean. |
+| `cargo fmt -p larql-server -- --check` | Clean. |
+| Coverage | 69.24% line / 75.64% function via `cargo llvm-cov`. Slight regression from 74.2/81.2 baseline attributable to new code added without proportional tests; mitigated by adding `topology.rs` tests (3) + `routes/expert.rs` `layer_batch_wire_tests` mod (4). |
+| Code-quality findings catalogued | New Q1 section in ROADMAP with 10 concrete items (Q1.1 split `routes/expert.rs` 1049 LOC, Q1.2 centralise env flags into `src/env_flags.rs`, etc.) — all with file:line references and effort estimates. Total ~7-8 hours for the full sweep. |
+| README + ROADMAP doublecheck | Fixed `gemma3-4b.vindex` references (file doesn't exist; replaced with `gemma3-4b-v2.vindex` which does), removed stale `ADR-009` reference (no such file), harmonised the two perf reference tables (Examples vs Recommended setups now reference each other), updated stale "2026-04-26" date stamp. |
+
+### 2026-04-26 — Per-expert byte table refactor + `experts_packed.bin` removal
+
+`MoeLayerWeights.experts_{gate_up,down}` migrated from `&[u8]` (monolith +
+`expert_idx * stride` arithmetic in the compute path) to `Vec<&[u8]>`
+(per-expert slice table). The CPU MoE consumer (`cpu_moe_forward` and
+`run_single_expert{,_with_norm}`) now indexes by expert id directly, with
+format dispatch (BF16 vs Q4_K) at the cache layer.
+
+| Item | Outcome |
+|---|---|
+| `larql-compute` | `cpu/ops/moe/{cache,expert,forward,mod}.rs` and `pipeline.rs::MoeLayerWeights`. `cached_dequant(bytes, format, expected_floats)` dispatches BF16/Q4_K. `expert_byte_slice` deleted. Tests updated. 94/94 pass. |
+| `larql-vindex` | `cpu/ops/q4_common.rs::dequantize_q4_k` lifted to module scope so the compute crate can dequant Q4_K without a `larql-models` dependency. |
+| `larql-inference` | `build_moe_weights` builds per-expert tables from either `weights.get_layer_entry_bytes(...)` (per-layer Q4_K) or BF16 stride slicing (legacy). `QuantFormat` re-exported. |
+| `larql-server` | `routes/expert.rs::run_expert` resolves per-expert bytes through whichever path the vindex provides; honours `expert_filter` ownership. `tests/test_expert_endpoint.rs` updated to slice synthetic monoliths into per-expert tables. 4/4 parity tests pass. |
+| 26B-A4B vindex | `weight_manifest.json` stripped of `packed_bf16` rows for experts (60 → 421 entries). `experts_packed.bin` deleted (43 GB freed; vindex 58 → 16 GB). |
+| Bench parity | `bench_expert_server` re-runs end-to-end against the per-layer-only vindex. `forward_moe` warm latency unchanged at 1.91 ms (was 1.93 ms when monolith was still on disk). 30-layer sweep at 56 ms (cold-page sweep on BF16 monolith was 866 ms). |
+
+`bench_expert_server` and the parity tests both detect the format
+automatically (`weights.has_per_layer_ffn()`); legacy BF16 vindexes still work
+unchanged. Future MoE vindexes only emit per-layer files — the q4k extractor
+at `format/weights/write_q4k/mod.rs` already does this.
+
+### 2026-04-30 — gRPC grid: end-to-end accuracy
+
+The grid produced semantically wrong text on Gemma 4 26B-A4B-it ("The capital
+of France is **not specified in the text**…") despite each shard correctly
+running its expert FFN. Root cause was on the **client** side
+(`larql-inference::layer_graph::grid`) — chat-template handling, detokeniser,
+EOS detection, and special-token suppression — not the shard server. The
+server work here was confirming the contract: shards return correct expert
+outputs given the right top-K input. Documenting for future grid changes.
+
+| Item | Notes |
+|------|-------|
+| Server shards verified correct | A 2-shard split (experts 0-63 on `:9081`, 64-127 on `:9082`) running against the unit manifest serves expert outputs that, when combined client-side with the proper detokenisation + EOS + special-token suppression + default system prompt, produce "**Paris**" as the answer |
+| Shard contract: per-(layer, expert) ownership via `--units` | The `parse_unit_manifest` path is what the client's `--moe-units-manifest` resolves against; ownership is the strict source of truth and `forward_moe_seq` rejects layers/experts not owned by any shard |
+| Decode throughput (loopback, M3 Max) | 2.3 tok/s end-to-end on the 26B-A4B with two shards in the same process — expected to climb meaningfully when shards run on separate hosts (less GPU contention with the client) |
+
+### 2026-04-30 — Metal expert dispatch: 3.7× speedup found, blocked on kernel bug
+
+`LARQL_MOE_TIMING=1` showed the grid bottleneck is **server compute = 95%** of token wall time (network = 2%, route+fire = 3%). Per layer: 8.36ms server / 0.18ms net. Each shard runs its 4 picked experts (gate + GELU + down) on CPU-rayon BLAS — that's where the time goes. Sub-arc:
+
+| Item | Notes |
+|------|-------|
+| Bottleneck localised | CPU experts = 250ms/token (95%) on the loopback 2-shard setup. Network = 5ms (2%). The grid-side overhead is negligible — accelerating the shard's expert math is the only meaningful lever |
+| `--features metal-experts` measured: **3.7× speedup** | Server with Metal expert dispatch: 264ms → 117ms per token, 2.3 tok/s → **9.4 tok/s** (preselected path → 11.2 tok/s). Significant — server compute drops from 250ms → 115ms |
+| **Accuracy bug blocks shipping** | Metal expert kernel (`MetalBackend::run_experts_preselected_metal` and `_prestaged_metal`, both routes) produces numerically wrong outputs for Gemma 4 26B-A4B-it MoE shape (cos≈0.7 vs CPU, \|metal\|≈70% of \|cpu\|). End-to-end output: "**Paris**" via CPU vs "answer is in the context" via Metal. Same kernels are correct for dense FFN at inter=2560/10240/21504 — bug is specific to MoE inter=704 dispatch |
+| Workaround: default to CPU even on metal-experts builds | `run_experts_metal_batch` now early-returns `None` unless `LARQL_USE_METAL_EXPERTS=1` is set. Shipping correctness over speed; the Metal path stays opt-in for kernel-debug runs |
+| Diagnostic: `LARQL_METAL_VS_CPU_DEBUG=1` | Server-side per-call A/B compare in `run_experts_metal_batch` — runs both Metal and CPU on the same input, prints max\|Δ\|, \|metal\|, \|cpu\|, cos. Ready to use when someone digs into the kernel |
+| See also | `larql-compute/ROADMAP.md` "Open: Metal MoE expert kernel — accuracy bug at inter=704" for the kernel-side investigation plan |
+
+### 2026-04-26 — examples, synthetic benchmark, grid checks
+
+| Item | Outcome |
+|---|---|
+| `server_demo` | Runs locally with synthetic data; fixed invalid probe-label JSON comma output and updated rate-limit text for `--trust-forwarded-for`. |
+| `embed_demo` | Runs locally with synthetic embed/logits/token responses and binary-wire examples. |
+| `server_bench --release` | Synthetic benchmark completed: `gate_knn` top-5 0.022 ms/op, 8-layer `walk` 0.203 ms/op, single-layer `walk-ffn` 0.032 ms/op, batched 8-layer `walk-ffn` 0.321 ms/op, describe simulation 0.298 ms/op, 512-token embed prefill 0.114 ms/op. |
+| `bench_embed_server` | Example builds under `cargo check -p larql-server --examples`; execution requires a real vindex path. |
+| Grid unit coverage | Added `GridState` tests for inclusive ranges, default single-model routing, least-loaded replica selection, deregistration, batched gap reporting, and status gaps. `cargo test -p larql-router` now runs 20 tests. |
+| Docs | Updated server README examples/benchmarks/testing, router README validation, and router spec validation commands. |
+
+### 2026-04-26 — coverage round-6 (embed + walk-ffn reachable gaps)
+
+| Item | Outcome |
+|---|---|
+| `routes/embed.rs` modularity | Extracted binary embed/logits parse helpers and binary embed response encoder |
+| `routes/embed.rs` coverage | **66.7% → 86.5% line**, **70.7% → 86.3% function** |
+| `routes/walk_ffn.rs` coverage | **76.7% → 79.5% line**, **77.3% → 82.0% function** |
+| Tests | 458 → **478** tests |
+| Coverage | **71.9% → 74.2% line**, **78.9% → 81.2% function** |
+
+### 2026-04-26 — modularity + coverage round-5
+
+| Item | Outcome |
+|---|---|
+| Boot/loading modularity | Moved parse/discovery/vindex-load helpers out of `main.rs` into `bootstrap.rs`; binary now keeps CLI orchestration while library code is directly testable |
+| `routes/stream.rs` | Extracted pure `stream_describe_messages`; describe stream behavior can be tested without a WebSocket client |
+| `routes/infer.rs` | Extracted mode selection and prediction formatting helpers |
+| `routes/explain.rs` | Extracted band mapping, probability/gate/attention rounding, prediction formatting, and lens formatting helpers |
+| Clippy | Server-local clippy clean with `--no-deps`; full dependency-checking command is blocked by existing `larql-vindex` warnings |
+| Coverage | **69.2% → 71.9% line**, **77.1% → 78.9% function** (458 tests) |
+
+### 2026-04-26 — coverage round-4 (T2 reachable gaps)
+
+| Item | Outcome |
+|---|---|
+| `embed_store.rs` | 25% → **98% line** with tiny f16 mmap fixtures and L1 cache behavior tests |
+| `announce.rs` | 6% → **56% line** by extracting/test-covering announce, heartbeat, dropping, and bearer helpers |
+| `main.rs` | 0% → **23% line** with binary unit tests for parse/discovery/serve-alias helpers |
+| `routes/stream.rs` | 0% → **28% line** with pure WebSocket message shape builders |
+| `routes/infer.rs`, `routes/explain.rs` | Default/request deserialization coverage added; full paths remain weight-gated |
+| Coverage | 63.9% → **69.2% line**, 73.4% → **77.1% function** (430 → 458 tests) |
+
+### 2026-04-26 — coverage round-3 (T2 partial) + magic strings round-2
+
+| Item | Outcome |
+|---|---|
+| `test_grpc.rs` — 28 new gRPC handler tests | Direct method calls on `VindexGrpcService` — no network socket; health, stats, describe, walk, select, relations, walk_ffn, infer, stream_describe |
+| `grpc.rs` coverage | 0% → **65%** (169 lines uncovered, all gated on real model weights or gRPC streaming) |
+| Magic strings — `"probe"` | `PROBE_RELATION_SOURCE` constant in `band_utils.rs`; used in describe.rs, grpc.rs, stream.rs |
+| Magic strings — `"ok"` | `HEALTH_STATUS_OK` constant; used in grpc.rs health handler |
+| Magic strings — gRPC modes | `INFER_MODE_WALK/DENSE/COMPARE` applied to grpc.rs (was using bare strings) |
+| Magic strings — WebSocket types | `WS_TYPE_ERROR/LAYER/DONE/PREDICTION/INFER_DONE` and `WS_CMD_DESCRIBE/INFER` in stream.rs |
+| Coverage | 57.2% → **63.3% line**, 65.3% → **73.2% function** (402 → 430 tests) |
+
+### 2026-04-26 — coverage round-2 (T1)
+
+| Item | Outcome |
+|---|---|
+| `functional_tokenizer()` in common | WordLevel tokenizer (France→0, …) added to test infra; unblocks describe/walk/walk-ffn body paths |
+| `test_http_full_routes.rs` | 39 new HTTP integration tests exercising full describe/walk/walk-ffn code paths |
+| `test_unit_band_utils.rs` | 13 pure unit tests for `band_utils.rs` constants + helpers |
+| Infer + ratelimit branches | `infer_disabled=false` model builder; ratelimit middleware axum tests |
+| Coverage | 49.1% → **58.0% line**, 56.4% → **65.3% function** (345 → 402 tests) |
+
+### 2026-04-26 — code quality round-1
+
+| Item | Outcome |
+|---|---|
+| Modularity — deduplicate `session_id()` | 3 identical private fn definitions → 1 `pub fn extract_session_id` in `session.rs` |
+| Modularity — `get_layer_bands()` / `filter_layers_by_band()` | 5 / 3 duplicated blocks → `src/band_utils.rs` |
+| Modularity — `model_or_err()` | 25 repeated `ok_or_else(NotFound)` sites → `AppState::model_or_err()` |
+| Modularity — `elapsed_ms()` | 20 repeated latency-rounding expressions → `src/state::elapsed_ms()` |
+| Magic strings — band names | `"syntax"/"knowledge"/"output"/"all"` → `BAND_*` constants in `band_utils.rs` |
+| Magic strings — infer modes | `"walk"/"dense"/"compare"` → `INFER_MODE_*` constants |
+| Magic strings — insert modes | `"constellation"/"embedding"` → `INSERT_MODE_*` constants |
+| Magic strings — patch names | `"unnamed"/"inline-patch"` → `PATCH_UNNAMED`/`PATCH_INLINE_NAME` constants |
+| Magic strings — HTTP headers | `"x-session-id"` → `HEADER_SESSION_ID`; `"etag"/"cache-control"/"if-none-match"` → axum `header::*` |
+| Test restructure | `test_api.rs` (2600 L) + `test_http.rs` (1400 L) → 10 focused files (100–350 L each) + `tests/common/mod.rs` |
+| Coverage baseline | 39.7% → **49.1% line**, 41.6% → **56.4% function** (345 tests, 0 failures) |
+
+### 2026-04-26 — perf round-1 (G1+G2+G3)
+
+| Item | Outcome |
+|---|---|
+| G1 cold-start profile | Two-phase: 1.27 s lazy weight load + 17 ms/layer mmap page-in. Warm steady state 0.2–0.3 ms/layer. |
+| G2 `/v1/warmup` + `--warmup-walk-ffn` | First walk-ffn 1247 ms → 12.6 ms (99×). Boot trades ~1.3 s + 3.2 GB pre-allocation. HTTP endpoint also exposed for live re-warm. |
+| G3 self-assembling gRPC grid | Live-validated `--grid-port` + `--join`: auto-join, coverage tracking, graceful failure (clean HTTP 400 on uncovered layer), auto-recovery on rejoin. |
+
+### 2026-04-26 — W2 retrofit + grid validation
+
+| Item | Outcome |
+|---|---|
+| `--warmup-hnsw` flag | Eager-builds HNSW across owned layers at boot via `warmup_hnsw_all_layers()`. Reports correct owned-layer count under `--layers`. |
+| Boot log: W2 status | `Down features Q4K: loaded (W2 — per-feature decode skips q4k_ffn_layer cache)` when `down_features_q4k.bin` is present. |
+| `/v1/stats.q4k_ffn` field | `{cache_slots, cache_bytes, feature_major_down}` — operators can verify W2 active + cache empty in steady state. |
+| `larql convert add-feature-major-down` | New CLI subcommand. Retrofits an existing Q4K vindex without re-quantising the rest. 30 layers / 152 MB / 1.12 s on Gemma 26B. Idempotent. |
+| Live grid validation | 2-shard layer-range split (0-14 + 15-29) on real 26B vindex, full fan-out via router, 8-way concurrent stress, 0.2 ms warm per-layer, 5.9 ms full-30-layer fan-out. |
+
+### Pre-2026-04-26 — foundations (already in place)
+
+- HTTP API: `/v1/walk`, `/v1/walk-ffn`, `/v1/stats`, `/v1/health`,
+  `/v1/infer`, `/v1/insert`, `/v1/expert/{layer}/{id}`, etc.
+- `--layers START-END` shard slicing (mmap pages outside range stay
+  paged out, RSS proportional to shard size).
+- `--max-q4k-cache-layers` LRU bound on the legacy Q4K dequant cache.
+- `--ffn-only` / `--embed-only` mode flags.
+- gRPC self-assembling grid (`--grid-port` / `--join` / `--grid-key`).
+- Bench rig daemon-aware (`larql-vindex` benches refuse if a server
+  shares the host; override with `LARQL_BENCH_ALLOW_DAEMONS=1`).

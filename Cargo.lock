@@ -2177,6 +2177,7 @@ dependencies = [
  "blas-src",
  "cc",
  "criterion",
+ "larql-execution",
  "larql-models",
  "libc",
  "memmap2",
@@ -2217,6 +2218,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "larql-demos"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "blas-src",
+ "larql-boundary",
+ "larql-compute",
+ "larql-core",
+ "larql-inference",
+ "larql-kv",
+ "larql-lql",
+ "larql-models",
+ "larql-router-protocol",
+ "larql-server",
+ "larql-vindex",
+ "ndarray",
+ "openblas-src",
+ "safetensors",
+ "serde",
+ "serde_json",
+ "tokenizers",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tower",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "larql-execution"
+version = "0.1.0"
+
+[[package]]
 name = "larql-factory"
 version = "0.1.0"
 dependencies = [
@@ -2246,6 +2280,7 @@ dependencies = [
  "larql-compute",
  "larql-compute-metal",
  "larql-core",
+ "larql-execution",
  "larql-kv",
  "larql-models",
  "larql-router-protocol",
@@ -2283,6 +2318,7 @@ dependencies = [
  "larql-boundary",
  "larql-compute",
  "larql-compute-metal",
+ "larql-execution",
  "larql-inference",
  "larql-vindex",
  "ndarray",
@@ -2466,7 +2502,9 @@ dependencies = [
  "larql-compute",
  "larql-compute-metal",
  "larql-core",
+ "larql-execution",
  "larql-inference",
+ "larql-kv",
  "larql-models",
  "larql-vindex-spec",
  "libc",

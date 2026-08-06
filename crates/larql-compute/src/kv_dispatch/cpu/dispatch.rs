@@ -40,7 +40,30 @@ impl KvDispatch for CpuBackend {
         h.append_row(k_row, v_row);
     }
 
+    /// Keep the tail `window_size` rows.
+    ///
+    /// Handles **both** cache shapes this backend allocates: the coarse
+    /// `CpuQ4kCacheHandle` (one handle for the whole model, a per-layer
+    /// `[rows, kv_dim]` pair inside) and the per-layer `CpuKvHandle`. Only the
+    /// second was handled before, so a windowed engine running on the coarse
+    /// path had its clip panic as a "foreign handle" — or, where the engine
+    /// never called clip at all, silently attended over its whole stream while
+    /// reporting a bounded window (issue #200).
     fn clip_kv(&self, handle: &mut KvHandle, window_size: usize) {
+        if let Some(coarse) = try_cpu_q4k_cache_mut(handle) {
+            for slot in coarse.cache.iter_mut() {
+                let Some((k, v)) = slot.as_mut() else {
+                    continue;
+                };
+                let rows = k.shape()[0];
+                if rows > window_size {
+                    let start = rows - window_size;
+                    *k = k.slice(ndarray::s![start.., ..]).to_owned();
+                    *v = v.slice(ndarray::s![start.., ..]).to_owned();
+                }
+            }
+            return;
+        }
         let h = cpu_handle_mut(handle);
         if h.rows > window_size {
             let start = h.rows - window_size;
@@ -51,6 +74,20 @@ impl KvDispatch for CpuBackend {
             h.k_buf.truncate(h.rows * kv_dim);
             h.v_buf.truncate(h.rows * kv_dim);
         }
+    }
+
+    fn truncate_kv(&self, handle: &mut KvHandle, len: usize) -> bool {
+        let h = cpu_handle_mut(handle);
+        // Growing only: `len` above the current row count would be asking
+        // this to invent rows, which is the one thing a rewind must not do.
+        if len > h.rows {
+            return false;
+        }
+        let kv_dim = h.kv_dim;
+        h.rows = len;
+        h.k_buf.truncate(len * kv_dim);
+        h.v_buf.truncate(len * kv_dim);
+        true
     }
 
     fn read_kv_to_host(&self, handle: &KvHandle) -> Option<(Array2<f32>, Array2<f32>)> {
@@ -224,6 +261,67 @@ impl KvDispatch for CpuBackend {
         Some((h, handle))
     }
 
+    /// Coarse prefill under an engine-requested window.
+    ///
+    /// Accepts the window only when it **cannot bind during the prompt**
+    /// (`token_ids.len() <= window`). That is the production shape — a
+    /// prompt inside the window, then decode sliding — and it lets the
+    /// engine keep the fused path for it.
+    ///
+    /// A prompt longer than the window would need per-query-position
+    /// masking inside `predict_kquant_prefill_with_state`, which this
+    /// entry point does not thread; rather than silently attend the full
+    /// prompt while the engine advertises a window, it declines and the
+    /// engine falls back to the per-layer path. Fail closed: a wrong
+    /// answer at full speed is worse than a right one at 2.4x.
+    fn coarse_prefill_windowed(
+        &self,
+        weights: &ModelWeights,
+        token_ids: &[u32],
+        index: Option<&dyn crate::KvIndex>,
+        window: Option<usize>,
+    ) -> Option<(Array2<f32>, KvHandle)> {
+        if let Some(w) = window {
+            if token_ids.len() > w {
+                return None;
+            }
+        }
+        self.coarse_prefill_with_state(weights, token_ids, index, None)
+    }
+
+    /// Coarse decode under an engine-requested window.
+    ///
+    /// The cache rows are absolute stream positions carrying their own
+    /// RoPE, and softmax over keys is order-independent, so a sliding
+    /// window is exactly "drop the oldest rows". Trimming to `w - 1`
+    /// *before* the step leaves room for the row this step appends, so
+    /// the cache holds at most `w` rows afterwards — bounding attention
+    /// and K/V together, which is the whole contract a windowed engine
+    /// advertises.
+    fn coarse_decode_step_windowed(
+        &self,
+        weights: &ModelWeights,
+        token_id: u32,
+        index: Option<&dyn crate::KvIndex>,
+        handle: &mut KvHandle,
+        abs_position: usize,
+        window: Option<usize>,
+    ) -> Option<Array2<f32>> {
+        if let Some(w) = window {
+            if w == 0 {
+                return None;
+            }
+            // Decline a handle this backend did not mint before mutating
+            // anything — `clip_kv` would panic on a foreign one.
+            try_cpu_q4k_cache_mut(handle)?;
+            // Reuse the existing clip rather than a second trim: `clip_kv`
+            // already keeps the tail of both cache shapes, and two copies
+            // of "drop the oldest rows" is how they drift apart.
+            self.clip_kv(handle, w - 1);
+        }
+        self.coarse_decode_step(weights, token_id, index, handle, abs_position)
+    }
+
     fn coarse_decode_step(
         &self,
         weights: &ModelWeights,
@@ -264,7 +362,7 @@ impl KvDispatch for CpuBackend {
     /// coarse Q4K cache handle. The cache rows are indexed by absolute
     /// stream position (prefill row 0 onward), matching the trait
     /// contract engines rely on for boundary-checkpoint readback
-    /// (`UnlimitedContextEngine::close_window` under HOnly). Returns
+    /// (`WindowedCheckpointEngine::close_window` under HOnly). Returns
     /// `None` for foreign handle shapes (per-layer `CpuKvHandle` has no
     /// cross-layer cache) and for out-of-range `layer`/`pos`.
     fn read_kv_row_at(

@@ -24,7 +24,7 @@ pub use dispatch::{
     run_attention_block_decode_step_backend,
 };
 pub use gqa_step::{
-    gqa_attention_decode_step, gqa_attention_decode_step_in_span, run_attention_block_decode_step,
+    gqa_attention_decode_step, gqa_attention_decode_step_windowed, run_attention_block_decode_step,
 };
 pub use inplace::{
     run_attention_block_decode_step_auto_inplace,

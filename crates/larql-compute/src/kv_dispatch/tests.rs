@@ -240,6 +240,17 @@ fn default_clip_kv_panics() {
 }
 
 #[test]
+fn default_truncate_kv_declines_instead_of_panicking() {
+    // Unlike its siblings above, this default must *return* rather than
+    // panic: "this backend cannot rewind" is a state the caller handles by
+    // invalidating the cache, not a programming error. A panic here would
+    // turn an unported backend into a crash on every refused decode step.
+    let backend = StubKvBackend;
+    let mut handle = stub_kv_handle(0, 4);
+    assert!(!backend.truncate_kv(&mut handle, 0));
+}
+
+#[test]
 #[should_panic(expected = "compressed_kv_append not implemented")]
 fn default_compressed_kv_append_panics() {
     let backend = StubKvBackend;
@@ -392,6 +403,151 @@ fn default_read_kv_row_at_returns_none() {
     let backend = StubKvBackend;
     let handle = KvHandle::new(StubKvInner { len: 0, dim: 4 });
     assert!(backend.read_kv_row_at(&handle, 0, 0).is_none());
+}
+
+// ── Accounting / honesty defaults ────────────────────────────────
+
+#[test]
+fn default_backend_resident_kv_bytes_is_zero() {
+    // 0 means "every byte I hold is reachable through a handle", so an
+    // engine adding this to its own accounting can't double-count. A
+    // backend holding K/V outside its handles must override.
+    assert_eq!(StubKvBackend.backend_resident_kv_bytes(), 0);
+}
+
+#[test]
+fn default_per_layer_is_host_delegated_is_false() {
+    // A backend is assumed to mean what it says; only one that runs the
+    // per-layer surface on the host (MetalBackend) overrides to `true`,
+    // so diagnostics can stop reporting a CPU measurement as GPU.
+    assert!(!StubKvBackend.per_layer_is_host_delegated());
+}
+
+// ── Windowed coarse defaults: the fail-closed pair ───────────────
+//
+// `window: None` means "no bound requested" and must forward to the
+// window-less method; `Some(w)` means "bound this", which the default
+// cannot honour and must therefore decline. Answering `Some` to a
+// windowed request asserts BOTH halves of the contract (attend at most
+// `window`, hold at most `window`) — so the default has to say no.
+
+/// Stub whose window-less coarse methods and `attention_step` succeed.
+/// With the all-default `StubKvBackend` both arms of the windowed
+/// defaults return `None`, so a test could not tell delegation from
+/// refusal. Here delegation returns `Some` and refusal returns `None`.
+struct CoarseCapableBackend;
+
+impl KvDispatch for CoarseCapableBackend {
+    fn clip_kv(&self, _handle: &mut KvHandle, _window_size: usize) {}
+
+    fn attention_step(
+        &self,
+        _weights: larql_models::WeightsView,
+        query: &Array2<f32>,
+        _kv: &mut KvHandle,
+        _layer: usize,
+        _abs_position: usize,
+        _index: Option<&dyn crate::KvIndex>,
+    ) -> Option<Array2<f32>> {
+        Some(query.clone())
+    }
+
+    fn coarse_prefill(
+        &self,
+        weights: &larql_models::ModelWeights,
+        _token_ids: &[u32],
+        _index: Option<&dyn crate::KvIndex>,
+    ) -> Option<(Array2<f32>, KvHandle)> {
+        Some((
+            Array2::zeros((1, weights.hidden_size)),
+            stub_kv_handle(1, weights.hidden_size),
+        ))
+    }
+
+    fn coarse_decode_step(
+        &self,
+        weights: &larql_models::ModelWeights,
+        _token_id: u32,
+        _index: Option<&dyn crate::KvIndex>,
+        _handle: &mut KvHandle,
+        _abs_position: usize,
+    ) -> Option<Array2<f32>> {
+        Some(Array2::zeros((1, weights.hidden_size)))
+    }
+}
+
+#[test]
+fn default_coarse_prefill_windowed_forwards_when_no_window_requested() {
+    let weights = make_test_weights();
+    let backend = CoarseCapableBackend;
+    let result = backend.coarse_prefill_windowed(&weights, &[0u32, 1], None, None);
+    let (hidden, handle) = result.expect("window: None must forward to coarse_prefill");
+    assert_eq!(hidden.shape(), &[1, weights.hidden_size]);
+    assert_eq!(handle.backend_name(), "stub");
+}
+
+#[test]
+fn default_coarse_prefill_windowed_declines_a_real_window() {
+    let weights = make_test_weights();
+    let backend = CoarseCapableBackend;
+    // Fail closed: the window-less prefill above succeeds, so a `None`
+    // here can only come from the refusal arm, not from an unsupported
+    // coarse path.
+    assert!(
+        backend
+            .coarse_prefill_windowed(&weights, &[0u32, 1], None, Some(4))
+            .is_none(),
+        "a backend that cannot bound the window must decline it"
+    );
+}
+
+#[test]
+fn default_coarse_decode_step_windowed_forwards_when_no_window_requested() {
+    let weights = make_test_weights();
+    let backend = CoarseCapableBackend;
+    let mut handle = stub_kv_handle(0, weights.hidden_size);
+    let result = backend.coarse_decode_step_windowed(&weights, 0, None, &mut handle, 0, None);
+    let hidden = result.expect("window: None must forward to coarse_decode_step");
+    assert_eq!(hidden.shape(), &[1, weights.hidden_size]);
+}
+
+#[test]
+fn default_coarse_decode_step_windowed_declines_a_real_window() {
+    let weights = make_test_weights();
+    let backend = CoarseCapableBackend;
+    let mut handle = stub_kv_handle(0, weights.hidden_size);
+    assert!(
+        backend
+            .coarse_decode_step_windowed(&weights, 0, None, &mut handle, 0, Some(4))
+            .is_none(),
+        "a backend that cannot bound the window must decline it"
+    );
+}
+
+#[test]
+fn default_attention_step_windowed_clips_then_returns_the_hidden() {
+    // The None-propagation branch is covered above; this drives the
+    // other half of the default decomposition — `attention_step`
+    // succeeded, so `clip_kv` runs and the hidden is handed back.
+    let weights = make_test_weights();
+    let backend = CoarseCapableBackend;
+    let mut handle = stub_kv_handle(0, weights.hidden_size);
+    let query = Array2::from_shape_fn((1, weights.hidden_size), |(_, j)| j as f32) as Array2<f32>;
+    let out = backend
+        .attention_step_windowed(
+            larql_models::WeightsView::dense(&weights),
+            &query,
+            &mut handle,
+            0,
+            0,
+            4,
+            None,
+        )
+        .expect("attention_step returned Some, so the windowed default must too");
+    assert_eq!(
+        out, query,
+        "the default must pass the hidden through unchanged"
+    );
 }
 
 // ── Inner handle as_any / as_any_mut surface ─────────────────────

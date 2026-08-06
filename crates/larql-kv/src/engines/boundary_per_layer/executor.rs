@@ -342,7 +342,7 @@ mod tests {
     /// loops — the E2B fixture (non-zero PLE tensors, layer_scalar 0.75)
     /// diverges bit-visibly if the tail is dropped. Representative for all
     /// `LayerExecutor`-driven engine loops (markov_residual{,_codec},
-    /// turbo_quant, unlimited_context share the same pattern).
+    /// turbo_quant, windowed_checkpoint share the same pattern).
     #[cfg(not(windows))]
     #[test]
     fn executor_prefill_and_decode_match_legacy_on_ple_arch() {

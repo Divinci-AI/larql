@@ -140,6 +140,7 @@ pub use quant_route::FormatRoute;
 
 pub use cpu::ops::linalg::{cholesky, cholesky_inverse, cholesky_solve, ridge_decomposition_solve};
 pub use cpu::ops::moe::{quantize_x_to_q8k, Q8KActivation};
+pub use cpu::ops::q4k_matvec::f16_to_f32;
 pub use cpu::ops::vector::{cosine, dot, norm};
 pub use cpu::CpuBackend;
 

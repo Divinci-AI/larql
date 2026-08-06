@@ -109,6 +109,64 @@ fn clip_kv_with_no_state_is_a_no_op() {
     assert_eq!(h.cached_len(), 0);
 }
 
+// ── truncate_kv ─────────────────────────────────────────────────────────────
+//
+// The inverse of an append: rewinds a partially-applied decode step. The
+// contract that matters is *which* rows survive — `clip_kv` keeps the tail,
+// this keeps the head — because a rewind that kept the wrong end would
+// restore the row count while corrupting the cache, and a length assertion
+// alone would not notice.
+
+#[test]
+fn truncate_kv_keeps_the_head_where_clip_keeps_the_tail() {
+    let b = backend();
+    let mut h = b.alloc_kv_buffer(0, 8, 2);
+    for i in 0..4u32 {
+        let f = i as f32;
+        b.append_kv(&mut h, &[f, f], &[f, f], i as usize);
+    }
+    assert!(b.truncate_kv(&mut h, 2));
+    assert_eq!(h.cached_len(), 2);
+    let (k, v) = b.read_kv_to_host(&h).unwrap();
+    // Rows 0 and 1 — the opposite end from `clip_kv_truncates_to_window_size`.
+    assert_eq!(k[[0, 0]], 0.0);
+    assert_eq!(k[[1, 0]], 1.0);
+    assert_eq!(v[[0, 0]], 0.0);
+    assert_eq!(v[[1, 0]], 1.0);
+}
+
+#[test]
+fn truncate_kv_to_the_current_length_is_a_no_op() {
+    let b = backend();
+    let mut h = b.alloc_kv_buffer(0, 4, 2);
+    b.append_kv(&mut h, &[1.0, 2.0], &[3.0, 4.0], 0);
+    assert!(b.truncate_kv(&mut h, 1));
+    assert_eq!(h.cached_len(), 1);
+    let (k, _) = b.read_kv_to_host(&h).unwrap();
+    assert_eq!(k[[0, 0]], 1.0);
+}
+
+#[test]
+fn truncate_kv_to_zero_empties_the_cache() {
+    let b = backend();
+    let mut h = b.alloc_kv_buffer(0, 4, 2);
+    b.append_kv(&mut h, &[1.0, 2.0], &[3.0, 4.0], 0);
+    assert!(b.truncate_kv(&mut h, 0));
+    assert_eq!(h.cached_len(), 0);
+}
+
+#[test]
+fn truncate_kv_beyond_the_current_length_refuses() {
+    // Asking for more rows than exist is asking this to invent them. It must
+    // answer `false` rather than silently leave the handle short, because the
+    // caller reads `true` as "the cache is exactly what you asked for".
+    let b = backend();
+    let mut h = b.alloc_kv_buffer(0, 8, 2);
+    b.append_kv(&mut h, &[1.0, 2.0], &[3.0, 4.0], 0);
+    assert!(!b.truncate_kv(&mut h, 5));
+    assert_eq!(h.cached_len(), 1, "a refused rewind must change nothing");
+}
+
 #[test]
 fn read_kv_to_host_returns_none_for_empty_handle() {
     let b = backend();
@@ -368,7 +426,7 @@ fn coarse_decode_step_returns_none_without_index() {
 
 /// `read_kv_row_at` on the coarse Q4K handle returns the row at the
 /// requested ABSOLUTE position, value-equal to the per-position K/V the
-/// state dump captured — the contract `UnlimitedContextEngine`'s
+/// state dump captured — the contract `WindowedCheckpointEngine`'s
 /// boundary-checkpoint readback depends on.
 #[test]
 fn read_kv_row_at_returns_absolute_rows_matching_state_dump() {

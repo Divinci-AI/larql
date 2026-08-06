@@ -77,7 +77,7 @@ responsible for capturing them at the correct depth, which is exactly
 what `larql_inference::capture_decoy_residuals` does. Validated against
 synthetic constellations by the unit tests in `patch/refine.rs`; the
 end-to-end Gemma 3 4B reproduction lives in
-`larql-lql/examples/refine_demo.rs`.
+`larql-lql/crates/larql-demos/examples/lql/refine_demo.rs`.
 
 ## The Headline
 

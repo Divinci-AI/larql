@@ -224,6 +224,28 @@ impl CompressedLayer {
         self.num_vecs += 1;
     }
 
+    /// Drop rows until the layer holds `rows` of them again.
+    ///
+    /// Byte-exact, and that is not an accident of the codec being good: rows
+    /// are appended as whole head-chunks at fixed byte offsets and existing
+    /// bytes are never re-encoded (see [`Self::append_row`]), so removing the
+    /// tail restores precisely the buffer that preceded it. The compression is
+    /// lossy against its *input*, not against what was stored — which is what
+    /// lets a K/V-canonical engine rewind at all.
+    ///
+    /// No-op when `rows` is not smaller than the current count, so a caller
+    /// rewinding a layer the failure never reached costs nothing.
+    pub(super) fn truncate_rows(&mut self, rows: usize, tq: &TurboQuant) {
+        if rows >= self.num_vecs {
+            return;
+        }
+        let heads = self.kv_dim / self.head_dim.max(1);
+        let bytes = rows * heads * tq.bytes_per_vector(self.head_dim);
+        self.compressed_k.truncate(bytes);
+        self.compressed_v.truncate(bytes);
+        self.num_vecs = rows;
+    }
+
     pub(super) fn memory_bytes(&self) -> usize {
         self.compressed_k.len() + self.compressed_v.len()
     }
@@ -383,7 +405,41 @@ impl TurboQuantEngine {
 
 impl TurboQuantEngine {
     /// Shared body for `decode_step` / `decode_step_resident`.
+    ///
+    /// **Transactional.** Unlike the residual-canonical engines, this one's
+    /// canonical state *is* the K/V: each layer's compressed cache grows
+    /// before the FFN gets its chance to refuse, so a step that does not
+    /// finish must undo those appends rather than leave a cache holding a
+    /// token that produced no output. [`CompressedLayer::truncate_rows`] does
+    /// that byte-exactly, and `abs_position` advances only on success — so a
+    /// caller who fixes the cause can drive the same token again.
     fn decode_step_impl(
+        &mut self,
+        weights: &ModelWeights,
+        ffn: &dyn FfnBackend,
+        token_id: u32,
+        index: Option<&larql_vindex::VectorIndex>,
+    ) -> Result<Array2<f32>, EngineError> {
+        // Recorded per layer rather than assumed uniform: nothing promises
+        // every layer caches the same number of rows, and a wrong assumption
+        // would rewind to a length no layer ever had.
+        let entry_rows: Vec<usize> = self.layers.iter().map(|l| l.num_vecs).collect();
+        match self.decode_step_appending(weights, ffn, token_id, index) {
+            Ok(hidden) => Ok(hidden),
+            Err(failure) => {
+                for (layer, &rows) in self.layers.iter_mut().zip(&entry_rows) {
+                    layer.truncate_rows(rows, &self.tq);
+                }
+                Err(failure)
+            }
+        }
+    }
+
+    /// The body of a decode step, which appends to `self.layers` as it goes.
+    ///
+    /// Split out so the rewind above can wrap every exit rather than every
+    /// `?` having to remember it.
+    fn decode_step_appending(
         &mut self,
         weights: &ModelWeights,
         ffn: &dyn FfnBackend,
@@ -438,15 +494,15 @@ impl TurboQuantEngine {
                 weights,
                 backend: self.backend.as_ref(),
             };
-            let h_out = crate::engines::layer_ffn_or_moe(
+            h = crate::engines::layer_ffn_or_moe(
                 weights,
                 &h_post_attn,
                 layer,
                 &bffn,
                 Some(ffn),
                 ple_inputs.get(layer),
-            );
-            h = h_out;
+            )
+            .map_err(EngineError::Execution)?;
         }
 
         self.abs_position += 1;
@@ -488,7 +544,10 @@ impl KvEngine for TurboQuantEngine {
         let mut h = embed_tokens_pub(weights, token_ids);
         // Empty on non-PLE archs — `ple_inputs.get(layer)` then yields `None`.
         let ple_inputs = precompute_per_layer_inputs(weights, &h, token_ids);
-        self.layers.clear();
+        // Built into a local, not into `self.layers`: a prefill that refuses
+        // partway must leave the engine holding whatever cache it already had
+        // rather than a truncated one for a prompt it never finished.
+        let mut layers: Vec<CompressedLayer> = Vec::with_capacity(num_layers);
 
         for layer in 0..num_layers {
             let (h_post_attn, k, v) = run_attention_with_kv_backend(
@@ -501,24 +560,24 @@ impl KvEngine for TurboQuantEngine {
             .ok_or_else(|| EngineError::BackendFailure {
                 details: "run_attention_with_kv_backend returned None".into(),
             })?;
-            self.layers
-                .push(CompressedLayer::compress(&(k, v), &self.tq));
+            layers.push(CompressedLayer::compress(&(k, v), &self.tq));
 
             let bffn = BackendFfn {
                 weights,
                 backend: self.backend.as_ref(),
             };
-            let h_out = crate::engines::layer_ffn_or_moe(
+            h = crate::engines::layer_ffn_or_moe(
                 weights,
                 &h_post_attn,
                 layer,
                 &bffn,
                 Some(ffn),
                 ple_inputs.get(layer),
-            );
-            h = h_out;
+            )
+            .map_err(EngineError::Execution)?;
         }
 
+        self.layers = layers;
         self.abs_position = token_ids.len();
         Ok(last_row(&h))
     }

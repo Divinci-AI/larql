@@ -4,7 +4,8 @@ use larql_compute::ComputeBackend;
 use larql_vindex::VectorIndex;
 use ndarray::Array2;
 
-use super::compute::{rs_decode_step, rs_decode_step_profiled, rs_prefill};
+use super::prefill::rs_prefill;
+use super::step::{rs_decode_step, rs_decode_step_profiled};
 use super::store::RsStore;
 use super::walk::{ensure_attn_tensors_dequantised, rs_decode_step_walk, rs_prefill_walk};
 use crate::profiler::EngineProfiler;
@@ -58,8 +59,19 @@ impl MarkovResidualEngine {
         self
     }
 
+    /// Residual store + any K/V held on this engine's behalf elsewhere.
+    ///
+    /// On the W1-GPU path the store stays empty and the K/V lives outside
+    /// the engine, so the store alone reports 0 — which reads as "costs
+    /// nothing" rather than "measured somewhere else". It can be in
+    /// either of two places depending on backend, and they are mutually
+    /// exclusive: inside the `kv_handle` (CPU's whole-model Q4K cache) or
+    /// inside the backend itself (Metal, whose handle is a sentinel and
+    /// whose `backend_resident_kv_bytes` is the only way to see it).
     pub fn total_memory_bytes(&self) -> usize {
         self.store.as_ref().map_or(0, |s| s.memory_bytes())
+            + self.kv_handle.as_ref().map_or(0, |h| h.resident_bytes())
+            + self.backend.backend_resident_kv_bytes()
     }
 }
 
@@ -98,6 +110,11 @@ pub(crate) fn check_residual_recompute_preconditions(
 impl MarkovResidualEngine {
     /// Shared body for `decode_step` / `decode_step_resident` — `index`
     /// reaches the attention step's Q4K-direct route when present.
+    /// The store is borrowed, never taken. A failed step therefore costs the
+    /// engine nothing but its droppable `hot_kv` derivative — see
+    /// [`super::step`]'s failure invariant — so a refusal is reported as
+    /// itself (`EngineError::Execution`, retryable) rather than as a dead
+    /// engine wearing the words "called before prefill".
     fn decode_step_impl(
         &mut self,
         weights: &ModelWeights,
@@ -105,40 +122,38 @@ impl MarkovResidualEngine {
         token_id: u32,
         index: Option<&larql_vindex::VectorIndex>,
     ) -> Result<Array2<f32>, EngineError> {
-        let rs = self
-            .store
-            .take()
+        let Self {
+            store,
+            backend,
+            profile,
+            profiling,
+            ..
+        } = self;
+        let rs = store
+            .as_mut()
             .ok_or_else(|| EngineError::InvariantViolation {
                 what: "decode_step called before prefill (store missing)".into(),
             })?;
-        let (hidden, new_rs) = if self.profiling {
+        if *profiling {
             rs_decode_step_profiled(
                 larql_inference::WeightsView::dense(weights),
                 token_id,
                 rs,
-                self.backend.as_ref(),
-                &mut self.profile,
+                backend.as_ref(),
+                profile,
                 Some(ffn),
                 index,
             )
-            .ok_or_else(|| EngineError::BackendFailure {
-                details: "rs_decode_step_profiled returned None".into(),
-            })?
         } else {
             rs_decode_step(
                 larql_inference::WeightsView::dense(weights),
                 token_id,
                 rs,
-                self.backend.as_ref(),
+                backend.as_ref(),
                 Some(ffn),
                 index,
             )
-            .ok_or_else(|| EngineError::BackendFailure {
-                details: "rs_decode_step returned None".into(),
-            })?
-        };
-        self.store = Some(new_rs);
-        Ok(hidden)
+        }
     }
 }
 
@@ -174,16 +189,17 @@ impl KvEngine for MarkovResidualEngine {
         if token_ids.is_empty() {
             return Err(EngineError::EmptyPrompt);
         }
+        // `?` before the assignment: a refused prefill must not replace the
+        // store an earlier one built. See `prefill`'s transactional contract.
         let result = rs_prefill(
             larql_inference::WeightsView::dense(weights),
             token_ids,
             self.window_size,
             self.backend.as_ref(),
             Some(ffn),
-        );
-        let hidden = result.hidden.clone();
+        )?;
         self.store = Some(result.store);
-        Ok(hidden)
+        Ok(result.hidden)
     }
 
     fn decode_step(
@@ -219,6 +235,18 @@ impl KvEngine for MarkovResidualEngine {
 
     fn cold_bytes(&self) -> usize {
         self.store.as_ref().map_or(0, |s| s.cold_bytes())
+    }
+
+    fn dispatch_path(&self) -> Option<larql_inference::kv_engine::DispatchPath> {
+        use larql_inference::kv_engine::DispatchPath;
+        // `kv_handle` is stashed only by the W1-GPU coarse prefill, and
+        // cleared when that path is abandoned; `store` exists after any
+        // successful prefill. Neither set = no prefill yet.
+        match (self.kv_handle.is_some(), self.store.is_some()) {
+            (true, _) => Some(DispatchPath::Coarse),
+            (false, true) => Some(DispatchPath::PerLayer),
+            (false, false) => None,
+        }
     }
 
     fn stage_summary(&self) -> Option<DecodeStageSummary> {
@@ -1482,7 +1510,10 @@ mod tests {
         let ffn = NullFfn;
         let mut engine = MarkovResidualEngine::new(None);
         let err = engine.prefill(&weights, &ffn, &[]).unwrap_err();
-        assert_eq!(err, larql_inference::kv_engine::EngineError::EmptyPrompt);
+        assert!(matches!(
+            err,
+            larql_inference::kv_engine::EngineError::EmptyPrompt
+        ));
     }
 
     #[test]
@@ -1513,7 +1544,10 @@ mod tests {
         let err = engine
             .prefill_quant(&weights, &ffn, &index, &[], &*backend)
             .unwrap_err();
-        assert_eq!(err, larql_inference::kv_engine::EngineError::EmptyPrompt);
+        assert!(matches!(
+            err,
+            larql_inference::kv_engine::EngineError::EmptyPrompt
+        ));
     }
 
     #[test]
@@ -1545,7 +1579,10 @@ mod tests {
         let err = engine
             .prefill_via_executor(&weights, &executor, &ffn, &[])
             .unwrap_err();
-        assert_eq!(err, larql_inference::kv_engine::EngineError::EmptyPrompt);
+        assert!(matches!(
+            err,
+            larql_inference::kv_engine::EngineError::EmptyPrompt
+        ));
     }
 
     #[test]
@@ -1561,7 +1598,10 @@ mod tests {
         let err = engine
             .prefill_quant_via_executor(&weights, &executor, &ffn, &index, &[])
             .unwrap_err();
-        assert_eq!(err, larql_inference::kv_engine::EngineError::EmptyPrompt);
+        assert!(matches!(
+            err,
+            larql_inference::kv_engine::EngineError::EmptyPrompt
+        ));
     }
 
     #[test]

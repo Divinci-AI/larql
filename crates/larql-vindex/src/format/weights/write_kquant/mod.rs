@@ -36,6 +36,9 @@ mod attn;
 mod ffn;
 mod lm_head;
 mod moe_layers;
+mod moe_layers_per_expert;
+#[cfg(test)]
+mod moe_layers_per_expert_tests;
 mod norms;
 
 pub mod feature_major_down;
@@ -257,6 +260,10 @@ pub fn write_model_weights_kquant_with_opts(
     attn::write_attn_weights_kquant(source, dir, num_layers, callbacks)?;
     ffn::write_interleaved_ffn_kquant(source, dir, num_layers, opts, callbacks)?;
     moe_layers::write_per_layer_moe_kquant(source, dir, num_layers)?;
+    // Separate-tensor MoE models fall through the packed writer above; without
+    // this they produce an index that verifies and slices cleanly and then
+    // panics on the first decoded token with no expert store.
+    moe_layers_per_expert::write_per_layer_moe_per_expert(source, dir, num_layers)?;
     let mut entries = norms::write_norms_and_router(source, dir, num_layers)?;
     super::ple_sidecar::write_ple_weights(source, dir, num_layers, &mut entries)?;
     lm_head::write_lm_head_kquant(source, dir, &mut entries)?;

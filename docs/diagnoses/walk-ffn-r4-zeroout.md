@@ -3,7 +3,7 @@
 **Status:** RESOLVED 2026-08-01 — **all-layer dynamic row sparsity REFUTED.**
 **Rule applied:** R4 (`docs/dec-funnel.md` §"Standing rules") — before testing a
 lever, set the bytes it targets to zero.
-**Harness:** `crates/larql-inference/examples/walk_ffn_r4_zeroout.rs`
+**Harness:** `chris-experiments/larql_probes/examples/walk_ffn/walk_ffn_r4_zeroout.rs`
 **Artifacts:** `bench/aim-validation/r4_zeroout_ac_paired.txt`, `..._v2.txt`
 **Model:** Gemma 3 4B (`output/gemma3-4b-q4k-v2.vindex`), 34 layers,
 10 240 features/layer, decode shape (seq_len = 1).
