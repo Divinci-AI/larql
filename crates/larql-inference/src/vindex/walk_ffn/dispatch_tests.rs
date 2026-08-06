@@ -97,6 +97,15 @@ fn walk_ffn_new_unlimited() {
 }
 
 #[test]
+fn dense_top_k_for_clamps_to_layer_feature_count() {
+    let weights = shared_weights();
+    let idx = mock_index(weights);
+    let ffn = WalkFfn::new_unlimited(weights, &idx);
+
+    assert_eq!(ffn.top_k_for(0), weights.intermediate_size);
+}
+
+#[test]
 fn walk_ffn_sparse_k() {
     let weights = shared_weights();
     let idx = mock_index(weights);

@@ -184,7 +184,9 @@ pub struct WalkFfn<'a> {
 
 impl<'a> WalkFfn<'a> {
     fn top_k_for(&self, layer: usize) -> usize {
-        self.config.k_for(layer).unwrap_or(usize::MAX)
+        self.config
+            .k_for(layer)
+            .unwrap_or_else(|| self.index.num_features(layer))
     }
 
     /// Number of joint-selector calls that degraded to the production
