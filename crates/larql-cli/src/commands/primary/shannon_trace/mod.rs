@@ -21,6 +21,7 @@ use std::path::PathBuf;
 use clap::Args;
 
 pub mod compare;
+pub mod decode_diff;
 pub mod dump;
 
 /// Cosine similarity below which a capture is reported as drifted.
@@ -64,6 +65,37 @@ pub struct LayerDiffArgs {
     pub b: PathBuf,
 
     /// Cosine similarity below which a capture counts as drifted.
+    #[arg(long, default_value_t = DEFAULT_DRIFT_COS)]
+    pub threshold_cos: f64,
+
+    /// Emit a `RESULT {...}` JSON line after the table.
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// `decode-diff` — CPU-vs-Metal parity across the prefill→decode seam.
+///
+/// A separate axis from `layer-diff`: that one compares this engine to an
+/// external reference over a prefill, which by construction cannot see a
+/// decode defect. See [`decode_diff`] for why that distinction cost a
+/// week once already.
+#[derive(Args)]
+pub struct DecodeDiffArgs {
+    /// Vindex directory to load.
+    #[arg(value_name = "VINDEX")]
+    pub vindex: PathBuf,
+
+    /// Prompt supplying the token window.
+    #[arg(long, default_value = "The capital of France is")]
+    pub prompt: String,
+
+    /// Decode this many trailing tokens instead of prefilling them. More
+    /// than one also exercises the decode→decode KV hand-off, which a
+    /// single step does not reach.
+    #[arg(long, default_value_t = 1)]
+    pub steps: usize,
+
+    /// Cosine similarity below which a layer counts as drifted.
     #[arg(long, default_value_t = DEFAULT_DRIFT_COS)]
     pub threshold_cos: f64,
 

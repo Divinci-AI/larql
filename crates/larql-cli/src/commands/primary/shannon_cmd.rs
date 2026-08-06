@@ -86,6 +86,11 @@ pub enum ShannonCommand {
     /// Compare two `layer-dump` directories layer by layer and name the first
     /// capture that drifts.
     LayerDiff(super::shannon_trace::LayerDiffArgs),
+
+    /// CPU-vs-Metal parity across the prefill→decode seam. `layer-diff`
+    /// compares this engine to an external reference over a prefill and so
+    /// cannot see a decode-only defect; this one can.
+    DecodeDiff(super::shannon_trace::DecodeDiffArgs),
 }
 
 #[derive(Args)]
@@ -306,6 +311,9 @@ pub fn run(cmd: ShannonCommand) -> Result<(), Box<dyn std::error::Error>> {
         ShannonCommand::Verify(args) => run_verify(args),
         ShannonCommand::LayerDump(args) => super::shannon_trace::dump::run_layer_dump(args),
         ShannonCommand::LayerDiff(args) => super::shannon_trace::compare::run_layer_diff(args),
+        ShannonCommand::DecodeDiff(args) => {
+            super::shannon_trace::decode_diff::run_decode_diff(args)
+        }
     }
 }
 
