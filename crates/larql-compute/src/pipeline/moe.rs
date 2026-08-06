@@ -78,6 +78,26 @@ impl MoeRoutingPolicy {
             post_expert_norm: MoePostExpertNormPolicy::None,
         }
     }
+
+    /// Select the top-k logits *first*, then softmax over just those, so the
+    /// selected weights sum to 1. GPT-OSS.
+    ///
+    /// Distinct from [`Self::top_k_softmax`], whose weights sum to *less*
+    /// than 1 by whatever mass the unselected experts hold. Getting the two
+    /// confused rescales the entire expert branch — a large error that still
+    /// produces coherent-looking output, which is why this rule now arrives
+    /// as a typed [`larql_models::MoeRouterKind`] rather than a string that
+    /// could miss its `match` arm (`docs/k3-funnel.md` §4.7.10).
+    pub const fn top_k_then_softmax() -> Self {
+        Self {
+            expert_input: MoeInputSource::Residual,
+            router_input: MoeInputSource::Residual,
+            selected_weight: MoeTopKWeightPolicy::RenormalizedSoftmax,
+            router_norm: MoeRouterNormPolicy::None,
+            expert_scale: MoeExpertScalePolicy::None,
+            post_expert_norm: MoePostExpertNormPolicy::None,
+        }
+    }
 }
 
 impl Default for MoeRoutingPolicy {

@@ -40,7 +40,9 @@
 
 use std::collections::HashMap;
 
-use larql_compute::cpu::ops::moe::{moe_expert_input, moe_route_from_router_input, moe_router_input};
+use larql_compute::cpu::ops::moe::{
+    moe_expert_input, moe_route_from_router_input, moe_router_input,
+};
 use larql_compute::forward::dump_config::{cpu_layer_h_post_attn_path, cpu_layer_path};
 use larql_compute::pipeline_layer::build_moe_weights;
 use larql_compute::MoeLayerWeights;
@@ -59,8 +61,15 @@ fn arg(name: &str) -> Option<String> {
 
 fn last_row(path: &str, width: usize) -> Vec<f32> {
     let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("{path}: {e}"));
-    let values: Vec<f32> = bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
-    assert!(values.len().is_multiple_of(width) && !values.is_empty(), "{path}: {} values not a whole number of {width}-wide rows", values.len());
+    let values: Vec<f32> = bytes
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect();
+    assert!(
+        values.len().is_multiple_of(width) && !values.is_empty(),
+        "{path}: {} values not a whole number of {width}-wide rows",
+        values.len()
+    );
     let rows = values.len() / width;
     values[(rows - 1) * width..].to_vec()
 }
@@ -79,7 +88,9 @@ fn overlap_count(a: &[usize], b: &[usize]) -> usize {
 /// Nearest earlier layer that's itself MoE (usually L-1 here, but not
 /// assumed — searched explicitly in case of a hybrid gap).
 fn nearest_earlier_moe_layer(weights: &ModelWeights, l: usize) -> Option<usize> {
-    (0..l).rev().find(|&p| build_moe_weights(weights, &*weights.arch, p).is_some())
+    (0..l)
+        .rev()
+        .find(|&p| build_moe_weights(weights, &*weights.arch, p).is_some())
 }
 
 fn top_k_by_frequency(counts: &HashMap<usize, usize>, k: usize) -> Vec<usize> {
@@ -91,8 +102,13 @@ fn top_k_by_frequency(counts: &HashMap<usize, usize>, k: usize) -> Vec<usize> {
 /// Every layer the real architecture actually routes through MoE — not a
 /// hand-picked sample. Cheap to test all of them: this probe only runs
 /// router math on cached residuals, no forward pass.
-fn discover_moe_layers(weights: &ModelWeights, arch: &dyn larql_models::ModelArchitecture) -> Vec<usize> {
-    (0..weights.num_layers).filter(|&l| build_moe_weights(weights, arch, l).is_some()).collect()
+fn discover_moe_layers(
+    weights: &ModelWeights,
+    arch: &dyn larql_models::ModelArchitecture,
+) -> Vec<usize> {
+    (0..weights.num_layers)
+        .filter(|&l| build_moe_weights(weights, arch, l).is_some())
+        .collect()
 }
 
 fn main() {
@@ -108,15 +124,21 @@ fn main() {
 
     println!("loading real vindex (weights only, no forward pass — activations come from real dumps): {vindex}");
     let mut cb = larql_vindex::SilentLoadCallbacks;
-    let weights = larql_vindex::load_model_weights_kquant(std::path::Path::new(&vindex), &mut cb).expect("load real vindex weights");
+    let weights = larql_vindex::load_model_weights_kquant(std::path::Path::new(&vindex), &mut cb)
+        .expect("load real vindex weights");
     let arch = &*weights.arch;
     let hidden = weights.hidden_size;
     let norm_offset = arch.norm_weight_offset();
     let eps = arch.norm_eps();
 
     let home_layers = discover_moe_layers(&weights, arch);
-    println!("discovered {} real MoE layers out of {}: {home_layers:?}\n", home_layers.len(), weights.num_layers);
-    let sample_moe = build_moe_weights(&weights, arch, home_layers[0]).expect("discovered layer must be MoE");
+    println!(
+        "discovered {} real MoE layers out of {}: {home_layers:?}\n",
+        home_layers.len(),
+        weights.num_layers
+    );
+    let sample_moe =
+        build_moe_weights(&weights, arch, home_layers[0]).expect("discovered layer must be MoE");
     let top_k = sample_moe.top_k;
     let num_experts = sample_moe.num_experts;
     let chance_overlap = (top_k * top_k) as f64 / num_experts as f64;
@@ -126,10 +148,15 @@ fn main() {
     let mut moe_at: HashMap<usize, MoeLayerWeights> = HashMap::new();
     let mut prev_of: HashMap<usize, usize> = HashMap::new();
     for &l in &home_layers {
-        moe_at.insert(l, build_moe_weights(&weights, arch, l).expect("home layer must be MoE"));
+        moe_at.insert(
+            l,
+            build_moe_weights(&weights, arch, l).expect("home layer must be MoE"),
+        );
         if let Some(p) = nearest_earlier_moe_layer(&weights, l) {
             prev_of.insert(l, p);
-            moe_at.entry(p).or_insert_with(|| build_moe_weights(&weights, arch, p).expect("prev layer must be MoE"));
+            moe_at.entry(p).or_insert_with(|| {
+                build_moe_weights(&weights, arch, p).expect("prev layer must be MoE")
+            });
         }
     }
 
@@ -154,7 +181,13 @@ fn main() {
 
     // ── Pass 2: stale-residual lead-time sweep (the original method) ──────
     println!("== stale-residual method (L's own router, fed L-k's residual) ==");
-    struct LeadCell { home_layer: usize, lead: usize, prompt: usize, overlap: usize, pred_ids: Vec<usize> }
+    struct LeadCell {
+        home_layer: usize,
+        lead: usize,
+        prompt: usize,
+        overlap: usize,
+        pred_ids: Vec<usize>,
+    }
     let mut lead_cells = Vec::new();
     for &l in &home_layers {
         let moe = &moe_at[&l];
@@ -167,7 +200,13 @@ fn main() {
                 let h_early = last_row(&cpu_layer_path(&dump_dir, l - k), hidden);
                 let pred_ids = route_at(moe, &h_early, norm_offset, eps);
                 let ov = overlap_count(&true_ids[&l][i], &pred_ids);
-                lead_cells.push(LeadCell { home_layer: l, lead: k, prompt: i, overlap: ov, pred_ids });
+                lead_cells.push(LeadCell {
+                    home_layer: l,
+                    lead: k,
+                    prompt: i,
+                    overlap: ov,
+                    pred_ids,
+                });
             }
         }
     }
@@ -177,13 +216,21 @@ fn main() {
             continue;
         }
         let mean = matching.iter().map(|c| c.overlap as f64).sum::<f64>() / matching.len() as f64;
-        print!("  lead {k:>2}: mean overlap {mean:.2}/{top_k}  (n={})  per-layer:", matching.len());
+        print!(
+            "  lead {k:>2}: mean overlap {mean:.2}/{top_k}  (n={})  per-layer:",
+            matching.len()
+        );
         for &l in &home_layers {
-            let per_layer: Vec<&LeadCell> = matching.iter().filter(|c| c.home_layer == l).copied().collect();
+            let per_layer: Vec<&LeadCell> = matching
+                .iter()
+                .filter(|c| c.home_layer == l)
+                .copied()
+                .collect();
             if per_layer.is_empty() {
                 continue;
             }
-            let m = per_layer.iter().map(|c| c.overlap as f64).sum::<f64>() / per_layer.len() as f64;
+            let m =
+                per_layer.iter().map(|c| c.overlap as f64).sum::<f64>() / per_layer.len() as f64;
             print!(" L{l}={m:.2}");
         }
         println!();
@@ -192,10 +239,16 @@ fn main() {
     // ── Pass 3: previous-route baseline (reuse L-1's OWN true selection) ──
     println!("\n== previous-route baseline (reuse the nearest earlier MoE layer's own true selection, no router substitution) ==");
     for &l in &home_layers {
-        let Some(&prev) = prev_of.get(&l) else { continue };
-        let overlaps: Vec<usize> = (0..NUM_PROMPTS).map(|i| overlap_count(&true_ids[&l][i], &true_ids[&prev][i])).collect();
+        let Some(&prev) = prev_of.get(&l) else {
+            continue;
+        };
+        let overlaps: Vec<usize> = (0..NUM_PROMPTS)
+            .map(|i| overlap_count(&true_ids[&l][i], &true_ids[&prev][i]))
+            .collect();
         let mean = overlaps.iter().sum::<usize>() as f64 / overlaps.len() as f64;
-        println!("  L{l:>2} <- L{prev}'s own selection: mean overlap {mean:.2}/{top_k}  ({overlaps:?})");
+        println!(
+            "  L{l:>2} <- L{prev}'s own selection: mean overlap {mean:.2}/{top_k}  ({overlaps:?})"
+        );
     }
 
     // ── Pass 4: static popularity baseline (leave-one-out) ─────────────────
@@ -232,12 +285,20 @@ fn main() {
     println!("  (positive = stale-residual beats the zero-cost popularity floor at that lead)");
     for &l in &home_layers {
         for &k in &LEAD_TIMES {
-            let cells: Vec<&LeadCell> = lead_cells.iter().filter(|c| c.home_layer == l && c.lead == k).collect();
+            let cells: Vec<&LeadCell> = lead_cells
+                .iter()
+                .filter(|c| c.home_layer == l && c.lead == k)
+                .collect();
             if cells.is_empty() {
                 continue;
             }
-            let stale_mean = cells.iter().map(|c| c.overlap as f64).sum::<f64>() / cells.len() as f64;
-            let pop_mean = cells.iter().map(|c| overlap_count(&true_ids[&l][c.prompt], &pop_sets[&(l, c.prompt)]) as f64).sum::<f64>() / cells.len() as f64;
+            let stale_mean =
+                cells.iter().map(|c| c.overlap as f64).sum::<f64>() / cells.len() as f64;
+            let pop_mean = cells
+                .iter()
+                .map(|c| overlap_count(&true_ids[&l][c.prompt], &pop_sets[&(l, c.prompt)]) as f64)
+                .sum::<f64>()
+                / cells.len() as f64;
             println!("  L{l:>2} lead={k:>2}: stale={stale_mean:.2}  popularity={pop_mean:.2}  excess={:+.2}", stale_mean - pop_mean);
         }
     }
@@ -248,7 +309,10 @@ fn main() {
     println!("  (reports achieved overlap AND the union's actual candidate-set size, since the union isn't free)");
     for &l in &home_layers {
         for &k in &LEAD_TIMES {
-            let cells: Vec<&LeadCell> = lead_cells.iter().filter(|c| c.home_layer == l && c.lead == k).collect();
+            let cells: Vec<&LeadCell> = lead_cells
+                .iter()
+                .filter(|c| c.home_layer == l && c.lead == k)
+                .collect();
             if cells.is_empty() {
                 continue;
             }
@@ -264,7 +328,8 @@ fn main() {
                 union_overlaps.push(overlap_count(&true_ids[&l][c.prompt], &union));
                 pop_overlaps.push(overlap_count(&true_ids[&l][c.prompt], pop));
             }
-            let mean_union_ov = union_overlaps.iter().sum::<usize>() as f64 / union_overlaps.len() as f64;
+            let mean_union_ov =
+                union_overlaps.iter().sum::<usize>() as f64 / union_overlaps.len() as f64;
             let mean_union_sz = union_sizes.iter().sum::<usize>() as f64 / union_sizes.len() as f64;
             let mean_pop_ov = pop_overlaps.iter().sum::<usize>() as f64 / pop_overlaps.len() as f64;
             println!(

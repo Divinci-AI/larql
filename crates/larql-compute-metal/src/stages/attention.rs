@@ -26,6 +26,11 @@ pub struct Flags {
 /// attention sinks; the `has_sinks` flag follows in slot 15.
 const SINKS_BUFFER_INDEX: u64 = 14;
 
+/// `amplitude` slot on `fused_attention`, appended after the sinks pair so no
+/// existing buffer index had to move. The frequency table took over the old
+/// `rope_base` slot (9) in place. See `shaders::fused_attention`.
+const FUSED_ATTENTION_AMPLITUDE_INDEX: u64 = 16;
+
 /// Threadgroup width for `fused_attention`. The kernel's threadgroup
 /// reductions size their scratch arrays against this, so it is fixed by
 /// the shader rather than tunable here.
@@ -46,7 +51,7 @@ pub fn encode(
     num_kv_heads: usize,
     head_dim: usize,
     scale: f32,
-    rope_base: f32,
+    plan: &larql_compute::attention::rope::RopeFreqPlan,
     flags: Flags,
     sinks: Option<&[f32]>,
 ) {
@@ -67,7 +72,6 @@ pub fn encode(
     enc.set_bytes(6, 4, &nq_val as *const u32 as *const c_void);
     enc.set_bytes(7, 4, &nkv_val as *const u32 as *const c_void);
     enc.set_bytes(8, 4, &scale as *const f32 as *const c_void);
-    enc.set_bytes(9, 4, &rope_base as *const f32 as *const c_void);
     enc.set_bytes(10, 4, &qknorm_val as *const u32 as *const c_void);
     enc.set_bytes(11, 4, &flags.softcap as *const f32 as *const c_void);
     enc.set_bytes(12, 4, &skip_rope_val as *const u32 as *const c_void);
@@ -75,6 +79,14 @@ pub fn encode(
     // Attention sinks (GPT-OSS): one learned logit per query head that
     // competes in the softmax and is then discarded.
     super::sinks::bind(enc, SINKS_BUFFER_INDEX, sinks, num_q_heads);
+    super::rope_freq::bind(
+        enc,
+        9,
+        FUSED_ATTENTION_AMPLITUDE_INDEX,
+        plan,
+        head_dim,
+        flags.rotary_dim as usize,
+    );
     enc.dispatch_thread_groups(
         MTLSize::new(num_q_heads as u64, seq_len as u64, 1),
         MTLSize::new(THREADS_PER_THREADGROUP, 1, 1),

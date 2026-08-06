@@ -199,6 +199,7 @@ fn moe_model_config() -> VindexModelConfig {
         residual_multiplier: None,
         logits_scaling: None,
         norm_eps: None,
+        ..Default::default()
     }
 }
 

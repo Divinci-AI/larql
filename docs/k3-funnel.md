@@ -678,6 +678,155 @@ Fixed by three additive accessors derived once from the weight key and gated on 
 - **The quantised MoE path still has findings 2–5.** `cpu_moe_forward` / `MoeLayerWeights` has no router-bias field, no expert-bias fields, and no gate policy; `RawSoftmax` is still normalise-then-select. It is untouched here deliberately — it cannot serve GPT-OSS today, and it *is* the measured, working Gemma 4 path, which uses `RenormalizedSoftmax` and is therefore correct for its own family. Bringing it up to the reference is R1/P5 work (item 14), and it now has a local f32 reference to be diffed against, which is the ordering the house rule asks for.
 - **Re-run the §4.2 edge-case scan at R3 as already pre-registered**, and add finding 1's check to it: K3's fused-tensor layout is a P1 one-liner (`does the export interleave?`) that must be *read*, not inherited.
 
+### 4.8 The layer diff gets built, and OLMoE closes — R1/P2, 2026-08-04/05
+
+§4 defines GB at R1/R2 as "a layer-by-layer f32 diff against the local reference implementation, **then** `larql shannon verify` ≤ 0.5 % bits/char". **Only the second half existed.** `shannon verify` compares one scalar at the end of a forward pass, so it can say *that* two engines disagree and never *where* — and §4.7's entire six-defect hunt was conducted without it, by transcribing one block into a test rather than diffing the pass.
+
+**Built:** `larql shannon layer-dump` writes each end-of-layer residual as a raw f32 plane plus a manifest; `larql shannon layer-diff` compares two dumps and names the **first** capture that drifts. First matters more than worst — downstream layers inherit an upstream difference, so the deepest disagreement is usually an echo and the shallowest is the defect. The reference side is `scripts/dump_layers_hf.py`, which takes its **token ids from the manifest** rather than re-tokenising, and `layer-diff` *refuses* to compare dumps whose token windows differ. That is §4.7.7's withdrawn verdict encoded as a precondition instead of a lesson.
+
+**OLMoE closed, and the instrument named both defects.**
+
+| difference | before | after |
+|---|---|---|
+| `rms_norm_eps` — `OlmoeConfig`'s class default is **1e-5**, and `allenai/OLMoE-1B-7B-0924-Instruct` ships no `rms_norm_eps` field, so the fallback is what actually runs. Serving it at the crate-wide 1e-6 was a systematic error in every norm of every layer | final-residual cos **0.890** | **0.991** |
+| `qk_norm_scope` — `OlmoeAttention` builds `OlmoeRMSNorm(hidden_size)` and applies it to the whole projection before any reshape into heads, where `Qwen3Attention` builds `Qwen3RMSNorm(head_dim)` and applies it after | 0.991 | **1.000000000** |
+
+**The second one is the more instructive.** The tensor *names* are identical (`self_attn.{q,k}_norm.weight`) and `transformers` marks the distinction in a Qwen3 source comment — *"unlike olmo, only on the head dim!"* — rather than in a type. **Shapes cannot discriminate it either:** OLMoE-1B-7B is MHA, so `num_heads × head_dim == hidden_size == 2048` and the stored `[2048]` weight is exactly as wide under both readings. Only the reduction differs, and treating it as per-head normalises every head to a common magnitude, discarding relative magnitude *between* heads. That is a structural change to attention, which is why it cost 1.9 bits/char rather than a rounding-sized amount.
+
+**Verified end to end, 2026-08-05.** All 17 captures at cos 1.000000000 (max_abs 1.1e-5, rel_rms 3.3e-6 at layer 15 — f32 accumulation-order noise). On the same 384-byte slice, **larql 166.1 total bits / 1.695 bits/token / 0.435 bits/char against the HF f32 reference's 166.10 / 1.6949 / 0.4348.** GB is green on OLMoE.
+
+**§4.7.6's OLMoE verdict is therefore closed, not carried.** Its "1.901 vs the HF reference's 0.390" is superseded: both numbers moved, and the residual gap is nil. The QK-norm/MHA hunt §4.7.6 pointed at was pointed at something real — this was it.
+
+### 4.9 GPT-OSS: the reference *does* run, and larql's forward was wrong — R1/P2, 2026-08-05
+
+§4.7.6 recorded a hole in the ladder's premise: the weights fit in RAM but the reference implementation would not execute, so GB degraded to a transcription diff. **Both halves of that are now resolved, and in opposite directions.**
+
+**The reference runs.** HF f32 crashed in `transformers`' own `_grouped_mm_fallback` because `convert_moe_packed_tensors` dequantises MXFP4 to **bf16 whatever dtype you ask for**, so f32 activations met bf16 expert weights inside `torch.mm`. The fix is four lines in `scripts/dump_layers_hf.py`: cast every parameter and buffer to f32 *after* load, count the casts, and assert the model is uniformly f32 before running. It reports `cast 48 non-f32 tensors to f32`, so a silent no-op cannot be mistaken for "already f32". **A reference you cannot run is not a reference — and this one was two lines of dtype coercion away from running the whole time.**
+
+**And the dequant is lossless, which is why this reference is sound.** MXFP4 values are ±{0, 0.5, 1, 1.5, 2, 3, 4, 6} scaled by an E8M0 power of two — every one exactly representable in bf16's 8-bit mantissa. The attention and norm tensors are excluded from quantisation by `modules_to_not_convert` and load bf16→f32 losslessly. So the bf16 waypoint costs nothing, and §4.7.6's suspicion of the reference was misplaced in a second way.
+
+**larql's GPT-OSS forward was wrong, from layer 0.**
+
+| capture | before | after |
+|---|---|---|
+| embed | 1.000000000 | 1.000000000 |
+| layer 0 | **0.977681807** (rel_rms 0.221) | **1.000000000** |
+| layer 17 (worst) | 0.931985023 (rel_rms 0.363) | 1.000000000 |
+| layer 23 | 0.974422198 | 1.000000000 |
+
+**The defect is `rope_scaling: {rope_type: "yarn"}`, which larql parsed and then ignored.** `RopeScaling::scaling_type` carried the string; the forward path's only scaling hook was an `Option<Llama3RopeScaling>` parameter, a type that **cannot express YaRN**. So GPT-OSS ran plain RoPE at base 150000. Two independent errors, both quantified against `transformers.modeling_rope_utils.ROPE_INIT_FUNCTIONS['yarn']` on the real config:
+
+1. **23 of 32 rotary dimensions carried the wrong frequency** — 14 of them by the full 32×, with a 9-dimension untouched band and a ramp between.
+2. **Every `cos`/`sin` was 34.7 % too small.** YaRN's `attention_factor` = `0.1·ln(32)+1` = **1.3465735902799727**, applied as `cos = emb.cos() * attention_scaling`. That is not a rotation — it rescales Q and K, so `q·k` was off by 1.81× **at every position, including position 0**.
+
+Point 2 is why YaRN cannot be approximated by ignoring it. A model served without the amplitude is not "slightly off at long range"; it is running attention at the wrong temperature everywhere.
+
+**What landed.** `YarnRopeScaling` + a `yarn_rope_scaling()` trait default that **reads the config** — §4.7.8's mechanism fix applied at the point of introduction rather than after the third recurrence, so any family declaring `rope_type: "yarn"` is served correctly with no per-architecture code. The `Option<Llama3RopeScaling>` parameter became a `RopeFreqScaling` enum, so a `match` is exhaustive and a future family cannot be added and silently ignored at one of the five call sites. `rope.rs` split into `rope/{mod,llama3,yarn,tests}.rs`, and the four attention paths that each reached for the llama3 resolver independently now share one `effective_rope_freq_scaling` — the same shape as §4.6's shared `softmax_in_place`.
+
+**DeepSeek's `mscale`/`mscale_all_dim` are parsed even though no R1 checkpoint uses them,** because when both are present HF computes the amplitude as a *ratio* that collapses to 1.0, where the single-argument form gives 1.35. Honouring YaRN without reading those two fields would have introduced a fresh 35 % error into every DeepSeek layer — a regression caused *by* a fix.
+
+#### 4.9.1 The 85-token fixture could not see the sliding window — and it did not
+
+**GB is green on GPT-OSS at 85 tokens. That licenses a claim about 85 tokens.** GPT-OSS ships `layer_types` alternating `sliding_attention` / `full_attention` at `sliding_window: 128`. **Below 128 tokens a sliding layer and a full-attention layer compute the identical thing**, so the fixture that passed is structurally incapable of testing half the model's attention layers. This is §4.7.3's `out_features = 2` and §4.7.7's `--bytes 384` a third time — *a fixture too small to distinguish the candidate behaviours is not a weak test, it is an absent one* — and this time it was predicted from the config before the diff was run, not discovered afterwards.
+
+The prediction paid out immediately. Two further defects, neither visible at 85 tokens:
+
+- **`is_sliding_window_layer` defaulted to `false` and `gpt_oss.rs` never overrode it**, so all 24 layers ran full attention. `config.layer_types` was parsed *and validated* — and never consulted by anything. §4.7.8's shape a fourth time. **Fixed:** the trait default now reads `layer_types`, so a family that declares its interleave is served correctly with no per-architecture code; stride-based families (Gemma 3) still override. A useful side effect: `has_heterogeneous_attention` now correctly reports GPT-OSS as hybrid, so a backend without `Capability::HeterogeneousAttention` fails loudly instead of computing the wrong thing quietly.
+- **The dense f32 path has no sliding-window support at all.** `attention/gqa.rs` slices `k[0..qi+1]` — causal, unwindowed — and the word "window" does not appear in `attention/block.rs`. Windowing exists only on the quantised `pipeline_layer` path. So the accessor fix is *necessary and not sufficient*: the reference tier GB measures still attends over the whole prefix on all 24 layers.
+
+**Consequently the 2048-byte score was not covered by the gate.** The post-YaRN figure of 9.437 bits/token over 510 tokens crossed the window and so ran 12 layers with the wrong attention span. It is superseded by §4.9.2, and no comparison should be drawn between it and §4.7.7's 8.338.
+
+#### 4.9.2 Sliding window implemented, and GB closes above the window — 2026-08-05
+
+**Landed:** `attention/span.rs` — one `AttentionSpan` type resolved from `is_sliding_window_layer` + `sliding_window_size`, consumed by **both** prefill (`gqa.rs`'s two score loops, via `run_attention_block_core`) and decode (`gqa_attention_decode_step_in_span`, via the decode dispatch). One type on both paths deliberately: decode dropping different keys than prefill for the same absolute position is the divergence a KV cache hides best, and `AttentionSpan::decode_range` is pinned against `AttentionSpan::range` across 300 positions so the two cannot drift.
+
+Captured attention distributions are written back at their **absolute** offset, so a consumer still reads key `j` at index `j` and sees exact zeros outside the window rather than a left-shifted distribution.
+
+The span-carrying entry points are the real ones; the existing unspanned names became `AttentionSpan::Full` wrappers — the same layering `rope.rs` already uses, and it keeps 68 call sites untouched while making the windowed path explicit at the three that matter.
+
+**Verified at 511 tokens — 4× the window.**
+
+| capture | cos | rel_rms |
+|---|---|---|
+| embed | 1.000000000 | 0.000000 |
+| **layer 0** (sliding) | **1.000000000** | 0.000001 |
+| layer 4 | 0.999997361 | 0.002297 |
+| layer 19 (worst) | 0.999976892 | 0.006798 |
+| layer 23 | 0.999988494 | 0.004797 |
+
+**Layer 0 is the proof.** It is a `sliding_attention` layer, the fixture is 4× its window, and it sits at cos 1.000000000 — a window off by even one position would show there first and unmistakably. Every capture clears the 0.9999 gate.
+
+**The residual is larger than the 85-token run (rel_rms 4e-6 → up to 6.8e-3) and that is worth naming rather than waving through.** Direction is preserved essentially exactly (cos ≥ 0.99997) while `max_abs` reaches 451 — a few elements far out, not a broad shift. The attribution is MoE expert-selection disagreement, and §4.9.3 measures it rather than asserting it.
+
+**Tests that the old fixture could not have been.** Deliberately run *past* the window, since below it there is nothing to see: a control pinning that windowed and full agree exactly below the window (the property that made the defect invisible), its converse above the window, a windowed position checked against an independent full-attention run over just its window's keys, absolute-offset capture, and prefill↔decode agreement on the last row. Plus `AttentionSpan`'s own suite, including the pin that the first position where sliding and full differ is *exactly* the window index.
+
+**Still owed:** the Metal rope shaders compute their own frequencies and have not been given YaRN, and the Metal attention kernels have not been given the span. **GPT-OSS on Metal is unmeasured and should be assumed wrong until diffed.** `gqa_attention_asym` (MLA/DeepSeek) is deliberately unwindowed — that family has no sliding layers.
+
+#### 4.9.3 The residual attribution, measured — and the test that nearly got it wrong
+
+§4.9.2's explanation of the residual was *reasoned*: direction preserved, extremes on few elements, shallow layers flat, therefore MoE tie-breaking. That is a causal claim about which tokens diverge and why, and none of it had been measured. **Measured now**, via `LARQL_MOE_ROUTE_TRACE` on the larql side, `--router-trace` on the reference side, and `scripts/diff_moe_routing.py`.
+
+**Expert selections disagree on 11 of 12,264 token-layer decisions (0.09 %), across just 4 of 511 tokens.**
+
+| layer | token | router margin | rel_rms *entering* the layer |
+|---|---|---|---|
+| 4 | 505 | **0.00000** | 1.96e-06 |
+| 8 | 505 | 0.00088 | 0.000526 |
+| 14 | 420 | 0.00000 | 0.001650 |
+| 16 | 420 | 0.00943 | 0.002288 |
+| 17 | 420 | 0.01484 | 0.004271 |
+| 18 | 420 | **0.07159** | 0.004449 |
+| 19 | 420 | 0.02140 | 0.006422 |
+| 20 | 510 | 0.00006 | 0.006798 |
+| 22 | 428 / 505 / 510 | 0.00024 / 0.00735 / 0.05510 | 0.005765 |
+
+**The causal loop closes on the planes themselves.** At layer 3 — before any disagreement — the largest per-token residual sits on token 509, which never flips: ordinary background noise. From layer 4 onward the largest residual is *always* on a flipped token, and at the final layer the top four positions by max-difference are exactly the four flipped tokens. **98.17 % of the final layer's squared residual sits on 0.78 % of positions.** The disagreements do not merely accompany the residual, they are it.
+
+**The pre-registered test failed, and it was the test that was wrong.** The bar was set before looking: ≥ 90 % of disagreements at a margin ≤ 1e-2. The data gives 63.6 %, and four flips at margins up to 0.0716 — on which the first verdict read *"REFUTED — something is wrong with the router itself"*.
+
+That verdict was an artifact of **scoring a causal chain as independent draws.** The same handful of tokens flip repeatedly, and each flip perturbs its own residual, which shifts its own router logits downstream, which lets it flip again at a margin far above a tie. Token 420 is the whole story: 0.00000 at layer 14, then 0.00943, 0.01484, 0.07159, 0.02140 as its state drifts further. A flat threshold cannot see that.
+
+**The discriminating test is temporal, not distributional.** A defective router disagrees regardless of upstream state, so it would flip at wide margins from the *first* layer, where nothing has diverged. A cascade cannot — it has nothing to cascade from. And the data separates cleanly:
+
+- layers 0–3, at rel_rms ~2e-6: **zero disagreements**;
+- the seed at layer 4 is an **exact tie (0.00000)** entering at rel_rms 1.96e-06;
+- **every** wide-margin flip enters with rel_rms ≥ 0.0043 — none occurs before the residual has drifted;
+- all 4 flips below that divergence are ties.
+
+**Verdict: CONFIRMED — a tie-break cascade seeded by one exact tie, not a router defect.** The tool now performs this test (`--layer-diff`) instead of the flat one, so the next person gets the right question rather than the right answer to the wrong one.
+
+**Two carried lessons.** First, the general one, which is [§4.7.3]'s in a new costume: *a threshold chosen without calibrating it against the quantity it bounds is a guess wearing a number.* 1e-2 was picked without ever measuring how closely the two engines' router logits agree, and it happened to sit inside the range a cascade produces. Second: **the losslessness claim in §4.9 survives** — a direct check on a real shard confirms every dequantised MXFP4 value round-trips through bf16 exactly, so the reference's expert weights equal larql's and weight precision contributes nothing to this residual. That mattered: had it been false, the whole attribution would have had a second, unmeasured cause sitting behind it.
+
+> The instrument's second outing found a defect in the first model it was pointed at, then its own fixture predicted two more it could not see, closing those needed a primitive the dense path had never had, and the leftover residual turned out to be a four-token cascade from a single exact tie. GB is green on OLMoE, and green on GPT-OSS **at 511 tokens, past the window** — on the CPU f32 path only.
+
+### 4.10 Metal decode ignores *every* RoPE scaling family — and the parity harness tests the half that works (2026-08-05)
+
+§4.9.2 carried "the Metal rope shaders have not been given YaRN" as a GPT-OSS follow-up. **The item was understated by a wide margin.** Auditing it found not a missing family but a missing *category*, live on shipped models today.
+
+**The four Metal rope kernels take `rope_base` and nothing else.** Each recomputes `freq = 1/pow(base, 2d/rdim)` in-shader. `FullPipelineLayer` — the single construction site for per-layer params — carries `rope_base`, `rotary_dim` and `sliding_window`, and **no scaling field of any kind**. So Metal decode applies unscaled RoPE regardless of what the checkpoint asks for.
+
+**Metal prefill is correct, which is why nothing caught it.** Prefill ropes on the *host* through `apply_rope_partial_at_full` (`attention/gpu.rs`), so it honours llama3 bands, YaRN and the linear position divisor. Decode ropes in-shader (`decode/encode_attn.rs`, `decode_hybrid.rs`) and honours none of them. **The same model therefore encodes its prompt under one rule and generates under another.**
+
+**Who is affected, from the local checkpoint cache:**
+
+| `rope_type` | model | status |
+|---|---|---|
+| `linear` (per-layer, global only) | `google/gemma-3-4b-it`, `gemma-3-12b-it`, `gemma-3-4b-pt` | **live** — the repo's primary model |
+| `llama3` | `meta-llama/Llama-3.2-1B` | **live** |
+| `yarn` | `openai/gpt-oss-20b` | live once GPT-OSS is Metal-servable |
+
+**This is a known bug class, fixed once already, in the other engine.** `kquant_forward/cached.rs` carries the comment: *"The unscaled `apply_rope_partial_at` here was the direct-path divergence on gemma3-4b (global-layer K/Q rope'd at 8× the position the prefill cache used)."* That is this defect, on the CPU direct path, found and fixed — and the identical defect sat untouched in the Metal kernels because the fix was applied where the bug was seen rather than to every path that ropes.
+
+**And the harness could not see it.** `examples/residual_diff.rs` is the CPU-vs-Metal instrument, and its own header says it triggers "a single prefill pass — no KV cache involvement". Prefill is the half that routes through the host and is correct. **A parity harness that exercises only the correct path returns green forever** — [R14 gate–claim congruence](dec-funnel.md) at the harness level, and the fourth instrument-shaped defect in this document.
+
+**The fix, landed.** A `RopeFreqPlan { inv_freq, amplitude }` precomputed on the host by `rope_freq_plan(...)` — the *same* function `apply_rope_partial_at_full` uses, so there is one definition rather than a CPU one and a shader one. Base, llama3 bands, YaRN's ramp and the position divisor all fold into those two values (`angle = (pos/divisor)·inv_freq` is exactly `pos·(inv_freq/divisor)`), so the kernels take a buffer and a scalar and no longer know about scaling families at all. `inv_freq` stays `f64` on the host; narrowing happens only at the GPU boundary, because the reference tier is what Gate B measures.
+
+**All four rope-bearing shaders converted in one change** — `rope` (4 kernels), `qk_norm_rope_fused`, `attn_fused` and `fused_attention`, eight rotation sites. **Zero `pow(rope_base, …)` remain in any shader.** The frequency table took over each kernel's existing `rope_base` slot in place and `amplitude` was appended at the end of every signature, so no other buffer index moved. `stages::rope_freq` owns the binding convention in one place, modelled on `stages::sinks`, and **verifies the table length against the layer's own `head_dim`/`rotary_dim`** — a table of the wrong width would otherwise rotate against wrong frequencies and look like a plausible forward pass.
+
+**The GPU suite is what made this safe: 551 Metal tests pass, and they caught 16 distinct binding mistakes on the way.** Every one was a raw-dispatch site still writing a bare `rope_base` float into what had become a pointer slot; each showed up as `cos = 0.000000` against the CPU reference rather than as a compile error, because Metal bindings are untyped. Two more surfaced as `Command encoder released without endEncoding` — the geometry assert firing *inside* a live encoder, which Metal reports as an abort rather than a readable panic. One of those was a genuine latent hazard: a test mutating `layer.rotary_dim` after the plan was built, desynchronising the two. That now goes through `set_rotary_dim_unscaled`, which moves both together.
+
+**Still owed:** `residual_diff.rs` covers prefill only, so the CPU-vs-Metal *decode* comparison that would have caught this in the first place still does not exist — tracked as **M3/M5** in [`ROADMAP.md`](../ROADMAP.md). The kernel-level parity tests now pin each rope kernel against the CPU reference across Llama-2, Gemma 3, Gemma 4 sliding and Gemma 4 global-partial geometries, which is a sharper instrument than the end-to-end diff but not a substitute for it. `AttentionSpan` is still absent from the Metal attention kernels (**M4**).
+
 ## 5. Claims under test
 
 | ID | Claim | Falsifier |

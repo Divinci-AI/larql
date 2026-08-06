@@ -19,7 +19,7 @@ pub fn run_attention_block_gpu(
 ) -> Option<(Array2<f32>, Array2<f32>, Option<AttentionWeights>)> {
     use crate::dot_proj_gpu;
     use crate::forward::add_bias;
-    use crate::residual::{rms_norm_heads, rms_norm_heads_no_weight};
+    use crate::residual::{rms_norm_heads_no_weight, rms_norm_qk_for_arch};
 
     let arch = &*weights.arch;
     let head_dim = arch.head_dim_for_layer(layer);
@@ -84,14 +84,14 @@ pub fn run_attention_block_gpu(
         .attn_q_norm_key(layer)
         .and_then(|k| weights.vectors.get(&k))
     {
-        Some(norm_w) => rms_norm_heads(&q_full, norm_w, num_q, head_dim, qk_norm_off),
+        Some(norm_w) => rms_norm_qk_for_arch(&q_full, norm_w, num_q, head_dim, qk_norm_off, arch),
         None => q_full,
     };
     let k_normed = match arch
         .attn_k_norm_key(layer)
         .and_then(|k| weights.vectors.get(&k))
     {
-        Some(norm_w) => rms_norm_heads(&k_full, norm_w, num_kv, head_dim, qk_norm_off),
+        Some(norm_w) => rms_norm_qk_for_arch(&k_full, norm_w, num_kv, head_dim, qk_norm_off, arch),
         None => k_full,
     };
 
@@ -173,7 +173,7 @@ pub fn run_attention_with_kv_backend(
     index: Option<&dyn crate::KvIndex>,
 ) -> Option<(Array2<f32>, Array2<f32>, Array2<f32>)> {
     use crate::forward::{add_bias, apply_norm};
-    use crate::residual::{rms_norm_heads, rms_norm_heads_no_weight};
+    use crate::residual::{rms_norm_heads_no_weight, rms_norm_qk_for_arch};
 
     let arch = &*weights.arch;
     let hd = arch.head_dim_for_layer(layer);
@@ -246,14 +246,14 @@ pub fn run_attention_with_kv_backend(
         .attn_q_norm_key(layer)
         .and_then(|k| weights.vectors.get(&k))
     {
-        Some(w) => rms_norm_heads(&q, w, nq, hd, qk_off),
+        Some(w) => rms_norm_qk_for_arch(&q, w, nq, hd, qk_off, arch),
         None => q,
     };
     let k = match arch
         .attn_k_norm_key(layer)
         .and_then(|k| weights.vectors.get(&k))
     {
-        Some(w) => rms_norm_heads(&k, w, nkv, hd, qk_off),
+        Some(w) => rms_norm_qk_for_arch(&k, w, nkv, hd, qk_off, arch),
         None => k,
     };
 
@@ -279,9 +279,9 @@ pub fn run_attention_with_kv_backend(
     let rf = arch.rotary_fraction_for_layer(layer);
     let pos_divisor =
         crate::forward_overrides::effective_rope_position_divisor_for_layer(arch, layer);
-    let llama3 = crate::forward_overrides::effective_llama3_rope_scaling(arch);
-    let q_r = apply_rope_partial_at_full(&q, nq, hd, rb, rf, 0, pos_divisor, llama3);
-    let k_r = apply_rope_partial_at_full(&k, nkv, hd, rb, rf, 0, pos_divisor, llama3);
+    let rope_scaling = crate::forward_overrides::effective_rope_freq_scaling(arch);
+    let q_r = apply_rope_partial_at_full(&q, nq, hd, rb, rf, 0, pos_divisor, rope_scaling);
+    let k_r = apply_rope_partial_at_full(&k, nkv, hd, rb, rf, 0, pos_divisor, rope_scaling);
 
     let (attn_out, _) = gqa_attention_with_weights(
         &q_r,

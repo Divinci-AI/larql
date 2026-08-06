@@ -40,9 +40,9 @@ use ndarray::{Array1, Array2, ArrayView2, Axis};
 
 use larql_compute::ffn::{gelu_tanh_gate_up, silu_gate_up};
 use larql_inference::ffn::WeightFfn;
-use larql_inference::FfnBackend;
 use larql_inference::forward::{trace_forward_full_hooked, RecordHook};
 use larql_inference::test_utils::make_test_weights;
+use larql_inference::FfnBackend;
 use larql_models::{ModelWeights, WeightArray};
 
 /// Deterministic derangement (fixed-point-free permutation) of `0..n`,
@@ -70,7 +70,10 @@ fn derangement(n: usize, seed: u64) -> Vec<usize> {
             perm.swap(i, j);
         }
     }
-    debug_assert!((0..n).all(|i| perm[i] != i), "repair pass left a fixed point");
+    debug_assert!(
+        (0..n).all(|i| perm[i] != i),
+        "repair pass left a fixed point"
+    );
     perm
 }
 
@@ -102,7 +105,13 @@ fn permute_rows(w: &WeightArray, perm: &[usize]) -> Array2<f32> {
 /// `larql_compute::ffn::weight::dense_ffn_forward`'s gated branch, but
 /// parametrized directly on explicit gate/up/down matrices so it can be
 /// evaluated against permuted weights that don't live in a `ModelWeights`.
-fn ffn_row(x: &Array1<f32>, w_gate: ArrayView2<f32>, w_up: ArrayView2<f32>, w_down: ArrayView2<f32>, gelu_tanh: bool) -> Array1<f32> {
+fn ffn_row(
+    x: &Array1<f32>,
+    w_gate: ArrayView2<f32>,
+    w_up: ArrayView2<f32>,
+    w_down: ArrayView2<f32>,
+    gelu_tanh: bool,
+) -> Array1<f32> {
     let x2 = x.clone().insert_axis(Axis(0));
     let gate = x2.dot(&w_gate.t());
     let up = x2.dot(&w_up.t());
@@ -115,11 +124,19 @@ fn ffn_row(x: &Array1<f32>, w_gate: ArrayView2<f32>, w_up: ArrayView2<f32>, w_do
 }
 
 fn max_abs_diff(a: &Array1<f32>, b: &Array1<f32>) -> f32 {
-    a.iter().zip(b.iter()).map(|(x, y)| (x - y).abs()).fold(0.0, f32::max)
+    a.iter()
+        .zip(b.iter())
+        .map(|(x, y)| (x - y).abs())
+        .fold(0.0, f32::max)
 }
 
 fn rel_l2(a: &Array1<f32>, b: &Array1<f32>) -> f32 {
-    let num: f32 = a.iter().zip(b.iter()).map(|(x, y)| (x - y).powi(2)).sum::<f32>().sqrt();
+    let num: f32 = a
+        .iter()
+        .zip(b.iter())
+        .map(|(x, y)| (x - y).powi(2))
+        .sum::<f32>()
+        .sqrt();
     let den: f32 = b.iter().map(|y| y.powi(2)).sum::<f32>().sqrt();
     if den == 0.0 {
         num
@@ -169,7 +186,13 @@ struct Map1Result {
 ///   be testing a bug in this file, not the conjugacy claim), or
 /// - the permuted-coords + permuted-chart arm fails to reproduce `P(y)`
 ///   near-exactly (the actual falsifiable claim).
-fn run_map1_on(label: &str, weights: &ModelWeights, layer: usize, x: &Array1<f32>, seed: u64) -> Map1Result {
+fn run_map1_on(
+    label: &str,
+    weights: &ModelWeights,
+    layer: usize,
+    x: &Array1<f32>,
+    seed: u64,
+) -> Map1Result {
     let arch = &*weights.arch;
     let hidden = weights.hidden_size;
     let w_gate = weights
@@ -227,7 +250,13 @@ fn run_map1_on(label: &str, weights: &ModelWeights, layer: usize, x: &Array1<f32
     let w_gate_p = permute_columns(w_gate, &perm);
     let w_up_p = permute_columns(w_up, &perm);
     let w_down_p = permute_rows(w_down, &perm);
-    let f_z_right = ffn_row(&z, w_gate_p.view(), w_up_p.view(), w_down_p.view(), gelu_tanh);
+    let f_z_right = ffn_row(
+        &z,
+        w_gate_p.view(),
+        w_up_p.view(),
+        w_down_p.view(),
+        gelu_tanh,
+    );
 
     let wrong = ArmMetrics::against(&f_z_wrong, &f_x_p);
     let right = ArmMetrics::against(&f_z_right, &f_x_p);
@@ -254,7 +283,11 @@ fn run_map1_on(label: &str, weights: &ModelWeights, layer: usize, x: &Array1<f32
         wrong.rel_l2
     );
 
-    Map1Result { hidden, wrong, right }
+    Map1Result {
+        hidden,
+        wrong,
+        right,
+    }
 }
 
 fn main() {
@@ -267,14 +300,29 @@ fn main() {
     let layer = 0usize;
 
     let mut record = RecordHook::for_layers([layer]);
-    let _ = trace_forward_full_hooked(&weights, &prompt, &[layer], false, 0, false, &ffn, &mut record);
+    let _ = trace_forward_full_hooked(
+        &weights,
+        &prompt,
+        &[layer],
+        false,
+        0,
+        false,
+        &ffn,
+        &mut record,
+    );
     let post_attn = record
         .post_attention
         .get(&layer)
         .expect("post-attention residual captured");
     let x = post_attn.row(post_attn.nrows() - 1).to_owned();
 
-    let phase1 = run_map1_on("Fixture A: synthetic TinyModel", &weights, layer, &x, /*seed=*/ 1);
+    let phase1 = run_map1_on(
+        "Fixture A: synthetic TinyModel",
+        &weights,
+        layer,
+        &x,
+        /*seed=*/ 1,
+    );
 
     // ── Phase 2: a real dense vindex, if one is pointed at ──────────────────
     let phase2 = match std::env::var("LARQL_MAP1_VINDEX") {
@@ -288,21 +336,41 @@ fn main() {
                 larql_vindex::LoadWeightsOptions::default(),
             )
             .expect("load real vindex weights");
-            let tokenizer = larql_vindex::load_vindex_tokenizer(dir).expect("load vindex tokenizer");
-            let prompt_ids = larql_inference::encode_prompt(&tokenizer, &*weights.arch, "The capital of France is")
-                .expect("tokenize prompt");
+            let tokenizer =
+                larql_vindex::load_vindex_tokenizer(dir).expect("load vindex tokenizer");
+            let prompt_ids = larql_inference::encode_prompt(
+                &tokenizer,
+                &*weights.arch,
+                "The capital of France is",
+            )
+            .expect("tokenize prompt");
 
             let layer = weights.num_layers / 2;
             let ffn = WeightFfn { weights: &weights };
             let mut record = RecordHook::for_layers([layer]);
-            let _ = trace_forward_full_hooked(&weights, &prompt_ids, &[layer], false, 0, false, &ffn, &mut record);
+            let _ = trace_forward_full_hooked(
+                &weights,
+                &prompt_ids,
+                &[layer],
+                false,
+                0,
+                false,
+                &ffn,
+                &mut record,
+            );
             let post_attn = record
                 .post_attention
                 .get(&layer)
                 .expect("post-attention residual captured");
             let x = post_attn.row(post_attn.nrows() - 1).to_owned();
 
-            Some(run_map1_on("Real Gemma vindex", &weights, layer, &x, /*seed=*/ 2))
+            Some(run_map1_on(
+                "Real Gemma vindex",
+                &weights,
+                layer,
+                &x,
+                /*seed=*/ 2,
+            ))
         }
         Err(_) => {
             println!(

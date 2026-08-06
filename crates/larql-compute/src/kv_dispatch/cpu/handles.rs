@@ -208,6 +208,16 @@ pub struct CpuQ4kCacheHandle {
 }
 
 impl KvHandleInner for CpuQ4kCacheHandle {
+    /// Rows in the **first populated layer**.
+    ///
+    /// This assumes every layer holds the same count, which is true only
+    /// while nothing rewrites layers independently. It holds today
+    /// because this is the *coarse* whole-model handle: engines reach
+    /// per-layer row surgery through `PerLayerKvAccess`, which is not
+    /// offered on the coarse path at all, so a heterogeneous coarse
+    /// cache is currently unreachable. If that changes, this must become
+    /// a `KvExtent`-shaped report rather than a scalar — see
+    /// `larql_inference::kv_engine::KvExtent`.
     fn cached_len(&self) -> usize {
         self.cache
             .iter()

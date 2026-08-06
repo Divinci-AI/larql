@@ -203,6 +203,44 @@ pub fn make_gemma3_rope_scaled_test_weights() -> ModelWeights {
     )
 }
 
+/// Gemma-3 shaped with a **narrow** sliding window (4 tokens) over 6
+/// layers, so layers 0–4 slide and layer 5 is global.
+///
+/// The narrow window is the point: with a realistic 1024-token window a
+/// short test prompt keeps every position inside every sliding layer's
+/// view, so a global-only exclusion is correctly *refused* and the
+/// heterogeneous-row-count case never arises. Four tokens puts a planted
+/// span outside the sliding layers while keeping the fixture small
+/// enough to prefill in a unit test.
+pub fn make_gemma3_narrow_window_test_weights() -> ModelWeights {
+    const HIDDEN: usize = 16;
+    const INTER: usize = 32;
+    const NUM_Q: usize = 2;
+    const NUM_KV: usize = 1;
+    const HEAD_DIM: usize = 8;
+    const VOCAB: usize = 32;
+    const NUM_LAYERS: usize = 6;
+    gemma3_test_weights_inner(
+        serde_json::json!({
+            "model_type": "gemma3",
+            "text_config": {
+                "model_type": "gemma3_text",
+                "hidden_size": HIDDEN,
+                "num_hidden_layers": NUM_LAYERS,
+                "intermediate_size": INTER,
+                "head_dim": HEAD_DIM,
+                "num_attention_heads": NUM_Q,
+                "num_key_value_heads": NUM_KV,
+                "vocab_size": VOCAB,
+                "rope_theta": 10000.0,
+                "residual_multiplier": 0.5,
+                "sliding_window": 4,
+            },
+        }),
+        NUM_LAYERS,
+    )
+}
+
 fn gemma3_test_weights_inner(arch_json: serde_json::Value, num_layers: usize) -> ModelWeights {
     const VOCAB: usize = 32;
     const HIDDEN: usize = 16;

@@ -71,7 +71,10 @@ struct Tile {
 fn extract_tile(weights: &ModelWeights, layer: usize) -> Tile {
     let arch = &*weights.arch;
     let get = |key: String| -> Array2<f32> {
-        let w: &WeightArray = weights.tensors.get(&key).unwrap_or_else(|| panic!("missing tensor {key}"));
+        let w: &WeightArray = weights
+            .tensors
+            .get(&key)
+            .unwrap_or_else(|| panic!("missing tensor {key}"));
         w.to_owned()
     };
     Tile {
@@ -126,32 +129,58 @@ impl LayerHook for SpliceHook {
 }
 
 fn max_abs_diff(a: &Array1<f32>, b: &Array1<f32>) -> f32 {
-    a.iter().zip(b.iter()).map(|(x, y)| (x - y).abs()).fold(0.0, f32::max)
+    a.iter()
+        .zip(b.iter())
+        .map(|(x, y)| (x - y).abs())
+        .fold(0.0, f32::max)
 }
 
 /// The same sanity gate MAP-1 used: a native (`m == l`) tile applied via
 /// our hand-rolled `ffn_row` must match the library's own
 /// `WeightFfn::forward` before anything built on top of `ffn_row` (every
 /// cross-tile cell in this file) can be trusted.
-fn sanity_check_ffn_row(ffn: &WeightFfn, x: &Array1<f32>, native_tile: &Tile, native_delta: &Array1<f32>, label: &str) {
+fn sanity_check_ffn_row(
+    ffn: &WeightFfn,
+    x: &Array1<f32>,
+    native_tile: &Tile,
+    native_delta: &Array1<f32>,
+    label: &str,
+) {
     let x_row = x.clone().insert_axis(Axis(0));
     let lib_out = ffn.forward(native_tile.layer, &x_row).row(0).to_owned();
     let diff = max_abs_diff(native_delta, &lib_out);
     println!("  sanity [{label}]: hand-rolled F(x) vs library WeightFfn::forward at L{} max|Δ| = {diff:.3e}", native_tile.layer);
-    assert!(diff < 1e-3, "hand-rolled ffn_row diverged from the library's dense_ffn_forward at layer {}", native_tile.layer);
+    assert!(
+        diff < 1e-3,
+        "hand-rolled ffn_row diverged from the library's dense_ffn_forward at layer {}",
+        native_tile.layer
+    );
 }
 
 fn rel_l2(a: &Array1<f32>, b: &Array1<f32>) -> f32 {
-    let num: f32 = a.iter().zip(b.iter()).map(|(x, y)| (x - y).powi(2)).sum::<f32>().sqrt();
+    let num: f32 = a
+        .iter()
+        .zip(b.iter())
+        .map(|(x, y)| (x - y).powi(2))
+        .sum::<f32>()
+        .sqrt();
     let den: f32 = b.iter().map(|y| y.powi(2)).sum::<f32>().sqrt();
-    if den == 0.0 { num } else { num / den }
+    if den == 0.0 {
+        num
+    } else {
+        num / den
+    }
 }
 
 fn cosine(a: &Array1<f32>, b: &Array1<f32>) -> f32 {
     let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
     let na = a.iter().map(|v| v * v).sum::<f32>().sqrt();
     let nb = b.iter().map(|v| v * v).sum::<f32>().sqrt();
-    if na == 0.0 || nb == 0.0 { 0.0 } else { dot / (na * nb) }
+    if na == 0.0 || nb == 0.0 {
+        0.0
+    } else {
+        dot / (na * nb)
+    }
 }
 
 /// Deterministic seeded pseudo-random unit vector (LCG, same generator
@@ -160,7 +189,9 @@ fn cosine(a: &Array1<f32>, b: &Array1<f32>) -> f32 {
 fn random_delta(dim: usize, target_norm: f32, seed: u64) -> Array1<f32> {
     let mut state = seed;
     let mut next_f32 = move || {
-        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         ((state as u32) as f32 / u32::MAX as f32) * 2.0 - 1.0
     };
     let raw: Array1<f32> = Array1::from_shape_fn(dim, |_| next_f32());
@@ -201,7 +232,13 @@ fn kl_divergence(p: &[f32], q: &[f32]) -> f32 {
     const EPS: f32 = 1e-30;
     p.iter()
         .zip(q.iter())
-        .map(|(&pi, &qi)| if pi <= 0.0 { 0.0 } else { pi * (pi.max(EPS) / qi.max(EPS)).ln() })
+        .map(|(&pi, &qi)| {
+            if pi <= 0.0 {
+                0.0
+            } else {
+                pi * (pi.max(EPS) / qi.max(EPS)).ln()
+            }
+        })
         .sum()
 }
 
@@ -211,14 +248,37 @@ fn kl_divergence(p: &[f32], q: &[f32]) -> f32 {
 /// point precision, so it stays informative exactly where the KL/NLL
 /// metrics hit their float32 floor.
 fn rank_of(sorted: &[(u32, f32)], token_id: u32) -> usize {
-    sorted.iter().position(|&(id, _)| id == token_id).unwrap_or(sorted.len())
+    sorted
+        .iter()
+        .position(|&(id, _)| id == token_id)
+        .unwrap_or(sorted.len())
 }
 
 /// Runs the model with `SpliceHook` at `layer` splicing in `delta`, returns
 /// the final-layer full distribution, sorted descending by probability.
-fn run_spliced(weights: &ModelWeights, ffn: &WeightFfn, prompt: &[u32], layer: usize, delta: Array1<f32>, last_layer: usize) -> Vec<(u32, f32)> {
-    let mut hook = SpliceHook { target_layer: layer, override_delta: delta, captured_x: None };
-    let trace = trace_forward_full_hooked(weights, prompt, &[last_layer], false, 0, false, ffn, &mut hook);
+fn run_spliced(
+    weights: &ModelWeights,
+    ffn: &WeightFfn,
+    prompt: &[u32],
+    layer: usize,
+    delta: Array1<f32>,
+    last_layer: usize,
+) -> Vec<(u32, f32)> {
+    let mut hook = SpliceHook {
+        target_layer: layer,
+        override_delta: delta,
+        captured_x: None,
+    };
+    let trace = trace_forward_full_hooked(
+        weights,
+        prompt,
+        &[last_layer],
+        false,
+        0,
+        false,
+        ffn,
+        &mut hook,
+    );
     full_sorted(weights, &trace.residuals[0].1)
 }
 
@@ -258,7 +318,14 @@ fn evaluate_cell(
     let native_norm = native_delta.iter().map(|v| v * v).sum::<f32>().sqrt();
     let random = random_delta(x_l.len(), native_norm, random_seed);
 
-    let p_swap = run_spliced(weights, ffn, prompt, native_tile.layer, foreign_delta.clone(), last_layer);
+    let p_swap = run_spliced(
+        weights,
+        ffn,
+        prompt,
+        native_tile.layer,
+        foreign_delta.clone(),
+        last_layer,
+    );
     let p_random = run_spliced(weights, ffn, prompt, native_tile.layer, random, last_layer);
     let native_top1 = p_native[0].0;
     let vocab = weights.vocab_size;
@@ -269,9 +336,13 @@ fn evaluate_cell(
         tile_layer: foreign_tile.layer,
         cosine_vs_native: cosine(&foreign_delta, native_delta),
         rel_l2_vs_native: rel_l2(&foreign_delta, native_delta),
-        norm_ratio: foreign_delta.iter().map(|v| v * v).sum::<f32>().sqrt() / native_norm.max(1e-12),
+        norm_ratio: foreign_delta.iter().map(|v| v * v).sum::<f32>().sqrt()
+            / native_norm.max(1e-12),
         downstream_kl: kl_divergence(&p_native_dense, &dense_from_sorted(&p_swap, vocab)),
-        downstream_kl_random_control: kl_divergence(&p_native_dense, &dense_from_sorted(&p_random, vocab)),
+        downstream_kl_random_control: kl_divergence(
+            &p_native_dense,
+            &dense_from_sorted(&p_random, vocab),
+        ),
         top1_preserved: native_top1 == p_swap[0].0,
         top1_preserved_random_control: native_top1 == p_random[0].0,
         native_top1_rank_under_swap: rank_of(&p_swap, native_top1),
@@ -304,7 +375,12 @@ fn run_smoke_test() {
 
     let mut record = RecordHook::for_layers([0usize]);
     let _ = trace_forward_full_hooked(&weights, &prompt, &[0], false, 0, false, &ffn, &mut record);
-    let x0 = record.post_attention.get(&0).unwrap().row(prompt.len() - 1).to_owned();
+    let x0 = record
+        .post_attention
+        .get(&0)
+        .unwrap()
+        .row(prompt.len() - 1)
+        .to_owned();
 
     let tile0 = extract_tile(&weights, 0);
     let tile1 = extract_tile(&weights, 1);
@@ -313,14 +389,30 @@ fn run_smoke_test() {
     sanity_check_ffn_row(&ffn, &x0, &tile0, &native_delta, "phase 0 smoke test");
 
     let p_native = run_spliced(&weights, &ffn, &prompt, 0, native_delta.clone(), last_layer);
-    let cell = evaluate_cell(&weights, &ffn, &prompt, last_layer, &x0, &tile0, &tile1, &native_delta, &p_native, gelu_tanh, 42);
+    let cell = evaluate_cell(
+        &weights,
+        &ffn,
+        &prompt,
+        last_layer,
+        &x0,
+        &tile0,
+        &tile1,
+        &native_delta,
+        &p_native,
+        gelu_tanh,
+        42,
+    );
     print_cell(&cell);
     let dense_native = dense_from_sorted(&p_native, weights.vocab_size);
     assert!(
         kl_divergence(&dense_native, &dense_native) < 1e-6,
         "KL of a distribution against itself must be ~0"
     );
-    assert_eq!(rank_of(&p_native, p_native[0].0), 0, "native's own top token must rank 0 against itself");
+    assert_eq!(
+        rank_of(&p_native, p_native[0].0),
+        0,
+        "native's own top token must rank 0 against itself"
+    );
     println!("  (smoke test passed — harness is sound)\n");
 }
 
@@ -356,11 +448,16 @@ fn run_real_gemma_sweep(vindex_path: &str) {
     println!("loading real vindex: {vindex_path}");
     let dir = std::path::Path::new(vindex_path);
     let mut cb = larql_vindex::SilentLoadCallbacks;
-    let weights = larql_vindex::load_model_weights_with_opts(dir, &mut cb, larql_vindex::LoadWeightsOptions::default())
-        .expect("load real vindex weights");
+    let weights = larql_vindex::load_model_weights_with_opts(
+        dir,
+        &mut cb,
+        larql_vindex::LoadWeightsOptions::default(),
+    )
+    .expect("load real vindex weights");
     let tokenizer = larql_vindex::load_vindex_tokenizer(dir).expect("load vindex tokenizer");
-    let prompt = larql_inference::encode_prompt(&tokenizer, &*weights.arch, "The capital of France is")
-        .expect("tokenize prompt");
+    let prompt =
+        larql_inference::encode_prompt(&tokenizer, &*weights.arch, "The capital of France is")
+            .expect("tokenize prompt");
     let ffn = WeightFfn { weights: &weights };
     let gelu_tanh = weights.arch.activation().uses_gelu_tanh_gate_up();
     let last_layer = weights.num_layers - 1;
@@ -378,18 +475,33 @@ fn run_real_gemma_sweep(vindex_path: &str) {
     );
 
     // One capture + native-reconstruction pass per touched layer.
-    let mut waypoints: std::collections::HashMap<usize, Array1<f32>> = std::collections::HashMap::new();
+    let mut waypoints: std::collections::HashMap<usize, Array1<f32>> =
+        std::collections::HashMap::new();
     let mut tiles: std::collections::HashMap<usize, Tile> = std::collections::HashMap::new();
-    let mut native_deltas: std::collections::HashMap<usize, Array1<f32>> = std::collections::HashMap::new();
-    let mut native_probs: std::collections::HashMap<usize, Vec<(u32, f32)>> = std::collections::HashMap::new();
+    let mut native_deltas: std::collections::HashMap<usize, Array1<f32>> =
+        std::collections::HashMap::new();
+    let mut native_probs: std::collections::HashMap<usize, Vec<(u32, f32)>> =
+        std::collections::HashMap::new();
 
     for &l in &touched_layers {
         let mut record = RecordHook::for_layers([l]);
-        let _ = trace_forward_full_hooked(&weights, &prompt, &[l], false, 0, false, &ffn, &mut record);
-        let x_l = record.post_attention.get(&l).unwrap().row(prompt.len() - 1).to_owned();
+        let _ =
+            trace_forward_full_hooked(&weights, &prompt, &[l], false, 0, false, &ffn, &mut record);
+        let x_l = record
+            .post_attention
+            .get(&l)
+            .unwrap()
+            .row(prompt.len() - 1)
+            .to_owned();
         let tile = extract_tile(&weights, l);
         let native_delta = ffn_row(&x_l, &tile, gelu_tanh);
-        sanity_check_ffn_row(&ffn, &x_l, &tile, &native_delta, &format!("real sweep L{l}"));
+        sanity_check_ffn_row(
+            &ffn,
+            &x_l,
+            &tile,
+            &native_delta,
+            &format!("real sweep L{l}"),
+        );
         let p_native = run_spliced(&weights, &ffn, &prompt, l, native_delta.clone(), last_layer);
         waypoints.insert(l, x_l);
         tiles.insert(l, tile);
@@ -399,7 +511,9 @@ fn run_real_gemma_sweep(vindex_path: &str) {
 
     // Report the abstraction floor once, comparing an m==l reconstruction
     // against a genuinely unmodified forward on the same prompt.
-    let true_baseline = trace_forward(&weights, &prompt, &[last_layer], false, 0).residuals[0].1.clone();
+    let true_baseline = trace_forward(&weights, &prompt, &[last_layer], false, 0).residuals[0]
+        .1
+        .clone();
     let p_true = full_sorted(&weights, &true_baseline);
     let some_layer = touched_layers[0];
     let abstraction_floor_kl = kl_divergence(
@@ -416,9 +530,17 @@ fn run_real_gemma_sweep(vindex_path: &str) {
     for &(a, b) in &pairs {
         for &(from, to) in &[(a, b), (b, a)] {
             let cell = evaluate_cell(
-                &weights, &ffn, &prompt, last_layer,
-                &waypoints[&from], &tiles[&from], &tiles[&to],
-                &native_deltas[&from], &native_probs[&from], gelu_tanh, seed,
+                &weights,
+                &ffn,
+                &prompt,
+                last_layer,
+                &waypoints[&from],
+                &tiles[&from],
+                &tiles[&to],
+                &native_deltas[&from],
+                &native_probs[&from],
+                gelu_tanh,
+                seed,
             );
             print_cell(&cell);
             results.push(cell);
@@ -429,20 +551,48 @@ fn run_real_gemma_sweep(vindex_path: &str) {
     println!("\n=== summary ===");
     let n = results.len() as f32;
     let mean_kl_swap: f32 = results.iter().map(|c| c.downstream_kl).sum::<f32>() / n;
-    let mean_kl_random: f32 = results.iter().map(|c| c.downstream_kl_random_control).sum::<f32>() / n;
+    let mean_kl_random: f32 = results
+        .iter()
+        .map(|c| c.downstream_kl_random_control)
+        .sum::<f32>()
+        / n;
     let top1_rate = results.iter().filter(|c| c.top1_preserved).count() as f32 / n;
-    let top1_rate_random = results.iter().filter(|c| c.top1_preserved_random_control).count() as f32 / n;
-    let mean_rank_swap: f64 = results.iter().map(|c| c.native_top1_rank_under_swap as f64).sum::<f64>() / results.len() as f64;
-    let mean_rank_random: f64 = results.iter().map(|c| c.native_top1_rank_under_random as f64).sum::<f64>() / results.len() as f64;
-    let swap_beats_random = results.iter().filter(|c| c.native_top1_rank_under_swap < c.native_top1_rank_under_random).count();
-    let random_beats_swap = results.iter().filter(|c| c.native_top1_rank_under_random < c.native_top1_rank_under_swap).count();
+    let top1_rate_random = results
+        .iter()
+        .filter(|c| c.top1_preserved_random_control)
+        .count() as f32
+        / n;
+    let mean_rank_swap: f64 = results
+        .iter()
+        .map(|c| c.native_top1_rank_under_swap as f64)
+        .sum::<f64>()
+        / results.len() as f64;
+    let mean_rank_random: f64 = results
+        .iter()
+        .map(|c| c.native_top1_rank_under_random as f64)
+        .sum::<f64>()
+        / results.len() as f64;
+    let swap_beats_random = results
+        .iter()
+        .filter(|c| c.native_top1_rank_under_swap < c.native_top1_rank_under_random)
+        .count();
+    let random_beats_swap = results
+        .iter()
+        .filter(|c| c.native_top1_rank_under_random < c.native_top1_rank_under_swap)
+        .count();
     let tied = results.len() - swap_beats_random - random_beats_swap;
 
     println!("{} directed cells", results.len());
     println!("mean downstream KL, swapped tile:   {mean_kl_swap:.5}  (context metric — see kl_divergence's doc comment on saturation)");
     println!("mean downstream KL, random control: {mean_kl_random:.5}");
-    println!("top-1 token preserved, swapped tile:   {:.1}%", top1_rate * 100.0);
-    println!("top-1 token preserved, random control:  {:.1}%", top1_rate_random * 100.0);
+    println!(
+        "top-1 token preserved, swapped tile:   {:.1}%",
+        top1_rate * 100.0
+    );
+    println!(
+        "top-1 token preserved, random control:  {:.1}%",
+        top1_rate_random * 100.0
+    );
     println!("mean rank of native's top token, swapped tile:  {mean_rank_swap:.1}  (0 = perfectly preserved, {} = vocab size)", weights.vocab_size);
     println!("mean rank of native's top token, random control: {mean_rank_random:.1}");
     println!(

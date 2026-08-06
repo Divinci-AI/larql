@@ -34,7 +34,9 @@
 
 use std::collections::HashMap;
 
-use larql_compute::cpu::ops::moe::{moe_expert_input, moe_route_from_router_input, moe_router_input};
+use larql_compute::cpu::ops::moe::{
+    moe_expert_input, moe_route_from_router_input, moe_router_input,
+};
 use larql_compute::forward::dump_config::{cpu_layer_h_post_attn_path, cpu_layer_path};
 use larql_compute::pipeline_layer::build_moe_weights;
 use larql_compute::MoeLayerWeights;
@@ -52,8 +54,15 @@ fn arg(name: &str) -> Option<String> {
 
 fn last_row(path: &str, width: usize) -> Vec<f32> {
     let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("{path}: {e}"));
-    let values: Vec<f32> = bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
-    assert!(values.len().is_multiple_of(width) && !values.is_empty(), "{path}: {} values not a whole number of {width}-wide rows", values.len());
+    let values: Vec<f32> = bytes
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect();
+    assert!(
+        values.len().is_multiple_of(width) && !values.is_empty(),
+        "{path}: {} values not a whole number of {width}-wide rows",
+        values.len()
+    );
     let rows = values.len() / width;
     values[(rows - 1) * width..].to_vec()
 }
@@ -74,8 +83,13 @@ fn cosine(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b).map(|(x, y)| x * y).sum::<f32>() / (na * nb)
 }
 
-fn discover_moe_layers(weights: &ModelWeights, arch: &dyn larql_models::ModelArchitecture) -> Vec<usize> {
-    (0..weights.num_layers).filter(|&l| build_moe_weights(weights, arch, l).is_some()).collect()
+fn discover_moe_layers(
+    weights: &ModelWeights,
+    arch: &dyn larql_models::ModelArchitecture,
+) -> Vec<usize> {
+    (0..weights.num_layers)
+        .filter(|&l| build_moe_weights(weights, arch, l).is_some())
+        .collect()
 }
 
 /// Full per-expert router probability distribution (not just top-8) —
@@ -103,7 +117,11 @@ fn router_full_probs(router_in: &[f32], moe: &MoeLayerWeights<'_>) -> Vec<f32> {
 }
 
 fn entropy_bits(probs: &[f32]) -> f64 {
-    probs.iter().filter(|&&p| p > 0.0).map(|&p| -(p as f64) * (p as f64).log2()).sum()
+    probs
+        .iter()
+        .filter(|&&p| p > 0.0)
+        .map(|&p| -(p as f64) * (p as f64).log2())
+        .sum()
 }
 
 fn margin_at_k(probs: &[f32], k: usize) -> f32 {
@@ -124,7 +142,8 @@ fn main() {
     let dump_prefix = arg("--dump-prefix").expect("set --dump-prefix <dir prefix>");
 
     let mut cb = larql_vindex::SilentLoadCallbacks;
-    let weights = larql_vindex::load_model_weights_kquant(std::path::Path::new(&vindex), &mut cb).expect("load real vindex weights");
+    let weights = larql_vindex::load_model_weights_kquant(std::path::Path::new(&vindex), &mut cb)
+        .expect("load real vindex weights");
     let arch = &*weights.arch;
     let hidden = weights.hidden_size;
     let norm_offset = arch.norm_weight_offset();
@@ -135,7 +154,10 @@ fn main() {
 
     let mut moe_at: HashMap<usize, MoeLayerWeights> = HashMap::new();
     for &l in &layers {
-        moe_at.insert(l, build_moe_weights(&weights, arch, l).expect("must be MoE"));
+        moe_at.insert(
+            l,
+            build_moe_weights(&weights, arch, l).expect("must be MoE"),
+        );
     }
 
     struct LayerStats {
@@ -169,7 +191,11 @@ fn main() {
 
             let ffn_delta = sub(&h_full, &h_post_attn);
             let denom = norm(&h_post_attn);
-            ffn_gains.push(if denom > 0.0 { (norm(&ffn_delta) / denom) as f64 } else { 0.0 });
+            ffn_gains.push(if denom > 0.0 {
+                (norm(&ffn_delta) / denom) as f64
+            } else {
+                0.0
+            });
 
             let expert_input = moe_expert_input(&h_post_attn, moe, norm_offset, eps);
             let router_in = moe_router_input(&h_post_attn, &expert_input, moe, norm_offset, eps);
@@ -204,7 +230,9 @@ fn main() {
     let mut reorientation: HashMap<usize, f64> = HashMap::new();
     let mut magnitude_ratio: HashMap<usize, f64> = HashMap::new();
     for &l in &layers {
-        let Some(&l_next) = layers.iter().find(|&&x| x == l + 1) else { continue };
+        let Some(&l_next) = layers.iter().find(|&&x| x == l + 1) else {
+            continue;
+        };
         let mut cosines = Vec::with_capacity(NUM_PROMPTS);
         let mut ratios = Vec::with_capacity(NUM_PROMPTS);
         for i in 0..NUM_PROMPTS {
@@ -219,14 +247,28 @@ fn main() {
     }
 
     println!("== per-layer diagnostics (all computed blind to the routing-excess result) ==");
-    println!("{:>4} {:>10} {:>9} {:>8} {:>8} {:>12} {:>9} {:>9}", "L", "reorient", "mag_rat", "ffn_gn", "entropy", "margin", "pop_top1", "distinct");
+    println!(
+        "{:>4} {:>10} {:>9} {:>8} {:>8} {:>12} {:>9} {:>9}",
+        "L", "reorient", "mag_rat", "ffn_gn", "entropy", "margin", "pop_top1", "distinct"
+    );
     for &l in &layers {
         let s = &stats[&l];
-        let reo = reorientation.get(&l).map(|v| format!("{v:.3}")).unwrap_or_else(|| "  n/a".into());
-        let mag = magnitude_ratio.get(&l).map(|v| format!("{v:.3}")).unwrap_or_else(|| "  n/a".into());
+        let reo = reorientation
+            .get(&l)
+            .map(|v| format!("{v:.3}"))
+            .unwrap_or_else(|| "  n/a".into());
+        let mag = magnitude_ratio
+            .get(&l)
+            .map(|v| format!("{v:.3}"))
+            .unwrap_or_else(|| "  n/a".into());
         println!(
             "{l:>4} {reo:>10} {mag:>9} {:>8.3} {:>8.3} {:>12.5} {:>9.3} {:>9}  sliding={}",
-            s.ffn_gain, s.entropy_bits, s.margin, s.pop_top1_share, s.pop_distinct_experts, s.sliding_window
+            s.ffn_gain,
+            s.entropy_bits,
+            s.margin,
+            s.pop_top1_share,
+            s.pop_distinct_experts,
+            s.sliding_window
         );
     }
 
@@ -244,12 +286,22 @@ fn main() {
     };
     let by_entropy_desc: Vec<usize> = {
         let mut v: Vec<usize> = layers.clone();
-        v.sort_by(|a, b| stats[b].entropy_bits.partial_cmp(&stats[a].entropy_bits).unwrap());
+        v.sort_by(|a, b| {
+            stats[b]
+                .entropy_bits
+                .partial_cmp(&stats[a].entropy_bits)
+                .unwrap()
+        });
         v
     };
     let by_mag_ratio_extremity: Vec<usize> = {
         let mut v: Vec<usize> = magnitude_ratio.keys().copied().collect();
-        v.sort_by(|a, b| (magnitude_ratio[b] - 1.0).abs().partial_cmp(&(magnitude_ratio[a] - 1.0).abs()).unwrap());
+        v.sort_by(|a, b| {
+            (magnitude_ratio[b] - 1.0)
+                .abs()
+                .partial_cmp(&(magnitude_ratio[a] - 1.0).abs())
+                .unwrap()
+        });
         v
     };
     let by_distinct_experts_asc: Vec<usize> = {
@@ -259,11 +311,26 @@ fn main() {
     };
 
     println!("\n== does the routing-excess dip set {{{:?}}} appear among the top-5 candidate transition layers, by each INDEPENDENT diagnostic? ==", dip_layers);
-    println!("  lowest write-delta reorientation (most 'rewritten'): {:?}", &by_reorientation[..5.min(by_reorientation.len())]);
-    println!("  most extreme write-delta magnitude jump:             {:?}", &by_mag_ratio_extremity[..5.min(by_mag_ratio_extremity.len())]);
-    println!("  lowest router top-8 margin (least confident cutoff): {:?}", &by_margin[..5.min(by_margin.len())]);
-    println!("  highest router entropy (most diffuse routing):       {:?}", &by_entropy_desc[..5.min(by_entropy_desc.len())]);
-    println!("  fewest distinct experts selected (most reused set):  {:?}", &by_distinct_experts_asc[..5.min(by_distinct_experts_asc.len())]);
+    println!(
+        "  lowest write-delta reorientation (most 'rewritten'): {:?}",
+        &by_reorientation[..5.min(by_reorientation.len())]
+    );
+    println!(
+        "  most extreme write-delta magnitude jump:             {:?}",
+        &by_mag_ratio_extremity[..5.min(by_mag_ratio_extremity.len())]
+    );
+    println!(
+        "  lowest router top-8 margin (least confident cutoff): {:?}",
+        &by_margin[..5.min(by_margin.len())]
+    );
+    println!(
+        "  highest router entropy (most diffuse routing):       {:?}",
+        &by_entropy_desc[..5.min(by_entropy_desc.len())]
+    );
+    println!(
+        "  fewest distinct experts selected (most reused set):  {:?}",
+        &by_distinct_experts_asc[..5.min(by_distinct_experts_asc.len())]
+    );
     for &d in &dip_layers {
         println!(
             "  L{d}: in reorientation top-5={}, mag-jump top-5={}, low-margin top-5={}, high-entropy top-5={}, low-distinct top-5={}, sliding_window={}",

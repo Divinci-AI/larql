@@ -132,6 +132,11 @@ mod tests {
             num_kv_heads,
             rope_base: larql_compute::pipeline::ROPE_BASE_DEFAULT,
             rotary_dim: 0,
+            rope_freq: larql_compute::attention::rope::RopeFreqPlan::unscaled(
+                head_dim,
+                0_usize,
+                larql_compute::pipeline::ROPE_BASE_DEFAULT as f64,
+            ),
             sliding_window: 0,
             has_v_norm: false,
             layer_scalar: 0.0,

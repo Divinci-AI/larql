@@ -507,9 +507,14 @@ mod tests {
     fn supports_direct_matvec_decode_inspects_fixture() {
         let weights = make_test_q4k_weights();
         let idx = make_q4k_fixture_index(&weights);
-        // Just exercise the property check; the exact value depends on
-        // fixture layout, but the call must complete without panic.
-        let _: bool = supports_direct_matvec_decode(&weights, &idx);
+        // The fixture is Q4_K throughout with a 256-multiple intermediate,
+        // so it qualifies. This used to bind the result to `let _: bool`
+        // and assert nothing "because the exact value depends on fixture
+        // layout" — but the layout is fixed by `make_q4k_fixture_index`,
+        // so the value is knowable and a routing regression should be
+        // visible here. The refusal side is covered by
+        // `cached::tests::layer_supports_direct_matvec_refuses_padded_intermediate`.
+        assert!(supports_direct_matvec_decode(&weights, &idx));
     }
 
     #[test]

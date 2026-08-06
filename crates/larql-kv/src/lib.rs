@@ -21,6 +21,7 @@ pub mod accuracy_suite;
 pub mod cache;
 pub mod engines;
 pub mod generation;
+pub mod model_walk;
 pub mod profiler;
 pub mod vindex_compare;
 
@@ -32,6 +33,7 @@ pub use engines::boundary_per_layer;
 pub use engines::markov_residual;
 pub use engines::markov_residual_codec;
 pub use engines::no_cache;
+pub use engines::semantic_promotion;
 pub use engines::standard;
 pub use engines::turbo_quant;
 pub use engines::unlimited_context;
@@ -112,6 +114,19 @@ pub enum EngineKind {
     BoundaryPerLayer {
         window_size: Option<usize>,
         num_layers: usize,
+    },
+    /// `SemanticPromotionEngine`: a semantic-authority policy wrapper
+    /// over another engine. `base` is the wrapped engine's own spec, so
+    /// `semantic-promotion:base=standard:window=512` composes. See
+    /// `crates/larql-kv/docs/specs/semantic-promotion-engine.md`.
+    ///
+    /// Only `PromotionMode::Observe` is constructible today, and it is
+    /// bit-identical to `base` — no engine yet implements the masking
+    /// and snapshot hooks the enforcing modes require, and construction
+    /// refuses those modes rather than downgrading.
+    SemanticPromotion {
+        base: Box<EngineKind>,
+        mode: semantic_promotion::PromotionMode,
     },
 }
 
@@ -216,6 +231,25 @@ impl EngineKind {
                     num_layers: get_usize("layers", 34),
                 })
             }
+            "semantic-promotion" | "semantic_promotion" | "promotion" => {
+                // `base=<spec>` may itself carry `:key=value` params —
+                // the split above takes only the FIRST colon, so
+                // `semantic-promotion:base=standard:window=512` parses.
+                // A base spec containing commas cannot be nested this
+                // way; name such a base without params.
+                let base = params
+                    .get("base")
+                    .map(|s| EngineKind::from_name(s))
+                    .unwrap_or(Some(EngineKind::Standard { window_size: None }))?;
+                let mode = params
+                    .get("mode")
+                    .map(|s| semantic_promotion::PromotionMode::from_name(s))
+                    .unwrap_or(Some(semantic_promotion::PromotionMode::default()))?;
+                Some(EngineKind::SemanticPromotion {
+                    base: Box::new(base),
+                    mode,
+                })
+            }
             _ => None,
         }
     }
@@ -284,6 +318,7 @@ impl EngineKind {
             EngineKind::BoundaryKv { .. } => "boundary-kv",
             EngineKind::MarkovResidualCodec { .. } => "markov-rs-codec",
             EngineKind::BoundaryPerLayer { .. } => "boundary-per-layer",
+            EngineKind::SemanticPromotion { .. } => "semantic-promotion",
         }
     }
 
@@ -312,6 +347,7 @@ impl EngineKind {
             "apollo",
             "boundary-kv",
             "boundary-per-layer",
+            "semantic-promotion",
         ]
     }
 
@@ -426,6 +462,25 @@ impl EngineKind {
                         backend,
                     )
                     .expect("boundary-per-layer construction failed"),
+                ))
+            }
+            EngineKind::SemanticPromotion { base, mode } => {
+                let inner = match base.build_with_profiling(backend, profiling) {
+                    AnyEngine::Kv(engine) => engine,
+                    AnyEngine::Retrieval(engine) => panic!(
+                        "semantic-promotion cannot wrap the retrieval engine {:?}: \
+                         the promotion protocol appends records through a KV decode path",
+                        engine.name()
+                    ),
+                };
+                let config = semantic_promotion::SemanticPromotionConfig::default().with_mode(mode);
+                AnyEngine::Kv(Box::new(
+                    semantic_promotion::SemanticPromotionEngine::new(inner, config)
+                        // Construction refuses any mode the base cannot
+                        // back. Surfacing that as a panic here matches
+                        // the other build arms; the CLI's own validation
+                        // should reject the spec before reaching this.
+                        .expect("semantic-promotion construction failed"),
                 ))
             }
         }
@@ -900,6 +955,7 @@ mod compliance_tests {
             "apollo",
             "boundary-kv",
             "boundary-per-layer",
+            "semantic-promotion",
         ]
         .iter()
         .map(|s| {
@@ -934,6 +990,8 @@ mod compliance_tests {
             ("turbo-quant", "turbo-quant"),
             ("tq3", "turbo-quant"),
             ("apollo", "apollo"),
+            ("semantic-promotion", "semantic-promotion"),
+            ("semantic-promotion:base=markov-rs", "semantic-promotion"),
         ];
         for (spec, expected_display) in specs {
             let kind =
@@ -944,6 +1002,59 @@ mod compliance_tests {
                 "{spec} parsed to wrong display_name"
             );
         }
+    }
+
+    #[test]
+    fn semantic_promotion_defaults_to_an_unbounded_standard_base_in_observe_mode() {
+        let kind = EngineKind::from_name("semantic-promotion").unwrap();
+        let EngineKind::SemanticPromotion { base, mode } = kind else {
+            panic!("expected a SemanticPromotion variant");
+        };
+        assert!(matches!(*base, EngineKind::Standard { window_size: None }));
+        assert_eq!(mode, semantic_promotion::PromotionMode::Observe);
+    }
+
+    #[test]
+    fn semantic_promotion_nests_a_parameterised_base_spec() {
+        // The outer split takes only the first colon, so the base spec
+        // keeps its own `:key=value` tail.
+        let kind = EngineKind::from_name("semantic-promotion:base=standard:window=512").unwrap();
+        let EngineKind::SemanticPromotion { base, .. } = kind else {
+            panic!("expected a SemanticPromotion variant");
+        };
+        assert!(matches!(
+            *base,
+            EngineKind::Standard {
+                window_size: Some(512)
+            }
+        ));
+    }
+
+    #[test]
+    fn semantic_promotion_rejects_an_unknown_base_or_mode() {
+        assert!(EngineKind::from_name("semantic-promotion:base=nonsuch").is_none());
+        assert!(EngineKind::from_name("semantic-promotion:mode=delete-everything").is_none());
+    }
+
+    #[test]
+    fn semantic_promotion_builds_and_wraps_its_base() {
+        let engine = EngineKind::from_name("semantic-promotion")
+            .unwrap()
+            .build(larql_inference::cpu_engine_backend());
+        assert_eq!(engine.name(), "semantic-promotion(standard)");
+        assert!(engine.is_kv());
+    }
+
+    #[test]
+    fn semantic_promotion_refuses_to_build_an_enforcing_mode() {
+        // No base engine implements the masking or snapshot hooks yet,
+        // so the enforcing modes must not construct — the build arm
+        // surfaces that as a panic rather than downgrading to Observe.
+        let kind = EngineKind::from_name("semantic-promotion:mode=enforce").unwrap();
+        let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            kind.build(larql_inference::cpu_engine_backend())
+        }));
+        assert!(built.is_err(), "enforcing mode must not construct today");
     }
 
     /// Synthetic engine that does not override `prefill_quant` /

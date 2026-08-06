@@ -56,15 +56,30 @@ const LAYER_SWEEP: [usize; 7] = [4, 8, 12, 16, 20, 24, 28];
 /// teleportation success/failure has an unambiguous single-token target.
 const PAIRS: [(&str, &str); 5] = [
     ("The capital of France is", "The capital of Japan is"),
-    ("The largest planet in the solar system is", "The smallest planet in the solar system is"),
+    (
+        "The largest planet in the solar system is",
+        "The smallest planet in the solar system is",
+    ),
     ("The opposite of hot is", "The opposite of up is"),
-    ("The chemical symbol for water is", "The chemical symbol for gold is"),
+    (
+        "The chemical symbol for water is",
+        "The chemical symbol for gold is",
+    ),
     ("Two plus two equals", "Three plus three equals"),
 ];
 
 fn kl_divergence(p: &[f32], q: &[f32]) -> f32 {
     const EPS: f32 = 1e-30;
-    p.iter().zip(q.iter()).map(|(&pi, &qi)| if pi <= 0.0 { 0.0 } else { pi * (pi.max(EPS) / qi.max(EPS)).ln() }).sum()
+    p.iter()
+        .zip(q.iter())
+        .map(|(&pi, &qi)| {
+            if pi <= 0.0 {
+                0.0
+            } else {
+                pi * (pi.max(EPS) / qi.max(EPS)).ln()
+            }
+        })
+        .sum()
 }
 
 fn dense_from_sorted(sorted: &[(u32, f32)], vocab: usize) -> Vec<f32> {
@@ -76,7 +91,10 @@ fn dense_from_sorted(sorted: &[(u32, f32)], vocab: usize) -> Vec<f32> {
 }
 
 fn rank_of(sorted: &[(u32, f32)], token_id: u32) -> usize {
-    sorted.iter().position(|&(id, _)| id == token_id).unwrap_or(sorted.len())
+    sorted
+        .iter()
+        .position(|&(id, _)| id == token_id)
+        .unwrap_or(sorted.len())
 }
 
 fn norm(v: &[f32]) -> f32 {
@@ -88,7 +106,9 @@ fn norm(v: &[f32]) -> f32 {
 fn random_unit_vector(len: usize, seed: u64) -> Vec<f32> {
     let mut state = seed;
     let mut next_f32 = move || {
-        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         ((state as u32) as f32 / u32::MAX as f32) * 2.0 - 1.0
     };
     let raw: Vec<f32> = (0..len).map(|_| next_f32()).collect();
@@ -103,9 +123,19 @@ fn final_sorted(weights: &ModelWeights, row: &[f32]) -> Vec<(u32, f32)> {
 
 /// Post-layer residual row at `layer`, last token, from a plain (unhooked)
 /// forward pass on `tokens`.
-fn capture_row(weights: &ModelWeights, ffn: &dyn FfnBackend, tokens: &[u32], layer: usize) -> Vec<f32> {
+fn capture_row(
+    weights: &ModelWeights,
+    ffn: &dyn FfnBackend,
+    tokens: &[u32],
+    layer: usize,
+) -> Vec<f32> {
     let trace = trace_forward_full(weights, tokens, &[layer], false, 0, false, ffn);
-    trace.residuals.into_iter().find(|(l, _)| *l == layer).expect("layer must be captured").1
+    trace
+        .residuals
+        .into_iter()
+        .find(|(l, _)| *l == layer)
+        .expect("layer must be captured")
+        .1
 }
 
 /// Per-pair targets that do NOT depend on the sweep layer — computed once
@@ -119,7 +149,13 @@ struct PairTargets {
     recipient_top1: u32,
 }
 
-fn compute_pair_targets(weights: &ModelWeights, ffn: &dyn FfnBackend, donor_tokens: &[u32], recipient_tokens: &[u32], last_layer: usize) -> PairTargets {
+fn compute_pair_targets(
+    weights: &ModelWeights,
+    ffn: &dyn FfnBackend,
+    donor_tokens: &[u32],
+    recipient_tokens: &[u32],
+    last_layer: usize,
+) -> PairTargets {
     let donor_final = capture_row(weights, ffn, donor_tokens, last_layer);
     let recipient_final = capture_row(weights, ffn, recipient_tokens, last_layer);
     let donor_final_sorted = final_sorted(weights, &donor_final);
@@ -137,7 +173,13 @@ struct Baselines {
     recipient_row: Vec<f32>,
 }
 
-fn compute_baselines(weights: &ModelWeights, ffn: &dyn FfnBackend, donor_tokens: &[u32], recipient_tokens: &[u32], layer: usize) -> Baselines {
+fn compute_baselines(
+    weights: &ModelWeights,
+    ffn: &dyn FfnBackend,
+    donor_tokens: &[u32],
+    recipient_tokens: &[u32],
+    layer: usize,
+) -> Baselines {
     Baselines {
         donor_row: capture_row(weights, ffn, donor_tokens, layer),
         recipient_row: capture_row(weights, ffn, recipient_tokens, layer),
@@ -146,10 +188,27 @@ fn compute_baselines(weights: &ModelWeights, ffn: &dyn FfnBackend, donor_tokens:
 
 /// Runs `patch_and_trace` with the given donor-state records, returns the
 /// recipient's post-patch final-layer sorted distribution.
-fn run_patched(weights: &ModelWeights, ffn: &dyn FfnBackend, recipient_tokens: &[u32], records: HashMap<(usize, usize), Vec<f32>>, last_layer: usize) -> Vec<(u32, f32)> {
+fn run_patched(
+    weights: &ModelWeights,
+    ffn: &dyn FfnBackend,
+    recipient_tokens: &[u32],
+    records: HashMap<(usize, usize), Vec<f32>>,
+    last_layer: usize,
+) -> Vec<(u32, f32)> {
     let donor = DonorState { records };
-    let trace = larql_inference::forward::patching::patch_and_trace_with_ffn(weights, recipient_tokens, &donor, &[last_layer], ffn);
-    let row = trace.residuals.into_iter().find(|(l, _)| *l == last_layer).expect("last layer must be captured").1;
+    let trace = larql_inference::forward::patching::patch_and_trace_with_ffn(
+        weights,
+        recipient_tokens,
+        &donor,
+        &[last_layer],
+        ffn,
+    );
+    let row = trace
+        .residuals
+        .into_iter()
+        .find(|(l, _)| *l == last_layer)
+        .expect("last layer must be captured")
+        .1;
     final_sorted(weights, &row)
 }
 
@@ -166,7 +225,16 @@ struct CellResult {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn evaluate_layer(weights: &ModelWeights, ffn: &dyn FfnBackend, donor_tokens: &[u32], recipient_tokens: &[u32], layer: usize, last_layer: usize, targets: &PairTargets, seed: u64) -> CellResult {
+fn evaluate_layer(
+    weights: &ModelWeights,
+    ffn: &dyn FfnBackend,
+    donor_tokens: &[u32],
+    recipient_tokens: &[u32],
+    layer: usize,
+    last_layer: usize,
+    targets: &PairTargets,
+    seed: u64,
+) -> CellResult {
     let b = compute_baselines(weights, ffn, donor_tokens, recipient_tokens, layer);
     let recipient_last_pos = recipient_tokens.len() - 1;
 
@@ -185,7 +253,16 @@ fn evaluate_layer(weights: &ModelWeights, ffn: &dyn FfnBackend, donor_tokens: &[
     {
         use larql_inference::forward::{trace_forward_full_hooked, RecordHook};
         let mut record = RecordHook::for_layers([layer]);
-        let _ = trace_forward_full_hooked(weights, donor_tokens, &[layer], false, 0, false, ffn, &mut record);
+        let _ = trace_forward_full_hooked(
+            weights,
+            donor_tokens,
+            &[layer],
+            false,
+            0,
+            false,
+            ffn,
+            &mut record,
+        );
         if let Some(matrix) = record.post_layer.get(&layer) {
             for pos in 0..overlap {
                 records_wide.insert((layer, pos), matrix.row(pos).to_vec());
@@ -196,9 +273,20 @@ fn evaluate_layer(weights: &ModelWeights, ffn: &dyn FfnBackend, donor_tokens: &[
 
     // Condition F: magnitude-matched random-direction control at the same
     // single position — real displacement magnitude, random direction.
-    let delta_mag = norm(&b.donor_row.iter().zip(b.recipient_row.iter()).map(|(d, r)| d - r).collect::<Vec<f32>>());
+    let delta_mag = norm(
+        &b.donor_row
+            .iter()
+            .zip(b.recipient_row.iter())
+            .map(|(d, r)| d - r)
+            .collect::<Vec<f32>>(),
+    );
     let rand_dir = random_unit_vector(b.recipient_row.len(), seed);
-    let control_row: Vec<f32> = b.recipient_row.iter().zip(rand_dir.iter()).map(|(r, d)| r + d * delta_mag).collect();
+    let control_row: Vec<f32> = b
+        .recipient_row
+        .iter()
+        .zip(rand_dir.iter())
+        .map(|(r, d)| r + d * delta_mag)
+        .collect();
     let mut records_control = HashMap::new();
     records_control.insert((layer, recipient_last_pos), control_row);
     let control = run_patched(weights, ffn, recipient_tokens, records_control, last_layer);
@@ -209,9 +297,15 @@ fn evaluate_layer(weights: &ModelWeights, ffn: &dyn FfnBackend, donor_tokens: &[
         kl_a_vs_recipient: kl_divergence(&targets.recipient_final_dense, &a_dense),
         rank_a_of_donor_top1: rank_of(&a, targets.donor_top1),
         rank_a_of_recipient_top1: rank_of(&a, targets.recipient_top1),
-        kl_wide_vs_donor: kl_divergence(&targets.donor_final_dense, &dense_from_sorted(&wide, weights.vocab_size)),
+        kl_wide_vs_donor: kl_divergence(
+            &targets.donor_final_dense,
+            &dense_from_sorted(&wide, weights.vocab_size),
+        ),
         rank_wide_of_donor_top1: rank_of(&wide, targets.donor_top1),
-        kl_control_vs_donor: kl_divergence(&targets.donor_final_dense, &dense_from_sorted(&control, weights.vocab_size)),
+        kl_control_vs_donor: kl_divergence(
+            &targets.donor_final_dense,
+            &dense_from_sorted(&control, weights.vocab_size),
+        ),
         rank_control_of_donor_top1: rank_of(&control, targets.donor_top1),
     }
 }
@@ -237,24 +331,50 @@ fn main() {
     println!("loading real vindex: {vindex_path}");
     let dir = std::path::Path::new(&vindex_path);
     let mut cb = larql_vindex::SilentLoadCallbacks;
-    let weights = larql_vindex::load_model_weights_with_opts(dir, &mut cb, larql_vindex::LoadWeightsOptions::default()).expect("load real vindex weights");
+    let weights = larql_vindex::load_model_weights_with_opts(
+        dir,
+        &mut cb,
+        larql_vindex::LoadWeightsOptions::default(),
+    )
+    .expect("load real vindex weights");
     let tokenizer = larql_vindex::load_vindex_tokenizer(dir).expect("load vindex tokenizer");
     let ffn = WeightFfn { weights: &weights };
     let last_layer = weights.num_layers - 1;
-    let sweep: Vec<usize> = LAYER_SWEEP.iter().copied().filter(|&l| l < last_layer).collect();
-    println!("{} layers x {} donor/recipient pairs\n", sweep.len(), PAIRS.len());
+    let sweep: Vec<usize> = LAYER_SWEEP
+        .iter()
+        .copied()
+        .filter(|&l| l < last_layer)
+        .collect();
+    println!(
+        "{} layers x {} donor/recipient pairs\n",
+        sweep.len(),
+        PAIRS.len()
+    );
 
     let mut per_pair_first_success: Vec<Option<usize>> = Vec::new();
 
     for (i, &(donor_text, recipient_text)) in PAIRS.iter().enumerate() {
-        let donor_tokens = larql_inference::encode_prompt(&tokenizer, &*weights.arch, donor_text).expect("tokenize donor");
-        let recipient_tokens = larql_inference::encode_prompt(&tokenizer, &*weights.arch, recipient_text).expect("tokenize recipient");
+        let donor_tokens = larql_inference::encode_prompt(&tokenizer, &*weights.arch, donor_text)
+            .expect("tokenize donor");
+        let recipient_tokens =
+            larql_inference::encode_prompt(&tokenizer, &*weights.arch, recipient_text)
+                .expect("tokenize recipient");
         println!("--- pair {i}: donor={donor_text:?} recipient={recipient_text:?} ---");
-        let targets = compute_pair_targets(&weights, &ffn, &donor_tokens, &recipient_tokens, last_layer);
+        let targets =
+            compute_pair_targets(&weights, &ffn, &donor_tokens, &recipient_tokens, last_layer);
 
         let mut first_success = None;
         for (j, &layer) in sweep.iter().enumerate() {
-            let cell = evaluate_layer(&weights, &ffn, &donor_tokens, &recipient_tokens, layer, last_layer, &targets, 20_000 + i as u64 * 1000 + j as u64 * 10);
+            let cell = evaluate_layer(
+                &weights,
+                &ffn,
+                &donor_tokens,
+                &recipient_tokens,
+                layer,
+                last_layer,
+                &targets,
+                20_000 + i as u64 * 1000 + j as u64 * 10,
+            );
             print_cell(&cell);
             if first_success.is_none() && cell.rank_a_of_donor_top1 == 0 {
                 first_success = Some(layer);
@@ -262,7 +382,9 @@ fn main() {
         }
         println!(
             "  first layer where condition A recovers donor's true top-1 as rank 0: {}\n",
-            first_success.map(|l| l.to_string()).unwrap_or_else(|| "none in sweep".to_string())
+            first_success
+                .map(|l| l.to_string())
+                .unwrap_or_else(|| "none in sweep".to_string())
         );
         per_pair_first_success.push(first_success);
     }
@@ -271,10 +393,15 @@ fn main() {
     for (i, &(donor_text, recipient_text)) in PAIRS.iter().enumerate() {
         println!(
             "  pair {i} ({donor_text:?} -> {recipient_text:?}): {}",
-            per_pair_first_success[i].map(|l| format!("YES, first at L{l}")).unwrap_or_else(|| "NO, never in this sweep".to_string())
+            per_pair_first_success[i]
+                .map(|l| format!("YES, first at L{l}"))
+                .unwrap_or_else(|| "NO, never in this sweep".to_string())
         );
     }
-    let n_success = per_pair_first_success.iter().filter(|s| s.is_some()).count();
+    let n_success = per_pair_first_success
+        .iter()
+        .filter(|s| s.is_some())
+        .count();
     println!(
         "\n{n_success}/{} pairs: residual-only teleportation at a single position recovers the donor's exact answer at some layer.\n\
          If this is LOW, that's real evidence the waypoint needs more than the residual alone (motivating the K/V follow-up).\n\

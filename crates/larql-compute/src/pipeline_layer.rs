@@ -104,20 +104,11 @@ pub fn build_arch_params<'a>(
             .map(|v| v.as_slice()),
         norm_offset: arch.norm_weight_offset(),
         has_post_norms: arch.has_post_norms(),
-        activation: match arch.activation() {
-            larql_models::Activation::GeluTanh => crate::Activation::GeluTanh,
-            _ => crate::Activation::Silu,
-        },
+        activation: arch.activation().into(),
         qk_norm_offset: arch.qk_norm_weight_offset(),
         eps: arch.norm_eps(),
-        norm_type: match arch.norm_type() {
-            larql_models::NormType::LayerNorm => crate::NormType::LayerNorm,
-            _ => crate::NormType::RmsNorm,
-        },
-        ffn_type: match arch.ffn_type() {
-            larql_models::FfnType::Standard => crate::FfnType::Standard,
-            _ => crate::FfnType::Gated,
-        },
+        norm_type: arch.norm_type().into(),
+        ffn_type: arch.ffn_type().into(),
         // Granite-family `attention_multiplier` (1/64 on 3B, 1/128 on
         // 8B/30B) *replaces* `1/sqrt(head_dim)` — it is the trained-time
         // attention score scale, not a factor multiplied on top of
@@ -140,6 +131,15 @@ pub fn build_arch_params<'a>(
         num_kv_heads: layer_nkv,
         rope_base: effective_rope_base_for_layer(arch, layer) as f32,
         rotary_dim,
+        // Same resolver the CPU rope path uses, so the GPU cannot be handed a
+        // different notion of this layer's frequencies.
+        rope_freq: crate::attention::rope::rope_freq_plan(
+            layer_hd,
+            rotary_frac,
+            effective_rope_base_for_layer(arch, layer),
+            crate::forward_overrides::effective_rope_position_divisor_for_layer(arch, layer),
+            crate::forward_overrides::effective_rope_freq_scaling(arch),
+        ),
         sliding_window: sw,
         has_v_norm: arch.has_v_norm(),
         layer_scalar,
@@ -281,15 +281,12 @@ pub fn build_moe_weights<'a>(
     let router_norm_parameter_free = arch.moe_router_norm_parameter_free();
     let router_input_scalar = arch.moe_router_input_scalar().unwrap_or(1.0);
 
-    let activation = match arch.activation() {
-        larql_models::Activation::GeluTanh => crate::Activation::GeluTanh,
-        _ => crate::Activation::Silu,
-    };
+    let activation = crate::Activation::from(arch.activation());
 
     Some(MoeLayerWeights {
         experts_gate_up,
         experts_down,
-        routing_policy: moe_routing_policy(arch.moe_router_type()),
+        routing_policy: moe_routing_policy(arch.moe_router_kind()),
         weight_layout: MoeWeightLayout::default(),
         expert_data_format,
         router_proj,
@@ -562,7 +559,7 @@ fn build_moe_stub<'a>(
     MoeLayerWeights {
         experts_gate_up: vec![],
         experts_down: vec![],
-        routing_policy: moe_routing_policy(arch.moe_router_type()),
+        routing_policy: moe_routing_policy(arch.moe_router_kind()),
         weight_layout: MoeWeightLayout::default(),
         expert_data_format,
         router_proj: &[],
@@ -577,17 +574,25 @@ fn build_moe_stub<'a>(
         num_experts: arch.num_experts(),
         top_k: arch.num_experts_per_token(),
         intermediate_size: arch.moe_intermediate_size(),
-        activation: match arch.activation() {
-            larql_models::Activation::GeluTanh => crate::Activation::GeluTanh,
-            _ => crate::Activation::Silu,
-        },
+        activation: arch.activation().into(),
     }
 }
 
-fn moe_routing_policy(router_type: &str) -> MoeRoutingPolicy {
-    match router_type {
-        "gemma4_top_k_softmax" => MoeRoutingPolicy::gemma4_hybrid(),
-        _ => MoeRoutingPolicy::top_k_softmax(),
+/// Map an architecture's routing rule onto the compute-side policy.
+///
+/// **Exhaustive on purpose.** This was a `match` over raw strings with a
+/// `_ =>` default, so `gpt_oss`'s router — which selects top-k *then*
+/// softmaxes over just those — silently took the ordinary policy. A new
+/// variant now fails to compile here instead of quietly computing the wrong
+/// expert weights. See `docs/k3-funnel.md` §4.7.8 for the same shape three
+/// times over.
+fn moe_routing_policy(kind: larql_models::MoeRouterKind) -> MoeRoutingPolicy {
+    match kind {
+        larql_models::MoeRouterKind::Gemma4Hybrid => MoeRoutingPolicy::gemma4_hybrid(),
+        larql_models::MoeRouterKind::TopKSoftmax => MoeRoutingPolicy::top_k_softmax(),
+        // Selected-then-normalised: the weights sum to 1 over the chosen
+        // experts. Distinct from `top_k_softmax`, which does not.
+        larql_models::MoeRouterKind::TopKThenSoftmax => MoeRoutingPolicy::top_k_then_softmax(),
     }
 }
 
@@ -649,12 +654,39 @@ mod tests {
         let _ = ffn_str_to_format("unknown", QuantFormat::Q4_K);
     }
 
+    /// Each router kind must map to a *distinct* policy.
+    ///
+    /// The predecessor of this test called `moe_routing_policy` twice and
+    /// asserted nothing, so it passed while the string `match` silently sent
+    /// GPT-OSS's router to the default arm.
     #[test]
-    fn moe_routing_policy_maps_gemma4_tag() {
-        // Gemma 4 hybrid tag → Gemma 4 routing.
-        let _ = moe_routing_policy("gemma4_top_k_softmax");
-        // Unknown tag → top-K softmax default.
-        let _ = moe_routing_policy("unknown");
+    fn every_router_kind_maps_to_its_own_policy() {
+        use larql_models::MoeRouterKind::*;
+        let gemma4 = moe_routing_policy(Gemma4Hybrid);
+        let plain = moe_routing_policy(TopKSoftmax);
+        let selected = moe_routing_policy(TopKThenSoftmax);
+        assert_ne!(gemma4, plain);
+        assert_ne!(
+            plain, selected,
+            "top-k-then-softmax must not equal the default"
+        );
+        assert_ne!(gemma4, selected);
+    }
+
+    /// The distinction that was being lost: selected weights summing to 1
+    /// versus keeping the raw softmax mass. Confusing them rescales the whole
+    /// expert branch.
+    #[test]
+    fn top_k_then_softmax_renormalises_where_the_default_does_not() {
+        use larql_models::MoeRouterKind::*;
+        assert_eq!(
+            moe_routing_policy(TopKThenSoftmax).selected_weight,
+            crate::MoeTopKWeightPolicy::RenormalizedSoftmax
+        );
+        assert_eq!(
+            moe_routing_policy(TopKSoftmax).selected_weight,
+            crate::MoeTopKWeightPolicy::RawSoftmax
+        );
     }
 
     /// `resolve_attn_weights` falls through to the Q8 branch when the

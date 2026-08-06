@@ -10,7 +10,9 @@
 //! the SAME top-8 set, to see if the discrepancy is a genuine bug or a
 //! floating-point summation-order tie-flip at the rank-8/9 boundary.
 
-use larql_compute::cpu::ops::moe::{moe_expert_input, moe_route_from_router_input, moe_router_input};
+use larql_compute::cpu::ops::moe::{
+    moe_expert_input, moe_route_from_router_input, moe_router_input,
+};
 use larql_compute::forward::dump_config::{cpu_layer_h_post_attn_path, cpu_layer_path};
 use larql_compute::pipeline_layer::build_moe_weights;
 use larql_compute::MoeLayerWeights;
@@ -19,12 +21,19 @@ const NUM_PROMPTS: usize = 8;
 const LAYER: usize = 20;
 
 fn arg(name: &str) -> Option<String> {
-    std::env::args().collect::<Vec<_>>().iter().position(|a| a == name).and_then(|i| std::env::args().nth(i + 1))
+    std::env::args()
+        .collect::<Vec<_>>()
+        .iter()
+        .position(|a| a == name)
+        .and_then(|i| std::env::args().nth(i + 1))
 }
 
 fn last_row(path: &str, width: usize) -> Vec<f32> {
     let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("{path}: {e}"));
-    let values: Vec<f32> = bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+    let values: Vec<f32> = bytes
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect();
     let rows = values.len() / width;
     values[(rows - 1) * width..].to_vec()
 }
@@ -61,7 +70,8 @@ fn main() {
     let vindex = arg("--vindex").expect("--vindex");
     let dump_prefix = arg("--dump-prefix").expect("--dump-prefix");
     let mut cb = larql_vindex::SilentLoadCallbacks;
-    let weights = larql_vindex::load_model_weights_kquant(std::path::Path::new(&vindex), &mut cb).expect("load");
+    let weights = larql_vindex::load_model_weights_kquant(std::path::Path::new(&vindex), &mut cb)
+        .expect("load");
     let arch = &*weights.arch;
     let hidden = weights.hidden_size;
     let norm_offset = arch.norm_weight_offset();
@@ -85,13 +95,20 @@ fn main() {
             let probs = router_full_probs(&router_in, &moe);
             let hand_ids = top_k_ids(&probs, moe.top_k);
 
-            let match_str = if lib_ids == hand_ids { "MATCH" } else { "DIFFER" };
+            let match_str = if lib_ids == hand_ids {
+                "MATCH"
+            } else {
+                "DIFFER"
+            };
             println!("prompt {i} [{label}]: lib={lib_ids:?} hand={hand_ids:?}  {match_str}");
             if lib_ids != hand_ids {
                 // print raw probs near the boundary for both computations to see if it's a near-tie
                 let mut sorted: Vec<(usize, f32)> = probs.iter().copied().enumerate().collect();
                 sorted.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-                println!("  hand-computed ranks 6..10 (0-indexed): {:?}", &sorted[6..10.min(sorted.len())]);
+                println!(
+                    "  hand-computed ranks 6..10 (0-indexed): {:?}",
+                    &sorted[6..10.min(sorted.len())]
+                );
             }
         }
     }

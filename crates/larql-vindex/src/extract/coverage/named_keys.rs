@@ -188,7 +188,9 @@ mod tests {
     /// constant. Do not bump it alone.
     #[test]
     fn every_key_accessor_is_enumerated() {
-        let src = include_str!("../../../../larql-models/src/config.rs");
+        // The trait's own file, not the `config` module root — a trait is one
+        // item, so every `*_key` accessor is declared here or nowhere.
+        let src = include_str!("../../../../larql-models/src/config/architecture.rs");
         let declared = src
             .lines()
             .filter(|l| {

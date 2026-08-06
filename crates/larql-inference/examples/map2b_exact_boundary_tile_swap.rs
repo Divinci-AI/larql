@@ -82,7 +82,10 @@ fn rescale_rows_to_match(source: &Array2<f32>, target: &Array2<f32>) -> Array2<f
     let target_norms = row_norms(target);
     let source_norms = row_norms(source);
     let mut out = source.clone();
-    for (mut row, (&sn, &tn)) in out.axis_iter_mut(Axis(0)).zip(source_norms.iter().zip(target_norms.iter())) {
+    for (mut row, (&sn, &tn)) in out
+        .axis_iter_mut(Axis(0))
+        .zip(source_norms.iter().zip(target_norms.iter()))
+    {
         if sn > 1e-12 {
             row.mapv_inplace(|v| v * (tn / sn));
         }
@@ -93,7 +96,9 @@ fn rescale_rows_to_match(source: &Array2<f32>, target: &Array2<f32>) -> Array2<f
 fn random_matrix_matching_row_norms(target: &Array2<f32>, seed: u64) -> Array2<f32> {
     let mut state = seed;
     let mut next_f32 = move || {
-        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         ((state as u32) as f32 / u32::MAX as f32) * 2.0 - 1.0
     };
     let raw = Array2::from_shape_fn(target.dim(), |_| next_f32());
@@ -165,12 +170,21 @@ fn kl_divergence(p: &[f32], q: &[f32]) -> f32 {
     const EPS: f32 = 1e-30;
     p.iter()
         .zip(q.iter())
-        .map(|(&pi, &qi)| if pi <= 0.0 { 0.0 } else { pi * (pi.max(EPS) / qi.max(EPS)).ln() })
+        .map(|(&pi, &qi)| {
+            if pi <= 0.0 {
+                0.0
+            } else {
+                pi * (pi.max(EPS) / qi.max(EPS)).ln()
+            }
+        })
         .sum()
 }
 
 fn rank_of(sorted: &[(u32, f32)], token_id: u32) -> usize {
-    sorted.iter().position(|&(id, _)| id == token_id).unwrap_or(sorted.len())
+    sorted
+        .iter()
+        .position(|&(id, _)| id == token_id)
+        .unwrap_or(sorted.len())
 }
 
 fn centered_cosine(a: &[f32], b: &[f32]) -> f32 {
@@ -183,7 +197,11 @@ fn centered_cosine(a: &[f32], b: &[f32]) -> f32 {
         na += cx * cx;
         nb += cy * cy;
     }
-    if na == 0.0 || nb == 0.0 { 0.0 } else { dot / (na.sqrt() * nb.sqrt()) }
+    if na == 0.0 || nb == 0.0 {
+        0.0
+    } else {
+        dot / (na.sqrt() * nb.sqrt())
+    }
 }
 
 /// Runs a forward pass with the given FFN backend, returning:
@@ -196,18 +214,34 @@ struct PassResult {
     final_logits: Vec<f32>,
 }
 
-fn run_pass(weights: &ModelWeights, ffn: &dyn FfnBackend, prompt: &[u32], near_layer: usize, last_layer: usize) -> PassResult {
-    let layers = if near_layer == last_layer { vec![last_layer] } else { vec![near_layer, last_layer] };
+fn run_pass(
+    weights: &ModelWeights,
+    ffn: &dyn FfnBackend,
+    prompt: &[u32],
+    near_layer: usize,
+    last_layer: usize,
+) -> PassResult {
+    let layers = if near_layer == last_layer {
+        vec![last_layer]
+    } else {
+        vec![near_layer, last_layer]
+    };
     let mut record = RecordHook::for_layers(layers.iter().copied());
     let _ = trace_forward_full_hooked(weights, prompt, &layers, false, 0, false, ffn, &mut record);
-    let near = record.post_layer.get(&near_layer).unwrap_or_else(|| record.post_layer.get(&last_layer).unwrap());
+    let near = record
+        .post_layer
+        .get(&near_layer)
+        .unwrap_or_else(|| record.post_layer.get(&last_layer).unwrap());
     let last = record.post_layer.get(&last_layer).unwrap();
     let near_row = near.row(near.nrows() - 1).to_vec();
     let last_row = last.row(last.nrows() - 1).to_vec();
     PassResult {
         final_sorted: logit_lens_topk(weights, &last_row, weights.vocab_size),
         near_sorted: logit_lens_topk(weights, &near_row, weights.vocab_size),
-        final_logits: hidden_to_raw_logits(weights, &last.row(last.nrows() - 1).to_owned().insert_axis(Axis(0))),
+        final_logits: hidden_to_raw_logits(
+            weights,
+            &last.row(last.nrows() - 1).to_owned().insert_axis(Axis(0)),
+        ),
     }
 }
 
@@ -246,25 +280,82 @@ fn evaluate_cell(
     let native_top1 = p_native_final[0].0;
     let dense_native = dense_from_sorted(p_native_final, vocab);
 
-    let raw = run_pass(weights, &TileSwapFfn { weights, target_layer: from_layer, foreign_layer: tile_layer, rescale_to_native_norm: false }, prompt, near_layer, last_layer);
-    let rescaled = run_pass(weights, &TileSwapFfn { weights, target_layer: from_layer, foreign_layer: tile_layer, rescale_to_native_norm: true }, prompt, near_layer, last_layer);
+    let raw = run_pass(
+        weights,
+        &TileSwapFfn {
+            weights,
+            target_layer: from_layer,
+            foreign_layer: tile_layer,
+            rescale_to_native_norm: false,
+        },
+        prompt,
+        near_layer,
+        last_layer,
+    );
+    let rescaled = run_pass(
+        weights,
+        &TileSwapFfn {
+            weights,
+            target_layer: from_layer,
+            foreign_layer: tile_layer,
+            rescale_to_native_norm: true,
+        },
+        prompt,
+        near_layer,
+        last_layer,
+    );
 
     let random_passes: Vec<PassResult> = seeds
         .iter()
-        .map(|&s| run_pass(weights, &RandomDeltaFfn { weights, target_layer: from_layer, seed: s }, prompt, near_layer, last_layer))
+        .map(|&s| {
+            run_pass(
+                weights,
+                &RandomDeltaFfn {
+                    weights,
+                    target_layer: from_layer,
+                    seed: s,
+                },
+                prompt,
+                near_layer,
+                last_layer,
+            )
+        })
         .collect();
-    let mean_kl_random: f32 = random_passes.iter().map(|p| kl_divergence(&dense_native, &dense_from_sorted(&p.final_sorted, vocab))).sum::<f32>() / random_passes.len() as f32;
-    let mean_rank_random: f64 = random_passes.iter().map(|p| rank_of(&p.final_sorted, native_top1) as f64).sum::<f64>() / random_passes.len() as f64;
-    let mean_cos_random: f32 = random_passes.iter().map(|p| centered_cosine(native_final_logits, &p.final_logits)).sum::<f32>() / random_passes.len() as f32;
-    let mean_near_rank_random: f64 = random_passes.iter().map(|p| rank_of(&p.near_sorted, native_top1) as f64).sum::<f64>() / random_passes.len() as f64;
-    let mean_final_rank_random: f64 = random_passes.iter().map(|p| rank_of(&p.final_sorted, native_top1) as f64).sum::<f64>() / random_passes.len() as f64;
+    let mean_kl_random: f32 = random_passes
+        .iter()
+        .map(|p| kl_divergence(&dense_native, &dense_from_sorted(&p.final_sorted, vocab)))
+        .sum::<f32>()
+        / random_passes.len() as f32;
+    let mean_rank_random: f64 = random_passes
+        .iter()
+        .map(|p| rank_of(&p.final_sorted, native_top1) as f64)
+        .sum::<f64>()
+        / random_passes.len() as f64;
+    let mean_cos_random: f32 = random_passes
+        .iter()
+        .map(|p| centered_cosine(native_final_logits, &p.final_logits))
+        .sum::<f32>()
+        / random_passes.len() as f32;
+    let mean_near_rank_random: f64 = random_passes
+        .iter()
+        .map(|p| rank_of(&p.near_sorted, native_top1) as f64)
+        .sum::<f64>()
+        / random_passes.len() as f64;
+    let mean_final_rank_random: f64 = random_passes
+        .iter()
+        .map(|p| rank_of(&p.final_sorted, native_top1) as f64)
+        .sum::<f64>()
+        / random_passes.len() as f64;
     let _ = p_native_near; // near-layer native distribution kept for parity/debuggability, not directly scored
 
     CellMetrics {
         from_layer,
         tile_layer,
         kl_raw: kl_divergence(&dense_native, &dense_from_sorted(&raw.final_sorted, vocab)),
-        kl_rescaled: kl_divergence(&dense_native, &dense_from_sorted(&rescaled.final_sorted, vocab)),
+        kl_rescaled: kl_divergence(
+            &dense_native,
+            &dense_from_sorted(&rescaled.final_sorted, vocab),
+        ),
         kl_random: mean_kl_random,
         rank_raw: rank_of(&raw.final_sorted, native_top1),
         rank_rescaled: rank_of(&rescaled.final_sorted, native_top1),
@@ -272,7 +363,8 @@ fn evaluate_cell(
         centered_cosine_raw: centered_cosine(native_final_logits, &raw.final_logits),
         centered_cosine_rescaled: centered_cosine(native_final_logits, &rescaled.final_logits),
         centered_cosine_random: mean_cos_random,
-        recoverability_raw: rank_of(&raw.near_sorted, native_top1) as i64 - rank_of(&raw.final_sorted, native_top1) as i64,
+        recoverability_raw: rank_of(&raw.near_sorted, native_top1) as i64
+            - rank_of(&raw.final_sorted, native_top1) as i64,
         recoverability_random: (mean_near_rank_random - mean_final_rank_random).round() as i64,
     }
 }
@@ -314,8 +406,17 @@ struct PromptSummary {
     mean_rank_random: f64,
 }
 
-fn run_prompt(weights: &ModelWeights, ffn: &WeightFfn, tokenizer: &tokenizers::Tokenizer, prompt_text: &str, pairs: &[(usize, usize)], last_layer: usize, seed_base: u64) -> PromptSummary {
-    let prompt = larql_inference::encode_prompt(tokenizer, &*weights.arch, prompt_text).expect("tokenize prompt");
+fn run_prompt(
+    weights: &ModelWeights,
+    ffn: &WeightFfn,
+    tokenizer: &tokenizers::Tokenizer,
+    prompt_text: &str,
+    pairs: &[(usize, usize)],
+    last_layer: usize,
+    seed_base: u64,
+) -> PromptSummary {
+    let prompt = larql_inference::encode_prompt(tokenizer, &*weights.arch, prompt_text)
+        .expect("tokenize prompt");
     println!("\n--- prompt: {prompt_text:?} ---");
 
     // One TRUE, bit-identical native pass per touched layer (this IS the
@@ -323,9 +424,12 @@ fn run_prompt(weights: &ModelWeights, ffn: &WeightFfn, tokenizer: &tokenizers::T
     let mut touched: Vec<usize> = pairs.iter().flat_map(|&(a, b)| [a, b]).collect();
     touched.sort_unstable();
     touched.dedup();
-    let mut native_final: std::collections::HashMap<usize, Vec<(u32, f32)>> = std::collections::HashMap::new();
-    let mut native_near: std::collections::HashMap<usize, Vec<(u32, f32)>> = std::collections::HashMap::new();
-    let mut native_final_logits: std::collections::HashMap<usize, Vec<f32>> = std::collections::HashMap::new();
+    let mut native_final: std::collections::HashMap<usize, Vec<(u32, f32)>> =
+        std::collections::HashMap::new();
+    let mut native_near: std::collections::HashMap<usize, Vec<(u32, f32)>> =
+        std::collections::HashMap::new();
+    let mut native_final_logits: std::collections::HashMap<usize, Vec<f32>> =
+        std::collections::HashMap::new();
     for &l in &touched {
         let near_layer = (l + 2).min(last_layer);
         let pass = run_pass(weights, ffn, &prompt, near_layer, last_layer);
@@ -340,8 +444,15 @@ fn run_prompt(weights: &ModelWeights, ffn: &WeightFfn, tokenizer: &tokenizers::T
         for &(from, to) in &[(a, b), (b, a)] {
             let near_layer = (from + 2).min(last_layer);
             let cell = evaluate_cell(
-                weights, &prompt, from, to, near_layer, last_layer,
-                &native_final[&from], &native_near[&from], &native_final_logits[&from],
+                weights,
+                &prompt,
+                from,
+                to,
+                near_layer,
+                last_layer,
+                &native_final[&from],
+                &native_near[&from],
+                &native_final_logits[&from],
                 [seed, seed + 1, seed + 2],
             );
             print_cell(&cell);
@@ -371,29 +482,61 @@ fn main() {
     println!("loading real vindex: {vindex_path}");
     let dir = std::path::Path::new(&vindex_path);
     let mut cb = larql_vindex::SilentLoadCallbacks;
-    let weights = larql_vindex::load_model_weights_with_opts(dir, &mut cb, larql_vindex::LoadWeightsOptions::default()).expect("load real vindex weights");
+    let weights = larql_vindex::load_model_weights_with_opts(
+        dir,
+        &mut cb,
+        larql_vindex::LoadWeightsOptions::default(),
+    )
+    .expect("load real vindex weights");
     let tokenizer = larql_vindex::load_vindex_tokenizer(dir).expect("load vindex tokenizer");
     let ffn = WeightFfn { weights: &weights };
     let last_layer = weights.num_layers - 1;
     let pairs = build_adjacent_pairs(weights.num_layers);
-    println!("{} adjacent pairs ({} directed cells/prompt) x {} prompts\n", pairs.len(), pairs.len() * 2, PROMPTS.len());
+    println!(
+        "{} adjacent pairs ({} directed cells/prompt) x {} prompts\n",
+        pairs.len(),
+        pairs.len() * 2,
+        PROMPTS.len()
+    );
 
     // Bit-identical sanity: m==l via TileSwapFfn must match the plain
     // unmodified forward exactly (not "close" — this is the whole point).
     {
-        let probe_prompt = larql_inference::encode_prompt(&tokenizer, &*weights.arch, PROMPTS[0]).expect("tokenize");
+        let probe_prompt = larql_inference::encode_prompt(&tokenizer, &*weights.arch, PROMPTS[0])
+            .expect("tokenize");
         let l = pairs[0].0;
         let plain = run_pass(&weights, &ffn, &probe_prompt, l, last_layer);
-        let identity_swap = TileSwapFfn { weights: &weights, target_layer: l, foreign_layer: l, rescale_to_native_norm: false };
+        let identity_swap = TileSwapFfn {
+            weights: &weights,
+            target_layer: l,
+            foreign_layer: l,
+            rescale_to_native_norm: false,
+        };
         let via_wrapper = run_pass(&weights, &identity_swap, &probe_prompt, l, last_layer);
-        let max_diff: f32 = plain.final_logits.iter().zip(via_wrapper.final_logits.iter()).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max);
+        let max_diff: f32 = plain
+            .final_logits
+            .iter()
+            .zip(via_wrapper.final_logits.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0, f32::max);
         println!("sanity: TileSwapFfn(m==l) vs unmodified forward, max logit |Δ| = {max_diff:.3e} (must be exactly 0.0 — same code path, same weights)\n");
-        assert_eq!(max_diff, 0.0, "m==l must be bit-identical to an unmodified forward — this is MAP-2b's entire point");
+        assert_eq!(
+            max_diff, 0.0,
+            "m==l must be bit-identical to an unmodified forward — this is MAP-2b's entire point"
+        );
     }
 
     let mut summaries = Vec::new();
     for (i, prompt_text) in PROMPTS.iter().enumerate() {
-        let summary = run_prompt(&weights, &ffn, &tokenizer, prompt_text, &pairs, last_layer, 10_000 + i as u64 * 100);
+        let summary = run_prompt(
+            &weights,
+            &ffn,
+            &tokenizer,
+            prompt_text,
+            &pairs,
+            last_layer,
+            10_000 + i as u64 * 100,
+        );
         summaries.push(summary);
     }
 
@@ -407,15 +550,38 @@ fn main() {
             "  {text:?}: raw={:.1} rescaled={:.1} random={:.1}",
             s.mean_rank_raw, s.mean_rank_rescaled, s.mean_rank_random
         );
-        if s.mean_rank_raw < s.mean_rank_random { raw_beats_random += 1 } else if s.mean_rank_random < s.mean_rank_raw { random_beats_raw += 1 }
-        if s.mean_rank_rescaled < s.mean_rank_random { rescaled_beats_random += 1 } else if s.mean_rank_random < s.mean_rank_rescaled { random_beats_rescaled += 1 }
+        if s.mean_rank_raw < s.mean_rank_random {
+            raw_beats_random += 1
+        } else if s.mean_rank_random < s.mean_rank_raw {
+            random_beats_raw += 1
+        }
+        if s.mean_rank_rescaled < s.mean_rank_random {
+            rescaled_beats_random += 1
+        } else if s.mean_rank_random < s.mean_rank_rescaled {
+            random_beats_rescaled += 1
+        }
     }
 
-    println!("\n=== decisive comparison: PROMPT is the replication unit (n={}) ===", summaries.len());
-    println!("raw swap beats random:      {raw_beats_random}/{}", summaries.len());
-    println!("random beats raw swap:      {random_beats_raw}/{}", summaries.len());
-    println!("rescaled swap beats random: {rescaled_beats_random}/{}", summaries.len());
-    println!("random beats rescaled swap: {random_beats_rescaled}/{}", summaries.len());
+    println!(
+        "\n=== decisive comparison: PROMPT is the replication unit (n={}) ===",
+        summaries.len()
+    );
+    println!(
+        "raw swap beats random:      {raw_beats_random}/{}",
+        summaries.len()
+    );
+    println!(
+        "random beats raw swap:      {random_beats_raw}/{}",
+        summaries.len()
+    );
+    println!(
+        "rescaled swap beats random: {rescaled_beats_random}/{}",
+        summaries.len()
+    );
+    println!(
+        "random beats rescaled swap: {random_beats_rescaled}/{}",
+        summaries.len()
+    );
     println!(
         "\nThis is a genuine n={}-independent-trial comparison (one prompt = one trial), not {} dependent\n\
          per-cell counts. A lopsided split here (e.g. 7/8 or 8/8 either direction) is real evidence;\n\

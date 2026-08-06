@@ -16,7 +16,9 @@ pub mod weights;
 
 pub use config::{
     Activation, ExpertFormat, ExpertGatePolicy, ExpertRoutingPolicy, FfnType, Llama3RopeScaling,
-    ModelArchitecture, ModelConfig, NormType, RopeScaling,
+    ModelArchitecture, ModelConfig, MoeRouterKind, NormType, QkNormScope, RopeScaling,
+    YarnRopeScaling, LAYER_TYPE_FULL_ATTENTION, LAYER_TYPE_SLIDING_ATTENTION, ROPE_TYPE_DEFAULT,
+    ROPE_TYPE_LINEAR, ROPE_TYPE_LLAMA3, ROPE_TYPE_YARN,
 };
 pub use detect::{
     detect_architecture, detect_architecture_validated, detect_from_json,

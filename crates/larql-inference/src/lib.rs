@@ -62,6 +62,7 @@ pub mod forward;
 pub mod forward_overrides;
 pub mod kv_dispatch;
 pub mod kv_engine;
+pub mod kv_row_positions;
 pub mod layer_executor;
 pub mod layer_graph;
 pub mod model;

@@ -431,6 +431,7 @@ pub fn write_synthetic_model_dir(dir: &std::path::Path) -> Result<(), String> {
         residual_multiplier: None,
         logits_scaling: None,
         norm_eps: None,
+        ..Default::default()
     };
 
     let mut config = VindexConfig {
@@ -555,6 +556,7 @@ pub fn write_synthetic_q4k_model_dir_layers(
         residual_multiplier: None,
         logits_scaling: None,
         norm_eps: None,
+        ..Default::default()
     };
 
     let mut config = VindexConfig {

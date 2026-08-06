@@ -309,6 +309,7 @@ fn synth_gpt2_config(
         per_layer_embed_dim: None,
         num_kv_shared_layers: None,
         has_vision_config: false,
+        tie_word_embeddings: None,
     }
 }
 
@@ -521,6 +522,7 @@ mod tests {
             per_layer_embed_dim: None,
             num_kv_shared_layers: None,
             has_vision_config: false,
+            tie_word_embeddings: None,
         };
         let arch = crate::architectures::gpt2::Gpt2Arch::from_config(cfg);
 

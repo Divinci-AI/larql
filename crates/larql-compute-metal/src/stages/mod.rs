@@ -26,4 +26,5 @@ pub mod qkv_proj;
 pub mod quant_matvec;
 pub mod residual;
 pub mod rope;
+pub mod rope_freq;
 pub mod sinks;

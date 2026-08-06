@@ -48,8 +48,15 @@ fn arg(name: &str) -> Option<String> {
 
 fn last_row(path: &str, width: usize) -> Vec<f32> {
     let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("{path}: {e}"));
-    let values: Vec<f32> = bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
-    assert!(values.len().is_multiple_of(width) && !values.is_empty(), "{path}: {} values not a whole number of {width}-wide rows", values.len());
+    let values: Vec<f32> = bytes
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect();
+    assert!(
+        values.len().is_multiple_of(width) && !values.is_empty(),
+        "{path}: {} values not a whole number of {width}-wide rows",
+        values.len()
+    );
     let rows = values.len() / width;
     values[(rows - 1) * width..].to_vec()
 }
@@ -67,7 +74,11 @@ fn cosine_f64(a: &[f32], b: &[f32]) -> f64 {
     if na == 0.0 || nb == 0.0 {
         return 0.0;
     }
-    a.iter().zip(b).map(|(x, y)| *x as f64 * *y as f64).sum::<f64>() / (na * nb)
+    a.iter()
+        .zip(b)
+        .map(|(x, y)| *x as f64 * *y as f64)
+        .sum::<f64>()
+        / (na * nb)
 }
 
 fn kl_bits(p: &[f32], q: &[f32]) -> f64 {
@@ -82,8 +93,13 @@ fn kl_bits(p: &[f32], q: &[f32]) -> f64 {
         / std::f64::consts::LN_2
 }
 
-fn discover_moe_layers(weights: &ModelWeights, arch: &dyn larql_models::ModelArchitecture) -> Vec<usize> {
-    (0..weights.num_layers).filter(|&l| build_moe_weights(weights, arch, l).is_some()).collect()
+fn discover_moe_layers(
+    weights: &ModelWeights,
+    arch: &dyn larql_models::ModelArchitecture,
+) -> Vec<usize> {
+    (0..weights.num_layers)
+        .filter(|&l| build_moe_weights(weights, arch, l).is_some())
+        .collect()
 }
 
 /// Full per-expert router probability distribution — same math as
@@ -136,7 +152,8 @@ fn main() {
     let dump_prefix = arg("--dump-prefix").expect("set --dump-prefix <dir prefix>");
 
     let mut cb = larql_vindex::SilentLoadCallbacks;
-    let weights = larql_vindex::load_model_weights_kquant(std::path::Path::new(&vindex), &mut cb).expect("load real vindex weights");
+    let weights = larql_vindex::load_model_weights_kquant(std::path::Path::new(&vindex), &mut cb)
+        .expect("load real vindex weights");
     let arch = &*weights.arch;
     let hidden = weights.hidden_size;
     let norm_offset = arch.norm_weight_offset();
@@ -145,7 +162,10 @@ fn main() {
     let layers = discover_moe_layers(&weights, arch);
     let mut moe_at: HashMap<usize, MoeLayerWeights> = HashMap::new();
     for &l in &layers {
-        moe_at.insert(l, build_moe_weights(&weights, arch, l).expect("must be MoE"));
+        moe_at.insert(
+            l,
+            build_moe_weights(&weights, arch, l).expect("must be MoE"),
+        );
     }
 
     struct LayerStats {
@@ -169,11 +189,13 @@ fn main() {
             let h_stale = last_row(&cpu_layer_path(&dump_dir, l - 1), hidden);
 
             let expert_input_true = moe_expert_input(&h_true, moe, norm_offset, eps);
-            let router_in_true = moe_router_input(&h_true, &expert_input_true, moe, norm_offset, eps);
+            let router_in_true =
+                moe_router_input(&h_true, &expert_input_true, moe, norm_offset, eps);
             let probs_true = router_full_probs(&router_in_true, moe);
 
             let expert_input_stale = moe_expert_input(&h_stale, moe, norm_offset, eps);
-            let router_in_stale = moe_router_input(&h_stale, &expert_input_stale, moe, norm_offset, eps);
+            let router_in_stale =
+                moe_router_input(&h_stale, &expert_input_stale, moe, norm_offset, eps);
             let probs_stale = router_full_probs(&router_in_stale, moe);
 
             cosines.push(cosine_f64(&probs_true, &probs_stale));
@@ -199,23 +221,43 @@ fn main() {
         );
     }
 
-    println!("{:>4} {:>12} {:>10} {:>10}", "L", "prob_cos", "prob_KL", "raw_gain");
+    println!(
+        "{:>4} {:>12} {:>10} {:>10}",
+        "L", "prob_cos", "prob_KL", "raw_gain"
+    );
     for &l in &layers {
         let Some(s) = stats.get(&l) else { continue };
-        println!("{l:>4} {:>12.4} {:>10.4} {:>10.2}", s.prob_cosine, s.prob_kl, s.raw_gain);
+        println!(
+            "{l:>4} {:>12.4} {:>10.4} {:>10.2}",
+            s.prob_cosine, s.prob_kl, s.raw_gain
+        );
     }
 
     let mut by_low_cosine: Vec<usize> = stats.keys().copied().collect();
-    by_low_cosine.sort_by(|a, b| stats[a].prob_cosine.partial_cmp(&stats[b].prob_cosine).unwrap());
+    by_low_cosine.sort_by(|a, b| {
+        stats[a]
+            .prob_cosine
+            .partial_cmp(&stats[b].prob_cosine)
+            .unwrap()
+    });
     let mut by_high_kl: Vec<usize> = stats.keys().copied().collect();
     by_high_kl.sort_by(|a, b| stats[b].prob_kl.partial_cmp(&stats[a].prob_kl).unwrap());
     let mut by_high_gain: Vec<usize> = stats.keys().copied().collect();
     by_high_gain.sort_by(|a, b| stats[b].raw_gain.partial_cmp(&stats[a].raw_gain).unwrap());
 
     println!("\n== rankings (n={}) ==", stats.len());
-    println!("  lowest router-probability cosine(true,stale): {:?}", &by_low_cosine[..5.min(by_low_cosine.len())]);
-    println!("  highest router-probability KL(true||stale):    {:?}", &by_high_kl[..5.min(by_high_kl.len())]);
-    println!("  highest raw router-projection gain:            {:?}", &by_high_gain[..5.min(by_high_gain.len())]);
+    println!(
+        "  lowest router-probability cosine(true,stale): {:?}",
+        &by_low_cosine[..5.min(by_low_cosine.len())]
+    );
+    println!(
+        "  highest router-probability KL(true||stale):    {:?}",
+        &by_high_kl[..5.min(by_high_kl.len())]
+    );
+    println!(
+        "  highest raw router-projection gain:            {:?}",
+        &by_high_gain[..5.min(by_high_gain.len())]
+    );
 
     println!("\n== the layers this whole diagnostic exists to compare ==");
     for l in [19usize, 20, 26, 27] {

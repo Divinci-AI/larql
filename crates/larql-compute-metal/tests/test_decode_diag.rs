@@ -113,6 +113,11 @@ fn decode_token_with_decode_debug_env_first_call_executes_log_body() {
         num_kv_heads: NUM_KV_HEADS,
         rope_base: 10_000.0,
         rotary_dim: 0,
+        rope_freq: larql_compute::attention::rope::RopeFreqPlan::unscaled(
+            HEAD_DIM,
+            0_usize,
+            10_000.0_f64,
+        ),
         sliding_window: 0,
         has_v_norm: false,
         layer_scalar: 0.0,

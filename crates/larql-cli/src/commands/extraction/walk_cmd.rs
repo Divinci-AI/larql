@@ -1102,6 +1102,7 @@ fn generate_stream(
                 EngineKind::BoundaryKv { .. } => "engine=boundary-kv",
                 EngineKind::MarkovResidualCodec { .. } => "engine=markov-rs-codec",
                 EngineKind::BoundaryPerLayer { .. } => "engine=boundary-per-layer",
+                EngineKind::SemanticPromotion { .. } => "engine=semantic-promotion",
             };
             (kind, label)
         }

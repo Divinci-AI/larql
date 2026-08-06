@@ -43,9 +43,12 @@ use crate::forward::layer::apply_layer_scalar;
 use crate::forward::ple::{apply_per_layer_embedding, precompute_per_layer_inputs};
 use crate::forward::run_ffn;
 use crate::forward::{add_bias, apply_norm};
-use crate::residual::{rms_norm_heads, rms_norm_heads_no_weight};
+use crate::residual::{rms_norm_heads_no_weight, rms_norm_qk_for_arch};
 
 use super::tensors::{insert_q4k_attn_tensors, insert_q4k_layer_tensors, remove_layer_tensors};
+
+#[cfg(test)]
+mod tests;
 
 /// Per-layer K/V captured during prefill. One entry per layer; matches
 /// the [`crate::attention::decode::KvCache`] convention so future work
@@ -651,7 +654,7 @@ pub fn attention_decode_step_native(
         .attn_q_norm_key(layer)
         .and_then(|k| weights.vectors.get(&k))
     {
-        Some(norm_w) => rms_norm_heads(&q_full, norm_w, num_q, head_dim, qk_norm_off),
+        Some(norm_w) => rms_norm_qk_for_arch(&q_full, norm_w, num_q, head_dim, qk_norm_off, arch),
         None => q_full,
     };
     // RoPE must match the staged path / prefill exactly: override-aware
@@ -664,7 +667,7 @@ pub fn attention_decode_step_native(
     let rotary_frac = arch.rotary_fraction_for_layer(layer);
     let pos_divisor =
         crate::forward_overrides::effective_rope_position_divisor_for_layer(arch, layer);
-    let llama3 = crate::forward_overrides::effective_llama3_rope_scaling(arch);
+    let rope_scaling = crate::forward_overrides::effective_rope_freq_scaling(arch);
     let q_rope = apply_rope_partial_at_full(
         &q_normed,
         num_q,
@@ -673,7 +676,7 @@ pub fn attention_decode_step_native(
         rotary_frac,
         abs_position,
         pos_divisor,
-        llama3,
+        rope_scaling,
     );
 
     let k_vec = matvec_q4k_or_q6k_q8k(k_bytes, k_fmt, &h_norm_q8k, kv_dim, hidden)?;
@@ -699,7 +702,9 @@ pub fn attention_decode_step_native(
         .attn_k_norm_key(layer)
         .and_then(|k| weights.vectors.get(&k))
     {
-        Some(norm_w) => rms_norm_heads(&k_full_new, norm_w, num_kv, head_dim, qk_norm_off),
+        Some(norm_w) => {
+            rms_norm_qk_for_arch(&k_full_new, norm_w, num_kv, head_dim, qk_norm_off, arch)
+        }
         None => k_full_new,
     };
     let k_new_rope = apply_rope_partial_at_full(
@@ -710,7 +715,7 @@ pub fn attention_decode_step_native(
         rotary_frac,
         abs_position,
         pos_divisor,
-        llama3,
+        rope_scaling,
     );
 
     let (k_concat, v_concat) = match kv_entry {

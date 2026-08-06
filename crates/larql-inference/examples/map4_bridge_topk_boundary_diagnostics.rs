@@ -48,14 +48,26 @@ fn arg(name: &str) -> Option<String> {
 
 fn last_row(path: &str, width: usize) -> Vec<f32> {
     let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("{path}: {e}"));
-    let values: Vec<f32> = bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
-    assert!(values.len().is_multiple_of(width) && !values.is_empty(), "{path}: {} values not a whole number of {width}-wide rows", values.len());
+    let values: Vec<f32> = bytes
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect();
+    assert!(
+        values.len().is_multiple_of(width) && !values.is_empty(),
+        "{path}: {} values not a whole number of {width}-wide rows",
+        values.len()
+    );
     let rows = values.len() / width;
     values[(rows - 1) * width..].to_vec()
 }
 
-fn discover_moe_layers(weights: &ModelWeights, arch: &dyn larql_models::ModelArchitecture) -> Vec<usize> {
-    (0..weights.num_layers).filter(|&l| build_moe_weights(weights, arch, l).is_some()).collect()
+fn discover_moe_layers(
+    weights: &ModelWeights,
+    arch: &dyn larql_models::ModelArchitecture,
+) -> Vec<usize> {
+    (0..weights.num_layers)
+        .filter(|&l| build_moe_weights(weights, arch, l).is_some())
+        .collect()
 }
 
 fn router_full_probs(router_in: &[f32], moe: &MoeLayerWeights<'_>) -> Vec<f32> {
@@ -97,7 +109,8 @@ fn main() {
     let dump_prefix = arg("--dump-prefix").expect("set --dump-prefix <dir prefix>");
 
     let mut cb = larql_vindex::SilentLoadCallbacks;
-    let weights = larql_vindex::load_model_weights_kquant(std::path::Path::new(&vindex), &mut cb).expect("load real vindex weights");
+    let weights = larql_vindex::load_model_weights_kquant(std::path::Path::new(&vindex), &mut cb)
+        .expect("load real vindex weights");
     let arch = &*weights.arch;
     let hidden = weights.hidden_size;
     let norm_offset = arch.norm_weight_offset();
@@ -106,7 +119,10 @@ fn main() {
     let all_layers = discover_moe_layers(&weights, arch);
     let mut moe_at: HashMap<usize, MoeLayerWeights> = HashMap::new();
     for &l in &FOCUS_LAYERS {
-        moe_at.insert(l, build_moe_weights(&weights, arch, l).expect("must be MoE"));
+        moe_at.insert(
+            l,
+            build_moe_weights(&weights, arch, l).expect("must be MoE"),
+        );
     }
 
     for &l in &FOCUS_LAYERS {
@@ -142,7 +158,11 @@ fn main() {
         }
         let mut pop_order: Vec<usize> = counts.keys().copied().collect();
         pop_order.sort_unstable_by(|a, b| counts[b].cmp(&counts[a]).then(a.cmp(b)));
-        let pop_rank: HashMap<usize, usize> = pop_order.iter().enumerate().map(|(i, &id)| (id, i + 1)).collect();
+        let pop_rank: HashMap<usize, usize> = pop_order
+            .iter()
+            .enumerate()
+            .map(|(i, &id)| (id, i + 1))
+            .collect();
         let unranked = pop_order.len() + 1; // experts never in any prompt's true top-8
 
         println!("\n=== L{l} ===");
@@ -158,8 +178,16 @@ fn main() {
             let true_ids = top_k_ids(probs_true, top_k);
             let stale_ids = top_k_ids(probs_stale, top_k);
 
-            let lost: Vec<usize> = true_ids.iter().copied().filter(|id| !stale_ids.contains(id)).collect();
-            let gained: Vec<usize> = stale_ids.iter().copied().filter(|id| !true_ids.contains(id)).collect();
+            let lost: Vec<usize> = true_ids
+                .iter()
+                .copied()
+                .filter(|id| !stale_ids.contains(id))
+                .collect();
+            let gained: Vec<usize> = stale_ids
+                .iter()
+                .copied()
+                .filter(|id| !true_ids.contains(id))
+                .collect();
             let mass_lost: f32 = lost.iter().map(|&id| probs_true[id]).sum();
             let mass_gained: f32 = gained.iter().map(|&id| probs_stale[id]).sum();
 
@@ -167,7 +195,11 @@ fn main() {
             mass_lost_all.push(mass_lost);
             mass_gained_all.push(mass_gained);
             lost_pop_ranks.extend(lost.iter().map(|id| *pop_rank.get(id).unwrap_or(&unranked)));
-            gained_pop_ranks.extend(gained.iter().map(|id| *pop_rank.get(id).unwrap_or(&unranked)));
+            gained_pop_ranks.extend(
+                gained
+                    .iter()
+                    .map(|id| *pop_rank.get(id).unwrap_or(&unranked)),
+            );
 
             println!(
                 "  prompt {i}: swaps={} lost={lost:?} gained={gained:?} mass_lost={mass_lost:.4} mass_gained={mass_gained:.4}",

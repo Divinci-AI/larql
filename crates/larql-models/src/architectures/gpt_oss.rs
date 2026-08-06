@@ -32,11 +32,6 @@ const SWIGLU_ALPHA: f32 = 1.702;
 /// GPT-OSS checkpoint ships the field; this only covers a hand-written config.
 const DEFAULT_SWIGLU_LIMIT: f32 = 7.0;
 
-/// Router algorithm identifier. Distinct from plain `top_k_softmax` because
-/// GPT-OSS softmaxes over the selected top-k logits rather than over all
-/// experts, and adds a router bias first.
-const ROUTER_TYPE: &str = "gpt_oss_topk_then_softmax";
-
 pub struct GptOssArch {
     config: ModelConfig,
 }
@@ -50,6 +45,15 @@ impl GptOssArch {
 impl ModelArchitecture for GptOssArch {
     fn family(&self) -> &str {
         "gpt_oss"
+    }
+
+    /// `GptOssConfig.rms_norm_eps` defaults to 1e-5, not the crate-wide 1e-6.
+    /// `openai/gpt-oss-20b` ships the field explicitly so this fallback does
+    /// not fire for it — it is declared so a *sibling* checkpoint that omits
+    /// it cannot inherit the wrong family's value, which is exactly how OLMoE
+    /// was mis-served (see [`super::olmoe`]).
+    fn default_norm_eps(&self) -> f32 {
+        crate::defaults::DEFAULT_NORM_EPS_1E5
     }
 
     fn config(&self) -> &ModelConfig {
@@ -104,8 +108,8 @@ impl ModelArchitecture for GptOssArch {
         Some(format!("{}mlp.router.bias", self.layer_prefix(layer)))
     }
 
-    fn moe_router_type(&self) -> &str {
-        ROUTER_TYPE
+    fn moe_router_kind(&self) -> crate::MoeRouterKind {
+        crate::MoeRouterKind::TopKThenSoftmax
     }
 
     /// GPT-OSS's experts use the model's own `intermediate_size` — there is no
@@ -232,7 +236,7 @@ impl ModelArchitecture for GptOssArch {
 
 #[cfg(test)]
 mod tests {
-    use super::{DEFAULT_SWIGLU_LIMIT, ROUTER_TYPE, SWIGLU_ALPHA};
+    use super::{DEFAULT_SWIGLU_LIMIT, SWIGLU_ALPHA};
     use crate::config::{ExpertFormat, ExpertGatePolicy, ModelArchitecture};
 
     /// Minimal `config.json` for `openai/gpt-oss-20b`, matching the real
@@ -446,6 +450,10 @@ mod tests {
         // Plain `top_k_softmax` means softmax-over-all-then-select, which
         // under-weights the expert branch for this family.
         assert_ne!(arch().moe_router_type(), "top_k_softmax");
-        assert_eq!(arch().moe_router_type(), ROUTER_TYPE);
+        assert_eq!(
+            arch().moe_router_kind(),
+            crate::MoeRouterKind::TopKThenSoftmax
+        );
+        assert_eq!(arch().moe_router_type(), "gpt_oss_topk_then_softmax");
     }
 }

@@ -1039,3 +1039,6 @@ impl MetalBackend {
         )
     }
 }
+
+#[cfg(test)]
+mod tests;

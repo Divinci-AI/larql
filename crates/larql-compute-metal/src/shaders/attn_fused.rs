@@ -54,10 +54,11 @@ kernel void attn_fused(
     constant uint&      window_size[[buffer(13)]],
     constant float&     eps        [[buffer(14)]],
     constant float&     qk_offset  [[buffer(15)]],  // 1.0 on Gemma 2/3, 0.0 on Gemma 4
-    constant float&     rope_base  [[buffer(16)]],
+    device const float* inv_freq   [[buffer(16)]], // [rotary_dim/2], host-computed
     constant uint&      rotary_dim [[buffer(17)]],
     constant float*     sinks      [[buffer(18)]],  // per-Q-head attention sink logits
-    constant uint&      has_sinks  [[buffer(19)]],  // 0 = no sinks (slot is a placeholder)
+    constant uint&      has_sinks  [[buffer(19)]],
+    constant float&     amplitude  [[buffer(20)]],  // cos/sin scalar (YaRN); 1.0 otherwise  // 0 = no sinks (slot is a placeholder)
     uint tg_id  [[threadgroup_position_in_grid]],
     uint tid    [[thread_index_in_threadgroup]],
     uint tg_sz  [[threads_per_threadgroup]],
@@ -123,10 +124,9 @@ kernel void attn_fused(
     // rope passes.
     uint cache_off = pos * num_kv * head_dim + kv_head * head_dim;
     for (uint d = tid; d < hdim; d += tg_sz) {
-        float freq  = 1.0f / pow(rope_base, float(2u * d) / float(rdim));
-        float angle = float(pos) * freq;
-        float cos_a = cos(angle);
-        float sin_a = sin(angle);
+        float angle = float(pos) * inv_freq[d];
+        float cos_a = cos(angle) * amplitude;
+        float sin_a = sin(angle) * amplitude;
 
         // Q rope: in-place
         float qr = tg_q[d];

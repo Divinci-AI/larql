@@ -145,7 +145,21 @@ fn fused_attention_matches_cpu_reference() {
     enc.set_bytes(6, 4, &num_q as *const u32 as *const std::ffi::c_void);
     enc.set_bytes(7, 4, &num_kv as *const u32 as *const std::ffi::c_void);
     enc.set_bytes(8, 4, &scale as *const f32 as *const std::ffi::c_void);
-    enc.set_bytes(9, 4, &rope_base as *const f32 as *const std::ffi::c_void);
+    // Buffer 9 is the frequency *table*, not `rope_base` — the kernels stopped
+    // deriving frequencies in-shader so they could not go on silently ignoring
+    // every scaling family (docs/k3-funnel.md §4.10). Unscaled here, which is
+    // what this fixture's CPU reference computes.
+    let rope_plan = larql_compute::attention::rope::RopeFreqPlan::unscaled(
+        head_dim as usize,
+        0,
+        rope_base as f64,
+    );
+    let inv_freq = rope_plan.inv_freq_f32();
+    enc.set_bytes(
+        9,
+        std::mem::size_of_val(&inv_freq[..]) as u64,
+        inv_freq.as_ptr() as *const std::ffi::c_void,
+    );
     enc.set_bytes(10, 4, &use_qk_norm as *const u32 as *const std::ffi::c_void);
     enc.set_bytes(11, 4, &softcap as *const f32 as *const std::ffi::c_void);
     let skip_rope_val = 0u32;
@@ -160,6 +174,9 @@ fn fused_attention_matches_cpu_reference() {
         4,
         &rotary_dim_val as *const u32 as *const std::ffi::c_void,
     );
+    // Buffer 16: cos/sin amplitude (YaRN); 1.0 for an unscaled fixture.
+    let amplitude = rope_plan.amplitude as f32;
+    enc.set_bytes(16, 4, &amplitude as *const f32 as *const std::ffi::c_void);
     // Buffers 14/15: attention sinks. Bound even when unused — Metal has
     // no null buffer, and an unbound `has_sinks` would be read as garbage.
     let no_sinks = [0.0f32];

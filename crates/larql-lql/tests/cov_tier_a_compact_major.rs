@@ -189,6 +189,7 @@ fn write_large_vindex_dir(dir: &std::path::Path) {
         residual_multiplier: None,
         logits_scaling: None,
         norm_eps: None,
+        ..Default::default()
     };
 
     let mut config = VindexConfig {

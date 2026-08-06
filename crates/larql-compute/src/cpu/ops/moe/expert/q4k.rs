@@ -99,13 +99,11 @@ pub fn run_single_expert_q4k_q8k_into<'s>(
     // GELU/SiLU(gate) ⊙ up.  Padding columns (`inter..inter_padded`) stay
     // at their zero-initialised value across reuses (we never write them),
     // matching the existing convention in `run_single_expert_into`.
+    let gelu = activation.gate_up_is_gelu_tanh();
     for j in 0..inter {
         let g = scratch.gate_out[j];
         let u = scratch.up_out[j];
-        scratch.act[j] = match activation {
-            crate::Activation::GeluTanh => gelu_tanh(g) * u,
-            _ => silu(g) * u,
-        };
+        scratch.act[j] = if gelu { gelu_tanh(g) * u } else { silu(g) * u };
     }
     let t_act = if timing { Some(t.elapsed()) } else { None };
     if timing {

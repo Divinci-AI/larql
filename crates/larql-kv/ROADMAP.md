@@ -1,5 +1,53 @@
 # Roadmap — larql-kv
 
+## Semantic promotion — Phase A/B landed, physical seam open (2026-08-05)
+
+`engines/semantic_promotion/` (policy wrapper over an exact decode engine)
+and `model_walk/` (its peer planner) are built and gated: 1 120 tests in
+this crate, clippy clean, workspace green, **uncommitted** — five commits
+prepped. Full pickup notes, evidence ledger and ordered queue:
+**`docs/semantic-promotion-pickup.md`**. Contract:
+`docs/specs/semantic-promotion-engine.md`.
+
+**What the measurements settled.** A late canonical record independently
+reconstructs the answer *payload* in a suffix that never saw the source —
+3/3 at 4K and 3/3 at ~49K distance, controls clean (EXP-25CF). It does
+**not** reconstruct the termination decision: all 12 canonical arms peak
+on the first termination token, in both histories, at both distances. So
+the runtime permission is `ExactPayloadLength`, never `FirstTermination`,
+which is what `RetirementScope::check_covered_by` enforces.
+
+A `DerivedClaim` is the *stronger* replacement at range — at ~49K it
+carries payload and trajectory — and actively wrong at short range, where
+the model reads it as a fresh operand and runs the operation twice
+(7432 → 7433). The switch is abrupt, between 48K and 64K, and identical
+across counterfactual histories, so source-conditioned state is excluded.
+The corrupt arm is non-monotone across the same sweep, so consumption is
+not a function of geometry alone. Certificates therefore carry
+`RegimeEvidence::Point` (never an interpolated band) keyed on both
+`record_digest` and `materialisation_digest`.
+
+**Scope correction — read before quoting Phase B.** These results are
+proven on the CPU per-layer executor. `kv_dispatch::helpers` never
+consults `arch.is_sliding_window_layer`; the global/sliding split is a
+promotion-wrapper policy, not attention. Ragged per-layer extents are
+mechanically valid; that they correspond to production architectural
+visibility is **pending**, and R8d is the gate for it.
+
+**Next implementation seam.** `larql_inference::kv_row_positions` exists
+and is gated but **not wired**. `clip_kv` keeps the tail *N physical
+rows*, so across a positional hole it retains rows thousands of positions
+old inside a small window (`r7b`). Wiring order, atomicity requirement and
+the R8-storage / R8-policy split are in the pickup notes §5.
+
+**Next experiment.** Source distance is ruled out (answer-mode at
+source→query 3K/8K/16K/32K at fixed 64K regime, versus operand at ~3K in
+a 4K context). The controlling variable is in the global-context regime,
+so the next run holds all three semantic distances fixed and varies an
+unrelated prefix. Queue in pickup notes §6.
+
+---
+
 ## MAP-5 persistence harness — scoped and verified, not started (2026-08-02)
 
 A parallel mechanistic-interpretability thread (MAP-5/5b/5c, registry

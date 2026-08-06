@@ -1040,6 +1040,7 @@ fn make_full_test_vindex_dir(tag: &str) -> std::path::PathBuf {
         residual_multiplier: None,
         logits_scaling: None,
         norm_eps: None,
+        ..Default::default()
     };
 
     let mut config = VindexConfig {
@@ -1270,6 +1271,7 @@ fn make_large_test_vindex_dir(tag: &str) -> std::path::PathBuf {
         residual_multiplier: None,
         logits_scaling: None,
         norm_eps: None,
+        ..Default::default()
     };
 
     let mut config = VindexConfig {
@@ -1425,6 +1427,7 @@ fn make_moe_test_vindex_dir(tag: &str) -> std::path::PathBuf {
         residual_multiplier: None,
         logits_scaling: None,
         norm_eps: None,
+        ..Default::default()
     };
 
     let mut config = VindexConfig {

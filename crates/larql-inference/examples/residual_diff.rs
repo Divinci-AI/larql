@@ -1,5 +1,5 @@
 //! Per-layer residual diff between CPU (`predict_kquant_hidden`) and Metal
-//! (`dispatch_full_pipeline`) forward passes.
+//! (`dispatch_full_pipeline`) forward passes — prefill **and** decode.
 //!
 //! Invariant under test: for the same input prompt, both backends should
 //! produce the same `[seq_len, hidden]` residual at the end of every
@@ -17,6 +17,12 @@
 //!      end-of-layer residual.
 //!   3. Computes cosine similarity + max abs diff per layer, flagging
 //!      the first layer where cos_sim drops below 0.9999.
+//!   4. Then repeats the comparison across the prefill→decode boundary:
+//!      Metal `prefill(N-1) + decode_token(N)` against CPU `prefill(N)`
+//!      projected to its last row. Steps 1-3 compare prefill to prefill,
+//!      which is why this tool could not see ROADMAP M1 (Metal decode
+//!      honoured no RoPE scaling family while prefill honoured all of
+//!      them); step 4 is the half that was missing.
 //!
 //! Usage:
 //!   cargo run --release --features metal -p larql-inference --example residual_diff -- \
@@ -33,6 +39,7 @@ use std::path::{Path, PathBuf};
 
 use larql_inference::layer_graph::generate::generate;
 use larql_inference::layer_graph::CachedLayerGraph;
+use larql_inference::residual_diff::{compare_captures, ParityThreshold, ResidualCapture};
 use larql_inference::wrap_chat_prompt;
 
 const DRIFT_THRESHOLD: f32 = 0.9999;
@@ -347,6 +354,84 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             (None, _) => println!("  {:<28} <cpu missing: {}>", name, cpu_path.display()),
             (_, None) => println!("  {:<28} <mtl missing: {}>", name, metal_path.display()),
+        }
+    }
+
+    // ── Decode pass ─────────────────────────────────────────────────────
+    //
+    // Everything above compares *prefill* against *prefill*. That is the
+    // half of the forward that routes through the host, and it is the
+    // half that was already correct — which is exactly why the §4.10
+    // RoPE defect (ROADMAP M1: Metal decode roped in-shader from
+    // `rope_base` alone and honoured no scaling family) survived this
+    // tool. Prefill agreed at every layer while KV-cached decode was
+    // rotating global-layer positions at the wrong frequency.
+    //
+    // So: run the same comparison across the prefill→decode boundary.
+    //
+    //   reference = CPU prefill(all N tokens), last row
+    //   subject   = Metal prefill(N-1) + decode_token(token N)
+    //
+    // A decode step that reproduces a fresh prefill at the same position
+    // is the property M1 broke, and it is not implied by prefill parity.
+    //
+    // This runs *after* the stage section on purpose: `metal_decode`
+    // drives its own Metal prefill over the N-1 prefix, and
+    // `LARQL_METAL_DUMP_LAYERS` is still pointed at `metal_path`, so
+    // doing it earlier would overwrite the N-token stage dumps the table
+    // above reads.
+    if token_ids.len() < 2 {
+        println!();
+        println!("━━━ Decode pass ────────────────────────────────────────────────────");
+        println!("  Skipped: needs at least 2 tokens to split into prefix + new token.");
+        return Ok(());
+    }
+
+    let split = token_ids.len() - 1;
+    let (prefix_ids, new_id) = (&token_ids[..split], token_ids[split]);
+
+    println!();
+    println!(
+        "━━━ Decode pass: Metal prefill({split}) + decode(1) vs CPU prefill({}) ─",
+        token_ids.len()
+    );
+
+    let cpu_ref =
+        ResidualCapture::cpu_prefill(&mut w_cpu, &token_ids, &index)?.project_to_last_position();
+    let metal_dec =
+        ResidualCapture::metal_decode(&mut w_metal, prefix_ids, new_id, &index, &metal_backend)?;
+
+    let report = compare_captures(&cpu_ref, &metal_dec, ParityThreshold::tight());
+    println!(
+        "  {:<6} {:>10}  {:>12}  {:>12}  {:>12}",
+        "L", "cos_sim", "max_abs_Δ", "||cpu||", "||mtl||"
+    );
+    let mut decode_first_bad: Option<usize> = None;
+    for (l, s) in report.layers.iter().enumerate() {
+        let bad = s.cos < DRIFT_THRESHOLD;
+        if bad && decode_first_bad.is_none() {
+            decode_first_bad = Some(l);
+        }
+        println!(
+            "  L{l:02}    {:>10.6}  {:>12.3e}  {:>12.3}  {:>12.3}{}",
+            s.cos,
+            s.max_abs,
+            s.a_norm,
+            s.b_norm,
+            if bad { " ←" } else { "" }
+        );
+    }
+
+    println!();
+    match decode_first_bad {
+        Some(l) => {
+            println!("  L{l} is the first layer where KV-cached decode leaves the");
+            println!("  prefill reference. Prefill parity above does not cover this —");
+            println!("  check the decode path's RoPE plan (position divisor, base,");
+            println!("  scaling family) and its KV read/write layout before the kernels.");
+        }
+        None => {
+            println!("  Decode reproduces prefill at every layer (cos >= {DRIFT_THRESHOLD}).");
         }
     }
 
