@@ -77,9 +77,28 @@ jobs:
   msrv:
     # Named without the version: a job-level `name` cannot reference `steps`,
     # and hardcoding a number here would be a second place to forget to bump.
-    name: MSRV (declared rust-version)
-    runs-on: ubuntu-latest
+    name: MSRV · ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      # Split by platform because no single runner can build the whole
+      # workspace. `larql-compute-metal` takes `blas-src` only under
+      # `cfg(target_os = "macos")` while its examples `extern crate blas_src`
+      # unconditionally, so on Linux they fail to resolve at *any* toolchain —
+      # nothing to do with the MSRV. Its own workflow is macOS-only for the
+      # same reason.
+      #
+      # So: Linux checks the workspace minus that crate (covering the
+      # cfg(linux) OpenBLAS paths in larql-compute and larql-inference), and
+      # macOS checks the crate Linux cannot. Between them every member crate
+      # is MSRV-gated with no silent hole.
+      matrix:
+        include:
+          - os: ubuntu-latest
+            args: --workspace --all-targets --exclude larql-compute-metal
+          - os: macos-14
+            args: -p larql-compute-metal --all-targets
     steps:
       - uses: actions/checkout@v7
 
@@ -102,6 +121,7 @@ jobs:
           toolchain: ${{ steps.msrv.outputs.version }}
 
       - name: Install OpenBLAS
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y libopenblas-dev pkg-config
@@ -125,8 +145,8 @@ jobs:
       #
       # `--locked` matters: without it cargo may resolve a newer dependency
       # than Cargo.lock pins and the job would test a graph nobody ships.
-      - name: Check workspace at declared MSRV
-        run: cargo check --workspace --all-targets --locked
+      - name: Check at declared MSRV
+        run: cargo check ${{ matrix.args }} --locked
 
   proto-lint:
     name: buf lint
