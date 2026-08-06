@@ -113,7 +113,7 @@ impl UnaidedTrial {
     /// excluded. There is deliberately no path that derives it from a
     /// qualification metric: EXP-36's contrast was a decision flip, not
     /// a divergence, and a KL threshold would not have detected it.
-    pub(crate) fn observe(record: RecordId, record_won: bool) -> Self {
+    pub fn observe(record: RecordId, record_won: bool) -> Self {
         Self { record, record_won }
     }
 
