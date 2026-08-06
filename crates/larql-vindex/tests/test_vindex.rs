@@ -800,6 +800,7 @@ fn v2_config_full_round_trip() {
             residual_multiplier: None,
             logits_scaling: None,
             norm_eps: None,
+            ..Default::default()
         }),
         fp4: None,
         ffn_layout: None,
@@ -895,6 +896,7 @@ fn v2_config_with_moe() {
             residual_multiplier: None,
             logits_scaling: None,
             norm_eps: None,
+            ..Default::default()
         }),
         fp4: None,
         ffn_layout: None,
@@ -1032,6 +1034,7 @@ fn moe_layer_info_round_trip() {
             residual_multiplier: None,
             logits_scaling: None,
             norm_eps: None,
+            ..Default::default()
         }),
         fp4: None,
         ffn_layout: None,

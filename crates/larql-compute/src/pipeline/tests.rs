@@ -260,6 +260,11 @@ fn layer_spec_views_preserve_flat_field_values() {
         num_kv_heads: 1,
         rope_base: ROPE_BASE_GLOBAL,
         rotary_dim: 2,
+        rope_freq: crate::attention::rope::RopeFreqPlan::unscaled(
+            4_usize,
+            2_usize,
+            ROPE_BASE_GLOBAL as f64,
+        ),
         sliding_window: 32,
         has_v_norm: true,
         q_norm_weight: Some(&q_norm),

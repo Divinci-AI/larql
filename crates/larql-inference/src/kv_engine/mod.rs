@@ -26,6 +26,7 @@ mod dispatch_path;
 mod error;
 mod info;
 mod kv;
+mod per_layer;
 mod retrieval;
 mod stages;
 #[cfg(test)]
@@ -36,5 +37,6 @@ pub use dispatch_path::DispatchPath;
 pub use error::EngineError;
 pub use info::EngineInfo;
 pub use kv::KvEngine;
+pub use per_layer::{ExcisedKvRows, ExcisedRows, KvExtent, PerLayerKvAccess};
 pub use retrieval::RetrievalEngine;
 pub use stages::DecodeStageSummary;

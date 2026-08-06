@@ -892,7 +892,17 @@ fn rope_apply_matches_cpu() {
     enc.set_compute_pipeline_state(&pipeline);
     enc.set_buffer(0, Some(&buf), 0);
     enc.set_bytes(1, 4, &dim as *const u32 as *const std::ffi::c_void);
-    enc.set_bytes(2, 4, &base as *const f32 as *const std::ffi::c_void);
+    // Buffer 2 is the frequency table; amplitude at 4. See §4.10.
+    let rope_plan =
+        larql_compute::attention::rope::RopeFreqPlan::unscaled(dim as usize, 0, base as f64);
+    let inv_freq = rope_plan.inv_freq_f32();
+    enc.set_bytes(
+        2,
+        std::mem::size_of_val(&inv_freq[..]) as u64,
+        inv_freq.as_ptr() as *const std::ffi::c_void,
+    );
+    let amplitude = rope_plan.amplitude as f32;
+    enc.set_bytes(4, 4, &amplitude as *const f32 as *const std::ffi::c_void);
     let rotary_dim_val = 0u32; // 0 = full dim rotation
     enc.set_bytes(
         3,
@@ -965,7 +975,20 @@ fn rope_apply_partial_rotation() {
     enc.set_compute_pipeline_state(&pipeline);
     enc.set_buffer(0, Some(&buf), 0);
     enc.set_bytes(1, 4, &dim as *const u32 as *const std::ffi::c_void);
-    enc.set_bytes(2, 4, &base as *const f32 as *const std::ffi::c_void);
+    // Buffer 2 is the frequency table; amplitude at 4. See §4.10.
+    let rope_plan = larql_compute::attention::rope::RopeFreqPlan::unscaled(
+        dim as usize,
+        rotary_dim as usize,
+        base as f64,
+    );
+    let inv_freq = rope_plan.inv_freq_f32();
+    enc.set_bytes(
+        2,
+        std::mem::size_of_val(&inv_freq[..]) as u64,
+        inv_freq.as_ptr() as *const std::ffi::c_void,
+    );
+    let amplitude = rope_plan.amplitude as f32;
+    enc.set_bytes(4, 4, &amplitude as *const f32 as *const std::ffi::c_void);
     enc.set_bytes(3, 4, &rotary_dim as *const u32 as *const std::ffi::c_void);
     enc.dispatch_threads(
         metal::MTLSize::new(half_rotary as u64, seq_len as u64, 1),
@@ -1433,6 +1456,11 @@ fn full_pipeline_seq1_produces_nonzero() {
         num_kv_heads,
         rope_base: 10000.0,
         rotary_dim: 0,
+        rope_freq: larql_compute::attention::rope::RopeFreqPlan::unscaled(
+            head_dim,
+            0_usize,
+            10000.0_f64,
+        ),
         sliding_window: 0,
         has_v_norm: false,
         layer_scalar: 0.0,

@@ -88,6 +88,11 @@ pub struct StandardEngine {
     /// incremented after each `decode_step`. The legacy `KvCache` had
     /// its own `next_position` field; this engine tracks it directly.
     abs_position: usize,
+    /// Logical position of each resident row, per layer. Kept congruent
+    /// with `handles` by every operation that adds or removes rows —
+    /// prefill, decode, excise, splice, replace. Empty on the coarse
+    /// path, which has no per-layer rows to describe.
+    row_positions: larql_inference::kv_row_positions::KvRowPositions,
     backend: BackendSlot,
     /// Engine-owned f32 dequant scratch for the per-layer fallback Q4K path
     /// (`prefill_quant`/`decode_step_quant` populate it; `do_prefill`/
@@ -117,6 +122,7 @@ impl StandardEngine {
             handles: None,
             prefill_mode: None,
             abs_position: 0,
+            row_positions: Default::default(),
             backend: BackendSlot::Sync(backend),
             dequant_scratch: larql_inference::DequantScratch::new(),
             invalidated: None,
@@ -136,6 +142,7 @@ impl StandardEngine {
             handles: None,
             prefill_mode: None,
             abs_position: 0,
+            row_positions: Default::default(),
             backend: BackendSlot::Async(backend),
             dequant_scratch: larql_inference::DequantScratch::new(),
             invalidated: None,
@@ -215,6 +222,7 @@ impl StandardEngine {
         // earlier failed step left behind is gone with it.
         self.invalidated = None;
         self.abs_position = token_ids.len();
+        self.reset_row_positions_after_prefill();
         Ok(hidden)
     }
 
@@ -273,6 +281,7 @@ impl StandardEngine {
         // continuation. Pinned by the StandardEngine entry-point
         // agreement test in this file's tests module.
         self.abs_position = initial_hidden.nrows();
+        self.reset_row_positions_after_prefill();
         Ok(hidden)
     }
 
@@ -351,6 +360,7 @@ impl StandardEngine {
 
         let failure = match outcome {
             Ok(Some(hidden)) => {
+                self.record_decode_append(self.abs_position as u64);
                 self.abs_position += 1;
                 return Ok(hidden);
             }
@@ -402,6 +412,72 @@ impl StandardEngine {
                 BackendSlot::Sync(b) => b.as_ref().truncate_kv(handle, len),
                 BackendSlot::Async(b) => b.as_ref().truncate_kv(handle, len),
             })
+    }
+    /// Rebuild the position map to describe the handles as they stand
+    /// after a prefill: one contiguous run per layer, ending at
+    /// `abs_position`.
+    ///
+    /// Sound *only* here. A prefilled cache is contiguous by
+    /// construction — a windowed prefill drops its oldest rows, which
+    /// shortens the run without perforating it — so the resident rows
+    /// and the next position do determine the positions at this one
+    /// moment. Every later mutation has to say what it did rather than
+    /// have it inferred, which is why nothing else calls this.
+    ///
+    /// The coarse path keeps an empty map: it has a single whole-model
+    /// handle and no per-layer rows to describe.
+    fn reset_row_positions_after_prefill(&mut self) {
+        self.row_positions = match self.prefill_mode {
+            Some(PrefillDispatchMode::PerLayer) => {
+                let rows: Vec<usize> = self
+                    .handles
+                    .as_ref()
+                    .map(|hs| hs.iter().map(|h| h.cached_len()).collect())
+                    .unwrap_or_default();
+                larql_inference::kv_row_positions::KvRowPositions::tails_ending_at(
+                    self.abs_position as u64,
+                    &rows,
+                )
+            }
+            _ => Default::default(),
+        };
+    }
+
+    /// Record the row every layer just appended at `position`, then
+    /// mirror whatever the window clip dropped.
+    ///
+    /// The clip happens inside dispatch, below this engine, and it keeps
+    /// the physical tail. Reproducing that here keeps the map an honest
+    /// description of the cache — including where the physical tail is
+    /// the wrong set of rows. Correcting it means changing the clip, not
+    /// the map: see `clip_layer_to_logical_window`.
+    fn record_decode_append(&mut self, position: u64) {
+        if !matches!(self.prefill_mode, Some(PrefillDispatchMode::PerLayer)) {
+            return;
+        }
+        let Some(handles) = self.handles.as_ref() else {
+            return;
+        };
+        for (layer, handle) in handles.iter().enumerate() {
+            let Some(map) = self.row_positions.layer_mut(layer) else {
+                continue;
+            };
+            // An append out of order means the engine's position moved
+            // backwards under rows that stayed put — an inconsistency
+            // this map exists to expose, so let it stand rather than
+            // patch it silently.
+            if map.append(position).is_ok() {
+                map.retain_tail(handle.cached_len());
+            }
+        }
+    }
+
+    /// Per-layer handles, or `None` on the coarse path / before prefill.
+    fn layer_handles(&self) -> Option<&[KvHandle]> {
+        match self.prefill_mode? {
+            PrefillDispatchMode::PerLayer => self.handles.as_deref(),
+            PrefillDispatchMode::Coarse => None,
+        }
     }
 }
 
@@ -519,6 +595,7 @@ impl KvEngine for StandardEngine {
             self.handles = Some(vec![handle]);
             self.prefill_mode = Some(PrefillDispatchMode::Coarse);
             self.abs_position = token_ids.len();
+            self.reset_row_positions_after_prefill();
             // Same reasoning as the per-layer prefills: the cache is new.
             self.invalidated = None;
             return Ok(hidden);
@@ -674,6 +751,13 @@ impl KvEngine for StandardEngine {
         self.do_decode_step(weights, ffn, token_id, Some(index))
     }
 
+    fn per_layer_kv_mut(
+        &mut self,
+    ) -> Option<&mut dyn larql_inference::kv_engine::PerLayerKvAccess> {
+        // Only the per-layer dispatch shape can offer row access.
+        matches!(self.prefill_mode, Some(PrefillDispatchMode::PerLayer)).then_some(self)
+    }
+
     fn memory_bytes(&self) -> usize {
         self.cache_memory_bytes()
     }
@@ -702,6 +786,253 @@ impl KvEngine for StandardEngine {
             PrefillDispatchMode::PerLayer => DispatchPath::PerLayer,
         })
     }
+}
+
+// ─── Per-layer K/V access (substrate only) ───────────────────────────────────
+//
+// Mechanical row surgery for policy wrappers. `StandardEngine` still
+// reports `logical_source_masking: false` — it does not decide which
+// rows leave, which layers are touched, or how a removal is undone.
+// Only the dense/per-layer prefill path offers this; the coarse quant
+// path has a single whole-model handle with no per-layer granularity,
+// and `prefill_mode` is what distinguishes them.
+
+impl larql_inference::kv_engine::PerLayerKvAccess for StandardEngine {
+    fn layer_count(&self) -> Option<usize> {
+        match self.prefill_mode? {
+            PrefillDispatchMode::PerLayer => self.handles.as_ref().map(Vec::len),
+            PrefillDispatchMode::Coarse => None,
+        }
+    }
+
+    fn logical_next_position(&self) -> usize {
+        self.abs_position
+    }
+
+    fn resident_rows(&self, layer: usize) -> Option<usize> {
+        self.layer_handles()?.get(layer).map(|h| h.cached_len())
+    }
+
+    fn read_layer_kv(&self, layer: usize) -> Option<(Array2<f32>, Array2<f32>)> {
+        let BackendSlot::Sync(backend) = &self.backend else {
+            return None;
+        };
+        backend.read_kv_to_host(self.layer_handles()?.get(layer)?)
+    }
+
+    fn excise_kv_rows(
+        &mut self,
+        layer: usize,
+        rows: std::ops::Range<usize>,
+    ) -> Option<larql_inference::kv_engine::ExcisedKvRows> {
+        if rows.start >= rows.end {
+            return None;
+        }
+        let BackendSlot::Sync(backend) = &self.backend else {
+            // Async dispatch has no host-readback surface here.
+            return None;
+        };
+        match self.prefill_mode? {
+            PrefillDispatchMode::PerLayer => {}
+            PrefillDispatchMode::Coarse => return None,
+        }
+        let handles = self.handles.as_mut()?;
+        let handle = handles.get(layer)?;
+        let (k, v) = backend.read_kv_to_host(handle)?;
+        if rows.end > k.nrows() {
+            return None;
+        }
+        // The map must already agree with the cache, or the positions
+        // this hands back describe rows that were never there.
+        let map = self.row_positions.layer_mut(layer)?;
+        if map.len() != k.nrows() {
+            return None;
+        }
+
+        let removed = larql_inference::kv_engine::ExcisedRows {
+            k: k.slice(ndarray::s![rows.clone(), ..]).to_owned(),
+            v: v.slice(ndarray::s![rows.clone(), ..]).to_owned(),
+        };
+        let kept: Vec<usize> = (0..k.nrows()).filter(|i| !rows.contains(i)).collect();
+        // Rebuild first: a failed rebuild must leave the map describing
+        // the cache that is still there.
+        let rebuilt = rebuild_handle(backend.as_ref(), layer, &k, &v, &kept)?;
+        let positions = map.excise(rows).ok()?;
+        handles[layer] = rebuilt;
+        larql_inference::kv_engine::ExcisedKvRows::new(removed, positions)
+    }
+
+    fn replace_layer_kv(
+        &mut self,
+        layer: usize,
+        k: &Array2<f32>,
+        v: &Array2<f32>,
+        positions: &[u64],
+    ) -> bool {
+        if k.nrows() != v.nrows() || k.ncols() != v.ncols() || positions.len() != k.nrows() {
+            return false;
+        }
+        let candidate = larql_inference::kv_row_positions::LayerRowPositions::from_positions(
+            positions.to_vec(),
+        );
+        if candidate.check_ascending().is_err() {
+            return false;
+        }
+        let BackendSlot::Sync(backend) = &self.backend else {
+            return false;
+        };
+        let Some(PrefillDispatchMode::PerLayer) = self.prefill_mode else {
+            return false;
+        };
+        let Some(handles) = self.handles.as_mut() else {
+            return false;
+        };
+        if layer >= handles.len() || self.row_positions.layer(layer).is_none() {
+            return false;
+        }
+        let all: Vec<usize> = (0..k.nrows()).collect();
+        match rebuild_handle(backend.as_ref(), layer, k, v, &all) {
+            Some(rebuilt) => {
+                handles[layer] = rebuilt;
+                // Both halves land together, after everything that could
+                // have failed already has.
+                *self
+                    .row_positions
+                    .layer_mut(layer)
+                    .expect("layer presence checked above") = candidate;
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn set_logical_next_position(&mut self, position: usize) -> bool {
+        // Rows are not re-rotated by this, so moving the next position
+        // *behind* a resident row would leave the cache holding a
+        // position it claims has not happened yet — and the next append
+        // could not ascend from it. Refuse rather than record it.
+        if let Some(max) = self.row_positions.max_position() {
+            if (position as u64) <= max {
+                return false;
+            }
+        }
+        self.abs_position = position;
+        true
+    }
+
+    fn row_positions(&self) -> Option<&larql_inference::kv_row_positions::KvRowPositions> {
+        matches!(self.prefill_mode, Some(PrefillDispatchMode::PerLayer))
+            .then_some(&self.row_positions)
+    }
+
+    fn clip_layer_to_logical_window(&mut self, layer: usize, window: u64) -> Option<usize> {
+        let BackendSlot::Sync(backend) = &self.backend else {
+            return None;
+        };
+        match self.prefill_mode? {
+            PrefillDispatchMode::PerLayer => {}
+            PrefillDispatchMode::Coarse => return None,
+        }
+        let keep = self
+            .row_positions
+            .layer(layer)?
+            .rows_within_window(self.abs_position as u64, window);
+        let handles = self.handles.as_mut()?;
+        let handle = handles.get(layer)?;
+        let (k, v) = backend.read_kv_to_host(handle)?;
+        let map = self.row_positions.layer_mut(layer)?;
+        if map.len() != k.nrows() {
+            return None;
+        }
+        if keep.len() == map.len() {
+            return Some(0);
+        }
+        let dropped = map.len() - keep.len();
+        let rebuilt = rebuild_handle(backend.as_ref(), layer, &k, &v, &keep)?;
+        map.retain_rows(&keep).ok()?;
+        handles[layer] = rebuilt;
+        Some(dropped)
+    }
+
+    fn splice_kv_rows(
+        &mut self,
+        layer: usize,
+        at: usize,
+        rows: &larql_inference::kv_engine::ExcisedKvRows,
+    ) -> bool {
+        let BackendSlot::Sync(backend) = &self.backend else {
+            return false;
+        };
+        let Some(PrefillDispatchMode::PerLayer) = self.prefill_mode else {
+            return false;
+        };
+        let Some(handles) = self.handles.as_mut() else {
+            return false;
+        };
+        let Some(handle) = handles.get(layer) else {
+            return false;
+        };
+        let Some((k, v)) = backend.read_kv_to_host(handle) else {
+            return false;
+        };
+        let kv = rows.kv();
+        if at > k.nrows() || kv.k.ncols() != k.ncols() {
+            return false;
+        }
+        let Some(map) = self.row_positions.layer_mut(layer) else {
+            return false;
+        };
+        if map.len() != k.nrows() {
+            return false;
+        }
+        // Splice into a copy first. A splice at the wrong offset leaves
+        // positions out of order, and finding that out after the handle
+        // has been rebuilt would mean the refusal came too late.
+        let mut candidate = map.clone();
+        if candidate.splice(at, rows.logical_positions()).is_err() {
+            return false;
+        }
+
+        let total = k.nrows() + rows.len();
+        let kv_dim = k.ncols();
+        let mut rebuilt = backend.alloc_kv_buffer(layer, total, kv_dim);
+        let push = |handle: &mut KvHandle, kr: &[f32], vr: &[f32], pos: usize| {
+            backend.append_kv(handle, kr, vr, pos);
+        };
+        for i in 0..at {
+            push(&mut rebuilt, row_of(&k, i), row_of(&v, i), i);
+        }
+        for i in 0..rows.len() {
+            push(&mut rebuilt, row_of(&kv.k, i), row_of(&kv.v, i), at + i);
+        }
+        for i in at..k.nrows() {
+            push(&mut rebuilt, row_of(&k, i), row_of(&v, i), rows.len() + i);
+        }
+        handles[layer] = rebuilt;
+        *map = candidate;
+        true
+    }
+}
+
+/// Rebuild a layer handle holding only `kept` rows of `(k, v)`.
+fn rebuild_handle(
+    backend: &dyn EngineBackend,
+    layer: usize,
+    k: &Array2<f32>,
+    v: &Array2<f32>,
+    kept: &[usize],
+) -> Option<KvHandle> {
+    let mut rebuilt = backend.alloc_kv_buffer(layer, kept.len().max(1), k.ncols());
+    for (physical, &i) in kept.iter().enumerate() {
+        backend.append_kv(&mut rebuilt, row_of(k, i), row_of(v, i), physical);
+    }
+    Some(rebuilt)
+}
+
+fn row_of(a: &Array2<f32>, i: usize) -> &[f32] {
+    a.row(i)
+        .to_slice()
+        .expect("host-read K/V rows are contiguous")
 }
 
 #[cfg(test)]

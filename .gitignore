@@ -68,6 +68,11 @@ bench/dec0/*.jsonl
 bench/dec0/anchor_*.json
 bench/dec0/dec0_*.json
 
+# Experiment run logs written to the repo root by the EXP-* examples.
+# Transient stdout captures, regenerable by re-running the example; the
+# findings live in docs/ and the experiments registry, not here.
+/run_*.log
+
 # quant-obs calibration captures — regenerable via `larql dec-bench capture`
 bench/quant-obs/residuals-*/
 bench/quant-obs/*.log

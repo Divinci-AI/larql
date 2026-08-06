@@ -499,6 +499,11 @@ fn decode_token_q4k_moe_with_real_moe_layer_drives_gpu_dispatch() {
         num_kv_heads,
         rope_base: 10_000.0,
         rotary_dim: 0,
+        rope_freq: larql_compute::attention::rope::RopeFreqPlan::unscaled(
+            head_dim,
+            0_usize,
+            10_000.0_f64,
+        ),
         sliding_window: 0,
         has_v_norm: false,
         layer_scalar: 0.0,

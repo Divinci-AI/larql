@@ -32,6 +32,14 @@ impl ModelArchitecture for StarCoder2Arch {
         NormType::LayerNorm
     }
 
+    /// `Starcoder2Config.norm_epsilon` defaults to 1e-5, not the crate-wide
+    /// 1e-6. Declared for the same reason as GPT-OSS's: the fallback is what
+    /// runs for any sibling checkpoint that omits the field, and inheriting
+    /// another family's value there is a silent, per-layer error.
+    fn default_norm_eps(&self) -> f32 {
+        crate::defaults::DEFAULT_NORM_EPS_1E5
+    }
+
     fn activation(&self) -> Activation {
         Activation::GeluTanh
     }

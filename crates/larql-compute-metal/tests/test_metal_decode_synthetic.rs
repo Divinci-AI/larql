@@ -130,6 +130,11 @@ fn build_synth_layer<'a>(
         num_kv_heads: NUM_KV_HEADS,
         rope_base: 10_000.0,
         rotary_dim: 0,
+        rope_freq: larql_compute::attention::rope::RopeFreqPlan::unscaled(
+            HEAD_DIM,
+            0_usize,
+            10_000.0_f64,
+        ),
         sliding_window: 0,
         has_v_norm: false,
         layer_scalar: 0.0,
@@ -421,6 +426,11 @@ fn decode_token_gemma3_style_post_norms_smoke() {
         num_kv_heads: NUM_KV_HEADS,
         rope_base: 10_000.0,
         rotary_dim: 0,
+        rope_freq: larql_compute::attention::rope::RopeFreqPlan::unscaled(
+            HEAD_DIM,
+            0_usize,
+            10_000.0_f64,
+        ),
         sliding_window: 0,
         has_v_norm: false,
         layer_scalar: 0.0,
@@ -632,6 +642,11 @@ fn decode_token_qkv_fused_opt_in_smoke() {
         num_kv_heads: NUM_KV_HEADS,
         rope_base: 10_000.0,
         rotary_dim: 0,
+        rope_freq: larql_compute::attention::rope::RopeFreqPlan::unscaled(
+            HEAD_DIM,
+            0_usize,
+            10_000.0_f64,
+        ),
         sliding_window: 0,
         has_v_norm: false,
         layer_scalar: 0.0,
@@ -1840,7 +1855,8 @@ fn decode_attention_layer_q4k_with_v_norm_post_norms_and_q4kf_wo() {
     layer.has_post_norms = true;
     layer.post_attn_norm = &norm_w;
     layer.wo.format = QuantFormat::Q4_KF;
-    layer.rotary_dim = HEAD_DIM / 2;
+    // Must move the frequency table with it — see `set_rotary_dim_unscaled`.
+    layer.set_rotary_dim_unscaled(HEAD_DIM / 2, layer.rope_base as f64);
 
     let x = synth_input(HIDDEN, 0.9);
     let mut kv = metal.create_kv_cache(1, 64, NUM_KV_HEADS, HEAD_DIM);

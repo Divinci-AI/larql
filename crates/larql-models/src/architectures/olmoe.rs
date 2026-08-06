@@ -28,7 +28,7 @@
 //! OLMoE also sets `attention_bias: false` and `num_key_value_heads ==
 //! num_attention_heads` (MHA, not GQA), so no bias keys are emitted.
 
-use crate::config::{ModelArchitecture, ModelConfig};
+use crate::config::{ModelArchitecture, ModelConfig, QkNormScope};
 use crate::tensor_keys::{moe_experts, qk_norm};
 
 pub struct OlmoeArch {
@@ -48,6 +48,18 @@ impl ModelArchitecture for OlmoeArch {
 
     fn config(&self) -> &ModelConfig {
         &self.config
+    }
+
+    /// Difference 4, and the one that cost the most: `OlmoeConfig`'s
+    /// `rms_norm_eps` class default is **1e-5**, not the 1e-6 that Llama,
+    /// Qwen3 and Gemma use — and `allenai/OLMoE-1B-7B-0924-Instruct` ships no
+    /// `rms_norm_eps` field at all, so the fallback is what actually runs.
+    ///
+    /// Serving it at 1e-6 was a systematic error in every norm of every
+    /// layer. The Gate-B layer diff measured it directly: final-residual
+    /// cosine 0.890 against the HF reference before, 0.991 after.
+    fn default_norm_eps(&self) -> f32 {
+        crate::defaults::DEFAULT_NORM_EPS_1E5
     }
 
     // ── MoE ──
@@ -119,6 +131,24 @@ impl ModelArchitecture for OlmoeArch {
 
     fn attn_k_norm_key(&self, layer: usize) -> Option<String> {
         qk_norm::k(&self.layer_prefix(layer))
+    }
+
+    /// Difference 3, and the one the header's "naming is identical to
+    /// Qwen3-MoE" note actively concealed: the *names* match, the *semantics*
+    /// do not. `OlmoeAttention` builds `OlmoeRMSNorm(config.hidden_size)` and
+    /// applies it to the whole projection before any reshape into heads, where
+    /// `Qwen3Attention` builds `Qwen3RMSNorm(head_dim)` and applies it after —
+    /// `transformers` marks this in a Qwen3 source comment, "unlike olmo, only
+    /// on the head dim!".
+    ///
+    /// Shapes cannot discriminate it here: OLMoE-1B-7B is MHA, so
+    /// `num_heads * head_dim == hidden_size == 2048` and the stored `[2048]`
+    /// weight is the same width under either reading. Only the reduction
+    /// differs, and treating it as per-head normalises every head to a common
+    /// magnitude — which is why it cost 1.9 bits/char against a 0.39 reference
+    /// rather than a rounding-sized amount.
+    fn qk_norm_scope(&self) -> QkNormScope {
+        QkNormScope::FullProjection
     }
 }
 
@@ -195,6 +225,53 @@ mod tests {
         assert_eq!(
             a.attn_k_norm_key(2),
             Some(format!("{p}self_attn.k_norm.weight"))
+        );
+    }
+
+    /// Difference 3: same key names as Qwen3, different reduction.
+    ///
+    /// Asserted against the *other* family rather than against a bare literal,
+    /// because the whole failure mode was inheriting Qwen3's convention along
+    /// with its naming. A test that only pinned `FullProjection` would still
+    /// pass if `PerHead` stopped being the default for everyone else.
+    #[test]
+    fn qk_norm_reduces_over_the_whole_projection_unlike_qwen3() {
+        assert_eq!(olmoe_arch().qk_norm_scope(), QkNormScope::FullProjection);
+
+        let qwen = crate::detect_from_json(&serde_json::json!({
+            "model_type": "qwen3_moe",
+            "hidden_size": 2048,
+            "intermediate_size": 1024,
+            "num_hidden_layers": 2,
+            "num_attention_heads": 16,
+            "num_key_value_heads": 16,
+            "num_experts": 64,
+            "num_experts_per_tok": 8,
+        }));
+        assert_eq!(
+            qwen.qk_norm_scope(),
+            QkNormScope::PerHead,
+            "Qwen3 must stay per-head — `transformers` marks the split in a \
+             source comment (\"unlike olmo, only on the head dim!\"), and both \
+             families store `self_attn.q_norm.weight`"
+        );
+    }
+
+    /// The shapes cannot discriminate the scope on this model, which is why
+    /// the declaration has to be explicit. OLMoE-1B-7B is MHA, so
+    /// `num_heads * head_dim == hidden_size`, and the real checkpoint ships a
+    /// `[2048]` q_norm — exactly as wide as `hidden_size`, and also exactly
+    /// `16 * 128`. Anything inferring scope from element count alone reads
+    /// this checkpoint as either convention.
+    #[test]
+    fn head_geometry_makes_the_two_scopes_indistinguishable_by_width() {
+        let a = olmoe_arch();
+        let c = a.config();
+        assert_eq!(
+            c.num_q_heads * c.head_dim,
+            c.hidden_size,
+            "if this ever stops holding, width alone becomes a usable signal \
+             and the cross-check in `rms_norm_qk_eps` gains teeth here"
         );
     }
 

@@ -12,7 +12,8 @@
 //! v2 (planned) — Metal as a third backend, attention/dense-ffn/layer/forward
 //! components. v3 — HF Python sidecar for ground-truth reference.
 //!
-//! See `crates/larql-cli/ROADMAP.md` P0 → "`larql parity`" for the full design.
+//! What shipped is in `crates/larql-cli/CHANGELOG.md` (2026-05-10); the
+//! remaining open scoping work is `ROADMAP.md` → "P2: parity polish".
 
 // Without the `gpu`+macOS feature the real `run` (and everything it calls —
 // the naive reference impls, MoE helpers, dump utilities) is `#[cfg]`'d out,

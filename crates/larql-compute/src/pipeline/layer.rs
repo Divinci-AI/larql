@@ -67,6 +67,14 @@ pub struct FullPipelineLayer<'a> {
     pub rope_base: f32,
     /// Dimensions to apply RoPE to. 0 = full head_dim. Gemma 4 global: head_dim * 0.25.
     pub rotary_dim: usize,
+    /// Effective RoPE frequencies + amplitude for this layer, with the
+    /// architecture's scaling family and position divisor already folded in.
+    ///
+    /// Carried per-layer rather than derived from [`Self::rope_base`] at the
+    /// kernel: deriving it in-shader is exactly how Metal decode came to
+    /// ignore llama3, YaRN and Gemma 3's linear divisor while Metal prefill
+    /// honoured all three (`docs/k3-funnel.md` §4.10).
+    pub rope_freq: crate::attention::rope::RopeFreqPlan,
     /// Sliding window size. 0 = full attention (no window).
     pub sliding_window: usize,
     /// Whether to apply parameter-free V-norm (Gemma 4).
@@ -170,6 +178,26 @@ impl<'a> FullPipelineLayer<'a> {
             has_post_norms: self.has_post_norms,
             norm_type: self.norm_type,
         }
+    }
+
+    /// Change the rotary width, keeping [`Self::rope_freq`] consistent.
+    ///
+    /// The frequency table's length is a function of the rotary width, so the
+    /// two must move together. Setting `rotary_dim` alone leaves a table of
+    /// the wrong length, which the GPU binding rejects loudly — but as a Metal
+    /// abort, not a readable panic, because the check necessarily runs inside
+    /// a live command encoder. Use this instead.
+    ///
+    /// Preserves the existing scaling family by rebuilding from the current
+    /// plan's own base is *not* possible (the base is not recoverable from the
+    /// table), so callers that need a scaled layer must rebuild the plan with
+    /// `rope_freq_plan`. This helper is for the unscaled geometry tweaks test
+    /// fixtures make.
+    pub fn set_rotary_dim_unscaled(&mut self, rotary_dim: usize, rope_base: f64) {
+        self.rotary_dim = rotary_dim;
+        self.rope_base = rope_base as f32;
+        self.rope_freq =
+            crate::attention::rope::RopeFreqPlan::unscaled(self.head_dim, rotary_dim, rope_base);
     }
 
     /// Return the layer's attention shape, RoPE, and attention-normalization behavior.
@@ -276,6 +304,14 @@ impl Default for FullPipelineLayer<'_> {
             num_kv_heads: 0,
             rope_base: ROPE_BASE_DEFAULT,
             rotary_dim: 0,
+            // Unscaled, stated rather than inherited. A default that silently
+            // meant "no scaling" for a model that needs some is the §4.10
+            // defect; `unscaled` makes the claim explicit at every fixture.
+            rope_freq: crate::attention::rope::RopeFreqPlan::unscaled(
+                0_usize,
+                0_usize,
+                ROPE_BASE_DEFAULT as f64,
+            ),
             sliding_window: 0,
             has_v_norm: false,
             layer_scalar: 0.0,

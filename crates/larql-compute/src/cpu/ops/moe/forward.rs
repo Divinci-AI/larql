@@ -204,13 +204,11 @@ pub fn cpu_moe_forward(
             let gate_out = matmul_vec(&expert_input, gate_w, inter, hidden);
             let up_out = matmul_vec(&expert_input, up_w, inter, hidden);
 
+            let gelu = activation.gate_up_is_gelu_tanh();
             for j in 0..inter {
                 let g = gate_out[j];
                 let u = up_out[j];
-                scratch.act[j] = match activation {
-                    crate::Activation::GeluTanh => gelu_tanh(g) * u,
-                    _ => silu(g) * u,
-                };
+                scratch.act[j] = if gelu { gelu_tanh(g) * u } else { silu(g) * u };
             }
 
             // Within-expert feature routing (aim-validation probe); no-op

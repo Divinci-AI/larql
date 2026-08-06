@@ -42,7 +42,7 @@ impl MetalBackend {
         let layer_head_dim = layer.head_dim;
         let layer_num_q_heads = layer.num_q_heads;
         let layer_num_kv_heads = layer.num_kv_heads;
-        let layer_rope_base = layer.rope_base;
+        let layer_rope_plan = &layer.rope_freq;
         let layer_rotary_dim = if layer.rotary_dim > 0 {
             layer.rotary_dim
         } else {
@@ -205,13 +205,16 @@ impl MetalBackend {
                 enc_a.set_compute_pipeline_state(&self.attention.rope_at_pos_pipeline);
                 enc_a.set_buffer(0, Some(&q_out), offset);
                 enc_a.set_bytes(1, 4, &hd as *const u32 as *const std::ffi::c_void);
-                enc_a.set_bytes(
-                    2,
-                    4,
-                    &layer_rope_base as *const f32 as *const std::ffi::c_void,
-                );
                 enc_a.set_bytes(3, 4, &pos as *const u32 as *const std::ffi::c_void);
                 enc_a.set_bytes(4, 4, &rdim as *const u32 as *const std::ffi::c_void);
+                crate::stages::rope_freq::bind(
+                    enc_a,
+                    2,
+                    5,
+                    layer_rope_plan,
+                    layer_head_dim,
+                    layer.rotary_dim,
+                );
                 enc_a.dispatch_threads(
                     MTLSize::new(rope_pairs, 1, 1),
                     MTLSize::new(rope_pairs.min(256), 1, 1),
@@ -222,13 +225,16 @@ impl MetalBackend {
                 enc_a.set_compute_pipeline_state(&self.attention.rope_at_pos_pipeline);
                 enc_a.set_buffer(0, Some(&k_out), offset);
                 enc_a.set_bytes(1, 4, &hd as *const u32 as *const std::ffi::c_void);
-                enc_a.set_bytes(
-                    2,
-                    4,
-                    &layer_rope_base as *const f32 as *const std::ffi::c_void,
-                );
                 enc_a.set_bytes(3, 4, &pos as *const u32 as *const std::ffi::c_void);
                 enc_a.set_bytes(4, 4, &rdim as *const u32 as *const std::ffi::c_void);
+                crate::stages::rope_freq::bind(
+                    enc_a,
+                    2,
+                    5,
+                    layer_rope_plan,
+                    layer_head_dim,
+                    layer.rotary_dim,
+                );
                 enc_a.dispatch_threads(
                     MTLSize::new(rope_pairs, 1, 1),
                     MTLSize::new(rope_pairs.min(256), 1, 1),

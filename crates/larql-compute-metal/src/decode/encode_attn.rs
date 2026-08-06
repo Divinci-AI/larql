@@ -34,6 +34,13 @@ use larql_models::quant::ggml::LEGACY_BLOCK_ELEMS;
 /// sinks; the `has_sinks` flag follows in slot 19. See `stages::sinks`.
 const ATTN_FUSED_SINKS_INDEX: u64 = 18;
 
+/// `inv_freq` slot on `attn_fused` — took over the old `rope_base` index in
+/// place, so no other binding moved.
+const ATTN_FUSED_INV_FREQ_INDEX: u64 = 16;
+
+/// `amplitude` slot on `attn_fused`, appended after the sinks pair.
+const ATTN_FUSED_AMPLITUDE_INDEX: u64 = 20;
+
 /// First of the two consecutive `kv_append_attend_fused` slots carrying
 /// attention sinks; the `has_sinks` flag follows in slot 13.
 const KV_APPEND_ATTEND_SINKS_INDEX: u64 = 12;
@@ -107,7 +114,7 @@ impl MetalBackend {
         let layer_head_dim = attn_spec.head_dim;
         let layer_num_q_heads = attn_spec.num_q_heads;
         let layer_num_kv_heads = attn_spec.num_kv_heads;
-        let layer_rope_base = attn_spec.rope_base;
+        let layer_rope_plan = &layer.rope_freq;
         let layer_rotary_dim = if attn_spec.rotary_dim > 0 {
             attn_spec.rotary_dim
         } else {
@@ -233,11 +240,6 @@ impl MetalBackend {
             enc.set_bytes(13, 4, &window_size as *const u32 as *const std::ffi::c_void);
             enc.set_bytes(14, 4, &eps as *const f32 as *const std::ffi::c_void);
             enc.set_bytes(15, 4, &qk_off as *const f32 as *const std::ffi::c_void);
-            enc.set_bytes(
-                16,
-                4,
-                &layer_rope_base as *const f32 as *const std::ffi::c_void,
-            );
             enc.set_bytes(17, 4, &rdim as *const u32 as *const std::ffi::c_void);
             // Attention sinks (GPT-OSS) — see `stages::sinks`.
             crate::stages::sinks::bind(
@@ -245,6 +247,14 @@ impl MetalBackend {
                 ATTN_FUSED_SINKS_INDEX,
                 layer.attn_sinks,
                 layer_num_q_heads,
+            );
+            crate::stages::rope_freq::bind(
+                enc,
+                ATTN_FUSED_INV_FREQ_INDEX,
+                ATTN_FUSED_AMPLITUDE_INDEX,
+                layer_rope_plan,
+                layer_head_dim,
+                layer.rotary_dim,
             );
             enc.dispatch_thread_groups(
                 MTLSize::new(layer_num_q_heads as u64, 1, 1),
@@ -277,13 +287,16 @@ impl MetalBackend {
             enc.set_bytes(5, 4, &nq_val as *const u32 as *const std::ffi::c_void);
             enc.set_bytes(6, 4, &eps as *const f32 as *const std::ffi::c_void);
             enc.set_bytes(7, 4, &qk_off as *const f32 as *const std::ffi::c_void);
-            enc.set_bytes(
-                8,
-                4,
-                &layer_rope_base as *const f32 as *const std::ffi::c_void,
-            );
             enc.set_bytes(9, 4, &pos as *const u32 as *const std::ffi::c_void);
             enc.set_bytes(10, 4, &rdim as *const u32 as *const std::ffi::c_void);
+            crate::stages::rope_freq::bind(
+                enc,
+                8,
+                11,
+                layer_rope_plan,
+                layer_head_dim,
+                layer.rotary_dim,
+            );
             enc.dispatch_thread_groups(
                 MTLSize::new(total_heads, 1, 1),
                 MTLSize::new(tg_w as u64, 1, 1),
@@ -325,14 +338,17 @@ impl MetalBackend {
             enc.set_buffer(0, Some(bufs.q_out), 0);
             enc.set_buffer(1, Some(bufs.k_out), 0);
             enc.set_bytes(2, 4, &hd as *const u32 as *const std::ffi::c_void);
-            enc.set_bytes(
-                3,
-                4,
-                &layer_rope_base as *const f32 as *const std::ffi::c_void,
-            );
             enc.set_bytes(4, 4, &pos as *const u32 as *const std::ffi::c_void);
             enc.set_bytes(5, 4, &rdim as *const u32 as *const std::ffi::c_void);
             enc.set_bytes(6, 4, &num_q as *const u32 as *const std::ffi::c_void);
+            crate::stages::rope_freq::bind(
+                enc,
+                3,
+                7,
+                layer_rope_plan,
+                layer_head_dim,
+                layer.rotary_dim,
+            );
             enc.dispatch_threads(
                 MTLSize::new(rope_pairs, total_qk_heads, 1),
                 MTLSize::new(rope_pairs.min(256), 1, 1),

@@ -4,7 +4,7 @@ Canonical rollup for the next execution slice. Keep the detailed design in
 `ROADMAP.md` and crate-local roadmaps; use this file to answer "what is active
 now?" without rereading every crate document.
 
-Last updated: 2026-08-04
+Last updated: 2026-08-06
 
 **Active slice: VINDEX3 container + execution binding**
 ([`ROADMAP.md` § VINDEX3](ROADMAP.md), spec
@@ -75,6 +75,522 @@ The V1–V4 aim-validation gate that previously governed this file is **closed**
 below as resolved history. Registry programmes `dec` and `vindex2` on the
 experiments server are the system of record for stage results.
 
+**MAP mechanistic-interp programme (registry `map`) PAUSED after MAP-5c
+(2026-08-02)** — a parallel research track, not part of the DEC/K3 critical
+path, deliberately stopped at a coherent boundary rather than left mid-thread.
+Findings, in engineering-relevant form: MoE-routed operands are exact,
+content-addressed, and not fungible with capacity-matched substitutes (MAP-3);
+future routed-expert identity has only narrow, mostly-popularity-explained
+predictability (map-3-4-bridge); a late-layer residual can act as a compact,
+content-specific executable waypoint that a recipient's own remaining
+computation will convert into the donor's answer, with separate and provably
+different depth thresholds for redirecting the immediate token vs. sustaining
+a later branch under repeated re-injection (MAP-5/5b/5c). None of this blocks
+K3 execution — the open question is no longer conceptual, it is whether K3's
+actual tensor families import and execute correctly. Recommended queue before
+any further MAP work: (1) complete VINDEX3 verification, (2) merge and tag
+the baseline, (3) Kimi Linear bring-up as the K3 adapter rehearsal (R2 of
+[`docs/k3-funnel.md`](docs/k3-funnel.md)), (4) K3 census + import (R3), (5)
+execute one K3 expert, (6) execute one latent MoE layer, (7) produce one exact
+K3 token, (8) establish the exact-format performance baseline, (9) only then
+return to MAP-scale physical prefetch policies informed by the above, (10)
+build the K/V intervention hook needed to measure whether MAP-5's waypoint
+transplant is token-mediated or genuinely persists in cache state — **scoped
+and verified against the real code, not a from-scratch build**: `larql-kv`
+already has genuine incremental decode (`StandardEngine::prefill`/
+`decode_step`, real per-step state) and 8 continuation-state policies behind
+one `KvEngine` dispatch; the actual gap is narrow — no hook anywhere exposes
+raw K/V during attention (`LayerHook` only ever sees the post-attention
+residual) — see [`crates/larql-kv/ROADMAP.md`](crates/larql-kv/ROADMAP.md)'s
+"MAP-5 persistence harness" entry for the verified scoping and a design
+sketch. Serve both mechanistic research and runtime debugging with it, don't
+build bespoke one-off scaffolding. Full experiment records, write-ups, and
+this same queue are on chuk-experiments programme `map` (see `map-5`,
+`map-6`, `map-3-4-bridge` for the individual next_action fields carrying
+this note).
+
+**RSL — Residual Semantic Liveness programme (registry `rsl`) STARTED
+(2026-08-02), explicit user override of the MAP-pause queue above.** Same
+session, same day as the MAP pause. User's own framing: MAP answers "what
+does the residual reconstruct," RSL asks the sharper question — "which
+historical K/V state still has a reachable future consumer, and when can it
+be permanently retired rather than retained or rebuilt." Not gated on the
+K3/VINDEX3 queue; runs as a parallel track the same way MAP did. Seven
+experiments registered with hypothesis+design, none run yet except RSL-1's
+first pilot (in flight as of this entry): `rsl-1` oracle last-use census
+(per-position K/V/KV retirement, E0/E1/E2 contracts), `rsl-2` path-dead vs
+branch-dead, `rsl-3` route-aware deletion vs marginal-importance scoring
+(direct test of the birth_einstein `{1,7,13,15}` lesson —
+[[project_gla4_spike_attribution]]), `rsl-4` channel-specific (K vs V vs KV)
+liveness, `rsl-5` prospective liveness from cheap learned features (GLA-3-style,
+expected weak per that prior null), `rsl-5b` mechanical alternative to
+`rsl-5` — partial/shadow execution of the model's own address/router
+projections instead of a learned predictor, run first since it uses the real
+causal mechanism rather than approximating it, `rsl-6` physical retain/
+rebuild/reload/retire policy on `larql-kv`/VINDEX3 (blocked on the same
+KV-intervention-hook gap item 10 above already identifies), `rsl-k3` the
+same framework applied natively to K3's own state classes (AttnRes/KDA/MLA/
+LatentMoE), explicitly gated on K3's first exact token per the queue above —
+RSL does not shortcut that gate. `rsl-1`'s first run (RSL-1A, a single-item
+pilot on `tr_dog`) reuses the existing GLA-4 harness in
+`chris-experiments/rsl/rsl1a_last_use_census_pilot.py` (new directory,
+separate from the concurrently-edited `jlens_port`/`gla0_lookup_vs_approx`
+dirs to avoid collision) — teacher-forced per-step isolated removal test
+against the real dense trajectory, not GLA-4's FFN-sparsity oracle.
+
+**EXP-26..38 — the authority control plane. Layer-mechanism branch CLOSED
+2026-08-05.** Registry `rsl-exp26`..`rsl-exp38`; instruments
+`chris-experiments/rsl/exp26_*.py` through `exp38_*.py`. Twelve experiments, all on
+Gemma-3-12B/chat/MLX at 64K, all sharing one corpus so results are cross-comparable.
+Opened as a graph-walk question ("can a promoted chain preserve identity across
+edges?") and became a KV/attention control-plane investigation *because the graph work
+exposed the missing operation*: an externally resolved closure is useless if a live
+source keeps control. See `docs/authority-control-plane.md` for the full state.
+
+Headline: **query-time authority control YES on one fact; physical KV saving NO,
+measured bit-exactly; transferable certificate NO — the regime the branch
+characterises does not exist for the second fact tested.**
+
+Read the EXP-36 and EXP-37 bullets before the ones above them: EXP-37 settles
+authority-vs-deletion by direct measurement, and EXP-36 removes the precondition
+every earlier layer result depends on.
+
+- **Composition (EXP-26)** — beyond depth 1 the contrast is UNMEASURABLE at 64K, not
+  refuted: the *reference* walk flips destination when an unrelated 11-token span moves
+  from 66% to 10% of the prefix. Traversal works, addressing doesn't. Single-edge
+  promotion replicates cleanly (0.0012–0.0027 bits, payload + trajectory) and stepwise
+  walk ≡ closure replay at depth 1.
+- **Binding (EXP-27/28)** — `PROMOTE_AND_BIND` REFUTED under a count-matched design:
+  only operand presence decides; path coherence and queried entity are both irrelevant.
+  Promotion tiers: supply ≈1 record, override-a-disposition ≈4 records + ~40 content
+  tokens, override-a-LIVE-source never — **and the third tier is FALSE, see EXP-36.**
+- **Authority (EXP-29..34)** — on *this fact*, a live source cannot be overridden at any
+  size (the record is *inert*, 0.0046 b, not outvoted). Retirement is what makes
+  promotion work. It is a per-LAYER gate (global layer 29 alone flips it; count is not
+  the variable), acquired at QUERY time, inside a 2–4 token window at the CHAT TURN
+  BOUNDARY — not at entity resolution. Injection-phase hiding is irrelevant;
+  answer-phase is route-dependent. **All of it is scoped to one fact by EXP-36.**
+- **Persistence (EXP-35)** — the decision is STICKY past the scope, with the echo
+  confound killed by teacher-forcing both arms to identical text. But hiding the
+  replacement recovers the true value, so the source stays readable and load-bearing:
+  **direct evidence the span must be RETAINED.** Likely mechanism is mundane — the
+  boundary tokens encoded under the scope carry the decision forward; the source was
+  never mutated.
+- **Transfer (EXP-36) — CONTRAST UNAVAILABLE, a fourth outcome the design did not
+  enumerate.** `k0` (nothing hidden, replacement injected) *already* answers the promoted
+  value, so all 12 layer arms and all 10 windows read `promoted` for free, including
+  `none` with zero tokens masked. The script's printed verdict ("same shape, different
+  layer") is wrong and the registry corrects it. Data quality is not at issue — the sham
+  arm still returns the true value, so the source is intact and readable. What it
+  establishes is larger than what it tested: **override-a-live-source is fact-dependent**,
+  and layer 29, the two routes, the acquisition/maintenance split and the turn-boundary
+  window were all measured inside a regime that does not exist for the second fact. **The
+  256-subset lattice is CANCELLED** — it was explicitly conditional on this transferring.
+  Missing gate: "is the record inert at `k0`?", now added to the instrument.
+- **Localisation (EXP-37) — SUPPORTED; the deletion argument closes negatively.** Scoped
+  and unscoped caches after query A are **bit-identical over the source span at every
+  global layer** (max|ΔK| = max|ΔV| = 0.0, all eight). The source is 55.6K tokens out,
+  far outside the 1024 sliding window, so global layers are the *only* path to it —
+  coverage is COMPLETE for this claim. The divergence footprint is exactly `{35,41,47}`,
+  matching the architecture (a layer-29 mask changes that layer's *output*, not its K/V
+  *write*), independently re-deriving EXP-33's second route. Transplanting rows at fixed
+  positions flips query B: boundary rows and model-turn rows are **each sufficient,
+  neither necessary**, and `Vonly` flips it while `Konly` does not — **the decision
+  travels in the VALUE stream, not the addressing**. Sufficient object ≈ **49 KB**.
+  Phase-A eviction is uninformative: the placebo eviction flips the unscoped arm on its
+  own, so removing any small window de-authorises the source.
+- **Overridability (EXP-38) — the tier is REFUTED; the predictor is not found.** Facts 2
+  and 3 fall to a terse `key=value` record with nothing hidden; **fact 1 — the exact fact
+  EXP-29 declared un-overridable across k=0..3 — falls to a natural-language corroborator,
+  which works ALONE with no terse record present.** The type-correct ally *correlates*
+  perfectly with the regime across the three usable facts (depths 15–41%, both digit and
+  word answers, so neither explains it) but **fails necessity**: a record asserting
+  `Kelvar`, verified absent from the whole 64K corpus, wins on fact 2 outright. So the
+  correlation must not be reported alone — whatever separates the regimes is confounded
+  with ally-presence and is not isolated here. **The result the graph-walk track needed:
+  a caller CAN manufacture authority at promotion time**, since `f2_novel` wins with no
+  corroborator at all — for this class `RESOLVE → PROMOTE → EXECUTE` needs no
+  `DEAUTHORIZE`, no certificate and no masked forwards. Live confound: what rescues fact 1
+  differs from its terse record in **form** (natural-language vs `key=value`) as well as
+  provenance; EXP-39 is the 2×2 that separates them, with corpus-absent values throughout.
+
+Three primitives must stay separate, and conflating them is the main hazard:
+`AuthorityScope` (temporarily decides which competing source wins) /
+`AuthorityCommit` (continuation state materialised while the scope is open) /
+`Retire` (certifies source removal — **evidence against**, for this mechanism).
+"Decision persists" is not "old evidence is dead". `AuthorityCommit` is real but
+**"small addressable record" is only half right**: it is small and transplantable, but
+*not removable by patching one site*, since substituting either carrier region alone
+leaves the effect intact. It behaves as the leading edge of a contaminated continuation,
+not a discrete object with a defined lifetime — so a runtime cannot *revoke* a commit by
+rewriting the boundary rows. The `AuthorityScope { source_span, excluded_layers, … }`
+certificate sketch has **no measured content** and is retained only as a record of what
+the branch was reaching for.
+
+**Stopping condition MET and the branch is stopped.** Authority-vs-deletion is settled
+(authority only, twice, independently). The certificate axis is *dead* rather than
+satisfied — EXP-36 removed its precondition. Do not continue into open-ended layer
+archaeology; there is no reproducible certificate to find at this level. Live work is
+EXP-38 and then an end-to-end graph-walk workload.
+
+Programme therefore SPLITS. Graph/context: authority scopes, boundary commits,
+transfer across operations, then end-to-end external-resolution + closure execution —
+shaped as `external step → authority commit → local neural operation → external step`
+rather than promoting a whole chain and hoping identity composes.
+KV compression: returns separately to canonical reconstruction, proven-dead
+alternatives, durable closure sufficiency and cold replay — authority control may
+assist compaction but is not itself compaction.
+
+Three instrument rules earned here, all generalisable. **Gate the precondition, not just
+the reference** (EXP-36 checked that the fact answers correctly with no record, but not
+that the record is *inert* with nothing hidden — the latter is what every attribution arm
+assumes). **Read a placebo on the arm that can actually move** (EXP-37's placebo check
+asked whether the *scoped* arm stayed promoted; it was promoted already, so the check was
+vacuous). **Score every arm against what its own record asserts** (EXP-38's first run
+scored novel-value arms against the fact's decoy, so two arms that asserted a
+corpus-absent word and *got that word back* were filed as "other" — the derived flag then
+reported that a caller cannot manufacture authority, the exact opposite of the data).
+All three share one shape: **a derived boolean inherits every assumption in the check
+that fed it**, and each of the three printed a confident verdict that was wrong.
+
+**EXP-25 — late promotion into already-built state, COMPLETE (2026-08-04).**
+Registry `rsl-exp25`; instrument `chris-experiments/rsl/exp25_late_promotion_matrix.py`.
+**Closes CR10 and removes the assumption sitting under BR4.** Gemma-3-12B/chat/64K:
+context built from the VERBOSE source, a 13-token canonical record injected ~49K
+tokens downstream, raw span excluded. All three operations pass causally — copy
+`7431`, `+1` `7432`, reversal `1347` — each with a failing pad-only control
+(`7249`/`789`/`7892`) and a following corrupt control (`5824`/`5825`/`4285`). The
+`+1` corrupt arm is the strongest evidence: injecting `5824` yields **`5825`**, a
+value absent from the context, so the model computes ON the injection rather than
+retrieving a string. Three consequences. (1) EXP-24's "records serve reads, not
+computation" was **distance, not records** — identical record/model/framing/
+question, `+1` goes 12.98 reciting `7431` (ingested 49K back) → **0.1472
+answering `7432`** (injected at the boundary); promotion is capability-RESTORING,
+not merely a memory operation. (2) Canonical promotion reproduces the payload at
+**0.0001/0.0010/0.0223** bits with **100% of residual on the first `<end_of_turn>`**
+— a reachable token, generalising CR6's termination-local signature to all three
+operations. (3) A discharged result fixes the stopping decision (`+1` derived:
+0.0008 payload / 0.0003 termination), so **canonical promotion licenses
+answer-scoped retirement and only discharged-result promotion licenses
+general-state retirement**. Refuted as a design assumption: **prose cannot encode
+`discharged=true`** — "The Meridian code reversed is 1347" makes the model reverse
+it again and answer `7431` (corrupt twin `4285`→`5824`), and the key-value form
+failed identically (`code_plus_one=5825`→`5826`). Needs typed records
+(`CanonicalFact` vs `DerivedResult{discharged}`), not wording. Carried forward:
+EXP-25 scored trajectories over the full budget without EXP-24's natural-termination
+cap — no conclusion changed here (all canonical peaks landed on the reachable
+first-EOT) but add the cap before reuse.
+
+**EXP-24 — operation-conditioned retirement frontiers, COMPLETE, primary contrast
+INCONCLUSIVE (2026-08-04).** Superseded in part by EXP-25's CR14 above: its
+"records are read-only" reading described the remote regime, not the
+representation.
+Registry `rsl-exp24`; instrument
+`chris-experiments/rsl/exp24_operation_conditioned_frontiers.py`. Closes CR7 and
+decides whether the CR4–CR6 result is a general context compiler or an exact-copy
+exception: same planted fact and 64K context, five query forms (copy / `+1` /
+digit-reversal / `>7000?` / reverse binding), each with the full exp22b–exp23
+machinery (REF, ABSENT, CORRUPT, compact-record arms plus the answer-progress
+frontier). **The claim is restricted to the length-matched trio** — copy, `+1`
+and digit-reversal all emit 4 digits + EOT — because `k*` is an output-token
+index and a one-token answer simply offers fewer positions at which liveness is
+detectable; `derived` and `binding` are reported as `k*/m` and cannot carry it.
+Digit-reversal exists because `7431+1 = 7432` shares the prefix `743`, leaving
+three of four "transformed" tokens literal. A 1-token spread is the instrument's
+quantisation floor and reports INCONCLUSIVE rather than Outcome A.
+Three defects were caught pre-run and are worth carrying forward: the boolean
+arm was admitted on a substring accident (matcher `"es"` hit the `es` inside
+`Question`, admitting a continuation where the model answered with the *code*);
+`answer_head` returned `''` whenever the model opened with a newline, silently
+dropping a correctly-answered `binding` arm; and the model answers **"no"** to
+`7431 > 7000` at 2K with filler while answering correctly when the fact is
+adjacent — the comparison capability degrades with context distance, which is
+itself a constraint on what a semantic planner may assume. Cost is held to four
+64K prefills (not twenty) by snapshotting each context before the query and
+re-entering per operation via suffix fill; gate G1 proves that round-trip
+bit-exact before any measurement, and the ~1–2 bf16 ulp difference between
+monolithic and split chunk partitioning is recorded (uniform across arms, so it
+cancels) rather than gated.
+
+**RSL side-branch `rsl-ovl-ffn-slots` opened and closed same session
+(2026-08-02), inconclusive by construction — not refuted.** User's own
+follow-on proposal after `rsl-ovl`'s whole-MLP-write causal map: decompose
+the layer-16 MLP write into its 10240 intermediate channels (Gemma-3's MLP
+is `down_proj(gelu_approx(gate)*up(x))`, GELU-approx not SiLU) and ask
+whether the already-characterized future-vocabulary effect is built from a
+small, individually coherent subset (lookup-like, the "slot assembly"
+framing) or distributed. Frozen design: analytic top-128 ranking (free —
+`|a_i| * ||down_proj[:,i]||` from the one real forward already in hand),
+one batched ablation forward per cell, joint top-10 ablated together and
+compared to the existing whole-MLP `skip_layer`/`skip_position` ablation.
+Raw result: 0/40 individual-slot ablations showed a genuine coherent
+footprint (the pipeline's nominal 1/40 hit was a `kw_hit()` substring
+false-positive on `' in'`), and individual single-channel effects
+frequently exceed the whole-MLP-write's own effect (13/128 at one cell).
+**First write-up called this "refuted" — user pushback caught the
+overclaim same session: that null is superposition's expected default
+(Toy Models of Superposition), not evidence either way, since raw-neuron
+ablation has asymmetric power — it can find a coherent slot if one exists,
+but a null doesn't rule out a lookup-like assembly living in a
+non-axis-aligned basis.** Second round of pushback caught a deeper problem
+with the first fix, which had named an SAE as *the* correct test: an SAE's
+own sparsity objective can manufacture apparent structure without controls
+(random-orthogonal, reconstruction-matched-no-sparsity), and more
+fundamentally, per-channel attribution isn't functionally invariant for a
+linear write — `y = W_down@h = (W_down@R^-1)(R@h)` for any invertible `R`
+— so a concentration claim in *any* single fixed basis, on *one*
+trajectory, is close to meaningless regardless of which basis produced it.
+**The basis-independent criterion is recurrence across examples, not
+concentration within one.** Corrected verdict: instrument closed as
+non-diagnostic; conceptual thread carried forward as `rsl-ovl-causal-dictionary`
+(chuk-experiments, planned not started) — multi-trajectory data collection,
+a real ablation-derived causal effect tensor (not activation-reconstruction
+error) as the decisive object, compared across native/PCA/random-control/
+reconstruction-matched-SAE/sparse-SAE/stretch-goal-causal-dictionary, with
+cross-example recurrence as the statistic that actually distinguishes
+lookup-like from distributed. Full record: chuk-experiments
+`rsl-ovl-ffn-slots` (closed) and `rsl-ovl-causal-dictionary` (planned);
+harness `chris-experiments/rsl/ovl_ffn_slot_decomposition.py`.
+
+**GLA-4 minimality claims CLOSED by teacher-forced re-derivation
+(2026-08-04) — the mechanism findings stand, the sparsity/minimality
+findings do not.** The 2026-08-03 audit had flagged the cap_france 9-cell
+route as bf16-derived and left the re-derivation as the open item. Done now,
+on the protocol that audit's own postmortem specified: teacher-force the
+published token sequence, re-derive only the decisions, and score the
+candidate on the deployment path against a canonical fp32 reference.
+Instruments `chris-experiments/rsl/exp14`–`exp18`.
+
+**First, a correction to the audit's own headline.** Its 0.0823b reproduces
+**exactly**, but it is the fp32-*candidate* counterfactual, not the shipping
+path — the `EVAL_FP32` arm moved the dtype globally. Separating the three
+axes that were collapsed into one (reference precision, candidate **body**
+precision, candidate **head**/unembedding precision) gives one fixed cell
+set four different verdicts: `0.0113` ✓ (published), `0.0194` ✓ (end-to-end
+bf16, what ships), **`0.0317` ✗ (canonical: fp32 reference, bf16 body, fp32
+readout)**, `0.0823` ✗ (fp32 counterfactual). The canonical row is the
+verdict, and note *how* it fails — **KL stays inside the 0.05 budget while
+top-1 flips**, emitting `','` where the exact model emits `' and'`. The
+published route's top-1 restoration was decided by unembedding rounding, so
+"restores top-1" cannot be claimed. Scoring resolution is non-negotiable;
+body precision is a contract choice; the first pass collapsing them got the
+verdict wrong in both directions before exp17 separated them. **A fourth
+knob surfaced on reconciliation:** the 2026-08-03 audit's canonical 0.0332 /
+deployment-relative 0.0354 reproduce to 0.033186 / 0.035351 only if
+`final_norm` is promoted into the head; leaving it in the body gives
+0.031719 / 0.031818, a 4.6%/11% shift with the verdict unchanged. Say where
+the body/head boundary falls, not just "fp32 scoring".
+
+**cap_france: the route is also mask-contingent.** Re-deriving the greedy
+oracle teacher-forced flips only **2 of 144** trials — but the first is at
+**step 0** (L2 @ position 5, 0.046731 → 0.054204), so the entire downstream
+path diverges: 58 cells vs the published 59, 8 same-slot disagreements. The
+published 9-cell route on the corrected mask sits at **0.432b**. Deriving
+the corrected structure with guarantees kept apart: minimum-cardinality over
+positions is **3, with 10 distinct minimum-cardinality addresses**
+(exhaustive over all 2^11 subsets), against the published claim of a unique
+4-position address `{8,12,17,18}`; inclusion-minimal routes inside address
+`(5,7,18)` are **8–9 cells and their size depends on the removal order**
+(8/8/9/9 from four orders over the same 15 candidates); minimum-cardinality
+within that address's cells is **4**, exhaustively verified.
+
+**Then the global cell-level search overturned the method itself, and it
+was the item most likely to be skipped as low-value.** Exhaustive over all
+C(58,1..3) = **32,567** subsets of the corrected mask: **global minimum-
+cardinality = 3**, with **9 qualifying 3-cell routes** — an exact identity,
+not a bound, since cardinalities 1–2 are empty and 4-cell solutions were
+already in hand. But **7 of the 9 sit at position sets that are not
+qualifying addresses at all**, so the published ladder's positions → layers
+→ cells decomposition is structurally *blind* to them. The within-address
+answer of 4 was an artifact of taking `addresses[0] = (5,7,18)` out of ten
+equally-valid tie-breaks; `(12,17,18)` contains a 3-cell route. **Four of
+the nine live entirely at positions {17,18}** — while restoring *all 12*
+cells at those same two positions gives KL **0.027329b, inside budget, but
+top-1 wrong**, so it does not qualify. Restoring 4× more cells at the
+identical positions **destroys** qualification. That is non-monotonicity in
+its sharpest form, and again it is the **categorical** criterion that
+breaks, not the continuous one. **The nine routes have a core-plus-branches
+structure:** the exact intersection of all nine is the singleton
+**`{(12,17)}` — 9/9** — with `(12,18)` a dominant secondary at **7/9** and
+every other cell appearing once or twice. So
+`P((12,17) | qualifies, |R|=3) = 1` and `P((12,18) | ...) = 7/9`, exact
+properties of an exhaustively enumerated family rather than sampled
+frequencies. **Scope, and it is measured not merely cautious:** `(12,17)` is
+mandatory across the minimum-cardinality routes, *not* across all feasible
+routes — all four of the 8–9-cell inclusion-minimal routes qualify while
+omitting it entirely.
+the cleanest route is **one layer at three positions**,
+`[(12,6),(12,17),(12,18)]` at 0.000582b. **Consequence for method: a
+position address does not bracket the cell route.** Any "localise to
+positions, then refine within them" protocol — which is what rounds 1→3→4→5→6
+were — can miss the minimum entirely, and no amount of exhaustiveness at the
+refine stage repairs a wrong bracket.
+
+**birth_einstein is the clean kill, and it is contract-wide.** Its
+published stage 4 — `VERDICT: MANDATORY MINIMAL SET (unique): [1,7,13,15],
+cardinality 4` — came from a search that stopped at the first rescuing
+cardinality, where the lone rescuing set cleared threshold by **0.0014b**
+(0.0486 vs 0.05). All 64 position-9 subsets were then enumerated under
+**all nine reference × candidate precision contracts**, so that a canonical
+failure could not be quietly reported as failure everywhere:
+
+    reference          candidate                 qualifying   best KL
+    bf16 body+head     bf16 body+head (published)     4      0.047402
+    bf16 body+head     bf16 body + fp32 head          0      0.053734
+    bf16 body+fp32hd   bf16 body + fp32 head          0      0.067488   (deployment-relative)
+    fp32 body+head     bf16 body + fp32 head          0      0.080344   (canonical)
+    ... 5 further contracts                           0
+
+**Four of 64 in exactly one contract; zero in the other eight.** Route
+existence at position 9 survives only where *both sides* read through a
+bf16 head — upgrading the candidate's readout alone, changing nothing
+else, already kills it. Reference precision is nearly irrelevant here; the
+readout is decisive. Even stage 2's own premise (restore all of position 9,
+published 0.047403b) fails. Uniqueness, cardinality **and existence** fail
+together, which a stopping rule structurally cannot detect. On the
+corrected mask position 9 skips `{1,4,7,15,29,30}`, so the published set is
+not even well-defined there.
+
+**The transferable result — now resting on ONE item, not two, and
+stronger for it.** The published K3 deliverable cited two independent
+instances. **It cannot any more: birth_einstein's half is gone.** With no
+qualifying route at position 9 under any contract but the published one,
+L1/L15's necessity test is **vacuous** — their low solo marginals
+(**+0.000054b / +0.000007b** against L7's +0.937b, and not rounding
+no-ops: 0.76/0.50 max |Δ|) are still measured, but there is no qualifying
+route left for them to be necessary *in*. Half the instance survives, and
+it is the uninteresting half.
+
+What carries the claim is cap_france's corrected mask, where the evidence
+is much sharper than either original instance. Cell `(3,7)` — **layer 3,
+the corrected-mask successor to the published round-10 L3 instance** — has
+a solo delta of **−0.732b**, i.e. restoring it alone is the single worst
+move available, yet it is necessary in **all four tested inclusion-minimal
+routes** (dropping it: 0.124/0.156/0.215b, all fail). Same shape for
+`(2,7)` at −0.170b and `(7,5)` at −0.080b: **11 of 34 membership tests
+pair a negative isolated effect with conditional necessity.** Converse
+also holds — cells with +0.179b solo effect were droppable. So the claim
+is not merely "low marginal importance doesn't imply dispensability"; it
+is that **isolated marginal ranking can be anti-predictive of
+route-conditional necessity** — a pruning policy scoring members
+independently would rank the mandatory cells among the *safest to drop*.
+Scope kept exact: `(3,7)` is necessary in the four routes tested, which
+does not make it globally mandatory across every feasible route.
+
+**Follow-on RSL-RP (registry `rsl-rp`, closed 2026-08-04): a route-aware
+HOT cache is justified by measurement; speculative storage prefetch is not,
+on this estate.** Two separable claims, deliberately not conflated.
+**Storage side — closed negative and narrowly scoped.** The whole schedulable
+pool is 12 candidate FFN layers × 150 MiB = **1.76 GiB**, so preloading it
+wholesale is correct and, once resident, `V_oracle(lead)` is **identically
+0.0 MiB/step at every lead** (steady-state and prewarmed agree exactly; the
+assertion is in code). All full-capacity value is cold-start scheduling.
+Capacity provisioning beats prediction 2.7×, and at deployable capacity an
+informed predictor only ties an *uninformed* always-prefetch control. K3 is
+the first estate where the question is even askable, since its routed
+population cannot be preloaded. **Hot side — CONFIRMED.** With zero SSD
+involvement and all weights resident, the nine cardinality-3 routes span 1–3
+distinct layers and their layer-grouped replay latency is **0.748 / 1.186 /
+1.576 ms** — bytes 3.0×, latency **2.11×**, 70% of proportional. The slope
+over all nine routes (R² = **0.9966**) is **0.364 ms + 2.594 ps/byte**,
+implying **385.6 GB/s** marginal bandwidth — **96% of the M3 Max's 400 GB/s
+spec peak**, and **1.05× the previously banked 367 GB/s attainable figure**,
+i.e. slightly *above* it. The kernel is unambiguously weight-bandwidth-bound;
+the 5% excess over the banked number is unexplained — **not** layer-12
+warmth, since layer 12 is in **9/9** routes and being common to all of them
+shifts the *intercept*, not the slope. **Units matter here — an earlier draft
+compared 354 GiB/s to 367 GB/s as though they were the same unit and wrongly
+reported exact roofline agreement.** Note the fit spans nine routes but only
+**three** footprint levels; within-level substitution is the real strength —
+the six 300 MiB routes use five different second owners (layers 1,2,4,7,13)
+and agree to **0.75% CV**, so cost tracks the *number* of owners, not which.
+The residual 30% is a **0.364 ms fitted fixed term (49% of the one-layer
+route; eliminating all of it is a mathematical ceiling of 1.95×, only part
+attributable to dispatch)**, which is the unclaimed
+kernel-shape lever and connects to the grouped-expert dispatch gains already
+banked for K3. Grouping by physical owner adds a further **1.80×** on the
+single-layer route (load layer 12 once, process positions 6/17/18) and
+**0.96–0.97×** where no reuse exists — the gain appears exactly and only
+where it is physically possible. What was measured is **oracle selection among already-known qualifying
+routes** — discovery cost, lookup overhead and prediction accuracy excluded,
+so the mechanism is confirmed but the net planner speedup is not.
+**`argmin |R|` cannot see either effect:**
+both are invisible to cell count and visible only in distinct-layer
+footprint. Scope: FFN replay/repair only, 1–3 rows per layer, so this is the
+most favourable regime — mechanism confirmed with high confidence, magnitude
+regime-specific and not quotable as a decode speedup.
+
+**Standing rule R12 added to [`dec-funnel.md`](docs/dec-funnel.md)** —
+*name the metric's SPACE and the search's GUARANTEE, both, every time* —
+explicitly binding RSL, DEC, VINDEX and K3 rather than sitting as a
+postmortem note, per user direction. Two methodological carry-overs: **do
+not batch inside a precision-sensitive ablation** (MLX batched vs unbatched
+differs by max |Δlogit| **0.125** at B=8 on this model — the 3.3× speedup
+buys exactly the confound under investigation, so every forward in
+exp14–exp18 is unbatched), and the precision floor
+`KL(fp32_exact || bf16_exact)` unsparsified is 0.0000005–0.0031b, so none of
+this is unavoidable precision loss — **sparsification amplifies the
+bf16/fp32 gap ~75× relative to the dense path**, which is why the substrate
+decides verdicts here and not in ordinary decoding. **Unaffected:** every
+channel-split conclusion (`KV_both == full_restore`, `block == baseline`,
+the K-vs-V asymmetry) — large categorical comparisons with orders of
+magnitude of headroom. [[project_gla4_spike_attribution]]'s mechanism
+findings stand.
+
+## Compute-layer hygiene pass 2 + M3/M5 closed (2026-08-06)
+
+Second pass over the 2026-08-05 review. Detail in
+[`ROADMAP.md`](ROADMAP.md) §"Compute-layer hygiene review" and §"K3 R1 Gate B".
+
+**Closed: H3, H5b, M3, M5.** Still open: **H4** (Metal `decode/mod.rs` tests)
+and H2 (low, deliberately). M4 untouched.
+
+**M5 is the entry worth reading.** The first run of the CPU-vs-Metal decode
+diff on `gemma-3-4b-it` passed at cos 1.000000 across all 34 layers — and the
+pass was worth nothing, because the vindex it loads carries no `rope_scaling`,
+so the 8x global-layer position divisor the experiment is *about* was never in
+play. Re-run under `LARQL_ROPE_POS_DIVISOR_GLOBAL=8` it passes for real:
+34/34 layers at cos 1.000000 over 1 and 2 decode steps, with the knob verified
+to bite rather than no-op (outputs identical L00-L04, diverging from **L05,
+the first global layer**; final norm 21424.07 -> 21878.96).
+
+**Two defects found by the standing scan, both fixed.**
+
+1. **`Activation` collapsed to SiLU crossing into compute.** A `_ => Silu`
+   wildcard at three `pipeline_layer.rs` sites mapped both `Relu` and `Gelu`
+   onto `Silu`, upstream of a *tested* Metal guard written to stop exactly
+   that - which the wildcard made unreachable. Fixed at the producer with
+   exhaustive `From` impls plus one shared `gate_up_is_gelu_tanh()` for the
+   five CPU MoE loops. Behaviour-preserving for every in-tree model.
+
+2. **The vindex format could not carry `rope_scaling`** - a *served-model*
+   correctness defect, not a test gap. `gemma-3-4b-it` declares
+   `{"factor": 8.0, "rope_type": "linear"}`; served from a vindex it ran its
+   five global layers at divisor 1.0, eight times faster than the checkpoint
+   specifies. Fixed with an inverse serialiser (round-trip tested per family)
+   and five previously-dropped fields, one of which is H5a's
+   `tie_word_embeddings` - so the H5a fix had never reached a vindex-served
+   model. **Existing vindexes must be re-extracted to pick these up**; they
+   load fine and keep answering `None`.
+
+**Standing rule earned, for the R14 family.** A CPU-vs-Metal parity gate
+cannot see a defect in a config both arms read. Both backends lost
+`rope_scaling` identically, so the parity suite was green throughout. Parity
+between two implementations is evidence about the implementations, never
+about their shared input.
+
+**Method note carried into H4.** The H3 work found that the pre-existing
+`kquant_forward` suite asserted only *shapes* - which is why the 4.10 RoPE
+defect passed through it - so the new tests assert agreement, with every
+threshold calibrated against a measured floor and a measured weakest defect.
+That exercise also quantified something worth knowing: the direct-matvec
+decode route (the production path) has only a **6.6x** margin between its
+Q8_K quantisation floor and a one-position RoPE error, where the staged route
+has **4.4e5x**. The sharp CPU-side parity gate is the staged test; the direct
+test is the one that covers what ships.
+
+---
+
 ## Recently shipped (delta since last update)
 
 - **VINDEX3 routes a real Gemma layer bit-identically to production (2026-08-02).**
@@ -99,6 +615,9 @@ experiments server are the system of record for stage results.
 
 - **Sparse-FFN thesis closed on three of four routes; the ANN/HNSW programme closes with it (2026-08-01).** A vindex+WalkFFN review exit finding (HNSW's level-0 graph fragments beyond ~64 nodes, recall@10 → 0.16 at n=200) opened the question of whether repairing the graph was worth it. **R4 says no, and for a reason that closes more than HNSW.** [`walk-ffn-r4-zeroout.md`](docs/diagnoses/walk-ffn-r4-zeroout.md): supplying perfect routes for **free** — kernel-matched, parity ✓, paired/interleaved with a drift+dispersion sentinel, replicated twice on AC — the sparse path still runs at **0.837× dense at the accuracy-viable K=4096** and only wins at K=2048, which fails top-1. **No overlap between speed-viable and accuracy-viable.** The mechanism is the kernel, not the router: with routing free it captures only **23–40%** of its row-count reduction, and the capture fraction *rises* as fewer rows are dropped (23→34→40% against ceilings 5.00/2.50/1.67×) — the signature of fixed per-row overhead. Merely *tying* dense needs ~18.6% execution improvement with routing already free. So a cheaper approximation of gate-top-K was never the missing piece; exact gate-top-K already sits on the wrong frontier. **Scope, deliberately narrow:** this refutes a *compute*-side claim and does **not** close DEC-8.1 (read-side, different denominator, far milder retention) — what it kills there is the *mechanism*, since runtime scattered gather costs more than it saves once rows are in hand. **Then the other axis of the factorisation was tested** ([`moe-latent-axis-sparsity.md`](docs/diagnoses/moe-latent-axis-sparsity.md)): masking the *shared expert input* rather than the row population, where one channel decision removes a column from every active expert's gate AND up. The signal is real — magnitude vs random separates **9.7% vs 555%** bits/token at 50% retention — but **the headline was an artifact of larql's known-divergent OLMoE forward**, which called r=0.5 free where the HF reference says +9.66%. At the project's ≤0.5% shannon gate the viable retention is r≈0.875, **ideal ceiling 1.040×**. Static channel sets refuted per-layer (96.7% of layer-channel pairs token-dependent; a P≥0.8 static core covers 6.6% of the budget); blocked latent sparsity refuted per-layer against exact induced loss and a **random-permutation control** that turned an apparent 40% win into a null. Surviving: dynamic per-channel via an input-major packed kernel, unbuilt, re-priced from "1.18× for free" to "≤1.04× at the gate". **New standing rule R11** in [`dec-funnel.md`](docs/dec-funnel.md): *a structural reduction is a claim about a kernel, not about a matrix* — with the corollary that realisability is a property of **layout**, not of the mask. Instruments `scripts/moe_latent_reference_olmoe.py`, `scripts/moe_latent_block_partition.py`; artifacts under `bench/aim-validation/`.
 - **Extraction tensor-coverage audit — every source tensor now classified, and the third bucket is loud (2026-07-31).** §4.6's work-item 2, built and wired. `extract::coverage` classifies every checkpoint tensor as **recognised** (an architecture accessor names it), **dropped by a named rule**, or **unrecognised**; the `tensor_audit` stage runs *first* in `build_vindex_streaming`, so a checkpoint carrying tensors nothing can address fails in seconds rather than after a multi-minute extraction. Reports always, fatal under `LARQL_EXTRACT_STRICT=1`, which is now set in the `larql-vindex` CI workflow (verified first: all 132 streaming-extraction tests pass under it, so it can't break the build on day one). **The case for it was five silent drops in one week**, none caught automatically: 5 of 11 attention tensors, 3 of 8 MLP tensors, the `gate_walk` trait default silently returning `None`, `moe_intermediate_size()` defaulting to 0, and LayerNorm `β`. Validated on ten real checkpoints — Qwen3-30B-A3B (18,867 tensors), OLMoE (3,219), gpt-oss-20b, Gemma 3 4B (439 SigLIP tensors correctly classified `non-text-tower`) — all clean. **GPT-2 from HF safetensors: 1 of 160 recognised**; `gpt2.rs` matches the trait defaults only *after* the GGUF→HF normalisation, so a raw HF checkpoint is unaddressable (it fails late at embeddings rather than silently, but 159 tensors are unreachable). Design notes: it measures **naming, not consumption** — the necessary condition, and where all five drops actually lived; the hand-maintained accessor enumeration fails **noisy, never quiet** (a new accessor not wired in reports its tensors as unrecognised) and its pin test has already fired twice for real; and drop rules are documented as a decision, not a mute button — "if you don't know what a tensor is, it belongs in `unrecognised`". **Also fixed, found by the audit: LayerNorm `β` was dropped for GPT-2 and StarCoder2.** No accessor named a norm bias, so extraction never wrote one and `build_pipeline_layers` hardcoded `input_norm_bias: None` — while the Metal `layer_norm` shader implemented `+ bias` and always selected its no-bias variant. The CPU dense path got away with it by mangling the weight key, which is why raw-safetensors inference was right and every vindex-backed path silently lost the shift term of `γ·x̂ + β`. Now declared (three additive accessors, derived once from the weight key and gated on `NormType` so RMSNorm families correctly claim nothing), extracted, and resolved in the pipeline; the honest status is "the tensor flows end to end", not "the output is verified". Both weight writers also stopped hardcoding `"norm.weight"` and now use `arch.final_norm_key()` — they agreed with every reader only by coincidence. Coverage: larql-vindex 92.42%, larql-models 90.41%, larql-compute 95.76%, larql-compute-metal 96.78% all pass their per-file policy; `residual_diff/capture.rs` went 34%→50% (first-ever test of `cpu_prefill`) and **cannot reach 90% in Linux CI by construction** — ~250 of 408 lines need a Metal device, which is why it sits outside `include_globs`. Follow-ups tracked in [`ROADMAP.md`](ROADMAP.md) §"Extraction tensor-coverage audit + silent-drop follow-ups".
+- **Metal decode was ignoring every RoPE scaling family; fixed, plus a compute-layer hygiene review (2026-08-05).** Chasing "Metal has no YaRN" found a missing *category*, not a missing family: **Metal prefill ropes on the host** (`attention/gpu.rs`, honours llama3 / YaRN / Gemma 3's linear divisor) while **Metal decode roped in-shader from `rope_base` alone and honoured none of them** — so an affected model encoded its prompt under one rule and generated under another. Live on `gemma-3-4b/12b-it` (the repo's own primary model) and `Llama-3.2-1B`, found by scanning every cached checkpoint's config. **It is a known bug class, fixed once already in the other engine**: `kquant_forward/cached.rs:660` carries the comment *"the unscaled `apply_rope_partial_at` here was the direct-path divergence on gemma3-4b (global-layer K/Q rope'd at 8× the position)"* — the fix went where the bug was seen rather than to every path that ropes. **And the harness could not see it:** `examples/residual_diff.rs`, the CPU-vs-Metal instrument, runs "a single prefill pass" by its own header — the half that routes through the host and is correct. A parity harness exercising only the correct path returns green forever; R14 gate–claim congruence at the harness level, and the fourth instrument-shaped defect in this programme. **Fixed atomically across all four rope-bearing shaders** (`rope`'s 4 kernels, `qk_norm_rope_fused`, `attn_fused`, `fused_attention`; eight rotation sites, **zero `pow(rope_base, …)` left**): a `RopeFreqPlan {inv_freq, amplitude}` precomputed by the *same* `rope_freq_plan` the CPU path calls, so base / llama3 bands / YaRN ramp+amplitude / position divisor all fold into a buffer and a scalar and the kernels stop knowing scaling families exist. The table took each kernel's old `rope_base` slot in place and `amplitude` was appended, so no other buffer index moved; `stages::rope_freq` owns the binding and **checks the table width against the layer's own geometry**. Partial conversion was explicitly rejected — `attn_fused` is the hot decode branch, so converting some kernels would make the bug depend on which one a layer selects. **551 Metal tests green, and the GPU suite caught 16 binding mistakes on the way**, every one surfacing as `cos = 0.000000` rather than a compile error because Metal bindings are untyped; two more as `Command encoder released without endEncoding` (the geometry assert firing inside a live encoder), one of which was a real latent hazard — a test mutating `layer.rotary_dim` after the plan was built, now routed through `set_rotary_dim_unscaled`. **Still owed: M3/M5** — the CPU-vs-Metal *decode* diff still does not exist, so this is verified at kernel and unit level, not on a real model's generation — and **M4**, `AttentionSpan` in the Metal attention kernels. **Hygiene review of `larql-compute` / `larql-compute-metal` / `larql-models`** (ROADMAP.md H1–H6) found the architecture-independence story healthy — model-type strings live almost only in `detect/mod.rs`, constants are named — but two silent-default defects: **H1**, `moe_router_type()` was a `&str` matched with a `_ =>` fallback, so GPT-OSS's router silently took the ordinary policy (the mechanism behind §4.7.10's open quantised-MoE defect), now a typed `MoeRouterKind` matched exhaustively with the string kept as the vindex wire form; and **H5a**, `lm_head` tied to the embedding matrix whenever the tensor was absent while **`tie_word_embeddings` was never parsed at all** — a model declaring `false` (GPT-OSS, OLMoE) that lost the tensor to a key mismatch would have served a wrong output projection and still produced fluent text; now parsed and untied-but-missing is an error. Both predecessors' tests were assertion-free or absent. `gqa.rs` split (H6); `shader_bench.rs` split attempted and **reverted** rather than finished badly (H2); H3/H4 (thousand-line untested decode paths) and H5b remain, with fixture-level next actions written into ROADMAP.md.
+
+- **GB is now a layer diff, and it closed OLMoE and found three more GPT-OSS defects (2026-08-04/05).** §4 defined GB as "a layer-by-layer f32 diff against the local reference, **then** `shannon verify`". Only the second half existed — one scalar at the end of a forward, which says *that* two engines disagree and never *where*, and §4.7's whole six-defect hunt was run without it. **Built:** `larql shannon layer-dump` / `layer-diff` plus `scripts/dump_layers_hf.py`, naming the *first* drifting capture (downstream layers inherit upstream error, so the shallowest disagreement is the defect and the deepest is an echo). The reference side takes its token ids from the manifest and `layer-diff` **refuses** to compare dumps with different token windows — §4.7.7's withdrawn verdict encoded as a precondition. **OLMoE CLOSED, GB green:** two defects, both named by the instrument. `OlmoeConfig`'s `rms_norm_eps` class default is **1e-5** and the checkpoint ships no such field, so a crate-wide 1e-6 fallback ran every norm of every layer an order of magnitude tight (final-residual cos **0.890 → 0.991**); and `qk_norm_scope` — `OlmoeAttention` normalises the **whole projection**, `Qwen3Attention` normalises **per head** (0.991 → **1.000000000**). The second is the instructive one: tensor names are identical, `transformers` marks it in a *source comment* (`# unlike olmo, only on the head dim!`) rather than a type, and **shapes cannot discriminate it** because OLMoE-1B-7B is MHA, so `num_heads × head_dim == hidden_size == 2048` and the stored `[2048]` weight is equally wide under both readings. End-to-end on the same 384 bytes: **larql 166.1 bits / 1.695 per token / 0.435 bits/char vs the HF f32 reference's 166.10 / 1.6949 / 0.4348.** §4.7.6's "1.901 vs 0.390" is superseded — its QK-norm/MHA hunt was pointed at something real, and this was it. **GPT-OSS: the reference DOES run, and larql's forward was wrong from layer 0.** §4.7.6 called the non-executing reference a hole in the ladder's premise; it was four lines of dtype coercion (`convert_moe_packed_tensors` dequantises MXFP4 to bf16 whatever dtype you request, so f32 activations met bf16 weights in `torch.mm` — cast everything to f32 after load, count the casts, assert uniformity). **And the bf16 waypoint is lossless**: MXFP4's ±{0,0.5,1,1.5,2,3,4,6}×2^k are all exactly representable in bf16, and attention/norms are excluded from quantisation, so the reference is sound — §4.7.6 suspected it on two counts and was wrong on both. With the reference running, larql sat at cos **0.9777 at layer 0** (rel_rms 0.221, worst 0.932 at layer 17). **The defect: `rope_scaling: {rope_type: "yarn"}` was parsed and then ignored**, because the forward's only scaling hook was an `Option<Llama3RopeScaling>` — a type that *cannot express YaRN*. Two independent errors, both pinned against `ROPE_INIT_FUNCTIONS['yarn']` on the real config: **23 of 32 rotary dims carried the wrong frequency** (14 by the full 32×), and **every cos/sin was 34.7 % too small** — YaRN's `attention_factor` = `0.1·ln(32)+1` = **1.3466**, which is not a rotation but a rescaling of Q and K, so `q·k` was off by 1.81× **at every position including position 0**. That is why YaRN cannot be approximated by ignoring it: the model runs at the wrong attention temperature everywhere, not merely at long range. **Fixed → all 25 captures at cos 1.000000000.** Landed as a `RopeFreqScaling` enum (exhaustive `match`, so a future family cannot be silently ignored at one of five call sites), a `yarn_rope_scaling()` trait default that **reads the config** so no architecture must opt in, one shared `effective_rope_freq_scaling` replacing four independent resolvers, and DeepSeek's `mscale`/`mscale_all_dim` parsed even though no R1 checkpoint uses them — with both present HF computes the amplitude as a *ratio* collapsing to 1.0 where the single-argument form gives 1.35, so honouring YaRN without them would have introduced a fresh 35 % error into every DeepSeek layer, a regression caused *by* a fix. **The gate's scope is the finding.** GPT-OSS alternates 12 sliding / 12 full attention layers at `sliding_window: 128`, so **an 85-token fixture computes the identical thing on both kinds** and is structurally incapable of testing half the model — §4.7.3's `out_features = 2` and §4.7.7's `--bytes 384` a third time, but predicted from the config *before* the run rather than discovered after. It paid out at once: **`is_sliding_window_layer` defaulted to `false` and `gpt_oss.rs` never overrode it**, so all 24 layers ran full attention while `config.layer_types` sat parsed *and validated* and consulted by nothing (the §4.7.8 shape a fourth time — now read in the trait default, and `has_heterogeneous_attention` consequently fails loudly on backends that can't do hybrid); and **the dense f32 path had no window support at all** — `gqa.rs` sliced `k[0..qi+1]` and "window" did not appear in `block.rs`. **Both fixed, and GB now closes above the window.** A single `AttentionSpan` resolved from `is_sliding_window_layer` + `sliding_window_size` is consumed by prefill *and* decode — one type on both paths deliberately, since decode dropping different keys than prefill for the same absolute position is the divergence a KV cache hides best, and `decode_range` is pinned against `range` across 300 positions. **Verified at 511 tokens, 4× the window: every capture ≥ cos 0.99997, and layer 0 — a `sliding_attention` layer — sits at cos 1.000000000, which is the proof the boundary is exact, since an off-by-one would show there first.** **The larger residual than the 85-token run (rel_rms 4e-6 → 6.8e-3, max_abs 451 at cos ≥ 0.99997) was attributed to MoE tie-breaking by reasoning, and is now MEASURED** (`LARQL_MOE_ROUTE_TRACE` + `--router-trace` + `scripts/diff_moe_routing.py`): expert selections disagree on **11 of 12,264 token-layer decisions (0.09 %) across just 4 of 511 tokens**, and **98.17 % of the final layer's squared residual sits on those 4 tokens** — at layer 3, before any flip, the largest residual sits on a token that never flips, and from layer 4 on it is always a flipped one. **The pre-registered test failed and the test was wrong:** the bar was ≥90 % of flips at margin ≤1e-2, the data gave 63.6 %, and the first verdict read "router defect". That was **scoring a causal chain as independent draws** — token 420 alone flips at layers 14/16/17/18/19 with margins 0.00000 → 0.00943 → 0.01484 → 0.07159 as its own state drifts, so later flips are *consequences* of earlier ones. The discriminating test is temporal, not distributional: a defective router flips at wide margins regardless of upstream state, so it would do so at layer 0 where nothing has diverged; a cascade cannot. Data separates cleanly — **zero disagreements in layers 0–3, seed is an exact tie (0.00000) at rel_rms 1.96e-6, and every wide-margin flip enters with rel_rms ≥ 0.0043.** Verdict **CONFIRMED: tie-break cascade, not a router defect**, and the tool now runs the cascade test (`--layer-diff`) rather than the flat one. Independently checked and holding: **MXFP4→bf16 dequant is exactly lossless** (184,320 real shard values, zero changed, with a control), so the reference's expert weights equal larql's and weight precision contributes nothing. Standing lesson: **a threshold chosen without calibrating it against the quantity it bounds is a guess wearing a number.** Tests are deliberately run *past* the window (below it there is nothing to see): windowed-equals-full below, differs above, a windowed position checked against an independent full run over just its window, absolute-offset capture, and prefill↔decode agreement. **Metal remains unmeasured** — its rope shaders have no YaRN and its attention kernels have no span; assume GPT-OSS on Metal is wrong until diffed. Also landed on the way: `config.rs` split 1704 lines → a `config/` module (trait 971, everything else ≤ 104), and `rope_type`/`layer_type` protocol strings named once instead of spelled inline. Write-up [`docs/k3-funnel.md`](docs/k3-funnel.md) §4.8–4.9.1.
 - **GB unblocked — and unblocking it found six defects in the GPT-OSS MoE forward pass, plus a hole in the ladder's own premise (2026-07-30).** §4.6.8 recorded GB as blocked because `larql shannon score` hardcoded a dense-only `WeightFfn` and so could not score *any* MoE model — the entire class R1/R2/R3 are built on. Routing the scorer by architecture turned out to be the smaller half of the job. **larql's GPT-OSS MoE forward diverged from the reference in six independent ways**, and the biggest is a layout error: the fused `gate_up` tensor is **interleaved** (gate on the even output rows, up on the odd — the reference dequantises, transposes, then slices `[..., 0::2]`/`[..., 1::2]`), while larql took the leading half as gate. **90.29 % of elements differ**, and the signature is unmistakable on the real checkpoint: the correct split separates two distinct distributions (gate std 0.0287/absmax 0.250 vs up 0.0449/0.500) while the wrong one yields two halves with *matching* statistics, because both are the same 50/50 mixture — with the bias as an independent witness (reference gate/up means −0.464/−0.898 separate cleanly; larql's −0.679/−0.684 both sat at the pooled mean with variance inflated 2×). `gpt_oss.rs`'s header asserted "first half = gate" in prose three lines above the sinks claim §4.6 falsified: two false load-bearing statements in one comment block, neither tested. The other five: the expert MLP is **not SwiGLU** (`(up.clamp(±7) + 1) · [g.clamp(max 7) · σ(1.702·g)]` — larql computed `silu(g)·u`, missing α, the `+1` and both clamps, with `swiglu_limit: 7.0` sitting unread in `config.json`); the router's normalise/select **order was inverted** (softmax-over-all-then-select attenuates the whole expert branch, where the reference softmaxes over the selected logits); and **3 of 8 per-layer MLP tensors were silently dropped** (`router.bias`, `gate_up_proj_bias`, `down_proj_bias` — the last two appeared *nowhere* in the workspace), the same mechanism as §4.6.1's 5-of-11 attention tensors. A seventh: `moe_intermediate_size()` defaults to 0 and GPT-OSS never overrode it. **Why the tests passed:** both `split_gate_up_experts` tests used `out_features = 2`, where row 0 is simultaneously "the first half" and "the even rows" — a fixture too small to distinguish the candidate behaviours is not a weak test, it is an absent one (second instance of this shape, after §4.5's plausibility-only timestamp tests). **Landed:** the de-interleaving convention owned once in `mxfp4::deinterleave_fused_half`; additive default-impl'd `ExpertGatePolicy`/`ExpertRoutingPolicy`/bias accessors on `ModelArchitecture` (G0 holds, no signature changed); `swiglu_limit` and `norm_topk_prob` now *read* rather than assumed; and `ExpertWeightFfn` — a per-expert f32 reference-tier MoE backend, fully architecture-driven, 98.1–99.0 % line coverage. **Verified** by a differential test pinning all 48 values of a 3-token MoE block against an independent transcription of `modeling_gpt_oss.py` at **< 1e-5** (no fixture file — both sides draw from the same LCG; generator at `scripts/moe_reference_gpt_oss.py`), with a control proving the old split diverges > 1e-3. **GB now runs: GPT-OSS-20B scores 0.708 bits/char / 3.221 bits/token, 86 GB peak RSS, 51 s.** **It is unblocked, not green,** and the two rungs fail differently. OLMoE sits at 1.901 vs the HF reference's 0.390 — the MoE block is pinned at < 1e-5 so the residual is elsewhere in a forward pass that had never been numerically checked before today. For GPT-OSS **all three reference engines failed**: HF f32 crashes (`float != c10::BFloat16` in transformers' own `_grouped_mm_fallback`, because `convert_moe_packed_tensors` dequantises to bf16 whatever dtype you ask for), HF bf16 runs but reports an implausible 8.03 bits/token for a 20B, and MLX crashes in `gather_qmm`. larql's number is the only plausible one in that table, which is suggestive and **is not verification**. **That is a hole in the ladder's premise worth more than the number:** §1 justified the detour on the ancestor "fitting on the Mac", which is two claims — the weights fit (86 GB, they do) *and the reference implementation actually executes* (for gpt-oss-20b, it does not). **Action for R2/P1: verify Kimi Linear's FLA/vLLM reference runs on Apple Silicon as the first task of the rung**, before any adapter work, because both are CUDA-first and the ladder's cost model assumes otherwise. Also caught: the new router hardcoded GPT-OSS's order and GB flagged it on OLMoE within one run (2.677 → 1.901) — finding 5 committed a second time, by me, an hour after documenting it, in a file whose header *already named the hazard*. A comment naming a hazard does not protect against it; only a type or a test does. Write-up [`docs/k3-funnel.md`](docs/k3-funnel.md) §4.7.
 - **K3 three-rung adapter ladder specced; R1 audit found and fixed two silent-drop bugs; GPT-OSS attention sinks implemented end-to-end (2026-07-28/29).** New spec [`docs/k3-funnel.md`](docs/k3-funnel.md) v0.1 splits the *model-side* K3 work out of DEC-6 into **R1** GPT-OSS-20B (expert/format pipeline) → **R2** Kimi Linear 48B-A3B (the KDA stack, against a *local* reference implementation) → **R3** K3 as a delta, with phases P1–P6, gates G0/GA/GB/GC/GD and registry programme `k3` (5 experiments). The rationale is verification economics, not scope: R2 is K3's direct architectural ancestor and fits on the Mac, so Gate B is a layer-by-layer f32 diff instead of API-oracle triangulation. **The ladder paid for itself inside R1/P1, before any model ran at scale.** (1) **MXFP4 codec verified** bit-identical to `transformers` on 16.6M real values; two edge-case divergences (`0x00`, `0xFF`) found and proven unreachable by scanning all 597M scale bytes — with a pre-registered decision rule that if the K3 scan finds either, we **match the serving kernels, not the OCP spec**, since the model's behaviour is defined by what it was served against. (2) **`--summary-features-per-expert` was a silent no-op on the packed-MXFP4 path** — the branch every many-expert MoE takes. It produced the full 11.87 GiB per-expert gate instead of 0.26 GiB; at K3 dims that is **1.82 TB, larger than the 1.4 TB source checkpoint**, for one third of one component, because the flag's absence re-inflates 4-bit weights to f16 at 896-expert multiplicity. Fixed (**43×**, exact to the byte), and it doubles as the substrate for the planned per-expert gate sketch, collapsing two roadmap items into one plus an evaluation. (3) **5 of 11 per-layer attention tensors were silently dropped** for GPT-OSS — all four projection biases plus `self_attn.sinks`, 120 tensors — because the architecture module's header *claimed* both while every accessor returned `None`, and because extraction never requested attention biases **for any architecture** (Qwen/GPT-2/StarCoder2 declared them and lost them too). Sinks are a learned per-head logit that competes in the softmax and is discarded, so real-position weights deliberately sum to <1; the measured magnitudes (mean **+2.45**, max **+8.19**, positive in every layer) make omitting them a systematic error, not a rounding one. Now extracted (manifest 145 → 265 entries) and **applied on every path**: one shared `softmax_in_place` replacing **four** byte-identical copies, one shared resolver, and three Metal kernels. Parity: NumPy reference at **< 1e-7** (CPU), CPU-reference at **< 1e-4** (Metal prefill and `kv_append_attend_fused`), and an exact analytic invariant for `attn_fused` (a sink rescales each head *uniformly* — a fingerprint no other bug reproduces). All three touched crates pass their 90% coverage policies. **Blocked, and the blocker is the finding:** GB (`shannon verify`) **cannot run on any MoE model** — the scorer hardcodes dense-only `WeightFfn`, so the end-to-end bits/char cost of the sink bug is still unmeasured. Also flagged, pre-existing and *not* the spin-pool sizing regression below: `stress_concurrent_realistic_decode_shape_no_corruption` fails ~1 workspace run in 3 and SIGSEGVs under coverage instrumentation, asserting buffer *corruption* in the default-on spin pool.
 - **Memory-bandwidth roofline measured; a 3.3× spin-pool regression found and fixed on every non-bench path (2026-07-29).** The whole speed programme was being argued with two numbers that are not the same kind of number: an *achieved* "larql extracts ~47 GB/s vs llama.cpp ~70" (recorded **before** the spin pool landed +28%) and the SoC **spec sheet**'s 400 GB/s. Achieved-vs-spec is not a roofline, so a new probe ([`crates/larql-compute/examples/membw_probe.rs`](crates/larql-compute/examples/membw_probe.rs)) measures the missing quantity — what the hardware actually delivers, per processor. **CPU cluster 127 GB/s read, saturating at *two* threads; GPU 367 GB/s; SoC spec 400.** The CPU cluster reaches **31%** of the chip's bandwidth and the GPU **92%** — a **2.9× structural advantage no CPU kernel can close**, since it is P-cluster fabric ports. The Metal production kernels already run at 273–314 GB/s (74–85% of attainable), which makes the roofline a much stronger argument for the G-ladder than "CUDA parity" was; the one outlier is `q4k_qkv_proj` at 130.8 (36%). The probe self-checks against C12's issue-rate trap (each arm run DRAM- *and* cache-resident): `read` 11.4× ⇒ genuinely memory-limited, `copy` 1.05× ⇒ reported as a **floor by design**, since stores reach memory in both arms. **The 47 GB/s was stale**: it came from the bench's hand-rolled rayon arm, not the shipping path — a new `bench_mt_production` arm on the real entry point puts that same shape at **98.7 GB/s**, and per-layer shapes at **50–91% of attainable, not 37%**. Consequence: **CPU bandwidth work is essentially finished** (≤~1.6× theoretical headroom), and the bandwidth-bound half belongs on the GPU. **The regression:** `spin_pool::global()` sized itself from `rayon::current_num_threads()`, but `configure_rayon_threads` is called from *exactly one place* — the CLI bench path, which picks 8 on Apple silicon — so `larql run`/`larql serve` inherited `available_parallelism()` = 16 = 12 P + 4 E. The pool partitions statically, so an efficiency core takes a performance core's share and the barrier waits on the slowest participant (rayon work-steals, hence pool-specific). Measured 16 participants **33 GiB/s** vs 12 → 124 and 8 → 126.7; **end-to-end 10.6 tok/s vs 37.3 on the 26B**. Fixed by capping the pool at the performance-core count in the **library** (not the CLI, so larql-server and embedders inherit it) — **verified 10.6 → 34.9 tok/s, 3.3× recovered**. Two carry-forwards: the **bench harness was structurally unable to see this** (bench was the only path setting a thread count, so every historical spin-pool number was taken on the one config that avoids the bug), and **criterion's default sampling flattered it** (58.5 GiB/s short-run vs a consistent 33 at `--measurement-time 20`). A first hypothesis — strided chunk ownership defeating the prefetcher — was **wrong and killed by measurement**: contiguous blocks did not close the gap, participant count did; the block change is kept for the prefetch property and pinned by its own test. Also corrects the "at the 400 GB/s GPU ceiling" claim in `larql-compute`'s ROADMAP/CHANGELOG. Writeup [`docs/diagnoses/memory-bandwidth-roofline.md`](docs/diagnoses/memory-bandwidth-roofline.md). **Unchanged by any of this:** arithmetic intensity — bandwidth ceilings are a denominator, and DEC-0's 13.9%-unique-at-B64 (~7.2× grouped-scheduler headroom) remains the only measured un-harvested lever. **KV cache now priced, and the bytes hypothesis REFUTED (2026-07-29).** Real geometry (30 layers, `kv_dim` 2048, `sliding_window` 1024, explicit `layer_types` = 5 global / 25 sliding) against the measured 3.63 GB/token budget: f16 KV would buy **3–8% of a token at chat-typical context**, and it cannot be the cause of the decay it was proposed for — the sliding window already bounds 25 of 30 layers, so past ctx 1024 the byte slope collapses six-fold to **0.65 µs/ctx-token** against a recorded decay implying ~12. Bytes are a hard *lower* bound on time, so **C10's original attribution to GQA compute was substantially right**; the bytes thesis died for a couple of hours of arithmetic instead of a KV-quantisation build. It does retain value on the **DEC-2** ledger as *capacity*, not speed: f32 costs ~1 GB of cache per client at ctx 2048, which is what caps clients-per-box, so halving it roughly doubles client density. Registry: experiment `c0-bandwidth-roofline` (programme `dec`), run `RUN-20260729-221048-00532`.

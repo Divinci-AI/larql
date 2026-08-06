@@ -166,13 +166,40 @@ impl KVCache {
         shape_pairs_have_mismatch(&existing, shapes)
     }
 
-    /// Grow the cache to cover `shapes`, preserving existing matching layers.
+    /// Grow the cache to cover `shapes` **and** `max_seq`, preserving
+    /// existing layers that are already big enough.
+    ///
+    /// The `max_seq` half of that used to be missing, and it was a silent
+    /// overrun rather than a slow path. `ensure_kv_cache_for_shapes`
+    /// rebuilds only on a *shape* mismatch, so a second, longer prompt with
+    /// the same attention geometry kept the buffers sized for the first one
+    /// — while the caller had just asked for more room and had no way to
+    /// tell it did not get it. `encode_kv_append` then writes at
+    /// `current_len` and bumps it with no bound check against `max_seq`, so
+    /// the appends run off the end of a buffer allocated as
+    /// `max_seq * num_kv_heads * head_dim * 4`.
+    ///
+    /// Reachable on a real path: `vindex::kquant_forward::metal` sizes the
+    /// cache as `token_ids.len().max(MIN_KV_CACHE_SEQ)`, so it varies with
+    /// prompt length across calls on one backend. The uniform call sites
+    /// (`kv_cache_mut*`) pass the constant `DEFAULT_KV_CACHE_MAX_SEQ` and
+    /// never take this branch.
+    ///
+    /// Regrowing reallocates, which drops that layer's cached K/V. That
+    /// matches what already happens on a shape mismatch, and the one caller
+    /// that varies `max_seq` calls `reset_kv_cache()` immediately after, so
+    /// nothing that was still live is lost.
     pub fn grow_to_shapes(
         &mut self,
         bufs: &BufferCache,
         shapes: &[(usize, usize)],
         max_seq: usize,
     ) {
+        for (layer, &(num_kv_heads, head_dim)) in self.layers.iter_mut().zip(shapes.iter()) {
+            if layer.max_seq < max_seq {
+                *layer = LayerKVCache::new(bufs, max_seq, num_kv_heads, head_dim);
+            }
+        }
         while self.layers.len() < shapes.len() {
             let (num_kv_heads, head_dim) = shapes[self.layers.len()];
             self.layers

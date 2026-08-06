@@ -1655,6 +1655,194 @@ exchangeable draws.
 
 ---
 
+### K3 R1 Gate B — forward parity closed on CPU, open on Metal (2026-08-04/05)
+
+Write-up [`docs/k3-funnel.md`](docs/k3-funnel.md) §4.8–4.10. Registry
+`k3r1-gptoss-pipeline` (programme `k3`). **P2 is closed on the CPU f32 path for
+both R1-class models; the remaining work is Metal and the P3–P6 phases.**
+
+**Closed.** GB's missing half — the layer-by-layer diff — is built
+(`larql shannon layer-dump` / `layer-diff` + `scripts/dump_layers_hf.py`) and
+immediately closed two models. OLMoE: `rms_norm_eps` class default 1e-5 with
+the field absent from the checkpoint, and a QK-norm applied over the whole
+projection rather than per head (cos 0.890 → 0.991 → **1.000000000**; bits/char
+0.435 vs the reference's 0.4348). GPT-OSS: `rope_type: "yarn"` parsed and then
+ignored because the only scaling hook was an `Option<Llama3RopeScaling>`, a type
+that could not express it — 23 of 32 rotary dims at the wrong frequency and
+every cos/sin 34.7 % small (cos 0.9777 → **1.000000000** at layer 0). Sliding-
+window attention, absent from the dense path entirely, now exists as one
+`AttentionSpan` shared by prefill and decode; verified at 511 tokens (4× the
+window) with layer 0 — a sliding layer — at cos 1.000000000. The leftover
+residual is measured, not assumed: a **four-token tie-break cascade** carrying
+98.17 % of the final squared residual, seeded by one exact tie.
+
+| # | Item | Crate | Status |
+|---|---|---|---|
+| M1 | **Metal decode ignored every RoPE scaling family.** Prefill roped on the host and honoured llama3 / YaRN / Gemma 3's linear divisor; decode roped in-shader from `rope_base` alone and honoured none — live on `gemma-3-4b/12b-it` and `Llama-3.2-1B`. **FIXED**: `RopeFreqPlan` computed once by the same `rope_freq_plan` the CPU uses, bound as a buffer + amplitude. | larql-compute-metal | **done** |
+| M2 | **All four rope-bearing shaders converted atomically** — `rope` (4 kernels), `qk_norm_rope_fused`, `attn_fused`, `fused_attention`; eight rotation sites, zero `pow(rope_base, …)` left. `stages::rope_freq` owns the binding and checks the table width against the layer's geometry. **551 Metal tests green; the suite caught 16 binding mistakes**, each surfacing as `cos = 0.0` rather than a compile error, since Metal bindings are untyped. | larql-compute-metal | **done** |
+| M3 | **Extend `residual_diff.rs` to a decode pass. DONE (2026-08-06).** The example now runs a fourth section: Metal `prefill(N-1) + decode_token(N)` against CPU `prefill(N)` projected to its last row, per layer, reusing `residual_diff::ResidualCapture` rather than re-spelling the dump plumbing. Note the finding along the way: the *library* already had `metal_decode` / `metal_decode_steps` and `tests/test_decode_consistency.rs` already compared them against a CPU reference — the gap was only in the interactive tool, so "the decode diff does not exist" was too strong. | larql-inference | **done** |
+| M4 | Metal attention kernels have no `AttentionSpan`; GPT-OSS's 12 sliding layers attend the whole prefix on GPU. Same atomic-conversion argument as M2. | larql-compute-metal | open |
+| M5 | **Prove the M1 fix end to end on `gemma-3-4b-it`. DONE (2026-08-06), and it took a detour.** First run passed at cos 1.000000 across all 34 layers — but the vindex the test loads has **no `rope_scaling` at all**, so `rope_position_divisor_for_layer` returned 1.0 on every layer and the 8× divisor M5 names was never exercised. That is a gate–claim congruence failure, not a result. Re-run with `LARQL_ROPE_POS_DIVISOR_GLOBAL=8`, which drives the same `effective_rope_position_divisor_for_layer` → `rope_freq_plan` both backends read: **34/34 layers at cos 1.000000, 1 and 2 decode steps**. Knob verified to bite, not silently no-op: outputs are identical for L00–L04 and diverge from **L05 — the first global layer** — with final ‖h‖ 21424.07 (divisor 1) vs 21878.96 (divisor 8). | — | **done** |
+
+**Phases.** R1/P1 (audit) and P2 (adapter) are closed. **P3 harvest, P4 extract,
+P5 serve, P6 shrink are not started.** P5 additionally still carries §4.7.10's
+blocker: `write_per_layer_moe_kquant` gates on `ExpertFormat::PackedBF16`, so a
+packed-MXFP4 model writes **no per-layer expert store at all** — GPT-OSS is not
+servable from a vindex until that is fixed, which is a prerequisite for item 14
+(routed `FfnBackend`) nobody had noticed was missing.
+
+**Standing rules earned here** (see [`AGENTS.md`](AGENTS.md)): diff the forward
+before theorising about it; a fixture too small to distinguish the candidate
+behaviours is an *absent* test, not a weak one; a config fact belongs in the
+trait default, not in one architecture; and a threshold chosen without
+calibrating it against the quantity it bounds is a guess wearing a number.
+
+---
+
+### Compute-layer hygiene review — `larql-compute` / `larql-compute-metal` / `larql-models` (2026-08-05)
+
+Scanned for the four standing rules: architecture-driven rather than
+model-hardcoded, no magic strings/numbers, modular and decoupled, no large
+files. **The architecture-independence story is much better than the file-size
+one**, and the one real hardcoding leak is a stringly-typed protocol.
+
+| # | Finding | Where | Priority |
+|---|---|---|---|
+| H1 | **`moe_router_type()` was a `&str` protocol between models and compute.** `pipeline_layer::moe_routing_policy` matched the literal `"gemma4_top_k_softmax"` and fell through to a default for everything else — so `gpt_oss`'s `"gpt_oss_topk_then_softmax"`, a genuinely different rule, **silently took the ordinary policy**. That is the mechanism behind §4.7.10's open quantised-MoE defect, not merely a style issue. **FIXED**: typed `MoeRouterKind` with the string kept as the vindex wire form (`as_str`/`from_wire`); compute now matches exhaustively, so a new variant fails to compile rather than defaulting. The predecessor test called the function twice and asserted nothing — replaced with one that pins each kind to a distinct policy. | `larql-compute`, `larql-models` | **done** |
+| H2 | **`diag/shader_bench.rs` — 1 759 non-test lines**, and it hardcodes `"gemma3"` profiles and `"gemma3-4b"` labels. Diagnostics may name models, but not at this size in one file. **Attempted and reverted:** a line-based carve into config / shapes / measure / benches kept cutting across item boundaries (a trailing `#[derive]`, a truncated function body, the `mod tests {` wrapper). It wants an AST-aware split or a careful manual one, not a `sed` pass — and it is the lowest-value item here, so it was not worth finishing badly. | `larql-compute-metal` | low (was medium) |
+| H3 | **`kquant_forward/cached.rs` — tests. DONE (2026-08-06).** "Zero tests" was half right: the sibling `kquant_forward/mod.rs` suite already drove most of the public surface, but **every one of those tests asserts a shape, not a value** (`h.shape() == [1, hidden]`, "must complete without panic"). That is exactly the hole §4.10 fell through — a RoPE defect keeps the shapes correct. 16 new tests in `cached/tests.rs` built on *agreement*: prefill-vs-decode on the rope-scaled Q4_K fixture (CPU analogue of M5), the padded-intermediate refusal in `layer_supports_direct_matvec`, and the guard clauses of `matvec_q4k_or_q6k_q8k`. Also replaced mod.rs's `let _: bool = supports_direct_matvec_decode(...)` — a test that asserted nothing — with a real assertion. | `larql-compute` | **done** |
+| H4 | **`decode/mod.rs` — tests. DONE (2026-08-06), and it found a bug.** "Zero tests" again described coverage, not correctness: `tests/test_metal_decode_synthetic.rs` already drives `decode_token` end to end and says so in its own header ("smoke tests, not numerical-parity tests"). What nothing touched was the **KV cache geometry** layer — `kv_shapes_for_layers` / `ensure_kv_cache_for_{layers,shapes}` — where every failure mode is silent: decode still runs, still returns finite numbers of the right shape, and is simply wrong past some position. Six tests in `decode/tests.rs` on the Gemma-4 sliding(16×256)/global(4×512) pair, GPU-guarded. **`grow_to_shapes` ignored its `max_seq` argument** — see below. | `larql-compute-metal` | **done** |
+| H5a | **`lm_head` silently tied to the embedding matrix.** `unwrap_or_else(\|\| embed.clone())` fired whenever `lm_head.weight` was absent, and **`tie_word_embeddings` was never parsed at all** despite appearing in every checkpoint config and several fixtures. A model declaring `false` (GPT-OSS, OLMoE) that lost the tensor to a key mismatch or skip filter would have served a wrong output projection and still produced fluent text. **FIXED**: field parsed (outer *and* `text_config`), and untied-but-missing is now a `MissingTensor` error naming the conflict. Absent stays `None` — not a claim either way — so tie-on-absence is unchanged for models that really are tied. | `larql-models` | **done** |
+| H5b | **Split `loading/safetensors.rs`. DONE (2026-08-06).** 1 205 lines → `safetensors/{mod,mxfp4,dtype,paths}.rs`, largest 491. Moved whole functions with the compiler as the check (the H2 lesson), then moved each concern's tests and helpers to sit with it. Seams: MXFP4 packed-expert expansion (+ the seven `MXFP4_*` name constants, which now live with the layout they describe), raw-dtype/FP8 decode, model-path resolution; the shard walk and key normalisation stay in `mod.rs`. 649 `larql-models` tests green, clippy clean. | `larql-models` | **done** |
+| H6 | `attention/gqa.rs` was 1 308 lines but **377 non-test** — the bulk was its (good) test suite. **FIXED**: split to `gqa/mod.rs` (379) + `gqa/tests.rs` (934), the same pattern `rope/` uses. | `larql-compute` | **done** |
+
+**What is already right, and worth not regressing.** Architecture behaviour is
+genuinely trait-driven: model-type strings appear almost exclusively in
+`detect/mod.rs` (the dispatcher, where they belong) and in test fixtures. The
+`stages::sinks` / `stages::rope_freq` modules are the pattern to copy — each
+owns one binding convention in one place, with the reason it exists documented
+against the defect that motivated it. Numeric constants are named
+(`ROPE_BASE_DEFAULT`, `DEFAULT_NORM_EPS`, `YARN_BETA_FAST`,
+`UNIT_AMPLITUDE`, `LAYER_TYPE_*`, `ROPE_TYPE_*`) rather than inline.
+
+**Status after the second pass (2026-08-06):** H1, H3, H4, H5a, H5b and H6 are
+done; M3 and M5 are done. **H2 is the only listed item still open**, and it is
+low by choice. M4 is untouched.
+
+The second pass also turned up **three** defects that were not on the list —
+two from the standing scan, one from writing H4's tests. All three are the same
+family as H1/H5a: a value that answers a question nobody asked it. Two are
+`_ =>`/omission defaults; the third is an argument accepted and ignored, which
+is a pattern the scan did not previously look for and now should.
+
+#### Next actions for the open items
+
+**H2 is the only one left**, and it is deliberately last.
+
+**H2 — split `diag/shader_bench.rs`.** Unchanged and still lowest value. Do
+**not** repeat the line-range carve: it cut across a trailing `#[derive]`,
+truncated a function body, and orphaned the `mod tests {` wrapper. Move items
+one at a time with the compiler as the check — that is how H5b was done this
+pass and it worked without incident — or leave it; it is diagnostics code with
+no known defect behind it.
+
+#### Standing follow-ups from the same pass
+
+- **M4** — `AttentionSpan` is still absent from the Metal attention kernels, so
+  GPT-OSS's 12 sliding layers attend the whole prefix on GPU. Untouched.
+
+##### Ninth instance — an argument accepted and ignored (H4, 2026-08-06)
+
+Not found by grepping for `_ =>` or `unwrap_or`: this one is a **parameter
+that is taken and then not used**, which the scan's three patterns do not
+catch. Worth adding as a fourth thing to look for at the boundary.
+
+`KVCache::grow_to_shapes(bufs, shapes, max_seq)` only ever grew the *layer
+count*; it never looked at `max_seq` for layers that already existed. Its
+caller `ensure_kv_cache_for_shapes` rebuilds only on a **shape** mismatch — so
+a second, longer prompt with the same attention geometry kept buffers sized
+for the first one, while the caller had just asked for more room and had no
+way to learn it did not get it. `encode_kv_append` then writes at
+`current_len` and bumps it with **no bound check** against `max_seq`, so the
+appends run off the end of a buffer allocated as
+`max_seq * num_kv_heads * head_dim * 4`.
+
+Reachable on a real path, not just in theory:
+`vindex::kquant_forward::metal` sizes the cache as
+`token_ids.len().max(MIN_KV_CACHE_SEQ)`, so it varies with prompt length
+across calls on one backend. The uniform call sites (`kv_cache_mut*`) pass the
+constant `DEFAULT_KV_CACHE_MAX_SEQ` and never take the branch, which is why
+nothing had hit it.
+
+Fixed by reallocating undersized layers in `grow_to_shapes`; regrowing drops
+that layer's cached K/V, which matches what a shape mismatch already does, and
+the one caller that varies `max_seq` calls `reset_kv_cache()` immediately
+after. `ensure_kv_cache_grows_max_seq_for_a_longer_prompt` pins it — verified
+to **fail** with the fix reverted while the other five geometry tests still
+pass, so it discriminates the defect rather than merely covering the line.
+
+##### The standing scan found two more (2026-08-06)
+
+The scan works. Run it: grep the model→compute boundary for `_ =>`,
+`unwrap_or`, and `&str` parameters that carry a behavioural choice — and now
+also for **parameters that are accepted and never read** (the H4 instance
+above, which none of the first three patterns would have caught). Two hits
+from this run, both fixed, both worth reading as a pair because they fail in
+opposite directions.
+
+**Seventh instance — `Activation` collapsed to SiLU at the pipeline boundary.**
+`pipeline_layer.rs` translated `arch.activation()` into the compute enum with
+`match { GeluTanh => GeluTanh, _ => Silu }`, re-spelled at three construction
+sites. `larql_models::Activation` has four variants, so **`Relu` and `Gelu`
+both became `Silu`** — and the compute enum already had `ReLU` and `GeluExact`
+waiting to receive them, so nothing was lost for lack of a destination. The
+damning part: `larql-compute-metal`'s `assert_metal_activation_supported`
+exists precisely to "fail loud rather than silently routing GeluExact / ReLU
+layers to SiLU (the prior behaviour, which produced wrong logits with no
+signal)". That guard is correct, tested, and **was unreachable** — the
+wildcard upstream guaranteed it could never be handed either variant. The fix
+was applied at the consumer and missed at the producer. Now three `From` impls
+in `pipeline/enums.rs` are the one definition, exhaustive so a new variant
+fails to compile; the five CPU MoE expert loops that carried the same
+`_ => silu` wildcard route through one `gate_up_is_gelu_tanh()`. No in-tree
+architecture returns `Gelu` or `Relu`, so this is behaviour-preserving today —
+it converts a latent silent-wrong into the loud refusal that already existed.
+
+**Eighth instance — the vindex format could not carry `rope_scaling`.** This
+one is an *omission*, not a wildcard: `VindexModelConfig` simply had no such
+field, so `from_arch` dropped it and every vindex-served model read back
+`rope_scaling: None`. `google/gemma-3-4b-it` declares
+`{"factor": 8.0, "rope_type": "linear"}`; served from a vindex it ran with a
+position divisor of **1.0 on its five global layers**, rotating them eight
+times faster than the checkpoint asks. This is a served-model correctness
+defect, not a test gap — and it is why M5 above needed an env override to mean
+anything.
+
+Note *why it was invisible*: CPU and Metal both read the same `index.json`, so
+both were wrong identically and `test_decode_consistency` stayed green.
+**A parity gate cannot see a defect in a config that both of its arms share.**
+That belongs next to R14 (gate–claim congruence) as a standing rule.
+
+Fixed by `RopeScaling::to_config_json` (an inverse of the detector's parser,
+with per-family `parse(emit(x)) == x` round-trip tests, because an inverse
+that drifts from its forward is worse than none) plus five previously-dropped
+fields — `rope_scaling`, `attn_logit_softcapping`, `swiglu_limit`,
+`norm_topk_prob`, `tie_word_embeddings`. That last one is H5a's field: the
+H5a fix could not reach a vindex-served model. All are `#[serde(default)]`, so
+**existing vindexes still load and still answer `None` — they must be
+re-extracted to pick the values up.** The two production writers that had
+open-coded their own copy of `from_arch` now call it.
+
+Two guards so the class cannot recur: `model_config_persists_every_forward_
+affecting_field` scrapes both structs and fails on any `ModelConfig` field
+with no home (a deliberate not-persisted list carries the reasons — MLA
+geometry and `has_vision_config` are named as real gaps, `embedding_multiplier`
+as already carried via `embed_scale`), and
+`gemma3_global_rope_divisor_survives_the_vindex_round_trip` asserts the
+divisor end to end with a precondition that the source arch had one.
+
+---
+
 ## Cleanup / consolidation track (added 2026-06-12)
 
 Standing recommendations from the 2026-06-12 review, distinct from the
@@ -2781,7 +2969,7 @@ connects them to the running server.
 | BR1 | int8-clip3σ + bf16 codec (Phase 1) | larql-boundary | **shipped** |
 | BR2 | Per-boundary metadata + calibrated gate at threshold=2.16 (Phase 2–3) | larql-boundary | **shipped** |
 | BR3 | BoundaryFrame wire format + A/B/C/D/E contract taxonomy | larql-boundary | **shipped** |
-| BR4 | Phase 4: bounded KV eviction + durability-first capture (Option A) | larql-server + larql-inference | not started |
+| BR4 | Phase 4: bounded KV eviction + durability-first capture (Option A) | larql-server + larql-inference | not started — **see CR10** in the context-retirement track below: promoting a compact record into *already-built* state is untested, and it is the operation this eviction path assumes |
 | BR5 | Phase 4: boundary archive (disk/remote) + restore path | larql-server + larql-inference | not started |
 | BR6 | Phase 5: boundary frames over gRPC grid (protobuf schema defined) | larql-router + larql-server | not started |
 | BR7 | Track B: per-channel codec (int4 + outlier side-channel, ≤1024 bytes) | larql-boundary | not started |
@@ -2802,6 +2990,131 @@ and falls back to compressed residual frames for older context.
 ordering decision (durability-first Option A: capture → gate → fsync → evict KV)
 is specified in the protocol; implementation in `larql-server` can start from it
 directly.
+
+---
+
+## P1 — Context retirement & route-aware hot tier (research track, opened 2026-08-04)
+
+Driver: BR4 assumes older context can be *represented* compactly. This track asks
+the prior question — **when does historical state stop being needed at all, and
+what cheaper form can it be promoted into?** Directly upstream of BR4/BR5 eviction
+policy and of VINDEX3's route metadata.
+
+Registry: `rsl-rp` (closed), `rsl-exp21` (open, write-ups v1–v12),
+`rsl-exp24`/`rsl-exp25` (CR7/CR10/CR13..CR16), `rsl-exp26`..`rsl-exp38` — the
+**authority control plane**, whose layer-mechanism branch closed 2026-08-05 and
+whose bankable results are CR17–CR19. Full state, open questions and instrument
+rules in `docs/authority-control-plane.md`; read EXP-36 and EXP-37 first.
+Instruments: `~/chris-source/chris-experiments/rsl/exp14`–`exp38`.
+
+```
+Which old tokens should this query attend to?   <- sparse attention
+Why do those tokens still exist as attention state at all?   <- this track
+```
+
+### What is measured and bankable
+
+| # | Finding | Status |
+|---|---------|--------|
+| CR1 | **Route-aware hot tier.** At equal semantic cardinality, a route touching 1 vs 3 distinct FFN layers differs **2.11×** in replay latency (0.748 → 1.576 ms, 150 → 450 MiB). Fit R² 0.9966 at 385.6 GB/s ≈ 96% of M3 Max spec peak. Grouping by physical owner adds **1.80×** where reuse exists, ~1.0× where it does not. `argmin \|R\|` sees neither. | **measured** |
+| CR2 | **Gemma-3 is 29 sliding + 5 global layers** (window 1024; MLX uses 29 `RotatingKVCache` + 5 `KVCache`). Long-context cost lives in 5 layers only; architecture-aware KV is **6.8× smaller** than a naive full-KV projection (20.1 GiB vs 136 GiB at 1M). | **measured** |
+| CR3 | **Bounded-history decode**, 64K, frozen state, paired: **1.700× [1.670, 1.717]** best, ~1.6× at the representative planned budget point. Allocation shape, page topology and recent-window size are all **null** — active positions alone predict latency. | **measured** |
+| CR4 | **Retirement refused for exact copy.** Post-question exclusion of the source span fails whole-answer qualification (maxKL 9.04 / 15.51, n=2). Causal origin **confirmed** — ABSENT fails and CORRUPT follows the replacement. | **measured** |
+| CR5 | **Frontier**: k\*_value = 4, k\*_trajectory = 5. Source stays live through the value **and the first termination decision**. Mechanism is **progressive prefix handoff with a late direct-dependence tail**, not per-token reattendance (3 of 5 k values diverge *beyond* k). | **measured** |
+| CR6 | **Compact record reproduces the payload at 1.14e-4 bits**; the entire 0.770-bit discrepancy sits on the single first-`<end_of_turn>` token. Semantic compressibility demonstrated. **Narrowed by EXP-24:** sufficiency is *prompt-mode and model-size dependent* — reproduced in raw mode on 4B (maxKL 0.7466 at 64K, same boundary structure), but in **chat** mode the same record makes 4B answer *"the text doesn't provide the vault access code"*, while on **12B/chat it qualifies outright at 0.0179**. | **measured; scope narrower than originally banked** |
+| CR6b | **The compact record is operation-conditioned: it serves reads and fails computation.** 12B/chat/64K, one span, identical padding and token length: copy **0.0179 QUALIFIES**, `>7000?` 0.0655 (payload right), binding 10.06 (payload right) — but `+1` **12.98** and digit-reversal **15.23**, in both cases the model reverting to emitting the raw literal `7431` instead of the computed value. Copy is a **positive control** carrying the identical `Noted. Noted` padding, so padding cannot be the cause; this **resolves the CR9 confound for this comparison** (CR9 still needed for CR6's boundary term). | **measured** |
+
+### The engineering diagnosis
+
+> The verbose wording is **not inherently required** to represent the fact. It stays
+> required in ordinary execution because the model has not promoted the fact into a
+> sufficiently complete replacement state.
+
+Ordinary computation *does* promote partially (first answer token survives full
+exclusion; prefix carry extends beyond the granted interval) — it just does not
+complete before transcription finishes. **The untested middle operation is injecting
+or promoting a record into already-built state**; neither experiment touches it, and
+it is what BR4-style eviction would actually need.
+
+### Open items
+
+| # | Item | Blocking |
+|---|------|----------|
+| CR7 | **Operation-conditioned frontiers** — **EXP-24 COMPLETE, primary contrast INCONCLUSIVE** (`rsl-exp24`, 4 runs at 64K: 4B raw + chat, 12B chat, + capability pre-screen). On 12B the two *monotone* length-matched arms are copy k\*=3 vs digit-reversal k\*=4 — spread 1, the instrument's quantisation floor. A spread-2 reading exists only via `+1`, whose frontier is **non-monotone** (passes k=3 at 0.0481, *fails* k=4 at 0.0816, passes k=5), so its k\* is decided by one point straddling KL_TOL=0.05 and was not banked. On 4B the contrast is unavailable outright — the only length-matched transformation it performs is `+1`, which shares `743`, so its identical frontiers are exactly what the confound predicts. **Not blocked on instrument design; blocked on finding a de-confounded transformation the model performs *at range*.** Signal that did survive: `derived` retires at **k\*=0** on both models (12B maxKL 0.00019), answering `Yes` — not the `No` that ABSENT gives — so the boolean is fully resolved into question state before the first output token. Length-confounded, so it cannot carry the claim alone. | complete, inconclusive |
+| CR8 | **Step-local transfer matrix** `M[j,t]` — access enabled/disabled only at step *j*, scored at every later position. Diagonal ⇒ per-token; triangular ⇒ progressive. | nothing |
+| CR9 | **Padding factorial** on the record arm (record × padding A/B/C, padding-only, corrupted record + same padding) to attribute the boundary-token KL. | nothing |
+| CR10 | **Promotion into built state — DEMONSTRATED (EXP-25, `rsl-exp25`).** A 64K context built from the *verbose* source; a 13-token canonical record injected ~49K tokens downstream; the raw span excluded. Copy row, all three legs: pad-only → `7249` (**fails**, source genuinely necessary), canonical → `7431` at maxKL **0.0441**, payload **and** trajectory qualifying, corrupt → `5824` (**follows the corruption**). This is hot-state *replacement*, not the ingestion exp23/exp24 measured. Margin is narrow (0.0441 vs 0.05), so the claim rests on payload recovery + causal steering, with trajectory equivalence supporting. | **measured** |
+| CR14 | **Read-only-ness was a property of DISTANCE, not of records.** Same record, model, framing, question and 64K context; only the record's position relative to the active boundary differs: `+1` under *ingestion* (49K back) → maxKL **12.98**, recites `7431`; under *late injection* (at the boundary) → **0.1472**, answers `7432`. Reversal likewise 15.23 → 0.0610. Causal control confirms real computation on the injected value (corrupt `5824` → **`5825`**, an answer appearing nowhere in the context). **Promotion is therefore a capability-restoring operation, not merely a memory operation** — refreshing a fact near the boundary buys back computation unavailable while it sat distant. Canonical passes reads 1/1 and compute 2/2 on payload. | **measured** |
+| CR15 | **Prose cannot encode `discharged=true`; the record store needs a semantic type.** A discharged-result injection works for `+1` (*"The Meridian code plus one is 7432"* → `7432`, maxKL **0.0218**, the *only* compute arm passing trajectory) and fails for reversal: *"The Meridian code reversed is 1347"* → model answers **`7431`**, having reversed 1347 *again*. Systematic, not noise — the corrupt twin (`4285`) likewise returns `5824`. The earlier key-value form (`code_plus_one=5825` → `5826`) failed the same way, so **rewriting as prose did not fix it and whether it bites depends on the operation**. Requires `CanonicalFact{subject,relation,value}` vs `DerivedResult{operation,operands,result,discharged}` as typed objects, not text. | **measured** |
+| CR16 | **Payload and state authority are distinct retirement permissions, and the difference is entirely the stopping decision.** Per-position KL decomposition: canonical promotion reproduces the **payload** at 0.0001 / 0.0010 / 0.0223 bits (copy / `+1` / reversal) and **100% of its residual sits on position 4, the first `<end_of_turn>`** — a reachable token, not an unreachable post-EOT probe, so the trajectory failures are real and not a scoring artifact. Copy's 0.0001-bit payload matches exp23's ingested record (1.14e-4), generalising CR6's termination-local signature from copy to all three operations. **The discharged result fixes exactly what the canonical fact does not:** `+1` derived is 0.0008 payload / **0.0003 termination** (its 0.0218 max is a post-termination probe). Design rule: **canonical promotion licenses `answer_scoped_retirement`; only discharged-result promotion licenses `general_state_retirement` for a compute operation.** Diagnostic worth keeping: peak *position* separates failure modes — wrong answers (pad-only, corrupt, derived-reversal) peak on a **digit** at 6.9–18.8 bits; right answers peak on **termination**. | **measured** |
+| CR13 | **Operation capability is an estate precondition, and it decays with distance.** At 64K, 4B answers the literal `7431` to *four of five* query forms; 12B computes `+1111` correctly at 2K but returns `74311111` (concatenation) at 64K. A frontier over an operation the model never performed measures nothing, so capability is now an admission gate that runs first — `exp24_capability_prescreen.py`, ~30s vs ~15min per 64K arm. Constrains what an operation-conditioned semantic planner may assume: at range, models converge on retrieve-and-transcribe. | **measured** |
+| CR17 | **Source authority is a query-time, per-LAYER gate — but only on the fact it was measured on.** Retiring global layer 29 *alone* flips a live source at 6.3298 bits with the source readable in all seven other global layers; no other singleton comes close (0.0008–0.2312), and count-matched triples behave oppositely (`[17,29,41]` 7.5827 vs `[5,23,47]` 0.0013). Authority is acquired at QUERY time in a 2–4 token window at the **chat turn boundary**, not at entity resolution — every prefix window fails, including one hiding the queried entity itself, and masking idx 22 flips it while idx 23 (*closer* to generation) does not. At least two distinct routes exist (`[29]` vs `[35,41,47]`), differing on layers, phases and window width. **Scope limit, load-bearing:** EXP-36 shows the regime this was measured in (contested source that wins by default) does not exist for the second fact in the same document, so none of these values is a transferable certificate. The 256-subset lattice is cancelled. | **measured, one cell** |
+| CR18 | **The authority mechanism licenses no KV deletion — measured bit-exactly, not inferred.** Scoped and unscoped caches after a masked query are **bit-identical over the source span at every global layer** (max\|ΔK\| = max\|ΔV\| = 0.0, all eight), with the placebo rows also identical as a span-arithmetic cross-check. The source sits 55.6K tokens from the query, far outside the 1024 sliding window, so global layers are the *only* path to it and coverage is **complete** for this claim. Attention-time masking changes a layer's *output*, never its K/V *write* — so no amount of scoping can free the source, and this is architectural rather than statistical. Independently doubled by EXP-35's `B_norecord`, where the demoted source still answers correctly once uncontested. **"The decision persists" is not "the old evidence is dead."** | **measured** |
+| CR19 | **The persisted decision is a ~49 KB object that rides in V, not K.** A layer-29 mask's entire global-layer divergence footprint is `{35,41,47}` — exactly the second authority route, re-derived by an independent instrument. Transplanting rows between arms at fixed positions (nothing added or removed, RoPE untouched, both row sets genuine model outputs at those positions) flips the later answer: boundary rows and model-turn rows are **each independently sufficient and neither is necessary**, and `Vonly` flips it while `Konly` does not. Sufficient object = 4 positions × 3 layers × 8 kv-heads × 256 dims, V only. **Not** a discrete revocable record: substituting either carrier region alone leaves the effect intact, so it is the leading edge of a contaminated continuation and a runtime cannot revoke it by rewriting boundary rows. Direct hit on `rsl-4`'s channel-specific-liveness premise. | **measured** |
+| CR20 | **A live readable source CAN be overridden by promotion alone — the "never" tier is refuted, and the engine question moves to the promotion side.** Two independent refutations at 64K with nothing hidden and no attention intervention: two of four planted facts fall to a terse `key=value` record, and the *original* fact — the one declared un-overridable across k=0..3 — falls to a natural-language corroborator that works **alone**, with no terse record present. A caller can supply the winning material at promotion time: a record asserting a value verified absent from the whole 64K corpus wins outright, so nothing has to have been present when the context was built. **For this class `RESOLVE → PROMOTE → EXECUTE` needs no `DEAUTHORIZE`, no per-span certificate and no masked forwards** — which removes the entire CR17 layer machinery from the critical path for it. **Not yet a runtime rule:** an in-context type-correct ally correlates perfectly with the regime across the usable facts (depths 15–41%, both digit and word answers, so neither explains it) but fails necessity, and what rescues the resistant fact differs in *form* (natural-language vs `key=value`) as well as provenance. EXP-39 is the 2×2 that separates them, holding ally-presence at zero. | **measured, predictor open** |
+| CR11 | **Physical compression** — the record was padded to equal token length, so CR6 shows semantic compressibility only. A production record should occupy fewer active slots or live outside the token stream. | CR10 |
+| CR12 | **Predictive resident-envelope benchmark** — policies (no-prefetch / LRU / record-lookup / operation-conditioned / oracle) scored on *envelope coverage*, not exact-route match; see the objective change below. Needs CR7's oracle lifetime traces to define the target. | CR7 |
+
+### Design consequence: predict residency, qualify execution
+
+The CR-track findings change what the predictive hot cache is *for*. The original
+framing made one predictor answer two questions at once — what should be
+physically available, and what the model should actually compute against — so a
+false positive could alter semantics and a false negative could damage the
+answer. Separating them makes the prediction problem strictly easier and removes
+its correctness burden:
+
+```
+resident set  ⊇  execution set
+```
+
+A prefetched page, expert or record does **not** participate in computation merely
+by being resident. False positives then cost capacity, I/O and eviction pressure
+but **cannot change model behaviour**; false negatives cost a cold replay or late
+fetch, not a wrong answer. Prediction controls residency; qualification controls
+execution. This is R13 Corollary A stated as an architecture rather than as a
+measurement rule.
+
+Four physical tiers follow: **active execution set** (semantically conservative —
+recent KV, answer prefix, qualified source pages) / **predicted resident envelope**
+(where prediction operates, legitimately larger) / **warm canonical records**
+(CR6 makes these excellent cache objects — far cheaper than token-level K/V) /
+**cold source and replay authority** (exact quotation, reinterpretation, record
+failure, operations the promoted state does not cover). A miss follows a
+provenance pointer rather than re-searching history.
+
+**The experiment objective changes accordingly.** The question is no longer "did
+the predictor choose the exact future route?" but "**did the predicted resident
+envelope contain the eventually qualified route?**" — minimising
+`late-miss + unused-prefetch + eviction` cost subject to the execution route
+qualifying semantically, with behavioural parity held fixed. CR7 supplies the
+second predictive input: not just *which* page will be needed but *for how long*,
+which is what makes lifetime-based eviction possible where LRU and frequency
+cannot see. Cache entries must be keyed by stable logical identity (record id,
+logical token range, layer, page identity, epoch, expert owner) and resolved to
+physical locations at execution time — the R14 mutating-state corollary, which a
+snapshot-index defect in this track already established the hard way.
+
+Attention-side and expert-side prediction can share one semantic planner but
+**must stay separate caches** — different costs, different routes, and their
+speedups must not be multiplied until end-to-end overlap is measured.
+
+**Estate caveat, carried:** 2 of 5 values admitted — 1 genuine retrieval failure,
+**2 rejected by a global answer-length cap, not by retrieval**. Per-value answer
+budgets are a **new estate**, not a re-blend. Everything in CR4–CR6 rests on one
+query form over two digit strings, and transcription is plausibly the worst case
+since every output token is a literal.
+
+**Not licensed by any of the above:** speculative SSD prefetch of route state. On
+this estate the whole schedulable pool is 1.76 GiB and fits in RAM; with it
+preloaded, storage stalls are exactly zero for every policy including no-prefetch.
+K3 is the first estate where that question is even askable.
+
+### Method rules earned here (now standing, see [`dec-funnel.md`](docs/dec-funnel.md))
+
+- **R12** — name the metric's SPACE and the search's GUARANTEE; record an execution fingerprint (per-operation precision, trajectory, batching).
+- **R13** — route membership is selected and validated jointly; isolated marginal importance is not a safe pruning criterion. Corollary A: resident ⊃ execution set, qualification attaches to the activation mask. Corollary B: a family's core is objective-relative — plan `argmin C_physical(R | residency)`, never `argmin |R|`.
+- **R14** — **gate–claim congruence**: a gate licenses only claims over the object, trajectory and counterfactual relation it tests. Five instrument defects in this track were caught only by gates spanning the same object as the claim; two were missed by gates that did not.
 
 ---
 

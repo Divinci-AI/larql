@@ -378,7 +378,9 @@ fn run_attention_block_core(
     let rotary_frac = arch.rotary_fraction_for_layer(layer);
     let pos_divisor =
         crate::forward_overrides::effective_rope_position_divisor_for_layer(arch, layer);
-    let llama3 = crate::forward_overrides::effective_llama3_rope_scaling(arch);
+    // M1: honour every scaling family (llama3 / YaRN / linear), not just
+    // llama3 — the same resolver the Metal pipeline spec reads.
+    let rope_scaling = crate::forward_overrides::effective_rope_freq_scaling(arch);
     let q_rope = crate::attention::rope::apply_rope_partial_at_full(
         &q_normed,
         num_q,
@@ -387,7 +389,7 @@ fn run_attention_block_core(
         rotary_frac,
         0,
         pos_divisor,
-        llama3,
+        rope_scaling,
     );
 
     // K/V: either from shared cache or computed fresh
@@ -452,7 +454,7 @@ fn run_attention_block_core(
             rotary_frac,
             0,
             pos_divisor,
-            llama3,
+            rope_scaling,
         );
         (k_r, v_full)
     };

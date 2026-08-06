@@ -100,6 +100,7 @@ impl TestMoeArch {
                 per_layer_embed_dim: None,
                 num_kv_shared_layers: None,
                 has_vision_config: false,
+                tie_word_embeddings: None,
             },
         }
     }

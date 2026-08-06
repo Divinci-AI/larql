@@ -29,13 +29,14 @@ kernel void fused_attention(
     constant uint&      num_q   [[buffer(6)]],
     constant uint&      num_kv  [[buffer(7)]],
     constant float&     scale   [[buffer(8)]],
-    constant float&     rope_base [[buffer(9)]],
+    device const float* inv_freq  [[buffer(9)]],   // [rotary_dim/2], host-computed
     constant uint&      use_qk_norm [[buffer(10)]],  // 0 or 1
     constant float&     softcap     [[buffer(11)]],  // 0.0 = disabled
     constant uint&      skip_rope   [[buffer(12)]],  // 0 = apply RoPE, 1 = skip (caller pre-applied)
     constant uint&      rotary_dim  [[buffer(13)]],  // 0 = full head_dim, else partial rotation
     constant float*     sinks       [[buffer(14)]],  // per-Q-head attention sink logits
-    constant uint&      has_sinks   [[buffer(15)]],  // 0 = no sinks (buffer is a dummy)
+    constant uint&      has_sinks   [[buffer(15)]],
+    constant float&     amplitude   [[buffer(16)]],  // cos/sin scalar (YaRN); 1.0 otherwise  // 0 = no sinks (buffer is a dummy)
     uint2 tg_id [[threadgroup_position_in_grid]],    // (head, query_pos)
     uint tid    [[thread_index_in_threadgroup]])
 {
@@ -63,10 +64,9 @@ kernel void fused_attention(
 
         if (skip_rope == 0 && d < rdim) {
             // RoPE: split-half rotation within rotary dims
-            float freq = 1.0f / pow(rope_base, float(2 * (d % hdim)) / float(rdim));
-            float angle = float(qi) * freq;
-            float cos_a = cos(angle);
-            float sin_a = sin(angle);
+            float angle = float(qi) * inv_freq[d % hdim];
+            float cos_a = cos(angle) * amplitude;
+            float sin_a = sin(angle) * amplitude;
 
             uint pair_d = (d < hdim) ? d + hdim : d - hdim;
             uint pair_idx = qi * num_q * head_dim + head * head_dim + pair_d;
@@ -119,10 +119,9 @@ kernel void fused_attention(
             float k_final;
             if (skip_rope == 0 && d < rdim) {
                 // RoPE on K (only within rotary dims)
-                float freq = 1.0f / pow(rope_base, float(2 * (d % hdim)) / float(rdim));
-                float angle = float(k) * freq;
-                float cos_a = cos(angle);
-                float sin_a = sin(angle);
+                float angle = float(k) * inv_freq[d % hdim];
+                float cos_a = cos(angle) * amplitude;
+                float sin_a = sin(angle) * amplitude;
 
                 uint pair_d = (d < hdim) ? d + hdim : d - hdim;
                 uint pair_idx = k * num_kv * head_dim + kv_head * head_dim + pair_d;

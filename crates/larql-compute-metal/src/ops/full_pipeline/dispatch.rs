@@ -251,7 +251,7 @@ pub fn dispatch_full_pipeline(
 
     for l in 0..num_layers {
         let eps = layers[l].eps;
-        let layer_rope_base = layers[l].rope_base;
+        let layer_rope_plan = &layers[l].rope_freq;
         let layer_head_dim = layers[l].head_dim;
         let layer_num_q_heads = layers[l].num_q_heads;
         let layer_num_kv_heads = layers[l].num_kv_heads;
@@ -411,7 +411,7 @@ pub fn dispatch_full_pipeline(
                 layer_num_kv_heads,
                 layer_head_dim,
                 layers[l].rotary_dim,
-                layer_rope_base,
+                layer_rope_plan,
             );
             enc.end_encoding();
         }
@@ -431,7 +431,7 @@ pub fn dispatch_full_pipeline(
                 layer_num_kv_heads,
                 layer_head_dim,
                 layer_attn_scale,
-                layer_rope_base,
+                layer_rope_plan,
                 crate::stages::attention::Flags {
                     // Caller pre-applied QK-norm: tell shader to skip its internal
                     // normalisation so we don't double-normalise.

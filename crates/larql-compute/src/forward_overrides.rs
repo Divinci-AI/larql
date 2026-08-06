@@ -227,6 +227,31 @@ pub fn effective_llama3_rope_scaling(
     llama3_rope_scaling_override().or_else(|| arch.llama3_rope_scaling())
 }
 
+/// The RoPE frequency family this architecture is served under.
+///
+/// **One resolver, called by every attention path.** The four call sites that
+/// rope Q/K (dense prefill, GPU prefill, Q4K-direct decode, cached kquant
+/// decode) previously each reached for `effective_llama3_rope_scaling`
+/// independently, so a family none of them knew about was ignored four times
+/// over. Resolving the whole decision once is the same shape as the shared
+/// `softmax_in_place` that replaced four byte-identical attention-sink copies
+/// (`docs/k3-funnel.md` §4.6).
+///
+/// Llama-3 wins a tie because its env-var override exists for diagnostics and
+/// must stay able to force a family; no checkpoint declares both.
+pub fn effective_rope_freq_scaling(
+    arch: &dyn larql_models::ModelArchitecture,
+) -> crate::attention::rope::RopeFreqScaling {
+    use crate::attention::rope::RopeFreqScaling;
+    if let Some(s) = effective_llama3_rope_scaling(arch) {
+        return RopeFreqScaling::Llama3(s);
+    }
+    if let Some(s) = arch.yarn_rope_scaling() {
+        return RopeFreqScaling::Yarn(s);
+    }
+    RopeFreqScaling::None
+}
+
 /// Diagnostic norm-epsilon override read from `LARQL_NORM_EPS_OVERRIDE=<f64>`.
 /// When set, replaces the architecture's `norm_eps()` value at every
 /// `rms_norm_for_arch` / `layer_norm_for_arch` call site. Use to test

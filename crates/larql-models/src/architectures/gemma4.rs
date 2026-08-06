@@ -256,11 +256,11 @@ impl ModelArchitecture for Gemma4Arch {
         self.config.moe_intermediate_size.unwrap_or(0)
     }
 
-    fn moe_router_type(&self) -> &str {
+    fn moe_router_kind(&self) -> crate::MoeRouterKind {
         if self.config.enable_moe_block {
-            "gemma4_top_k_softmax"
+            crate::MoeRouterKind::Gemma4Hybrid
         } else {
-            "top_k_softmax"
+            crate::MoeRouterKind::TopKSoftmax
         }
     }
 

@@ -230,6 +230,11 @@ mod tests {
             num_kv_heads: 4,
             rope_base: 10000.0,
             rotary_dim: 0,
+            rope_freq: larql_compute::attention::rope::RopeFreqPlan::unscaled(
+                64_usize,
+                0_usize,
+                10000.0_f64,
+            ),
             sliding_window: 0,
             has_v_norm: false,
             layer_scalar: 0.0,

@@ -1,5 +1,157 @@
 # Roadmap — larql-kv
 
+## Semantic promotion — Phase A/B landed, physical seam open (2026-08-05)
+
+`engines/semantic_promotion/` (policy wrapper over an exact decode engine)
+and `model_walk/` (its peer planner) are built and gated: 1 120 tests in
+this crate, clippy clean, workspace green, **uncommitted** — five commits
+prepped. Full pickup notes, evidence ledger and ordered queue:
+**`docs/semantic-promotion-pickup.md`**. Contract:
+`docs/specs/semantic-promotion-engine.md`.
+
+**What the measurements settled.** A late canonical record independently
+reconstructs the answer *payload* in a suffix that never saw the source —
+3/3 at 4K and 3/3 at ~49K distance, controls clean (EXP-25CF). It does
+**not** reconstruct the termination decision: all 12 canonical arms peak
+on the first termination token, in both histories, at both distances. So
+the runtime permission is `ExactPayloadLength`, never `FirstTermination`,
+which is what `RetirementScope::check_covered_by` enforces.
+
+A `DerivedClaim` is the *stronger* replacement at range — at ~49K it
+carries payload and trajectory — and actively wrong at short range, where
+the model reads it as a fresh operand and runs the operation twice
+(7432 → 7433). The switch is abrupt, between 48K and 64K, and identical
+across counterfactual histories, so source-conditioned state is excluded.
+The corrupt arm is non-monotone across the same sweep, so consumption is
+not a function of geometry alone. Certificates therefore carry
+`RegimeEvidence::Point` (never an interpolated band) keyed on both
+`record_digest` and `materialisation_digest`.
+
+**Scope correction — read before quoting Phase B.** These results are
+proven on the CPU per-layer executor. `kv_dispatch::helpers` never
+consults `arch.is_sliding_window_layer`; the global/sliding split is a
+promotion-wrapper policy, not attention. Ragged per-layer extents are
+mechanically valid; that they correspond to production architectural
+visibility is **pending**, and R8d is the gate for it.
+
+**Next implementation seam.** `larql_inference::kv_row_positions` exists
+and is gated but **not wired**. `clip_kv` keeps the tail *N physical
+rows*, so across a positional hole it retains rows thousands of positions
+old inside a small window (`r7b`). Wiring order, atomicity requirement and
+the R8-storage / R8-policy split are in the pickup notes §5.
+
+**Next experiment.** Source distance is ruled out (answer-mode at
+source→query 3K/8K/16K/32K at fixed 64K regime, versus operand at ~3K in
+a 4K context). The controlling variable is in the global-context regime,
+so the next run holds all three semantic distances fixed and varies an
+unrelated prefix. Queue in pickup notes §6.
+
+---
+
+## MAP-5 persistence harness — scoped and verified, not started (2026-08-02)
+
+A parallel mechanistic-interpretability thread (MAP-5/5b/5c, registry
+`map`, see `crates/larql-inference/examples/map5*.rs`) found that a
+late-layer residual can act as a compact, content-specific executable
+waypoint: splicing a donor prompt's residual into a recipient at one
+position/layer redirects the recipient's output to the donor's answer,
+with separate, measurably different depth thresholds for redirecting
+the immediate next token vs. sustaining a later branch under repeated
+re-injection. The open question — does this persist as genuine hidden
+state, or is it entirely mediated by which token gets emitted — could
+not be answered by MAP-5b's harness, because `trace_forward_full`/
+`patch_and_trace_with_ffn` (the activation-patching primitives it used)
+recompute the ENTIRE hidden state from raw token IDs on every call, with
+no persistent state threaded between generation steps. Testing genuine
+persistence needs a real incremental decode loop with actual K/V
+continuity across steps — which is most of what this crate already is.
+**Scoped here so the harness can be picked up once VINDEX3 lands**,
+without duplicating this crate's own state/execution machinery.
+
+**What already exists (verified against the current code, not assumed):**
+
+- `StandardEngine::prefill(weights, ffn, token_ids)` and
+  `::decode_step(weights, ffn, token_id)` (`engines/standard.rs`) are
+  genuine incremental decode: `token_id` is explicit per step, state
+  (`handles: Option<Vec<KvHandle>>`, `abs_position`) lives in `&mut
+  self` and persists across calls — not a recompute-from-scratch design.
+  This directly gives arm **C** (donor-token-only, no residual patch:
+  `engine.prefill(recipient)?; engine.decode_step(donor_token)?;`) and
+  arm **D** (residual patch, then force the recipient's own token into
+  the next step) as thin drivers, no new engine code.
+- `KvHandle` (`larql-compute::kv_dispatch::handles`) is real but
+  **opaque** — `cached_len()`/`kv_dim()`/`backend_name()`/`as_any()`
+  only, no per-row read or write. `StandardEngine` migrated OFF the old
+  `larql-kv::cache::KvCache` (with its `get_layer`/`set_layer`/
+  `clone_layer_from`/`clone_layer_position_range`) on 2026-05-16 per its
+  own module doc — that API is not reachable from the current handle-based
+  decode path. Earlier notes citing those methods as usable for this
+  harness were wrong; they exist, but on a representation `StandardEngine`
+  no longer touches.
+- `KvEngine` (`larql-inference::kv_engine`) has 8 implementors —
+  `StandardEngine`, `NoCacheEngine`, `UnlimitedContextEngine`,
+  `MarkovResidualEngine`, `MarkovResidualCodecEngine`, `TurboQuantEngine`,
+  `BoundaryPerLayerEngine`, `BoundaryKvEngine` (`ApolloEngine` implements
+  a separate `RetrievalEngine` trait, not this one) — a real, already-built
+  catalogue of different continuation-state policies (canonical K/V vs.
+  canonical residual with derivative K/V, etc., per `docs/state-policy.md`
+  §5's slotting table), reachable through one dispatch surface.
+- **Correction to an earlier framing**: `docs/state-policy.md`'s
+  `(canonical_state, derivative_state, correctness_contract)` triple is a
+  **draft proposal (v0.1)**, not an implemented framework — the doc's own
+  §7 states refactoring `KvEngine` to formalize it is explicitly a
+  non-goal for now. It's a good *descriptive* lens for reasoning about
+  the engines (and for interpreting this harness's own results), but it
+  is not code anyone can call today.
+- No hook anywhere lets a caller intercept or mutate raw K/V during
+  attention — confirmed by direct search (`before_attention`,
+  `before_append`, and any K/V-observing `LayerHook` method: zero
+  matches). `LayerHook::on_post_attention`/`on_post_layer`
+  (`larql-compute::forward::hooks`) only ever see the **residual**, after
+  attention has already run and consumed whatever K/V existed — this is
+  the one genuinely missing piece.
+
+**What's actually missing, precisely:** an intervention-capable bridge
+between an incremental engine's K/V state and the attention computation
+that creates/reads/appends it — nothing else needed for the six-arm
+design (see `map-5`'s chuk-experiments record for the arm definitions
+and how they map onto existing vs. new machinery). A rough shape, not a
+commitment:
+
+```rust
+// Proposed — does not exist yet. Lives in larql-compute (low-level
+// observation/mutation over the real attention/append path), surfaced
+// through a larql-inference hook type, orchestrated by an larql-kv
+// experimental driver (NOT folded into KvEngine itself — that trait
+// stays production-shaped: continuation state, advance, correctness
+// contract; a raw-K/V research hook doesn't belong on its signature).
+pub trait KvIntervention {
+    fn before_attention(&mut self, layer: usize, position: usize, cache: &mut dyn MutableKvView);
+    fn before_append(&mut self, layer: usize, position: usize, key: &mut [f32], value: &mut [f32]);
+}
+```
+
+`MutableKvView` would need to distinguish current-token K/V (about to be
+appended) from historical-cache K/V (already stored, read by this
+step's attention) from whole-layer transplant from position-range
+transplant from K-only/V-only mutation — conflating these makes any
+result hard to interpret. CPU implements it first; Metal/opaque
+whole-model-handle backends report unsupported rather than silently
+falling back to a CPU copy.
+
+**Do not build a parallel experimental decode loop.** The correct shape
+is an instrumented research mode bolted onto `StandardEngine`'s existing
+CPU path (selectively inspectable/forkable), with the fast/opaque
+production path left untouched — not a second engine competing with this
+crate's own state-policy catalogue.
+
+**Explicitly deferred pending VINDEX3** (see `ROADMAP_STATUS.md`'s
+2026-08-02 entry and chuk-experiments `map-5`'s `next_action`) — this
+section exists so the scoping work already done isn't lost, not as a
+signal to start now.
+
+## Spin-barrier pool — CPU MoE decode caught llama.cpp (2026-06-13)
+
 ## Current state (2026-08-04)
 
 Nine engines behind one `EngineKind` selector, all reachable from

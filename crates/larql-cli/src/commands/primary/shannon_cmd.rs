@@ -21,7 +21,7 @@ use larql_inference::{
 use ndarray::{s, Array2};
 
 const LN_2: f64 = std::f64::consts::LN_2;
-const DEFAULT_CONTEXT: usize = 512;
+pub(crate) const DEFAULT_CONTEXT: usize = 512;
 const DEFAULT_STRIDE: usize = 256;
 
 // ── Engine identifiers used across `shannon verify` ─────────────────────
@@ -77,6 +77,15 @@ pub enum ShannonCommand {
     /// (subprocesses); prints a delta table and exits non-zero if any pair-wise
     /// delta exceeds `--threshold`. See `scripts/README_shannon_score.md`.
     Verify(VerifyArgs),
+
+    /// Dump every end-of-layer residual of one forward pass as raw f32 planes.
+    /// The *where* half of Gate B — `verify` says two engines disagree, this
+    /// says at which layer. See [`super::shannon_trace`].
+    LayerDump(super::shannon_trace::LayerDumpArgs),
+
+    /// Compare two `layer-dump` directories layer by layer and name the first
+    /// capture that drifts.
+    LayerDiff(super::shannon_trace::LayerDiffArgs),
 }
 
 #[derive(Args)]
@@ -295,6 +304,8 @@ pub fn run(cmd: ShannonCommand) -> Result<(), Box<dyn std::error::Error>> {
         ShannonCommand::Encode(args) => run_encode(args),
         ShannonCommand::Decode(args) => run_decode(args),
         ShannonCommand::Verify(args) => run_verify(args),
+        ShannonCommand::LayerDump(args) => super::shannon_trace::dump::run_layer_dump(args),
+        ShannonCommand::LayerDiff(args) => super::shannon_trace::compare::run_layer_diff(args),
     }
 }
 
@@ -1286,7 +1297,7 @@ fn run_decode_vindex(args: DecodeArgs) -> Result<(), Box<dyn std::error::Error>>
     Ok(())
 }
 
-fn load_model(model: &str) -> Result<InferenceModel, Box<dyn std::error::Error>> {
+pub(crate) fn load_model(model: &str) -> Result<InferenceModel, Box<dyn std::error::Error>> {
     eprintln!("loading {model}...");
     let start = Instant::now();
     let loaded = InferenceModel::load(model)?;
@@ -1299,7 +1310,7 @@ fn load_model(model: &str) -> Result<InferenceModel, Box<dyn std::error::Error>>
     Ok(loaded)
 }
 
-fn read_text(
+pub(crate) fn read_text(
     path: &PathBuf,
     limit_bytes: Option<usize>,
 ) -> Result<String, Box<dyn std::error::Error>> {
@@ -1462,7 +1473,7 @@ fn forward_hidden(
     Ok(h)
 }
 
-fn forward_hidden_all_layers(
+pub(crate) fn forward_hidden_all_layers(
     weights: &ModelWeights,
     token_ids: &[u32],
 ) -> Result<Vec<Array2<f32>>, Box<dyn std::error::Error>> {

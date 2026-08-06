@@ -104,6 +104,7 @@ pub mod markov_residual;
 pub mod markov_residual_codec;
 pub mod no_cache;
 pub mod no_expert_route;
+pub mod semantic_promotion;
 pub mod standard;
 pub mod turbo_quant;
 pub mod windowed_checkpoint;

@@ -107,13 +107,11 @@ pub fn run_single_expert(
     // Build inner activation at `inter_padded` so the down matmul (which
     // expects `inter_padded` columns under Q4_K) sees zero in the padding.
     let mut hidden_state: Vec<f32> = vec![0.0f32; inter_padded];
+    let gelu = activation.gate_up_is_gelu_tanh();
     for j in 0..inter {
         let g = gate_out[j];
         let u = up_out[j];
-        hidden_state[j] = match activation {
-            crate::Activation::GeluTanh => gelu_tanh(g) * u,
-            _ => silu(g) * u,
-        };
+        hidden_state[j] = if gelu { gelu_tanh(g) * u } else { silu(g) * u };
     }
 
     let down_w = try_cached_dequant(down_bytes, format, hidden * inter_padded)
@@ -222,13 +220,11 @@ pub fn run_single_expert_into<'s>(
         if timing {
             t = std::time::Instant::now();
         }
+        let gelu = activation.gate_up_is_gelu_tanh();
         for j in 0..inter {
             let g = scratch.gate_out[j];
             let u = scratch.up_out[j];
-            scratch.act[j] = match activation {
-                crate::Activation::GeluTanh => gelu_tanh(g) * u,
-                _ => silu(g) * u,
-            };
+            scratch.act[j] = if gelu { gelu_tanh(g) * u } else { silu(g) * u };
         }
         let t_act = if timing { Some(t.elapsed()) } else { None };
         if timing {
@@ -279,13 +275,11 @@ pub fn run_single_expert_into<'s>(
     // Build inner activation at `inter_padded`; padding columns
     // (`inter..inter_padded`) stay at their zero-initialised value across
     // reuses since we never write them.
+    let gelu = activation.gate_up_is_gelu_tanh();
     for j in 0..inter {
         let g = scratch.gate_out[j];
         let u = scratch.up_out[j];
-        scratch.act[j] = match activation {
-            crate::Activation::GeluTanh => gelu_tanh(g) * u,
-            _ => silu(g) * u,
-        };
+        scratch.act[j] = if gelu { gelu_tanh(g) * u } else { silu(g) * u };
     }
     let t_act = if timing { Some(t.elapsed()) } else { None };
     if timing {

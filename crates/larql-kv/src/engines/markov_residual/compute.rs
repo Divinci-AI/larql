@@ -12,7 +12,7 @@ use std::cmp::Ordering;
 
 use larql_inference::attention::apply_rope_partial_at;
 use larql_inference::forward::{add_bias, apply_norm};
-use larql_inference::residual::{rms_norm_heads, rms_norm_heads_no_weight};
+use larql_inference::residual::{rms_norm_heads_no_weight, rms_norm_qk_for_arch};
 
 #[derive(Clone, Copy)]
 enum KvProjection {
@@ -241,7 +241,7 @@ pub fn recompute_kv(
         .attn_k_norm_key(layer)
         .and_then(|k| weights.vectors.get(&k))
     {
-        Some(norm_w) => rms_norm_heads(&k, norm_w, num_kv, head_dim, qk_norm_off),
+        Some(norm_w) => rms_norm_qk_for_arch(&k, norm_w, num_kv, head_dim, qk_norm_off, arch),
         None => k,
     };
     let k_rope = apply_rope_partial_at(

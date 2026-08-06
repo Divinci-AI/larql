@@ -1,7 +1,7 @@
 //! [`KvEngine`] — the interface the autoregressive decode loop dispatches
 //! against.
 
-use super::{DecodeStageSummary, DispatchPath, EngineError, EngineInfo};
+use super::{DecodeStageSummary, DispatchPath, EngineError, EngineInfo, PerLayerKvAccess};
 use crate::ffn::FfnBackend;
 use crate::ModelWeights;
 use ndarray::Array2;
@@ -88,6 +88,14 @@ pub trait KvEngine: Send {
              check supports_multimodal() before calling prefill_from_hidden",
             self.name()
         );
+    }
+
+    /// Per-layer K/V row access, for policy wrappers that rewrite the
+    /// cache. Default `None` — an engine opts in only when its cache is
+    /// genuinely per-layer. See [`PerLayerKvAccess`] for why offering
+    /// this is not a masking claim.
+    fn per_layer_kv_mut(&mut self) -> Option<&mut dyn PerLayerKvAccess> {
+        None
     }
 
     /// Bytes of persistent engine state (excludes model weights).

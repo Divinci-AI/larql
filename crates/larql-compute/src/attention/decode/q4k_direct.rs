@@ -130,7 +130,7 @@ pub fn decode_step_project_q4k_direct(
     index: &dyn crate::KvIndex,
 ) -> Option<Q4kDecodeProj> {
     use crate::forward::add_bias;
-    use crate::residual::{rms_norm_heads, rms_norm_heads_no_weight};
+    use crate::residual::{rms_norm_heads_no_weight, rms_norm_qk_for_arch};
 
     let arch = &*weights.arch;
     let head_dim = arch.head_dim_for_layer(layer);
@@ -176,14 +176,14 @@ pub fn decode_step_project_q4k_direct(
         .attn_q_norm_key(layer)
         .and_then(|k| weights.vectors.get(&k))
     {
-        Some(norm_w) => rms_norm_heads(&q_full, norm_w, num_q, head_dim, qk_norm_off),
+        Some(norm_w) => rms_norm_qk_for_arch(&q_full, norm_w, num_q, head_dim, qk_norm_off, arch),
         None => q_full,
     };
     let layer_rope_base = crate::forward_overrides::effective_rope_base_for_layer(arch, layer);
     let rotary_frac = arch.rotary_fraction_for_layer(layer);
     let pos_divisor =
         crate::forward_overrides::effective_rope_position_divisor_for_layer(arch, layer);
-    let llama3 = crate::forward_overrides::effective_llama3_rope_scaling(arch);
+    let rope_scaling = crate::forward_overrides::effective_rope_freq_scaling(arch);
     let q_rope = crate::attention::rope::apply_rope_partial_at_full(
         &q_normed,
         num_q,
@@ -192,7 +192,7 @@ pub fn decode_step_project_q4k_direct(
         rotary_frac,
         position,
         pos_divisor,
-        llama3,
+        rope_scaling,
     );
 
     let mut k_full_new = direct_proj(backend, &wk, &h_norm, &mut h_norm_q8k, int8, kv_dim, hidden)?;
@@ -216,7 +216,9 @@ pub fn decode_step_project_q4k_direct(
         .attn_k_norm_key(layer)
         .and_then(|k| weights.vectors.get(&k))
     {
-        Some(norm_w) => rms_norm_heads(&k_full_new, norm_w, num_kv, head_dim, qk_norm_off),
+        Some(norm_w) => {
+            rms_norm_qk_for_arch(&k_full_new, norm_w, num_kv, head_dim, qk_norm_off, arch)
+        }
         None => k_full_new,
     };
     let k_new_rope = crate::attention::rope::apply_rope_partial_at_full(
@@ -227,7 +229,7 @@ pub fn decode_step_project_q4k_direct(
         rotary_frac,
         position,
         pos_divisor,
-        llama3,
+        rope_scaling,
     );
 
     Some(Q4kDecodeProj {
