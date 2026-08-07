@@ -137,7 +137,7 @@ impl BoundaryKvEngine {
     /// True iff `abs_position` (the just-completed step) lands on a chunk
     /// boundary. Position 0 is never a boundary.
     fn at_chunk_boundary(&self) -> bool {
-        self.abs_position > 0 && self.abs_position % self.chunk_tokens() == 0
+        self.abs_position > 0 && self.abs_position.is_multiple_of(self.chunk_tokens())
     }
 
     /// The archive chain id frames are currently emitted under.

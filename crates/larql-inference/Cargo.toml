@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+rust-version.workspace = true
 description = "Transformer inference engine — forward pass, attention, FFN, layer norm from safetensors weights"
 keywords = ["transformer", "inference", "llm", "interpretability"]
 categories = ["science"]
@@ -71,8 +72,8 @@ async-stream = "0.3"
 futures = "0.3"
 
 # WASM expert registry
-wasmtime = { version = "29", default-features = false, features = ["cranelift", "runtime"] }
-wasmtime-wasi = "29"
+wasmtime = { version = "36.0.7", default-features = false, features = ["cranelift", "runtime"] }
+wasmtime-wasi = "36.0.7"
 anyhow = "1"
 
 

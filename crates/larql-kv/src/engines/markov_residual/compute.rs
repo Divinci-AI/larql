@@ -342,10 +342,11 @@ pub(crate) fn markov_inplace_kv_enabled() -> bool {
 }
 
 fn markov_walk_kv_diag_layer(layer: usize) -> bool {
-    // `is_none_or` is MSRV 1.82; project pins MSRV 1.80. Equivalent
-    // semantics: env-var absent → true (diag applies to all layers),
-    // env-var present → check the comma-list.
-    read_markov_env("LARQL_MARKOV_WALK_KV_LAYERS").map_or(true, |spec| layer_in_spec(&spec, layer))
+    // Env-var absent → true (diag applies to all layers); present → check
+    // the comma-list. This was a `map_or(true, ..)` while the workspace
+    // pinned MSRV 1.80, since `is_none_or` stabilised in 1.82; the MSRV is
+    // 1.88 now, so it says what it means.
+    read_markov_env("LARQL_MARKOV_WALK_KV_LAYERS").is_none_or(|spec| layer_in_spec(&spec, layer))
 }
 
 fn layer_in_spec(spec: &str, layer: usize) -> bool {

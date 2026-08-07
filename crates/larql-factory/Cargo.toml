@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+rust-version.workspace = true
 description = "Vindex Factory recipe schema, build_id canonicaliser, and structural validator (docs/vindex-factory.md)"
 keywords = ["vindex", "factory", "recipe", "schema"]
 categories = ["data-structures", "encoding"]
