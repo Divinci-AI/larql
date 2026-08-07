@@ -1,0 +1,248 @@
+# Model Publishing Roadmap
+
+How a vindex gets from a source checkpoint to a published, archived artifact
+— and the traps that made the 2026-08-07/08 republish take a day rather than
+an afternoon.
+
+Written after re-extracting and republishing every affected vindex following
+the ggml nibble-layout fix (PR #212). The process below is what actually
+worked; the pitfalls are ones that were hit, not ones imagined.
+
+---
+
+## 1. Why this document exists
+
+PR #207 moved the CPU side of Q4_0 and Q6_K onto ggml's planar nibble layout
+and changed no file under `larql-compute-metal`. PR #212 fixed the GPU side.
+Both are correctness fixes — but they also **invalidated every vindex written
+before 2026-08-07 that stores Q4_0 or Q6_K blocks**, because those files hold
+bytes in the old private layout and the fixed readers decode them as planar.
+
+The symptom is not a crash. It is fluent garbage:
+
+```
+$ larql run gemma3-4b-q4k-v2.vindex "The capital of France is"
+ shaker peč mixtoவர கருதப்படுகிறதுstehungjö às części ladder Vase znač
+```
+
+Nine of twelve published vindex repos were affected. Nothing warned; the
+vindex format records no nibble-layout version. That is the standing gap
+(§7).
+
+---
+
+## 2. Is a vindex affected?
+
+A vindex is affected **iff both** hold:
+
+1. it stores `Q6_K` or `Q4_0` blocks, **and**
+2. it was written before **2026-08-07**.
+
+`Q4_K` was never affected — a Q4_K-only vindex is fine regardless of age.
+
+### Checking (1) — content
+
+Two naming generations exist and a check must cover both, or it will report
+a false negative:
+
+| generation | weight files |
+|---|---|
+| current | `attn_weights_kquant.bin`, `interleaved_kquant.bin` (+ `*_manifest.json`) |
+| legacy | `attn_weights_q4k.bin`, `interleaved_q4k.bin` (+ `*_q4k_manifest.json`) |
+
+```bash
+# Both generations, plus the manifests that name the block format.
+ls VINDEX/ | grep -E 'attn_weights_(kquant|q4k)\.bin|interleaved_(kquant|q4k)\.bin'
+cat VINDEX/*_manifest.json | grep -oE '"(Q4_K|Q6_K|Q4_0)"' | sort -u
+```
+
+`interleaved_*.bin` written in `q4k` mode always carries Q6_K: the layout is
+`[gate Q4_K | up Q4_K | down Q6_K]` (`write_kquant/ffn.rs`). `attn_weights_*`
+carries Q6_K for the V projection.
+
+**`lm_head_q4.bin` is Q4_K** (`quantize_q4_k` in `write_kquant/lm_head.rs`)
+and is *not* affected — do not delete it as part of a cleanup.
+
+### Checking (2) — age
+
+`stat -f "%Sm" VINDEX/interleaved_*.bin`, or `index.json`'s absence of
+`rope_scaling` (added 2026-08-06) as a coarse proxy.
+
+### Confirming
+
+Run it. An affected vindex emits obvious garbage; there is no subtle case.
+
+---
+
+## 3. The pipeline
+
+Each step gates the next. Do not skip the verifies — the two that matter most
+(3.2 and 3.6) each caught a real problem during the 2026-08 run.
+
+### 3.1 Re-extract
+
+```bash
+larql extract <hf-snapshot-path> \
+  --output <name>-v2.vindex \
+  --quant q4k --down-top-k 10
+```
+
+Extract to a **new** path. Overwriting in place destroys the only copy of a
+working artifact if the extraction fails halfway.
+
+`--quant q4k` implies `--level all` (fixed in PR #215; before that it silently
+recorded `inference`).
+
+### 3.2 Verify it generates
+
+```bash
+larql run <name>-v2.vindex "The capital of France is" --max-tokens 10
+```
+
+Coherent output only. This is the gate that distinguishes "re-extracted" from
+"re-extracted correctly", and it costs seconds.
+
+### 3.3 Publish
+
+```bash
+larql publish <name>-v2.vindex --repo chrishayuk/<repo-name> --slices none
+```
+
+Add `--slices client,attn,embed,server,browse` for the sliced topology (the
+gemma-3-4b family); `--collections none` to skip collection updates.
+
+Since PR #215 this **prunes** remote files absent from the source, so a
+rename no longer leaves both generations in the repo. `README.md` and
+dot-files are exempt.
+
+### 3.4 Verify the publish
+
+```bash
+curl -s "https://huggingface.co/api/models/<repo>?blobs=true" | \
+  python3 -c "import json,sys; d=json.load(sys.stdin); \
+    print([s['rfilename'] for s in d['siblings']])"
+```
+
+Confirm the current-generation names are present and no legacy ones remain.
+
+### 3.5 Archive
+
+```bash
+COPYFILE_DISABLE=1 rsync -a SRC/ /Volumes/chrishayuk/vindexes/<org>/<name>.vindex/
+```
+
+Mirrors the `models/` layout — organised by HuggingFace org (`google/`,
+`ibm-granite/`, `Qwen/`, `microsoft/`).
+
+### 3.6 Verify the archive, *then* delete
+
+```bash
+cmp SRC/interleaved_kquant.bin DST/interleaved_kquant.bin   # content, not size
+```
+
+Size equality does not catch a silent SMB write corruption. Compare the large
+weight files and both manifests before removing the local copy.
+
+---
+
+## 4. Naming
+
+| kind | pattern | example |
+|---|---|---|
+| quantised full | `<model>-q4k-vindex` | `chrishayuk/granite-4.1-8b-q4k-vindex` |
+| unquantised full | `<model>-vindex` | `chrishayuk/qwen3-0.6b-vindex` |
+| slice sibling | `<repo>-<preset>` | `chrishayuk/gemma-3-4b-it-vindex-client` |
+
+Slice repos are generated by `publish`'s default
+`--slice-repo-template {repo}-{preset}`.
+
+**Two repos predate this convention** and have no parent:
+`gemma-4-26b-a4b-it-vindex-expert-server` and
+`gemma-4-26b-a4b-client-vindex-client`. Reproduce them with `--no-full` and
+an explicit `--repo` rather than creating parents that never existed.
+
+---
+
+## 5. Pitfalls
+
+Each of these cost real time on 2026-08-07/08.
+
+**Publish only ever added files.** Until PR #215 it never deleted, so a
+renamed weight file left both generations in the repo and `pick_bin` chose by
+name. Repos carried 2.0 GB of dead bytes and could serve the stale one.
+Fixed, but any repo last published before #215 needs checking.
+
+**HuggingFace rate-limits long uploads.** `503 SlowDown` on part 35 of 109
+killed a whole publish and left a repo holding a stale weight file with *no*
+replacement — worse than a clean failure, because it still serves. PR #215
+retries transient failures; before that, retry manually and re-verify.
+
+**macOS writes AppleDouble sidecars to SMB.** A 15-file vindex arrives as 30,
+each `._name` an xattr sidecar. Harmless for loading, but they would be
+uploaded if the archive were ever published from. `COPYFILE_DISABLE=1`
+prevents them; `find DST -name '._*' -delete` cleans up after the fact.
+
+**Piping to `tail` masks the exit code.** `larql extract ... | tail -40`
+reports `tail`'s status, so a failed extraction looks successful. One 26B
+extraction "succeeded" in two minutes having done nothing. Use
+`set -o pipefail`, or do not pipe.
+
+**Filename-pattern checks miss the legacy generation.** An audit globbing
+only `*kquant_manifest.json` reported `qwen3-0.6b-q4k` as carrying no
+quantised weights. It carries `interleaved_q4k.bin` and was fully broken.
+Match both generations, or list the directory.
+
+**`--quant q4k` did not imply `--level all`.** Its help said so; nothing
+acted on it, so `index.json` recorded `inference` while the writer had
+emitted an `all` vindex. Fixed in PR #215.
+
+---
+
+## 6. Status — 2026-08-08
+
+### Published
+
+| repo | state |
+|---|---|
+| `gemma-3-4b-it-vindex` (+ 5 slices) | ✅ republished, pruned, verified |
+| `granite-4.1-3b-q4k-vindex` | ✅ republished, auto-pruned |
+| `granite-4.1-8b-q4k-vindex` | 🔄 uploading |
+| `granite-4.1-30b-q4k-vindex` | ⬜ queued |
+| `gemma-4-26b-a4b-it-vindex-expert-server` | ⬜ queued (reproduce with `--no-full`) |
+| `gemma-4-26b-a4b-client-vindex-client` | ⬜ queued (reproduce with `--no-full`) |
+
+`gemma-3-4b-it-vindex-embed` and `-browse` carry no quantised weights and
+were never affected.
+
+### Local
+
+| vindex | affected | state |
+|---|---|---|
+| `gemma3-4b-q4k-v3` | was | ✅ re-extracted, published, **kept local** (testing) |
+| `gemma4-26b-a4b-v2` | was | ✅ re-extracted, **kept local** (testing) |
+| `granite-4.1-3b-q4k` | was | ✅ archived, local copy deleted |
+| `granite-4.1-8b-q4k-v2` | was | ✅ re-extracted, publishing |
+| `granite-4.1-30b-q4k-v2` | was | ✅ re-extracted (34 GB) |
+| `qwen3-0.6b-q4k-v2` | was | ✅ re-extracted, verified |
+| `qwen3-0.6b` | no (dense f32) | works as-is |
+| `bitnet-2b` | no (ternary) | works as-is |
+| `gemma3-4b-f16` | no (f16 dense) | works as-is |
+| `gemma4-26b-a4b` (original) | **yes, broken** | delete once its replacement is published |
+
+---
+
+## 7. Not yet done
+
+**The format records no nibble-layout version.** This whole exercise was
+necessary because nothing in a vindex says which layout its bytes are in, so
+a fixed reader decodes old bytes into garbage silently. A version field —
+with the loader refusing, or transparently converting, on mismatch — turns
+"fluent garbage" into a clear error. That is the durable fix; everything
+above is recovery from its absence.
+
+**No automated audit.** Section 2's rule is mechanical and could be a
+subcommand (`larql vindex doctor`) rather than a manual check.
+
+**Old published bytes are unversioned too.** Anyone who pulled an affected
+repo before 2026-08-07 holds broken bytes with no way to know. Model-card
+notes on the affected repos would help.
