@@ -891,7 +891,7 @@ The full surface is documented in [crates/larql-inference/ROADMAP.md](crates/lar
 | [crates/larql-vindex-spec/SPEC.md](crates/larql-vindex-spec/SPEC.md) | Vindex v1 public contract — manifest schema, sharding rule, validation thresholds, model card tags |
 | [crates/larql-vindex-spec/schema/vindex-v1.schema.json](crates/larql-vindex-spec/schema/vindex-v1.schema.json) | JSON Schema 2020-12 mirror of the v1 manifest |
 | [docs/vindex-factory.md](docs/vindex-factory.md) | Vindex Factory — recipe-driven, verified, remote-executed vindex builds; `larql-factory` crate (recipe schema, `build_id`, validator, capability manifest, card generator, PREFLIGHT→RELEASE build driver) |
-| [docs/model-publishing.md](docs/model-publishing.md) | Model publishing roadmap — extract → verify → publish → prune → archive, naming conventions, the affected-vindex audit rule, and the pitfalls that cost time on the 2026-08 republish |
+| [docs/model-publishing.md](docs/model-publishing.md) | Republishing models — why the 2026-08 recovery could not use the Vindex Factory, what that cost, the affected-vindex audit rule, and the recipes that need to exist so the next one is `larql recipe build` |
 | [crates/larql-factory/README.md](crates/larql-factory/README.md) | `larql-factory` crate reference — module layout, CLI usage, what's not built yet |
 | [docs/lql-guide.md](docs/lql-guide.md) | LQL quick start guide |
 | [docs/cli.md](docs/cli.md) | CLI reference |
