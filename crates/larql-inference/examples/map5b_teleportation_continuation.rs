@@ -167,6 +167,11 @@ fn patched_step(
     (dist[0].0, dist)
 }
 
+/// What one reference run yields: the generated sequence (prompt + new
+/// tokens), the residual captured at `capture_layer` per generated position,
+/// and the full sorted distribution at each step.
+type ReferenceRun = (Vec<u32>, Vec<Vec<f32>>, Vec<Vec<(u32, f32)>>);
+
 /// Runs `n_steps` of free-running greedy generation, capturing the
 /// residual at `capture_layer` for each newly generated position (used
 /// later as the "repeated" condition's per-step donor injection) and the
@@ -178,7 +183,7 @@ fn run_reference(
     capture_layer: usize,
     last_layer: usize,
     n_steps: usize,
-) -> (Vec<u32>, Vec<Vec<f32>>, Vec<Vec<(u32, f32)>>) {
+) -> ReferenceRun {
     let mut seq = prompt_tokens.to_vec();
     let mut rows = Vec::with_capacity(n_steps);
     let mut dists = Vec::with_capacity(n_steps);

@@ -4,7 +4,7 @@
 **Date:** 2026-04-01  
 **Status:** Implemented (~98%)  
 **Implementation:** `larql-vindex` crate (Rust)  
-**Companion specs:** [Format](vindex-format-spec.md), [Ecosystem](vindex-ecosystem-spec.md), [LQL](lql-spec.md)
+**Companion specs:** [Format](format-spec.md), [Ecosystem](ecosystem-spec.md), [LQL](../../larql-lql/docs/spec.md)
 
 **Implementation coverage:** All core operations (load, KNN, walk, describe, mutate, compile), full patch lifecycle, build pipeline (safetensors/GGUF/MLX), Vindexfile, HuggingFace publish/download — all implemented. Readonly base with auto-patch overlay. GateIndex trait for transparent patched/unpatched access. 600 tests.
 

@@ -86,7 +86,7 @@ the ~211 parallel sections/token took the cold path (`in_worker_cold →
 LockLatch::wait_and_reset → __psynch_cvwait`) and workers slept between sections
 — ~40% of thread-time in wait states.
 
-**Built** [`larql_compute::cpu::spin_pool`](../../larql-compute/src/cpu/spin_pool.rs):
+**Built** [`larql_compute::cpu::spin_pool`](../larql-compute/src/cpu/spin_pool.rs):
 a llama.cpp-style persistent spin-barrier pool. Workers spin on an epoch counter
 and only `park` after a long idle gap; the dispatcher participates as the n-th
 worker; **static strided chunk ownership** makes `completed == num_chunks` a
@@ -263,7 +263,7 @@ prefill shapes).
 
 ## Hardening — codebase review 2026-05-28
 
-From the whole-codebase review ([`docs/audits/codebase-review-2026-05-28.md`](../../../docs/audits/codebase-review-2026-05-28.md)):
+From the whole-codebase review ([`docs/audits/codebase-review-2026-05-28.md`](../../docs/audits/codebase-review-2026-05-28.md)):
 
 - **P2 — CLI-supplied sizing params can reach prefill panics**; validate at the boundary.
 - **P2 — positional QKVO contract** (`attn_data[1]/[2]`, shared with larql-models) is maintained by convention, not type. Silent-drift risk — consider a typed accessor.

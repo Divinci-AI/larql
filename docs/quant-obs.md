@@ -9,7 +9,7 @@
 
 ## 1. Thesis
 
-Every quantisation error a codec makes gets summed with other errors before anything observes the result, and the observer is a linear map with a wildly unequal spectrum. In K3, that observer has a closed form: `RMSNorm → W↑`. In Gemma (and everywhere else), the observer is the residual stream plus the rest of the stack — which is exactly the Jacobian-transport object already being fit under programme [`j-space`](../MEMORY.md) (`js-1-basis-rotation-dark-space`, `js-2-sensitivity-in-jacobian-basis`). Same object, different question: j-space asks whether that matrix explains dark-space structure; this ladder asks whether it predicts *quantisation drift* well enough to allocate bits offline.
+Every quantisation error a codec makes gets summed with other errors before anything observes the result, and the observer is a linear map with a wildly unequal spectrum. In K3, that observer has a closed form: `RMSNorm → W↑`. In Gemma (and everywhere else), the observer is the residual stream plus the rest of the stack — which is exactly the Jacobian-transport object already being fit under programme `j-space` (experiment registry, not in-tree) (`js-1-basis-rotation-dark-space`, `js-2-sensitivity-in-jacobian-basis`). Same object, different question: j-space asks whether that matrix explains dark-space structure; this ladder asks whether it predicts *quantisation drift* well enough to allocate bits offline.
 
 **K3 is the confirmation case, not the discovery case.** Nothing below requires K3 weights, a GPU, or a download until OBS-4 passes.
 

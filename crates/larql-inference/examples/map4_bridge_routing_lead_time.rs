@@ -191,6 +191,12 @@ fn main() {
     let mut lead_cells = Vec::new();
     for &l in &home_layers {
         let moe = &moe_at[&l];
+        // `i` is the prompt ordinal, not merely an index into `true_ids`: it
+        // also names the dump directory and is recorded on each cell.
+        // Iterating `true_ids[&l]` instead would silently do fewer prompts if
+        // that entry were short, where indexing panics — for a research sweep
+        // a loud stop beats a quiet undercount.
+        #[allow(clippy::needless_range_loop)]
         for i in 0..NUM_PROMPTS {
             let dump_dir = format!("{dump_prefix}{i}");
             for &k in &LEAD_TIMES {

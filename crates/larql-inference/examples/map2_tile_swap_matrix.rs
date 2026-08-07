@@ -301,34 +301,49 @@ struct CellResult {
     native_top1_rank_under_random: usize,
 }
 
-fn evaluate_cell(
-    weights: &ModelWeights,
-    ffn: &WeightFfn,
-    prompt: &[u32],
+/// The parts of a run that are fixed across every cell of the swap matrix.
+///
+/// Both call sites pass the same five values to every cell, so they travel
+/// together rather than as five of `evaluate_cell`'s arguments.
+struct RunCtx<'a> {
+    weights: &'a ModelWeights,
+    ffn: &'a WeightFfn<'a>,
+    prompt: &'a [u32],
     last_layer: usize,
+    gelu_tanh: bool,
+}
+
+fn evaluate_cell(
+    ctx: &RunCtx,
     x_l: &Array1<f32>,
     native_tile: &Tile,
     foreign_tile: &Tile,
     native_delta: &Array1<f32>,
     p_native: &[(u32, f32)],
-    gelu_tanh: bool,
     random_seed: u64,
 ) -> CellResult {
-    let foreign_delta = ffn_row(x_l, foreign_tile, gelu_tanh);
+    let foreign_delta = ffn_row(x_l, foreign_tile, ctx.gelu_tanh);
     let native_norm = native_delta.iter().map(|v| v * v).sum::<f32>().sqrt();
     let random = random_delta(x_l.len(), native_norm, random_seed);
 
     let p_swap = run_spliced(
-        weights,
-        ffn,
-        prompt,
+        ctx.weights,
+        ctx.ffn,
+        ctx.prompt,
         native_tile.layer,
         foreign_delta.clone(),
-        last_layer,
+        ctx.last_layer,
     );
-    let p_random = run_spliced(weights, ffn, prompt, native_tile.layer, random, last_layer);
+    let p_random = run_spliced(
+        ctx.weights,
+        ctx.ffn,
+        ctx.prompt,
+        native_tile.layer,
+        random,
+        ctx.last_layer,
+    );
     let native_top1 = p_native[0].0;
-    let vocab = weights.vocab_size;
+    let vocab = ctx.weights.vocab_size;
     let p_native_dense = dense_from_sorted(p_native, vocab);
 
     CellResult {
@@ -389,19 +404,14 @@ fn run_smoke_test() {
     sanity_check_ffn_row(&ffn, &x0, &tile0, &native_delta, "phase 0 smoke test");
 
     let p_native = run_spliced(&weights, &ffn, &prompt, 0, native_delta.clone(), last_layer);
-    let cell = evaluate_cell(
-        &weights,
-        &ffn,
-        &prompt,
+    let ctx = RunCtx {
+        weights: &weights,
+        ffn: &ffn,
+        prompt: &prompt,
         last_layer,
-        &x0,
-        &tile0,
-        &tile1,
-        &native_delta,
-        &p_native,
         gelu_tanh,
-        42,
-    );
+    };
+    let cell = evaluate_cell(&ctx, &x0, &tile0, &tile1, &native_delta, &p_native, 42);
     print_cell(&cell);
     let dense_native = dense_from_sorted(&p_native, weights.vocab_size);
     assert!(
@@ -527,19 +537,22 @@ fn run_real_gemma_sweep(vindex_path: &str) {
 
     let mut results = Vec::new();
     let mut seed = 1000u64;
+    let ctx = RunCtx {
+        weights: &weights,
+        ffn: &ffn,
+        prompt: &prompt,
+        last_layer,
+        gelu_tanh,
+    };
     for &(a, b) in &pairs {
         for &(from, to) in &[(a, b), (b, a)] {
             let cell = evaluate_cell(
-                &weights,
-                &ffn,
-                &prompt,
-                last_layer,
+                &ctx,
                 &waypoints[&from],
                 &tiles[&from],
                 &tiles[&to],
                 &native_deltas[&from],
                 &native_probs[&from],
-                gelu_tanh,
                 seed,
             );
             print_cell(&cell);

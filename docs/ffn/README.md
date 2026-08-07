@@ -16,15 +16,17 @@ and can be swapped into the forward pass.
 ## Experimental Backends
 
 Research backends from FFN optimization work. All in `ffn/experimental/`.
+These were falsified rather than adopted, so no per-backend page was ever
+written for them — the `File` column is the reference.
 
 | Backend | File | Speed | Accuracy | Why it fails |
 |---------|------|-------|----------|-------------|
-| [CachedFfn](cached.md) | `cached.rs` | 4160x (1us/layer) | 100% bit-identical | Not scalable: one cache per prompt |
-| [GraphFfn](graph.md) | `graph.rs` | 2.5x | 0% | Embedding != residual (1.5% feature overlap) |
-| [EntityRoutedFfn](entity_routed.md) | `entity_routed.rs` | 4.2x | 0% | Same root cause as GraphFfn |
-| [ClusteredFfn](clustered.md) | `clustered.rs` | 2.3x (c1) | 0% | Gate activations are distributed, not clustered |
-| [DownClusteredFfn](down_clustered.md) | `down_clustered.rs` | ~1x | 0% | Residual direction != answer direction |
-| [FeatureListFfn](feature_list.md) | `feature_list.rs` | ~1x | 0-30% | Cascade drift from early sparse layers |
+| CachedFfn | `cached.rs` | 4160x (1us/layer) | 100% bit-identical | Not scalable: one cache per prompt |
+| GraphFfn | `graph.rs` | 2.5x | 0% | Embedding != residual (1.5% feature overlap) |
+| EntityRoutedFfn | `entity_routed.rs` | 4.2x | 0% | Same root cause as GraphFfn |
+| ClusteredFfn | `clustered.rs` | 2.3x (c1) | 0% | Gate activations are distributed, not clustered |
+| DownClusteredFfn | `down_clustered.rs` | ~1x | 0% | Residual direction != answer direction |
+| FeatureListFfn | `feature_list.rs` | ~1x | 0-30% | Cascade drift from early sparse layers |
 
 ## Key Finding
 

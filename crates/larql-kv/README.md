@@ -296,7 +296,7 @@ larql-kv/
 ```
 
 The `KvEngine` trait itself lives in
-[`larql-inference/src/kv_engine.rs`](../larql-inference/src/kv_engine.rs).
+[`larql-inference/src/kv_engine.rs`](../larql-inference/src/kv_engine/mod.rs).
 
 ## Architecture notes
 
