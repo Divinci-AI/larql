@@ -29,17 +29,17 @@ use larql_inference::residual_diff::{compare_captures, ParityThreshold, Residual
 use super::DecodeDiffArgs;
 
 pub fn run_decode_diff(args: DecodeDiffArgs) -> Result<(), Box<dyn std::error::Error>> {
-    #[cfg(not(feature = "gpu"))]
+    #[cfg(not(all(feature = "gpu", target_os = "macos")))]
     {
         let _ = args;
         return Err(format!(
-            "decode-diff compares the CPU and Metal backends, so it needs the \
-             `gpu` feature; rebuild with --features gpu"
+            "decode-diff compares the CPU and Metal backends, so it needs a macOS host with the \
+             `gpu` feature; this build has one or neither"
         )
         .into());
     }
 
-    #[cfg(feature = "gpu")]
+    #[cfg(all(feature = "gpu", target_os = "macos"))]
     {
         let vindex = &args.vindex;
         if !vindex.is_dir() {
