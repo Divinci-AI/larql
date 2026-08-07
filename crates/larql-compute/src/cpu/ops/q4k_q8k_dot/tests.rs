@@ -837,11 +837,6 @@ fn q8k_gate_up_neon_zero_dims_and_short_weights_zero_output() {
 /// path, so the intrinsic twin needs its own direct exercise.
 #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
 #[test]
-#[ignore = "TODO(q6k-planar): the NEON kernel still decodes the pre-fix \
-            interleaved nibble layout while the scalar reference is now \
-            ggml-planar, so parity cannot hold. The dispatcher routes every \
-            arch through scalar; re-enable once the NEON form is reworked and \
-            re-verified on ARM."]
 fn q6k_matvec_neon_matches_scalar_bit_exact() {
     for &(rows, cols) in &[(7usize, 1024usize), (8, 2560), (3, 2560), (16, 512)] {
         let x: Vec<f32> = (0..cols)

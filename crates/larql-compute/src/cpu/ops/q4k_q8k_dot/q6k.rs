@@ -1,7 +1,8 @@
 use super::common::ELEMS_PER_BLOCK;
 // TODO(q6k-planar): re-import `super::q4k_asm::use_asm_kernel` when the
-// NEON/hand-asm Q6_K kernels are reworked onto ggml's planar layout and
-// the dispatcher below can opt into them again.
+// hand-asm Q6_K kernel is reworked onto ggml's planar layout, so the
+// dispatcher can offer the `LARQL_Q4K_ASM=1` opt-in again. The NEON
+// intrinsic form is already planar and is what the dispatcher uses.
 #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
 use super::q4k_neon::sdot_acc;
 use super::q8k_activation::Q8KActivation;
@@ -88,19 +89,22 @@ pub fn q6k_q8k_matvec_scalar(
 
 /// NEON-accelerated Q6_K × Q8_K matvec for `aarch64`.
 ///
-/// Per 16-element scale group:
-/// 1. Vectorised dequant: 8 ql bytes → lo4[16] via nibble-unpack + vzip.
-///    4 qh bytes → hi2[16] via byte-replicate + vshlq_s8 + mask.
+/// Per 16-element scale group, under ggml's planar layout the group's
+/// source bytes are contiguous in both planes, so the dequant is two
+/// loads and no shuffle:
+/// 1. 16 ql bytes → lo4[16] via one `vld1q_u8` plus a mask (planes 0/1)
+///    or a constant `vshrq_n_u8(_, 4)` (planes 2/3).
+///    16 qh bytes → hi2[16] via one `vld1q_u8`, a uniform right-shift of
+///    `plane*2`, and a 2-bit mask.
 ///    raw6 = lo4 | (hi2 << 4); signed = raw6 - 32 → int8.
-/// 2. One SDOT over the 16 int8 weight × int8 activation products.
+/// 2. One SDOT over the 16 int8 weight × int8 activation products —
+///    the Q8_K activation is sequential, so it pairs directly.
 /// 3. scale * dot_g accumulated into sum1.
 ///
 /// Final: acc += d_w * d_y * sum1.
 ///
-/// TODO(q6k-planar): still decodes the pre-fix interleaved layout —
-/// unreachable from the dispatcher until reworked for ggml's planar
-/// layout and re-verified on ARM.
-#[allow(dead_code)]
+/// Decodes ggml's planar layout, bit-exact with `q6k_q8k_matvec_scalar`
+/// (`q6k_matvec_neon_matches_scalar_bit_exact`).
 #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
 pub fn q6k_q8k_matvec_neon(
     out: &mut [f32],
@@ -126,10 +130,6 @@ pub fn q6k_q8k_matvec_neon(
         return;
     }
 
-    // Shift-right pattern for hi2 extraction: 0, -2, -4, -6 repeated 4×.
-    // vshlq_s8 with negative b shifts right: out[i] = a[i] >> (-b[i]).
-    const SHIFT_RIGHT: [i8; 16] = [0, -2, -4, -6, 0, -2, -4, -6, 0, -2, -4, -6, 0, -2, -4, -6];
-    let shift_v = unsafe { vld1q_s8(SHIFT_RIGHT.as_ptr()) };
     let mask_0f = unsafe { vdupq_n_u8(0x0F) };
     let mask_03 = unsafe { vdupq_n_u8(0x03) };
     let sub32 = unsafe { vdupq_n_s8(32) };
@@ -151,48 +151,37 @@ pub fn q6k_q8k_matvec_neon(
             let mut sum1: i32 = 0;
 
             for g in 0..16usize {
-                // Scale group g covers elements g*16..(g+1)*16.
-                // ql bytes for group g: ql[g*8..(g+1)*8] (8 bytes → 16 nibbles).
-                // qh bytes for group g: qh[g*4..(g+1)*4] (4 bytes → 16 × 2-bit).
-                let ql_g = unsafe { ql_base.add(g * 8) };
-                let qh_g = unsafe { qh_base.add(g * 4) };
+                // ggml planar layout (mirrors
+                // `larql_models::quant::ggml::q6_k::q6k_subblock_vals`).
+                // Scale group g covers elements g*16..(g+1)*16, which always
+                // lie in a single nibble plane — so both the 16 `ql` source
+                // bytes and the 16 `qh` source bytes are *contiguous*, and the
+                // interleaved form's vzip disappears: one load each, paired
+                // directly against the sequential Q8 activation.
+                let half = g / 8; // which 128-element half
+                let grp = g % 8; // scale group within the half
+                let plane = grp / 2; // q1/q2/q3/q4 in ggml's naming
+                let lbase = (grp % 2) * 16; // byte offset within the 32-byte plane row
+                let ql_g = unsafe { ql_base.add(half * 64 + (plane & 1) * 32 + lbase) };
+                let qh_g = unsafe { qh_base.add(half * 32 + lbase) };
                 let q8_g = unsafe { q8_ptr.add(q8_base + g * 16) };
                 let scale = unsafe { *sc_base.add(g) as i32 };
 
-                // ── Lo4 extraction (8 ql bytes → 16 uint4 values, in element order) ──
-                // ql_v[j] holds lo4 of element 2j (low nibble) and 2j+1 (high nibble).
-                let ql_v = unsafe { vld1_u8(ql_g) };
-                let lo4_even = unsafe { vand_u8(ql_v, vget_low_u8(mask_0f)) }; // elements 0,2,4,...,14
-                let lo4_odd = unsafe { vshr_n_u8(ql_v, 4) }; // elements 1,3,5,...,15
-                                                             // Interleave to restore element order: [e0,e1,e2,...,e15].
-                let zip = unsafe { vzip_u8(lo4_even, lo4_odd) };
-                let lo4_v = unsafe { vcombine_u8(zip.0, zip.1) }; // uint8x16_t
+                // ── Lo4: 16 contiguous ql bytes; planes 0/1 take the low
+                // nibble, planes 2/3 the high nibble. Uniform across the group.
+                let ql_v = unsafe { vld1q_u8(ql_g) };
+                let lo4_v = if plane < 2 {
+                    unsafe { vandq_u8(ql_v, mask_0f) }
+                } else {
+                    unsafe { vshrq_n_u8(ql_v, 4) }
+                };
 
-                // ── Hi2 extraction (4 qh bytes → 16 uint2 values) ──
-                // Each qh byte j holds hi2 for elements 4j+0..4j+3 in bits 0-1,2-3,4-5,6-7.
-                // Build a 16-byte vector with each qh byte replicated 4 times, then
-                // shift right by [0,2,4,6, 0,2,4,6, ...] and mask to 2 bits.
-                let (q0, q1, q2, q3) = unsafe {
-                    (
-                        (*qh_g) as u32 * 0x01010101u32,
-                        (*qh_g.add(1)) as u32 * 0x01010101u32,
-                        (*qh_g.add(2)) as u32 * 0x01010101u32,
-                        (*qh_g.add(3)) as u32 * 0x01010101u32,
-                    )
-                };
-                let qh_rep: uint8x16_t = unsafe {
-                    vreinterpretq_u8_u32(vcombine_u32(
-                        vreinterpret_u32_u64(vcreate_u64((q0 as u64) | ((q1 as u64) << 32))),
-                        vreinterpret_u32_u64(vcreate_u64((q2 as u64) | ((q3 as u64) << 32))),
-                    ))
-                };
-                // Variable right-shift then mask to 2 bits.
-                let hi2_v = unsafe {
-                    vandq_u8(
-                        vreinterpretq_u8_s8(vshlq_s8(vreinterpretq_s8_u8(qh_rep), shift_v)),
-                        mask_03,
-                    )
-                };
+                // ── Hi2: 16 contiguous qh bytes, one uniform right-shift of
+                // plane*2, then mask to 2 bits. `vshlq_u8` with a negative
+                // amount shifts right.
+                let qh_v = unsafe { vld1q_u8(qh_g) };
+                let hi2_v =
+                    unsafe { vandq_u8(vshlq_u8(qh_v, vdupq_n_s8(-((plane as i8) * 2))), mask_03) };
 
                 // ── Combine → signed int8 weight values ──
                 // raw6 = lo4 | (hi2 << 4) ∈ [0..63]; signed = raw6 - 32 ∈ [-32..31].
@@ -396,9 +385,15 @@ pub fn q6k_q8k_matvec_into(
     rows: usize,
     cols: usize,
 ) {
-    // TODO(q6k-planar): the NEON and hand-asm forms still decode the
-    // pre-fix interleaved nibble layout; they need the same ggml-planar
-    // rework as the scalar path (and verification on ARM hardware) before
-    // they can be re-enabled. Until then every arch takes the scalar path.
+    #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+    {
+        // TODO(q6k-planar): the `LARQL_Q4K_ASM=1` hand-asm form still decodes
+        // the pre-fix interleaved layout, so unlike the Q4_K kernels there is
+        // no asm opt-in here yet. The NEON intrinsic form is ggml-planar and
+        // bit-exact with the scalar reference.
+        q6k_q8k_matvec_neon(out, q8k_x, w, rows, cols);
+        return;
+    }
+    #[allow(unreachable_code)]
     q6k_q8k_matvec_scalar(out, q8k_x, w, rows, cols);
 }
