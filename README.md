@@ -520,7 +520,7 @@ LQL parser and executor. 20+ statement types across 5 categories:
 
 ## LQL Reference
 
-See [docs/specs/lql-spec.md](docs/specs/lql-spec.md) for the full language specification and [docs/lql-guide.md](docs/lql-guide.md) for a quick start guide.
+See [crates/larql-lql/docs/spec.md](crates/larql-lql/docs/spec.md) for the full language specification and [docs/lql-guide.md](docs/lql-guide.md) for a quick start guide.
 
 ### Key Statements
 
@@ -634,7 +634,7 @@ Input formats: **safetensors** (HuggingFace), **GGUF** (llama.cpp, dequantized t
 | GPT-OSS | GPT-OSS-120B | MoE (128 experts, MXFP4) |
 | GPT-2 | GPT-2 (117M-1.5B) | Standard (GELU-tanh, vindex extraction only) |
 
-Dense and full-precision MoE models support all operations (DESCRIBE, WALK, INFER). MXFP4-quantized MoE models (GPT-OSS) can be extracted and served but DESCRIBE/WALK produce noisy results due to 4-bit weight precision — use INFER for accurate knowledge queries. See [operations spec](docs/specs/vindex-operations-spec.md) for details.
+Dense and full-precision MoE models support all operations (DESCRIBE, WALK, INFER). MXFP4-quantized MoE models (GPT-OSS) can be extracted and served but DESCRIBE/WALK produce noisy results due to 4-bit weight precision — use INFER for accurate knowledge queries. See [operations spec](crates/larql-vindex/docs/operations-spec.md) for details.
 
 **GPT-OSS attention sinks (2026-07-29).** GPT-OSS attention uses a learned per-head *sink* logit that competes in the softmax and is then discarded, so attention weights over real positions deliberately sum to less than one. Until 2026-07-29 larql neither extracted nor applied it — along with all four projection biases — so 5 of 11 attention tensors per layer were silently dropped and the forward pass was systematically wrong. Both are now extracted and applied on the CPU and Metal paths, with numerical parity tests against the reference implementation. Details and the measured sink magnitudes are in [`docs/k3-funnel.md`](docs/k3-funnel.md) §4.6.
 
@@ -877,17 +877,17 @@ End-to-end walkthrough on synthetic weights (no vindex required):
 cargo run --release -p larql-inference --example mech_interp_demo
 ```
 
-The full surface is documented in `crates/larql-inference/ROADMAP.md` §
+The full surface is documented in [crates/larql-inference/ROADMAP.md](crates/larql-inference/ROADMAP.md) §
 "P0: Mechanistic hooks (lazarus parity)".
 
 ## Documentation
 
 | Doc | Description |
 |---|---|
-| [docs/specs/lql-spec.md](docs/specs/lql-spec.md) | LQL language specification (v0.3) |
-| [docs/specs/vindex-format-spec.md](docs/specs/vindex-format-spec.md) | Vindex file format specification (v0.3, ~98% implemented) |
-| [docs/specs/vindex-operations-spec.md](docs/specs/vindex-operations-spec.md) | Vindex operations, API, patches (~98% implemented) |
-| [docs/specs/vindex-ecosystem-spec.md](docs/specs/vindex-ecosystem-spec.md) | Distributed hosting, HuggingFace, Vindexfile (~85% implemented) |
+| [crates/larql-lql/docs/spec.md](crates/larql-lql/docs/spec.md) | LQL language specification (v0.3) |
+| [crates/larql-vindex/docs/format-spec.md](crates/larql-vindex/docs/format-spec.md) | Vindex file format specification (v0.3, ~98% implemented) |
+| [crates/larql-vindex/docs/operations-spec.md](crates/larql-vindex/docs/operations-spec.md) | Vindex operations, API, patches (~98% implemented) |
+| [crates/larql-vindex/docs/ecosystem-spec.md](crates/larql-vindex/docs/ecosystem-spec.md) | Distributed hosting, HuggingFace, Vindexfile (~85% implemented) |
 | [crates/larql-vindex-spec/SPEC.md](crates/larql-vindex-spec/SPEC.md) | Vindex v1 public contract — manifest schema, sharding rule, validation thresholds, model card tags |
 | [crates/larql-vindex-spec/schema/vindex-v1.schema.json](crates/larql-vindex-spec/schema/vindex-v1.schema.json) | JSON Schema 2020-12 mirror of the v1 manifest |
 | [docs/vindex-factory.md](docs/vindex-factory.md) | Vindex Factory — recipe-driven, verified, remote-executed vindex builds; `larql-factory` crate (recipe schema, `build_id`, validator, capability manifest, card generator, PREFLIGHT→RELEASE build driver) |
@@ -903,7 +903,7 @@ The full surface is documented in `crates/larql-inference/ROADMAP.md` §
 | [docs/walk-boundary-sweep.md](docs/walk-boundary-sweep.md) | Walk boundary sweep — correctness proof across all layer boundaries |
 | [docs/residual-trace.md](docs/residual-trace.md) | Residual stream trace — decomposition, storage, tiered context |
 | [docs/mech-interp.md](docs/mech-interp.md) | Mechanistic interp surface — hooks, lens, vocab proj, patching, KV surgery (Rust + Python) |
-| [docs/specs/trace-format-spec.md](docs/specs/trace-format-spec.md) | Trace file format specification (.bin, .bndx, .ctxt) |
+| [crates/larql-inference/docs/trace-format.md](crates/larql-inference/docs/trace-format.md) | Trace file format specification (.bin, .bndx, .ctxt) |
 | [docs/adr/0009-wire-format-evolution.md](docs/adr/0009-wire-format-evolution.md) | Wire format: f16 default, i8 opt-in, Accept/Content-Type negotiation |
 | [docs/adr/0010-quic-grid-transport.md](docs/adr/0010-quic-grid-transport.md) | QUIC transport for grid (planned) |
 | [docs/adr/0011-grid-self-balancing.md](docs/adr/0011-grid-self-balancing.md) | Grid Mode B + dynamic rebalancing (planned) |
