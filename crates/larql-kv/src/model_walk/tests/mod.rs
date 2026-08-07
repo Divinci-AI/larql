@@ -11,5 +11,7 @@ mod enforce_gates;
 mod exclusion_oracle;
 mod exp25;
 mod heterogeneous_gates;
+mod rendering;
 mod replay_gates;
+mod validation_refusals;
 mod walk_gates;
