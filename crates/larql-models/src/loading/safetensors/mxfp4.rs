@@ -289,3 +289,263 @@ pub(super) fn dequantize_per_expert_mxfp4(
 
     Ok(consumed)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use safetensors::{tensor::TensorView, Dtype};
+
+    /// Build an in-memory safetensors buffer. Returned as bytes because
+    /// `SafeTensors::deserialize` borrows them, so the caller must own the
+    /// buffer for as long as the parsed view lives.
+    fn st_bytes(tensors: Vec<(&str, Dtype, Vec<usize>, Vec<u8>)>) -> Vec<u8> {
+        let owned: Vec<(String, Dtype, Vec<usize>, Vec<u8>)> = tensors
+            .into_iter()
+            .map(|(n, d, s, b)| (n.to_string(), d, s, b))
+            .collect();
+        let views: Vec<(String, TensorView)> = owned
+            .iter()
+            .map(|(n, d, s, b)| (n.clone(), TensorView::new(*d, s.clone(), b).unwrap()))
+            .collect();
+        safetensors::serialize(views, None).unwrap()
+    }
+
+    fn never_skip() -> impl Fn(&str) -> bool {
+        |_: &str| false
+    }
+
+    #[test]
+    fn expert_key_follows_the_shared_mixtral_convention() {
+        // The doc contract: `layer_prefix` arrives with no trailing dot and
+        // the helper supplies it. A drift here silently produces keys the
+        // architecture never advertises.
+        let k = mxfp4_expert_key("layers.3", 7, MIXTRAL_GATE_PROJ);
+        assert_eq!(
+            k,
+            crate::tensor_keys::mxfp4_dequantised::projection("layers.3.", 7, MIXTRAL_GATE_PROJ)
+        );
+        assert!(
+            k.contains("layers.3."),
+            "prefix must gain its separator: {k}"
+        );
+        assert!(!k.contains("layers.3.."), "and must not double it: {k}");
+    }
+
+    // ── dequantize_per_expert_mxfp4: the rejection ladder ────────────────
+    //
+    // Each guard returns "not mine, leave it to the main loop" rather than
+    // erroring, so the observable is an empty `consumed` set plus an
+    // untouched tensor map. Tested one guard at a time.
+
+    #[test]
+    fn v4_ignores_names_without_an_experts_index() {
+        // `.w1.weight` alone is not enough — the `.experts.<digit>.` segment
+        // is what distinguishes a V4 expert from an ordinary projection.
+        let buf = st_bytes(vec![(
+            "layers.0.ffn.w1.weight",
+            Dtype::I8,
+            vec![2, 16],
+            vec![0u8; 32],
+        )]);
+        let st = safetensors::SafeTensors::deserialize(&buf).unwrap();
+        let names = vec!["layers.0.ffn.w1.weight".to_string()];
+        let mut tensors = HashMap::new();
+        let consumed = dequantize_per_expert_mxfp4(&st, &names, &[], &mut tensors).unwrap();
+        assert!(consumed.is_empty());
+        assert!(tensors.is_empty());
+    }
+
+    #[test]
+    fn v4_ignores_a_non_numeric_expert_segment() {
+        let name = "layers.0.ffn.experts.shared.w1.weight";
+        let buf = st_bytes(vec![(name, Dtype::I8, vec![2, 16], vec![0u8; 32])]);
+        let st = safetensors::SafeTensors::deserialize(&buf).unwrap();
+        let mut tensors = HashMap::new();
+        let consumed =
+            dequantize_per_expert_mxfp4(&st, &[name.to_string()], &[], &mut tensors).unwrap();
+        assert!(consumed.is_empty(), "`experts.shared` is not an index");
+    }
+
+    #[test]
+    fn v4_ignores_a_correctly_named_tensor_of_the_wrong_dtype() {
+        // Right name, wrong dtype: an F32 expert is a dense weight the main
+        // loop must still see, not an MXFP4 one to unpack here.
+        let name = "layers.0.ffn.experts.0.w1.weight";
+        let buf = st_bytes(vec![(name, Dtype::F32, vec![2, 4], vec![0u8; 32])]);
+        let st = safetensors::SafeTensors::deserialize(&buf).unwrap();
+        let mut tensors = HashMap::new();
+        let consumed =
+            dequantize_per_expert_mxfp4(&st, &[name.to_string()], &[], &mut tensors).unwrap();
+        assert!(consumed.is_empty());
+        assert!(tensors.is_empty(), "must be left for the main loop");
+    }
+
+    #[test]
+    fn v4_ignores_an_i8_expert_with_no_scale_companion() {
+        let name = "layers.0.ffn.experts.0.w1.weight";
+        let buf = st_bytes(vec![(name, Dtype::I8, vec![2, 16], vec![0u8; 32])]);
+        let st = safetensors::SafeTensors::deserialize(&buf).unwrap();
+        let mut tensors = HashMap::new();
+        let consumed =
+            dequantize_per_expert_mxfp4(&st, &[name.to_string()], &[], &mut tensors).unwrap();
+        assert!(consumed.is_empty(), "no `.scale` → not MXFP4");
+    }
+
+    #[test]
+    fn v4_ignores_a_scale_of_the_wrong_dtype() {
+        let w = "layers.0.ffn.experts.0.w1.weight";
+        let s = "layers.0.ffn.experts.0.w1.scale";
+        let buf = st_bytes(vec![
+            (w, Dtype::I8, vec![2, 16], vec![0u8; 32]),
+            (s, Dtype::U8, vec![2, 1], vec![127u8; 2]),
+        ]);
+        let st = safetensors::SafeTensors::deserialize(&buf).unwrap();
+        let mut tensors = HashMap::new();
+        let consumed =
+            dequantize_per_expert_mxfp4(&st, &[w.to_string()], &[], &mut tensors).unwrap();
+        assert!(consumed.is_empty(), "scale must be F8_E8M0");
+    }
+
+    #[test]
+    fn v4_ignores_a_row_count_mismatch_between_weight_and_scale() {
+        let w = "layers.0.ffn.experts.0.w1.weight";
+        let s = "layers.0.ffn.experts.0.w1.scale";
+        let buf = st_bytes(vec![
+            (w, Dtype::I8, vec![2, 16], vec![0u8; 32]),
+            // 3 rows of scale against 2 rows of weight.
+            (s, Dtype::F8_E8M0, vec![3, 1], vec![127u8; 3]),
+        ]);
+        let st = safetensors::SafeTensors::deserialize(&buf).unwrap();
+        let mut tensors = HashMap::new();
+        let consumed =
+            dequantize_per_expert_mxfp4(&st, &[w.to_string()], &[], &mut tensors).unwrap();
+        assert!(consumed.is_empty(), "out_features must agree");
+    }
+
+    #[test]
+    fn v4_ignores_a_packed_width_that_contradicts_the_group_count() {
+        // The layout assertion: weight cols × 2 nibbles must equal
+        // groups × 32. Here 16 cols → 32 values, but 2 groups claim 64.
+        let w = "layers.0.ffn.experts.0.w1.weight";
+        let s = "layers.0.ffn.experts.0.w1.scale";
+        let buf = st_bytes(vec![
+            (w, Dtype::I8, vec![2, 16], vec![0u8; 32]),
+            (s, Dtype::F8_E8M0, vec![2, 2], vec![127u8; 4]),
+        ]);
+        let st = safetensors::SafeTensors::deserialize(&buf).unwrap();
+        let mut tensors = HashMap::new();
+        let consumed =
+            dequantize_per_expert_mxfp4(&st, &[w.to_string()], &[], &mut tensors).unwrap();
+        assert!(consumed.is_empty(), "packed width must match groups*32");
+    }
+
+    #[test]
+    fn v4_dequantises_a_well_formed_expert_and_reports_both_names_consumed() {
+        // out_features = 2, one group of 32 → 16 packed bytes per row.
+        let w = "layers.0.ffn.experts.0.w1.weight";
+        let s = "layers.0.ffn.experts.0.w1.scale";
+        let buf = st_bytes(vec![
+            (w, Dtype::I8, vec![2, 16], vec![0x21u8; 32]),
+            // 127 → 2^0 = 1.0, so the dequantised values are the raw table.
+            (s, Dtype::F8_E8M0, vec![2, 1], vec![127u8; 2]),
+        ]);
+        let st = safetensors::SafeTensors::deserialize(&buf).unwrap();
+        let mut tensors = HashMap::new();
+        let consumed =
+            dequantize_per_expert_mxfp4(&st, &[w.to_string()], &[], &mut tensors).unwrap();
+
+        assert_eq!(consumed.len(), 2, "both weight and scale are consumed");
+        assert!(consumed.contains(w) && consumed.contains(s));
+        let arr = tensors.get(w).expect("dequantised expert must be inserted");
+        assert_eq!(arr.shape(), &[2, 32], "groups*32 columns");
+    }
+
+    // ── load_mxfp4_expert_tensors (GPT-OSS fused layout) ─────────────────
+
+    #[test]
+    fn fused_loader_ignores_tensors_without_the_gate_up_blocks_suffix() {
+        let name = "layers.0.mlp.experts.down_proj_blocks";
+        let buf = st_bytes(vec![(name, Dtype::U8, vec![1, 2, 1, 16], vec![0u8; 32])]);
+        let st = safetensors::SafeTensors::deserialize(&buf).unwrap();
+        let mut tensors = HashMap::new();
+        load_mxfp4_expert_tensors(&st, &[name.to_string()], &[], &never_skip(), &mut tensors)
+            .unwrap();
+        assert!(
+            tensors.is_empty(),
+            "only *.gate_up_proj_blocks is a trigger"
+        );
+    }
+
+    #[test]
+    fn fused_loader_errors_when_the_scales_companion_is_absent() {
+        // Unlike the V4 path's silent skips, a fused blocks tensor with no
+        // scales is malformed rather than foreign — the pair is written
+        // together by the exporter.
+        let name = "layers.0.mlp.experts.gate_up_proj_blocks";
+        let buf = st_bytes(vec![(name, Dtype::U8, vec![1, 2, 1, 16], vec![0u8; 32])]);
+        let st = safetensors::SafeTensors::deserialize(&buf).unwrap();
+        let mut tensors = HashMap::new();
+        let err =
+            load_mxfp4_expert_tensors(&st, &[name.to_string()], &[], &never_skip(), &mut tensors)
+                .unwrap_err();
+        assert!(
+            format!("{err}").contains("MXFP4 scales"),
+            "error should name the missing side: {err}"
+        );
+    }
+
+    #[test]
+    fn fused_loader_skips_a_blocks_tensor_that_is_not_four_dimensional() {
+        // A 3-D blocks tensor cannot carry [experts, out, groups, 16];
+        // treated as not-this-layout rather than an error.
+        let b = "layers.0.mlp.experts.gate_up_proj_blocks";
+        let s = "layers.0.mlp.experts.gate_up_proj_scales";
+        let buf = st_bytes(vec![
+            (b, Dtype::U8, vec![2, 1, 16], vec![0u8; 32]),
+            (s, Dtype::U8, vec![2, 1], vec![127u8; 2]),
+        ]);
+        let st = safetensors::SafeTensors::deserialize(&buf).unwrap();
+        let mut tensors = HashMap::new();
+        load_mxfp4_expert_tensors(&st, &[b.to_string()], &[], &never_skip(), &mut tensors).unwrap();
+        assert!(tensors.is_empty());
+    }
+
+    #[test]
+    fn fused_loader_honours_skip_key_and_does_no_work_when_everything_is_filtered() {
+        // `should_load_gate_up` is the guard that makes a fully-skipped
+        // layer cheap: with every key filtered, nothing is dequantised.
+        let b = "layers.0.mlp.experts.gate_up_proj_blocks";
+        let s = "layers.0.mlp.experts.gate_up_proj_scales";
+        let buf = st_bytes(vec![
+            (b, Dtype::U8, vec![1, 2, 1, 16], vec![0x21u8; 32]),
+            (s, Dtype::U8, vec![1, 2, 1], vec![127u8; 2]),
+        ]);
+        let st = safetensors::SafeTensors::deserialize(&buf).unwrap();
+        let mut tensors = HashMap::new();
+        let skip_all = |_: &str| true;
+        load_mxfp4_expert_tensors(&st, &[b.to_string()], &[], &skip_all, &mut tensors).unwrap();
+        assert!(tensors.is_empty(), "skip_key must suppress every insert");
+    }
+
+    #[test]
+    fn fused_loader_splits_gate_and_up_into_separate_mixtral_keys() {
+        // out_features = 2 → half = 1: one gate row (w1) and one up row (w3).
+        let b = "layers.0.mlp.experts.gate_up_proj_blocks";
+        let s = "layers.0.mlp.experts.gate_up_proj_scales";
+        let buf = st_bytes(vec![
+            (b, Dtype::U8, vec![1, 2, 1, 16], vec![0x21u8; 32]),
+            (s, Dtype::U8, vec![1, 2, 1], vec![127u8; 2]),
+        ]);
+        let st = safetensors::SafeTensors::deserialize(&buf).unwrap();
+        let mut tensors = HashMap::new();
+        load_mxfp4_expert_tensors(&st, &[b.to_string()], &[], &never_skip(), &mut tensors).unwrap();
+
+        let gate = mxfp4_expert_key("layers.0", 0, MIXTRAL_GATE_PROJ);
+        let up = mxfp4_expert_key("layers.0", 0, MIXTRAL_UP_PROJ);
+        assert!(tensors.contains_key(&gate), "missing gate key {gate}");
+        assert!(tensors.contains_key(&up), "missing up key {up}");
+        // in_features = groups * 32.
+        assert_eq!(tensors[&gate].shape(), &[1, 32]);
+        assert_eq!(tensors[&up].shape(), &[1, 32]);
+    }
+}
