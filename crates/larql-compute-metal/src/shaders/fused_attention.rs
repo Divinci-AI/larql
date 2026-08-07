@@ -37,6 +37,7 @@ kernel void fused_attention(
     constant float*     sinks       [[buffer(14)]],  // per-Q-head attention sink logits
     constant uint&      has_sinks   [[buffer(15)]],
     constant float&     amplitude   [[buffer(16)]],  // cos/sin scalar (YaRN); 1.0 otherwise  // 0 = no sinks (buffer is a dummy)
+    constant uint&      window_size [[buffer(17)]],  // sliding window; 0 = attend the whole causal prefix
     uint2 tg_id [[threadgroup_position_in_grid]],    // (head, query_pos)
     uint tid    [[thread_index_in_threadgroup]])
 {
@@ -108,8 +109,18 @@ kernel void fused_attention(
 
     float local_max = -1e30f;
     uint causal_len = qi + 1;
+    // First key this query may attend. Mirrors the CPU rule in
+    // `attention::gqa::window_start` (causal_len.saturating_sub(w)); a
+    // window at least as wide as the prefix leaves k_start = 0, so the
+    // windowed path is bit-identical to the unwindowed one until the
+    // window actually binds.
+    uint k_start = (window_size > 0u && causal_len > window_size)
+                 ? (causal_len - window_size)
+                 : 0u;
+    // Number of keys in range, i.e. how many threads did work below.
+    uint active_len = causal_len - k_start;
 
-    for (uint k = tid; k < causal_len; k += tg_sz) {
+    for (uint k = k_start + tid; k < causal_len; k += tg_sz) {
         // Load K[k] for this KV head, optionally apply partial RoPE
         float dot = 0.0f;
         for (uint d = 0; d < head_dim; d++) {
@@ -157,7 +168,7 @@ kernel void fused_attention(
     threadgroup_barrier(mem_flags::mem_threadgroup);
     if (tid == 0) {
         float m = -1e30f;
-        for (uint i = 0; i < min(tg_sz, causal_len); i++) {
+        for (uint i = 0; i < min(tg_sz, active_len); i++) {
             if (tg_maxes[i] > m) m = tg_maxes[i];
         }
         // The sink competes in the softmax, so it must join the max or
@@ -169,7 +180,7 @@ kernel void fused_attention(
 
     // Softmax: exp and sum
     float local_sum = 0.0f;
-    for (uint k = tid; k < causal_len; k += tg_sz) {
+    for (uint k = k_start + tid; k < causal_len; k += tg_sz) {
         float w = exp(tg_scores[k] - tg_max);
         tg_scores[k] = w;
         local_sum += w;
@@ -181,7 +192,7 @@ kernel void fused_attention(
     threadgroup_barrier(mem_flags::mem_threadgroup);
     if (tid == 0) {
         float s = 0.0f;
-        for (uint i = 0; i < min(tg_sz, causal_len); i++) s += tg_sums[i];
+        for (uint i = 0; i < min(tg_sz, active_len); i++) s += tg_sums[i];
         // Denominator only: the sink has no output slot, so the emitted
         // weights deliberately sum to less than one.
         if (has_sinks != 0u) s += exp(sinks[head] - tg_max);
@@ -194,7 +205,7 @@ kernel void fused_attention(
     // ── Weighted sum of V ──
     for (uint d = tid; d < head_dim; d += tg_sz) {
         float acc = 0.0f;
-        for (uint k = 0; k < causal_len; k++) {
+        for (uint k = k_start; k < causal_len; k++) {
             uint v_idx = k * num_kv * head_dim + kv_head * head_dim + d;
             acc += tg_scores[k] * inv_sum * V[v_idx];
         }
