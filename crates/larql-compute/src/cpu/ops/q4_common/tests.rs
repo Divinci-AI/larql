@@ -317,13 +317,12 @@ fn q4_round_trip_accuracy() {
     let scale_bits = u16::from_le_bytes([q4[0], q4[1]]);
     let scale = f16_to_f32(scale_bits);
 
-    let mut decoded = Vec::with_capacity(32);
+    // ggml planar layout: low nibbles are elements 0..16, high 16..32.
+    let mut decoded = [0.0f32; 32];
     for j in 0..16 {
         let byte = q4[2 + j];
-        let lo = (byte & 0x0F) as i32 - 8;
-        let hi = (byte >> 4) as i32 - 8;
-        decoded.push(lo as f32 * scale);
-        decoded.push(hi as f32 * scale);
+        decoded[j] = ((byte & 0x0F) as i32 - 8) as f32 * scale;
+        decoded[j + 16] = ((byte >> 4) as i32 - 8) as f32 * scale;
     }
 
     // Check approximate reconstruction (Q4 is lossy, but should be close)
