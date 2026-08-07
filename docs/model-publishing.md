@@ -152,22 +152,88 @@ Fixed in PR #215.
 
 ---
 
-## 7. What should exist
+## 7. The road to recipe-driven — sequenced
 
-**Recipes for these nine models**, in `chuk-vindex-recipes`. That is the
-deliverable this document is really arguing for: with them, the next
-format-level fix is `larql recipe build` per model rather than a day of
-`extract`/`publish`/`cmp`, and it gets revision pinning and the
-private-until-verified gate for free.
+Decided 2026-08-08: finish this recovery on the factory path rather than by
+hand. The steps are ordered because each unblocks the next.
 
-**A nibble-layout version in the vindex format.** Nothing in a vindex records
-which layout its bytes are in, which is the entire reason a fixed reader
-turns old bytes into fluent garbage instead of erroring. A version field —
+### R1 — cut `v0.2.0` *(blocks everything below)*
+
+`v0.1.1` is dated 2026-07-27 and **predates the nibble-layout fix**. A recipe
+pinning it would extract the broken layout, so the tag has to move before any
+recipe can honestly reference it.
+
+Needs #215 (publish prune + retry), #216 (models coverage), #217 (this doc)
+merged first.
+
+**Why the pin matters even though nothing enforces it.** `larql recipe build`
+runs subprocesses of `std::env::current_exe()`, and no stage reads
+`extractor.version` — so a build today would use the local binary and produce
+*correct bytes*. But the recorded provenance would name a release that never
+built them, which is precisely what §4.1 of
+[`vindex-factory.md`](vindex-factory.md) says the pin exists to prevent:
+"without a pinned upstream it is not reproducible and the provenance in the
+vindex-v1 manifest is a lie." Correct bytes with false provenance are worse
+than manual publishing with none.
+
+*Worth fixing separately:* the driver should assert that its own version
+matches `extractor.version`, or record the actual one. A pin nothing checks
+is a comment.
+
+### R2 — create `chuk-vindex-recipes`
+
+§3.1 is RESOLVED — recipes, `policy/`, `verify/` prompt sets and the two
+workflows live there, not in `larql`. The repo does not exist yet.
+
+Seven validated recipes are ready to seed it (one per model in §6), each with
+a pinned upstream revision and a distinct `build_id`.
+
+### R3 — resolve the dotted-name conflict
+
+`metadata.name` *is* the repo slug (`card::naming::hub_repo_name`), and
+`is_kebab_case` rejects dots — but `granite-4.1-3b`, `qwen3-0.6b` and
+`bitnet-b1.58-2b-4t` all carry dotted versions and are already published under
+dotted names. Deriving the slug from the name would silently move
+`granite-4.1-3b-q4k-vindex` to `granite-4-1-3b-q4k-vindex` and orphan the
+existing repo.
+
+Worked around by pinning literal `repo_template` values, which loses the
+`{model_slug}` indirection. The real question: should `is_kebab_case` permit
+dots in this position? Upstream model names routinely contain them.
+
+### R4 — run the builds
+
+`larql recipe build recipes/<model>.yaml` per model, which brings what the
+manual path lacked: a pinned revision, checksum verification, and
+private-until-verified.
+
+### R5 — resolve PIN 13.1 explicitly
+
+§13.1 is still formally open (dataset repos vs model repos). Every published
+vindex is a **model** repo and the recipes say `repo_type: model`, so this is
+already decided in practice — it should be written down before more artifacts
+accumulate under an undocumented choice.
+
+---
+
+## 8. Beyond the recovery
+
+**A nibble-layout version in the vindex format.** Nothing records which
+layout a vindex's bytes are in, which is the entire reason a fixed reader
+turns old bytes into fluent garbage rather than erroring. A version field —
 with the loader refusing, or converting, on mismatch — is the durable fix.
-Everything in §3 is a workaround for its absence.
+Everything in §3 is a workaround for its absence, and it is the single most
+valuable item on this page.
 
 **An audit subcommand.** §3's rule is mechanical; `larql vindex doctor` could
-answer it instead of a human globbing filenames and getting it wrong.
+answer it instead of a human globbing filenames and getting it wrong — which
+happened, and reported a fully-broken vindex as unaffected.
 
 **Model-card notes on affected repos.** Anyone who pulled before 2026-08-07
 holds broken bytes and has no way to know.
+
+**A verify harness with teeth.** §3.1's footnote 2 is honest that
+`larql verify` is checksum integrity only; the reconstruction and logit-match
+blocks in every recipe's `verify:` section are declared but not yet enforced.
+Recipes asserting thresholds nothing checks is the same failure mode as R1's
+unchecked version pin.

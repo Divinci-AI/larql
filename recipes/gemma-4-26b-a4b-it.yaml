@@ -1,0 +1,67 @@
+# Generated for the 2026-08 republish — see docs/model-publishing.md.
+#
+# `extractor.version` pins 0.2.0: the first release containing the ggml planar
+# nibble-layout fix (#212). v0.1.1 predates it and would extract the broken
+# layout, reproducing the defect this republish exists to correct.
+#
+# `repo_template` is the literal published repo name rather than
+# `{model_slug}-vindex`. `metadata.name` must be kebab-case (no dots), but
+# these models carry dotted versions and are already published under the
+# dotted names; deriving the slug from the name would orphan those repos.
+apiVersion: vindex.chukai.io/v1
+kind: VindexBuild
+metadata:
+  name: gemma-4-26b-a4b-it
+  description: FFN knowledge index for Gemma 4 26B A4B IT (MoE)
+
+spec:
+  source:
+    hf_repo: google/gemma-4-26B-A4B-it
+    revision: 7d4c97e54145f8ffd1a4dd1b4986a5015a517842
+    licence: gemma
+
+  extractor:
+    tool: larql
+    version: "0.2.0"
+    level: all
+    dtype: f16
+    options:
+      down_q4k: false
+      drop_gate_vectors: false
+
+  outputs:
+    - preset: full
+    - preset: client
+    - preset: server
+
+  verify:
+    reconstruction:
+      layers_sampled: 8
+      seed: 1729
+      max_abs_diff: 0.0
+      min_cosine: 1.0
+    logit_match:
+      prompt_set: verify/smoke-32.jsonl
+      top1_agreement_min: 0.99
+      bits_per_char_drift_max: 0.005
+    from_hub: true
+
+  publish:
+    hub:
+      owner: chrishayuk
+      repo_template: "gemma-4-26b-a4b-it-vindex{slice_suffix}"
+      repo_type: model
+      collection: "larql/vindex-v1"
+      tags: [vindex, larql, mechanistic-interpretability]
+      visibility: private-until-verified
+    mirror:
+      r2_bucket: chuk-vindex
+
+  budget:
+    executor: auto
+    max_wall_minutes: 480
+    max_usd: 12
+    requires:
+      disk_gib: 512
+      ram_gib: 64
+      net_down_mbps: 1000
