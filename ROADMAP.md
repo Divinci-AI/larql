@@ -1685,11 +1685,33 @@ residual is measured, not assumed: a **four-token tie-break cascade** carrying
 | M5 | **Prove the M1 fix end to end on `gemma-3-4b-it`. DONE (2026-08-06), and it took a detour.** First run passed at cos 1.000000 across all 34 layers — but the vindex the test loads has **no `rope_scaling` at all**, so `rope_position_divisor_for_layer` returned 1.0 on every layer and the 8× divisor M5 names was never exercised. That is a gate–claim congruence failure, not a result. Re-run with `LARQL_ROPE_POS_DIVISOR_GLOBAL=8`, which drives the same `effective_rope_position_divisor_for_layer` → `rope_freq_plan` both backends read: **34/34 layers at cos 1.000000, 1 and 2 decode steps**. Knob verified to bite, not silently no-op: outputs are identical for L00–L04 and diverge from **L05 — the first global layer** — with final ‖h‖ 21424.07 (divisor 1) vs 21878.96 (divisor 8). | — | **done** |
 
 **Phases.** R1/P1 (audit) and P2 (adapter) are closed. **P3 harvest, P4 extract,
-P5 serve, P6 shrink are not started.** P5 additionally still carries §4.7.10's
-blocker: `write_per_layer_moe_kquant` gates on `ExpertFormat::PackedBF16`, so a
-packed-MXFP4 model writes **no per-layer expert store at all** — GPT-OSS is not
-servable from a vindex until that is fixed, which is a prerequisite for item 14
-(routed `FfnBackend`) nobody had noticed was missing.
+P5 serve, P6 shrink are not started** — but P5's named blocker is gone.
+
+**P5 expert-store blocker CLEARED (2026-08-07).** The diagnosis in §4.7.10 was
+half the story: GPT-OSS fell through *both* writers, not one.
+`write_per_layer_moe_kquant` requires `PackedBF16` and
+`write_per_layer_moe_per_expert` required `PerExpert`, so `PackedMxfp4` matched
+neither and no expert store was written at all — extraction reporting success,
+checksums verifying, and the model unservable. That is the **third** appearance
+of the silent-0-byte expert store this file's lineage has documented, and each
+time the cause was a gate testing an *enum value* rather than the *capability*
+the writer needs. The gate is now `arch.is_moe() && arch.expert_ffn_gate_key(0,
+0).is_some()` — "does this arch expose per-expert tensors", which is exactly
+what the writer consumes. Packed models still decline correctly, because the
+trait default for that key is `None` and Gemma 4 does not override it.
+
+**Format:** MXFP4 experts transcode to **Q6_K, not Q4_K.** An MXFP4 group
+reconstructs at most 15 distinct values and Q6_K represents every one exactly,
+so the transcode is lossless — the K3 kernel-ladder result, applied. Q4_K would
+re-quantise an already-quantised tensor and discard the checkpoint's own values
+for no benefit the serving path can use.
+
+**Still to verify:** this is pinned by unit tests on a synthetic GPT-OSS-shaped
+source (both verified to fail against the old gate), *not* by a real extraction.
+`openai/gpt-oss-20b` is present locally; running P4 extract against it end to end
+and then serving it is the next step, and until that is done "GPT-OSS is
+servable" remains a claim about the writer, not about the model. Item 14 (routed
+`FfnBackend`) is still the other half.
 
 **Standing rules earned here** (see [`AGENTS.md`](AGENTS.md)): diff the forward
 before theorising about it; a fixture too small to distinguish the candidate
