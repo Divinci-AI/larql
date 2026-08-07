@@ -98,8 +98,9 @@ kernel void q6k_grouped_experts(
     // ---- body identical to q6k_matvec from here ----
     const uint ix  = lane & 1u;
     const uint tid = lane >> 1u;
-    const uint base    = tid << 2u;
-    const uint sc_base = tid >> 2u;
+    // Planar Q6_K nibble columns; see `q6k_matvec` for the layout derivation.
+    const uint l0 = tid;
+    const uint l1 = tid + 16u;
 
     float acc = 0.0f;
 
@@ -111,56 +112,48 @@ kernel void q6k_grouped_experts(
         ushort d_bits = ushort(block[208]) | (ushort(block[209]) << 8u);
         float  d = decode_f16_metal(d_bits);
 
-        const uint xb = i * 256u + base;
+        const uint xb = i * 256u;
+        const uint x0 = xb + l0;
+        const uint x1 = xb + l1;
+        const uint x2 = xb + 128u + l0;
+        const uint x3 = xb + 128u + l1;
         float xl[16];
-        xl[ 0] = Xs[xb      ]; xl[ 1] = Xs[xb +  1u];
-        xl[ 2] = Xs[xb +  2u]; xl[ 3] = Xs[xb +  3u];
-        xl[ 4] = Xs[xb + 64u]; xl[ 5] = Xs[xb + 65u];
-        xl[ 6] = Xs[xb + 66u]; xl[ 7] = Xs[xb + 67u];
-        xl[ 8] = Xs[xb +128u]; xl[ 9] = Xs[xb +129u];
-        xl[10] = Xs[xb +130u]; xl[11] = Xs[xb +131u];
-        xl[12] = Xs[xb +192u]; xl[13] = Xs[xb +193u];
-        xl[14] = Xs[xb +194u]; xl[15] = Xs[xb +195u];
+        xl[ 0] = Xs[x0]; xl[ 1] = Xs[x0 + 32u]; xl[ 2] = Xs[x0 + 64u]; xl[ 3] = Xs[x0 + 96u];
+        xl[ 4] = Xs[x1]; xl[ 5] = Xs[x1 + 32u]; xl[ 6] = Xs[x1 + 64u]; xl[ 7] = Xs[x1 + 96u];
+        xl[ 8] = Xs[x2]; xl[ 9] = Xs[x2 + 32u]; xl[10] = Xs[x2 + 64u]; xl[11] = Xs[x2 + 96u];
+        xl[12] = Xs[x3]; xl[13] = Xs[x3 + 32u]; xl[14] = Xs[x3 + 64u]; xl[15] = Xs[x3 + 96u];
 
         {
-            const uint b = base;
-            uchar la = ql[b >> 1u], lb = ql[(b >> 1u) + 1u], hi = qh[b >> 2u];
-            float _sc = d * float(sc[sc_base + 0u]);
-            acc += _sc * (
-                float((char)((la & 0x0Fu) | ((hi & 0x03u) << 4u)) - 32) * xl[ 0] +
-                float((char)(((la >> 4u) & 0x0Fu) | ((hi & 0x0Cu) << 2u)) - 32) * xl[ 1] +
-                float((char)((lb & 0x0Fu) | ((hi & 0x30u))) - 32) * xl[ 2] +
-                float((char)(((lb >> 4u) & 0x0Fu) | ((hi & 0xC0u) >> 2u)) - 32) * xl[ 3]);
+            uchar la = ql[l0], lb = ql[l0 + 32u], hi = qh[l0];
+            acc += d * (
+                float(sc[0u]) * float((char)((la & 0x0Fu) | ((hi & 0x03u) << 4u)) - 32) * xl[ 0] +
+                float(sc[2u]) * float((char)((lb & 0x0Fu) | ((hi & 0x0Cu) << 2u)) - 32) * xl[ 1] +
+                float(sc[4u]) * float((char)(((la >> 4u) & 0x0Fu) | (hi & 0x30u)) - 32) * xl[ 2] +
+                float(sc[6u]) * float((char)(((lb >> 4u) & 0x0Fu) | ((hi & 0xC0u) >> 2u)) - 32) * xl[ 3]);
         }
         {
-            const uint b = base + 64u;
-            uchar la = ql[b >> 1u], lb = ql[(b >> 1u) + 1u], hi = qh[b >> 2u];
-            float _sc = d * float(sc[sc_base + 4u]);
-            acc += _sc * (
-                float((char)((la & 0x0Fu) | ((hi & 0x03u) << 4u)) - 32) * xl[ 4] +
-                float((char)(((la >> 4u) & 0x0Fu) | ((hi & 0x0Cu) << 2u)) - 32) * xl[ 5] +
-                float((char)((lb & 0x0Fu) | ((hi & 0x30u))) - 32) * xl[ 6] +
-                float((char)(((lb >> 4u) & 0x0Fu) | ((hi & 0xC0u) >> 2u)) - 32) * xl[ 7]);
+            uchar la = ql[l1], lb = ql[l1 + 32u], hi = qh[l1];
+            acc += d * (
+                float(sc[1u]) * float((char)((la & 0x0Fu) | ((hi & 0x03u) << 4u)) - 32) * xl[ 4] +
+                float(sc[3u]) * float((char)((lb & 0x0Fu) | ((hi & 0x0Cu) << 2u)) - 32) * xl[ 5] +
+                float(sc[5u]) * float((char)(((la >> 4u) & 0x0Fu) | (hi & 0x30u)) - 32) * xl[ 6] +
+                float(sc[7u]) * float((char)(((lb >> 4u) & 0x0Fu) | ((hi & 0xC0u) >> 2u)) - 32) * xl[ 7]);
         }
         {
-            const uint b = base + 128u;
-            uchar la = ql[b >> 1u], lb = ql[(b >> 1u) + 1u], hi = qh[b >> 2u];
-            float _sc = d * float(sc[sc_base + 8u]);
-            acc += _sc * (
-                float((char)((la & 0x0Fu) | ((hi & 0x03u) << 4u)) - 32) * xl[ 8] +
-                float((char)(((la >> 4u) & 0x0Fu) | ((hi & 0x0Cu) << 2u)) - 32) * xl[ 9] +
-                float((char)((lb & 0x0Fu) | ((hi & 0x30u))) - 32) * xl[10] +
-                float((char)(((lb >> 4u) & 0x0Fu) | ((hi & 0xC0u) >> 2u)) - 32) * xl[11]);
+            uchar la = ql[64u + l0], lb = ql[96u + l0], hi = qh[32u + l0];
+            acc += d * (
+                float(sc[ 8u]) * float((char)((la & 0x0Fu) | ((hi & 0x03u) << 4u)) - 32) * xl[ 8] +
+                float(sc[10u]) * float((char)((lb & 0x0Fu) | ((hi & 0x0Cu) << 2u)) - 32) * xl[ 9] +
+                float(sc[12u]) * float((char)(((la >> 4u) & 0x0Fu) | (hi & 0x30u)) - 32) * xl[10] +
+                float(sc[14u]) * float((char)(((lb >> 4u) & 0x0Fu) | ((hi & 0xC0u) >> 2u)) - 32) * xl[11]);
         }
         {
-            const uint b = base + 192u;
-            uchar la = ql[b >> 1u], lb = ql[(b >> 1u) + 1u], hi = qh[b >> 2u];
-            float _sc = d * float(sc[sc_base + 12u]);
-            acc += _sc * (
-                float((char)((la & 0x0Fu) | ((hi & 0x03u) << 4u)) - 32) * xl[12] +
-                float((char)(((la >> 4u) & 0x0Fu) | ((hi & 0x0Cu) << 2u)) - 32) * xl[13] +
-                float((char)((lb & 0x0Fu) | ((hi & 0x30u))) - 32) * xl[14] +
-                float((char)(((lb >> 4u) & 0x0Fu) | ((hi & 0xC0u) >> 2u)) - 32) * xl[15]);
+            uchar la = ql[64u + l1], lb = ql[96u + l1], hi = qh[32u + l1];
+            acc += d * (
+                float(sc[ 9u]) * float((char)((la & 0x0Fu) | ((hi & 0x03u) << 4u)) - 32) * xl[12] +
+                float(sc[11u]) * float((char)((lb & 0x0Fu) | ((hi & 0x0Cu) << 2u)) - 32) * xl[13] +
+                float(sc[13u]) * float((char)(((la >> 4u) & 0x0Fu) | (hi & 0x30u)) - 32) * xl[14] +
+                float(sc[15u]) * float((char)(((lb >> 4u) & 0x0Fu) | ((hi & 0xC0u) >> 2u)) - 32) * xl[15]);
         }
     }
 
