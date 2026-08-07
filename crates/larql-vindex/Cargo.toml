@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+rust-version.workspace = true
 description = "Vindex — the queryable model format. Storage, KNN index, build, load, mutate."
 keywords = ["transformer", "vindex", "knn", "interpretability"]
 categories = ["science"]

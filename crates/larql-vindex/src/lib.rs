@@ -100,10 +100,11 @@ pub use format::huggingface::{
     SilentPublishCallbacks,
 };
 pub use format::weights::{
-    load_model_weights, load_model_weights_kquant, load_model_weights_kquant_shard,
-    load_model_weights_with_opts, write_model_weights, write_model_weights_kquant,
-    write_model_weights_kquant_with_opts, write_model_weights_with_opts, DownProjFormat,
-    KquantWriteOptions, LoadWeightsOptions, StreamingWeights, WeightSource, WriteWeightsOptions,
+    arch_from_vindex_config, load_model_weights, load_model_weights_kquant,
+    load_model_weights_kquant_shard, load_model_weights_with_opts, write_model_weights,
+    write_model_weights_kquant, write_model_weights_kquant_with_opts,
+    write_model_weights_with_opts, DownProjFormat, KquantWriteOptions, LoadWeightsOptions,
+    StreamingWeights, WeightSource, WriteWeightsOptions,
 };
 
 // Patch

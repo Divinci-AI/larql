@@ -29,6 +29,11 @@ use larql_inference::residual_diff::{compare_captures, ParityThreshold, Residual
 use super::DecodeDiffArgs;
 
 pub fn run_decode_diff(args: DecodeDiffArgs) -> Result<(), Box<dyn std::error::Error>> {
+    // The `gpu` feature alone is not enough: it compiles on every target,
+    // but `larql_compute_metal::MetalBackend` is `#[cfg(target_os =
+    // "macos")]`, so a Linux build with the feature on reaches for a type
+    // that is not there. Cargo cannot express "this feature, on this OS",
+    // so the call site carries it.
     #[cfg(not(all(feature = "gpu", target_os = "macos")))]
     {
         let _ = args;

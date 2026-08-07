@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+rust-version.workspace = true
 description = "Execution-refusal semantics shared across LARQL's runtime crates. Zero larql-* deps."
 keywords = ["execution", "refusal", "runtime"]
 categories = ["data-structures"]

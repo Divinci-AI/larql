@@ -4,6 +4,7 @@
 //! cross-module ones: G0 parity, the FFN-dispatch gate, the lifecycle
 //! refusals, and the EXP-25 qualification matrix expressed as policy.
 
+mod engine_delegation;
 mod fixtures;
 mod lifecycle;
 mod parity;
@@ -11,3 +12,4 @@ mod position_seam;
 mod qualification_gate;
 mod row_position_storage;
 mod window_policy_gates;
+mod window_policy_refusals;
