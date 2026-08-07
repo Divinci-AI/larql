@@ -52,11 +52,11 @@ pub struct LayerDumpManifest {
     pub dtype: String,
 }
 
-impl LayerDumpManifest {
-    /// Bytes each plane file must be, given the declared geometry.
-    pub fn plane_bytes(&self) -> usize {
-        self.seq_len * self.hidden_size * std::mem::size_of::<f32>()
-    }
+/// Bytes one `[seq_len, hidden_size]` plane file must be. The single
+/// definition of the geometry→size rule: `read_plane` validates against it,
+/// so a manifest and the file it describes cannot disagree about it.
+pub fn plane_bytes(seq_len: usize, hidden_size: usize) -> usize {
+    seq_len * hidden_size * std::mem::size_of::<f32>()
 }
 
 /// Plane filename for capture `idx`. Zero-padded so a directory listing sorts
@@ -81,7 +81,7 @@ pub fn read_plane(
     hidden_size: usize,
 ) -> Result<Array2<f32>, Box<dyn std::error::Error>> {
     let bytes = fs::read(path)?;
-    let expected = seq_len * hidden_size * std::mem::size_of::<f32>();
+    let expected = plane_bytes(seq_len, hidden_size);
     if bytes.len() != expected {
         return Err(format!(
             "{}: {} bytes, expected {expected} for [{seq_len}, {hidden_size}] {PLANE_DTYPE}",
@@ -219,7 +219,8 @@ mod tests {
 
     #[test]
     fn plane_bytes_follows_declared_geometry() {
-        assert_eq!(manifest_for(2, 3).plane_bytes(), 24);
+        let m = manifest_for(2, 3);
+        assert_eq!(plane_bytes(m.seq_len, m.hidden_size), 24);
     }
 
     #[test]
