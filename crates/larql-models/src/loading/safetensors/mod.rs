@@ -488,4 +488,79 @@ mod tests {
     // ── FP8 decoders (per-byte bit-pattern → f32) ─────────────────────────
 
     // ── tensor_to_f32 dispatcher ──────────────────────────────────────────
+
+    // ── the six public entry points ─────────────────────────────────────
+    //
+    // All delegate to `load_model_dir_filtered_with_validation`, and none
+    // was exercised: the loader family was reachable only through a real
+    // model directory, so the split left every wrapper uncovered. The
+    // `NotADirectory` contract is the one branch testable without weights,
+    // and it pins that each wrapper actually forwards rather than
+    // shadowing the check.
+
+    fn missing_path() -> std::path::PathBuf {
+        std::path::PathBuf::from("/nonexistent/larql/model/dir")
+    }
+
+    /// `ModelWeights` has no `Debug`, so `unwrap_err()` is unavailable —
+    /// reduce the `Result` to a bool first. Written as `matches!` rather
+    /// than match arms with `panic!` bodies so the helper adds no branches
+    /// that only execute when a test fails.
+    fn assert_not_a_directory(res: Result<ModelWeights, ModelError>, which: &str) {
+        assert!(
+            matches!(res, Err(ModelError::NotADirectory(_))),
+            "{which} should report NotADirectory"
+        );
+    }
+
+    #[test]
+    fn every_loader_entry_point_rejects_a_missing_path() {
+        assert_not_a_directory(load_model_dir(missing_path()), "load_model_dir");
+        assert_not_a_directory(
+            load_model_dir_validated(missing_path()),
+            "load_model_dir_validated",
+        );
+        assert_not_a_directory(
+            load_model_dir_walk_only(missing_path()),
+            "load_model_dir_walk_only",
+        );
+        assert_not_a_directory(
+            load_model_dir_walk_only_validated(missing_path()),
+            "load_model_dir_walk_only_validated",
+        );
+        assert_not_a_directory(
+            load_model_dir_filtered(missing_path(), |_| false),
+            "load_model_dir_filtered",
+        );
+        assert_not_a_directory(
+            load_model_dir_filtered_validated(missing_path(), |_| false),
+            "load_model_dir_filtered_validated",
+        );
+    }
+
+    #[test]
+    fn a_plain_file_that_is_not_gguf_is_not_a_directory() {
+        // The `path.is_file()` branch: only a `.gguf` file is a valid
+        // single-file model; anything else falls through to the same error
+        // a missing directory produces.
+        let tmp = tempfile::tempdir().unwrap();
+        let f = tmp.path().join("weights.bin");
+        std::fs::write(&f, b"not a model").unwrap();
+        assert_not_a_directory(load_model_dir(&f), "plain file");
+    }
+
+    #[test]
+    fn a_directory_with_no_config_fails_architecture_detection_not_the_path_check() {
+        // Distinguishes the two early failures: an empty *directory* gets
+        // past `is_dir` and dies in detection, so a NotADirectory here
+        // would mean the path check was wrong.
+        let tmp = tempfile::tempdir().unwrap();
+        let res = load_model_dir(tmp.path());
+        assert!(
+            !matches!(res, Err(ModelError::NotADirectory(_))),
+            "an existing empty dir must fail architecture detection, not the \
+             path check"
+        );
+        assert!(res.is_err(), "an empty directory is not a loadable model");
+    }
 }
