@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 use crate::error::VindexError;
 
-use super::protocol::{hf_base, repo_type_plural, HTTP_STATUS_CONFLICT};
+use super::protocol::{hf_base, repo_type_plural, CONTENT_TYPE_NDJSON, HTTP_STATUS_CONFLICT};
 
 /// List remote files and return `filename → lfs.oid` for every LFS-tracked
 /// file at the repo root. Files without an `lfs.oid` (git-tracked small
@@ -131,6 +131,104 @@ pub(super) fn update_repo_visibility(
             "HF repo visibility update failed ({status}): {body}"
         )))
     }
+}
+
+/// Every file path in the repo, whether LFS-tracked or not.
+///
+/// [`fetch_remote_lfs_oids`] deliberately drops non-LFS entries because it
+/// only answers "can I skip this upload". Pruning needs the full set: the
+/// small `*_manifest.json` siblings of a renamed weight file are git-tracked,
+/// not LFS, and leaving them behind is what makes a half-renamed vindex load
+/// the wrong pair.
+pub(super) fn fetch_remote_file_paths(
+    repo_id: &str,
+    token: &str,
+    repo_type: &str,
+) -> Result<Vec<String>, VindexError> {
+    let plural = repo_type_plural(repo_type);
+    let url = format!(
+        "{}/api/{plural}/{repo_id}/tree/main?recursive=true",
+        hf_base()
+    );
+    let resp = reqwest::blocking::Client::new()
+        .get(&url)
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .map_err(|e| VindexError::Parse(format!("HF tree fetch failed: {e}")))?;
+    if !resp.status().is_success() {
+        // Fresh repo → nothing to prune.
+        return Ok(Vec::new());
+    }
+    let body: serde_json::Value = resp
+        .json()
+        .map_err(|e| VindexError::Parse(format!("HF tree JSON: {e}")))?;
+    Ok(parse_file_paths(&body))
+}
+
+/// Pull `path` from every `type == "file"` entry of a tree listing.
+fn parse_file_paths(body: &serde_json::Value) -> Vec<String> {
+    let arr = match body.as_array() {
+        Some(a) => a,
+        None => return Vec::new(),
+    };
+    arr.iter()
+        .filter(|e| e.get("type").and_then(|v| v.as_str()) == Some("file"))
+        .filter_map(|e| e.get("path").and_then(|v| v.as_str()).map(str::to_string))
+        .collect()
+}
+
+/// Delete `paths` from the repo in one commit.
+pub(super) fn delete_remote_files(
+    repo_id: &str,
+    token: &str,
+    repo_type: &str,
+    paths: &[String],
+) -> Result<(), VindexError> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let plural = repo_type_plural(repo_type);
+    let url = format!("{}/api/{plural}/{repo_id}/commit/main", hf_base());
+
+    let mut ndjson = serde_json::to_string(&serde_json::json!({
+        "key": "header",
+        "value": { "summary": format!("Prune {} file(s) not in the source vindex", paths.len()) },
+    }))
+    .unwrap();
+    ndjson.push('\n');
+    for p in paths {
+        ndjson.push_str(
+            &serde_json::to_string(&serde_json::json!({
+                "key": "deletedFile",
+                "value": { "path": p },
+            }))
+            .unwrap(),
+        );
+        ndjson.push('\n');
+    }
+
+    let resp = reqwest::blocking::Client::new()
+        .post(&url)
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", CONTENT_TYPE_NDJSON)
+        .body(ndjson)
+        .send()
+        .map_err(|e| VindexError::Parse(format!("prune commit failed: {e}")))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().unwrap_or_default();
+        return Err(VindexError::Parse(format!(
+            "prune commit ({status}): {body}"
+        )));
+    }
+    Ok(())
+}
+
+/// Repo files that `publish` never writes and must therefore never prune:
+/// git plumbing and the model card, which is authored separately
+/// (`larql card`) and lives only on the Hub.
+pub(super) fn is_prune_exempt(path: &str) -> bool {
+    path.starts_with('.') || path == "README.md" || path.ends_with("/README.md")
 }
 
 #[cfg(test)]
