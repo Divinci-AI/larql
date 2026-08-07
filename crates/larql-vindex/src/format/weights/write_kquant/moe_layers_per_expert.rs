@@ -39,7 +39,18 @@ pub(super) fn write_per_layer_moe_per_expert(
     num_layers: usize,
 ) -> Result<usize, VindexError> {
     let arch = source.arch();
-    if !(arch.is_moe() && arch.expert_format() == larql_models::ExpertFormat::PerExpert) {
+    // Gate on the *capability* this writer needs — "does the arch expose
+    // per-expert tensor keys" — not on one enum value. `PackedMxfp4`
+    // (GPT-OSS) is stored packed on disk but the safetensors loader
+    // dequantises and de-interleaves it, so by the time a `WeightSource`
+    // is asked it answers `expert_ffn_{gate,up,down}_key` exactly like
+    // `PerExpert` does. Testing the enum instead of the capability sent
+    // GPT-OSS through *both* writers untouched — the packed one requires
+    // `PackedBF16`, this one required `PerExpert` — so it wrote no expert
+    // store at all and could not be served from a vindex (ROADMAP P5).
+    // That is the third time this exact gap has been found in this file's
+    // lineage; both doc comments above describe the same failure.
+    if !arch.is_moe() || arch.expert_ffn_gate_key(0, 0).is_none() {
         return Ok(0);
     }
 
@@ -50,7 +61,15 @@ pub(super) fn write_per_layer_moe_per_expert(
         return Ok(0);
     }
 
-    let format = LayerWeightFormat::Q4_K;
+    // MXFP4 groups reconstruct at most 15 distinct values, all of which
+    // Q6_K represents exactly — the transcode is lossless, and it is the
+    // K3 kernel-ladder result. Q4_K would quantise an already-quantised
+    // tensor a second time and lose the checkpoint's own values for no
+    // benefit the serving path can use.
+    let format = match arch.expert_format() {
+        larql_models::ExpertFormat::PackedMxfp4 => LayerWeightFormat::Q6_K,
+        _ => LayerWeightFormat::Q4_K,
+    };
     let mut written = 0usize;
 
     for layer in 0..num_layers {

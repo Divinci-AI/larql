@@ -1681,15 +1681,37 @@ residual is measured, not assumed: a **four-token tie-break cascade** carrying
 | M1 | **Metal decode ignored every RoPE scaling family.** Prefill roped on the host and honoured llama3 / YaRN / Gemma 3's linear divisor; decode roped in-shader from `rope_base` alone and honoured none — live on `gemma-3-4b/12b-it` and `Llama-3.2-1B`. **FIXED**: `RopeFreqPlan` computed once by the same `rope_freq_plan` the CPU uses, bound as a buffer + amplitude. | larql-compute-metal | **done** |
 | M2 | **All four rope-bearing shaders converted atomically** — `rope` (4 kernels), `qk_norm_rope_fused`, `attn_fused`, `fused_attention`; eight rotation sites, zero `pow(rope_base, …)` left. `stages::rope_freq` owns the binding and checks the table width against the layer's geometry. **551 Metal tests green; the suite caught 16 binding mistakes**, each surfacing as `cos = 0.0` rather than a compile error, since Metal bindings are untyped. | larql-compute-metal | **done** |
 | M3 | **A decode-pass diff exists. DONE (2026-08-06), re-homed 2026-08-07 as `larql shannon decode-diff`.** The example it originally landed in was deleted by main's examples reorganisation, so the pass now lives in the CLI beside `layer-dump`/`layer-diff`, driving `residual_diff::ResidualCapture` rather than reimplementing it. It is a *different axis* from `layer-diff` and the doc says so: `layer-diff` compares this engine to an external HF reference over a prefill, which by construction cannot see a decode-only defect. Verified on `gemma-3-4b-it`, 34/34 layers, `--steps 2`. **Original entry:** The example now runs a fourth section: Metal `prefill(N-1) + decode_token(N)` against CPU `prefill(N)` projected to its last row, per layer, reusing `residual_diff::ResidualCapture` rather than re-spelling the dump plumbing. Note the finding along the way: the *library* already had `metal_decode` / `metal_decode_steps` and `tests/test_decode_consistency.rs` already compared them against a CPU reference — the gap was only in the interactive tool, so "the decode diff does not exist" was too strong. | larql-inference | **done** |
-| M4 | **Metal *prefill* ignores the sliding window. Still open, and re-stated 2026-08-07** — the original wording ("Metal attention kernels have no `AttentionSpan`") went stale when the merge dropped `AttentionSpan` for main's `window` API. Measured, not assumed: Metal **decode** honours it (`decode/encode_attn.rs` → `effective_window_for` → `ops::kv_cache::attention_span`), but Metal **prefill** does not — `stages::attention::encode` takes no window parameter and its `Flags` struct carries `use_qk_norm` / `skip_rope` / `softcap` / `rotary_dim` and nothing else, while CPU prefill windows at `attention/block.rs:481` via the shared `effective_attention_window_for_layer`. So on GPU every sliding layer attends the whole prefix during prefill: Gemma 3 (29 of 34 sliding, window 1024), GPT-OSS (12 sliding). **This is the M1 asymmetry inverted** — there prefill was right and decode wrong; here decode is right and prefill wrong. **Why no gate sees it:** `test_decode_consistency` and `test_cpu_metal_parity` prompt with `"The capital of France is"` (~16 tokens), an order of magnitude under the window, so the two behaviours are indistinguishable on the fixture — an *absent* test, not a weak one. Any fix needs a >1024-token prompt in the parity fixture first, or it cannot be shown to work. | larql-compute-metal | open |
+| M4 | **Metal prefill now honours the sliding window. DONE (2026-08-07).** The defect, measured before fixing: Metal *decode* windowed correctly but Metal *prefill* took no window at all — `stages::attention::encode` had no such argument — while CPU prefill windowed via `effective_attention_window_for_layer`. So every sliding layer attended the whole prefix on GPU (Gemma 3: 29 of 34, window 1024; GPT-OSS: 12). **The M1 asymmetry inverted.** **Fix:** `fused_attention` gains `window_size` at buffer 17 and a `k_start` that mirrors the CPU rule (`causal_len.saturating_sub(w)`) exactly; the score, softmax and V-weighted loops all start there, and the two threadgroup reductions now count `active_len` rather than `causal_len`. The per-layer window was already resolved and already on `FullPipelineLayer` — `build_pipeline_layers` computes it through the shared rule with `0` as the no-window sentinel — so global layers arrive as 0 and stay unwindowed. **Evidence:** `tests/test_prefill_sliding_window.rs` compares Metal prefill against the production CPU `gqa_attention_windowed` (not a hand-rolled reference — the claim is that the two *backends* agree). `seq_len=48, window=8` puts 40 of 48 queries outside the window, and a fixture-adequacy test asserts windowed and unwindowed CPU actually differ on it, so the suite cannot pass vacuously. Verified discriminating: with `k_start` forced to 0 exactly one test fails and the no-window control still passes. Full Metal suite green; real-model decode-consistency green on gemma3-4b/llama2-7b/mistral-7b. **Left open:** a model-level long-prompt parity fixture. The existing suites still prompt with ~16 tokens against a 1024 window, so they remain blind to this class — the kernel test is what guards it today. | larql-compute-metal | **done** |
 | M5 | **Prove the M1 fix end to end on `gemma-3-4b-it`. DONE (2026-08-06), and it took a detour.** First run passed at cos 1.000000 across all 34 layers — but the vindex the test loads has **no `rope_scaling` at all**, so `rope_position_divisor_for_layer` returned 1.0 on every layer and the 8× divisor M5 names was never exercised. That is a gate–claim congruence failure, not a result. Re-run with `LARQL_ROPE_POS_DIVISOR_GLOBAL=8`, which drives the same `effective_rope_position_divisor_for_layer` → `rope_freq_plan` both backends read: **34/34 layers at cos 1.000000, 1 and 2 decode steps**. Knob verified to bite, not silently no-op: outputs are identical for L00–L04 and diverge from **L05 — the first global layer** — with final ‖h‖ 21424.07 (divisor 1) vs 21878.96 (divisor 8). | — | **done** |
 
 **Phases.** R1/P1 (audit) and P2 (adapter) are closed. **P3 harvest, P4 extract,
-P5 serve, P6 shrink are not started.** P5 additionally still carries §4.7.10's
-blocker: `write_per_layer_moe_kquant` gates on `ExpertFormat::PackedBF16`, so a
-packed-MXFP4 model writes **no per-layer expert store at all** — GPT-OSS is not
-servable from a vindex until that is fixed, which is a prerequisite for item 14
-(routed `FfnBackend`) nobody had noticed was missing.
+P5 serve, P6 shrink are not started** — but P5's named blocker is gone.
+
+**P5 expert-store blocker CLEARED (2026-08-07).** The diagnosis in §4.7.10 was
+half the story: GPT-OSS fell through *both* writers, not one.
+`write_per_layer_moe_kquant` requires `PackedBF16` and
+`write_per_layer_moe_per_expert` required `PerExpert`, so `PackedMxfp4` matched
+neither and no expert store was written at all — extraction reporting success,
+checksums verifying, and the model unservable. That is the **third** appearance
+of the silent-0-byte expert store this file's lineage has documented, and each
+time the cause was a gate testing an *enum value* rather than the *capability*
+the writer needs. The gate is now `arch.is_moe() && arch.expert_ffn_gate_key(0,
+0).is_some()` — "does this arch expose per-expert tensors", which is exactly
+what the writer consumes. Packed models still decline correctly, because the
+trait default for that key is `None` and Gemma 4 does not override it.
+
+**Format:** MXFP4 experts transcode to **Q6_K, not Q4_K.** An MXFP4 group
+reconstructs at most 15 distinct values and Q6_K represents every one exactly,
+so the transcode is lossless — the K3 kernel-ladder result, applied. Q4_K would
+re-quantise an already-quantised tensor and discard the checkpoint's own values
+for no benefit the serving path can use.
+
+**Still to verify:** this is pinned by unit tests on a synthetic GPT-OSS-shaped
+source (both verified to fail against the old gate), *not* by a real extraction.
+`openai/gpt-oss-20b` is present locally; running P4 extract against it end to end
+and then serving it is the next step, and until that is done "GPT-OSS is
+servable" remains a claim about the writer, not about the model. Item 14 (routed
+`FfnBackend`) is still the other half.
 
 **Standing rules earned here** (see [`AGENTS.md`](AGENTS.md)): diff the forward
 before theorising about it; a fixture too small to distinguish the candidate

@@ -38,8 +38,8 @@ pub fn run_decode_diff(args: DecodeDiffArgs) -> Result<(), Box<dyn std::error::E
     {
         let _ = args;
         return Err(format!(
-            "decode-diff compares the CPU and Metal backends, so it needs the \
-             `gpu` feature on macOS; rebuild with --features gpu on a Mac"
+            "decode-diff compares the CPU and Metal backends, so it needs a macOS host with the \
+             `gpu` feature; this build has one or neither"
         )
         .into());
     }

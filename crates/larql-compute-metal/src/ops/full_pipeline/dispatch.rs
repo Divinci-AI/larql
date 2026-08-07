@@ -439,6 +439,13 @@ pub fn dispatch_full_pipeline(
                     skip_rope: use_separate_rope,
                     softcap,
                     rotary_dim: layers[l].rotary_dim as u32,
+                    // ROADMAP M4. `sliding_window` is already per-layer and
+                    // already resolved through
+                    // `effective_attention_window_for_layer` in
+                    // `build_pipeline_layers`, with 0 as the "attend
+                    // everything" sentinel — so global layers arrive as 0 and
+                    // stay unwindowed.
+                    window: (layers[l].sliding_window != 0).then_some(layers[l].sliding_window),
                 },
                 layers[l].attn_sinks,
             );

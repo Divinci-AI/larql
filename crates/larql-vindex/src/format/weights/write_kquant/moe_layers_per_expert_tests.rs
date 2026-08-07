@@ -274,3 +274,95 @@ fn a_dense_model_is_declined() {
         0
     );
 }
+
+/// ROADMAP P5. GPT-OSS is `PackedMxfp4`: packed on disk, but the
+/// safetensors loader dequantises and de-interleaves it, so by the time
+/// a `WeightSource` is asked it answers `expert_ffn_*_key` exactly like a
+/// separate-tensor model.
+///
+/// It used to fall through **both** writers — the packed one requires
+/// `PackedBF16`, this one required `PerExpert` — and so wrote no expert
+/// store at all. Extraction reported success, checksums verified, and the
+/// model could not be served. That is the same silent-0-byte failure both
+/// writers' doc comments were written about, arriving a third time through
+/// a gate that tested an enum value instead of the capability.
+#[test]
+fn a_packed_mxfp4_model_gets_an_expert_store() {
+    let arch = larql_models::detect_from_json(&serde_json::json!({
+        "model_type": "gpt_oss",
+        "hidden_size": HIDDEN,
+        "intermediate_size": INTER,
+        "num_hidden_layers": NUM_LAYERS,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 4,
+        "num_local_experts": NUM_EXPERTS,
+        "num_experts_per_tok": 2,
+    }));
+    // Precondition: this really is the packed-MXFP4 arch, and it really
+    // does advertise per-expert keys. Without both, the test below would
+    // be exercising some other path.
+    assert_eq!(
+        arch.expert_format(),
+        larql_models::ExpertFormat::PackedMxfp4,
+        "fixture is not the packed-MXFP4 arch"
+    );
+    assert!(
+        arch.expert_ffn_gate_key(0, 0).is_some(),
+        "arch does not advertise per-expert keys; this writer cannot serve it"
+    );
+
+    let mut tensors = HashMap::new();
+    for layer in 0..NUM_LAYERS {
+        for expert in 0..NUM_EXPERTS {
+            insert_expert(&mut tensors, &*arch, layer, expert);
+        }
+    }
+    let source = MapSource { arch, tensors };
+
+    let dir = temp_dir("packed_mxfp4");
+    let written = write_per_layer_moe_per_expert(&source, &dir, NUM_LAYERS).unwrap();
+    assert_eq!(
+        written, NUM_LAYERS,
+        "packed-MXFP4 model wrote no expert store — it cannot be served from a vindex"
+    );
+    for layer in 0..NUM_LAYERS {
+        assert!(
+            layer_file(&dir, layer).exists(),
+            "layer {layer} store missing"
+        );
+    }
+}
+
+/// MXFP4 groups reconstruct at most 15 distinct values, all exactly
+/// representable in Q6_K, so the transcode is lossless. Q4_K would
+/// re-quantise an already-quantised tensor and discard the checkpoint's
+/// own values for nothing — this pins the choice so a later "make every
+/// expert store Q4_K for uniformity" cannot quietly undo it.
+#[test]
+fn packed_mxfp4_experts_are_stored_exactly_as_q6k() {
+    let arch = larql_models::detect_from_json(&serde_json::json!({
+        "model_type": "gpt_oss",
+        "hidden_size": HIDDEN,
+        "intermediate_size": INTER,
+        "num_hidden_layers": NUM_LAYERS,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 4,
+        "num_local_experts": NUM_EXPERTS,
+        "num_experts_per_tok": 2,
+    }));
+    let mut tensors = HashMap::new();
+    for expert in 0..NUM_EXPERTS {
+        insert_expert(&mut tensors, &*arch, 0, expert);
+    }
+    let source = MapSource { arch, tensors };
+    let dir = temp_dir("mxfp4_q6k");
+    write_per_layer_moe_per_expert(&source, &dir, NUM_LAYERS).unwrap();
+
+    let bytes = std::fs::read(layer_file(&dir, 0)).unwrap();
+    let (format, ..) = parse_layer_weights_header(&bytes).unwrap();
+    assert_eq!(
+        format,
+        super::super::write_layers::LayerWeightFormat::Q6_K,
+        "MXFP4 experts were not stored as Q6_K, so the transcode is lossy"
+    );
+}

@@ -20,6 +20,15 @@ pub struct Flags {
     pub skip_rope: bool,
     pub softcap: f32,
     pub rotary_dim: u32,
+    /// This layer's sliding window, or `None` for full attention.
+    ///
+    /// ROADMAP M4: prefill had no window at all, so every sliding layer
+    /// attended the whole prefix on GPU while CPU prefill windowed —
+    /// the M1 asymmetry inverted. Resolve it through
+    /// `forward_overrides::effective_attention_window_for_layer`, the
+    /// same rule the CPU path and the Metal decode path read, so the
+    /// three cannot disagree about which layers are windowed.
+    pub window: Option<usize>,
 }
 
 /// First of the two consecutive `fused_attention` slots carrying
@@ -76,6 +85,11 @@ pub fn encode(
     enc.set_bytes(11, 4, &flags.softcap as *const f32 as *const c_void);
     enc.set_bytes(12, 4, &skip_rope_val as *const u32 as *const c_void);
     enc.set_bytes(13, 4, &flags.rotary_dim as *const u32 as *const c_void);
+    // 0 = no window. `effective_attention_window_for_layer` normalises a
+    // declared zero-width window to `None`, so `Some(0)` cannot arrive
+    // here and mean "attend nothing".
+    let window_val: u32 = flags.window.unwrap_or(0) as u32;
+    enc.set_bytes(17, 4, &window_val as *const u32 as *const c_void);
     // Attention sinks (GPT-OSS): one learned logit per query head that
     // competes in the softmax and is then discarded.
     super::sinks::bind(enc, SINKS_BUFFER_INDEX, sinks, num_q_heads);
