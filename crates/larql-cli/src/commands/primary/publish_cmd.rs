@@ -118,6 +118,21 @@ pub struct PublishArgs {
     #[arg(long)]
     pub force_upload: bool,
 
+    /// Keep remote files that no longer exist in the source vindex.
+    ///
+    /// By default `publish` mirrors the source: after uploading, any file
+    /// on the Hub that the vindex no longer contains is deleted (except
+    /// `README.md` and dot-files, which are authored separately). This
+    /// matters when a weight file is renamed — leaving both generations in
+    /// the repo lets the loader pick the stale one by name, which is how
+    /// `gemma-3-4b-it-vindex` ended up serving a pre-ggml-layout weight
+    /// after a republish on 2026-08-07.
+    ///
+    /// Pass this to keep extra files, e.g. when a repo intentionally
+    /// carries hand-added assets alongside the vindex.
+    #[arg(long)]
+    pub no_prune: bool,
+
     /// HuggingFace repo type: `model` (default) or `dataset`.
     #[arg(long, default_value = "model")]
     pub repo_type: String,
@@ -226,6 +241,7 @@ pub fn run(args: PublishArgs) -> Result<(), Box<dyn std::error::Error>> {
             args.force_upload,
             &args.repo_type,
             args.private,
+            !args.no_prune,
         )?;
         results.push(StepOutcome {
             label: step.label,
@@ -526,12 +542,20 @@ fn execute_step(
     force_upload: bool,
     repo_type: &str,
     private: bool,
+    prune_remote: bool,
 ) -> Result<String, Box<dyn std::error::Error>> {
     match (&step.preset, &step.staging) {
         // Full vindex — upload the source directory directly, no slicing.
         (None, _) => {
             println!("\n→ Uploading full vindex to {}", step.repo);
-            upload_dir(src, &step.repo, force_upload, repo_type, private)
+            upload_dir(
+                src,
+                &step.repo,
+                force_upload,
+                repo_type,
+                private,
+                prune_remote,
+            )
         }
         // Sliced upload — carve into staging, upload, clean up.
         (Some(preset), Some(staging)) => {
@@ -548,7 +572,14 @@ fn execute_step(
                 staging.display()
             );
             println!("→ Uploading slice `{preset}` to {}", step.repo);
-            let result = upload_dir(staging, &step.repo, force_upload, repo_type, private);
+            let result = upload_dir(
+                staging,
+                &step.repo,
+                force_upload,
+                repo_type,
+                private,
+                prune_remote,
+            );
             // Always try to clean up the staging dir, regardless of outcome.
             let _ = std::fs::remove_dir_all(staging);
             result
@@ -563,12 +594,14 @@ fn upload_dir(
     force_upload: bool,
     repo_type: &str,
     private: bool,
+    prune_remote: bool,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let mut callbacks = CliPublishCallbacks::new();
     let opts = larql_vindex::PublishOptions {
         skip_unchanged: !force_upload,
         repo_type: repo_type.to_string(),
         private,
+        prune_remote,
     };
     let url = larql_vindex::publish_vindex_with_opts(dir, repo, &opts, &mut callbacks)?;
     Ok(url)
@@ -653,6 +686,29 @@ impl larql_vindex::PublishCallbacks for CliPublishCallbacks {
             truncate_msg(filename, 28),
             short_sha
         ));
+    }
+
+    fn on_retry(
+        &mut self,
+        filename: &str,
+        attempt: u32,
+        max_attempts: u32,
+        reason: &str,
+        wait: std::time::Duration,
+    ) {
+        // Say it out loud: a silent multi-second sleep inside a stalled
+        // progress bar is indistinguishable from a hung upload.
+        let _ = self.mp.println(format!(
+            "    ⟳ {} — {reason}, retrying in {:.0}s (attempt {attempt}/{max_attempts})",
+            truncate_msg(filename, 40),
+            wait.as_secs_f32(),
+        ));
+    }
+
+    fn on_file_deleted(&mut self, filename: &str) {
+        let _ = self
+            .mp
+            .println(format!("    ✗ {filename} [pruned — not in source vindex]"));
     }
 
     fn on_complete(&mut self, url: &str) {

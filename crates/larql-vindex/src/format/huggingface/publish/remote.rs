@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 use crate::error::VindexError;
 
-use super::protocol::{hf_base, repo_type_plural, HTTP_STATUS_CONFLICT};
+use super::protocol::{hf_base, repo_type_plural, CONTENT_TYPE_NDJSON, HTTP_STATUS_CONFLICT};
 
 /// List remote files and return `filename → lfs.oid` for every LFS-tracked
 /// file at the repo root. Files without an `lfs.oid` (git-tracked small
@@ -133,6 +133,104 @@ pub(super) fn update_repo_visibility(
     }
 }
 
+/// Every file path in the repo, whether LFS-tracked or not.
+///
+/// [`fetch_remote_lfs_oids`] deliberately drops non-LFS entries because it
+/// only answers "can I skip this upload". Pruning needs the full set: the
+/// small `*_manifest.json` siblings of a renamed weight file are git-tracked,
+/// not LFS, and leaving them behind is what makes a half-renamed vindex load
+/// the wrong pair.
+pub(super) fn fetch_remote_file_paths(
+    repo_id: &str,
+    token: &str,
+    repo_type: &str,
+) -> Result<Vec<String>, VindexError> {
+    let plural = repo_type_plural(repo_type);
+    let url = format!(
+        "{}/api/{plural}/{repo_id}/tree/main?recursive=true",
+        hf_base()
+    );
+    let resp = reqwest::blocking::Client::new()
+        .get(&url)
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .map_err(|e| VindexError::Parse(format!("HF tree fetch failed: {e}")))?;
+    if !resp.status().is_success() {
+        // Fresh repo → nothing to prune.
+        return Ok(Vec::new());
+    }
+    let body: serde_json::Value = resp
+        .json()
+        .map_err(|e| VindexError::Parse(format!("HF tree JSON: {e}")))?;
+    Ok(parse_file_paths(&body))
+}
+
+/// Pull `path` from every `type == "file"` entry of a tree listing.
+fn parse_file_paths(body: &serde_json::Value) -> Vec<String> {
+    let arr = match body.as_array() {
+        Some(a) => a,
+        None => return Vec::new(),
+    };
+    arr.iter()
+        .filter(|e| e.get("type").and_then(|v| v.as_str()) == Some("file"))
+        .filter_map(|e| e.get("path").and_then(|v| v.as_str()).map(str::to_string))
+        .collect()
+}
+
+/// Delete `paths` from the repo in one commit.
+pub(super) fn delete_remote_files(
+    repo_id: &str,
+    token: &str,
+    repo_type: &str,
+    paths: &[String],
+) -> Result<(), VindexError> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let plural = repo_type_plural(repo_type);
+    let url = format!("{}/api/{plural}/{repo_id}/commit/main", hf_base());
+
+    let mut ndjson = serde_json::to_string(&serde_json::json!({
+        "key": "header",
+        "value": { "summary": format!("Prune {} file(s) not in the source vindex", paths.len()) },
+    }))
+    .unwrap();
+    ndjson.push('\n');
+    for p in paths {
+        ndjson.push_str(
+            &serde_json::to_string(&serde_json::json!({
+                "key": "deletedFile",
+                "value": { "path": p },
+            }))
+            .unwrap(),
+        );
+        ndjson.push('\n');
+    }
+
+    let resp = reqwest::blocking::Client::new()
+        .post(&url)
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", CONTENT_TYPE_NDJSON)
+        .body(ndjson)
+        .send()
+        .map_err(|e| VindexError::Parse(format!("prune commit failed: {e}")))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().unwrap_or_default();
+        return Err(VindexError::Parse(format!(
+            "prune commit ({status}): {body}"
+        )));
+    }
+    Ok(())
+}
+
+/// Repo files that `publish` never writes and must therefore never prune:
+/// git plumbing and the model card, which is authored separately
+/// (`larql card`) and lives only on the Hub.
+pub(super) fn is_prune_exempt(path: &str) -> bool {
+    path.starts_with('.') || path == "README.md" || path.ends_with("/README.md")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -238,6 +336,163 @@ mod tests {
                 None => std::env::remove_var(TEST_BASE_ENV),
             }
         }
+    }
+
+    #[test]
+    fn parse_file_paths_takes_every_file_regardless_of_lfs() {
+        // The contrast with `parse_lfs_oid_index`: pruning must see the
+        // small git-tracked manifests too, because a renamed weight file
+        // leaves its `*_manifest.json` sibling behind as well.
+        let body = serde_json::json!([
+            {"type": "file", "path": "interleaved_kquant.bin", "lfs": {"oid": "a"}},
+            {"type": "file", "path": "interleaved_kquant_manifest.json"},
+            {"type": "directory", "path": "layers"},
+            {"type": "file", "path": "layers/layer_00.weights", "lfs": {"oid": "b"}}
+        ]);
+        let paths = parse_file_paths(&body);
+        assert_eq!(
+            paths,
+            vec![
+                "interleaved_kquant.bin",
+                "interleaved_kquant_manifest.json",
+                "layers/layer_00.weights"
+            ],
+            "directories must be dropped, non-LFS files kept"
+        );
+    }
+
+    #[test]
+    fn parse_file_paths_tolerates_a_non_array_body() {
+        assert!(parse_file_paths(&serde_json::json!({"error": "nope"})).is_empty());
+    }
+
+    #[test]
+    fn prune_exempts_git_plumbing_and_the_model_card() {
+        // These are authored outside the vindex (`larql card`, repo
+        // creation) so publishing must never treat them as stale.
+        for p in [".gitattributes", ".gitignore", "README.md", "sub/README.md"] {
+            assert!(is_prune_exempt(p), "{p} must be exempt");
+        }
+        // Everything the build emits is fair game.
+        for p in [
+            "interleaved_q4k.bin",
+            "attn_weights_q4k_manifest.json",
+            "layers/layer_00.weights",
+            "index.json",
+        ] {
+            assert!(!is_prune_exempt(p), "{p} must be prunable");
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn fetch_remote_file_paths_lists_files_and_skips_directories() {
+        let mut server = mockito::Server::new();
+        let _guard = EnvBaseGuard::new(&server.url());
+        let mock = server
+            .mock("GET", "/api/models/org/repo/tree/main?recursive=true")
+            .match_header("authorization", "Bearer t")
+            .with_status(200)
+            .with_body(
+                serde_json::json!([
+                    {"type": "file", "path": "index.json"},
+                    {"type": "directory", "path": "layers"},
+                    {"type": "file", "path": "layers/layer_00.weights", "lfs": {"oid": "x"}}
+                ])
+                .to_string(),
+            )
+            .create();
+        let paths = fetch_remote_file_paths("org/repo", "t", "model").unwrap();
+        mock.assert();
+        assert_eq!(paths, vec!["index.json", "layers/layer_00.weights"]);
+    }
+
+    #[test]
+    #[serial]
+    fn fetch_remote_file_paths_dataset_uses_datasets_path_segment() {
+        let mut server = mockito::Server::new();
+        let _guard = EnvBaseGuard::new(&server.url());
+        let mock = server
+            .mock("GET", "/api/datasets/org/repo/tree/main?recursive=true")
+            .with_status(200)
+            .with_body("[]")
+            .create();
+        assert!(fetch_remote_file_paths("org/repo", "t", "dataset")
+            .unwrap()
+            .is_empty());
+        mock.assert();
+    }
+
+    #[test]
+    #[serial]
+    fn fetch_remote_file_paths_returns_empty_on_a_missing_repo() {
+        // A fresh repo 404s on the tree API; that means "nothing to prune",
+        // not an error that should abort a successful publish.
+        let mut server = mockito::Server::new();
+        let _guard = EnvBaseGuard::new(&server.url());
+        let mock = server
+            .mock("GET", "/api/models/org/new/tree/main?recursive=true")
+            .with_status(404)
+            .create();
+        assert!(fetch_remote_file_paths("org/new", "t", "model")
+            .unwrap()
+            .is_empty());
+        mock.assert();
+    }
+
+    #[test]
+    #[serial]
+    fn delete_remote_files_posts_one_commit_with_a_deleted_entry_per_path() {
+        let mut server = mockito::Server::new();
+        let _guard = EnvBaseGuard::new(&server.url());
+        let mock = server
+            .mock("POST", "/api/models/org/repo/commit/main")
+            .match_header("authorization", "Bearer t")
+            .match_body(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::Regex(r#""key":"header""#.into()),
+                mockito::Matcher::Regex(r#""path":"interleaved_q4k\.bin""#.into()),
+                mockito::Matcher::Regex(r#""path":"attn_weights_q4k\.bin""#.into()),
+            ]))
+            .with_status(200)
+            .create();
+
+        delete_remote_files(
+            "org/repo",
+            "t",
+            "model",
+            &[
+                "interleaved_q4k.bin".to_string(),
+                "attn_weights_q4k.bin".to_string(),
+            ],
+        )
+        .unwrap();
+        mock.assert();
+    }
+
+    #[test]
+    #[serial]
+    fn delete_remote_files_is_a_no_op_for_an_empty_list() {
+        // No mock is registered: if this issued a request it would fail to
+        // connect, so passing proves no commit was attempted.
+        let server = mockito::Server::new();
+        let _guard = EnvBaseGuard::new(&server.url());
+        delete_remote_files("org/repo", "t", "model", &[]).unwrap();
+    }
+
+    #[test]
+    #[serial]
+    fn delete_remote_files_surfaces_a_rejected_commit() {
+        let mut server = mockito::Server::new();
+        let _guard = EnvBaseGuard::new(&server.url());
+        let _mock = server
+            .mock("POST", "/api/models/org/repo/commit/main")
+            .with_status(403)
+            .with_body("forbidden")
+            .create();
+        let err = delete_remote_files("org/repo", "t", "model", &["a.bin".to_string()])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("403"), "error should name the status: {err}");
     }
 
     #[test]

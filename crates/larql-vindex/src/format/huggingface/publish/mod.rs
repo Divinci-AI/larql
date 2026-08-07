@@ -23,7 +23,10 @@ use crate::error::VindexError;
 use crate::format::filenames::*;
 
 use protocol::{hf_base, repo_type_plural, REPO_TYPE_DATASET, REPO_TYPE_MODEL};
-use remote::{create_hf_repo, fetch_remote_lfs_oids, update_repo_visibility};
+use remote::{
+    create_hf_repo, delete_remote_files, fetch_remote_file_paths, fetch_remote_lfs_oids,
+    is_prune_exempt, update_repo_visibility,
+};
 use upload::upload_file_to_hf;
 
 /// Options controlling [`publish_vindex_with_opts`]. Kept as a struct so
@@ -45,6 +48,17 @@ pub struct PublishOptions {
     /// existing caller's behaviour (`larql publish`/`larql hf publish`
     /// have always created public repos).
     pub private: bool,
+    /// Delete remote files that no longer exist in the source vindex.
+    ///
+    /// Publishing only ever *added* files until 2026-08-07. When the Q6_K
+    /// weight files were renamed (`interleaved_q4k.bin` →
+    /// `interleaved_kquant.bin`) a republish left both generations in the
+    /// repo, and `pick_bin` chose between them by name — so a repo could
+    /// silently serve a stale weight file that the source vindex no longer
+    /// contained. Mirroring the source is the intended meaning of "publish
+    /// this vindex", so this defaults to `true`; see [`is_prune_exempt`]
+    /// for what is never removed.
+    pub prune_remote: bool,
 }
 
 impl Default for PublishOptions {
@@ -53,6 +67,7 @@ impl Default for PublishOptions {
             skip_unchanged: false,
             repo_type: REPO_TYPE_MODEL.into(),
             private: false,
+            prune_remote: true,
         }
     }
 }
@@ -174,6 +189,29 @@ pub fn publish_vindex_with_opts(
         callbacks.on_file_done(filename);
     }
 
+    // Mirror the source: anything on the Hub that the vindex no longer
+    // contains is removed. Runs *after* the uploads so a failed upload
+    // never leaves the repo with neither the old file nor the new one.
+    if opts.prune_remote {
+        let local: std::collections::HashSet<&str> =
+            files.iter().map(|(_, name)| name.as_str()).collect();
+        // A listing failure is not fatal — the upload already succeeded and
+        // stale files are a tidiness problem, not a correctness one now that
+        // the current generation is present.
+        if let Ok(remote) = fetch_remote_file_paths(repo_id, &token, repo_type) {
+            let stale: Vec<String> = remote
+                .into_iter()
+                .filter(|p| !local.contains(p.as_str()) && !is_prune_exempt(p))
+                .collect();
+            if !stale.is_empty() {
+                delete_remote_files(repo_id, &token, repo_type, &stale)?;
+                for p in &stale {
+                    callbacks.on_file_deleted(p);
+                }
+            }
+        }
+    }
+
     let url = hf_repo_url(repo_type, repo_id);
     callbacks.on_complete(&url);
     Ok(url)
@@ -235,6 +273,22 @@ pub trait PublishCallbacks {
     /// `lfs.oid` and the upload is skipped. Default no-op so existing
     /// callbacks don't need to change.
     fn on_file_skipped(&mut self, _filename: &str, _size: u64, _sha256: &str) {}
+    /// Fired before sleeping to retry a transient upload failure —
+    /// `attempt` is the one about to be made, `reason` the status or
+    /// transport error that triggered it. Default no-op; surface it, because
+    /// a silent multi-minute backoff looks identical to a hung upload.
+    fn on_retry(
+        &mut self,
+        _filename: &str,
+        _attempt: u32,
+        _max_attempts: u32,
+        _reason: &str,
+        _wait: std::time::Duration,
+    ) {
+    }
+    /// Fired for each remote file deleted because it no longer exists in
+    /// the source vindex. Default no-op.
+    fn on_file_deleted(&mut self, _filename: &str) {}
     fn on_complete(&mut self, _url: &str) {}
 }
 
@@ -756,5 +810,130 @@ mod tests {
             "file with matching remote SHA must not be uploaded: {:?}",
             rec.uploaded
         );
+    }
+
+    #[test]
+    #[serial]
+    fn publish_prunes_remote_files_absent_from_the_vindex() {
+        // The defect this pins: publish only ever added files, so a renamed
+        // weight file left both generations in the repo and the loader chose
+        // between them by name.
+        let mut server = mockito::Server::new();
+        let _base = EnvGuard::set(protocol::TEST_BASE_ENV, &server.url());
+        let _tok = EnvGuard::set("HF_TOKEN", "tok");
+
+        let tmp = tempfile::tempdir().unwrap();
+        make_minimal_vindex(tmp.path());
+
+        let _create = server
+            .mock("POST", "/api/repos/create")
+            .with_status(200)
+            .with_body("{}")
+            .expect_at_least(1)
+            .create();
+        // Remote carries the local file plus a superseded weight file, its
+        // manifest sibling, and two entries that must survive.
+        let _tree = server
+            .mock("GET", "/api/models/org/repo/tree/main?recursive=true")
+            .with_status(200)
+            .with_body(
+                serde_json::json!([
+                    {"type":"file","path":"index.json"},
+                    {"type":"file","path":"interleaved_q4k.bin","lfs":{"oid":"stale"}},
+                    {"type":"file","path":"interleaved_q4k_manifest.json"},
+                    {"type":"file","path":"README.md"},
+                    {"type":"file","path":".gitattributes"}
+                ])
+                .to_string(),
+            )
+            .expect_at_least(1)
+            .create();
+        // Upload of index.json, then the prune commit. Both POST the same
+        // path, so one mock serves both and the callback records the split.
+        let _preupload = server
+            .mock("POST", "/api/models/org/repo/preupload/main")
+            .with_status(200)
+            .with_body(r#"{"files":[{"path":"index.json","uploadMode":"regular"}]}"#)
+            .expect_at_least(1)
+            .create();
+        let _commit = server
+            .mock("POST", "/api/models/org/repo/commit/main")
+            .with_status(200)
+            .with_body("{}")
+            .expect_at_least(1)
+            .create();
+
+        #[derive(Default)]
+        struct Recorder {
+            deleted: Vec<String>,
+        }
+        impl PublishCallbacks for Recorder {
+            fn on_file_deleted(&mut self, f: &str) {
+                self.deleted.push(f.into());
+            }
+        }
+        let mut rec = Recorder::default();
+
+        publish_vindex_with_opts(tmp.path(), "org/repo", &PublishOptions::default(), &mut rec)
+            .expect("publish with prune must return Ok");
+
+        rec.deleted.sort();
+        assert_eq!(
+            rec.deleted,
+            vec![
+                "interleaved_q4k.bin".to_string(),
+                "interleaved_q4k_manifest.json".to_string()
+            ],
+            "only files absent from the vindex, and never README/dot-files"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn publish_with_prune_disabled_deletes_nothing() {
+        let mut server = mockito::Server::new();
+        let _base = EnvGuard::set(protocol::TEST_BASE_ENV, &server.url());
+        let _tok = EnvGuard::set("HF_TOKEN", "tok");
+
+        let tmp = tempfile::tempdir().unwrap();
+        make_minimal_vindex(tmp.path());
+
+        let _create = server
+            .mock("POST", "/api/repos/create")
+            .with_status(200)
+            .with_body("{}")
+            .expect_at_least(1)
+            .create();
+        let _preupload = server
+            .mock("POST", "/api/models/org/repo/preupload/main")
+            .with_status(200)
+            .with_body(r#"{"files":[{"path":"index.json","uploadMode":"regular"}]}"#)
+            .expect_at_least(1)
+            .create();
+        let _commit = server
+            .mock("POST", "/api/models/org/repo/commit/main")
+            .with_status(200)
+            .with_body("{}")
+            .expect_at_least(1)
+            .create();
+
+        #[derive(Default)]
+        struct Recorder {
+            deleted: Vec<String>,
+        }
+        impl PublishCallbacks for Recorder {
+            fn on_file_deleted(&mut self, f: &str) {
+                self.deleted.push(f.into());
+            }
+        }
+        let mut rec = Recorder::default();
+
+        let opts = PublishOptions {
+            prune_remote: false,
+            ..PublishOptions::default()
+        };
+        publish_vindex_with_opts(tmp.path(), "org/repo", &opts, &mut rec)
+            .expect("publish must return Ok");
+        assert!(rec.deleted.is_empty(), "--no-prune must delete nothing");
     }
 }
