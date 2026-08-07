@@ -10,6 +10,7 @@
 #   deny        — licences, advisories, sources, bans            (blocking)
 #   msrv        — the declared rust-version really compiles      (blocking)
 #   proto-lint  — buf lint over the four gRPC schemas            (blocking)
+#   doc-links   — every relative Markdown link resolves          (blocking)
 #   mutants     — mutation testing on the PR diff             (informational)
 #
 # NOTE ON `schedule`: this workflow deliberately has no `paths:` filter and
@@ -147,6 +148,21 @@ jobs:
       # than Cargo.lock pins and the job would test a graph nobody ships.
       - name: Check at declared MSRV
         run: cargo check ${{ matrix.args }} --locked
+
+  doc-links:
+    name: doc links
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+
+      # Docs move between docs/ and crates/*/docs/ and their links get left
+      # behind: the tree carried 45 dead relative links on 2026-08-07, seven of
+      # them in README.md alone (found by an outside contributor, PR #211).
+      # Nothing fails when a link dies -- the reader just lands nowhere -- so
+      # it needs a gate rather than review attention.
+      - name: Check relative documentation links
+        run: python3 scripts/check_doc_links.py
 
   proto-lint:
     name: buf lint

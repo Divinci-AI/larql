@@ -24,7 +24,7 @@ engine.
   points; LayerEngine is what serves a WALK zone. Read ZoneEngine
   first for the top-level structure; this spec for the per-layer
   details of WALK.
-- [`state-policy.md`](./state-policy.md) — engine identity as
+- [`state-policy.md`](../../../larql-kv/docs/state-policy.md) — engine identity as
   `(canonical_state, derivative_state, correctness_contract)`. This
   spec inherits that vocabulary.
 - [`engine-state-vs-execution.md`](./engine-state-vs-execution.md) —
@@ -568,7 +568,7 @@ its scope as "the top-level engine" was wrong.
 
 ## 13. Cross-references
 
-- [`state-policy.md`](./state-policy.md) — engine identity taxonomy.
+- [`state-policy.md`](../../../larql-kv/docs/state-policy.md) — engine identity taxonomy.
   §3.1 has the W10 worked-example table that LayerEngine §4 builds on.
 - [`engine-state-vs-execution.md`](./engine-state-vs-execution.md) —
   the orthogonal cut. §11 (W10's mask cascade as a §2 worked example)
