@@ -546,6 +546,25 @@ fn run_predict_q4k(
         // something else under the caller's chosen label: silently dropping
         // the flag is what made every engine look identical through
         // `larql run` (issue #199), since they were all the same path.
+        // Fast path first: a non-PLE hybrid-MoE model can run the resident,
+        // KV-cached route instead of the O(N^2) re-dequantising loop below.
+        //
+        // Measured on gemma4-26b-a4b (M3 Max, 2026-08-08): 1745 ms/token on
+        // the uncached path against 26.8 ms/token here — 65x — for 2.1 GB
+        // more RSS (15.5 -> 17.6 GB). The two compute the same model: same
+        // layers, same experts (which stay Q4_K in both), same lm_head. All
+        // that differs is *when* attention and the dense FFN are dequantised:
+        // once, up front, instead of on every token. `larql bench --cpu` has
+        // always taken this route, which is why its numbers and `larql run`'s
+        // disagreed by a factor nobody could place.
+        if !arch_needs_per_layer_embeddings(weights) && weights.arch.is_hybrid_moe() {
+            return run_q4k_generate_cpu_resident(weights, tokenizer, &token_ids, args, &index);
+        }
+
+        // Uncached fallback: PLE architectures and dense models. This path has
+        // no KV cache and therefore no engine to select, so a named `--engine`
+        // cannot be honoured — say so instead of running something else under
+        // the caller's chosen label (issue #199).
         if let Some(spec) = requested_engine_spec(args) {
             return Err(engine_unsupported_on_uncached_path(&spec).into());
         }
@@ -711,6 +730,89 @@ fn run_predict_q4k_remote(
         );
     }
 
+    Ok(())
+}
+
+/// Whether this architecture applies Per-Layer Embeddings.
+///
+/// The resident engine path does not apply PLE, so those architectures
+/// (Gemma 4 E-series) must keep the full-recompute route — the same guard
+/// `bench`'s in-process MoE runner enforces, kept in both places because a
+/// silent mismatch here is a wrong answer rather than a slow one.
+fn arch_needs_per_layer_embeddings(weights: &ModelWeights) -> bool {
+    weights.arch.per_layer_input_gate_key(0).is_some()
+}
+
+/// CPU Q4K generation over resident attention + dense FFN, with a KV cache.
+///
+/// Dequantises attention and the dense FFN slab to f32 once and keeps them
+/// resident for the whole run; experts stay Q4_K and are read directly by
+/// `LocalMoeFfn`. Identical in what it computes to
+/// [`run_q4k_generate_cpu`] — the difference is that the uncached loop redoes
+/// that dequantisation, and re-runs the entire growing sequence, on every
+/// token.
+fn run_q4k_generate_cpu_resident(
+    weights: &mut ModelWeights,
+    tokenizer: &tokenizers::Tokenizer,
+    initial_ids: &[u32],
+    args: &WalkArgs,
+    index: &VectorIndex,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::Write;
+    let start = Instant::now();
+
+    for layer in 0..weights.num_layers {
+        larql_inference::vindex::insert_q4k_layer_tensors_resident(weights, index, layer)
+            .map_err(|e| format!("failed to dequantise layer {layer} to f32: {e}"))?;
+    }
+    let resident_ms = start.elapsed().as_secs_f64() * 1000.0;
+
+    // `--engine` is honoured here, unlike on the uncached path: this route
+    // has a real KV engine to select.
+    let engine_spec = requested_engine_spec(args);
+    let spec = engine_spec.as_deref().unwrap_or("standard");
+    let kind = larql_kv::EngineKind::from_name(spec)
+        .ok_or_else(|| format!("--engine {spec:?}: unknown engine"))?;
+    let engine_label = kind.display_name().to_string();
+    let mut engine = kind.build(larql_inference::cpu_engine_backend());
+
+    let weights_ref: &ModelWeights = weights;
+    let moe_ffn = larql_inference::ffn::LocalMoeFfn {
+        weights: weights_ref,
+        index: Some(index),
+    };
+
+    let decode_start = Instant::now();
+    let mut stdout = std::io::stdout();
+    let mut emitted = 0usize;
+    let ids = larql_kv::generation::generate_with_engine_resident(
+        &mut engine,
+        weights_ref,
+        tokenizer,
+        &moe_ffn,
+        index,
+        initial_ids,
+        args.max_tokens,
+        |_id, tok| {
+            print!("{tok}");
+            let _ = stdout.flush();
+            emitted += 1;
+        },
+    );
+    println!();
+
+    if args.verbose {
+        let decode_ms = decode_start.elapsed().as_secs_f64() * 1000.0;
+        let n = ids.len().saturating_sub(initial_ids.len()).max(emitted);
+        eprintln!(
+            "  Q4K CPU generate (resident, {}): {:.2}s  ({} tokens, {:.1} ms/token)",
+            engine_label,
+            decode_ms / 1000.0,
+            n,
+            if n == 0 { 0.0 } else { decode_ms / n as f64 },
+        );
+        eprintln!("  f32-resident dequantisation: {resident_ms:.0} ms (once)");
+    }
     Ok(())
 }
 
