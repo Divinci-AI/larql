@@ -557,7 +557,18 @@ fn run_predict_q4k(
         // once, up front, instead of on every token. `larql bench --cpu` has
         // always taken this route, which is why its numbers and `larql run`'s
         // disagreed by a factor nobody could place.
-        if !arch_needs_per_layer_embeddings(weights) && weights.arch.is_hybrid_moe() {
+        // `LARQL_CPU_RESIDENT=0` forces the uncached route so the two can be
+        // A/B'd in one binary under identical conditions. Without it the old
+        // path becomes unreachable on MoE models the moment this lands, and a
+        // before/after measured on two different builds — or, worse, two
+        // different prompts — is not a comparison.
+        let resident_allowed = std::env::var("LARQL_CPU_RESIDENT")
+            .map(|v| v != "0")
+            .unwrap_or(true);
+        if resident_allowed
+            && !arch_needs_per_layer_embeddings(weights)
+            && weights.arch.is_hybrid_moe()
+        {
             return run_q4k_generate_cpu_resident(weights, tokenizer, &token_ids, args, &index);
         }
 
