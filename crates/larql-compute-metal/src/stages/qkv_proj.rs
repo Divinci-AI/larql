@@ -339,16 +339,27 @@ mod tests {
         let q_rows = 16usize;
         let kv_rows = 8usize;
 
+        // The kernel indexes weight scales as `[rows * blocks]` (see
+        // `Wqs` in shaders/q8_attn_proj.rs), not `[rows]`. Allocating
+        // one scale per row left `row_scales[b]` reading past the end of
+        // the buffer for every row but the first — usually landing on
+        // zeroed memory, but occasionally on another test's leftovers,
+        // which is why this test failed non-finite roughly one run in
+        // three under a full suite and passed in isolation.
+        // `blocks = K / 32` in the kernel is the legacy (Q8_0) block size.
+        // Ask for it rather than spelling 32 here — re-spelling a layout
+        // constant locally is what produced the under-allocation below.
+        let blocks = hidden / larql_models::quant::ggml::LEGACY_BLOCK_ELEMS;
         let zero_q8 = vec![0i8; (q_rows + kv_rows + kv_rows) * hidden];
-        let zero_f32 = vec![0.0f32; q_rows + kv_rows + kv_rows];
+        let zero_f32 = vec![0.0f32; (q_rows + kv_rows + kv_rows) * blocks];
         let wq_buf = m.bufs.transient_from_i8(&zero_q8[..q_rows * hidden]);
         let wk_buf = m.bufs.transient_from_i8(&zero_q8[..kv_rows * hidden]);
         let wv_buf = m.bufs.transient_from_i8(&zero_q8[..kv_rows * hidden]);
-        let wq_scale = m.bufs.transient_from_f32(&zero_f32[..q_rows]);
-        let wk_scale = m.bufs.transient_from_f32(&zero_f32[..kv_rows]);
-        let wv_scale = m.bufs.transient_from_f32(&zero_f32[..kv_rows]);
+        let wq_scale = m.bufs.transient_from_f32(&zero_f32[..q_rows * blocks]);
+        let wk_scale = m.bufs.transient_from_f32(&zero_f32[..kv_rows * blocks]);
+        let wv_scale = m.bufs.transient_from_f32(&zero_f32[..kv_rows * blocks]);
         let q8_in = m.bufs.transient_from_i8(&vec![0i8; hidden]);
-        let q8s_in = m.bufs.transient_from_f32(&vec![0.0f32; hidden / 32]);
+        let q8s_in = m.bufs.transient_from_f32(&vec![0.0f32; blocks]);
         let q_out = m.bufs.output((q_rows * 4) as u64);
         let k_out = m.bufs.output((kv_rows * 4) as u64);
         let v_out = m.bufs.output((kv_rows * 4) as u64);

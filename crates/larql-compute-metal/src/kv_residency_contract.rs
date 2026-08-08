@@ -365,11 +365,13 @@ mod capacity_tests {
     const G_HEAD_DIM: usize = 256;
     const G_WINDOW: usize = 1024;
     const G_DEFAULT: usize = 4096;
-    const G_GLOBAL_EVERY: usize = 6;
-
-    fn gemma3_is_sliding(layer: usize) -> bool {
-        !(layer + 1).is_multiple_of(G_GLOBAL_EVERY)
-    }
+    /// Gemma 3 4B's published split. Stated as a fact about the model
+    /// rather than recomputed from its layer pattern: re-implementing
+    /// `gemma3.rs::is_sliding_window_layer` here would be a second copy
+    /// of an architecture rule that can drift silently, and this test is
+    /// about allocation arithmetic, not about that rule.
+    const G_SLIDING: usize = 29;
+    const G_GLOBAL: usize = 5;
 
     /// Capacity is the compaction trigger, not the window — a capacity of
     /// `W` would be an overrun, since occupancy is allowed to reach
@@ -397,16 +399,18 @@ mod capacity_tests {
             eprintln!("skip: no Metal device");
             return;
         };
+        assert_eq!(
+            G_SLIDING + G_GLOBAL,
+            G_LAYERS,
+            "the split must cover every layer"
+        );
         let shapes = vec![(G_KV_HEADS, G_HEAD_DIM); G_LAYERS];
         let capacities: Vec<usize> = (0..G_LAYERS)
             .map(|l| {
-                let w = if gemma3_is_sliding(l) { G_WINDOW } else { 0 };
+                let w = if l < G_SLIDING { G_WINDOW } else { 0 };
                 kv_capacity_for_window(w, G_DEFAULT)
             })
             .collect();
-
-        let sliding = (0..G_LAYERS).filter(|&l| gemma3_is_sliding(l)).count();
-        assert_eq!(sliding, 29, "Gemma 3 is 29 sliding + 5 global");
 
         let before = KVCache::new_per_layer(&metal.bufs, &shapes, G_DEFAULT).allocated_bytes();
         let after =
@@ -415,9 +419,9 @@ mod capacity_tests {
 
         // 32 MiB per layer at 4096 rows (K+V, f32) -> 1.088 GiB.
         assert_eq!(before, 1_140_850_688, "baseline allocation");
-        // 29 sliding at 16 MiB + 5 global at 32 MiB.
+        // Sliding layers at 16 MiB, global at 32 MiB.
         assert_eq!(after, 654_311_424, "per-layer allocation");
-        // Exactly 464 MiB reclaimed — 29 layers x 16 MiB.
+        // Exactly 464 MiB reclaimed — G_SLIDING layers x 16 MiB.
         assert_eq!(
             before - after,
             464 * 1024 * 1024,
