@@ -1397,48 +1397,51 @@ fn full_pipeline_seq1_produces_nonzero() {
     let wk_data = quantize_q4_0(&vec![0.01f32; kv_dim * hidden]);
     let wv_data = quantize_q4_0(&vec![0.01f32; kv_dim * hidden]);
     let wo_data = quantize_q4_0(&vec![0.01f32; hidden * q_dim]);
-    let (_q8_x_q, q8_s_q) = q4::quantize_to_q8(&vec![0.01f32; hidden]);
 
     let norm = vec![1.0f32; hidden];
     let x: Vec<f32> = (0..hidden).map(|i| (i as f32 * 0.01).sin()).collect();
 
+    // Q4_0 packs its f16 scale inside each 18-byte block, so no external
+    // scale array exists. This fixture used to fabricate one out of
+    // *input*-quantization scales — the wrong object entirely — which
+    // `QuantWeight::new` now refuses.
     let layer = larql_compute::FullPipelineLayer {
         attn_sinks: None,
-        wq: larql_compute::QuantWeight {
-            data: &wq_data,
-            scales: Some(&q8_s_q),
-            format: larql_compute::QuantFormat::Q4_0,
-        },
-        wk: larql_compute::QuantWeight {
-            data: &wk_data,
-            scales: Some(&q8_s_q),
-            format: larql_compute::QuantFormat::Q4_0,
-        },
-        wv: larql_compute::QuantWeight {
-            data: &wv_data,
-            scales: Some(&q8_s_q),
-            format: larql_compute::QuantFormat::Q4_0,
-        },
-        wo: larql_compute::QuantWeight {
-            data: &wo_data,
-            scales: Some(&q8_s_q),
-            format: larql_compute::QuantFormat::Q4_0,
-        },
-        gate: larql_compute::QuantWeight {
-            data: &gate_data,
-            scales: None,
-            format: larql_compute::QuantFormat::Q4_0,
-        },
-        up: larql_compute::QuantWeight {
-            data: &up_data,
-            scales: None,
-            format: larql_compute::QuantFormat::Q4_0,
-        },
-        down: larql_compute::QuantWeight {
-            data: &down_data,
-            scales: None,
-            format: larql_compute::QuantFormat::Q4_0,
-        },
+        wq: larql_compute::QuantWeight::new(
+            larql_compute::QuantFormat::Q4_0,
+            &wq_data,
+            larql_compute::QuantAux::None,
+        ),
+        wk: larql_compute::QuantWeight::new(
+            larql_compute::QuantFormat::Q4_0,
+            &wk_data,
+            larql_compute::QuantAux::None,
+        ),
+        wv: larql_compute::QuantWeight::new(
+            larql_compute::QuantFormat::Q4_0,
+            &wv_data,
+            larql_compute::QuantAux::None,
+        ),
+        wo: larql_compute::QuantWeight::new(
+            larql_compute::QuantFormat::Q4_0,
+            &wo_data,
+            larql_compute::QuantAux::None,
+        ),
+        gate: larql_compute::QuantWeight::new(
+            larql_compute::QuantFormat::Q4_0,
+            &gate_data,
+            larql_compute::QuantAux::None,
+        ),
+        up: larql_compute::QuantWeight::new(
+            larql_compute::QuantFormat::Q4_0,
+            &up_data,
+            larql_compute::QuantAux::None,
+        ),
+        down: larql_compute::QuantWeight::new(
+            larql_compute::QuantFormat::Q4_0,
+            &down_data,
+            larql_compute::QuantAux::None,
+        ),
         input_norm: &norm,
         post_attn_norm: &norm,
         pre_ffn_norm: None,

@@ -53,7 +53,7 @@ pub(super) fn encode_input_norm_and_qkv(
     lb: &LayerBuffers,
 ) {
     let l = layer_idx;
-    let attn_format = layer.wq.format;
+    let attn_format = layer.wq.format();
     let uses_f32_input = matches!(
         attn_format,
         larql_compute::QuantFormat::Q4_K
@@ -67,7 +67,8 @@ pub(super) fn encode_input_norm_and_qkv(
     let q8_off = |p: usize| (p * ctx.q8_row_max) as u64;
     let q8s_off = |p: usize| (p * ctx.q8s_row_bytes) as u64;
 
-    let all_same_format = layer.wq.format == layer.wk.format && layer.wk.format == layer.wv.format;
+    let all_same_format =
+        layer.wq.format() == layer.wk.format() && layer.wk.format() == layer.wv.format();
     // Pick the fused kernel whose host-side TG geometry matches the
     // shader being dispatched. The two shaders use different rows/TG and
     // threads/TG counts; getting them out of sync silently leaves rows
@@ -76,7 +77,7 @@ pub(super) fn encode_input_norm_and_qkv(
     // pair so the dispatcher can't use one without the other.
     let fused_qkv_pipe: Option<(&ComputePipelineState, qkv_proj::FusedQkvKernel)> =
         if all_same_format {
-            match layer.wq.format {
+            match layer.wq.format() {
                 larql_compute::QuantFormat::Q4_KF => pipes
                     .q4kf_qkv_proj
                     .map(|p| (p, qkv_proj::FusedQkvKernel::Q4kf))
@@ -154,21 +155,21 @@ pub(super) fn encode_input_norm_and_qkv(
                     0,
                     [
                         qkv_proj::Proj {
-                            format: layer.wq.format,
+                            format: layer.wq.format(),
                             w_buf: &lb.wq[l],
                             out_buf: &lb.q_out[l],
                             out_off: pos_qoff,
                             rows: ctx.layer_q_dim,
                         },
                         qkv_proj::Proj {
-                            format: layer.wk.format,
+                            format: layer.wk.format(),
                             w_buf: &lb.wk[l],
                             out_buf: &lb.k_out[l],
                             out_off: pos_kvoff,
                             rows: ctx.layer_kv_dim,
                         },
                         qkv_proj::Proj {
-                            format: layer.wv.format,
+                            format: layer.wv.format(),
                             w_buf: &lb.wv[l],
                             out_buf: &lb.v_out[l],
                             out_off: pos_kvoff,
@@ -201,19 +202,25 @@ pub(super) fn encode_input_norm_and_qkv(
                 ctx.eps,
                 ctx.norm_offset,
             );
-            if layer.wq.format == larql_compute::QuantFormat::Q8_0
-                && layer.wk.format == larql_compute::QuantFormat::Q8_0
-                && layer.wv.format == larql_compute::QuantFormat::Q8_0
+            if layer.wq.format() == larql_compute::QuantFormat::Q8_0
+                && layer.wk.format() == larql_compute::QuantFormat::Q8_0
+                && layer.wv.format() == larql_compute::QuantFormat::Q8_0
             {
                 qkv_proj::encode_fused_q8(
                     enc,
                     pipes.q8_qkv_proj,
                     &lb.wq[l],
-                    &lb.wq_scale[l],
+                    lb.wq_scale[l]
+                        .as_ref()
+                        .expect("q8 qkv path requires external scales"),
                     &lb.wk[l],
-                    &lb.wk_scale[l],
+                    lb.wk_scale[l]
+                        .as_ref()
+                        .expect("q8 qkv path requires external scales"),
                     &lb.wv[l],
-                    &lb.wv_scale[l],
+                    lb.wv_scale[l]
+                        .as_ref()
+                        .expect("q8 qkv path requires external scales"),
                     &lb.q8[l],
                     q8_off(pos),
                     &lb.q8s[l],
@@ -242,21 +249,21 @@ pub(super) fn encode_input_norm_and_qkv(
                     q8s_off(pos),
                     [
                         qkv_proj::Proj {
-                            format: layer.wq.format,
+                            format: layer.wq.format(),
                             w_buf: &lb.wq[l],
                             out_buf: &lb.q_out[l],
                             out_off: pos_qoff,
                             rows: ctx.layer_q_dim,
                         },
                         qkv_proj::Proj {
-                            format: layer.wk.format,
+                            format: layer.wk.format(),
                             w_buf: &lb.wk[l],
                             out_buf: &lb.k_out[l],
                             out_off: pos_kvoff,
                             rows: ctx.layer_kv_dim,
                         },
                         qkv_proj::Proj {
-                            format: layer.wv.format,
+                            format: layer.wv.format(),
                             w_buf: &lb.wv[l],
                             out_buf: &lb.v_out[l],
                             out_off: pos_kvoff,

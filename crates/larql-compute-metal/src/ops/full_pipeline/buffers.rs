@@ -51,11 +51,11 @@ pub(crate) fn q8_staging_size(
 pub(super) struct LayerBuffers {
     // ── Q4 weight buffers (cached, mmap-backed) ──
     pub wq: Vec<Buffer>,
-    pub wq_scale: Vec<Buffer>,
+    pub wq_scale: Vec<Option<Buffer>>,
     pub wk: Vec<Buffer>,
-    pub wk_scale: Vec<Buffer>,
+    pub wk_scale: Vec<Option<Buffer>>,
     pub wv: Vec<Buffer>,
-    pub wv_scale: Vec<Buffer>,
+    pub wv_scale: Vec<Option<Buffer>>,
     pub wo: Vec<Buffer>,
     pub gate: Vec<Buffer>,
     pub up: Vec<Buffer>,
@@ -109,17 +109,17 @@ impl LayerBuffers {
         let wq: Vec<_> = layers.iter().map(|l| bufs.get_bytes(l.wq.data)).collect();
         let wq_scale: Vec<_> = layers
             .iter()
-            .map(|l| bufs.get_f32(l.wq.scales.unwrap_or(&[])))
+            .map(|l| l.wq.external_scales().map(|s| bufs.get_f32(s)))
             .collect();
         let wk: Vec<_> = layers.iter().map(|l| bufs.get_bytes(l.wk.data)).collect();
         let wk_scale: Vec<_> = layers
             .iter()
-            .map(|l| bufs.get_f32(l.wk.scales.unwrap_or(&[])))
+            .map(|l| l.wk.external_scales().map(|s| bufs.get_f32(s)))
             .collect();
         let wv: Vec<_> = layers.iter().map(|l| bufs.get_bytes(l.wv.data)).collect();
         let wv_scale: Vec<_> = layers
             .iter()
-            .map(|l| bufs.get_f32(l.wv.scales.unwrap_or(&[])))
+            .map(|l| l.wv.external_scales().map(|s| bufs.get_f32(s)))
             .collect();
         let wo: Vec<_> = layers.iter().map(|l| bufs.get_bytes(l.wo.data)).collect();
         let gate: Vec<_> = layers.iter().map(|l| bufs.get_bytes(l.gate.data)).collect();
@@ -247,11 +247,7 @@ mod tests {
     ) -> FullPipelineLayer<'static> {
         let q4 = Box::leak(vec![0u8; 32 * 18].into_boxed_slice());
         let norm = Box::leak(vec![1.0f32; 32].into_boxed_slice());
-        let q4w = || QuantWeight {
-            data: q4,
-            scales: None,
-            format: QuantFormat::Q4_K,
-        };
+        let q4w = || QuantWeight::new(QuantFormat::Q4_K, q4, larql_compute::QuantAux::None);
         FullPipelineLayer {
             attn_sinks: None,
             wq: q4w(),

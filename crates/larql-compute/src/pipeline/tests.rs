@@ -1,11 +1,7 @@
 use super::*;
 
 fn minimal_qw(data: &[u8]) -> QuantWeight<'_> {
-    QuantWeight {
-        data,
-        scales: None,
-        format: QuantFormat::Q4_0,
-    }
+    QuantWeight::new(QuantFormat::Q4_0, data, crate::QuantAux::None)
 }
 
 fn minimal_layer<'a>(
@@ -204,10 +200,7 @@ fn default_layer_accepts_local_borrows_via_spread() {
     let layer = FullPipelineLayer {
         input_norm: &norms,
         post_attn_norm: &norms,
-        wq: QuantWeight {
-            data: &data,
-            ..Default::default()
-        },
+        wq: QuantWeight::new(QuantFormat::Q4_0, &data, crate::QuantAux::None),
         head_dim: 4,
         num_q_heads: 1,
         num_kv_heads: 1,
@@ -234,11 +227,7 @@ fn layer_spec_views_preserve_flat_field_values() {
     let norms: Vec<f32> = vec![1.0; 8];
     let q_norm: Vec<f32> = vec![0.5; 4];
 
-    let qw = QuantWeight {
-        data: &data,
-        scales: None,
-        format: QuantFormat::Q4_K,
-    };
+    let qw = QuantWeight::new(QuantFormat::Q4_K, &data, crate::QuantAux::None);
     let layer = FullPipelineLayer {
         wq: qw,
         wk: qw,
@@ -275,7 +264,7 @@ fn layer_spec_views_preserve_flat_field_values() {
     };
 
     let weights = layer.weights();
-    assert_eq!(weights.attention.wq.format, QuantFormat::Q4_K);
+    assert_eq!(weights.attention.wq.format(), QuantFormat::Q4_K);
     assert_eq!(weights.ffn.down.data.len(), data.len());
 
     let norms_view = layer.norms();

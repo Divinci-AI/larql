@@ -35,10 +35,10 @@ pub(super) struct DecodeScratch {
     pub wk_bufs: Vec<Buffer>,
     pub wv_bufs: Vec<Buffer>,
     pub wo_bufs: Vec<Buffer>,
-    pub wq_scale_bufs: Vec<Buffer>,
-    pub wk_scale_bufs: Vec<Buffer>,
-    pub wv_scale_bufs: Vec<Buffer>,
-    pub wo_scale_bufs: Vec<Buffer>,
+    pub wq_scale_bufs: Vec<Option<Buffer>>,
+    pub wk_scale_bufs: Vec<Option<Buffer>>,
+    pub wv_scale_bufs: Vec<Option<Buffer>>,
+    pub wo_scale_bufs: Vec<Option<Buffer>>,
     pub gate_bufs: Vec<Buffer>,
     pub up_bufs: Vec<Buffer>,
     pub down_bufs: Vec<Buffer>,
@@ -124,21 +124,21 @@ impl DecodeScratch {
         // Stable across decode calls → cache by slice identity. Skips ~136
         // per-token Metal-buffer allocations for scales/norms on 34-layer
         // Gemma 3. `get_f32` hits the cache from the second decode onward.
-        let wq_scale_bufs: Vec<_> = layers
+        let wq_scale_bufs: Vec<Option<Buffer>> = layers
             .iter()
-            .map(|l| bufs.get_f32(l.wq.scales.unwrap_or(&[])))
+            .map(|l| l.wq.external_scales().map(|s| bufs.get_f32(s)))
             .collect();
-        let wk_scale_bufs: Vec<_> = layers
+        let wk_scale_bufs: Vec<Option<Buffer>> = layers
             .iter()
-            .map(|l| bufs.get_f32(l.wk.scales.unwrap_or(&[])))
+            .map(|l| l.wk.external_scales().map(|s| bufs.get_f32(s)))
             .collect();
-        let wv_scale_bufs: Vec<_> = layers
+        let wv_scale_bufs: Vec<Option<Buffer>> = layers
             .iter()
-            .map(|l| bufs.get_f32(l.wv.scales.unwrap_or(&[])))
+            .map(|l| l.wv.external_scales().map(|s| bufs.get_f32(s)))
             .collect();
-        let wo_scale_bufs: Vec<_> = layers
+        let wo_scale_bufs: Vec<Option<Buffer>> = layers
             .iter()
-            .map(|l| bufs.get_f32(l.wo.scales.unwrap_or(&[])))
+            .map(|l| l.wo.external_scales().map(|s| bufs.get_f32(s)))
             .collect();
         let gate_bufs: Vec<_> = layers.iter().map(|l| bufs.get_bytes(l.gate.data)).collect();
         let up_bufs: Vec<_> = layers.iter().map(|l| bufs.get_bytes(l.up.data)).collect();

@@ -30,9 +30,9 @@ pub(super) struct QkvBufs<'a> {
     pub wq: &'a metal::Buffer,
     pub wk: &'a metal::Buffer,
     pub wv: &'a metal::Buffer,
-    pub wq_scales: &'a metal::Buffer, // Q4_0 path only; ignored otherwise
-    pub wk_scales: &'a metal::Buffer,
-    pub wv_scales: &'a metal::Buffer,
+    pub wq_scales: Option<&'a metal::Buffer>, // present only for external-scale formats
+    pub wk_scales: Option<&'a metal::Buffer>,
+    pub wv_scales: Option<&'a metal::Buffer>,
     // Outputs
     pub norm_out: &'a metal::Buffer,
     pub q_out: &'a metal::Buffer,
@@ -87,7 +87,7 @@ impl MetalBackend {
             let use_fused = self.decode_flags.qkv_fused;
 
             // Pull structured views once at the top — replaces the
-            // direct `layer.wq.format` / `layer.norm_type` /
+            // direct `layer.wq.format()` / `layer.norm_type` /
             // `layer.input_norm_bias` reads scattered through the
             // function body. The compiler optimises the view methods
             // to plain field copies, so this is zero-cost.
@@ -102,7 +102,11 @@ impl MetalBackend {
             // by `q4k_q6k_qkv_proj_normed`) lands as one match arm
             // here, not a new boolean.
             use crate::stages::qkv_proj::{pick_qkv_route, QkvFormatRoute};
-            let route = pick_qkv_route(weights.wq.format, weights.wk.format, weights.wv.format);
+            let route = pick_qkv_route(
+                weights.wq.format(),
+                weights.wk.format(),
+                weights.wv.format(),
+            );
             let mixed_q4k_q6k_v = matches!(route, QkvFormatRoute::MixedQ4kQ6kV);
             if mixed_q4k_q6k_v
                 && use_fused
@@ -218,9 +222,9 @@ impl MetalBackend {
         // `metal::stages::qkv_proj::pick_qkv_route` for the table.
         use crate::stages::qkv_proj::{pick_qkv_route, QkvFormatRoute};
         let route = pick_qkv_route(
-            attn_weights.wq.format,
-            attn_weights.wk.format,
-            attn_weights.wv.format,
+            attn_weights.wq.format(),
+            attn_weights.wk.format(),
+            attn_weights.wv.format(),
         );
 
         match route {
@@ -308,21 +312,21 @@ impl MetalBackend {
                     0,
                     [
                         Proj {
-                            format: attn_weights.wq.format,
+                            format: attn_weights.wq.format(),
                             w_buf: bufs.wq,
                             out_buf: bufs.q_out,
                             out_off: 0,
                             rows: layer_q_dim,
                         },
                         Proj {
-                            format: attn_weights.wk.format,
+                            format: attn_weights.wk.format(),
                             w_buf: bufs.wk,
                             out_buf: bufs.k_out,
                             out_off: 0,
                             rows: layer_kv_dim,
                         },
                         Proj {
-                            format: attn_weights.wv.format,
+                            format: attn_weights.wv.format(),
                             w_buf: bufs.wv,
                             out_buf: bufs.v_out,
                             out_off: 0,
@@ -375,9 +379,9 @@ impl MetalBackend {
         // M2: read the per-projection format triple once, through the
         // structured weights view.
         let attn_weights = layer.weights().attention;
-        if attn_weights.wq.format == larql_compute::QuantFormat::Q8_0
-            && attn_weights.wk.format == larql_compute::QuantFormat::Q8_0
-            && attn_weights.wv.format == larql_compute::QuantFormat::Q8_0
+        if attn_weights.wq.format() == larql_compute::QuantFormat::Q8_0
+            && attn_weights.wk.format() == larql_compute::QuantFormat::Q8_0
+            && attn_weights.wv.format() == larql_compute::QuantFormat::Q8_0
         {
             let total_rows = (layer_q_dim + layer_kv_dim + layer_kv_dim) as u32;
             let q_rows = layer_q_dim as u32;
@@ -394,9 +398,30 @@ impl MetalBackend {
             enc.set_buffer(1, Some(bufs.wk), 0);
             enc.set_buffer(2, Some(bufs.wv), 0);
             enc.set_buffer(3, Some(bufs.ffn_q8), 0);
-            enc.set_buffer(4, Some(bufs.wq_scales), 0);
-            enc.set_buffer(5, Some(bufs.wk_scales), 0);
-            enc.set_buffer(6, Some(bufs.wv_scales), 0);
+            enc.set_buffer(
+                4,
+                Some(
+                    bufs.wq_scales
+                        .expect("legacy scale path requires an external-scale format"),
+                ),
+                0,
+            );
+            enc.set_buffer(
+                5,
+                Some(
+                    bufs.wk_scales
+                        .expect("legacy scale path requires an external-scale format"),
+                ),
+                0,
+            );
+            enc.set_buffer(
+                6,
+                Some(
+                    bufs.wv_scales
+                        .expect("legacy scale path requires an external-scale format"),
+                ),
+                0,
+            );
             enc.set_buffer(7, Some(bufs.ffn_q8s), 0);
             enc.set_buffer(8, Some(bufs.q_out), 0);
             enc.set_buffer(9, Some(bufs.k_out), 0);
@@ -430,21 +455,21 @@ impl MetalBackend {
                 0,
                 [
                     Proj {
-                        format: attn_weights.wq.format,
+                        format: attn_weights.wq.format(),
                         w_buf: bufs.wq,
                         out_buf: bufs.q_out,
                         out_off: 0,
                         rows: layer_q_dim,
                     },
                     Proj {
-                        format: attn_weights.wk.format,
+                        format: attn_weights.wk.format(),
                         w_buf: bufs.wk,
                         out_buf: bufs.k_out,
                         out_off: 0,
                         rows: layer_kv_dim,
                     },
                     Proj {
-                        format: attn_weights.wv.format,
+                        format: attn_weights.wv.format(),
                         w_buf: bufs.wv,
                         out_buf: bufs.v_out,
                         out_off: 0,

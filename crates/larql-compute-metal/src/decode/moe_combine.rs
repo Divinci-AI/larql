@@ -109,11 +109,7 @@ mod tests {
         moe_combined_output_norm: bool,
         layer_scalar: f32,
     ) -> FullPipelineLayer<'a> {
-        let empty_q4 = QuantWeight {
-            data: &[],
-            scales: None,
-            format: QuantFormat::Q4_K,
-        };
+        let empty_q4 = QuantWeight::new(QuantFormat::Q4_K, &[], larql_compute::QuantAux::None);
         FullPipelineLayer {
             attn_sinks: None,
             wq: empty_q4,

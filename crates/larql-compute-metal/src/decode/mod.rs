@@ -495,7 +495,7 @@ impl MetalBackend {
             let layer_head_dim = layer.head_dim;
             let layer_num_q_heads = layer.num_q_heads;
             let layer_num_kv_heads = layer.num_kv_heads;
-            let uses_kquant = layer.wq.format.is_kquant_family();
+            let uses_kquant = layer.wq.format().is_kquant_family();
             let layer_q_dim = layer_num_q_heads * layer_head_dim;
             let layer_kv_dim = layer_num_kv_heads * layer_head_dim;
 
@@ -522,9 +522,9 @@ impl MetalBackend {
                     wq: &wq_bufs[l],
                     wk: &wk_bufs[l],
                     wv: &wv_bufs[l],
-                    wq_scales: &wq_scale_bufs[l],
-                    wk_scales: &wk_scale_bufs[l],
-                    wv_scales: &wv_scale_bufs[l],
+                    wq_scales: wq_scale_bufs[l].as_ref(),
+                    wk_scales: wk_scale_bufs[l].as_ref(),
+                    wv_scales: wv_scale_bufs[l].as_ref(),
                     norm_out: &norm_f32_buf,
                     q_out: &q_out,
                     k_out: &k_out,
@@ -569,18 +569,17 @@ impl MetalBackend {
                     ffn_q8s: &ffn_q8s,
                     normed_scratch: &normed_scratch,
                     wo: &wo_bufs[l],
-                    wo_scales: &wo_scale_bufs[l],
+                    wo_scales: wo_scale_bufs[l].as_ref(),
                     post_attn_norm: &post_attn_norm_bufs[l],
                 },
                 encode_attn::AttnDims {
                     hidden,
                     layer_q_dim,
-                    uses_kquant,
-                    ffn_uses_kquant: layer.gate.format.is_kquant_family(),
+                    ffn_uses_kquant: layer.gate.format().is_kquant_family(),
                 },
             );
             let new_h = if l % 2 == 0 { &h_a } else { &h_b };
-            let ffn_uses_kquant = layer.gate.format.is_kquant_family();
+            let ffn_uses_kquant = layer.gate.format().is_kquant_family();
 
             // ── Steps 6-7: FFN + post-FFN residual ──
             //

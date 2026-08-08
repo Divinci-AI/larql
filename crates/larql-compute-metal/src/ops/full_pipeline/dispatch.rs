@@ -519,7 +519,7 @@ pub fn dispatch_full_pipeline(
                     enc,
                     &qm_pipes,
                     q8_quant_pipeline,
-                    layers[l].wo.format,
+                    layers[l].wo.format(),
                     &wo_bufs[l],
                     &attn_outs[l],
                     q_off(pos),
@@ -575,7 +575,7 @@ pub fn dispatch_full_pipeline(
         //       consumed only by Q4_0 / Q8_0 FFN.
         // `h_post_attns[l]` holds the post-residual f32 hidden state for the
         // final residual add at the end of this layer (step 10).
-        let ffn_format = layers[l].gate.format;
+        let ffn_format = layers[l].gate.format();
         let ffn_needs_q8 = matches!(
             ffn_format,
             larql_compute::QuantFormat::Q4_0 | larql_compute::QuantFormat::Q8_0
@@ -638,8 +638,8 @@ pub fn dispatch_full_pipeline(
                     &qm_pipes,
                     silu_pipeline,
                     gelu_tanh_pipeline,
-                    layers[l].up.format,
-                    layers[l].down.format,
+                    layers[l].up.format(),
+                    layers[l].down.format(),
                     act,
                     &up_bufs[l],
                     &down_bufs[l],
@@ -669,9 +669,9 @@ pub fn dispatch_full_pipeline(
                         q6k_silu: fused_q6k_geglu_silu_down,
                         q6k_gelu_tanh: fused_q6k_geglu_gelu_tanh_down,
                     },
-                    layers[l].gate.format,
-                    layers[l].up.format,
-                    layers[l].down.format,
+                    layers[l].gate.format(),
+                    layers[l].up.format(),
+                    layers[l].down.format(),
                     act,
                     &gate_bufs[l],
                     &up_bufs[l],

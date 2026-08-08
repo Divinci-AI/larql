@@ -577,11 +577,7 @@ mod moe_prefill_integration {
         norm: &'a [f32],
         moe: Option<MoeLayerWeights<'a>>,
     ) -> FullPipelineLayer<'a> {
-        let q4w = || QuantWeight {
-            data: q4k,
-            scales: None,
-            format: QuantFormat::Q4_K,
-        };
+        let q4w = || QuantWeight::new(QuantFormat::Q4_K, q4k, larql_compute::QuantAux::None);
         FullPipelineLayer {
             attn_sinks: None,
             wq: q4w(),
@@ -748,15 +744,13 @@ mod moe_prefill_integration {
         let q4k = synth_q4k(hidden.max(inter), hidden);
         let norm = vec![1.0f32; hidden];
         // Build a layer where Q/K/V are Q4_KF but gate/up/down stay Q4_K.
-        let q4kf = QuantWeight {
-            data: &q4k,
-            scales: None,
-            format: QuantFormat::Q4_KF,
-        };
-        let q4w = || QuantWeight {
-            data: q4k.as_slice(),
-            scales: None,
-            format: QuantFormat::Q4_K,
+        let q4kf = QuantWeight::new(QuantFormat::Q4_KF, &q4k, larql_compute::QuantAux::None);
+        let q4w = || {
+            QuantWeight::new(
+                QuantFormat::Q4_K,
+                q4k.as_slice(),
+                larql_compute::QuantAux::None,
+            )
         };
         let layers = vec![FullPipelineLayer {
             attn_sinks: None,
@@ -830,11 +824,7 @@ mod moe_prefill_integration {
         let seq_len = 1usize;
         let q4k = synth_q4k(hidden.max(inter), hidden);
         let norm = vec![1.0f32; hidden];
-        let q4_view = |fmt| QuantWeight {
-            data: q4k.as_slice(),
-            scales: None,
-            format: fmt,
-        };
+        let q4_view = |fmt| QuantWeight::new(fmt, q4k.as_slice(), larql_compute::QuantAux::None);
         let layers = vec![FullPipelineLayer {
             attn_sinks: None,
             wq: q4_view(QuantFormat::Q4_K),
@@ -919,28 +909,25 @@ mod moe_prefill_integration {
         let wv_q8: Vec<u8> = vec![1u8; kv_dim * hidden];
         let wv_scales: Vec<f32> = vec![0.01f32; kv_dim];
 
-        let q4w = |fmt: QuantFormat| QuantWeight {
-            data: q4k.as_slice(),
-            scales: None,
-            format: fmt,
-        };
+        let q4w =
+            |fmt: QuantFormat| QuantWeight::new(fmt, q4k.as_slice(), larql_compute::QuantAux::None);
         let layers = vec![FullPipelineLayer {
             attn_sinks: None,
-            wq: QuantWeight {
-                data: &wq_q8,
-                scales: Some(&wq_scales),
-                format: QuantFormat::Q8_0,
-            },
-            wk: QuantWeight {
-                data: &wk_q8,
-                scales: Some(&wk_scales),
-                format: QuantFormat::Q8_0,
-            },
-            wv: QuantWeight {
-                data: &wv_q8,
-                scales: Some(&wv_scales),
-                format: QuantFormat::Q8_0,
-            },
+            wq: QuantWeight::new(
+                QuantFormat::Q8_0,
+                &wq_q8,
+                larql_compute::QuantAux::ExternalScales(&wq_scales),
+            ),
+            wk: QuantWeight::new(
+                QuantFormat::Q8_0,
+                &wk_q8,
+                larql_compute::QuantAux::ExternalScales(&wk_scales),
+            ),
+            wv: QuantWeight::new(
+                QuantFormat::Q8_0,
+                &wv_q8,
+                larql_compute::QuantAux::ExternalScales(&wv_scales),
+            ),
             wo: q4w(QuantFormat::Q4_K),
             gate: q4w(QuantFormat::Q4_K),
             up: q4w(QuantFormat::Q4_K),
