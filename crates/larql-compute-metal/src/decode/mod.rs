@@ -64,6 +64,29 @@ impl MetalBackend {
             .collect()
     }
 
+    /// Per-layer capacities implied by each layer's own attention window.
+    pub(crate) fn kv_capacities_for_layers(
+        layers: &[larql_compute::FullPipelineLayer<'_>],
+        default_capacity: usize,
+    ) -> Vec<usize> {
+        layers
+            .iter()
+            .map(|layer| {
+                larql_compute::pipeline_layer::kv_capacity_for_window(
+                    layer.sliding_window,
+                    default_capacity,
+                )
+            })
+            .collect()
+    }
+
+    /// Ensure a cache sized by each layer's *own* capacity.
+    ///
+    /// This must not route through [`Self::ensure_kv_cache_for_shapes`]:
+    /// that grows every layer to a single `max_seq`, which would
+    /// immediately re-inflate a sliding layer that was deliberately
+    /// allocated at `SLACK * W` and undo the saving on the first decode
+    /// step.
     pub(crate) fn ensure_kv_cache_for_layers<'a>(
         &self,
         cache: &'a mut Option<ops::kv_cache::KVCache>,
@@ -71,7 +94,22 @@ impl MetalBackend {
         max_seq: usize,
     ) -> &'a mut ops::kv_cache::KVCache {
         let shapes = Self::kv_shapes_for_layers(layers);
-        self.ensure_kv_cache_for_shapes(cache, &shapes, max_seq)
+        let capacities = Self::kv_capacities_for_layers(layers, max_seq);
+
+        let needs_rebuild = cache
+            .as_ref()
+            .is_none_or(|kv| kv.has_shape_mismatch(&shapes));
+        if needs_rebuild {
+            *cache = Some(ops::kv_cache::KVCache::new_per_layer_with_capacities(
+                &self.bufs,
+                &shapes,
+                &capacities,
+                max_seq,
+            ));
+        }
+        let kv = cache.as_mut().expect("KV cache initialized above");
+        kv.grow_to_capacities(&self.bufs, &shapes, &capacities, max_seq);
+        kv
     }
 
     pub(crate) fn ensure_kv_cache_for_shapes<'a>(

@@ -155,6 +155,43 @@ impl KVCache {
         Self { layers }
     }
 
+    /// Allocate with a per-layer capacity as well as a per-layer shape.
+    ///
+    /// A sliding layer can never hold more than `SLACK * W` rows, so
+    /// sizing it for the global default is waste — on Gemma 3 4B, 29 of 34
+    /// layers at 4096 rows instead of 2048. `capacities[i]` pairs with
+    /// `shapes[i]`; a short `capacities` falls back to `default_capacity`
+    /// for the remainder rather than under-allocating, since an
+    /// under-sized buffer is an overrun and an over-sized one is only
+    /// waste.
+    pub fn new_per_layer_with_capacities(
+        bufs: &BufferCache,
+        shapes: &[(usize, usize)],
+        capacities: &[usize],
+        default_capacity: usize,
+    ) -> Self {
+        let layers = shapes
+            .iter()
+            .enumerate()
+            .map(|(i, &(num_kv, hd))| {
+                let cap = capacities.get(i).copied().unwrap_or(default_capacity);
+                LayerKVCache::new(bufs, cap, num_kv, hd)
+            })
+            .collect();
+        Self { layers }
+    }
+
+    /// Total bytes held by every layer's K and V buffers.
+    ///
+    /// Exists so a test can assert the allocation actually fell, rather
+    /// than asserting a row count and assuming the bytes followed.
+    pub fn allocated_bytes(&self) -> u64 {
+        self.layers
+            .iter()
+            .map(|l| l.k_cache.length() + l.v_cache.length())
+            .sum()
+    }
+
     /// Return true if any already-allocated layer disagrees with the
     /// corresponding expected `(num_kv_heads, head_dim)` shape.
     pub fn has_shape_mismatch(&self, shapes: &[(usize, usize)]) -> bool {
@@ -204,6 +241,38 @@ impl KVCache {
             let (num_kv_heads, head_dim) = shapes[self.layers.len()];
             self.layers
                 .push(LayerKVCache::new(bufs, max_seq, num_kv_heads, head_dim));
+        }
+    }
+
+    /// Grow each layer to its *own* capacity, preserving layers already
+    /// large enough.
+    ///
+    /// The capacity-aware twin of [`Self::grow_to_shapes`]. Growing every
+    /// layer to one `max_seq` would re-inflate a sliding layer that was
+    /// deliberately allocated at `SLACK * W`, so a per-layer bound is not
+    /// an optimisation here — it is what makes the smaller allocation
+    /// survive the first decode step.
+    pub fn grow_to_capacities(
+        &mut self,
+        bufs: &BufferCache,
+        shapes: &[(usize, usize)],
+        capacities: &[usize],
+        default_capacity: usize,
+    ) {
+        let cap_at = |i: usize| capacities.get(i).copied().unwrap_or(default_capacity);
+        for (i, (layer, &(num_kv_heads, head_dim))) in
+            self.layers.iter_mut().zip(shapes.iter()).enumerate()
+        {
+            let want = cap_at(i);
+            if layer.max_seq < want {
+                *layer = LayerKVCache::new(bufs, want, num_kv_heads, head_dim);
+            }
+        }
+        while self.layers.len() < shapes.len() {
+            let i = self.layers.len();
+            let (num_kv_heads, head_dim) = shapes[i];
+            self.layers
+                .push(LayerKVCache::new(bufs, cap_at(i), num_kv_heads, head_dim));
         }
     }
 

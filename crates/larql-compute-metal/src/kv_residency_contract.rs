@@ -350,3 +350,122 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod capacity_tests {
+    use crate::ops::kv_cache::KVCache;
+    use crate::MetalBackend;
+    use larql_compute::pipeline_layer::{kv_capacity_for_window, KV_COMPACTION_SLACK};
+
+    /// Gemma 3 4B: 34 layers, 4 KV heads, head_dim 256, window 1024, and
+    /// the 5:1 global pattern that puts full attention on layers
+    /// 5/11/17/23/29.
+    const G_LAYERS: usize = 34;
+    const G_KV_HEADS: usize = 4;
+    const G_HEAD_DIM: usize = 256;
+    const G_WINDOW: usize = 1024;
+    const G_DEFAULT: usize = 4096;
+    /// Gemma 3 4B's published split. Stated as a fact about the model
+    /// rather than recomputed from its layer pattern: re-implementing
+    /// `gemma3.rs::is_sliding_window_layer` here would be a second copy
+    /// of an architecture rule that can drift silently, and this test is
+    /// about allocation arithmetic, not about that rule.
+    const G_SLIDING: usize = 29;
+    const G_GLOBAL: usize = 5;
+
+    /// Capacity is the compaction trigger, not the window — a capacity of
+    /// `W` would be an overrun, since occupancy is allowed to reach
+    /// `SLACK * W` before compaction reclaims it.
+    #[test]
+    fn capacity_accommodates_the_compaction_trigger() {
+        assert_eq!(kv_capacity_for_window(G_WINDOW, G_DEFAULT), 2048);
+        assert_eq!(
+            kv_capacity_for_window(G_WINDOW, G_DEFAULT),
+            G_WINDOW * KV_COMPACTION_SLACK,
+            "capacity below the trigger is an overrun, not a saving"
+        );
+        // A global layer is unbounded and keeps the full default.
+        assert_eq!(kv_capacity_for_window(0, G_DEFAULT), G_DEFAULT);
+        // A window wider than the default cannot ask for more than it.
+        assert_eq!(kv_capacity_for_window(8192, G_DEFAULT), G_DEFAULT);
+    }
+
+    /// The byte win, asserted on the real geometry so it cannot regress
+    /// silently. Measures allocated bytes, not row counts — a row-count
+    /// assertion would pass even if the buffers never shrank.
+    #[test]
+    fn gemma3_4b_allocation_falls() {
+        let Some(metal) = MetalBackend::new() else {
+            eprintln!("skip: no Metal device");
+            return;
+        };
+        assert_eq!(
+            G_SLIDING + G_GLOBAL,
+            G_LAYERS,
+            "the split must cover every layer"
+        );
+        let shapes = vec![(G_KV_HEADS, G_HEAD_DIM); G_LAYERS];
+        let capacities: Vec<usize> = (0..G_LAYERS)
+            .map(|l| {
+                let w = if l < G_SLIDING { G_WINDOW } else { 0 };
+                kv_capacity_for_window(w, G_DEFAULT)
+            })
+            .collect();
+
+        let before = KVCache::new_per_layer(&metal.bufs, &shapes, G_DEFAULT).allocated_bytes();
+        let after =
+            KVCache::new_per_layer_with_capacities(&metal.bufs, &shapes, &capacities, G_DEFAULT)
+                .allocated_bytes();
+
+        // 32 MiB per layer at 4096 rows (K+V, f32) -> 1.088 GiB.
+        assert_eq!(before, 1_140_850_688, "baseline allocation");
+        // Sliding layers at 16 MiB, global at 32 MiB.
+        assert_eq!(after, 654_311_424, "per-layer allocation");
+        // Exactly 464 MiB reclaimed — G_SLIDING layers x 16 MiB.
+        assert_eq!(
+            before - after,
+            464 * 1024 * 1024,
+            "reclaimed bytes changed; if this is intended, update the figure \
+             in docs/kv-residency-contract.md too"
+        );
+    }
+
+    /// Growing must respect each layer's own bound. Growing to a single
+    /// `max_seq` would re-inflate every sliding layer on the first decode
+    /// step and silently undo the change.
+    #[test]
+    fn growing_does_not_re_inflate_a_sliding_layer() {
+        let Some(metal) = MetalBackend::new() else {
+            eprintln!("skip: no Metal device");
+            return;
+        };
+        let shapes = vec![(G_KV_HEADS, G_HEAD_DIM); 2];
+        let capacities = vec![2048usize, G_DEFAULT];
+        let mut kv =
+            KVCache::new_per_layer_with_capacities(&metal.bufs, &shapes, &capacities, G_DEFAULT);
+        let before = kv.allocated_bytes();
+
+        kv.grow_to_capacities(&metal.bufs, &shapes, &capacities, G_DEFAULT);
+
+        assert_eq!(
+            kv.layers[0].max_seq, 2048,
+            "sliding layer must stay bounded"
+        );
+        assert_eq!(kv.layers[1].max_seq, G_DEFAULT, "global layer unchanged");
+        assert_eq!(kv.allocated_bytes(), before, "growing reallocated nothing");
+    }
+
+    /// A layer whose capacity genuinely rises is still grown.
+    #[test]
+    fn growing_still_enlarges_an_undersized_layer() {
+        let Some(metal) = MetalBackend::new() else {
+            eprintln!("skip: no Metal device");
+            return;
+        };
+        let shapes = vec![(2, 64)];
+        let mut kv = KVCache::new_per_layer_with_capacities(&metal.bufs, &shapes, &[64], 64);
+        assert_eq!(kv.layers[0].max_seq, 64);
+        kv.grow_to_capacities(&metal.bufs, &shapes, &[256], 256);
+        assert_eq!(kv.layers[0].max_seq, 256);
+    }
+}

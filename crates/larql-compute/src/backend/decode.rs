@@ -280,6 +280,24 @@ pub trait DecodeBackend {
     /// asymmetric attention geometry (Gemma 4 alternates sliding/global).
     fn preallocate_kv_cache_per_layer(&self, _shapes: &[(usize, usize)], _max_seq: usize) {}
 
+    /// Pre-allocate with a per-layer *capacity* as well as a per-layer
+    /// shape, so a sliding layer is not sized for history it can never
+    /// reach.
+    ///
+    /// `capacities[i]` is the row count for layer `i`, from
+    /// [`crate::pipeline_layer::kv_capacities_for_arch`]. The default impl
+    /// ignores them and falls back to the uniform allocation, so a backend
+    /// that has not opted in keeps its previous behaviour — over-allocating
+    /// is wasteful, never wrong.
+    fn preallocate_kv_cache_per_layer_with_capacity(
+        &self,
+        shapes: &[(usize, usize)],
+        capacities: &[usize],
+    ) {
+        let max_seq = capacities.iter().copied().max().unwrap_or(0);
+        self.preallocate_kv_cache_per_layer(shapes, max_seq);
+    }
+
     /// Decode one token through all layers with KV cache.
     fn decode_token(
         &self,
@@ -635,6 +653,21 @@ mod tests {
         b.reset_kv_cache();
         b.truncate_kv_cache(0);
         b.preallocate_kv_cache_per_layer(&[(2, 4)], 16);
+        assert_eq!(b.kv_cache_len(), 0);
+    }
+
+    /// The capacity-aware variant falls back to the uniform allocation
+    /// using the *largest* requested capacity. Taking the max rather than
+    /// the min matters: a backend that ignores per-layer capacity must
+    /// over-allocate, never under-allocate — too small is an overrun,
+    /// too large is only waste.
+    #[test]
+    fn default_capacity_preallocate_falls_back_to_the_largest_capacity() {
+        let b = StubDecode;
+        // Mixed sliding/global capacities, as a real model produces.
+        b.preallocate_kv_cache_per_layer_with_capacity(&[(2, 4), (2, 4)], &[2048, 4096]);
+        // Empty input must not panic on the `max` of an empty iterator.
+        b.preallocate_kv_cache_per_layer_with_capacity(&[], &[]);
         assert_eq!(b.kv_cache_len(), 0);
     }
 

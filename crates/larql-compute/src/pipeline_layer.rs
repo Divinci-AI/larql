@@ -21,6 +21,58 @@ use larql_models::ModelWeights;
 
 pub const DEFAULT_GPU_KV_CACHE_MAX_SEQ: usize = 4096;
 
+/// Occupancy multiple of the window at which KV compaction runs.
+///
+/// Compaction memmoves the surviving rows, so running it every step would
+/// cost O(window) per token; letting occupancy reach this multiple makes
+/// it O(1) amortised. The attention span clamp means the extra resident
+/// rows are never read, so this is pure amortisation slack and carries no
+/// semantic meaning.
+///
+/// It is therefore the difference between what a sliding layer can
+/// *reach* (`W`) and what it must be able to *hold* (`SLACK * W`). A ring
+/// buffer would let capacity approach `W` without changing any policy.
+pub const KV_COMPACTION_SLACK: usize = 2;
+
+/// Physical rows a layer's KV cache must be able to hold.
+///
+/// A windowed layer leaves prefill with `W` rows (see
+/// `full_pipeline/kv_copy.rs`), climbs to `SLACK * W` during decode and is
+/// compacted back. It can therefore never need more than `SLACK * W`, and
+/// allocating `default_capacity` for it is waste.
+///
+/// `sliding_window == 0` is the unbounded sentinel — global layers keep
+/// the full default, because nothing bounds what they may read.
+pub fn kv_capacity_for_window(sliding_window: usize, default_capacity: usize) -> usize {
+    if sliding_window == 0 {
+        default_capacity
+    } else {
+        sliding_window
+            .saturating_mul(KV_COMPACTION_SLACK)
+            .min(default_capacity)
+    }
+}
+
+/// Per-layer KV capacities for a model, parallel to
+/// [`kv_cache_shapes_for_arch`].
+///
+/// Deliberately a separate slice rather than a third tuple element:
+/// `num_kv_heads` and `head_dim` describe the *representation* of a row,
+/// while capacity is *residency policy*. Widening the shape tuple would
+/// put both behind one type across five crates — see
+/// `docs/kv-residency-contract.md`.
+pub fn kv_capacities_for_arch(weights: &ModelWeights, default_capacity: usize) -> Vec<usize> {
+    let arch = &*weights.arch;
+    (0..weights.num_layers)
+        .map(|layer| {
+            let window =
+                crate::forward_overrides::effective_attention_window_for_layer(arch, layer)
+                    .unwrap_or(0);
+            kv_capacity_for_window(window, default_capacity)
+        })
+        .collect()
+}
+
 pub fn kv_cache_shapes_for_arch(weights: &ModelWeights) -> Vec<(usize, usize)> {
     let arch = &*weights.arch;
     (0..weights.num_layers)
@@ -611,6 +663,61 @@ mod tests {
     //! reachable.
     use super::*;
     use larql_models::test_fixtures::make_test_weights;
+
+    /// Capacity must accommodate the compaction trigger, not merely the
+    /// window: occupancy is allowed to reach `SLACK * W` before
+    /// compaction reclaims it, so a capacity of `W` would be an overrun
+    /// rather than a smaller allocation.
+    #[test]
+    fn kv_capacity_accommodates_the_compaction_trigger() {
+        assert_eq!(
+            kv_capacity_for_window(1024, 4096),
+            1024 * KV_COMPACTION_SLACK
+        );
+        assert_eq!(kv_capacity_for_window(1024, 4096), 2048);
+    }
+
+    /// `0` is the unbounded sentinel — a global layer keeps the full
+    /// default because nothing bounds what it may read.
+    #[test]
+    fn kv_capacity_leaves_unbounded_layers_at_the_default() {
+        assert_eq!(kv_capacity_for_window(0, 4096), 4096);
+    }
+
+    /// A window wider than the default cannot ask for more than it, and
+    /// a window near `usize::MAX` must not overflow into a tiny capacity.
+    #[test]
+    fn kv_capacity_is_clamped_by_the_default() {
+        assert_eq!(kv_capacity_for_window(8192, 4096), 4096);
+        assert_eq!(kv_capacity_for_window(usize::MAX, 4096), 4096);
+    }
+
+    /// A window small enough that the trigger stays under the default
+    /// gets the smaller allocation, which is the whole point.
+    #[test]
+    fn kv_capacity_shrinks_a_narrow_window() {
+        assert_eq!(kv_capacity_for_window(64, 4096), 128);
+    }
+
+    #[test]
+    fn kv_capacities_for_arch_returns_one_entry_per_layer() {
+        let weights = make_test_weights();
+        let caps = kv_capacities_for_arch(&weights, 4096);
+        assert_eq!(caps.len(), weights.num_layers);
+        // Every entry is a real allocation and never exceeds the default.
+        for c in &caps {
+            assert!(*c > 0 && *c <= 4096, "capacity {c} out of range");
+        }
+        // And each agrees with the per-window rule applied to that layer.
+        for (layer, &c) in caps.iter().enumerate() {
+            let window = crate::forward_overrides::effective_attention_window_for_layer(
+                &*weights.arch,
+                layer,
+            )
+            .unwrap_or(0);
+            assert_eq!(c, kv_capacity_for_window(window, 4096), "layer {layer}");
+        }
+    }
 
     #[test]
     fn kv_cache_shapes_for_arch_returns_one_pair_per_layer() {
