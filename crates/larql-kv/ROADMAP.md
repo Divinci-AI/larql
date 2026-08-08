@@ -48,6 +48,37 @@ unrelated prefix. Queue in pickup notes §6.
 
 ---
 
+## KV residency contract — documented and tested, not fixed (2026-08-08)
+
+The fused Metal decode path and the coarse `KvDispatch` path implement
+**identical attention semantics and different physical-residency
+contracts**. Both clamp what attention reads via `attention_span`; only
+the coarse path bounds what is retained, by calling
+`compact_kv_to_window` each step. So on `larql run` / `larql bench`,
+sliding layers accumulate rows without limit.
+
+Three quantities that get conflated, and must not be: architectural
+reachability (`W` = 1024), logical occupancy (`<= 2W`, the
+`COMPACTION_SLACK` bound), physical capacity (4096, fixed at
+allocation). **Compaction reclaims occupancy, not bytes** — wiring it
+into the fused path saves no memory, because the buffer is still
+allocated at 4096 rows.
+
+Per-layer capacity *would* save ~464 MB on Gemma 3 4B (1.09 GB → ~624
+MB), but it is blocked on prefill rather than on allocation: prefill
+bulk-copies `seq_len` rows with a bound that is enforced nowhere local,
+so shrinking a sliding layer's capacity turns it into an overrun. The
+open question — whether a sliding layer needs every prefill row
+materialised at once or only the terminal tail — plus the evidence, the
+blast radius of the shape-tuple approach (134 refs / 26 files / 5
+crates), and why the eventual seam should be setup-time configuration
+rather than a per-layer callback, are all in
+[`docs/kv-residency-contract.md`](../../docs/kv-residency-contract.md).
+Executable form:
+[`kv_residency_contract.rs`](../larql-compute-metal/src/kv_residency_contract.rs).
+
+---
+
 ## MAP-5 persistence harness — scoped and verified, not started (2026-08-02)
 
 A parallel mechanistic-interpretability thread (MAP-5/5b/5c, registry

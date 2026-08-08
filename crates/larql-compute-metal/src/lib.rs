@@ -68,6 +68,8 @@ pub mod kernels;
 #[cfg(target_os = "macos")]
 pub mod kv_dispatch_impl;
 #[cfg(target_os = "macos")]
+pub mod kv_residency_contract;
+#[cfg(target_os = "macos")]
 pub mod ops;
 #[cfg(target_os = "macos")]
 pub mod options;
