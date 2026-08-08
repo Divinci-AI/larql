@@ -626,6 +626,25 @@ impl DecodeBackend for MetalBackend {
         *cache_guard = Some(self.create_kv_cache_per_layer(shapes, max_seq));
     }
 
+    fn preallocate_kv_cache_per_layer_with_capacity(
+        &self,
+        shapes: &[(usize, usize)],
+        capacities: &[usize],
+    ) {
+        // Same replace-outright contract as the uniform variant above;
+        // only the per-layer row count differs.
+        let default_capacity = capacities.iter().copied().max().unwrap_or(0);
+        let mut cache_guard = self.kv_cache.lock().unwrap();
+        *cache_guard = Some(
+            crate::ops::kv_cache::KVCache::new_per_layer_with_capacities(
+                &self.bufs,
+                shapes,
+                capacities,
+                default_capacity,
+            ),
+        );
+    }
+
     fn decode_token(
         &self,
         layers: &[larql_compute::FullPipelineLayer<'_>],

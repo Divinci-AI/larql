@@ -898,11 +898,11 @@ mod tests {
 
 /// Occupancy multiple of the window at which compaction runs.
 ///
-/// Compaction memmoves the surviving rows, so running it every step
-/// would cost O(window) per token. Letting occupancy reach this multiple
-/// before reclaiming makes it O(1) amortised, and the attention span
-/// clamp means the extra resident rows are never read.
-pub(crate) const COMPACTION_SLACK: usize = 2;
+/// Re-exported from `larql-compute` so the compaction trigger and the
+/// capacity rule that must accommodate it (`kv_capacity_for_window`)
+/// cannot drift apart — a capacity below the trigger is a buffer overrun,
+/// not a smaller allocation.
+pub(crate) use larql_compute::pipeline_layer::KV_COMPACTION_SLACK as COMPACTION_SLACK;
 
 impl MetalBackend {
     /// Reclaim K/V above `COMPACTION_SLACK x window` rows, per layer.

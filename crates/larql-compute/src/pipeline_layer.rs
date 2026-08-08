@@ -21,6 +21,58 @@ use larql_models::ModelWeights;
 
 pub const DEFAULT_GPU_KV_CACHE_MAX_SEQ: usize = 4096;
 
+/// Occupancy multiple of the window at which KV compaction runs.
+///
+/// Compaction memmoves the surviving rows, so running it every step would
+/// cost O(window) per token; letting occupancy reach this multiple makes
+/// it O(1) amortised. The attention span clamp means the extra resident
+/// rows are never read, so this is pure amortisation slack and carries no
+/// semantic meaning.
+///
+/// It is therefore the difference between what a sliding layer can
+/// *reach* (`W`) and what it must be able to *hold* (`SLACK * W`). A ring
+/// buffer would let capacity approach `W` without changing any policy.
+pub const KV_COMPACTION_SLACK: usize = 2;
+
+/// Physical rows a layer's KV cache must be able to hold.
+///
+/// A windowed layer leaves prefill with `W` rows (see
+/// `full_pipeline/kv_copy.rs`), climbs to `SLACK * W` during decode and is
+/// compacted back. It can therefore never need more than `SLACK * W`, and
+/// allocating `default_capacity` for it is waste.
+///
+/// `sliding_window == 0` is the unbounded sentinel — global layers keep
+/// the full default, because nothing bounds what they may read.
+pub fn kv_capacity_for_window(sliding_window: usize, default_capacity: usize) -> usize {
+    if sliding_window == 0 {
+        default_capacity
+    } else {
+        sliding_window
+            .saturating_mul(KV_COMPACTION_SLACK)
+            .min(default_capacity)
+    }
+}
+
+/// Per-layer KV capacities for a model, parallel to
+/// [`kv_cache_shapes_for_arch`].
+///
+/// Deliberately a separate slice rather than a third tuple element:
+/// `num_kv_heads` and `head_dim` describe the *representation* of a row,
+/// while capacity is *residency policy*. Widening the shape tuple would
+/// put both behind one type across five crates — see
+/// `docs/kv-residency-contract.md`.
+pub fn kv_capacities_for_arch(weights: &ModelWeights, default_capacity: usize) -> Vec<usize> {
+    let arch = &*weights.arch;
+    (0..weights.num_layers)
+        .map(|layer| {
+            let window =
+                crate::forward_overrides::effective_attention_window_for_layer(arch, layer)
+                    .unwrap_or(0);
+            kv_capacity_for_window(window, default_capacity)
+        })
+        .collect()
+}
+
 pub fn kv_cache_shapes_for_arch(weights: &ModelWeights) -> Vec<(usize, usize)> {
     let arch = &*weights.arch;
     (0..weights.num_layers)
