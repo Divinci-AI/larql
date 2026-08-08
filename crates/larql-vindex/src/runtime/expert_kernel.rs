@@ -168,40 +168,96 @@ impl BankKernel {
             }
         }
     }
+}
 
-    /// Run one expert, returning its unweighted output.
+impl BankKernel {
+    /// Run `experts` into `out`, one `hidden`-wide slot each, in parallel when
+    /// the incumbent kernel and the spin pool are both available.
     ///
-    /// Returns an owned vector for both kernels. The reference allocates one
-    /// anyway, and the copy out of the incumbent's scratch keeps the two
-    /// arms' cost comparable without making the caller reason about a borrow
-    /// that lives across the reduction.
-    pub(crate) fn run(
+    /// **Why this replaced a serial per-expert `run`.** Profiling a composed
+    /// run showed the bound path and the incumbent calling the *identical*
+    /// `run_single_expert_q4k_q8k_into` on identical bytes — but the incumbent
+    /// dispatching it through `spin_pool::par_chunks_mut` while the bound path
+    /// ran top-8 experts on the calling thread. 9293 samples against 1151 in
+    /// one window, and +992 ms/token on a 26B MoE. Nothing about the container
+    /// was slow; the expert loop simply was not parallel. Parallelising it took
+    /// the measured container tax to +7 ms/token.
+    ///
+    /// **Determinism holds by construction.** Each expert writes only its own
+    /// disjoint slot and *nothing is summed here* — the caller accumulates the
+    /// slots afterwards in selection order, so float additions happen in the
+    /// same order the serial loop used. Every bit-exactness claim in the
+    /// VINDEX3 ladder still holds. Summing inside the pool would reorder them,
+    /// which is exactly what this avoids.
+    pub(crate) fn run_many_into(
         &mut self,
-        expert: &BoundExpert<'_>,
+        experts: &[&BoundExpert<'_>],
         bank: &BoundBankOperation<'_>,
         bank_input: &[f32],
-    ) -> Result<Vec<f32>, ExecutionError> {
-        match self {
+        hidden: usize,
+        out: &mut [f32],
+    ) -> Result<(), ExecutionError> {
+        debug_assert_eq!(out.len(), experts.len() * hidden);
+
+        let session = match self {
+            // The reference kernel is a differential instrument, not a
+            // production path; keep it serial and obviously correct.
             Self::Reference => {
-                expert::forward(expert, bank_input, bank.intermediate_dim, bank.activation)
+                for (slot, expert) in out.chunks_mut(hidden).zip(experts) {
+                    let v = expert::forward(
+                        expert,
+                        bank_input,
+                        bank.intermediate_dim,
+                        bank.activation,
+                    )?;
+                    slot.copy_from_slice(&v);
+                }
+                return Ok(());
             }
-            Self::IncumbentQ4kQ8k(session) => {
-                let operands = incumbent_operands(expert, bank.intermediate_dim, bank.hidden_dim)?;
-                // The incumbent's own function, over the region's own bytes.
-                // Its internal short-slab guard — which would zero the output
-                // and return successfully — is unreachable from here: the
-                // operand checks above pin exactly the byte count it measures.
-                let out = run_single_expert_q4k_q8k_into(
-                    &mut session.scratch,
-                    &session.input,
-                    operands.gate_up.bytes,
-                    operands.down.bytes,
-                    bank.intermediate_dim,
-                    bank.activation,
+            Self::IncumbentQ4kQ8k(session) => session,
+        };
+
+        // Operand resolution can fail, and a failure inside a pool closure
+        // cannot propagate — resolve everything first, and only enter the
+        // parallel section once every operand is known good.
+        let operands = experts
+            .iter()
+            .map(|e| incumbent_operands(e, bank.intermediate_dim, bank.hidden_dim))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let padded = padded_intermediate(bank.intermediate_dim, block_elements());
+        let input = &session.input;
+        let intermediate = bank.intermediate_dim;
+        let activation = bank.activation;
+        let ops = &operands[..];
+
+        if larql_compute::cpu::spin_pool::enabled() && experts.len() > 1 {
+            larql_compute::cpu::spin_pool::par_chunks_mut(out, hidden, |ci, slot| {
+                let mut scratch = ExpertScratch::new(hidden, intermediate, padded);
+                let v = run_single_expert_q4k_q8k_into(
+                    &mut scratch,
+                    input,
+                    ops[ci].gate_up.bytes,
+                    ops[ci].down.bytes,
+                    intermediate,
+                    activation,
                 );
-                Ok(out.to_vec())
+                slot.copy_from_slice(v);
+            });
+        } else {
+            for (ci, slot) in out.chunks_mut(hidden).enumerate() {
+                let v = run_single_expert_q4k_q8k_into(
+                    &mut session.scratch,
+                    input,
+                    ops[ci].gate_up.bytes,
+                    ops[ci].down.bytes,
+                    intermediate,
+                    activation,
+                );
+                slot.copy_from_slice(v);
             }
         }
+        Ok(())
     }
 }
 
