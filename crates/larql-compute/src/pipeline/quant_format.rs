@@ -307,7 +307,12 @@ mod scale_storage_tests {
     /// must break this test rather than silently misbehave.
     #[test]
     fn inline_and_block_packed_coincide_today() {
-        for f in [QuantFormat::Q4_0, QuantFormat::Q4_K, QuantFormat::Q4_KF, QuantFormat::Q6_K] {
+        for f in [
+            QuantFormat::Q4_0,
+            QuantFormat::Q4_K,
+            QuantFormat::Q4_KF,
+            QuantFormat::Q6_K,
+        ] {
             assert!(f.packed_block_layout().is_some());
             assert_eq!(f.scale_storage(), ScaleStorage::Inline);
         }
@@ -323,7 +328,12 @@ mod scale_storage_tests {
 
     #[test]
     fn inline_formats_accept_no_aux() {
-        for f in [QuantFormat::Q4_0, QuantFormat::Q4_K, QuantFormat::Q4_KF, QuantFormat::Q6_K] {
+        for f in [
+            QuantFormat::Q4_0,
+            QuantFormat::Q4_K,
+            QuantFormat::Q4_KF,
+            QuantFormat::Q6_K,
+        ] {
             let w = QuantWeight::new(f, &[0u8; 4], QuantAux::None);
             assert!(w.external_scales().is_none(), "{f:?}");
         }
