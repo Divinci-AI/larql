@@ -843,6 +843,13 @@ impl DecodeBackend for MetalBackend {
                 attn_ms: wall_ms,
                 gate_up_ms: 0.0,
                 down_ms: 0.0,
+                // No split was recorded, so nothing is known about how much
+                // of this wall was GPU. Report zero rather than guessing —
+                // a fabricated `gpu_ms` here would be the same mistake the
+                // "GPU fwd" counter made.
+                gpu_ms: 0.0,
+                wall_ms,
+                cmd_buffers: 0,
             }
         });
         (result, timings.attn_ms, timings.gate_up_ms, timings.down_ms)

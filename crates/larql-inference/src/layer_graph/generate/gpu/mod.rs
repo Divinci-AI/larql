@@ -399,6 +399,9 @@ where
         stage_timings: StageTimings {
             embed_ms_total: outcome.t_embed,
             gpu_ms_total: outcome.t_gpu,
+            gpu_only_ms_total: outcome.t_gpu_only,
+            attn_ms_total: outcome.t_attn,
+            cmd_buffers_total: outcome.n_cmd_buffers,
             cpu_fwd_ms_total: 0.0,
             gate_up_ms_total: outcome.t_gate_up,
             down_ms_total: outcome.t_down,

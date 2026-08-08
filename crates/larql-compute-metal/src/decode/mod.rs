@@ -1001,6 +1001,15 @@ impl MetalBackend {
                 attn_ms: gpu_time.attn_ms,
                 gate_up_ms: gpu_time.gate_up_ms,
                 down_ms: gpu_time.down_ms,
+                // The GPU/wall pair travels with the stage split so a caller
+                // can report how much of the token was on the GPU at all.
+                // The numbers were already measured here; they only ever
+                // reached stderr via `print_if_enabled`, so every structured
+                // consumer — the bench table, `--json` — attributed the whole
+                // wall to "GPU fwd".
+                gpu_ms: gpu_time.total_gpu_ms,
+                wall_ms,
+                cmd_buffers: gpu_time.n_cmd_buffers as u32,
             });
         }
 
