@@ -123,6 +123,26 @@ pub struct ProfileTimings {
     pub gate_up_ms: f64,
     /// Wall time for the FFN down projection + post-FFN residual + scalar.
     pub down_ms: f64,
+    /// Total time the GPU was actually executing, summed from
+    /// `MTLCommandBuffer` start/end windows. Zero on CPU backends.
+    ///
+    /// Reported alongside [`Self::wall_ms`] so a reader can see that "GPU
+    /// fwd" is wall time *around* the dispatch rather than GPU time.
+    ///
+    /// **The split is only valid against itself.** Turning profiling on
+    /// costs 2.5× — qwen3-0.6b runs 94.8 tok/s unprofiled and 38.2 tok/s
+    /// with `LARQL_PROFILE_SPLIT=1`, with `gpu_ms` steady near 2.8ms while
+    /// the wall around it goes 4.3ms → 20ms. Almost all of the CPU-side
+    /// share this reports is the instrument's own per-command-buffer
+    /// synchronisation, not production cost. Use it to compare stages within
+    /// one profiled run; do not quote the CPU/GPU ratio as a property of the
+    /// unprofiled path.
+    pub gpu_ms: f64,
+    /// Wall time around the whole token, CPU encoding and readback included.
+    pub wall_ms: f64,
+    /// Command buffers submitted for this token. A large count is dispatch
+    /// overhead the per-stage numbers do not show.
+    pub cmd_buffers: u32,
 }
 
 impl ProfileTimings {
@@ -461,6 +481,7 @@ mod tests {
             attn_ms: 1.5,
             gate_up_ms: 2.5,
             down_ms: 1.0,
+            ..Default::default()
         };
         assert!((p.total_ms() - 5.0).abs() < 1e-9);
     }
@@ -480,6 +501,7 @@ mod tests {
             attn_ms: 6.0,
             gate_up_ms: 3.0,
             down_ms: 1.0,
+            ..Default::default()
         };
         let s = p.format_summary(10);
         assert!(s.contains("total=10.00ms"));
@@ -493,6 +515,7 @@ mod tests {
             attn_ms: 1.0,
             gate_up_ms: 1.0,
             down_ms: 1.0,
+            ..Default::default()
         };
         let s = p.format_summary(0);
         assert!(s.contains("0 layers"));

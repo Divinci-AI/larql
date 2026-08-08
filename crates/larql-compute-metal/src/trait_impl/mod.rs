@@ -199,6 +199,7 @@ mod tests {
             attn_ms: 3.0,
             gate_up_ms: 1.5,
             down_ms: 0.5,
+            ..Default::default()
         };
         crate::decode::profile::store_last_split_timings(written);
         let read = ComputeBackend::take_split_timings(&m).expect("must surface stored timing");
