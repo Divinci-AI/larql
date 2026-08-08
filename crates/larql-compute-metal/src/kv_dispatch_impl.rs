@@ -902,7 +902,7 @@ mod tests {
 /// would cost O(window) per token. Letting occupancy reach this multiple
 /// before reclaiming makes it O(1) amortised, and the attention span
 /// clamp means the extra resident rows are never read.
-const COMPACTION_SLACK: usize = 2;
+pub(crate) const COMPACTION_SLACK: usize = 2;
 
 impl MetalBackend {
     /// Reclaim K/V above `COMPACTION_SLACK x window` rows, per layer.
