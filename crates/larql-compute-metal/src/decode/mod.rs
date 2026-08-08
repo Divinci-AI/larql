@@ -495,7 +495,7 @@ impl MetalBackend {
             let layer_head_dim = layer.head_dim;
             let layer_num_q_heads = layer.num_q_heads;
             let layer_num_kv_heads = layer.num_kv_heads;
-            let uses_kquant = layer.wq.format.is_kquant_family();
+            let uses_kquant = layer.wq.format().is_kquant_family();
             let layer_q_dim = layer_num_q_heads * layer_head_dim;
             let layer_kv_dim = layer_num_kv_heads * layer_head_dim;
 
@@ -575,12 +575,11 @@ impl MetalBackend {
                 encode_attn::AttnDims {
                     hidden,
                     layer_q_dim,
-                    uses_kquant,
-                    ffn_uses_kquant: layer.gate.format.is_kquant_family(),
+                    ffn_uses_kquant: layer.gate.format().is_kquant_family(),
                 },
             );
             let new_h = if l % 2 == 0 { &h_a } else { &h_b };
-            let ffn_uses_kquant = layer.gate.format.is_kquant_family();
+            let ffn_uses_kquant = layer.gate.format().is_kquant_family();
 
             // ── Steps 6-7: FFN + post-FFN residual ──
             //

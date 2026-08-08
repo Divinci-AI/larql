@@ -26,9 +26,9 @@ pub(super) fn q8k_direct_proj(
     // kernel below; gate on those two, but take the packed row stride from
     // the format helper instead of re-spelling `(in_dim/256)*144`/`*210`
     // (= `Q4_K_BLOCK_BYTES` / `Q6_K_BLOCK_BYTES` per 256-element block).
-    let bytes_per_row = match qw.format {
+    let bytes_per_row = match qw.format() {
         crate::QuantFormat::Q4_K | crate::QuantFormat::Q6_K => {
-            qw.format.packed_matrix_bytes(1, in_dim)?
+            qw.format().packed_matrix_bytes(1, in_dim)?
         }
         _ => return None,
     };
@@ -45,7 +45,7 @@ pub(super) fn q8k_direct_proj(
             return;
         }
         let w_chunk = &qw.data[row_start * bytes_per_row..(row_start + chunk_len) * bytes_per_row];
-        match qw.format {
+        match qw.format() {
             crate::QuantFormat::Q4_K => {
                 q4k_q8k_matvec_into(&mut chunk[..chunk_len], x_q8k, w_chunk, chunk_len, in_dim)
             }
@@ -103,7 +103,7 @@ pub(super) fn q4k_direct_proj(
     in_dim: usize,
 ) -> Option<Array2<f32>> {
     let x_slice = x.as_slice()?;
-    let out = backend.quant_matvec(qw.format, qw.data, x_slice, num_rows, in_dim)?;
+    let out = backend.quant_matvec(qw.format(), qw.data, x_slice, num_rows, in_dim)?;
     Array2::from_shape_vec((1, num_rows), out).ok()
 }
 

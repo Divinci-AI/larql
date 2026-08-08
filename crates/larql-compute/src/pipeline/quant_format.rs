@@ -215,12 +215,36 @@ pub enum QuantAux<'a> {
 #[derive(Clone, Copy)]
 pub struct QuantWeight<'a> {
     pub data: &'a [u8],
-    pub format: QuantFormat,
-    /// Private on purpose: this is the field a caller must not be able to
-    /// set independently of `format`. One private field is enough to
-    /// force construction through [`QuantWeight::new`], while `data` and
-    /// `format` stay readable without ceremony.
+    /// Private on purpose, like `aux`: the pair is one validated fact,
+    /// and either field writable alone lets a caller desynchronise them
+    /// by plain assignment after `new` has checked the combination once.
+    /// Read via [`QuantWeight::format`]; change via
+    /// [`QuantWeight::with_format`], which re-checks against the aux the
+    /// weight already carries.
+    format: QuantFormat,
     aux: QuantAux<'a>,
+}
+
+/// The one validation of the (format, aux) pair. Both construction paths
+/// funnel through here so there is exactly one statement of the contract.
+///
+/// # Panics
+/// If `aux` disagrees with `format.scale_storage()`.
+fn check_aux_matches_format(format: QuantFormat, aux: QuantAux<'_>) {
+    match (format.scale_storage(), aux) {
+        (ScaleStorage::External(_), QuantAux::ExternalScales(_))
+        | (ScaleStorage::Inline, QuantAux::None)
+        | (ScaleStorage::None, QuantAux::None) => {}
+        (ScaleStorage::External(kind), QuantAux::None) => {
+            panic!("{format:?} stores scales externally ({kind:?}) but none were supplied")
+        }
+        (ScaleStorage::Inline, QuantAux::ExternalScales(_)) => panic!(
+            "{format:?} packs its scales inline; an external scale array is not a                  thing it has"
+        ),
+        (ScaleStorage::None, QuantAux::ExternalScales(_)) => {
+            panic!("{format:?} is unquantised and has no scales")
+        }
+    }
 }
 
 impl<'a> QuantWeight<'a> {
@@ -233,21 +257,30 @@ impl<'a> QuantWeight<'a> {
     /// a runtime condition — the alternative is a kernel reading a
     /// fabricated buffer, which is how this became worth enforcing.
     pub fn new(format: QuantFormat, data: &'a [u8], aux: QuantAux<'a>) -> Self {
-        match (format.scale_storage(), aux) {
-            (ScaleStorage::External(_), crate::QuantAux::ExternalScales(_))
-            | (ScaleStorage::Inline, crate::QuantAux::None)
-            | (ScaleStorage::None, crate::QuantAux::None) => {}
-            (ScaleStorage::External(kind), crate::QuantAux::None) => panic!(
-                "{format:?} stores scales externally ({kind:?}) but none were supplied"
-            ),
-            (ScaleStorage::Inline, crate::QuantAux::ExternalScales(_)) => panic!(
-                "{format:?} packs its scales inline; an external scale array is not a                  thing it has"
-            ),
-            (ScaleStorage::None, crate::QuantAux::ExternalScales(_)) => {
-                panic!("{format:?} is unquantised and has no scales")
-            }
-        }
+        check_aux_matches_format(format, aux);
         Self { data, format, aux }
+    }
+
+    /// The weight's quantization format.
+    pub fn format(&self) -> QuantFormat {
+        self.format
+    }
+
+    /// The same weight reinterpreted under a different format tag,
+    /// re-checked against the aux it already carries.
+    ///
+    /// This exists for test fixtures that build packed bytes once and
+    /// retag them to steer dispatch. It can only move within the same
+    /// auxiliary-storage class — e.g. Q4_K → Q4_KF (both inline), or
+    /// Q8_0 → I2S (both external). Crossing classes panics, which is the
+    /// hole this closes: `w.format = Q8_0` on an inline-format weight
+    /// used to fabricate a Q8 weight with no scale source.
+    ///
+    /// # Panics
+    /// If the new format's scale storage disagrees with the existing aux.
+    pub fn with_format(self, format: QuantFormat) -> Self {
+        check_aux_matches_format(format, self.aux);
+        Self { format, ..self }
     }
 
     /// The external scale array, when the format has one.
@@ -401,7 +434,45 @@ mod scale_storage_tests {
     #[test]
     fn default_weight_is_internally_consistent() {
         let w = QuantWeight::default();
-        assert_eq!(w.format.scale_storage(), ScaleStorage::Inline);
+        assert_eq!(w.format().scale_storage(), ScaleStorage::Inline);
         assert!(w.external_scales().is_none());
+    }
+
+    // ── with_format: retagging within an aux class is fine; crossing
+    //    classes is the desynchronisation hole and must panic ─────────
+
+    #[test]
+    fn with_format_allows_retagging_within_the_inline_class() {
+        let w = QuantWeight::new(QuantFormat::Q4_K, &[0u8; 4], QuantAux::None);
+        let w = w.with_format(QuantFormat::Q4_KF);
+        assert_eq!(w.format(), QuantFormat::Q4_KF);
+        assert!(w.external_scales().is_none());
+    }
+
+    #[test]
+    fn with_format_allows_retagging_within_the_external_class() {
+        let s = [1.0f32, 2.0];
+        let w = QuantWeight::new(QuantFormat::Q8_0, &[0u8; 4], QuantAux::ExternalScales(&s));
+        let w = w.with_format(QuantFormat::I2S);
+        assert_eq!(w.format(), QuantFormat::I2S);
+        assert_eq!(w.external_scales(), Some(&s[..]));
+    }
+
+    /// The exact shape of the hole this closes: a weight built inline
+    /// (no scales) retagged to a format whose kernels read an external
+    /// scale buffer that does not exist.
+    #[test]
+    #[should_panic(expected = "stores scales externally")]
+    fn with_format_refuses_inline_to_external_retag() {
+        let w = QuantWeight::new(QuantFormat::Q4_K, &[0u8; 4], QuantAux::None);
+        let _ = w.with_format(QuantFormat::Q8_0);
+    }
+
+    #[test]
+    #[should_panic(expected = "packs its scales inline")]
+    fn with_format_refuses_external_to_inline_retag() {
+        let s = [1.0f32];
+        let w = QuantWeight::new(QuantFormat::Q8_0, &[0u8; 4], QuantAux::ExternalScales(&s));
+        let _ = w.with_format(QuantFormat::Q4_K);
     }
 }

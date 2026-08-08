@@ -264,7 +264,7 @@ fn layer_spec_views_preserve_flat_field_values() {
     };
 
     let weights = layer.weights();
-    assert_eq!(weights.attention.wq.format, QuantFormat::Q4_K);
+    assert_eq!(weights.attention.wq.format(), QuantFormat::Q4_K);
     assert_eq!(weights.ffn.down.data.len(), data.len());
 
     let norms_view = layer.norms();

@@ -786,7 +786,7 @@ mod tests {
         };
         let result = resolve_attn_weights(&idx, 0);
         let (q, _k, _v, _o) = result.expect("Q8 fallback returns Some");
-        assert_eq!(q.format, QuantFormat::Q8_0);
+        assert_eq!(q.format(), QuantFormat::Q8_0);
     }
 
     /// `build_arch_params` rotary_dim branch fires when `rotary_fraction`
@@ -916,8 +916,8 @@ mod tests {
         assert!(gate.data.is_empty());
         assert!(up.data.is_empty());
         assert!(down.data.is_empty());
-        assert_eq!(gate.format, QuantFormat::Q4_K);
-        assert_eq!(up.format, QuantFormat::Q4_K);
-        assert_eq!(down.format, QuantFormat::Q4_K);
+        assert_eq!(gate.format(), QuantFormat::Q4_K);
+        assert_eq!(up.format(), QuantFormat::Q4_K);
+        assert_eq!(down.format(), QuantFormat::Q4_K);
     }
 }

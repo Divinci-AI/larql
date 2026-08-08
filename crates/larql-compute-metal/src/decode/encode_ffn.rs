@@ -83,7 +83,7 @@ impl MetalBackend {
         let inter_padded_val = inter_padded as u32;
         let hidden_val = hidden as u32;
 
-        let ffn_is_q4kf = layer.gate.format == larql_compute::QuantFormat::Q4_KF;
+        let ffn_is_q4kf = layer.gate.format() == larql_compute::QuantFormat::Q4_KF;
 
         if ffn_is_q4kf {
             self.encode_q4kf_ffn(enc, layer, &bufs, hidden, inter, hidden_val, inter_val);
@@ -316,7 +316,7 @@ impl MetalBackend {
             // dead code for the investigation in
             // `larql-inference/ROADMAP.md` G-3 follow-up).
             let use_fused_q6k_down = self.decode_flags.fused_q6k_down
-                && layer.down.format == larql_compute::QuantFormat::Q6_K
+                && layer.down.format() == larql_compute::QuantFormat::Q6_K
                 && matches!(layer.activation, larql_compute::Activation::GeluTanh);
             if use_fused_q6k_down {
                 let kh = &self.ffn.q6k_geglu_gelu_tanh_down_pipeline;
@@ -338,7 +338,7 @@ impl MetalBackend {
                     metal::MTLSize::new(n_tgs, 1, 1),
                     metal::MTLSize::new(kh.threads_per_tg, 1, 1),
                 );
-            } else if layer.down.format == larql_compute::QuantFormat::Q4_K
+            } else if layer.down.format() == larql_compute::QuantFormat::Q4_K
                 && inter_padded <= MAX_FUSED_GEGLU_DOWN_INTER
                 && self.decode_flags.fused_down
             {
@@ -370,7 +370,7 @@ impl MetalBackend {
                 };
                 qmv::encode(
                     enc,
-                    layer.down.format,
+                    layer.down.format(),
                     bufs.down_w,
                     bufs.act_buf,
                     0,
@@ -524,7 +524,7 @@ impl MetalBackend {
     /// Fused `activation(gate) * up → q4k_matvec(W_down)` in one
     /// dispatch, replacing the separated GEGLU + Q4_K down pair.
     ///
-    /// Only fires when `layer.down.format == Q4_K` — gated by the
+    /// Only fires when `layer.down.format() == Q4_K` — gated by the
     /// caller. Picks `silu_down` or `gelu_tanh_down` based on the
     /// layer's activation. Behaviour pinned by
     /// `test_kernel_q4k_geglu_down.rs::*_gemma3_4b_ffn`.
@@ -614,7 +614,7 @@ impl MetalBackend {
         let FfnDims { hidden, inter, .. } = dims;
         let inter_val = inter as u32;
         let hidden_val = hidden as u32;
-        let ffn_is_q4kf = layer.gate.format == larql_compute::QuantFormat::Q4_KF;
+        let ffn_is_q4kf = layer.gate.format() == larql_compute::QuantFormat::Q4_KF;
 
         if ffn_is_q4kf {
             use crate::shaders::q4kf_ffn_gate_up as q4kf_gu;
@@ -720,7 +720,7 @@ impl MetalBackend {
         let inter_val = inter as u32;
         let inter_padded_val = inter_padded as u32;
         let hidden_val = hidden as u32;
-        let ffn_is_q4kf = layer.gate.format == larql_compute::QuantFormat::Q4_KF;
+        let ffn_is_q4kf = layer.gate.format() == larql_compute::QuantFormat::Q4_KF;
 
         if ffn_is_q4kf {
             if layer.is_gated() {
@@ -751,9 +751,9 @@ impl MetalBackend {
         } else if ffn_uses_kquant {
             if layer.is_gated() {
                 let use_fused_q6k = self.decode_flags.fused_q6k_down
-                    && layer.down.format == larql_compute::QuantFormat::Q6_K
+                    && layer.down.format() == larql_compute::QuantFormat::Q6_K
                     && matches!(layer.activation, larql_compute::Activation::GeluTanh);
-                if layer.down.format == larql_compute::QuantFormat::Q4_K {
+                if layer.down.format() == larql_compute::QuantFormat::Q4_K {
                     self.encode_q4k_fused_geglu_down(
                         enc,
                         layer,
@@ -874,7 +874,7 @@ impl MetalBackend {
         };
         qmv::encode(
             enc,
-            layer.down.format,
+            layer.down.format(),
             bufs.down_w,
             bufs.act_buf,
             0,
