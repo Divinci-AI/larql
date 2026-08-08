@@ -656,6 +656,21 @@ mod tests {
         assert_eq!(b.kv_cache_len(), 0);
     }
 
+    /// The capacity-aware variant falls back to the uniform allocation
+    /// using the *largest* requested capacity. Taking the max rather than
+    /// the min matters: a backend that ignores per-layer capacity must
+    /// over-allocate, never under-allocate — too small is an overrun,
+    /// too large is only waste.
+    #[test]
+    fn default_capacity_preallocate_falls_back_to_the_largest_capacity() {
+        let b = StubDecode;
+        // Mixed sliding/global capacities, as a real model produces.
+        b.preallocate_kv_cache_per_layer_with_capacity(&[(2, 4), (2, 4)], &[2048, 4096]);
+        // Empty input must not panic on the `max` of an empty iterator.
+        b.preallocate_kv_cache_per_layer_with_capacity(&[], &[]);
+        assert_eq!(b.kv_cache_len(), 0);
+    }
+
     #[test]
     fn default_decode_token_returns_none() {
         let b = StubDecode;

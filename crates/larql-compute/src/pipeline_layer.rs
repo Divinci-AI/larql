@@ -664,6 +664,61 @@ mod tests {
     use super::*;
     use larql_models::test_fixtures::make_test_weights;
 
+    /// Capacity must accommodate the compaction trigger, not merely the
+    /// window: occupancy is allowed to reach `SLACK * W` before
+    /// compaction reclaims it, so a capacity of `W` would be an overrun
+    /// rather than a smaller allocation.
+    #[test]
+    fn kv_capacity_accommodates_the_compaction_trigger() {
+        assert_eq!(
+            kv_capacity_for_window(1024, 4096),
+            1024 * KV_COMPACTION_SLACK
+        );
+        assert_eq!(kv_capacity_for_window(1024, 4096), 2048);
+    }
+
+    /// `0` is the unbounded sentinel — a global layer keeps the full
+    /// default because nothing bounds what it may read.
+    #[test]
+    fn kv_capacity_leaves_unbounded_layers_at_the_default() {
+        assert_eq!(kv_capacity_for_window(0, 4096), 4096);
+    }
+
+    /// A window wider than the default cannot ask for more than it, and
+    /// a window near `usize::MAX` must not overflow into a tiny capacity.
+    #[test]
+    fn kv_capacity_is_clamped_by_the_default() {
+        assert_eq!(kv_capacity_for_window(8192, 4096), 4096);
+        assert_eq!(kv_capacity_for_window(usize::MAX, 4096), 4096);
+    }
+
+    /// A window small enough that the trigger stays under the default
+    /// gets the smaller allocation, which is the whole point.
+    #[test]
+    fn kv_capacity_shrinks_a_narrow_window() {
+        assert_eq!(kv_capacity_for_window(64, 4096), 128);
+    }
+
+    #[test]
+    fn kv_capacities_for_arch_returns_one_entry_per_layer() {
+        let weights = make_test_weights();
+        let caps = kv_capacities_for_arch(&weights, 4096);
+        assert_eq!(caps.len(), weights.num_layers);
+        // Every entry is a real allocation and never exceeds the default.
+        for c in &caps {
+            assert!(*c > 0 && *c <= 4096, "capacity {c} out of range");
+        }
+        // And each agrees with the per-window rule applied to that layer.
+        for (layer, &c) in caps.iter().enumerate() {
+            let window = crate::forward_overrides::effective_attention_window_for_layer(
+                &*weights.arch,
+                layer,
+            )
+            .unwrap_or(0);
+            assert_eq!(c, kv_capacity_for_window(window, 4096), "layer {layer}");
+        }
+    }
+
     #[test]
     fn kv_cache_shapes_for_arch_returns_one_pair_per_layer() {
         let weights = make_test_weights();
