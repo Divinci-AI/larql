@@ -115,41 +115,41 @@ fn main() {
             .iter()
             .map(|ld| larql_compute::FullPipelineLayer {
                 attn_sinks: None,
-                wq: larql_compute::QuantWeight {
-                    data: &ld.wq_q4k,
-                    scales: None,
-                    format: larql_compute::QuantFormat::Q4_K,
-                },
-                wk: larql_compute::QuantWeight {
-                    data: &ld.wk_q4k,
-                    scales: None,
-                    format: larql_compute::QuantFormat::Q4_K,
-                },
-                wv: larql_compute::QuantWeight {
-                    data: &ld.wv_q4k,
-                    scales: None,
-                    format: larql_compute::QuantFormat::Q4_K,
-                },
-                wo: larql_compute::QuantWeight {
-                    data: &ld.wo_q4k,
-                    scales: None,
-                    format: larql_compute::QuantFormat::Q4_K,
-                },
-                gate: larql_compute::QuantWeight {
-                    data: &ld.gate_q4,
-                    scales: None,
-                    format: larql_compute::QuantFormat::Q4_0,
-                },
-                up: larql_compute::QuantWeight {
-                    data: &ld.up_q4,
-                    scales: None,
-                    format: larql_compute::QuantFormat::Q4_0,
-                },
-                down: larql_compute::QuantWeight {
-                    data: &ld.down_q4,
-                    scales: None,
-                    format: larql_compute::QuantFormat::Q4_0,
-                },
+                wq: larql_compute::QuantWeight::new(
+                    larql_compute::QuantFormat::Q4_K,
+                    &ld.wq_q4k,
+                    larql_compute::QuantAux::None,
+                ),
+                wk: larql_compute::QuantWeight::new(
+                    larql_compute::QuantFormat::Q4_K,
+                    &ld.wk_q4k,
+                    larql_compute::QuantAux::None,
+                ),
+                wv: larql_compute::QuantWeight::new(
+                    larql_compute::QuantFormat::Q4_K,
+                    &ld.wv_q4k,
+                    larql_compute::QuantAux::None,
+                ),
+                wo: larql_compute::QuantWeight::new(
+                    larql_compute::QuantFormat::Q4_K,
+                    &ld.wo_q4k,
+                    larql_compute::QuantAux::None,
+                ),
+                gate: larql_compute::QuantWeight::new(
+                    larql_compute::QuantFormat::Q4_0,
+                    &ld.gate_q4,
+                    larql_compute::QuantAux::None,
+                ),
+                up: larql_compute::QuantWeight::new(
+                    larql_compute::QuantFormat::Q4_0,
+                    &ld.up_q4,
+                    larql_compute::QuantAux::None,
+                ),
+                down: larql_compute::QuantWeight::new(
+                    larql_compute::QuantFormat::Q4_0,
+                    &ld.down_q4,
+                    larql_compute::QuantAux::None,
+                ),
                 input_norm: &ld.norm,
                 post_attn_norm: &ld.norm,
                 pre_ffn_norm: None,
@@ -211,41 +211,41 @@ fn main() {
             .iter()
             .map(|ld| larql_compute::FullPipelineLayer {
                 attn_sinks: None,
-                wq: larql_compute::QuantWeight {
-                    data: &ld.wq_q8,
-                    scales: Some(&ld.wq_q8s),
-                    format: larql_compute::QuantFormat::Q8_0,
-                },
-                wk: larql_compute::QuantWeight {
-                    data: &ld.wk_q8,
-                    scales: Some(&ld.wk_q8s),
-                    format: larql_compute::QuantFormat::Q8_0,
-                },
-                wv: larql_compute::QuantWeight {
-                    data: &ld.wv_q8,
-                    scales: Some(&ld.wv_q8s),
-                    format: larql_compute::QuantFormat::Q8_0,
-                },
-                wo: larql_compute::QuantWeight {
-                    data: &ld.wo_q8,
-                    scales: Some(&ld.wo_q8s),
-                    format: larql_compute::QuantFormat::Q8_0,
-                },
-                gate: larql_compute::QuantWeight {
-                    data: &ld.gate_q4,
-                    scales: None,
-                    format: larql_compute::QuantFormat::Q4_0,
-                },
-                up: larql_compute::QuantWeight {
-                    data: &ld.up_q4,
-                    scales: None,
-                    format: larql_compute::QuantFormat::Q4_0,
-                },
-                down: larql_compute::QuantWeight {
-                    data: &ld.down_q4,
-                    scales: None,
-                    format: larql_compute::QuantFormat::Q4_0,
-                },
+                wq: larql_compute::QuantWeight::new(
+                    larql_compute::QuantFormat::Q8_0,
+                    &ld.wq_q8,
+                    larql_compute::QuantAux::ExternalScales(&ld.wq_q8s),
+                ),
+                wk: larql_compute::QuantWeight::new(
+                    larql_compute::QuantFormat::Q8_0,
+                    &ld.wk_q8,
+                    larql_compute::QuantAux::ExternalScales(&ld.wk_q8s),
+                ),
+                wv: larql_compute::QuantWeight::new(
+                    larql_compute::QuantFormat::Q8_0,
+                    &ld.wv_q8,
+                    larql_compute::QuantAux::ExternalScales(&ld.wv_q8s),
+                ),
+                wo: larql_compute::QuantWeight::new(
+                    larql_compute::QuantFormat::Q8_0,
+                    &ld.wo_q8,
+                    larql_compute::QuantAux::ExternalScales(&ld.wo_q8s),
+                ),
+                gate: larql_compute::QuantWeight::new(
+                    larql_compute::QuantFormat::Q4_0,
+                    &ld.gate_q4,
+                    larql_compute::QuantAux::None,
+                ),
+                up: larql_compute::QuantWeight::new(
+                    larql_compute::QuantFormat::Q4_0,
+                    &ld.up_q4,
+                    larql_compute::QuantAux::None,
+                ),
+                down: larql_compute::QuantWeight::new(
+                    larql_compute::QuantFormat::Q4_0,
+                    &ld.down_q4,
+                    larql_compute::QuantAux::None,
+                ),
                 input_norm: &ld.norm,
                 post_attn_norm: &ld.norm,
                 pre_ffn_norm: None,

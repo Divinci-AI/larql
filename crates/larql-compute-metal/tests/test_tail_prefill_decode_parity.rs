@@ -139,18 +139,10 @@ fn synth_weights() -> SynthWeights {
 
 fn build_layer(w: &SynthWeights, sliding_window: usize) -> FullPipelineLayer<'_> {
     fn q4k(data: &[u8]) -> QuantWeight<'_> {
-        QuantWeight {
-            data,
-            scales: None,
-            format: QuantFormat::Q4_K,
-        }
+        QuantWeight::new(QuantFormat::Q4_K, data, larql_compute::QuantAux::None)
     }
     fn q40(data: &[u8]) -> QuantWeight<'_> {
-        QuantWeight {
-            data,
-            scales: None,
-            format: QuantFormat::Q4_0,
-        }
+        QuantWeight::new(QuantFormat::Q4_0, data, larql_compute::QuantAux::None)
     }
     FullPipelineLayer {
         attn_sinks: None,

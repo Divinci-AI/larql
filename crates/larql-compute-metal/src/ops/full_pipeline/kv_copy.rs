@@ -157,11 +157,7 @@ mod tests {
     ) -> FullPipelineLayer<'static> {
         let q4 = Box::leak(vec![0u8; 32 * 18].into_boxed_slice());
         let norm = Box::leak(vec![1.0f32; 32].into_boxed_slice());
-        let q4w = || QuantWeight {
-            data: q4,
-            scales: None,
-            format: QuantFormat::Q4_K,
-        };
+        let q4w = || QuantWeight::new(QuantFormat::Q4_K, q4, larql_compute::QuantAux::None);
         FullPipelineLayer {
             attn_sinks: None,
             wq: q4w(),

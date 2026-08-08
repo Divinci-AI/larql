@@ -27,11 +27,7 @@ fn q8k_direct_proj_chunking_is_bit_exact() {
             crate::QuantFormat::Q4_K => quantize_q4_k(&w_f32),
             _ => quantize_q6_k(&w_f32),
         };
-        let qw = crate::QuantWeight {
-            data: &bytes,
-            scales: None,
-            format: fmt,
-        };
+        let qw = crate::QuantWeight::new(fmt, &bytes, crate::QuantAux::None);
         let chunked = q8k_direct_proj(&qw, &q8, num_rows, in_dim).expect("q8k proj must run");
 
         let mut whole = vec![0.0f32; num_rows];
@@ -66,11 +62,7 @@ fn q8k_direct_proj_matches_f32_activation_within_quant_tolerance() {
         .map(|i| ((i as f32) * 0.011).sin() * 0.3)
         .collect();
     let bytes = quantize_q4_k(&w_f32);
-    let qw = crate::QuantWeight {
-        data: &bytes,
-        scales: None,
-        format: crate::QuantFormat::Q4_K,
-    };
+    let qw = crate::QuantWeight::new(crate::QuantFormat::Q4_K, &bytes, crate::QuantAux::None);
     let x: Vec<f32> = (0..in_dim).map(|i| ((i as f32) * 0.017).cos()).collect();
 
     let q8 = quantize_x_to_q8k(&x);

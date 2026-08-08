@@ -1404,41 +1404,41 @@ fn full_pipeline_seq1_produces_nonzero() {
 
     let layer = larql_compute::FullPipelineLayer {
         attn_sinks: None,
-        wq: larql_compute::QuantWeight {
-            data: &wq_data,
-            scales: Some(&q8_s_q),
-            format: larql_compute::QuantFormat::Q4_0,
-        },
-        wk: larql_compute::QuantWeight {
-            data: &wk_data,
-            scales: Some(&q8_s_q),
-            format: larql_compute::QuantFormat::Q4_0,
-        },
-        wv: larql_compute::QuantWeight {
-            data: &wv_data,
-            scales: Some(&q8_s_q),
-            format: larql_compute::QuantFormat::Q4_0,
-        },
-        wo: larql_compute::QuantWeight {
-            data: &wo_data,
-            scales: Some(&q8_s_q),
-            format: larql_compute::QuantFormat::Q4_0,
-        },
-        gate: larql_compute::QuantWeight {
-            data: &gate_data,
-            scales: None,
-            format: larql_compute::QuantFormat::Q4_0,
-        },
-        up: larql_compute::QuantWeight {
-            data: &up_data,
-            scales: None,
-            format: larql_compute::QuantFormat::Q4_0,
-        },
-        down: larql_compute::QuantWeight {
-            data: &down_data,
-            scales: None,
-            format: larql_compute::QuantFormat::Q4_0,
-        },
+        wq: larql_compute::QuantWeight::new(
+            larql_compute::QuantFormat::Q4_0,
+            &wq_data,
+            larql_compute::QuantAux::ExternalScales(&q8_s_q),
+        ),
+        wk: larql_compute::QuantWeight::new(
+            larql_compute::QuantFormat::Q4_0,
+            &wk_data,
+            larql_compute::QuantAux::ExternalScales(&q8_s_q),
+        ),
+        wv: larql_compute::QuantWeight::new(
+            larql_compute::QuantFormat::Q4_0,
+            &wv_data,
+            larql_compute::QuantAux::ExternalScales(&q8_s_q),
+        ),
+        wo: larql_compute::QuantWeight::new(
+            larql_compute::QuantFormat::Q4_0,
+            &wo_data,
+            larql_compute::QuantAux::ExternalScales(&q8_s_q),
+        ),
+        gate: larql_compute::QuantWeight::new(
+            larql_compute::QuantFormat::Q4_0,
+            &gate_data,
+            larql_compute::QuantAux::None,
+        ),
+        up: larql_compute::QuantWeight::new(
+            larql_compute::QuantFormat::Q4_0,
+            &up_data,
+            larql_compute::QuantAux::None,
+        ),
+        down: larql_compute::QuantWeight::new(
+            larql_compute::QuantFormat::Q4_0,
+            &down_data,
+            larql_compute::QuantAux::None,
+        ),
         input_norm: &norm,
         post_attn_norm: &norm,
         pre_ffn_norm: None,

@@ -209,11 +209,17 @@ pub(super) fn encode_input_norm_and_qkv(
                     enc,
                     pipes.q8_qkv_proj,
                     &lb.wq[l],
-                    &lb.wq_scale[l],
+                    lb.wq_scale[l]
+                        .as_ref()
+                        .expect("q8 qkv path requires external scales"),
                     &lb.wk[l],
-                    &lb.wk_scale[l],
+                    lb.wk_scale[l]
+                        .as_ref()
+                        .expect("q8 qkv path requires external scales"),
                     &lb.wv[l],
-                    &lb.wv_scale[l],
+                    lb.wv_scale[l]
+                        .as_ref()
+                        .expect("q8 qkv path requires external scales"),
                     &lb.q8[l],
                     q8_off(pos),
                     &lb.q8s[l],

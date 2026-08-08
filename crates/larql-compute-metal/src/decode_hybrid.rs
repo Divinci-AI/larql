@@ -57,10 +57,22 @@ impl MetalBackend {
         let wk_buf = self.bufs.get_bytes(layer.wk.data);
         let wv_buf = self.bufs.get_bytes(layer.wv.data);
         let wo_buf = self.bufs.get_bytes(layer.wo.data);
-        let wq_scale_buf = self.bufs.transient_from_f32(layer.wq.scales.unwrap_or(&[]));
-        let wk_scale_buf = self.bufs.transient_from_f32(layer.wk.scales.unwrap_or(&[]));
-        let wv_scale_buf = self.bufs.transient_from_f32(layer.wv.scales.unwrap_or(&[]));
-        let wo_scale_buf = self.bufs.transient_from_f32(layer.wo.scales.unwrap_or(&[]));
+        let wq_scale_buf = layer
+            .wq
+            .external_scales()
+            .map(|s| self.bufs.transient_from_f32(s));
+        let wk_scale_buf = layer
+            .wk
+            .external_scales()
+            .map(|s| self.bufs.transient_from_f32(s));
+        let wv_scale_buf = layer
+            .wv
+            .external_scales()
+            .map(|s| self.bufs.transient_from_f32(s));
+        let wo_scale_buf = layer
+            .wo
+            .external_scales()
+            .map(|s| self.bufs.transient_from_f32(s));
         let input_norm_buf = self.bufs.transient_from_f32(layer.input_norm);
         let post_attn_norm_buf = self.bufs.transient_from_f32(layer.post_attn_norm);
 
@@ -154,9 +166,33 @@ impl MetalBackend {
             enc_a.set_buffer(1, Some(&wk_buf), 0);
             enc_a.set_buffer(2, Some(&wv_buf), 0);
             enc_a.set_buffer(3, Some(&q8_buf), 0);
-            enc_a.set_buffer(4, Some(&wq_scale_buf), 0);
-            enc_a.set_buffer(5, Some(&wk_scale_buf), 0);
-            enc_a.set_buffer(6, Some(&wv_scale_buf), 0);
+            enc_a.set_buffer(
+                4,
+                Some(
+                    wq_scale_buf
+                        .as_ref()
+                        .expect("legacy scale path requires an external-scale format"),
+                ),
+                0,
+            );
+            enc_a.set_buffer(
+                5,
+                Some(
+                    wk_scale_buf
+                        .as_ref()
+                        .expect("legacy scale path requires an external-scale format"),
+                ),
+                0,
+            );
+            enc_a.set_buffer(
+                6,
+                Some(
+                    wv_scale_buf
+                        .as_ref()
+                        .expect("legacy scale path requires an external-scale format"),
+                ),
+                0,
+            );
             enc_a.set_buffer(7, Some(&q8s_buf), 0);
             enc_a.set_buffer(8, Some(&q_out), 0);
             enc_a.set_buffer(9, Some(&k_out), 0);
@@ -388,7 +424,15 @@ impl MetalBackend {
             enc_c.set_compute_pipeline_state(&self.quant.q8_matvec_pipeline.state);
             enc_c.set_buffer(0, Some(&wo_buf), 0);
             enc_c.set_buffer(1, Some(&o_q8), 0);
-            enc_c.set_buffer(2, Some(&wo_scale_buf), 0);
+            enc_c.set_buffer(
+                2,
+                Some(
+                    wo_scale_buf
+                        .as_ref()
+                        .expect("legacy scale path requires an external-scale format"),
+                ),
+                0,
+            );
             enc_c.set_buffer(3, Some(&o_q8s), 0);
             enc_c.set_buffer(4, Some(&o_out), 0);
             enc_c.set_bytes(5, 4, &o_rows as *const u32 as *const std::ffi::c_void);

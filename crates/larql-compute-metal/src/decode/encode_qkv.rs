@@ -30,9 +30,9 @@ pub(super) struct QkvBufs<'a> {
     pub wq: &'a metal::Buffer,
     pub wk: &'a metal::Buffer,
     pub wv: &'a metal::Buffer,
-    pub wq_scales: &'a metal::Buffer, // Q4_0 path only; ignored otherwise
-    pub wk_scales: &'a metal::Buffer,
-    pub wv_scales: &'a metal::Buffer,
+    pub wq_scales: Option<&'a metal::Buffer>, // present only for external-scale formats
+    pub wk_scales: Option<&'a metal::Buffer>,
+    pub wv_scales: Option<&'a metal::Buffer>,
     // Outputs
     pub norm_out: &'a metal::Buffer,
     pub q_out: &'a metal::Buffer,
@@ -394,9 +394,30 @@ impl MetalBackend {
             enc.set_buffer(1, Some(bufs.wk), 0);
             enc.set_buffer(2, Some(bufs.wv), 0);
             enc.set_buffer(3, Some(bufs.ffn_q8), 0);
-            enc.set_buffer(4, Some(bufs.wq_scales), 0);
-            enc.set_buffer(5, Some(bufs.wk_scales), 0);
-            enc.set_buffer(6, Some(bufs.wv_scales), 0);
+            enc.set_buffer(
+                4,
+                Some(
+                    bufs.wq_scales
+                        .expect("legacy scale path requires an external-scale format"),
+                ),
+                0,
+            );
+            enc.set_buffer(
+                5,
+                Some(
+                    bufs.wk_scales
+                        .expect("legacy scale path requires an external-scale format"),
+                ),
+                0,
+            );
+            enc.set_buffer(
+                6,
+                Some(
+                    bufs.wv_scales
+                        .expect("legacy scale path requires an external-scale format"),
+                ),
+                0,
+            );
             enc.set_buffer(7, Some(bufs.ffn_q8s), 0);
             enc.set_buffer(8, Some(bufs.q_out), 0);
             enc.set_buffer(9, Some(bufs.k_out), 0);

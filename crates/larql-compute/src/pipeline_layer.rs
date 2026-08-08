@@ -392,49 +392,17 @@ pub fn resolve_attn_weights<'a>(
 
     if let Some([q, k, v, o]) = index.attn_kquant_layer_data(layer) {
         Some((
-            QuantWeight {
-                data: q.0,
-                scales: None,
-                format: to_format(q.1),
-            },
-            QuantWeight {
-                data: k.0,
-                scales: None,
-                format: to_format(k.1),
-            },
-            QuantWeight {
-                data: v.0,
-                scales: None,
-                format: to_format(v.1),
-            },
-            QuantWeight {
-                data: o.0,
-                scales: None,
-                format: to_format(o.1),
-            },
+            QuantWeight::new(to_format(q.1), q.0, crate::QuantAux::None),
+            QuantWeight::new(to_format(k.1), k.0, crate::QuantAux::None),
+            QuantWeight::new(to_format(v.1), v.0, crate::QuantAux::None),
+            QuantWeight::new(to_format(o.1), o.0, crate::QuantAux::None),
         ))
     } else if let Some([q, k, v, o]) = index.attn_q8_layer_data(layer) {
         Some((
-            QuantWeight {
-                data: q.0,
-                scales: Some(q.1),
-                format: QuantFormat::Q8_0,
-            },
-            QuantWeight {
-                data: k.0,
-                scales: Some(k.1),
-                format: QuantFormat::Q8_0,
-            },
-            QuantWeight {
-                data: v.0,
-                scales: Some(v.1),
-                format: QuantFormat::Q8_0,
-            },
-            QuantWeight {
-                data: o.0,
-                scales: Some(o.1),
-                format: QuantFormat::Q8_0,
-            },
+            QuantWeight::new(QuantFormat::Q8_0, q.0, crate::QuantAux::ExternalScales(q.1)),
+            QuantWeight::new(QuantFormat::Q8_0, k.0, crate::QuantAux::ExternalScales(k.1)),
+            QuantWeight::new(QuantFormat::Q8_0, v.0, crate::QuantAux::ExternalScales(v.1)),
+            QuantWeight::new(QuantFormat::Q8_0, o.0, crate::QuantAux::ExternalScales(o.1)),
         ))
     } else {
         None
@@ -475,21 +443,17 @@ pub fn resolve_ffn_weights<'a>(
 
     if let Some([gate, up, down]) = index.interleaved_kquant_layer_data(layer) {
         return (
-            QuantWeight {
-                data: gate.0,
-                scales: None,
-                format: str_to_format(gate.1, ffn_format),
-            },
-            QuantWeight {
-                data: up.0,
-                scales: None,
-                format: str_to_format(up.1, ffn_format),
-            },
-            QuantWeight {
-                data: down.0,
-                scales: None,
-                format: str_to_format(down.1, ffn_format),
-            },
+            QuantWeight::new(
+                str_to_format(gate.1, ffn_format),
+                gate.0,
+                crate::QuantAux::None,
+            ),
+            QuantWeight::new(str_to_format(up.1, ffn_format), up.0, crate::QuantAux::None),
+            QuantWeight::new(
+                str_to_format(down.1, ffn_format),
+                down.0,
+                crate::QuantAux::None,
+            ),
         );
     }
 
@@ -501,32 +465,28 @@ pub fn resolve_ffn_weights<'a>(
     // dense weights for MoE layers, and `moe_fn` supersedes the dense FFN path
     // during decode, so the empty slices are never read.
     if q4_ffn_mmap.is_empty() {
-        let empty = QuantWeight {
-            data: &[],
-            scales: None,
-            format: ffn_format,
-        };
+        let empty = QuantWeight::new(ffn_format, &[], crate::QuantAux::None);
         return (empty, empty, empty);
     }
 
     let q4_ffn_per_layer = q4_ffn_per_matrix * 3;
     let fs = layer * q4_ffn_per_layer;
     (
-        QuantWeight {
-            data: &q4_ffn_mmap[fs..fs + q4_ffn_per_matrix],
-            scales: None,
-            format: ffn_format,
-        },
-        QuantWeight {
-            data: &q4_ffn_mmap[fs + q4_ffn_per_matrix..fs + 2 * q4_ffn_per_matrix],
-            scales: None,
-            format: ffn_format,
-        },
-        QuantWeight {
-            data: &q4_ffn_mmap[fs + 2 * q4_ffn_per_matrix..fs + 3 * q4_ffn_per_matrix],
-            scales: None,
-            format: ffn_format,
-        },
+        QuantWeight::new(
+            ffn_format,
+            &q4_ffn_mmap[fs..fs + q4_ffn_per_matrix],
+            crate::QuantAux::None,
+        ),
+        QuantWeight::new(
+            ffn_format,
+            &q4_ffn_mmap[fs + q4_ffn_per_matrix..fs + 2 * q4_ffn_per_matrix],
+            crate::QuantAux::None,
+        ),
+        QuantWeight::new(
+            ffn_format,
+            &q4_ffn_mmap[fs + 2 * q4_ffn_per_matrix..fs + 3 * q4_ffn_per_matrix],
+            crate::QuantAux::None,
+        ),
     )
 }
 
@@ -834,11 +794,7 @@ mod tests {
     #[test]
     fn build_arch_params_handles_partial_rotary_fraction() {
         let weights = larql_models::test_fixtures::make_starcoder2_test_weights();
-        let dummy = crate::QuantWeight {
-            data: &[],
-            scales: None,
-            format: QuantFormat::Q4_K,
-        };
+        let dummy = crate::QuantWeight::new(QuantFormat::Q4_K, &[], crate::QuantAux::None);
         // The partial-rotary branch is shape-dependent on the arch; what
         // we want is just to ensure no panic on a non-full-rotary arch.
         let layer = build_arch_params(&weights, 0, dummy, dummy, dummy, dummy, dummy, dummy, dummy);
@@ -850,11 +806,7 @@ mod tests {
     #[test]
     fn build_arch_params_handles_silu_activation() {
         let weights = make_test_weights();
-        let dummy = crate::QuantWeight {
-            data: &[],
-            scales: None,
-            format: QuantFormat::Q4_K,
-        };
+        let dummy = crate::QuantWeight::new(QuantFormat::Q4_K, &[], crate::QuantAux::None);
         let layer = build_arch_params(&weights, 0, dummy, dummy, dummy, dummy, dummy, dummy, dummy);
         assert!(matches!(layer.activation, crate::Activation::Silu));
     }
@@ -864,11 +816,7 @@ mod tests {
     #[test]
     fn build_arch_params_handles_layernorm_and_standard_ffn() {
         let weights = larql_models::test_fixtures::make_starcoder2_test_weights();
-        let dummy = crate::QuantWeight {
-            data: &[],
-            scales: None,
-            format: QuantFormat::Q4_K,
-        };
+        let dummy = crate::QuantWeight::new(QuantFormat::Q4_K, &[], crate::QuantAux::None);
         let layer = build_arch_params(&weights, 0, dummy, dummy, dummy, dummy, dummy, dummy, dummy);
         assert!(matches!(layer.norm_type, crate::NormType::LayerNorm));
         assert!(matches!(layer.ffn_type, crate::FfnType::Standard));
@@ -907,11 +855,7 @@ mod tests {
         let weights = larql_models::test_fixtures::make_test_gemma4_moe_weights();
         // Build pipeline layers with no MoE locally — simulates the
         // remote-MoE client deployment.
-        let dummy = crate::QuantWeight {
-            data: &[],
-            scales: None,
-            format: QuantFormat::Q4_K,
-        };
+        let dummy = crate::QuantWeight::new(QuantFormat::Q4_K, &[], crate::QuantAux::None);
         let mut layers: Vec<crate::FullPipelineLayer<'_>> = (0..weights.num_layers)
             .map(|_| crate::FullPipelineLayer {
                 wq: dummy,

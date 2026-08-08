@@ -66,7 +66,7 @@ pub(super) struct AttnBufs<'a> {
     /// Scratch for the unfused post-attn norm chain.
     pub normed_scratch: &'a Buffer,
     pub wo: &'a Buffer,
-    pub wo_scales: &'a Buffer,
+    pub wo_scales: Option<&'a Buffer>,
     pub post_attn_norm: &'a Buffer,
 }
 
@@ -532,7 +532,14 @@ impl MetalBackend {
             enc.set_compute_pipeline_state(&self.quant.q8_matvec_pipeline.state);
             enc.set_buffer(0, Some(bufs.wo), 0);
             enc.set_buffer(1, Some(bufs.o_q8_scratch), 0);
-            enc.set_buffer(2, Some(bufs.wo_scales), 0);
+            enc.set_buffer(
+                2,
+                Some(
+                    bufs.wo_scales
+                        .expect("legacy scale path requires an external-scale format"),
+                ),
+                0,
+            );
             enc.set_buffer(3, Some(bufs.o_q8s_scratch), 0);
             enc.set_buffer(4, Some(bufs.o_out_buf), 0);
             enc.set_bytes(5, 4, &o_rows as *const u32 as *const std::ffi::c_void);

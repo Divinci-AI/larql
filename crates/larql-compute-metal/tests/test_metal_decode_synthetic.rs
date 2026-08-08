@@ -78,41 +78,13 @@ fn build_synth_layer<'a>(
 ) -> FullPipelineLayer<'a> {
     FullPipelineLayer {
         attn_sinks: None,
-        wq: QuantWeight {
-            data: wq_data,
-            scales: None,
-            format: QuantFormat::Q4_K,
-        },
-        wk: QuantWeight {
-            data: wk_data,
-            scales: None,
-            format: QuantFormat::Q4_K,
-        },
-        wv: QuantWeight {
-            data: wv_data,
-            scales: None,
-            format: QuantFormat::Q4_K,
-        },
-        wo: QuantWeight {
-            data: wo_data,
-            scales: None,
-            format: QuantFormat::Q4_K,
-        },
-        gate: QuantWeight {
-            data: gate_data,
-            scales: None,
-            format: QuantFormat::Q4_0,
-        },
-        up: QuantWeight {
-            data: up_data,
-            scales: None,
-            format: QuantFormat::Q4_0,
-        },
-        down: QuantWeight {
-            data: down_data,
-            scales: None,
-            format: QuantFormat::Q4_0,
-        },
+        wq: QuantWeight::new(QuantFormat::Q4_K, wq_data, larql_compute::QuantAux::None),
+        wk: QuantWeight::new(QuantFormat::Q4_K, wk_data, larql_compute::QuantAux::None),
+        wv: QuantWeight::new(QuantFormat::Q4_K, wv_data, larql_compute::QuantAux::None),
+        wo: QuantWeight::new(QuantFormat::Q4_K, wo_data, larql_compute::QuantAux::None),
+        gate: QuantWeight::new(QuantFormat::Q4_0, gate_data, larql_compute::QuantAux::None),
+        up: QuantWeight::new(QuantFormat::Q4_0, up_data, larql_compute::QuantAux::None),
+        down: QuantWeight::new(QuantFormat::Q4_0, down_data, larql_compute::QuantAux::None),
         input_norm: norm_w,
         post_attn_norm: norm_w,
         pre_ffn_norm: None,
@@ -374,41 +346,13 @@ fn decode_token_gemma3_style_post_norms_smoke() {
     // four-norm-per-layer pattern.
     let layer = FullPipelineLayer {
         attn_sinks: None,
-        wq: QuantWeight {
-            data: &wq_data,
-            scales: None,
-            format: QuantFormat::Q4_K,
-        },
-        wk: QuantWeight {
-            data: &wk_data,
-            scales: None,
-            format: QuantFormat::Q4_K,
-        },
-        wv: QuantWeight {
-            data: &wv_data,
-            scales: None,
-            format: QuantFormat::Q6_K,
-        },
-        wo: QuantWeight {
-            data: &wo_data,
-            scales: None,
-            format: QuantFormat::Q4_K,
-        },
-        gate: QuantWeight {
-            data: &gate_data,
-            scales: None,
-            format: QuantFormat::Q4_K,
-        },
-        up: QuantWeight {
-            data: &up_data,
-            scales: None,
-            format: QuantFormat::Q4_K,
-        },
-        down: QuantWeight {
-            data: &down_data,
-            scales: None,
-            format: QuantFormat::Q6_K,
-        },
+        wq: QuantWeight::new(QuantFormat::Q4_K, &wq_data, larql_compute::QuantAux::None),
+        wk: QuantWeight::new(QuantFormat::Q4_K, &wk_data, larql_compute::QuantAux::None),
+        wv: QuantWeight::new(QuantFormat::Q6_K, &wv_data, larql_compute::QuantAux::None),
+        wo: QuantWeight::new(QuantFormat::Q4_K, &wo_data, larql_compute::QuantAux::None),
+        gate: QuantWeight::new(QuantFormat::Q4_K, &gate_data, larql_compute::QuantAux::None),
+        up: QuantWeight::new(QuantFormat::Q4_K, &up_data, larql_compute::QuantAux::None),
+        down: QuantWeight::new(QuantFormat::Q6_K, &down_data, larql_compute::QuantAux::None),
         input_norm: &norm_w,
         post_attn_norm: &norm_w,
         pre_ffn_norm: Some(&norm_w),
@@ -590,41 +534,13 @@ fn decode_token_qkv_fused_opt_in_smoke() {
     // (a non-Gemma layer that still hits the normed QKV opt-in).
     let layer = FullPipelineLayer {
         attn_sinks: None,
-        wq: QuantWeight {
-            data: &wq_data,
-            scales: None,
-            format: QuantFormat::Q4_K,
-        },
-        wk: QuantWeight {
-            data: &wk_data,
-            scales: None,
-            format: QuantFormat::Q4_K,
-        },
-        wv: QuantWeight {
-            data: &wv_data,
-            scales: None,
-            format: QuantFormat::Q6_K,
-        },
-        wo: QuantWeight {
-            data: &wo_data,
-            scales: None,
-            format: QuantFormat::Q4_K,
-        },
-        gate: QuantWeight {
-            data: &gate_data,
-            scales: None,
-            format: QuantFormat::Q4_K,
-        },
-        up: QuantWeight {
-            data: &up_data,
-            scales: None,
-            format: QuantFormat::Q4_K,
-        },
-        down: QuantWeight {
-            data: &down_data,
-            scales: None,
-            format: QuantFormat::Q6_K,
-        },
+        wq: QuantWeight::new(QuantFormat::Q4_K, &wq_data, larql_compute::QuantAux::None),
+        wk: QuantWeight::new(QuantFormat::Q4_K, &wk_data, larql_compute::QuantAux::None),
+        wv: QuantWeight::new(QuantFormat::Q6_K, &wv_data, larql_compute::QuantAux::None),
+        wo: QuantWeight::new(QuantFormat::Q4_K, &wo_data, larql_compute::QuantAux::None),
+        gate: QuantWeight::new(QuantFormat::Q4_K, &gate_data, larql_compute::QuantAux::None),
+        up: QuantWeight::new(QuantFormat::Q4_K, &up_data, larql_compute::QuantAux::None),
+        down: QuantWeight::new(QuantFormat::Q6_K, &down_data, larql_compute::QuantAux::None),
         input_norm: &norm_w,
         post_attn_norm: &norm_w,
         pre_ffn_norm: None,
@@ -1771,12 +1687,10 @@ fn decode_attention_layer_q4k_smoke() {
     let up = quantize_q4_0(&synth_weight_f32(INTER * HIDDEN, 0.6));
     let down = quantize_q4_0(&synth_weight_f32(HIDDEN * INTER, 0.7));
     let norm_w: Vec<f32> = (0..HIDDEN).map(|i| 1.0 + (i as f32 * 0.001)).collect();
-    let stub_scales = vec![0.0f32; 1]; // empty-slice-avoidance stub
-    let mut layer = build_synth_layer(&wq, &wk, &wv, &wo, &gate, &up, &down, &norm_w);
-    layer.wq.scales = Some(&stub_scales);
-    layer.wk.scales = Some(&stub_scales);
-    layer.wv.scales = Some(&stub_scales);
-    layer.wo.scales = Some(&stub_scales);
+    // No scale stub: these are Q4_K, which packs its scales inline. The
+    // stub that used to live here existed only to avoid an empty slice —
+    // the fabricated-resource pattern this type change removes.
+    let layer = build_synth_layer(&wq, &wk, &wv, &wo, &gate, &up, &down, &norm_w);
 
     let x = synth_input(HIDDEN, 0.9);
     let mut kv = metal.create_kv_cache(1, 64, NUM_KV_HEADS, HEAD_DIM);
@@ -1802,20 +1716,17 @@ fn decode_attention_layer_q4_0_smoke() {
     let up = quantize_q4_0(&synth_weight_f32(INTER * HIDDEN, 0.6));
     let down = quantize_q4_0(&synth_weight_f32(HIDDEN * INTER, 0.7));
     let norm_w: Vec<f32> = (0..HIDDEN).map(|i| 1.0 + (i as f32 * 0.001)).collect();
-    // Synthetic per-row scales so `transient_from_f32` doesn't see an
-    // empty slice (metal-rs 0.29 dereferences null on zero-length).
-    let q_scales: Vec<f32> = vec![0.01f32; Q_DIM];
-    let kv_scales: Vec<f32> = vec![0.01f32; KV_DIM];
-    let hidden_scales: Vec<f32> = vec![0.01f32; HIDDEN];
+    // Q4_0 packs its scale inside each 18-byte block (f16 scale + 16
+    // bytes of nibbles), so no external scale array is attached. This
+    // fixture used to supply one, with a comment explaining that the
+    // stub existed because `transient_from_f32` dereferences null on a
+    // zero-length slice — i.e. the fabricated buffer was working around
+    // a crash, not modelling the format.
     let mut layer = build_synth_layer(&wq, &wk, &wv, &wo, &gate, &up, &down, &norm_w);
-    layer.wq.format = QuantFormat::Q4_0;
-    layer.wk.format = QuantFormat::Q4_0;
-    layer.wv.format = QuantFormat::Q4_0;
-    layer.wo.format = QuantFormat::Q4_0;
-    layer.wq.scales = Some(&q_scales);
-    layer.wk.scales = Some(&kv_scales);
-    layer.wv.scales = Some(&kv_scales);
-    layer.wo.scales = Some(&hidden_scales);
+    layer.wq = QuantWeight::new(QuantFormat::Q4_0, &wq, larql_compute::QuantAux::None);
+    layer.wk = QuantWeight::new(QuantFormat::Q4_0, &wk, larql_compute::QuantAux::None);
+    layer.wv = QuantWeight::new(QuantFormat::Q4_0, &wv, larql_compute::QuantAux::None);
+    layer.wo = QuantWeight::new(QuantFormat::Q4_0, &wo, larql_compute::QuantAux::None);
 
     let x = synth_input(HIDDEN, 0.9);
     let mut kv = metal.create_kv_cache(1, 64, NUM_KV_HEADS, HEAD_DIM);
@@ -1845,12 +1756,7 @@ fn decode_attention_layer_q4k_with_v_norm_post_norms_and_q4kf_wo() {
     let up = quantize_q4_0(&synth_weight_f32(INTER * HIDDEN, 0.6));
     let down = quantize_q4_0(&synth_weight_f32(HIDDEN * INTER, 0.7));
     let norm_w: Vec<f32> = (0..HIDDEN).map(|i| 1.0 + (i as f32 * 0.001)).collect();
-    let stub_scales = vec![0.0f32; 1];
     let mut layer = build_synth_layer(&wq, &wk, &wv, &wo, &gate, &up, &down, &norm_w);
-    layer.wq.scales = Some(&stub_scales);
-    layer.wk.scales = Some(&stub_scales);
-    layer.wv.scales = Some(&stub_scales);
-    layer.wo.scales = Some(&stub_scales);
     layer.has_v_norm = true;
     layer.has_post_norms = true;
     layer.post_attn_norm = &norm_w;
@@ -1882,12 +1788,7 @@ fn decode_attention_layer_q4k_with_q6k_wo_drives_q6k_proj_branch() {
     let up = quantize_q4_0(&synth_weight_f32(INTER * HIDDEN, 0.6));
     let down = quantize_q4_0(&synth_weight_f32(HIDDEN * INTER, 0.7));
     let norm_w: Vec<f32> = (0..HIDDEN).map(|i| 1.0 + (i as f32 * 0.001)).collect();
-    let stub_scales = vec![0.0f32; 1];
     let mut layer = build_synth_layer(&wq, &wk, &wv, &wo, &gate, &up, &down, &norm_w);
-    layer.wq.scales = Some(&stub_scales);
-    layer.wk.scales = Some(&stub_scales);
-    layer.wv.scales = Some(&stub_scales);
-    layer.wo.scales = Some(&stub_scales);
     layer.wo.format = QuantFormat::Q6_K;
 
     let x = synth_input(HIDDEN, 0.9);
@@ -2281,11 +2182,8 @@ fn decode_token_with_q8_0_qkv_drives_fused_q8_qkv_path() {
 
     // Q8_0 weights: i8 values, num_rows × hidden bytes.  Per-row f32 scales.
     let wq_q8: Vec<i8> = vec![1i8; Q_DIM * HIDDEN];
-    let wq_scales: Vec<f32> = vec![0.01f32; Q_DIM];
     let wk_q8: Vec<i8> = vec![1i8; KV_DIM * HIDDEN];
-    let wk_scales: Vec<f32> = vec![0.01f32; KV_DIM];
     let wv_q8: Vec<i8> = vec![1i8; KV_DIM * HIDDEN];
-    let wv_scales: Vec<f32> = vec![0.01f32; KV_DIM];
     let wq_bytes: Vec<u8> = wq_q8.iter().map(|&b| b as u8).collect();
     let wk_bytes: Vec<u8> = wk_q8.iter().map(|&b| b as u8).collect();
     let wv_bytes: Vec<u8> = wv_q8.iter().map(|&b| b as u8).collect();
@@ -2300,9 +2198,6 @@ fn decode_token_with_q8_0_qkv_drives_fused_q8_qkv_path() {
     layer.wq.format = QuantFormat::Q8_0;
     layer.wk.format = QuantFormat::Q8_0;
     layer.wv.format = QuantFormat::Q8_0;
-    layer.wq.scales = Some(&wq_scales);
-    layer.wk.scales = Some(&wk_scales);
-    layer.wv.scales = Some(&wv_scales);
     // wo can stay Q4_0 (output projection); only QKV needs Q8_0 for the fused path.
     layer.wo.format = QuantFormat::Q4_0;
 
