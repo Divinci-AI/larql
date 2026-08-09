@@ -420,3 +420,37 @@ fn decode_token_with_mixed_gate_up_formats_is_rejected() {
         10_000.0,
     );
 }
+
+/// Non-gated (`FfnType::Standard`) Q6_K FFN — covers `encode_q6k_ffn`'s
+/// up → activation → down arm, which the gated test above cannot reach.
+#[test]
+fn decode_token_with_q6k_non_gated_ffn_drives_standard_path() {
+    let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(metal) = larql_compute_metal::MetalBackend::new() else {
+        return;
+    };
+    use larql_compute::cpu::ops::q4_common::{quantize_q4_k, quantize_q6_k};
+    metal.reset_kv_cache();
+    let wq = quantize_q4_k(&synth_weight_f32(Q_DIM * HIDDEN, 0.1));
+    let wk = quantize_q4_k(&synth_weight_f32(KV_DIM * HIDDEN, 0.2));
+    let wv = quantize_q4_k(&synth_weight_f32(KV_DIM * HIDDEN, 0.3));
+    let wo = quantize_q4_k(&synth_weight_f32(HIDDEN * Q_DIM, 0.4));
+    let gate = quantize_q6_k(&synth_weight_f32(INTER * HIDDEN, 0.5));
+    let up = quantize_q6_k(&synth_weight_f32(INTER * HIDDEN, 0.6));
+    let down = quantize_q6_k(&synth_weight_f32(HIDDEN * INTER, 0.7));
+    let norm_w: Vec<f32> = (0..HIDDEN).map(|i| 1.0 + (i as f32 * 0.001)).collect();
+    let mut layer = build_synth_layer(&wq, &wk, &wv, &wo, &gate, &up, &down, &norm_w);
+    layer.gate = QuantWeight::new(QuantFormat::Q6_K, &gate, larql_compute::QuantAux::None);
+    layer.up = QuantWeight::new(QuantFormat::Q6_K, &up, larql_compute::QuantAux::None);
+    layer.down = QuantWeight::new(QuantFormat::Q6_K, &down, larql_compute::QuantAux::None);
+    layer.ffn_type = FfnType::Standard;
+
+    let x = synth_input(HIDDEN, 0.9);
+    let mut kv = metal.create_kv_cache(1, 64, NUM_KV_HEADS, HEAD_DIM);
+    let out = larql_compute_metal::MetalBackend::decode_token(
+        &metal, &mut kv, &[layer], &x, HIDDEN, INTER, Q_DIM, KV_DIM, NUM_Q_HEADS, NUM_KV_HEADS,
+        HEAD_DIM, 10_000.0,
+    );
+    assert_eq!(out.len(), HIDDEN);
+    assert!(out.iter().all(|v| v.is_finite()));
+}
