@@ -538,6 +538,12 @@ impl MetalBackend {
                     q4_matvec: &self.q4.matvec,
                     q4k_matmul: None,
                 };
+                // K from the store's own row width, not the logical
+                // `layer_q_dim` — O rows may be padded to the quant block
+                // (same audit-F17 hazard as the QKV kernels; the padded
+                // columns dequantise to zero, so the stored width is
+                // exact given the input buffer's zeroed slack).
+                let o_k_store = layer.wo.stored_cols(hidden, layer_q_dim);
                 crate::stages::o_proj::encode(
                     enc,
                     &pipes,
@@ -552,7 +558,7 @@ impl MetalBackend {
                     0,
                     bufs.o_out_buf,
                     0,
-                    layer_q_dim,
+                    o_k_store,
                     hidden,
                 );
             }
@@ -614,6 +620,28 @@ impl MetalBackend {
                 "O projection has no dispatch for {format:?}; supported: \
                  Q4_0, Q4_K, Q4_KF, Q6_K (o_proj::encode) and Q8_0 (legacy q8_matvec)"
             ),
+        }
+
+        // O-projection bias (GPT-OSS) joins before the residual add —
+        // the same point the CPU reference (`forward::add_bias`) applies
+        // it. Dispatched only when the layer carries the bias.
+        if let Some(b) = layer.attn_o_bias {
+            assert_eq!(
+                b.len(),
+                hidden,
+                "O projection bias has {} entries but hidden is {hidden} — \
+                 the extracted tensor does not match this model",
+                b.len()
+            );
+            let b_buf = self.bufs.get_f32(b);
+            crate::stages::bias_add::encode(
+                enc,
+                &self.attention.bias_add_pipeline,
+                bufs.o_out_buf,
+                0,
+                &b_buf,
+                hidden,
+            );
         }
 
         // ── Step 5b: Residual + post-attn norm + ffn-input norm ──

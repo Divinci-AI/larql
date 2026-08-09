@@ -133,6 +133,19 @@ pub fn build_arch_params<'a>(
         .and_then(|k| weights.vectors.get(&k))
         .map(|v| v.as_slice());
 
+    // Attention projection biases (GPT-OSS: all four; most archs: none).
+    // Resolved here, at the arch boundary, exactly like the sinks above —
+    // the CPU reference path reads the same keys, so leaving these unset
+    // makes the GPU forward silently biasless (docs/k3-funnel.md §4.6).
+    let bias_vec = |key: Option<String>| {
+        key.and_then(|k| weights.vectors.get(&k))
+            .map(|v| v.as_slice())
+    };
+    let attn_q_bias = bias_vec(arch.attn_q_bias_key(layer));
+    let attn_k_bias = bias_vec(arch.attn_k_bias_key(layer));
+    let attn_v_bias = bias_vec(arch.attn_v_bias_key(layer));
+    let attn_o_bias = bias_vec(arch.attn_o_bias_key(layer));
+
     // 0.0 = disabled. Set here, at the arch boundary, so every decode
     // consumer sees the model's real cap instead of the field default
     // silently answering for capped architectures.
@@ -140,6 +153,10 @@ pub fn build_arch_params<'a>(
 
     FullPipelineLayer {
         attn_sinks,
+        attn_q_bias,
+        attn_k_bias,
+        attn_v_bias,
+        attn_o_bias,
         attn_softcap,
         wq,
         wk,

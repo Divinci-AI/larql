@@ -380,3 +380,48 @@ fn remote_moe_patching_builds_stubs_for_unserved_layers() {
         );
     }
 }
+
+/// The attention projection biases resolve at the arch boundary exactly
+/// like the sinks: `arch.attn_*_bias_key` → `weights.vectors` → layer
+/// fields. StarCoder2 declares all four keys, so inserting vectors under
+/// those names must surface on the built layer — and a fixture without
+/// the vectors must yield `None`, never a fabricated bias.
+#[test]
+fn build_arch_params_threads_attention_projection_biases() {
+    let mut weights = larql_models::test_fixtures::make_starcoder2_test_weights();
+    let dummy = crate::QuantWeight::new(QuantFormat::Q4_K, &[], crate::QuantAux::None);
+
+    let q_key = weights
+        .arch
+        .attn_q_bias_key(0)
+        .expect("starcoder2 declares q bias");
+    let k_key = weights
+        .arch
+        .attn_k_bias_key(0)
+        .expect("starcoder2 declares k bias");
+    let v_key = weights
+        .arch
+        .attn_v_bias_key(0)
+        .expect("starcoder2 declares v bias");
+    let o_key = weights
+        .arch
+        .attn_o_bias_key(0)
+        .expect("starcoder2 declares o bias");
+
+    // Fixture without the vectors: all four stay None — the builder must
+    // never fabricate a bias.
+    if !weights.vectors.contains_key(&q_key) {
+        let bare = build_arch_params(&weights, 0, dummy, dummy, dummy, dummy, dummy, dummy, dummy);
+        assert!(bare.attn_q_bias.is_none());
+    }
+    weights.vectors.insert(q_key, vec![0.25f32; 8]);
+    weights.vectors.insert(k_key, vec![0.5f32; 4]);
+    weights.vectors.insert(v_key, vec![0.75f32; 4]);
+    weights.vectors.insert(o_key, vec![1.25f32; 8]);
+
+    let layer = build_arch_params(&weights, 0, dummy, dummy, dummy, dummy, dummy, dummy, dummy);
+    assert_eq!(layer.attn_q_bias.unwrap()[0], 0.25);
+    assert_eq!(layer.attn_k_bias.unwrap()[0], 0.5);
+    assert_eq!(layer.attn_v_bias.unwrap()[0], 0.75);
+    assert_eq!(layer.attn_o_bias.unwrap()[0], 1.25);
+}

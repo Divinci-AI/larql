@@ -71,6 +71,10 @@ fn main() {
 
     let layer = FullPipelineLayer {
         attn_sinks: None,
+        attn_q_bias: None,
+        attn_k_bias: None,
+        attn_v_bias: None,
+        attn_o_bias: None,
         attn_softcap: 0.0,
         wq: QuantWeight::new(QuantFormat::Q4_K, &wq_data, larql_compute::QuantAux::None),
         wk: QuantWeight::new(QuantFormat::Q4_K, &wk_data, larql_compute::QuantAux::None),
@@ -235,6 +239,10 @@ fn main() {
     {
         let layer4 = FullPipelineLayer {
             attn_sinks: None,
+            attn_q_bias: None,
+            attn_k_bias: None,
+            attn_v_bias: None,
+            attn_o_bias: None,
             attn_softcap: 0.0,
             wq: QuantWeight::new(QuantFormat::Q4_K, &wq_data, larql_compute::QuantAux::None),
             wk: QuantWeight::new(QuantFormat::Q4_K, &wk_data, larql_compute::QuantAux::None),
@@ -321,6 +329,10 @@ fn main() {
     {
         let layer5 = FullPipelineLayer {
             attn_sinks: None,
+            attn_q_bias: None,
+            attn_k_bias: None,
+            attn_v_bias: None,
+            attn_o_bias: None,
             attn_softcap: 0.0,
             wq: QuantWeight::new(QuantFormat::Q4_K, &wq_data, larql_compute::QuantAux::None),
             wk: QuantWeight::new(QuantFormat::Q4_K, &wk_data, larql_compute::QuantAux::None),

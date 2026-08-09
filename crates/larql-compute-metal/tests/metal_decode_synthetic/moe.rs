@@ -434,3 +434,123 @@ fn decode_token_with_moe_split_fn_drives_split_mode_path() {
     assert_eq!(fired, 1);
     assert_eq!(collected, 1);
 }
+
+/// PURE-MoE layer: `moe` present and NO dense FFN weights extracted (the
+/// GPT-OSS shape). The dense branch must be skipped — encoding it over
+/// empty slices poisoned `new_h` before the expert add — and the combine
+/// must be `new_h = h_post_attn + moe_out` exactly. Pinned by the
+/// difference between two moe_fn arms: constant-c minus zeros must be c
+/// in every element, and both outputs finite.
+#[test]
+fn pure_moe_layer_skips_dense_ffn_and_adds_expert_output_directly() {
+    let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(metal) = larql_compute_metal::MetalBackend::new() else {
+        return;
+    };
+    use larql_compute::cpu::ops::q4_common::quantize_q4_k;
+    use larql_compute::{
+        Activation, MoeLayerWeights, MoeRoutingPolicy, MoeWeightLayout, QuantFormat,
+    };
+
+    let wq = quantize_q4_k(&synth_weight_f32(Q_DIM * HIDDEN, 0.1));
+    let wk = quantize_q4_k(&synth_weight_f32(KV_DIM * HIDDEN, 0.2));
+    let wv = quantize_q4_k(&synth_weight_f32(KV_DIM * HIDDEN, 0.3));
+    let wo = quantize_q4_k(&synth_weight_f32(HIDDEN * Q_DIM, 0.4));
+    let norm_w: Vec<f32> = (0..HIDDEN).map(|i| 1.0 + (i as f32 * 0.001)).collect();
+    let null_moe = || MoeLayerWeights {
+        experts_gate_up: Vec::new(),
+        experts_down: Vec::new(),
+        routing_policy: MoeRoutingPolicy::default(),
+        weight_layout: MoeWeightLayout::default(),
+        router_proj: &[],
+        router_scale: &[],
+        router_per_expert_scale: &[],
+        router_norm: &[],
+        router_norm_parameter_free: false,
+        router_input_scalar: 1.0,
+        pre_experts_norm: &[],
+        post_ffn1_norm: &[],
+        post_experts_norm: &[],
+        num_experts: 0,
+        top_k: 1,
+        intermediate_size: INTER,
+        router_bias: &[],
+        experts_gate_up_bias: &[],
+        experts_down_bias: &[],
+        gate_rule: larql_compute::MoeGateRule::Gated(Activation::Silu),
+        expert_data_format: QuantFormat::BF16,
+    };
+
+    const EXPERT_CONST: f32 = 0.75;
+    let mut outs: Vec<Vec<f32>> = Vec::new();
+    for c in [0.0f32, EXPERT_CONST] {
+        // Empty dense weights: `FullPipelineLayer::default()` quant slices
+        // are zero-length — `has_dense_ffn()` is false by construction.
+        let mut layer = larql_compute::FullPipelineLayer {
+            wq: larql_compute::QuantWeight::new(
+                QuantFormat::Q4_K,
+                &wq,
+                larql_compute::QuantAux::None,
+            ),
+            wk: larql_compute::QuantWeight::new(
+                QuantFormat::Q4_K,
+                &wk,
+                larql_compute::QuantAux::None,
+            ),
+            wv: larql_compute::QuantWeight::new(
+                QuantFormat::Q4_K,
+                &wv,
+                larql_compute::QuantAux::None,
+            ),
+            wo: larql_compute::QuantWeight::new(
+                QuantFormat::Q4_K,
+                &wo,
+                larql_compute::QuantAux::None,
+            ),
+            input_norm: &norm_w,
+            post_attn_norm: &norm_w,
+            attn_scale: 1.0 / (HEAD_DIM as f32).sqrt(),
+            head_dim: HEAD_DIM,
+            num_q_heads: NUM_Q_HEADS,
+            num_kv_heads: NUM_KV_HEADS,
+            rope_freq: larql_compute::attention::rope::RopeFreqPlan::unscaled(
+                HEAD_DIM,
+                0_usize,
+                10_000.0_f64,
+            ),
+            ..larql_compute::FullPipelineLayer::default()
+        };
+        layer.moe = Some(null_moe());
+        assert!(!layer.has_dense_ffn(), "fixture must be the pure-MoE shape");
+
+        let x = synth_input(HIDDEN, 0.9);
+        let mut kv = metal.create_kv_cache(1, 64, NUM_KV_HEADS, HEAD_DIM);
+        let mut moe_fn = move |_l: usize, h: &[f32]| -> Vec<f32> { vec![c; h.len()] };
+        let out = metal.decode_token_with_moe_fn(
+            &mut kv,
+            std::slice::from_ref(&layer),
+            &x,
+            HIDDEN,
+            INTER,
+            Q_DIM,
+            KV_DIM,
+            NUM_Q_HEADS,
+            NUM_KV_HEADS,
+            HEAD_DIM,
+            10_000.0,
+            Some(&mut moe_fn),
+        );
+        assert!(
+            out.iter().all(|v| v.is_finite()),
+            "pure-MoE decode produced non-finite output (dense branch ran on empty weights?)"
+        );
+        outs.push(out);
+    }
+    for (i, (a, b)) in outs[0].iter().zip(outs[1].iter()).enumerate() {
+        let delta = b - a;
+        assert!(
+            (delta - EXPERT_CONST).abs() < 1e-4,
+            "combine is not h_post_attn + moe_out at element {i}: delta={delta}"
+        );
+    }
+}

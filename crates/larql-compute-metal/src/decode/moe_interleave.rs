@@ -94,52 +94,55 @@ impl MetalBackend {
         let moe_out = if ctx.defer_ffn_for_split {
             // Split path: fire MoE NOW, then encode dense FFN + post-FFN
             // residual on a fresh cb so GPU runs while the remote trip is in
-            // flight.
+            // flight. Pure-MoE layers have no dense branch to overlap —
+            // fire and collect with no GPU work in between.
             let fire = moe_fn.as_deref_mut().expect("split_mode implies moe_fn");
             fire(ctx.layer_idx, attn_slice);
 
             *state.cmd = self.queue.new_command_buffer().to_owned();
-            let ffn_enc = state.cmd.new_compute_command_encoder();
+            if layer.has_dense_ffn() {
+                let ffn_enc = state.cmd.new_compute_command_encoder();
 
-            self.encode_ffn_step(
-                ffn_enc,
-                layer,
-                encode_ffn::FfnBufs {
-                    gate_w: bufs.gate_w,
-                    up_w: bufs.up_w,
-                    down_w: bufs.down_w,
-                    ffn_norm_out: bufs.ffn_norm_out,
-                    ffn_q8: bufs.ffn_q8,
-                    ffn_q8s: bufs.ffn_q8s,
-                    gate_out_scratch: bufs.gate_out_scratch,
-                    up_out: bufs.up_out,
-                    act_buf: bufs.act_buf,
-                    down_out: bufs.down_out,
-                },
-                encode_ffn::FfnDims {
-                    hidden: ctx.hidden,
-                    inter: ctx.inter,
-                    inter_padded: ctx.inter_padded,
-                },
-            );
+                self.encode_ffn_step(
+                    ffn_enc,
+                    layer,
+                    encode_ffn::FfnBufs {
+                        gate_w: bufs.gate_w,
+                        up_w: bufs.up_w,
+                        down_w: bufs.down_w,
+                        ffn_norm_out: bufs.ffn_norm_out,
+                        ffn_q8: bufs.ffn_q8,
+                        ffn_q8s: bufs.ffn_q8s,
+                        gate_out_scratch: bufs.gate_out_scratch,
+                        up_out: bufs.up_out,
+                        act_buf: bufs.act_buf,
+                        down_out: bufs.down_out,
+                    },
+                    encode_ffn::FfnDims {
+                        hidden: ctx.hidden,
+                        inter: ctx.inter,
+                        inter_padded: ctx.inter_padded,
+                    },
+                );
 
-            // Always unfused here: this preserves the previous split-MoE path.
-            // D-RMS-FUSE Phase 1 not applied: split-MoE path commits per-layer
-            // boundaries that don't match the cross-layer fusion pattern.
-            self.encode_post_ffn_residual(
-                ffn_enc,
-                layer,
-                encode_post_ffn::PostFfnBufs {
-                    down_out: bufs.down_out,
-                    h_post_attn: bufs.h_post_attn,
-                    new_h: bufs.new_h,
-                    normed_scratch: bufs.normed_scratch,
-                },
-                ctx.hidden,
-                false,
-                None,
-            );
-            ffn_enc.end_encoding();
+                // Always unfused here: this preserves the previous split-MoE path.
+                // D-RMS-FUSE Phase 1 not applied: split-MoE path commits per-layer
+                // boundaries that don't match the cross-layer fusion pattern.
+                self.encode_post_ffn_residual(
+                    ffn_enc,
+                    layer,
+                    encode_post_ffn::PostFfnBufs {
+                        down_out: bufs.down_out,
+                        h_post_attn: bufs.h_post_attn,
+                        new_h: bufs.new_h,
+                        normed_scratch: bufs.normed_scratch,
+                    },
+                    ctx.hidden,
+                    false,
+                    None,
+                );
+                ffn_enc.end_encoding();
+            }
             state.cmd.commit();
 
             let collect = moe_collect_fn
@@ -171,12 +174,12 @@ impl MetalBackend {
         //   The GPU has already written `h_post_attn + dense_ffn` into new_h,
         //   so we add moe_out in-place.
         //
-        // Remote-FFN path (ffn_is_remote): new_h = h_post_attn + remote_ffn_out.
-        //   The GPU did NOT run the local FFN, so new_h is uninitialised for
-        //   this layer. We set new_h[i] = h_post_attn[i] + moe_out[i] directly.
+        // Remote-FFN path (ffn_is_remote) and pure-MoE layers (no dense
+        // branch extracted): new_h = h_post_attn + moe_out. The GPU did
+        // NOT run a local FFN, so new_h is uninitialised for this layer;
+        // set it directly rather than accumulating into garbage.
         let h_ptr = bufs.new_h.contents() as *mut f32;
-        if layer.ffn_is_remote {
-            // Remote-FFN: new_h = h_post_attn + remote_ffn_out.
+        if layer.ffn_is_remote || !layer.has_dense_ffn() {
             // attn_ptr was already computed above (h_post_attn contents).
             unsafe {
                 for (i, v) in moe_out.iter().enumerate() {

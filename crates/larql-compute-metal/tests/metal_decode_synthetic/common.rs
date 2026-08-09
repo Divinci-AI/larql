@@ -54,6 +54,10 @@ pub fn build_synth_layer<'a>(
 ) -> FullPipelineLayer<'a> {
     FullPipelineLayer {
         attn_sinks: None,
+        attn_q_bias: None,
+        attn_k_bias: None,
+        attn_v_bias: None,
+        attn_o_bias: None,
         attn_softcap: 0.0,
         wq: QuantWeight::new(QuantFormat::Q4_K, wq_data, larql_compute::QuantAux::None),
         wk: QuantWeight::new(QuantFormat::Q4_K, wk_data, larql_compute::QuantAux::None),

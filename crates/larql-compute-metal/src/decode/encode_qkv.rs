@@ -119,8 +119,16 @@ impl MetalBackend {
                 weights.wv.format(),
             );
             let mixed_q4k_q6k_v = matches!(route, QkvFormatRoute::MixedQ4kQ6kV);
+            // The norm-fused kernel derives its projection width from the
+            // norm width, so it cannot serve padded row stores (stored
+            // width > hidden, e.g. GPT-OSS 2880 → 3072); those take the
+            // separate-norm chain, whose QKV dispatch runs at the store's
+            // own width.
+            let store_is_padded =
+                weights.wq.stored_cols(dims.layer_q_dim, dims.hidden) != dims.hidden;
             if mixed_q4k_q6k_v
                 && use_fused
+                && !store_is_padded
                 && norms.norm_type == larql_compute::NormType::RmsNorm
                 && norms.input_norm_bias.is_none()
             {
@@ -143,6 +151,36 @@ impl MetalBackend {
             // run the standard norm+qkv chain.
             let _ = input_already_normed;
             self.encode_q4_0_norm_and_qkv(enc, layer, &bufs, dims);
+        }
+
+        // Attention projection biases (GPT-OSS: Q/K/V all carry one) join
+        // right after the projections, so QK-norm/RoPE and the KV-cache
+        // append downstream read the biased values — the same points the
+        // CPU reference (`forward::add_bias`) applies them. Dispatched
+        // only when present; bias-free layers encode nothing extra.
+        for (bias, out, n) in [
+            (layer.attn_q_bias, bufs.q_out, dims.layer_q_dim),
+            (layer.attn_k_bias, bufs.k_out, dims.layer_kv_dim),
+            (layer.attn_v_bias, bufs.v_out, dims.layer_kv_dim),
+        ] {
+            if let Some(b) = bias {
+                assert_eq!(
+                    b.len(),
+                    n,
+                    "attention projection bias has {} entries but the projection \
+                     is {n} wide — the extracted tensor does not match this model",
+                    b.len()
+                );
+                let b_buf = self.bufs.get_f32(b);
+                crate::stages::bias_add::encode(
+                    enc,
+                    &self.attention.bias_add_pipeline,
+                    out,
+                    0,
+                    &b_buf,
+                    n,
+                );
+            }
         }
     }
 
@@ -228,6 +266,28 @@ impl MetalBackend {
         // than touching `layer.wq` / `layer.wk` / `layer.wv` directly.
         let attn_weights = layer.weights().attention;
 
+        // The store's own row width, derived from the byte count — writers
+        // pad rows to the quant block, so hidden%256≠0 models (GPT-OSS:
+        // 2880 → 3072) store wider rows than `hidden`. Every kernel below
+        // derives its superblock count as `K / 256`; handing it the logical
+        // width truncates the tail and desynchronises the row stride
+        // (audit F17). The padded weight columns dequantise to exactly
+        // zero, so running at the stored width is exact provided the input
+        // buffer has that many readable floats (the setup allocates the
+        // slack and zeroes it once).
+        let k_store = attn_weights.wq.stored_cols(layer_q_dim, hidden);
+        for (name, w, rows) in [
+            ("wk", &attn_weights.wk, layer_kv_dim),
+            ("wv", &attn_weights.wv, layer_kv_dim),
+        ] {
+            assert_eq!(
+                w.stored_cols(rows, hidden),
+                k_store,
+                "QKV row stores disagree on their padded width ({name}); \
+                 refusing to guess a shared K"
+            );
+        }
+
         // Format-route descriptor — single source of truth for how a
         // `(q, k, v)` triple maps to a fused QKV pipeline. See
         // `metal::stages::qkv_proj::pick_qkv_route` for the table.
@@ -273,19 +333,29 @@ impl MetalBackend {
                     0,
                     layer_q_dim,
                     layer_kv_dim,
-                    hidden,
+                    k_store,
                 );
             }
             QkvFormatRoute::MixedQ4kQ6kV => {
                 // Geometry travels with the bound `KernelHandle` (mirrors the
                 // decode_hybrid Q4_K geometry-fix pattern).
+                //
+                // Same superblock-truncation hazard as `encode_fused_f32`'s
+                // assert (audit F17): this kernel derives its superblock
+                // count as `K / 256`, so a misaligned K silently drops the
+                // tail. The stored width satisfies this by construction;
+                // an unpadded misaligned store must refuse, not truncate.
+                assert!(
+                    k_store.is_multiple_of(256),
+                    "mixed Q4K/Q6K-V QKV kernel requires K % 256 == 0; got {k_store}"
+                );
                 let kh = &self.attention.q4k_q6k_qkv_proj_pipeline;
                 let total_rows = (layer_q_dim + layer_kv_dim + layer_kv_dim) as u64;
                 let num_tgs = total_rows.div_ceil(kh.rows_per_tg);
                 let q_rows_u = layer_q_dim as u32;
                 let k_rows_u = layer_kv_dim as u32;
                 let v_rows_u = layer_kv_dim as u32;
-                let k_u = hidden as u32;
+                let k_u = k_store as u32;
                 enc.set_compute_pipeline_state(&kh.state);
                 enc.set_buffer(0, Some(bufs.wq), 0);
                 enc.set_buffer(1, Some(bufs.wk), 0);
@@ -350,7 +420,7 @@ impl MetalBackend {
                             rows: layer_kv_dim,
                         },
                     ],
-                    hidden,
+                    k_store,
                 );
             }
         }

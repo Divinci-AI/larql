@@ -605,6 +605,14 @@ impl MetalBackend {
             // is no local FFN work to encode on the GPU.
             let defer_ffn_for_split = split_mode && layer.moe.is_some();
 
+            // Pure-MoE layers extract no dense FFN weights — encoding the
+            // dense branch would run the kernels over empty slices and
+            // poison `new_h` with garbage that the expert add can't
+            // recover. Their FFN is the expert block alone; the MoE
+            // interleave below writes `new_h = h_post_attn + moe_out`
+            // directly (same combine as the remote-FFN arm).
+            let layer_runs_dense_ffn = layer.has_dense_ffn() || layer.moe.is_none();
+
             // Stage-timing boundary: when LARQL_PROFILE_SPLIT=1 (or the legacy
             // alias LARQL_DECODE_STAGE_TIMING=1), close the encoder here so
             // attention CB time can be recorded separately from FFN CB time.
@@ -622,7 +630,7 @@ impl MetalBackend {
                 encoder_ended = false;
             }
 
-            if !defer_ffn_for_split && !layer.ffn_is_remote {
+            if !defer_ffn_for_split && !layer.ffn_is_remote && layer_runs_dense_ffn {
                 let ffn_bufs = encode_ffn::FfnBufs {
                     gate_w: &gate_bufs[l],
                     up_w: &up_bufs[l],

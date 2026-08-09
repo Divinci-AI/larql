@@ -36,6 +36,15 @@ pub struct FullPipelineLayer<'a> {
     /// emitted weights sum to less than one. `None` for every other
     /// architecture. See `docs/k3-funnel.md` §4.6.
     pub attn_sinks: Option<&'a [f32]>,
+    /// Attention projection biases (GPT-OSS, Qwen-style archs). Added to
+    /// the Q/K/V projections before QK-norm/RoPE and to the O projection
+    /// before the residual add — the same points the CPU reference
+    /// (`attention/decode/dispatch.rs`) applies them. `None` for the
+    /// bias-free majority.
+    pub attn_q_bias: Option<&'a [f32]>,
+    pub attn_k_bias: Option<&'a [f32]>,
+    pub attn_v_bias: Option<&'a [f32]>,
+    pub attn_o_bias: Option<&'a [f32]>,
     /// Attention logit softcapping (Gemma 2): scores become
     /// `softcap * tanh(score / softcap)` before the softmax. `0.0`
     /// disables — the universal correct default; the layer builder
@@ -259,6 +268,18 @@ impl<'a> FullPipelineLayer<'a> {
         self.moe.is_some()
     }
 
+    /// Whether this layer carries a local dense FFN branch.
+    ///
+    /// A representation fact, not an architecture flag: pure-MoE layers
+    /// extract no dense up/down weights — their FFN is the expert block
+    /// alone — while hybrid layers carry both and sum the branches.
+    /// Consumers that would otherwise run the dense kernels over empty
+    /// weight slices (producing garbage, not a refusal) must consult
+    /// this before encoding the dense branch.
+    pub fn has_dense_ffn(&self) -> bool {
+        !self.up.data.is_empty() && !self.down.data.is_empty()
+    }
+
     /// Per-Layer Embeddings spec for this layer, if active. Returns `None`
     /// unless all three required weights are present (gate, projection, post-norm).
     pub fn ple_spec(&self) -> Option<PleSpec<'a>> {
@@ -285,6 +306,10 @@ impl Default for FullPipelineLayer<'_> {
         let qw = QuantWeight::default();
         Self {
             attn_sinks: None,
+            attn_q_bias: None,
+            attn_k_bias: None,
+            attn_v_bias: None,
+            attn_o_bias: None,
             attn_softcap: 0.0,
             wq: qw,
             wk: qw,

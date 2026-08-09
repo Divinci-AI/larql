@@ -65,6 +65,11 @@ pub(super) struct LayerBuffers {
     pub post_attn_norm: Vec<Buffer>,
     pub pre_ffn_norm: Vec<Option<Buffer>>,
     pub post_ffn_norm: Vec<Option<Buffer>>,
+    // ── Attention projection bias buffers (GPT-OSS; `None` elsewhere) ──
+    pub attn_q_bias: Vec<Option<Buffer>>,
+    pub attn_k_bias: Vec<Option<Buffer>>,
+    pub attn_v_bias: Vec<Option<Buffer>>,
+    pub attn_o_bias: Vec<Option<Buffer>>,
     // ── Per-layer per-position scratch outputs ──
     pub h: Vec<Buffer>, // num_layers + 1: input + each layer's output
     pub norm_out: Vec<Buffer>,
@@ -141,6 +146,24 @@ impl LayerBuffers {
             .map(|l| l.post_ffn_norm.map(|n| bufs.get_f32(n)))
             .collect();
 
+        // Attention projection biases — stable slices, cached like norms.
+        let attn_q_bias: Vec<Option<_>> = layers
+            .iter()
+            .map(|l| l.attn_q_bias.map(|b| bufs.get_f32(b)))
+            .collect();
+        let attn_k_bias: Vec<Option<_>> = layers
+            .iter()
+            .map(|l| l.attn_k_bias.map(|b| bufs.get_f32(b)))
+            .collect();
+        let attn_v_bias: Vec<Option<_>> = layers
+            .iter()
+            .map(|l| l.attn_v_bias.map(|b| bufs.get_f32(b)))
+            .collect();
+        let attn_o_bias: Vec<Option<_>> = layers
+            .iter()
+            .map(|l| l.attn_o_bias.map(|b| bufs.get_f32(b)))
+            .collect();
+
         // Q8 staging buffers shared between Q8 attention input and the
         // O-projection input — sized at `max(hidden, max_layer_q_dim)`
         // per position so both writers fit with offsets.
@@ -168,11 +191,33 @@ impl LayerBuffers {
         for layer in layers.iter() {
             let lq = layer.num_q_heads * layer.head_dim;
             let lkv = layer.num_kv_heads * layer.head_dim;
-            norm_out.push(bufs.output((seq_len * hidden * 4) as u64));
+            // The QKV and O-projection kernels read their input at the
+            // STORE's row width, which may be padded past the logical dim
+            // (GPT-OSS: hidden 2880 → 3072-wide rows). Rows within the
+            // sequence read into the next position's live values — exact,
+            // because the padded weight columns dequantise to zero — but
+            // the LAST position's read needs real, zeroed slack past the
+            // buffer's logical end (mirrors `decode/setup.rs`).
+            let qkv_slack = layer.wq.stored_cols(lq, hidden).saturating_sub(hidden);
+            let o_slack = layer.wo.stored_cols(hidden, lq).saturating_sub(lq);
+            let with_zeroed_slack = |elems: usize, slack: usize| {
+                let buf = bufs.output(((elems + slack) * 4) as u64);
+                if slack > 0 {
+                    // SAFETY: freshly-allocated shared-storage buffer with
+                    // `(elems + slack) * 4` bytes; only the trailing slack
+                    // is zeroed, and no dispatch ever writes past `elems`,
+                    // so it stays zero for the pipeline's lifetime.
+                    unsafe {
+                        std::ptr::write_bytes((buf.contents() as *mut f32).add(elems), 0, slack)
+                    };
+                }
+                buf
+            };
+            norm_out.push(with_zeroed_slack(seq_len * hidden, qkv_slack));
             q_out.push(bufs.output((seq_len * lq * 4) as u64));
             k_out.push(bufs.output((seq_len * lkv * 4) as u64));
             v_out.push(bufs.output((seq_len * lkv * 4) as u64));
-            attn_out.push(bufs.output((seq_len * lq * 4) as u64));
+            attn_out.push(with_zeroed_slack(seq_len * lq, o_slack));
             o_out.push(bufs.output((seq_len * hidden * 4) as u64));
             h_post_attn.push(bufs.output((seq_len * hidden * 4) as u64));
             ffn_norm_out.push(bufs.output((seq_len * hidden * 4) as u64));
@@ -202,6 +247,10 @@ impl LayerBuffers {
             post_attn_norm,
             pre_ffn_norm,
             post_ffn_norm,
+            attn_q_bias,
+            attn_k_bias,
+            attn_v_bias,
+            attn_o_bias,
             h,
             norm_out,
             q_out,
@@ -250,6 +299,10 @@ mod tests {
         let q4w = || QuantWeight::new(QuantFormat::Q4_K, q4, larql_compute::QuantAux::None);
         FullPipelineLayer {
             attn_sinks: None,
+            attn_q_bias: None,
+            attn_k_bias: None,
+            attn_v_bias: None,
+            attn_o_bias: None,
             attn_softcap: 0.0,
             wq: q4w(),
             wk: q4w(),
