@@ -566,7 +566,19 @@ batch ≡ incremental unaffected — both sessions share the path).
 Measured end-to-end on the fixture: **prefill 1.97 → 1.50 s, TTFA
 2006 → 1530 ms**, steady-state 23.3 fps / RTF 1.85 (clean run), p50
 31 ms. TTFA budget now: ~0.86 s GEMM (Metal simdgroup target
-~0.2 s) + ~0.64 s non-GEMM overhead (next dissection target). Bonus
+~0.2 s) + ~0.64 s non-GEMM overhead — **dissected to a third
+shape-mismatch** (2026-08-10): the production attention prefill
+(`attention/gqa`) runs per-head × per-query-position loops — one BLAS
+gemv per position for Q·K (≈154k gemv calls per 343-row prefill),
+per-element f64-`exp` softmax (≈26M exps, the `exp` frames the stall
+profile showed), a second gemv plus scalar accumulate for A·V.
+Arithmetic puts that at ~0.4-0.7 s, matching the bucket. The batched
+form (per layer × head: one [S,d]·[d,S] scores GEMM, triangular mask,
+row-vectorised f32 softmax, one [S,S]·[S,d] output GEMM — ~27 GFLOP
+at BLAS rates ≈ tens of ms) is the next implementation. Caution
+pinned in advance: any accumulation-order change must re-pass the
+step-4 dump gate (token-exact greedy parity), so the batched path
+lands behind that verification, not alongside it. Bonus
 diagnostic, twice confirmed: during stall episodes the BLAS-phase
 prefill holds (1.58 s) while spin-pool decode collapses (9.4 fps, max
 frame 1008 ms) — the episodic interference selectively degrades
