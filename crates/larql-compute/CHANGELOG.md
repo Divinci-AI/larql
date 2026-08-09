@@ -4,6 +4,42 @@ Reverse-chronological ship log. Entries migrated from ROADMAP.md on
 2026-05-09; pre-2026-05-09 entries preserve the date and voice they were
 originally written in.
 
+## 2026-08-09
+
+### Post-Phase-B performance baseline: correctness hardening is performance-neutral
+
+The capability-audit programme (PRs #231–#237: 22 findings, three
+routing authorities, softcap in all four decode attention kernels,
+sinks on every fallback, per-decode format validation) benchmarked
+against the pre-audit build (`f832c575`, post-Phase-A) on
+**gemma4-26b-a4b-v2** — the hybrid-MoE arch that spends ~95% of decode
+in GPU forward, so the change set has nowhere to hide.
+
+**Protocol** (M3 Max, AC, no thermal warnings): one discarded full
+warm-up round per binary, then **10 paired rounds with alternating
+order**, production defaults (no `LARQL_*` overrides, profile-split
+off), default prompt, 50 decode tokens + 3 token warmups. All 20
+measured runs terminated identically at 49/49 steps.
+
+**Result — median paired deltas (new − old):**
+
+| metric | median Δ | range |
+|---|---|---|
+| decode p50 | +0.54% | −1.27% .. +2.17% |
+| mean decode | +0.43% | −5.12% .. +7.05% |
+| GPU forward | +0.59% | −4.31% .. +6.16% |
+| prefill | −0.30% | −8.79% .. +20.74% |
+| GPU fraction | 95.2% → 95.2% | unchanged |
+
+New was faster in only 2/10 paired rounds — an earlier 2-round result
+suggesting "~2% faster" was a cold-start artifact, which is why the
+paired-alternating protocol exists. **Verdict: performance-neutral
+within the noise floor.**
+
+**Frozen baseline** (both builds within 0.25% on every metric):
+decode p50 **43.2 ms** (~22.9 tok/s), GPU forward **41.8 ms** (95.2%),
+prefill **1.35 s** at the 5-token default prompt.
+
 ## 2026-07-29
 
 ### Bandwidth roofline measured; spin-pool E-core collapse found and fixed (3.3× on non-bench paths)

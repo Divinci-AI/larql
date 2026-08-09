@@ -120,6 +120,15 @@ hard-disabled at both dispatch sites; reproducer test
 `decode_token_with_q4k_ffn_and_fused_q6k_down_option` is `#[ignore]`d
 with the finding. Root-cause before re-engaging.
 
+**Instrument note (2026-08-09, post-Phase-B benchmarking):** `larql
+bench` reports `early stop @N/50 (EOS or GPU fallback)` — it cannot
+distinguish a legitimate EOS from a silent GPU fallback. For a harness
+increasingly used as a correctness instrument that ambiguity is too
+coarse: granite-4.1-8b stops at 4/50 on Metal on both pre- and
+post-audit builds and the bench cannot say which of the two reasons
+applies. Surface the stop reason explicitly (token id vs backend
+fallback flag).
+
 The structural target (capability doc §9): one authority table consumed by
 the QKV/FFN/O-proj/attention dispatchers — per-operand format rows instead
 of `is_kquant_family()` tests, every silently-assumed dim promoted to a
