@@ -1,6 +1,19 @@
 # The TTS funnel — audio-token output as a forcing function
 
-Status: scoping. Branch `worktree-tts-audio-tokens`, started 2026-08-09.
+Status: step 0 green. Branch `worktree-tts-audio-tokens`, started 2026-08-09.
+
+Gate log:
+
+- **Step 0 PASS** (2026-08-09) — reference dump harness at
+  `jarvis-voice/.engines/moss_parity_dump.py`; fixture long-23 with the
+  aru-12 voice-clone splice; cpu / fp32 / eager / greedy / repetition
+  penalty off. 138 frames (11.0 s audio) in ~34 s, EOS reached, prefill
+  343 rows. Two independent process runs **bit-for-bit identical** across
+  all eleven arrays (prompt matrix, prefill embeds/hiddens, per-step ids /
+  summed embeds / backbone hiddens, 138×16×1027 local logits, frames,
+  emitted tokens). Dumps in
+  `jarvis-voice/renders/moss-realtime/parity-dump/` (run manifest records
+  versions and hashes). Steps 2–4 compare against `run1.npz`.
 
 This document plays the role `k3-funnel.md` plays for sparse execution: it
 names one model that cannot run, inventories exactly why, and commits to
