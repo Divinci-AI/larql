@@ -75,6 +75,37 @@ impl MetalBackend {
         );
         let qkv_uses_kquant = layer.wq.format().is_kquant_family();
         let o_uses_kquant = layer.wo.format().is_kquant_family();
+        // Route on the full (wq, wk, wv) triple, never on `wq` alone.
+        // Selecting on `wq` sent the production Gemma 3/4 shape
+        // (Q4_K Q/K + Q6_K V) to the uniform Q4_K kernel, which strides
+        // V at 144 bytes per superblock against Q6_K's 210-byte blocks
+        // — silent corruption of every V projection. Capability audit
+        // F2; same operand-local-ABI lesson as the Phase A O-projection
+        // fix. Resolved HERE, before any command encoder exists: the
+        // refusal panic must not unwind past a live encoder, or Metal's
+        // "released without endEncoding" assertion turns it into a
+        // process-killing SIGTRAP.
+        let qkv_kquant_pipeline = if qkv_uses_kquant {
+            use crate::stages::qkv_proj::{pick_qkv_route, QkvFormatRoute};
+            let route = pick_qkv_route(layer.wq.format(), layer.wk.format(), layer.wv.format());
+            Some(match route {
+                QkvFormatRoute::UniformQ4K => &self.attention.q4k_qkv_proj_pipeline,
+                QkvFormatRoute::UniformQ4Kf => &self.attention.q4kf_qkv_proj_pipeline,
+                QkvFormatRoute::MixedQ4kQ6kV => &self.attention.q4k_q6k_qkv_proj_pipeline,
+                // The hybrid path has no per-projection escape, and
+                // dispatching a fused kernel on a triple it does not
+                // decode reinterprets weight bytes. Refuse loudly.
+                QkvFormatRoute::PerProjection => panic!(
+                    "hybrid QKV has no fused kernel for (wq={:?}, wk={:?}, wv={:?}); \
+                     supported triples: Q4_K^3, Q4_KF^3, (Q4_K, Q4_K, Q6_K)",
+                    layer.wq.format(),
+                    layer.wk.format(),
+                    layer.wv.format(),
+                ),
+            })
+        } else {
+            None
+        };
         let layer_q_dim = layer_num_q_heads * layer_head_dim;
         let window_size = layer.sliding_window as u32;
 
@@ -141,12 +172,10 @@ impl MetalBackend {
             // vs 4/64) — using one shader's constants while binding
             // the other's pipeline silently drops 75 % of QKV rows.
             // Same dispatch-geometry-mismatch class as the q4_matvec_v4
-            // ROADMAP ship-log entry.
-            let qkv_pipeline = if layer.wq.format() == larql_compute::QuantFormat::Q4_KF {
-                &self.attention.q4kf_qkv_proj_pipeline
-            } else {
-                &self.attention.q4k_qkv_proj_pipeline
-            };
+            // ROADMAP ship-log entry. Route selection happened before
+            // the encoder was created (see `qkv_kquant_pipeline`).
+            let qkv_pipeline =
+                qkv_kquant_pipeline.expect("kquant QKV branch implies a routed fused pipeline");
             let num_tgs = (total_rows as u64).div_ceil(qkv_pipeline.rows_per_tg);
             enc_a.set_compute_pipeline_state(&qkv_pipeline.state);
             enc_a.set_buffer(0, Some(&wq_buf), 0);

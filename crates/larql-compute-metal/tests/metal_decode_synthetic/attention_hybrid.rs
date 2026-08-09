@@ -191,3 +191,64 @@ fn decode_attention_layer_q4k_with_q6k_wo_drives_q6k_proj_branch() {
     assert_eq!(h_post_attn.len(), HIDDEN);
     assert!(h_post_attn.iter().all(|v| v.is_finite()));
 }
+
+/// The production Gemma 3/4 attention shape — Q4_K Q/K with a Q6_K V —
+/// must route to the mixed `q4k_q6k_qkv_proj` kernel on the hybrid
+/// path (capability audit F2).
+///
+/// Before the route fix, `decode_hybrid` selected the QKV kernel on
+/// `wq` alone, so this exact triple dispatched the uniform Q4_K kernel
+/// and strode the Q6_K V weights at 144 bytes per superblock against
+/// their 210-byte blocks — silent corruption of every V projection on
+/// a production-reachable path.
+#[test]
+fn decode_attention_layer_mixed_q4k_q6k_v_routes_to_mixed_kernel() {
+    let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(metal) = larql_compute_metal::MetalBackend::new() else {
+        return;
+    };
+    use larql_compute::cpu::ops::q4_common::{quantize_q4_0, quantize_q4_k, quantize_q6_k};
+    let wq = quantize_q4_k(&synth_weight_f32(Q_DIM * HIDDEN, 0.1));
+    let wk = quantize_q4_k(&synth_weight_f32(KV_DIM * HIDDEN, 0.2));
+    let wv = quantize_q6_k(&synth_weight_f32(KV_DIM * HIDDEN, 0.3));
+    let wo = quantize_q4_k(&synth_weight_f32(HIDDEN * Q_DIM, 0.4));
+    let gate = quantize_q4_0(&synth_weight_f32(INTER * HIDDEN, 0.5));
+    let up = quantize_q4_0(&synth_weight_f32(INTER * HIDDEN, 0.6));
+    let down = quantize_q4_0(&synth_weight_f32(HIDDEN * INTER, 0.7));
+    let norm_w: Vec<f32> = (0..HIDDEN).map(|i| 1.0 + (i as f32 * 0.001)).collect();
+    let mut layer = build_synth_layer(&wq, &wk, &wv, &wo, &gate, &up, &down, &norm_w);
+    layer.wv = QuantWeight::new(QuantFormat::Q6_K, &wv, larql_compute::QuantAux::None);
+
+    let x = synth_input(HIDDEN, 0.9);
+    let mut kv = metal.create_kv_cache(1, 64, NUM_KV_HEADS, HEAD_DIM);
+    let h_post_attn = metal.decode_attention_layer(&mut kv, &layer, 0, &x, HIDDEN, Q_DIM, KV_DIM);
+    assert_eq!(h_post_attn.len(), HIDDEN);
+    assert!(h_post_attn.iter().all(|v| v.is_finite()));
+}
+
+/// A k-quant triple with no fused kernel (Q6_K Q) is refused loudly on
+/// the hybrid path rather than reinterpreted by the uniform Q4_K
+/// kernel — the hybrid path has no per-projection escape.
+#[test]
+#[should_panic(expected = "hybrid QKV has no fused kernel")]
+fn decode_attention_layer_q6k_q_is_rejected() {
+    let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(metal) = larql_compute_metal::MetalBackend::new() else {
+        panic!("hybrid QKV has no fused kernel (no Metal device; asserted statically)");
+    };
+    use larql_compute::cpu::ops::q4_common::{quantize_q4_0, quantize_q4_k, quantize_q6_k};
+    let wq = quantize_q6_k(&synth_weight_f32(Q_DIM * HIDDEN, 0.1));
+    let wk = quantize_q4_k(&synth_weight_f32(KV_DIM * HIDDEN, 0.2));
+    let wv = quantize_q4_k(&synth_weight_f32(KV_DIM * HIDDEN, 0.3));
+    let wo = quantize_q4_k(&synth_weight_f32(HIDDEN * Q_DIM, 0.4));
+    let gate = quantize_q4_0(&synth_weight_f32(INTER * HIDDEN, 0.5));
+    let up = quantize_q4_0(&synth_weight_f32(INTER * HIDDEN, 0.6));
+    let down = quantize_q4_0(&synth_weight_f32(HIDDEN * INTER, 0.7));
+    let norm_w: Vec<f32> = (0..HIDDEN).map(|i| 1.0 + (i as f32 * 0.001)).collect();
+    let mut layer = build_synth_layer(&wq, &wk, &wv, &wo, &gate, &up, &down, &norm_w);
+    layer.wq = QuantWeight::new(QuantFormat::Q6_K, &wq, larql_compute::QuantAux::None);
+
+    let x = synth_input(HIDDEN, 0.9);
+    let mut kv = metal.create_kv_cache(1, 64, NUM_KV_HEADS, HEAD_DIM);
+    let _ = metal.decode_attention_layer(&mut kv, &layer, 0, &x, HIDDEN, Q_DIM, KV_DIM);
+}
