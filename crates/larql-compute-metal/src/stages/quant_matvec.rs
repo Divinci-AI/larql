@@ -233,8 +233,17 @@ pub fn encode(
         larql_compute::QuantFormat::BF16
         | larql_compute::QuantFormat::F16
         | larql_compute::QuantFormat::F32 => {
-            // Not dispatchable via this Q4 shader path — caller should use
-            // a float matvec or dequantize before calling.
+            // Previously a silent no-op: no dispatch was encoded and the
+            // output buffer kept whatever the pooled scratch last held —
+            // stale data presented as a result, the worst failure mode
+            // in the capability audit (F4). Fail loudly, mirroring the
+            // Q8_0 and I2S arms above.
+            panic!(
+                "metal::stages::quant_matvec::encode: {format:?} weights are \
+                 not dispatchable through the quant matvec path. Use a float \
+                 matvec (f32_gemv / f16_gemv) or quantize the weights before \
+                 routing them here."
+            );
         }
     }
 }
