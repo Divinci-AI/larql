@@ -580,6 +580,7 @@ mod moe_prefill_integration {
         let q4w = || QuantWeight::new(QuantFormat::Q4_K, q4k, larql_compute::QuantAux::None);
         FullPipelineLayer {
             attn_sinks: None,
+            attn_softcap: 0.0,
             wq: q4w(),
             wk: q4w(),
             wv: q4w(),
@@ -754,6 +755,7 @@ mod moe_prefill_integration {
         };
         let layers = vec![FullPipelineLayer {
             attn_sinks: None,
+            attn_softcap: 0.0,
             wq: q4kf,
             wk: q4kf,
             wv: q4kf,
@@ -827,6 +829,7 @@ mod moe_prefill_integration {
         let q4_view = |fmt| QuantWeight::new(fmt, q4k.as_slice(), larql_compute::QuantAux::None);
         let layers = vec![FullPipelineLayer {
             attn_sinks: None,
+            attn_softcap: 0.0,
             wq: q4_view(QuantFormat::Q4_K),
             wk: q4_view(QuantFormat::Q4_K),
             wv: q4_view(QuantFormat::Q6_K),
@@ -913,6 +916,7 @@ mod moe_prefill_integration {
             |fmt: QuantFormat| QuantWeight::new(fmt, q4k.as_slice(), larql_compute::QuantAux::None);
         let layers = vec![FullPipelineLayer {
             attn_sinks: None,
+            attn_softcap: 0.0,
             wq: QuantWeight::new(
                 QuantFormat::Q8_0,
                 &wq_q8,

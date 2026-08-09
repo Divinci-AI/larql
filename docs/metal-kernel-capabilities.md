@@ -77,11 +77,11 @@ Notes
 
 | kernel | role | softmax | scratch | hard limits | sinks | softcap | wired |
 |---|---|---|---|---|---|---|---|
-| `attn_fused` | decode, full fusion (norm+RoPE+append+attend) | 2-pass | tg_q/tg_k/tg_red/tg_scores ≈6KB; **tg_red max→sum reuse UNFENCED** | head≤256 a, span≤1024 a; GQA div s | yes | no | opt-in `LARQL_FUSED_ATTN=1` |
-| `kv_append_attend_fused` | decode default (append+attend) | 2-pass | fenced (reference impl) | head≤256 a, span≤1024 a; GQA s | yes | no | **prod default** |
-| `kv_attention` / `_long` | decode fallback attend | 2-pass | fenced | span ≤1024 / ≤4096 (**long unguarded beyond alloc**) | **NO** | no | prod (fallback + KV-shared) |
+| `attn_fused` | decode, full fusion (norm+RoPE+append+attend) | 2-pass | tg_q/tg_k/tg_red/tg_scores ≈6KB; fenced (F11) | head≤256 a, span≤1024 a; GQA div s | yes | yes (F8) | opt-in `LARQL_FUSED_ATTN=1` |
+| `kv_append_attend_fused` | decode default (append+attend) | 2-pass | fenced (reference impl) | head≤256 a, span≤1024 a; GQA s | yes | yes (F8) | **prod default** |
+| `kv_attention` / `_long` | decode fallback attend | 2-pass | fenced | span ≤1024 / ≤4096 a (F14) | yes (F7) | yes (F8) | prod (fallback + KV-shared) |
 | `kv_cache_append` | flat copy | — | — | — | — | — | prod (unfused chain) |
-| `fused_attention` | prefill, one TG per (head,pos) | 2-pass serial tid0 scan | ~19KB, no reuse | **head≤512 s, seq≤4096 s — both unasserted**; TG hardcoded 256 both sides | yes | **yes (only kernel with it)** | prod (always, prefill) |
+| `fused_attention` | prefill, one TG per (head,pos) | 2-pass serial tid0 scan | ~19KB, no reuse | head≤512 a, seq≤4096 a (F14); TG hardcoded 256 both sides | yes | yes (clamped) | prod (always, prefill) |
 | `causal_attention` | bench-only, single head, no GQA | 2-pass recompute O(seq²·d²) | none | — | no | no | bench (`full_layer_direct`) |
 
 Decode fallback chain: `attn_fused` → `kv_append_attend_fused` →
@@ -220,7 +220,11 @@ Correctness, live path:
 - **F7. Attention sinks silently dropped** on every non-fused decode
   fallback (span>1024, head>256, KV-shared): different softmax
   denominator, no guard. Softcap exists only at prefill (F8) — a
-  capped arch decodes uncapped. **AUDIT-FINDING**
+  capped arch decodes uncapped. **FIXED (slice 3)**: sinks and softcap
+  travel on `FullPipelineLayer` (`attn_sinks` / `attn_softcap`, set at
+  the arch boundary) and every decode attention kernel — fused and
+  fallback — applies both, parity-pinned against the CPU reference
+  with a cap-actually-applied control.
 - **F9. Dense layers of hybrid-MoE models never get `layer_scalar`.** **AUDIT-FINDING**
 - **F10. MoE staging loop missing `valid_count >= top_k` guard** (its
   sibling has one) — release-mode buffer overflow on excess indices. **AUDIT-FINDING**

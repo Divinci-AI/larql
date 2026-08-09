@@ -36,6 +36,13 @@ pub struct FullPipelineLayer<'a> {
     /// emitted weights sum to less than one. `None` for every other
     /// architecture. See `docs/k3-funnel.md` §4.6.
     pub attn_sinks: Option<&'a [f32]>,
+    /// Attention logit softcapping (Gemma 2): scores become
+    /// `softcap * tanh(score / softcap)` before the softmax. `0.0`
+    /// disables — the universal correct default; the layer builder
+    /// sets it from `arch.attn_logit_softcapping()`. Until slice 3 of
+    /// the capability work, only the prefill kernel applied it, so a
+    /// capped architecture prefilled capped and decoded uncapped.
+    pub attn_softcap: f32,
     pub input_norm_bias: Option<&'a [f32]>,
     pub post_attn_norm_bias: Option<&'a [f32]>,
 
@@ -278,6 +285,7 @@ impl Default for FullPipelineLayer<'_> {
         let qw = QuantWeight::default();
         Self {
             attn_sinks: None,
+            attn_softcap: 0.0,
             wq: qw,
             wk: qw,
             wv: qw,

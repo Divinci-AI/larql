@@ -221,6 +221,7 @@ fn decode_token_gemma3_style_post_norms_smoke() {
     // four-norm-per-layer pattern.
     let layer = FullPipelineLayer {
         attn_sinks: None,
+        attn_softcap: 0.0,
         wq: QuantWeight::new(QuantFormat::Q4_K, &wq_data, larql_compute::QuantAux::None),
         wk: QuantWeight::new(QuantFormat::Q4_K, &wk_data, larql_compute::QuantAux::None),
         wv: QuantWeight::new(QuantFormat::Q6_K, &wv_data, larql_compute::QuantAux::None),
@@ -409,6 +410,7 @@ fn decode_token_qkv_fused_opt_in_smoke() {
     // (a non-Gemma layer that still hits the normed QKV opt-in).
     let layer = FullPipelineLayer {
         attn_sinks: None,
+        attn_softcap: 0.0,
         wq: QuantWeight::new(QuantFormat::Q4_K, &wq_data, larql_compute::QuantAux::None),
         wk: QuantWeight::new(QuantFormat::Q4_K, &wk_data, larql_compute::QuantAux::None),
         wv: QuantWeight::new(QuantFormat::Q6_K, &wv_data, larql_compute::QuantAux::None),

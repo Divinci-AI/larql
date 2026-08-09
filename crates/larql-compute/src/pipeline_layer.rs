@@ -133,8 +133,14 @@ pub fn build_arch_params<'a>(
         .and_then(|k| weights.vectors.get(&k))
         .map(|v| v.as_slice());
 
+    // 0.0 = disabled. Set here, at the arch boundary, so every decode
+    // consumer sees the model's real cap instead of the field default
+    // silently answering for capped architectures.
+    let attn_softcap = arch.attn_logit_softcapping().unwrap_or(0.0);
+
     FullPipelineLayer {
         attn_sinks,
+        attn_softcap,
         wq,
         wk,
         wv,

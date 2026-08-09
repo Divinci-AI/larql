@@ -115,6 +115,7 @@ fn main() {
             .iter()
             .map(|ld| larql_compute::FullPipelineLayer {
                 attn_sinks: None,
+                attn_softcap: 0.0,
                 wq: larql_compute::QuantWeight::new(
                     larql_compute::QuantFormat::Q4_K,
                     &ld.wq_q4k,
@@ -211,6 +212,7 @@ fn main() {
             .iter()
             .map(|ld| larql_compute::FullPipelineLayer {
                 attn_sinks: None,
+                attn_softcap: 0.0,
                 wq: larql_compute::QuantWeight::new(
                     larql_compute::QuantFormat::Q8_0,
                     &ld.wq_q8,

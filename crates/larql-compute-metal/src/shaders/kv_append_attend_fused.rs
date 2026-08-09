@@ -43,6 +43,7 @@ kernel void kv_append_attend_fused(
     device const float* new_v   [[buffer(11)]],  // [num_kv * head_dim]
     constant float*     sinks     [[buffer(12)]],  // per-Q-head attention sink logits
     constant uint&      has_sinks [[buffer(13)]],  // 0 = no sinks (slot is a placeholder)
+    constant float&     softcap [[buffer(14)]],    // 0.0 = disabled
     uint tg_id  [[threadgroup_position_in_grid]],
     uint tid    [[thread_index_in_threadgroup]],
     uint tg_sz  [[threads_per_threadgroup]],
@@ -83,6 +84,10 @@ kernel void kv_append_attend_fused(
         }
         for (uint d = (head_dim & ~3u); d < head_dim; d++) dot += q[d] * k[d];
         dot *= scale;
+        // Gemma-2-style logit softcapping (clamped; see attn_fused).
+        if (softcap > 0.0f) {
+            dot = softcap * tanh(clamp(dot / softcap, -15.0f, 15.0f));
+        }
         tg_scores[t - t_start] = dot;
         local_max = max(local_max, dot);
     }

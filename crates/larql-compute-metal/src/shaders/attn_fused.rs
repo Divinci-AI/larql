@@ -60,6 +60,7 @@ kernel void attn_fused(
     constant uint&      has_sinks  [[buffer(19)]],
     constant float&     amplitude  [[buffer(20)]],  // cos/sin scalar (YaRN); 1.0 otherwise  // 0 = no sinks (slot is a placeholder)
     constant uint&      abs_pos    [[buffer(21)]],  // ABSOLUTE stream position for RoPE
+    constant float&     softcap    [[buffer(22)]],  // 0.0 = disabled
     uint tg_id  [[threadgroup_position_in_grid]],
     uint tid    [[thread_index_in_threadgroup]],
     uint tg_sz  [[threads_per_threadgroup]],
@@ -176,6 +177,12 @@ kernel void attn_fused(
         }
         for (uint d = (head_dim & ~3u); d < head_dim; d++) dot += tg_q[d] * k[d];
         dot *= scale;
+        // Gemma-2-style logit softcapping (clamped: Apple tanh NaNs
+        // past |y| ~ 44). A fused path must not silently drop a
+        // semantic feature its fallbacks apply (audit F8).
+        if (softcap > 0.0f) {
+            dot = softcap * tanh(clamp(dot / softcap, -15.0f, 15.0f));
+        }
         tg_scores[t - t_start] = dot;
         local_max = max(local_max, dot);
     }
