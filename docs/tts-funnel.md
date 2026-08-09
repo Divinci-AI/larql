@@ -253,10 +253,17 @@ final hidden within fp32 tolerance.*
 *Gate: per-codebook logits match the dump within tolerance; greedy frames
 identical.*
 
-**Step 4 — full decode loop.** A decode path that carries
-`(text_token, [u32;16])` per step: typed `TokenStep`, audio EOS on
-codebook 0, tokenizer optional, ids preserved in the result type.
-This is the step that earns the output-side abstractions.
+**Step 4 — full decode loop.** The architectural invariant this step
+installs is more fundamental than an audio token type: **core generation
+produces model-domain ids/state; interpretation — detokenisation included —
+belongs to an output adapter.** The present defect is not "LARQL lacks
+`AudioToken`"; it is that generated ids are destroyed by unconditional
+text detokenisation inside the sampling step and `GenerateResult` retains
+only strings. Fix that seam first (ids preserved end-to-end, the text
+detokeniser demoted to one adapter among possible others); then a decode
+path carrying `(text_token, [u32;16])` per step — with audio EOS on
+codebook 0 — is merely the first non-text consumer of the seam, not the
+definition of it.
 *Gate: full-utterance greedy audio-token sequence identical to the
 reference for the canonical fixture — long enough to exercise the KV
 cache well past attention-window degeneracies (the short-fixture lesson).*
@@ -266,9 +273,13 @@ frames out, `<|text_pad|>` drain, voice-clone splice in the prefill.
 External codec decodes the emitted tokens for listening checks; measure
 real TTFA (first frame emitted after 12th text token) — the first genuine
 streaming TTFA figure in the whole Jarvis evaluation.
-*Gate: token stream from incremental feeding matches batch generation on
-the same text; a rendered aru-12 clone is audibly the same speaker as the
-reference implementation's output.*
+*Gate: token stream from incremental feeding is identical to batch
+generation on the same text.* The gate is token-based deliberately: if
+audio sounds wrong while the RVQ sequence matches, LARQL has done its job
+and the fault is downstream. A listening check (external codec decode of
+the emitted tokens; is the aru-12 clone audibly the same speaker as the
+reference implementation's output?) is recorded as a separate integration
+observation, never as parity evidence.
 
 **Later, in rough order, each gated on the above:** sampled mode (replicate
 the non-standard top-p; validate against raw logits, not tokens);
@@ -306,10 +317,16 @@ plan there; summary of what scoping established (from the installed
   same-size checkpoints (1024 vs 2048 are dimensionally incompatible, and
   it's architectural). Cross-model portability starts at zero shared
   space — which is the research question, not a disappointment.
-- MOSS contrast worth exploiting: MOSS conditions on spliced **audio
-  tokens**, Qwen3-TTS on a **pooled vector**. Two entirely different
-  representations of the same identity (aru-12) — EXP-V6/V7 can ask which
-  survives transformation between them.
+- MOSS contrast worth exploiting: MOSS has **no speaker encoder at all** —
+  it conditions on spliced audio tokens, where Qwen3-TTS conditions on a
+  pooled vector. Two unrelated serialisations of the same identity
+  (aru-12) that both cause a transformer to instantiate the same perceived
+  speaker. The endpoint of the ladder is therefore not "which embedding
+  format wins" but whether both conditioning mechanisms converge onto an
+  equivalent downstream residual state — an `I_voice` that is neither the
+  x-vector nor the acoustic prompt, just induced by both. If that object
+  exists, *it* is the portable representation, and "voice as data" stops
+  being a metaphor.
 
 ---
 
