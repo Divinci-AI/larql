@@ -104,8 +104,12 @@ kernel void q6k_geglu_gelu_tanh_down_cached(
                 int raw = int(lo4 | (hi2 << 4u)) - 32;
                 float w = d * float(sc[i >> 4u]) * float(raw);
 
+                // Clamp like `geglu_gelu_tanh`: Apple's tanh NaNs for
+                // |y| >~ 44, which real gate values (~±10) reach.
                 float gi = tg_gate[i];
-                float t = tanh(c * (gi + 0.044715f * gi * gi * gi));
+                float y = clamp(c * (gi + 0.044715f * gi * gi * gi),
+                                -15.0f, 15.0f);
+                float t = tanh(y);
                 float gelu_g = 0.5f * gi * (1.0f + t);
                 float ai = gelu_g * tg_up[i];
 

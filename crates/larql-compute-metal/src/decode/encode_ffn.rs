@@ -60,11 +60,63 @@ pub(super) struct FfnDims {
     pub inter_padded: usize,
 }
 
+/// Validate a layer's FFN formats and return the format that drives
+/// route selection (capability audit F3).
+///
+/// Called at decode entry, before any command buffer or encoder is
+/// created, so a refusal panic unwinds cleanly instead of tripping
+/// Metal's "encoder released without endEncoding" abort. Rules:
+/// - a gated layer's gate and up must share a format — no fused kernel
+///   decodes a mixed pair, and reinterpretation is silent corruption;
+/// - a non-gated layer routes on `up` (its actual first matvec; `gate`
+///   may be a default-constructed placeholder);
+/// - only Q4_K / Q4_KF / Q6_K / Q4_0 have decode FFN paths.
+pub(super) fn validate_ffn_formats(layer: &FullPipelineLayer) -> larql_compute::QuantFormat {
+    use larql_compute::QuantFormat;
+    if layer.is_gated() {
+        assert_eq!(
+            layer.gate.format(),
+            layer.up.format(),
+            "mixed gate/up FFN formats have no fused Metal kernel; \
+             gate={:?} up={:?}",
+            layer.gate.format(),
+            layer.up.format(),
+        );
+    }
+    let route_fmt = if layer.is_gated() {
+        layer.gate.format()
+    } else {
+        layer.up.format()
+    };
+    match route_fmt {
+        QuantFormat::Q4_K | QuantFormat::Q4_KF | QuantFormat::Q6_K | QuantFormat::Q4_0 => route_fmt,
+        other => panic!(
+            "FFN has no Metal decode path for {other:?} gate/up weights; \
+             supported: Q4_K, Q4_KF, Q6_K, Q4_0"
+        ),
+    }
+}
+
 impl MetalBackend {
     /// Encode the full FFN block (gate / up / activation / down) into
-    /// the encoder. `ffn_uses_kquant` selects the path; the function
-    /// returns the same `down_out` buffer the caller passed in via
-    /// `bufs`. No commit/flush — the caller owns encoder lifecycle.
+    /// the encoder. The path is selected per-operand from the layer's
+    /// own weight formats; the function returns the same `down_out`
+    /// buffer the caller passed in via `bufs`. No commit/flush — the
+    /// caller owns encoder lifecycle.
+    ///
+    /// Routing rules (capability audit F3). The previous branch keyed
+    /// on `gate.format().is_kquant_family()` alone, which decoded a
+    /// Q6_K gate with the Q4_K kernels (210-byte blocks read at a
+    /// 144-byte stride) and a Q8_0 gate with the Q4_0 kernels — silent
+    /// corruption in both cases — and never consulted `up.format()` at
+    /// all. Now:
+    /// - a gated layer's gate and up must share a format (no fused
+    ///   kernel decodes a mixed pair; refuse rather than reinterpret);
+    /// - a non-gated layer routes on `up`, its actual first matvec —
+    ///   `gate` may be a default-constructed placeholder;
+    /// - Q6_K runs the separated per-format chain (`q6k_matvec` per
+    ///   projection), mirroring the prefill path;
+    /// - formats with no decode FFN kernel refuse loudly.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn encode_ffn_step(
         &self,
@@ -72,7 +124,6 @@ impl MetalBackend {
         layer: &FullPipelineLayer,
         bufs: FfnBufs<'_>,
         dims: FfnDims,
-        ffn_uses_kquant: bool,
     ) {
         let FfnDims {
             hidden,
@@ -83,25 +134,127 @@ impl MetalBackend {
         let inter_padded_val = inter_padded as u32;
         let hidden_val = hidden as u32;
 
-        let ffn_is_q4kf = layer.gate.format() == larql_compute::QuantFormat::Q4_KF;
+        use larql_compute::QuantFormat;
+        let route_fmt = validate_ffn_formats(layer);
 
-        if ffn_is_q4kf {
-            self.encode_q4kf_ffn(enc, layer, &bufs, hidden, inter, hidden_val, inter_val);
-        } else if ffn_uses_kquant {
-            self.encode_q4k_ffn(
+        match route_fmt {
+            QuantFormat::Q4_KF => {
+                self.encode_q4kf_ffn(enc, layer, &bufs, hidden, inter, hidden_val, inter_val);
+            }
+            QuantFormat::Q4_K => {
+                self.encode_q4k_ffn(
+                    enc,
+                    layer,
+                    &bufs,
+                    hidden,
+                    inter,
+                    inter_padded,
+                    hidden_val,
+                    inter_val,
+                    inter_padded_val,
+                );
+            }
+            QuantFormat::Q6_K => {
+                self.encode_q6k_ffn(enc, layer, &bufs, hidden, inter, inter_val);
+            }
+            QuantFormat::Q4_0 => {
+                self.encode_q4_0_ffn(enc, layer, &bufs, hidden, inter, hidden_val, inter_val);
+            }
+            // validate_ffn_formats admits only the four arms above.
+            other => unreachable!("validate_ffn_formats admitted {other:?}"),
+        }
+    }
+
+    // ── Q6_K (separated per-format chain) ────────────────────────────────────
+
+    /// Q6_K gate/up FFN via the separated per-format chain: one
+    /// `q6k_matvec` per projection through `quant_matvec::encode`,
+    /// activation in between, down per its own format. No fused Q6_K
+    /// gate+up kernel exists; before this path was added, a Q6_K gate
+    /// fell into the Q4_K branch and was silently mis-decoded
+    /// (capability audit F3). The prefill path has always routed Q6_K
+    /// this way — this brings decode into line.
+    fn encode_q6k_ffn(
+        &self,
+        enc: &ComputeCommandEncoderRef,
+        layer: &FullPipelineLayer,
+        bufs: &FfnBufs<'_>,
+        hidden: usize,
+        inter: usize,
+        inter_val: u32,
+    ) {
+        use crate::stages::quant_matvec::{self as qmv, Pipelines};
+        let pipes = Pipelines {
+            q4kf_proj: Some(&self.attention.q4kf_proj_pipeline.state),
+            q4k_matvec_fallback: &self.quant.q4k_matvec_pipeline,
+            q6k_matvec: &self.quant.q6k_matvec_pipeline,
+            q4_matvec: &self.q4.matvec,
+            q4k_matmul: None,
+        };
+        if layer.is_gated() {
+            qmv::encode(
+                enc,
+                larql_compute::QuantFormat::Q6_K,
+                bufs.gate_w,
+                bufs.ffn_norm_out,
+                0,
+                bufs.ffn_norm_out,
+                0,
+                bufs.ffn_norm_out,
+                0, // Q8 operands unused for f32-input formats
+                bufs.gate_out_scratch,
+                0,
+                &pipes,
+                inter,
+                hidden,
+            );
+            qmv::encode(
+                enc,
+                larql_compute::QuantFormat::Q6_K,
+                bufs.up_w,
+                bufs.ffn_norm_out,
+                0,
+                bufs.ffn_norm_out,
+                0,
+                bufs.ffn_norm_out,
+                0,
+                bufs.up_out,
+                0,
+                &pipes,
+                inter,
+                hidden,
+            );
+            self.encode_geglu(enc, layer, bufs, inter_val, inter as u64);
+        } else {
+            qmv::encode(
+                enc,
+                larql_compute::QuantFormat::Q6_K,
+                bufs.up_w,
+                bufs.ffn_norm_out,
+                0,
+                bufs.ffn_norm_out,
+                0,
+                bufs.ffn_norm_out,
+                0,
+                bufs.up_out,
+                0,
+                &pipes,
+                inter,
+                hidden,
+            );
+            self.encode_activation(
                 enc,
                 layer,
-                &bufs,
-                hidden,
-                inter,
-                inter_padded,
-                hidden_val,
+                bufs.up_out,
+                bufs.act_buf,
                 inter_val,
-                inter_padded_val,
+                inter as u64,
             );
-        } else {
-            self.encode_q4_0_ffn(enc, layer, &bufs, hidden, inter, hidden_val, inter_val);
         }
+        // Down per its own format. K = `inter` (unpadded): the
+        // activation wrote [0, inter) and the Q6_K fused-down parity
+        // tests pin this convention.
+        self.encode_qmv_down(enc, layer, bufs, hidden, inter);
     }
 
     // ── Q4_KF (GGUF) ─────────────────────────────────────────────────────────
