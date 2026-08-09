@@ -169,7 +169,7 @@ backbone forward, 1 position, persistent KV  →  hidden [B,1,2048]
 depth transformer (4 Qwen3-shaped layers, hidden 2048, fresh 16-slot
 static cache each frame — no cross-frame state):
   micro-step 0 :  input = raw backbone hidden, pos 0 → head 0 → c0
-  micro-step i :  input = embed_tokens[i-1](c_{i-1}), pos i → head i → c_i
+  micro-step i :  input = embed of c_{i-1} via table i-1, pos i → head i → c_i
         │
         ▼
 frame [B,16] emitted; c0 == 1026 marks stop; frame feeds next step's input

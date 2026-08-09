@@ -119,6 +119,99 @@ fn config_missing_local_config_errors() {
     assert!(err.to_string().contains("local_config"));
 }
 
+#[test]
+fn config_missing_float_field_errors_by_name() {
+    let mut json = config_json(2, 11, 8, 8, 1, 1);
+    json["local_config"]
+        .as_object_mut()
+        .unwrap()
+        .remove("rms_norm_eps");
+    let err = MossTtsRealtimeConfig::from_config_json(&json).unwrap_err();
+    assert!(
+        err.to_string().contains("rms_norm_eps"),
+        "error names the field: {err}"
+    );
+}
+
+#[test]
+fn audio_special_ids_derive_from_pad() {
+    let config = MossTtsRealtimeConfig::from_config_json(&config_json(2, 11, 8, 8, 1, 1)).unwrap();
+    assert_eq!(config.audio_bos_token(), 9);
+    assert_eq!(config.audio_eos_token(), 10);
+    // The layout invariant the derivation rests on: pad + specials fit
+    // the audio vocabulary exactly.
+    assert!(config.audio_eos_token() < config.audio_vocab_size);
+}
+
+// ── Keys: layer-member derivation from the architecture ──────────────────
+
+#[test]
+fn layer_member_suffixes_derive_from_moss_arch() {
+    let (arch, _) = synth_setup();
+    let members = super::keys::LayerMemberSuffixes::from_arch(arch.as_ref()).unwrap();
+    assert_eq!(members.q_proj, "self_attn.q_proj.weight");
+    assert_eq!(members.q_norm, "self_attn.q_norm.weight");
+    assert_eq!(members.down_proj, "mlp.down_proj.weight");
+    assert_eq!(
+        members.post_attention_layernorm,
+        "post_attention_layernorm.weight"
+    );
+    assert_eq!(members.all().len(), 11);
+}
+
+#[test]
+fn layer_member_suffixes_require_qk_norms() {
+    // A Qwen3-shaped depth transformer needs QK norms; an architecture
+    // without them (llama) must be refused by name.
+    let llama = detect_from_json(&serde_json::json!({
+        "model_type": "llama",
+        "hidden_size": 8,
+        "num_hidden_layers": 1,
+        "intermediate_size": 16,
+        "num_attention_heads": 2,
+    }));
+    let err = super::keys::LayerMemberSuffixes::from_arch(llama.as_ref()).unwrap_err();
+    assert!(err.to_string().contains("q_norm"), "got: {err}");
+}
+
+#[test]
+fn layer_member_suffixes_reject_prefix_violating_arch() {
+    // Defensive path: an architecture whose key methods do not start
+    // with its own layer prefix cannot be decomposed into suffixes.
+    struct BadArch {
+        config: crate::config::ModelConfig,
+    }
+    impl ModelArchitecture for BadArch {
+        fn family(&self) -> &str {
+            "bad"
+        }
+        fn config(&self) -> &crate::config::ModelConfig {
+            &self.config
+        }
+        fn attn_q_key(&self, _layer: usize) -> String {
+            "unprefixed.q_proj.weight".to_string()
+        }
+        fn attn_q_norm_key(&self, layer: usize) -> Option<String> {
+            Some(format!(
+                "{}self_attn.q_norm.weight",
+                self.layer_prefix(layer)
+            ))
+        }
+        fn attn_k_norm_key(&self, layer: usize) -> Option<String> {
+            Some(format!(
+                "{}self_attn.k_norm.weight",
+                self.layer_prefix(layer)
+            ))
+        }
+    }
+    let (arch, _) = synth_setup();
+    let bad = BadArch {
+        config: arch.config().clone(),
+    };
+    let err = super::keys::LayerMemberSuffixes::from_arch(&bad).unwrap_err();
+    assert!(err.to_string().contains("layer prefix"), "got: {err}");
+}
+
 // ── Coverage: the step-1 gate against the real inventory ─────────────────
 
 #[test]
@@ -417,6 +510,100 @@ fn real_checkpoint_aux_load() {
     assert_eq!(aux.local.embed_tables.len(), config.local_embed_tables());
     assert_eq!(aux.local.lm_heads.len(), config.lm_heads());
     assert_eq!(aux.local.layers.len(), config.local.num_layers);
+}
+
+#[test]
+fn loader_rejects_empty_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let (arch, config) = synth_setup();
+    let err = load_moss_tts_aux_from_safetensors(dir.path(), arch.as_ref(), config).unwrap_err();
+    assert!(err.to_string().contains("safetensors"), "got: {err}");
+}
+
+#[test]
+fn loader_rejects_unexpected_rank() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut tensors = synth_checkpoint(SYNTH_HIDDEN, SYNTH_RVQ, SYNTH_AUDIO_VOCAB, SYNTH_PAD);
+    let table = tensors
+        .iter_mut()
+        .find(|t| t.name == "embed_tokens.1.weight")
+        .unwrap();
+    table.shape = vec![SYNTH_AUDIO_VOCAB, SYNTH_HIDDEN / 2, 2];
+    write_checkpoint(dir.path(), &tensors);
+    let (arch, config) = synth_setup();
+
+    let err = load_moss_tts_aux_from_safetensors(dir.path(), arch.as_ref(), config).unwrap_err();
+    assert!(err.to_string().contains("rank"), "got: {err}");
+}
+
+#[test]
+fn loader_requires_backbone_embed_for_dup_check() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut tensors = synth_checkpoint(SYNTH_HIDDEN, SYNTH_RVQ, SYNTH_AUDIO_VOCAB, SYNTH_PAD);
+    tensors.retain(|t| t.name != "language_model.embed_tokens.weight");
+    write_checkpoint(dir.path(), &tensors);
+    let (arch, config) = synth_setup();
+
+    let err = load_moss_tts_aux_from_safetensors(dir.path(), arch.as_ref(), config).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("language_model.embed_tokens.weight"),
+        "got: {err}"
+    );
+}
+
+#[test]
+fn loader_rejects_pad_token_outside_vocab() {
+    let dir = tempfile::tempdir().unwrap();
+    let tensors = synth_checkpoint(SYNTH_HIDDEN, SYNTH_RVQ, SYNTH_AUDIO_VOCAB, SYNTH_PAD);
+    write_checkpoint(dir.path(), &tensors);
+    // Same checkpoint, but a config whose pad id cannot index the tables.
+    let json = config_json(
+        SYNTH_RVQ,
+        SYNTH_AUDIO_VOCAB,
+        SYNTH_AUDIO_VOCAB + 5,
+        SYNTH_HIDDEN,
+        1,
+        1,
+    );
+    let arch = detect_from_json(&json);
+    let config = MossTtsRealtimeConfig::from_config_json(&json).unwrap();
+
+    let err = load_moss_tts_aux_from_safetensors(dir.path(), arch.as_ref(), config).unwrap_err();
+    assert!(err.to_string().contains("out of range"), "got: {err}");
+}
+
+#[test]
+fn loader_handles_dup_check_across_files() {
+    // The duplication assertion must work when the text table and the
+    // backbone embedding live in different shards.
+    let dir = tempfile::tempdir().unwrap();
+    let mut tensors = synth_checkpoint(SYNTH_HIDDEN, SYNTH_RVQ, SYNTH_AUDIO_VOCAB, SYNTH_PAD);
+    let text_table = {
+        let position = tensors
+            .iter()
+            .position(|t| t.name == "embed_tokens.0.weight")
+            .unwrap();
+        tensors.remove(position)
+    };
+    write_checkpoint(dir.path(), &tensors);
+    // Second shard carrying only the text table.
+    let bytes: Vec<u8> = text_table
+        .data
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect();
+    let view = TensorView::new(Dtype::F32, text_table.shape.clone(), &bytes).unwrap();
+    serialize_to_file(
+        vec![(text_table.name.as_str(), &view)],
+        None,
+        &dir.path().join("model-2.safetensors"),
+    )
+    .unwrap();
+    let (arch, config) = synth_setup();
+
+    let aux = load_moss_tts_aux_from_safetensors(dir.path(), arch.as_ref(), config).unwrap();
+    assert_eq!(aux.audio_embed_tables.len(), SYNTH_RVQ);
 }
 
 #[test]
