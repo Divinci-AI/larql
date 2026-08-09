@@ -34,6 +34,84 @@ fn row_block_bytes(cols: usize, format: crate::QuantFormat) -> usize {
         .expect("integer expert path requires a block format");
     cols / block_elems * block_bytes
 }
+
+/// Row-parallel sibling of [`run_single_expert_kq_q8k_into`] for layers
+/// whose ACTIVE expert count cannot fill the thread pool.
+///
+/// The block forward parallelises across active experts, which is the
+/// right schedule when top-k ≥ the pool width (Gemma's top-8 on 8
+/// threads). GPT-OSS routes top-4, so expert-parallel left half the
+/// machine idle on every layer — the experts here instead run serially
+/// (in the caller) and each matvec fans its rows across the pool via
+/// `q4k_q8k_matvec_parallel`. Same math, same kernels, different
+/// schedule; output differs from the serial form only by f32
+/// accumulation order inside a row, which is none at all (rows are
+/// independent).
+pub fn run_single_expert_kq_q8k_parallel_into<'s>(
+    scratch: &'s mut ExpertScratch,
+    h_norm_q8k: &Q8KActivation,
+    gate_up_bytes: &[u8],
+    down_bytes: &[u8],
+    inter: usize,
+    format: crate::QuantFormat,
+    mlp: crate::ExpertMlp<'_>,
+) -> &'s [f32] {
+    use crate::cpu::ops::q4k_q8k_dot::q4k_q8k_matvec_parallel;
+
+    let cols = h_norm_q8k.qs.len();
+    let hidden_out = scratch.out.len();
+    if inter == 0 || cols == 0 {
+        for v in scratch.out.iter_mut() {
+            *v = 0.0;
+        }
+        return &scratch.out;
+    }
+    let (block, _) = format
+        .packed_block_layout()
+        .expect("integer expert path requires a block format");
+    let inter_padded = inter.div_ceil(block) * block;
+    let half = inter * row_block_bytes(cols, format);
+    if gate_up_bytes.len() < 2 * half {
+        for v in scratch.out.iter_mut() {
+            *v = 0.0;
+        }
+        return &scratch.out;
+    }
+    let tag = format.registry_tag();
+    q4k_q8k_matvec_parallel(
+        &mut scratch.gate_out,
+        h_norm_q8k,
+        &gate_up_bytes[..half],
+        inter,
+        cols,
+        tag,
+    );
+    q4k_q8k_matvec_parallel(
+        &mut scratch.up_out,
+        h_norm_q8k,
+        &gate_up_bytes[half..2 * half],
+        inter,
+        cols,
+        tag,
+    );
+    for j in 0..inter {
+        let g = scratch.gate_out[j] + mlp.gate_bias(j);
+        let u = scratch.up_out[j] + mlp.up_bias(j);
+        scratch.act[j] = mlp.rule.combine(g, u);
+    }
+    super::super::within_expert::prune_act(&mut scratch.act, inter);
+    quantize_x_to_q8k_into(&mut scratch.act_q8k, &scratch.act);
+    q4k_q8k_matvec_parallel(
+        &mut scratch.out,
+        &scratch.act_q8k,
+        down_bytes,
+        hidden_out,
+        inter_padded,
+        tag,
+    );
+    mlp.add_down_bias(&mut scratch.out);
+    &scratch.out
+}
 // `q4k_q8k_gate_up_into` exists for future kernel exploration but is not
 // wired into the hot path — see comment in `run_single_expert_q4k_q8k_into`.
 

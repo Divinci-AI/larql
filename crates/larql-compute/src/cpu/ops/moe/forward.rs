@@ -245,35 +245,78 @@ pub fn cpu_moe_forward(
         });
     };
 
+    /// Expert-parallel needs at least this many active experts per pool
+    /// thread to fill the machine; below it, experts run serially with
+    /// row-parallel matvecs instead. At 2, Gemma's top-8 on an 8-thread
+    /// pool keeps its measured expert-parallel schedule (8×2 > 8), while
+    /// GPT-OSS's top-4 (4×2 ≤ 8) — which left half the pool idle on
+    /// every layer — switches to row-parallel.
+    const EXPERT_PARALLEL_MIN_FILL: usize = 2;
+
     let expert_out = if crate::cpu::spin_pool::enabled() {
-        // Spin-pool path: one chunk per active (non-zero-weight) expert, each
-        // accumulating into its own disjoint `hidden`-wide slot; summed after.
-        // Keeps all decode sections on one hot pool (no rayon/spin two-pool
-        // contention). Sum order differs from the rayon tree-reduce by fp
-        // reordering only — within the experts' tolerance parity.
         let active: Vec<(usize, f32)> = expert_indices
             .iter()
             .copied()
             .zip(expert_weights.iter().copied())
             .filter(|(_, w)| *w != 0.0)
             .collect();
-        let mut contribs = vec![0.0f32; active.len() * hidden];
-        let active_ref = &active[..];
-        let add_expert_ref = &add_expert;
-        crate::cpu::spin_pool::par_chunks_mut(&mut contribs, hidden, |ci, slot| {
-            let (ei, w) = active_ref[ci];
-            add_expert_ref(ei, w, slot);
-        });
-        let mut acc = vec![0.0f32; hidden];
-        for ci in 0..active.len() {
-            for (a, &v) in acc
-                .iter_mut()
-                .zip(contribs[ci * hidden..(ci + 1) * hidden].iter())
-            {
-                *a += v;
+        let pool_threads = crate::cpu::spin_pool::global().num_threads();
+        if let Some(q8k) = expert_input_q8k
+            .as_ref()
+            .filter(|_| active.len() * EXPERT_PARALLEL_MIN_FILL <= pool_threads)
+        {
+            // Row-parallel schedule: experts serial, each matvec fanned
+            // across the whole pool (`q4k_q8k_matvec_parallel`). Weighted
+            // accumulation happens here in selection order, so the sum
+            // order matches the serial reference exactly.
+            let mut acc = vec![0.0f32; hidden];
+            let mut scratch = ExpertScratch::new(hidden, inter, inter_padded);
+            for &(ei, w) in &active {
+                let (Some(&gate_up_bytes), Some(&down_bytes)) =
+                    (moe.experts_gate_up.get(ei), moe.experts_down.get(ei))
+                else {
+                    continue;
+                };
+                let mlp = moe.expert_mlp(ei);
+                let h2 = super::expert::run_single_expert_kq_q8k_parallel_into(
+                    &mut scratch,
+                    q8k,
+                    gate_up_bytes,
+                    down_bytes,
+                    inter,
+                    format,
+                    mlp,
+                );
+                for (a, &v) in acc.iter_mut().zip(h2.iter()) {
+                    *a += w * v;
+                }
             }
+            acc
+        } else {
+            // Spin-pool path: one chunk per active (non-zero-weight) expert,
+            // each accumulating into its own disjoint `hidden`-wide slot;
+            // summed after. Keeps all decode sections on one hot pool (no
+            // rayon/spin two-pool contention). Sum order differs from the
+            // rayon tree-reduce by fp reordering only — within the experts'
+            // tolerance parity.
+            let mut contribs = vec![0.0f32; active.len() * hidden];
+            let active_ref = &active[..];
+            let add_expert_ref = &add_expert;
+            crate::cpu::spin_pool::par_chunks_mut(&mut contribs, hidden, |ci, slot| {
+                let (ei, w) = active_ref[ci];
+                add_expert_ref(ei, w, slot);
+            });
+            let mut acc = vec![0.0f32; hidden];
+            for ci in 0..active.len() {
+                for (a, &v) in acc
+                    .iter_mut()
+                    .zip(contribs[ci * hidden..(ci + 1) * hidden].iter())
+                {
+                    *a += v;
+                }
+            }
+            acc
         }
-        acc
     } else {
         expert_indices
             .par_iter()
