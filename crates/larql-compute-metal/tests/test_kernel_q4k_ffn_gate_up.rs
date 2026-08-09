@@ -159,9 +159,12 @@ fn q4k_ffn_gate_up_gemma4_26b_a4b_moe_shape() {
 
 #[test]
 fn q4k_ffn_gate_up_max_k_boundary_4096() {
-    // Right at the shader's Q4K_GU_MAX_K=4096 shared-memory cap. Should
-    // pass — the threadgroup tile fits exactly. Anything past this is
-    // out-of-bounds shared-memory access (Metal UB).
+    // Historical boundary: the shader once staged X in a shared-memory
+    // tile capped by Q4K_GU_MAX_K = 4096. That tile (and the constant)
+    // are gone — the kernel now streams X from device memory — but the
+    // geometry stays pinned as a regression guard for any future
+    // reintroduction of a K cap (audit F22: the old comment described
+    // a constant that no longer exists).
     assert_q4k_ffn_gate_up_matches_per_matrix("at MAX_K (4096)", 32, 4096);
 }
 
