@@ -71,10 +71,21 @@ impl MetalBackend {
         layer: &FullPipelineLayer,
         bufs: QkvBufs<'_>,
         dims: QkvDims,
-        uses_kquant: bool,
         input_already_normed: bool,
     ) {
-        if uses_kquant {
+        // The QKV plan (kernel route + input encoding) from the full
+        // (wq, wk, wv) triple — the same authority the prefill and
+        // hybrid paths consult. Replaces the caller-supplied
+        // `uses_kquant` boolean, which was keyed on wq alone
+        // (capability audit, slice 1). Unroutable triples (floats,
+        // BitNet, mixed input encodings) refuse here, before any
+        // dispatch is encoded.
+        let plan = crate::stages::qkv_proj::plan_qkv(
+            layer.wq.format(),
+            layer.wk.format(),
+            layer.wv.format(),
+        );
+        if plan.input == crate::stages::qkv_proj::QkvInputEncoding::F32 {
             // Default path (since 2026-05-09): separate `rms_norm` dispatch
             // + non-fused `q4k_q6k_qkv_proj`. The fused alternative
             // (`q4k_q6k_qkv_proj_normed`) saves 1 dispatch/layer (~0.24
@@ -228,6 +239,12 @@ impl MetalBackend {
         );
 
         match route {
+            // Q8_0 triples carry the Q8 input encoding, so the plan
+            // sends them down the Q8 branch of the entry function —
+            // this f32-input helper can never see the route.
+            QkvFormatRoute::FusedQ8 => {
+                unreachable!("FusedQ8 is served by the Q8-input branch")
+            }
             QkvFormatRoute::UniformQ4K | QkvFormatRoute::UniformQ4Kf => {
                 use crate::stages::qkv_proj::FusedQkvKernel;
                 let (fused_pipe, fused_kernel) = match route {
@@ -377,12 +394,16 @@ impl MetalBackend {
         );
 
         // M2: read the per-projection format triple once, through the
-        // structured weights view.
+        // structured weights view. Route from the plan's table — this
+        // was the second copy of a hand-written Q8_0 triple check
+        // (prefill held the other) that the route table now owns.
         let attn_weights = layer.weights().attention;
-        if attn_weights.wq.format() == larql_compute::QuantFormat::Q8_0
-            && attn_weights.wk.format() == larql_compute::QuantFormat::Q8_0
-            && attn_weights.wv.format() == larql_compute::QuantFormat::Q8_0
-        {
+        let route = crate::stages::qkv_proj::pick_qkv_route(
+            attn_weights.wq.format(),
+            attn_weights.wk.format(),
+            attn_weights.wv.format(),
+        );
+        if route == crate::stages::qkv_proj::QkvFormatRoute::FusedQ8 {
             let total_rows = (layer_q_dim + layer_kv_dim + layer_kv_dim) as u32;
             let q_rows = layer_q_dim as u32;
             let k_rows = layer_kv_dim as u32;

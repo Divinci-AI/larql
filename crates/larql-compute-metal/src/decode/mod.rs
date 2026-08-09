@@ -509,7 +509,6 @@ impl MetalBackend {
             let layer_head_dim = layer.head_dim;
             let layer_num_q_heads = layer.num_q_heads;
             let layer_num_kv_heads = layer.num_kv_heads;
-            let uses_kquant = layer.wq.format().is_kquant_family();
             let layer_q_dim = layer_num_q_heads * layer_head_dim;
             let layer_kv_dim = layer_num_kv_heads * layer_head_dim;
 
@@ -553,7 +552,6 @@ impl MetalBackend {
                     eps,
                     norm_offset,
                 },
-                uses_kquant,
                 prelayer_norm_active,
             );
 

@@ -73,25 +73,30 @@ impl MetalBackend {
             larql_compute::QuantFormat::Q4_0,
             "Q4_0 O-projection weights are not supported on the hybrid path"
         );
-        let qkv_uses_kquant = layer.wq.format().is_kquant_family();
         let o_uses_kquant = layer.wo.format().is_kquant_family();
-        // Route on the full (wq, wk, wv) triple, never on `wq` alone.
-        // Selecting on `wq` sent the production Gemma 3/4 shape
-        // (Q4_K Q/K + Q6_K V) to the uniform Q4_K kernel, which strides
-        // V at 144 bytes per superblock against Q6_K's 210-byte blocks
-        // — silent corruption of every V projection. Capability audit
-        // F2; same operand-local-ABI lesson as the Phase A O-projection
-        // fix. Resolved HERE, before any command encoder exists: the
-        // refusal panic must not unwind past a live encoder, or Metal's
-        // "released without endEncoding" assertion turns it into a
-        // process-killing SIGTRAP.
-        let qkv_kquant_pipeline = if qkv_uses_kquant {
-            use crate::stages::qkv_proj::{pick_qkv_route, QkvFormatRoute};
-            let route = pick_qkv_route(layer.wq.format(), layer.wk.format(), layer.wv.format());
-            Some(match route {
+        // The QKV plan from the full (wq, wk, wv) triple — the same
+        // authority decode and prefill consult. Selecting on `wq` alone
+        // sent the production Gemma 3/4 shape (Q4_K Q/K + Q6_K V) to
+        // the uniform Q4_K kernel, which strides V at 144 bytes per
+        // superblock against Q6_K's 210-byte blocks — silent corruption
+        // of every V projection (audit F2; same operand-local-ABI
+        // lesson as the Phase A O-projection fix). Resolved HERE,
+        // before any command encoder exists: a refusal panic must not
+        // unwind past a live encoder, or Metal's "released without
+        // endEncoding" assertion turns it into a process-killing
+        // SIGTRAP.
+        use crate::stages::qkv_proj::{plan_qkv, QkvFormatRoute, QkvInputEncoding};
+        let qkv_plan = plan_qkv(layer.wq.format(), layer.wk.format(), layer.wv.format());
+        let qkv_uses_f32_input = qkv_plan.input == QkvInputEncoding::F32;
+        let qkv_kquant_pipeline = if qkv_uses_f32_input {
+            Some(match qkv_plan.route {
                 QkvFormatRoute::UniformQ4K => &self.attention.q4k_qkv_proj_pipeline,
                 QkvFormatRoute::UniformQ4Kf => &self.attention.q4kf_qkv_proj_pipeline,
                 QkvFormatRoute::MixedQ4kQ6kV => &self.attention.q4k_q6k_qkv_proj_pipeline,
+                // Q8 input encoding takes the else-branch below.
+                QkvFormatRoute::FusedQ8 => {
+                    unreachable!("FusedQ8 carries the Q8 input encoding")
+                }
                 // The hybrid path has no per-projection escape, and
                 // dispatching a fused kernel on a triple it does not
                 // decode reinterprets weight bytes. Refuse loudly.
@@ -146,7 +151,7 @@ impl MetalBackend {
 
         let enc_a = cmd.new_compute_command_encoder();
 
-        if qkv_uses_kquant {
+        if qkv_uses_f32_input {
             use crate::ops::full_pipeline::encode_rms_norm;
             let norm_f32_buf = self.bufs.output((hidden * 4) as u64);
             let total_rows = (q_dim + kv_dim + kv_dim) as u32;
