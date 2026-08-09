@@ -26,6 +26,45 @@ larql> INFER "The capital of France is" TOP 3;
   3. a                    (0.31%)
 ```
 
+## Table of Contents
+
+- [Quick Start](#quick-start)
+    - [Serve it over HTTP + gRPC](#serve-it-over-http--grpc)
+    - [Run attention locally, FFN on another machine](#run-attention-locally-ffn-on-another-machine)
+    - [MoE expert sharding — experts on CPU-only remote machines](#moe-expert-sharding--experts-on-cpu-only-remote-machines)
+    - [Publish to HuggingFace — full + slices + collections](#publish-to-huggingface--full--slices--collections)
+    - [Vindex Factory — recipe-driven builds](#vindex-factory--recipe-driven-builds)
+    - [Pull with slice awareness](#pull-with-slice-awareness)
+    - [Query via LQL](#query-via-lql)
+    - [Research / interpretability tools](#research--interpretability-tools)
+- [What is a Vindex?](#what-is-a-vindex)
+- [Architecture](#architecture)
+    - [larql-vindex](#larql-vindex)
+    - [larql-kv](#larql-kv)
+    - [larql-lql](#larql-lql)
+- [LQL Reference](#lql-reference)
+    - [Key Statements](#key-statements)
+- [Patches](#patches)
+- [Vindexfile](#vindexfile)
+- [Model Support](#model-support)
+- [Benchmarks](#benchmarks)
+    - [Vindex Operations](#vindex-operations)
+    - [Inference Engine (Gemma 3 4B, Apple Silicon M3 Max)](#inference-engine-gemma-3-4b-apple-silicon-m3-max)
+    - [MoE / grid (Gemma 4 26B A4B, M3 Max)](#moe--grid-gemma-4-26b-a4b-m3-max)
+    - [Load-bearing environment flags (serving & measurement)](#load-bearing-environment-flags-serving--measurement)
+    - [Dense remote-FFN (Gemma 4 31B Q4K, M3 Max, localhost)](#dense-remote-ffn-gemma-4-31b-q4k-m3-max-localhost)
+- [Residual Stream Trace](#residual-stream-trace)
+    - [Tiered Context (infinite context without KV cache)](#tiered-context-infinite-context-without-kv-cache)
+- [Mechanistic interpretability surface](#mechanistic-interpretability-surface)
+- [Documentation](#documentation)
+- [Platform Support](#platform-support)
+- [Install](#install)
+- [Building & Testing](#building--testing)
+    - [Cross-engine correctness check](#cross-engine-correctness-check)
+- [License](#license)
+
+---
+
 ## Quick Start
 
 ```bash
