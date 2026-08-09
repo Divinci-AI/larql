@@ -98,7 +98,56 @@ impl MetalBackend {
         let gate_half_bytes = (inter * scratch.row_bytes) as u64;
         let n_rows = inter as u32;
         let k_cols = scratch.weight_cols as u32;
+        // Grouped dispatch wants ONE base buffer + a u32 byte-offset table.
+        // Zero-copy resolution guarantees it per layer in practice (every
+        // expert of a layer lives in that layer's mmap → one region
+        // buffer); cross-buffer or >4 GiB offsets fall back to per-expert
+        // dispatches, which are exact but occupancy-poor (η ≈ 0.64 at the
+        // expert shape — the K3a measurement the grouped kernel exists for).
+        let single_base = |extract: fn(&ResolvedExpert) -> &(Buffer, u64)| -> bool {
+            resolved
+                .windows(2)
+                .all(|w| extract(&w[0]).0.gpu_address() == extract(&w[1]).0.gpu_address())
+                && resolved.iter().all(|r| u32::try_from(extract(r).1).is_ok())
+        };
         match scratch.format {
+            larql_compute::QuantFormat::Q6_K if single_base(|r| &r.gate_up) => {
+                // K3a grouped kernel: all selected experts' gate rows in one
+                // 2-D dispatch (row tiles × slots), then the same for up.
+                // Reduction body is byte-identical to `q6k_matvec`, so
+                // outputs match the per-expert form exactly.
+                let kh = &self.quant.q6k_grouped_experts_pipeline;
+                let base = &resolved[0].gate_up.0;
+                let row_tiles = (inter as u64).div_ceil(kh.rows_per_tg);
+                let xstride_shared: u32 = 0;
+                for half in [0u64, 1] {
+                    let offsets: Vec<u32> = resolved
+                        .iter()
+                        .map(|r| (r.gate_up.1 + half * gate_half_bytes) as u32)
+                        .collect();
+                    let out_buf = if half == 0 {
+                        &scratch.g_out
+                    } else {
+                        &scratch.u_out
+                    };
+                    enc.set_compute_pipeline_state(&kh.state);
+                    enc.set_buffer(0, Some(base), 0);
+                    enc.set_bytes(
+                        1,
+                        (offsets.len() * 4) as u64,
+                        offsets.as_ptr() as *const c_void,
+                    );
+                    enc.set_buffer(2, Some(&scratch.x_buf), 0);
+                    enc.set_buffer(3, Some(out_buf), 0);
+                    enc.set_bytes(4, 4, &n_rows as *const u32 as *const c_void);
+                    enc.set_bytes(5, 4, &k_cols as *const u32 as *const c_void);
+                    enc.set_bytes(6, 4, &xstride_shared as *const u32 as *const c_void);
+                    enc.dispatch_thread_groups(
+                        MTLSize::new(row_tiles, valid_count as u64, 1),
+                        MTLSize::new(kh.threads_per_tg, 1, 1),
+                    );
+                }
+            }
             larql_compute::QuantFormat::Q6_K => {
                 let kh = &self.quant.q6k_matvec_pipeline;
                 let tgs = (inter as u64).div_ceil(kh.rows_per_tg);
@@ -116,6 +165,42 @@ impl MetalBackend {
                             MTLSize::new(kh.threads_per_tg, 1, 1),
                         );
                     }
+                }
+            }
+            _ if single_base(|r| &r.gate_up) => {
+                // Q4_K grouped sibling: same offset-table interface, gate
+                // rows for every selected expert in one 2-D dispatch, then
+                // up. Reduction body is byte-identical to `q4k_matvec`.
+                let kh = &self.quant.q4k_grouped_experts_pipeline;
+                let base = &resolved[0].gate_up.0;
+                let row_tiles = (inter as u64).div_ceil(kh.rows_per_tg);
+                let xstride_shared: u32 = 0;
+                for half in [0u64, 1] {
+                    let offsets: Vec<u32> = resolved
+                        .iter()
+                        .map(|r| (r.gate_up.1 + half * gate_half_bytes) as u32)
+                        .collect();
+                    let out_buf = if half == 0 {
+                        &scratch.g_out
+                    } else {
+                        &scratch.u_out
+                    };
+                    enc.set_compute_pipeline_state(&kh.state);
+                    enc.set_buffer(0, Some(base), 0);
+                    enc.set_bytes(
+                        1,
+                        (offsets.len() * 4) as u64,
+                        offsets.as_ptr() as *const c_void,
+                    );
+                    enc.set_buffer(2, Some(&scratch.x_buf), 0);
+                    enc.set_buffer(3, Some(out_buf), 0);
+                    enc.set_bytes(4, 4, &n_rows as *const u32 as *const c_void);
+                    enc.set_bytes(5, 4, &k_cols as *const u32 as *const c_void);
+                    enc.set_bytes(6, 4, &xstride_shared as *const u32 as *const c_void);
+                    enc.dispatch_thread_groups(
+                        MTLSize::new(row_tiles, valid_count as u64, 1),
+                        MTLSize::new(kh.threads_per_tg, 1, 1),
+                    );
                 }
             }
             _ => {
@@ -185,28 +270,58 @@ impl MetalBackend {
             );
         }
 
-        // ── Down projection per expert at its region offset.
+        // ── Down projection at the experts' region offsets.
         let n_out = hidden as u32;
         let k_in = inter_padded as u32;
-        let down_kh = match scratch.format {
-            larql_compute::QuantFormat::Q6_K => &self.quant.q6k_matvec_pipeline,
-            _ => &self.quant.q4k_matvec_pipeline,
-        };
-        let down_tgs = (hidden as u64).div_ceil(down_kh.rows_per_tg);
-        for (e, r) in resolved.iter().enumerate() {
-            let (buf, off) = &r.down;
-            let act_offset = (e * inter_padded * 4) as u64;
-            let out_offset = (e * hidden * 4) as u64;
-            enc.set_compute_pipeline_state(&down_kh.state);
-            enc.set_buffer(0, Some(buf), *off);
-            enc.set_buffer(1, Some(&scratch.act_buf), act_offset);
-            enc.set_buffer(2, Some(&scratch.expert_outs), out_offset);
-            enc.set_bytes(3, 4, &n_out as *const u32 as *const c_void);
-            enc.set_bytes(4, 4, &k_in as *const u32 as *const c_void);
-            enc.dispatch_thread_groups(
-                MTLSize::new(down_tgs, 1, 1),
-                MTLSize::new(down_kh.threads_per_tg, 1, 1),
+        if single_base(|r| &r.down) {
+            // Grouped down: each slot reads its OWN activation
+            // (`XSTRIDE = inter_padded` — the strided act_buf layout the
+            // activation stage wrote above).
+            let kh = match scratch.format {
+                larql_compute::QuantFormat::Q6_K => &self.quant.q6k_grouped_experts_pipeline,
+                _ => &self.quant.q4k_grouped_experts_pipeline,
+            };
+            let row_tiles = (hidden as u64).div_ceil(kh.rows_per_tg);
+            let base = &resolved[0].down.0;
+            let offsets: Vec<u32> = resolved.iter().map(|r| r.down.1 as u32).collect();
+            let xstride_own: u32 = inter_padded as u32;
+            enc.set_compute_pipeline_state(&kh.state);
+            enc.set_buffer(0, Some(base), 0);
+            enc.set_bytes(
+                1,
+                (offsets.len() * 4) as u64,
+                offsets.as_ptr() as *const c_void,
             );
+            enc.set_buffer(2, Some(&scratch.act_buf), 0);
+            enc.set_buffer(3, Some(&scratch.expert_outs), 0);
+            enc.set_bytes(4, 4, &n_out as *const u32 as *const c_void);
+            enc.set_bytes(5, 4, &k_in as *const u32 as *const c_void);
+            enc.set_bytes(6, 4, &xstride_own as *const u32 as *const c_void);
+            enc.dispatch_thread_groups(
+                MTLSize::new(row_tiles, valid_count as u64, 1),
+                MTLSize::new(kh.threads_per_tg, 1, 1),
+            );
+        } else {
+            let down_kh = match scratch.format {
+                larql_compute::QuantFormat::Q6_K => &self.quant.q6k_matvec_pipeline,
+                _ => &self.quant.q4k_matvec_pipeline,
+            };
+            let down_tgs = (hidden as u64).div_ceil(down_kh.rows_per_tg);
+            for (e, r) in resolved.iter().enumerate() {
+                let (buf, off) = &r.down;
+                let act_offset = (e * inter_padded * 4) as u64;
+                let out_offset = (e * hidden * 4) as u64;
+                enc.set_compute_pipeline_state(&down_kh.state);
+                enc.set_buffer(0, Some(buf), *off);
+                enc.set_buffer(1, Some(&scratch.act_buf), act_offset);
+                enc.set_buffer(2, Some(&scratch.expert_outs), out_offset);
+                enc.set_bytes(3, 4, &n_out as *const u32 as *const c_void);
+                enc.set_bytes(4, 4, &k_in as *const u32 as *const c_void);
+                enc.dispatch_thread_groups(
+                    MTLSize::new(down_tgs, 1, 1),
+                    MTLSize::new(down_kh.threads_per_tg, 1, 1),
+                );
+            }
         }
         enc.end_encoding();
         cmd.commit();
