@@ -1,7 +1,7 @@
 # The TTS funnel — audio-token output as a forcing function
 
-Status: steps 0-4 green — Milestone A: LARQL speaks in tokens. Branch
-`worktree-tts-audio-tokens`, started 2026-08-09.
+Status: steps 0-4 green; step 5 speaks at **1.68x realtime on CPU**.
+Branch `worktree-tts-audio-tokens`, started 2026-08-09.
 
 Gate log:
 

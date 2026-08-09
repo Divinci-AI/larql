@@ -127,7 +127,15 @@ pub fn kv_prefill_via_dispatch(
         return Ok(None);
     }
     let h = embed_tokens_pub(&weights, prompt_ids);
-    kv_prefill_from_hidden_via_dispatch(backend, weights, ffn, &h, Some(prompt_ids), window, index)
+    kv_prefill_from_hidden_via_dispatch(
+        backend,
+        weights,
+        ffn,
+        &h,
+        Some(prompt_ids),
+        window,
+        index.map(|v| v as &dyn larql_compute::KvIndex),
+    )
 }
 
 /// Multi-modal-aware peer of [`kv_prefill_via_dispatch`]. Takes
@@ -154,7 +162,7 @@ pub fn kv_prefill_from_hidden_via_dispatch(
     initial_hidden: &Array2<f32>,
     token_ids: Option<&[u32]>,
     window: Option<usize>,
-    index: Option<&larql_vindex::VectorIndex>,
+    index: Option<&dyn larql_compute::KvIndex>,
 ) -> DispatchOutcome<PrefilledCache> {
     if initial_hidden.nrows() == 0 {
         return Ok(None);
@@ -173,13 +181,9 @@ pub fn kv_prefill_from_hidden_via_dispatch(
         let _t_attn = std::time::Instant::now();
         // A declining backend is not a refusal — it is this dispatch having no
         // answer, which is what `Ok(None)` has always meant to the engine.
-        let Some((h_post_attn, mut handle)) = backend.attention_prefill(
-            weights,
-            &h,
-            layer,
-            window,
-            index.map(|v| v as &dyn larql_compute::KvIndex),
-        ) else {
+        let Some((h_post_attn, mut handle)) =
+            backend.attention_prefill(weights, &h, layer, window, index)
+        else {
             return Ok(None);
         };
         crate::decode_stages::record_attn(_t_attn.elapsed().as_nanos());
@@ -269,7 +273,7 @@ pub fn kv_decode_step_from_hidden_via_dispatch(
     hidden_row: &Array2<f32>,
     abs_position: usize,
     window: Option<usize>,
-    index: Option<&larql_vindex::VectorIndex>,
+    index: Option<&dyn larql_compute::KvIndex>,
 ) -> DispatchOutcome<Array2<f32>> {
     let num_layers = weights.num_layers;
     debug_assert_eq!(
@@ -286,14 +290,9 @@ pub fn kv_decode_step_from_hidden_via_dispatch(
 
     for (layer, handle) in handles.iter_mut().enumerate().take(num_layers) {
         let _t_attn = std::time::Instant::now();
-        let Some(h_post_attn) = backend.attention_step(
-            weights,
-            &h_step,
-            handle,
-            layer,
-            abs_position,
-            index.map(|v| v as &dyn larql_compute::KvIndex),
-        ) else {
+        let Some(h_post_attn) =
+            backend.attention_step(weights, &h_step, handle, layer, abs_position, index)
+        else {
             return Ok(None);
         };
         crate::decode_stages::record_attn(_t_attn.elapsed().as_nanos());
@@ -343,7 +342,7 @@ pub fn kv_prefill_via_dispatch_async(
         &h,
         Some(prompt_ids),
         window,
-        index,
+        index.map(|v| v as &dyn larql_compute::KvIndex),
     )
 }
 
@@ -363,7 +362,7 @@ pub fn kv_prefill_from_hidden_via_dispatch_async(
     initial_hidden: &Array2<f32>,
     token_ids: Option<&[u32]>,
     window: Option<usize>,
-    index: Option<&larql_vindex::VectorIndex>,
+    index: Option<&dyn larql_compute::KvIndex>,
 ) -> DispatchOutcome<PrefilledCache> {
     if initial_hidden.nrows() == 0 {
         return Ok(None);
@@ -379,13 +378,8 @@ pub fn kv_prefill_from_hidden_via_dispatch_async(
     };
 
     for layer in 0..num_layers {
-        let (h_post_attn_handle, mut handle) = backend.attention_prefill_async(
-            weights,
-            &h,
-            layer,
-            window,
-            index.map(|v| v as &dyn larql_compute::KvIndex),
-        );
+        let (h_post_attn_handle, mut handle) =
+            backend.attention_prefill_async(weights, &h, layer, window, index);
         if let Some(w) = window {
             // Sync clip — backends with deferred dispatch must flush
             // before clip per spec §11.3.
@@ -465,7 +459,7 @@ pub fn kv_decode_step_from_hidden_via_dispatch_async(
     hidden_row: &Array2<f32>,
     abs_position: usize,
     window: Option<usize>,
-    index: Option<&larql_vindex::VectorIndex>,
+    index: Option<&dyn larql_compute::KvIndex>,
 ) -> DispatchOutcome<Array2<f32>> {
     let num_layers = weights.num_layers;
     debug_assert_eq!(
@@ -476,14 +470,8 @@ pub fn kv_decode_step_from_hidden_via_dispatch_async(
     let mut h_step = hidden_row.clone();
 
     for (layer, handle) in handles.iter_mut().enumerate().take(num_layers) {
-        let h_post_attn_handle = backend.attention_step_async(
-            weights,
-            &h_step,
-            handle,
-            layer,
-            abs_position,
-            index.map(|v| v as &dyn larql_compute::KvIndex),
-        );
+        let h_post_attn_handle =
+            backend.attention_step_async(weights, &h_step, handle, layer, abs_position, index);
         if let Some(w) = window {
             backend.clip_kv(handle, w);
         }

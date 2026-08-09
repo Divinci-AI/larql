@@ -91,6 +91,7 @@ pub mod kquant_forward;
 pub mod kv_dispatch;
 pub mod kv_index;
 pub mod options;
+pub mod packed_attn_index;
 pub mod per_layer_decode_state;
 pub mod pipeline;
 pub mod pipeline_layer;
@@ -144,6 +145,7 @@ pub use cpu::ops::moe::{quantize_x_to_q8k, Q8KActivation};
 pub use cpu::ops::q4k_matvec::f16_to_f32;
 pub use cpu::ops::vector::{cosine, dot, norm};
 pub use cpu::CpuBackend;
+pub use packed_attn_index::PackedAttnIndex;
 
 /// Build a CPU backend.  Always returns a usable backend (BLAS on
 /// macOS via Accelerate, OpenBLAS on Linux/Windows).

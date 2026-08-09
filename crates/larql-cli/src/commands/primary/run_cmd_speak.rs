@@ -17,12 +17,12 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use larql_compute::ffn::q4k_weight::Q4kFfn;
+use larql_compute::{KvIndex, PackedAttnIndex};
 use larql_inference::ffn::{FfnBackend, WeightFfn};
 use larql_inference::speech::moss_prompt::build_prompt;
 use larql_inference::speech::moss_realtime::generate_frames_streaming;
 use larql_inference::speech::moss_sampling::{DecodeMode, MossSampling};
 use larql_inference::tokenizer::load_tokenizer;
-use larql_kv::engines::standard::StandardEngine;
 use larql_models::loading::safetensors::load_model_dir;
 use larql_models::speech::moss_tts_realtime::{
     depth_transformer_model, load_moss_tts_aux_from_safetensors, MossTtsRealtimeConfig,
@@ -97,10 +97,10 @@ pub fn run_speak(args: &RunArgs) -> Result<(), BoxErr> {
     // `--metal` routes the backbone through the default backend
     // composition (Metal + CPU fallback when built with the gpu
     // feature); the depth transformer stays on CPU either way for now.
-    let mut engine = if args.metal {
-        StandardEngine::with_backend(None, larql_inference::default_engine_backend())
+    let backend = if args.metal {
+        larql_inference::default_engine_backend()
     } else {
-        StandardEngine::new(None)
+        larql_inference::cpu_engine_backend()
     };
     let backbone_dense = WeightFfn { weights: &weights };
     let depth_dense = WeightFfn {
@@ -108,19 +108,27 @@ pub fn run_speak(args: &RunArgs) -> Result<(), BoxErr> {
     };
     let (ffn, depth_ffn): (&dyn FfnBackend, &dyn FfnBackend);
     let (backbone_q4, depth_q4);
+    let (backbone_attn_q4, depth_attn_q4);
+    let (backbone_attn, depth_attn): (Option<&dyn KvIndex>, Option<&dyn KvIndex>);
     if args.q4 {
         let quant_start = Instant::now();
         backbone_q4 = Q4kFfn::quantize_from(&weights)?;
         depth_q4 = Q4kFfn::quantize_from(&depth.weights)?;
+        backbone_attn_q4 = PackedAttnIndex::quantize_from(&weights)?;
+        depth_attn_q4 = PackedAttnIndex::quantize_from(&depth.weights)?;
         eprintln!(
-            "FFNs quantised to Q4_K in {:.1}s (attention stays fp32)",
+            "FFNs + attention projections quantised to Q4_K in {:.1}s",
             quant_start.elapsed().as_secs_f64()
         );
         ffn = &backbone_q4;
         depth_ffn = &depth_q4;
+        backbone_attn = Some(&backbone_attn_q4);
+        depth_attn = Some(&depth_attn_q4);
     } else {
         ffn = &backbone_dense;
         depth_ffn = &depth_dense;
+        backbone_attn = None;
+        depth_attn = None;
     }
     let generation_start = Instant::now();
     let mut frame_instants: Vec<f64> = Vec::new();
@@ -130,7 +138,7 @@ pub fn run_speak(args: &RunArgs) -> Result<(), BoxErr> {
         DecodeMode::Sampled(MossSampling::default())
     };
     let generation = generate_frames_streaming(
-        &mut engine,
+        backend.as_ref(),
         &weights,
         ffn,
         &audio_tables,
@@ -143,6 +151,8 @@ pub fn run_speak(args: &RunArgs) -> Result<(), BoxErr> {
         args.max_frames,
         mode,
         args.seed,
+        backbone_attn,
+        depth_attn,
         |index, _codes| {
             frame_instants.push(generation_start.elapsed().as_secs_f64());
             if (index + 1) % 25 == 0 {

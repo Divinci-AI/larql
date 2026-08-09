@@ -30,7 +30,6 @@ use larql_inference::larql_models::speech::moss_tts_realtime::{
     depth_transformer_model, load_moss_tts_aux_from_safetensors, MossTtsRealtimeConfig,
 };
 use larql_inference::speech::moss_realtime::generate_frames_greedy;
-use larql_kv::engines::standard::StandardEngine;
 
 /// The reference consumed this many text ids during prefill
 /// (`delay_tokens_len`); the queue starts after them. Derived from the
@@ -84,13 +83,13 @@ fn moss_full_greedy_loop_matches_reference_dump() {
     let step_ids = fixtures.i64_matrix_as_u32("step_ids");
     let text_pad_id = step_ids[[step_ids.nrows() - 1, 0]];
 
-    let mut engine = StandardEngine::new(None);
+    let backend = larql_inference::cpu_engine_backend();
     let ffn = WeightFfn { weights: &weights };
     let depth_ffn = WeightFfn {
         weights: &depth.weights,
     };
     let generation = generate_frames_greedy(
-        &mut engine,
+        backend.as_ref(),
         &weights,
         &ffn,
         &audio_tables,

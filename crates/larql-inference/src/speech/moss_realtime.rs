@@ -42,7 +42,8 @@ use crate::kv_engine::EngineError;
 use crate::speech::moss_sampling::{
     apply_repetition_penalty, filter_logits, sample_multinomial, DecodeMode,
 };
-use crate::KvEngine;
+use crate::EngineBackend;
+use larql_compute::KvIndex;
 
 /// Where one frame's compute went — the step-5 performance surface.
 #[derive(Debug, Clone, Copy)]
@@ -91,7 +92,7 @@ impl MossGeneration {
 /// (`supports_multimodal`).
 #[allow(clippy::too_many_arguments)]
 pub fn generate_frames_greedy(
-    engine: &mut dyn KvEngine,
+    backend: &dyn EngineBackend,
     backbone: &ModelWeights,
     backbone_ffn: &dyn FfnBackend,
     audio_tables: &[Array2<f32>],
@@ -104,7 +105,7 @@ pub fn generate_frames_greedy(
     max_frames: usize,
 ) -> Result<MossGeneration, EngineError> {
     generate_frames_greedy_streaming(
-        engine,
+        backend,
         backbone,
         backbone_ffn,
         audio_tables,
@@ -126,7 +127,7 @@ pub fn generate_frames_greedy(
 /// hangs directly off this callback.
 #[allow(clippy::too_many_arguments)]
 pub fn generate_frames_greedy_streaming(
-    engine: &mut dyn KvEngine,
+    backend: &dyn EngineBackend,
     backbone: &ModelWeights,
     backbone_ffn: &dyn FfnBackend,
     audio_tables: &[Array2<f32>],
@@ -140,7 +141,7 @@ pub fn generate_frames_greedy_streaming(
     on_frame: impl FnMut(usize, &[u32]),
 ) -> Result<MossGeneration, EngineError> {
     generate_frames_streaming(
-        engine,
+        backend,
         backbone,
         backbone_ffn,
         audio_tables,
@@ -153,6 +154,8 @@ pub fn generate_frames_greedy_streaming(
         max_frames,
         DecodeMode::Greedy,
         0,
+        None,
+        None,
         on_frame,
     )
 }
@@ -162,7 +165,7 @@ pub fn generate_frames_greedy_streaming(
 /// greedy does not terminate on novel text).
 #[allow(clippy::too_many_arguments)]
 pub fn generate_frames_streaming(
-    engine: &mut dyn KvEngine,
+    backend: &dyn EngineBackend,
     backbone: &ModelWeights,
     backbone_ffn: &dyn FfnBackend,
     audio_tables: &[Array2<f32>],
@@ -175,6 +178,8 @@ pub fn generate_frames_streaming(
     max_frames: usize,
     mode: DecodeMode,
     seed: u64,
+    backbone_attn: Option<&dyn KvIndex>,
+    depth_attn: Option<&dyn KvIndex>,
     mut on_frame: impl FnMut(usize, &[u32]),
 ) -> Result<MossGeneration, EngineError> {
     let mut rng = StdRng::seed_from_u64(seed);
@@ -194,10 +199,28 @@ pub fn generate_frames_streaming(
         .chain(audio_tables.iter().map(|table| table.view()))
         .collect();
 
-    // ── Prefill, and the first frame off its last hidden ──
+    // ── Prefill, and the first frame off its last hidden. The driver
+    // owns the backbone cache handles directly (single-consumer loop; a
+    // dispatch failure aborts the generation, so engine-style rewind
+    // machinery buys nothing here) — which is also what lets the packed
+    // attention index reach the Q4K-direct decode path. ──
+    let backbone_view = larql_models::WeightsView::dense(backbone);
     let embeds = embed_tables_sum(&backbone_tables, prefill_matrix);
     let prefill_start = std::time::Instant::now();
-    let last = engine.prefill_from_hidden(backbone, backbone_ffn, &embeds)?;
+    let (last, mut backbone_handles) = kv_prefill_from_hidden_via_dispatch(
+        backend,
+        backbone_view,
+        backbone_ffn,
+        &embeds,
+        None,
+        None,
+        backbone_attn,
+    )
+    .map_err(EngineError::Execution)?
+    .ok_or_else(|| EngineError::BackendFailure {
+        details: "backbone prefill declined by backend".into(),
+    })?;
+    let mut abs_position = embeds.nrows();
     let prefill_seconds = prefill_start.elapsed().as_secs_f64();
     let mut frames: Vec<Vec<u32>> = Vec::new();
     let mut stage_timings: Vec<FrameStages> = Vec::new();
@@ -208,7 +231,9 @@ pub fn generate_frames_streaming(
     let mut hidden = backbone_final_norm(backbone, &last);
     loop {
         let depth_start = std::time::Instant::now();
-        let frame = depth_frame(depth, depth_ffn, &hidden, mode, &frames, &mut rng)?;
+        let frame = depth_frame(
+            depth, depth_ffn, backend, depth_attn, &hidden, mode, &frames, &mut rng,
+        )?;
         stage_timings.push(FrameStages {
             backbone_seconds,
             depth_seconds: depth_start.elapsed().as_secs_f64(),
@@ -237,7 +262,21 @@ pub fn generate_frames_streaming(
         }
         let step_embed = embed_tables_sum(&backbone_tables, &step_ids);
         let backbone_start = std::time::Instant::now();
-        let step_hidden = engine.decode_step_from_hidden(backbone, backbone_ffn, &step_embed)?;
+        let step_hidden = kv_decode_step_from_hidden_via_dispatch(
+            backend,
+            backbone_view,
+            backbone_ffn,
+            &mut backbone_handles,
+            &step_embed,
+            abs_position,
+            None,
+            backbone_attn,
+        )
+        .map_err(EngineError::Execution)?
+        .ok_or_else(|| EngineError::BackendFailure {
+            details: "backbone decode step declined by backend".into(),
+        })?;
+        abs_position += 1;
         backbone_seconds = backbone_start.elapsed().as_secs_f64();
         hidden = backbone_final_norm(backbone, &step_hidden);
     }
@@ -256,9 +295,12 @@ pub fn generate_frames_streaming(
 /// `prior_frames` is the per-codebook repetition history (frame-major);
 /// empty on the first frame, which matches the reference disabling the
 /// penalty for the prefill frame.
+#[allow(clippy::too_many_arguments)]
 fn depth_frame(
     depth: &DepthTransformerModel,
     ffn: &dyn FfnBackend,
+    backend: &dyn EngineBackend,
+    attn_index: Option<&dyn KvIndex>,
     backbone_hidden: &Array2<f32>,
     mode: DecodeMode,
     prior_frames: &[Vec<u32>],
@@ -266,20 +308,19 @@ fn depth_frame(
 ) -> Result<Vec<u32>, EngineError> {
     let weights = &depth.weights;
     let view = larql_models::WeightsView::dense(weights);
-    let backend = crate::cpu_engine_backend();
     let rvq = depth.lm_heads.len();
 
     let mut frame = Vec::with_capacity(rvq);
 
     // Micro-step 0: the raw backbone hidden is the whole prefix.
     let (mut hidden, mut handles) = kv_prefill_from_hidden_via_dispatch(
-        backend.as_ref(),
+        backend,
         view,
         ffn,
         backbone_hidden,
         None,
         None,
-        None,
+        attn_index,
     )
     .map_err(EngineError::Execution)?
     .ok_or_else(|| EngineError::BackendFailure {
@@ -300,14 +341,14 @@ fn depth_frame(
             row
         };
         hidden = kv_decode_step_from_hidden_via_dispatch(
-            backend.as_ref(),
+            backend,
             view,
             ffn,
             &mut handles,
             &embed_row,
             micro + 1,
             None,
-            None,
+            attn_index,
         )
         .map_err(EngineError::Execution)?
         .ok_or_else(|| EngineError::BackendFailure {

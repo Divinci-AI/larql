@@ -378,7 +378,7 @@ impl StandardEngine {
                     hidden_row,
                     abs_position,
                     window,
-                    index,
+                    index.map(|v| v as &dyn larql_compute::KvIndex),
                 )
             }
             (BackendSlot::Async(b), StepInput::Token(token_id)) => {
@@ -402,7 +402,7 @@ impl StandardEngine {
                     hidden_row,
                     abs_position,
                     window,
-                    index,
+                    index.map(|v| v as &dyn larql_compute::KvIndex),
                 )
             }
         };
