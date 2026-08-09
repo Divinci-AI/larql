@@ -640,3 +640,81 @@ fn experts_gate_up_indexed_by_expert_id_not_topk_position() {
     // expert 0, not whichever expert the router happens to pick first.
     assert_eq!(experts_gate_up[0][0], 0xA0);
 }
+
+/// The row-parallel schedule (experts serial, matvec rows fanned across the
+/// pool) fires when the active expert count cannot fill the pool. CI
+/// coverage runs with `LARQL_SPIN_POOL=0`, so the branch is driven here via
+/// the thread-local env override rather than process env.
+#[test]
+fn row_parallel_schedule_matches_expert_parallel() {
+    use crate::cpu::ops::q4_common::quantize_q6_k;
+
+    const H: usize = 256;
+    const I: usize = 256;
+    const E: usize = 4;
+    let fill = |n: usize, seed: u32| -> Vec<f32> {
+        (0..n)
+            .map(|i| {
+                let h = (i as u32).wrapping_mul(2654435761).wrapping_add(seed);
+                ((h >> 16) as f32 / 65536.0) - 0.5
+            })
+            .collect()
+    };
+    let mut gate_up = Vec::with_capacity(E);
+    let mut down = Vec::with_capacity(E);
+    for e in 0..E {
+        let mut gu = fill(I * H, 100 + e as u32);
+        gu.extend(fill(I * H, 200 + e as u32));
+        gate_up.push(quantize_q6_k(&gu));
+        down.push(quantize_q6_k(&fill(H * I, 300 + e as u32)));
+    }
+    let router = fill(E * H, 5);
+    let moe = MoeLayerWeights {
+        experts_gate_up: gate_up.iter().map(|v| v.as_slice()).collect(),
+        experts_down: down.iter().map(|v| v.as_slice()).collect(),
+        routing_policy: crate::MoeRoutingPolicy::top_k_then_softmax(),
+        weight_layout: crate::MoeWeightLayout::default(),
+        expert_data_format: crate::QuantFormat::Q6_K,
+        router_proj: &router,
+        router_bias: &[],
+        experts_gate_up_bias: &[],
+        experts_down_bias: &[],
+        router_scale: &[],
+        router_per_expert_scale: &[],
+        router_norm: &[],
+        router_norm_parameter_free: false,
+        router_input_scalar: 1.0,
+        pre_experts_norm: &[],
+        post_ffn1_norm: &[],
+        post_experts_norm: &[],
+        num_experts: E,
+        top_k: 2, // 2 × MIN_FILL(2) ≤ pool threads on any multi-core box
+        intermediate_size: I,
+        gate_rule: crate::MoeGateRule::Gated(crate::Activation::Silu),
+    };
+    let h = fill(H, 77);
+
+    // Arm A: spin pool OFF → rayon expert-parallel fold.
+    crate::options::set_env_override(crate::options::ENV_SPIN_POOL, Some("0"));
+    let rayon_out = cpu_moe_forward(&h, &moe, 0.0, 1e-6);
+    // Arm B: spin pool ON → row-parallel schedule (top_k 2 underfills any
+    // pool of ≥ 4 threads; on narrower machines it still exercises the
+    // schedule-selection code, taking the expert-parallel arm).
+    crate::options::set_env_override(crate::options::ENV_SPIN_POOL, Some("1"));
+    let spin_out = cpu_moe_forward(&h, &moe, 0.0, 1e-6);
+    crate::options::set_env_override(crate::options::ENV_SPIN_POOL, None);
+
+    let num: f32 = rayon_out
+        .iter()
+        .zip(&spin_out)
+        .map(|(a, b)| (a - b) * (a - b))
+        .sum::<f32>()
+        .sqrt();
+    let den: f32 = rayon_out.iter().map(|v| v * v).sum::<f32>().sqrt();
+    assert!(
+        num / den.max(1e-30) < 1e-5,
+        "schedules disagree beyond fp reordering: rel={}",
+        num / den.max(1e-30)
+    );
+    assert!(den > 1e-3, "fixture degenerated to ~zero output");
+}

@@ -159,3 +159,69 @@ fn a_transposed_down_is_refused_rather_than_reinterpreted() {
     .unwrap_err();
     assert!(err.to_string().contains("down"), "{err}");
 }
+
+// ── quantize_dense_entry: the shape-refusal arms ─────────────────────────
+//
+// A mis-shaped input would otherwise quantise happily into a store whose
+// row stride disagrees with every reader (the padded-row geometry).
+
+#[test]
+fn dense_entry_refuses_a_mis_sized_gate_or_up() {
+    use crate::format::weights::write_layers::{quantize_dense_entry, LayerWeightFormat};
+    let err = quantize_dense_entry(
+        &[1.0; 3], // gate: not inter × hidden
+        &[1.0; 4],
+        &[1.0; 4],
+        2,
+        2,
+        LayerWeightFormat::F32,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("gate/up must each be"), "{err}");
+}
+
+#[test]
+fn dense_entry_refuses_a_mis_sized_down() {
+    use crate::format::weights::write_layers::{quantize_dense_entry, LayerWeightFormat};
+    let err = quantize_dense_entry(
+        &[1.0; 4],
+        &[1.0; 4],
+        &[1.0; 3], // down: not hidden × inter
+        2,
+        2,
+        LayerWeightFormat::F32,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("down must be"), "{err}");
+}
+
+/// Gate/up rows are stored at the padded width and the two halves must not
+/// interleave: gate rows land first, then up rows, each padded rowwise.
+/// Pinned on values, not sizes — a concatenate-then-pad (padding the fused
+/// buffer as if rows were 2×hidden wide) produces the same byte count with
+/// the wrong layout.
+#[test]
+fn dense_entry_pads_each_half_rowwise_before_concatenation() {
+    use crate::format::weights::write_layers::{quantize_dense_entry, LayerWeightFormat};
+    let block = larql_models::quant::ggml::K_QUANT_BLOCK_ELEMS;
+    let entry = quantize_dense_entry(
+        &[1.0, 2.0, 3.0, 4.0], // gate [2,2]
+        &[5.0, 6.0, 7.0, 8.0], // up   [2,2]
+        &[9.0, 10.0, 11.0, 12.0],
+        2,
+        2,
+        LayerWeightFormat::F32,
+    )
+    .unwrap();
+    let floats: Vec<f32> = entry
+        .gate_up
+        .chunks_exact(4)
+        .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        .collect();
+    // Row r of gate at r*block; up rows start at 2*block.
+    assert_eq!(&floats[0..2], &[1.0, 2.0]);
+    assert_eq!(floats[2], 0.0, "row padding must be zero");
+    assert_eq!(&floats[block..block + 2], &[3.0, 4.0]);
+    assert_eq!(&floats[2 * block..2 * block + 2], &[5.0, 6.0]);
+    assert_eq!(&floats[3 * block..3 * block + 2], &[7.0, 8.0]);
+}

@@ -220,3 +220,79 @@ fn a_short_bias_table_panics_rather_than_reusing_expert_zero() {
     };
     let _ = moe.expert_mlp(1);
 }
+
+/// The row-parallel expert variant computes the same numbers as the serial
+/// form — same kernels, different schedule — pinned on a Q6_K fixture at a
+/// block-multiple width so both take the integer path. Rows are
+/// independent, so equality here is exact, not a tolerance.
+#[test]
+fn parallel_expert_variant_matches_serial_exactly() {
+    use super::super::super::{
+        quantize_h_norm_for_q4k, run_single_expert_kq_q8k_into,
+        run_single_expert_kq_q8k_parallel_into, ExpertScratch,
+    };
+    use crate::cpu::ops::q4_common::quantize_q6_k;
+
+    const H: usize = 256;
+    const I: usize = 256;
+    let fill = |n: usize, seed: u32| -> Vec<f32> {
+        (0..n)
+            .map(|i| {
+                let h = (i as u32).wrapping_mul(2654435761).wrapping_add(seed);
+                ((h >> 16) as f32 / 65536.0) - 0.5
+            })
+            .collect()
+    };
+    let mut gu = fill(I * H, 1);
+    gu.extend(fill(I * H, 2));
+    let gu_q = quantize_q6_k(&gu);
+    let dn_q = quantize_q6_k(&fill(H * I, 3));
+    let h = fill(H, 9);
+    let q8k = quantize_h_norm_for_q4k(&h).expect("block-multiple width");
+    let mlp = ExpertMlp {
+        rule: MoeGateRule::ClampedGlu {
+            limit: 7.0,
+            alpha: 1.702,
+        },
+        gate_up_bias: &[],
+        down_bias: &[],
+    };
+
+    let mut s1 = ExpertScratch::new(H, I, I);
+    let serial = run_single_expert_kq_q8k_into(
+        &mut s1,
+        &q8k,
+        &gu_q,
+        &dn_q,
+        I,
+        crate::QuantFormat::Q6_K,
+        mlp,
+    )
+    .to_vec();
+    let mut s2 = ExpertScratch::new(H, I, I);
+    let parallel = run_single_expert_kq_q8k_parallel_into(
+        &mut s2,
+        &q8k,
+        &gu_q,
+        &dn_q,
+        I,
+        crate::QuantFormat::Q6_K,
+        mlp,
+    )
+    .to_vec();
+    assert_eq!(serial, parallel, "schedules must not change the numbers");
+    assert!(serial.iter().any(|v| v.abs() > 1e-4));
+
+    // Degenerate guards return zeroed output on both variants.
+    let mut s3 = ExpertScratch::new(H, I, I);
+    let short = run_single_expert_kq_q8k_parallel_into(
+        &mut s3,
+        &q8k,
+        &gu_q[..10],
+        &dn_q,
+        I,
+        crate::QuantFormat::Q6_K,
+        mlp,
+    );
+    assert!(short.iter().all(|v| *v == 0.0));
+}

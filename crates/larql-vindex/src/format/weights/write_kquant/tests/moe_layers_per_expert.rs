@@ -754,3 +754,45 @@ fn non_block_multiple_hidden_round_trips_through_the_integer_kernel() {
          (a stride/padding slip moves every row after the first)"
     );
 }
+
+/// A packed blocks tensor whose shape contradicts the architecture's own
+/// dims must fail with names — a transposed or truncated export read at a
+/// guessed geometry is the silent-wrong-bytes failure this module exists
+/// to prevent.
+#[test]
+fn packed_blocks_with_a_wrong_shape_are_refused_with_names() {
+    let arch = gpt_oss_arch();
+    let mut raw = HashMap::new();
+    packed_layer_fixture(&*arch, 0, &mut raw);
+    let key = arch.packed_gate_up_blocks_key(0).unwrap();
+    // Swap the expert and row axes — same byte count, wrong meaning.
+    let (bytes, shape) = raw.get(&key).cloned().unwrap();
+    let swapped = vec![shape[1], shape[0], shape[2], shape[3]];
+    raw.insert(key.clone(), (bytes, swapped));
+    let source = RawPackedSource { arch, raw };
+    let dir = temp_dir("wrong_shape");
+    let err = write_per_layer_moe_per_expert(&source, &dir, NUM_LAYERS).unwrap_err();
+    let s = err.to_string();
+    assert!(
+        s.contains("does not match") && s.contains(&key),
+        "shape refusal must name the tensor and the expectation: {s}"
+    );
+}
+
+/// Gate/up blocks present but the DOWN pair absent is malformed, not a
+/// dense layer.
+#[test]
+fn packed_gate_up_without_down_blocks_is_refused() {
+    let arch = gpt_oss_arch();
+    let mut raw = HashMap::new();
+    packed_layer_fixture(&*arch, 0, &mut raw);
+    let down_key = arch.packed_down_blocks_key(0).unwrap();
+    raw.remove(&down_key);
+    let source = RawPackedSource { arch, raw };
+    let dir = temp_dir("no_down_blocks");
+    let err = write_per_layer_moe_per_expert(&source, &dir, NUM_LAYERS).unwrap_err();
+    assert!(
+        err.to_string().contains(&down_key),
+        "error should name the missing tensor: {err}"
+    );
+}
