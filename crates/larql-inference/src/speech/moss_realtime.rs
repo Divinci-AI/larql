@@ -21,18 +21,20 @@
 //! prefix-recomputed: micro-step `i` appends one position.
 //!
 //! No tokenizer exists anywhere in this loop. Text ids arrive from the
-//! caller; audio ids leave to the caller. Greedy only for now — sampled
-//! mode arrives with the reference's non-standard top-p replication.
+//! caller; audio ids leave to the caller. The batch entry points below
+//! are wrappers over [`MossSession`] — one loop implementation serves
+//! batch and incremental, so the step-5 "incremental equals batch" gate
+//! holds by construction.
+//!
+//! [`MossSession`]: crate::speech::moss_session::MossSession
 
 use ndarray::Array2;
 
-use larql_compute::forward::embed::embed_tables_sum;
 use larql_compute::forward::ops::apply_norm;
 use larql_models::speech::moss_tts_realtime::{DepthTransformerModel, MossTtsRealtimeConfig};
 use larql_models::ModelWeights;
 
 use rand::rngs::StdRng;
-use rand::SeedableRng;
 
 use crate::ffn::FfnBackend;
 use crate::kv_dispatch::helpers::{
@@ -42,6 +44,7 @@ use crate::kv_engine::EngineError;
 use crate::speech::moss_sampling::{
     apply_repetition_penalty, filter_logits, sample_multinomial, DecodeMode,
 };
+use crate::speech::moss_session::{MossSession, MossSpeech};
 use crate::EngineBackend;
 use larql_compute::KvIndex;
 
@@ -182,7 +185,6 @@ pub fn generate_frames_streaming(
     depth_attn: Option<&dyn KvIndex>,
     mut on_frame: impl FnMut(usize, &[u32]),
 ) -> Result<MossGeneration, EngineError> {
-    let mut rng = StdRng::seed_from_u64(seed);
     let rvq = config.rvq;
     assert_eq!(
         prefill_matrix.ncols(),
@@ -195,98 +197,30 @@ pub fn generate_frames_streaming(
         "one backbone audio input table per codebook"
     );
 
-    let backbone_tables: Vec<ndarray::ArrayView2<f32>> = std::iter::once(backbone.embed.view())
-        .chain(audio_tables.iter().map(|table| table.view()))
-        .collect();
-
-    // ── Prefill, and the first frame off its last hidden. The driver
-    // owns the backbone cache handles directly (single-consumer loop; a
-    // dispatch failure aborts the generation, so engine-style rewind
-    // machinery buys nothing here) — which is also what lets the packed
-    // attention index reach the Q4K-direct decode path. ──
-    let backbone_view = larql_models::WeightsView::dense(backbone);
-    let embeds = embed_tables_sum(&backbone_tables, prefill_matrix);
-    let prefill_start = std::time::Instant::now();
-    let (last, mut backbone_handles) = kv_prefill_from_hidden_via_dispatch(
+    let speech = MossSpeech {
         backend,
-        backbone_view,
+        backbone,
         backbone_ffn,
-        &embeds,
-        None,
-        None,
+        audio_tables,
+        depth,
+        depth_ffn,
+        config,
         backbone_attn,
-    )
-    .map_err(EngineError::Execution)?
-    .ok_or_else(|| EngineError::BackendFailure {
-        details: "backbone prefill declined by backend".into(),
-    })?;
-    let mut abs_position = embeds.nrows();
-    let prefill_seconds = prefill_start.elapsed().as_secs_f64();
-    let mut frames: Vec<Vec<u32>> = Vec::new();
-    let mut stage_timings: Vec<FrameStages> = Vec::new();
-    let mut eos_at = None;
-    let mut text_cursor = 0usize;
-    let mut backbone_seconds = 0.0f64;
-
-    let mut hidden = backbone_final_norm(backbone, &last);
-    loop {
-        let depth_start = std::time::Instant::now();
-        let frame = depth_frame(
-            depth, depth_ffn, backend, depth_attn, &hidden, mode, &frames, &mut rng,
-        )?;
-        stage_timings.push(FrameStages {
-            backbone_seconds,
-            depth_seconds: depth_start.elapsed().as_secs_f64(),
-        });
-        let is_eos = frame[0] as usize == config.audio_eos_token();
-        on_frame(frames.len(), &frame);
-        frames.push(frame);
-        if is_eos {
-            eos_at = Some(frames.len() - 1);
-            break;
-        }
-        if frames.len() >= max_frames {
-            break;
-        }
-
-        // ── Next outer step: one text id + the frame just produced ──
-        let text_id = match text_queue.get(text_cursor) {
-            Some(&id) => id,
-            None => text_pad_id,
-        };
-        text_cursor += 1;
-        let mut step_ids = Array2::<u32>::zeros((1, 1 + rvq));
-        step_ids[[0, 0]] = text_id;
-        for (column, &code) in frames.last().expect("frame just pushed").iter().enumerate() {
-            step_ids[[0, column + 1]] = code;
-        }
-        let step_embed = embed_tables_sum(&backbone_tables, &step_ids);
-        let backbone_start = std::time::Instant::now();
-        let step_hidden = kv_decode_step_from_hidden_via_dispatch(
-            backend,
-            backbone_view,
-            backbone_ffn,
-            &mut backbone_handles,
-            &step_embed,
-            abs_position,
-            None,
-            backbone_attn,
-        )
-        .map_err(EngineError::Execution)?
-        .ok_or_else(|| EngineError::BackendFailure {
-            details: "backbone decode step declined by backend".into(),
-        })?;
-        abs_position += 1;
-        backbone_seconds = backbone_start.elapsed().as_secs_f64();
-        hidden = backbone_final_norm(backbone, &step_hidden);
-    }
-
-    Ok(MossGeneration {
-        frames,
-        eos_at,
-        prefill_seconds,
-        stage_timings,
-    })
+        depth_attn,
+    };
+    let mut session = MossSession::from_prefill_matrix(
+        speech,
+        prefill_matrix.clone(),
+        text_pad_id,
+        max_frames,
+        mode,
+        seed,
+    );
+    let mut observer = |index: usize, codes: &[u32]| on_frame(index, codes);
+    session.push_text_ids(text_queue, &mut observer)?;
+    session.end_text(&mut observer)?;
+    session.finish(&mut observer)?;
+    Ok(session.into_generation())
 }
 
 /// One frame through the depth transformer: cached micro-steps over a
@@ -296,7 +230,7 @@ pub fn generate_frames_streaming(
 /// empty on the first frame, which matches the reference disabling the
 /// penalty for the prefill frame.
 #[allow(clippy::too_many_arguments)]
-fn depth_frame(
+pub(crate) fn depth_frame(
     depth: &DepthTransformerModel,
     ffn: &dyn FfnBackend,
     backend: &dyn EngineBackend,
@@ -400,7 +334,7 @@ fn argmax(logits: &[f32]) -> usize {
     best
 }
 
-fn backbone_final_norm(weights: &ModelWeights, hidden: &Array2<f32>) -> Array2<f32> {
+pub(crate) fn backbone_final_norm(weights: &ModelWeights, hidden: &Array2<f32>) -> Array2<f32> {
     apply_norm(
         weights,
         hidden,

@@ -22,6 +22,7 @@ use larql_inference::ffn::{FfnBackend, WeightFfn};
 use larql_inference::speech::moss_prompt::build_prompt;
 use larql_inference::speech::moss_realtime::generate_frames_streaming;
 use larql_inference::speech::moss_sampling::{DecodeMode, MossSampling};
+use larql_inference::speech::stream_timing::{analyze_stream, SECONDS_PER_FRAME};
 use larql_inference::tokenizer::load_tokenizer;
 use larql_models::loading::safetensors::load_model_dir;
 use larql_models::speech::moss_tts_realtime::{
@@ -33,8 +34,6 @@ use super::run_cmd::RunArgs;
 
 type BoxErr = Box<dyn std::error::Error>;
 
-/// Seconds of audio per generated frame (12.5 Hz frame rate).
-const SECONDS_PER_FRAME: f64 = 0.08;
 /// Environment fallback for `--codec-cmd`.
 const CODEC_CMD_ENV: &str = "LARQL_MOSS_CODEC_CMD";
 const TOKENS_PLACEHOLDER: &str = "{tokens}";
@@ -232,10 +231,26 @@ pub fn run_speak(args: &RunArgs) -> Result<(), BoxErr> {
     );
     if !frame_durations.is_empty() {
         println!(
-            "frame compute         p50 {:.0} ms | p95 {:.0} ms | max {:.0} ms (budget 80 ms)",
+            "frame compute         p50 {:.0} ms | p95 {:.0} ms | max {:.0} ms (budget {:.0} ms)",
             percentile(50.0) * 1000.0,
             percentile(95.0) * 1000.0,
-            frame_durations.last().unwrap() * 1000.0
+            frame_durations.last().unwrap() * 1000.0,
+            SECONDS_PER_FRAME * 1000.0
+        );
+    }
+    // The step-5 streaming measurements: what a playback clock at the
+    // frame rate would have experienced against these arrival times.
+    if let Some(report) = analyze_stream(&frame_instants, SECONDS_PER_FRAME) {
+        println!(
+            "stream                min stable pre-buffer {:.0} ms | cold-start underruns {}",
+            report.min_stable_prebuffer_seconds * 1000.0,
+            report.cold_start_underruns
+        );
+        println!(
+            "buffer                {:+.0} ms audio per second of playback | occupancy p50 {:.0} ms | p95 {:.0} ms",
+            report.buffer_growth_per_second * 1000.0,
+            report.occupancy_p50_seconds * 1000.0,
+            report.occupancy_p95_seconds * 1000.0
         );
     }
     // Stage split: where a frame's milliseconds actually go.

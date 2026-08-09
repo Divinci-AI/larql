@@ -1,6 +1,7 @@
 # The TTS funnel — audio-token output as a forcing function
 
-Status: steps 0-4 green; step 5 speaks at **1.68x realtime on CPU**.
+Status: **steps 0-5 green**; speaks at **1.6-1.7x realtime on CPU**,
+incremental and batch token-identical, zero-pre-buffer stable.
 Branch `worktree-tts-audio-tokens`, started 2026-08-09.
 
 Gate log:
@@ -141,6 +142,40 @@ Gate log:
   sampling flags). Next: wire Q4 into the speech path for real (not
   just the kernel bench) and verify the quantised model still sounds
   like Jarvis before trusting any speed number.
+
+- **Step 5 PASS** (2026-08-09) — the incremental push-text session
+  closes the step-5 gate. `MossSession`
+  (`larql-inference/src/speech/moss_session.rs`) is the reference's
+  streaming contract restated in ids: pending text queue, prefill at
+  `DELAY_TOKENS_LEN` pending ids (or fewer when the text has ended),
+  one frame per pushed id, `<|text_pad|>` drain on `finish` — and the
+  batch entry points are now wrappers over it, so batch and incremental
+  share one loop rather than two kept in sync. Prompt construction split
+  to match (`build_turn` + `append_text_lead`; `build_prompt` is their
+  composition), which is what makes the two paths' prefill matrices
+  identical by construction. Gate, both halves green: CI on a synthetic
+  miniature speech model (chunk sizes 1/3/all + greedy + short-text
+  cases, `larql-inference/tests/test_moss_session.rs`), and the real
+  checkpoint (`larql-kv/tests/moss_incremental_parity.rs`, ignored):
+  sampled seed 0, novel text — batch 72 frames with EOS, incremental
+  **identical at chunk sizes 1, 5, and all-at-once**; greedy chunk 7
+  identical over the 150-frame cap. The step-4 full-loop dump parity
+  re-verified bit-exact after the refactor (138 frames). Buffer
+  measurements landed with it (`speech/stream_timing.rs`, pure and
+  unit-tested; reported by `--speak`): on the parity fixture,
+  Q4, clean CPU build — 19.9 frames/s (RTF 1.58, within the 1.6-1.7x
+  run band), p50 35 ms / p95 37 ms / max 93 ms, TTFA 2.0 s
+  (prefill-dominated: prefill 1.97 s), and the streaming verdict:
+  **min stable pre-buffer 0 ms, cold-start underruns 0**, buffer
+  growing +1.25 s audio per second of playback. Same command on the
+  gpu-featured build — the like-for-like A/B the previous entry owed —
+  reads 5.17 frames/s, prefill 8.8 s (~3.8x slower on the Q4 path, worse
+  than the 2.7x fp32 reading): the CPU-path regression in the gpu build
+  is confirmed with sampling flags matched, still to be filed and fixed
+  separately. Not in scope here, deliberately: an actual audio-device
+  ring buffer (the §5 runtime shape) and the incremental codec — the
+  session emits frames through the same `on_frame` seam either will
+  consume.
 
 This document plays the role `k3-funnel.md` plays for sparse execution: it
 names one model that cannot run, inventories exactly why, and commits to
