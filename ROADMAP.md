@@ -3344,6 +3344,126 @@ the EXP-V ladder experiments (and eventual `voice compare`) one-liners.
 
 ---
 
+## P1 — Model-to-model fusion: the FUSE ladder (added 2026-08-09)
+
+The principle to lock in now: **text is one interoperability layer, not
+LARQL's model-to-model ABI.** Two models in the same runtime should
+exchange the cheapest useful materialisation of a computation —
+generated ids, residual state, KV state — with English text reserved
+for when text genuinely is the cheapest interchange format.
+
+The abstraction is model-to-model fusion, NOT "Qwen token sharing."
+Qwen→MOSS is only the first proving ground (shared tokenizer lineage
+makes the experiments easy); the architecture is:
+
+```text
+producer model → intermediate state / token domain / residual
+              → binding (model-specific; LARQL owns the mechanism)
+              → consumer model
+```
+
+Compatibility levels, weakest binding first:
+
+```text
+1. token-compatible      reuse ids directly
+2. vocabulary-mappable   cheap token-domain translation
+3. hidden-state          reuse residuals directly
+4. projectable           small learned/fixed projection
+5. state-composable      semantic state + target-specific state
+```
+
+The runtime consequence: a decode step exposes more than its final
+token — `GeneratedToken { id, hidden, kv_position, .. }` — and the
+consumer takes the view it needs (ids → text protocol, residual →
+conditioning). Generated text becomes one *view* of the computation.
+VINDEX3 eventually describes interfaces, not pairings: a model declares
+`output_domain` (token ids, semantic hidden) and `input_domain` (text
+tokens, hidden state, acoustic context); the binding
+(mapping/projection/adapter) is a separate, inspectable object.
+
+### The ladder (speech instance; each rung gated on the last)
+
+- **FUSE-0 — token pipe.** LLM-generated ids feed MOSS's text channel
+  directly (MOSS has no text head; text is already an input stream, and
+  the 12-token lead maps onto a generated-token queue naturally). Gate:
+  identical speech tokens to the encode(decode(ids)) round trip.
+  Stated precisely: *zero-copy token-domain forwarding when producer
+  and consumer domains happen to be compatible* — not "speech fusion
+  requires a Qwen LLM". Mostly an engineering cleanup; the value is the
+  primitive it installs: token-domain piping between models.
+- **FUSE-1 — residual comparison.** Same text prefix through a generic
+  Qwen LLM and the MOSS backbone; compare hiddens layer-by-layer.
+  Cosine is not enough (the voice ladder's lesson) — behavioural
+  probes and linear mappings too.
+- **FUSE-2 — direct residual substitution.** Replace a MOSS final
+  backbone hidden with a shape-compatible LLM residual; run the proven
+  depth transformer. Ask only: plausible codebooks? terminates? how far
+  do logits move? Cheap falsification — MOSS's backbone state carries
+  semantics + acoustic history + previous frame + conversation KV,
+  while an LLM residual carries semantics + LLM state, so straight
+  substitution *should* fail informatively.
+- **FUSE-3 — small bridge.** `H_llm → projection P → depth stage`,
+  acoustic conditioning preserved separately. The thesis test: how
+  little MOSS backbone computation is required once semantic state
+  already exists upstream?
+- **FUSE-4 — acoustic residual injection.**
+  `H_llm + A(previous audio tokens) → P → speech decoder`. If this
+  works, MOSS's backbone has been decomposed into semantic and
+  acoustic operands — and the steady-state frame stops paying for a
+  second full language-model pass.
+
+Prior art, tracked honestly: PRIME-Speech (HF 2606.30944) already
+drives a causal speech decoder from intermediate hidden states of a
+frozen LM — one specifically *trained* architecture. TADA (arXiv
+2602.23068) aligns text/acoustic representations. LARQL's differentiated
+claim is the **runtime composition primitive**: arbitrary producer →
+declared interface → binding → arbitrary consumer, across models that
+were never trained together. K3 → SpeechBinding → MOSS (or a small fast
+planner → speech model) is the long-term Jarvis pipeline this enables.
+
+---
+
+## Speech track — competitive position & the three proofs (added 2026-08-09)
+
+Position audit (2026-08-09, external claims are vendors'/leaderboards',
+not our measurements): LARQL's speech-token generator at Q4 on a laptop
+CPU (~RTF 0.63 conventional) sits in the same throughput order as the
+vendor's own MOSS figure on an L20 GPU (RTF 0.51, 180 ms TTFB) — as an
+inference-engine result, unusually strong. But the frontier is faster on
+cold latency (Fish S2 ~100 ms TTFA; Qwen3-TTS ~97 ms e2e claims;
+ElevenLabs Flash ~75 ms model inference), clone quality is externally
+unproven (top of Artificial Analysis is closed models; best open-weight
+~Fish S2 Pro), and `voice clone` as a product surface is table stakes.
+The moat is NOT "local TTS in Rust" (VoxCPM2 has GGUF/ONNX/ANE/Rust
+ports; Chatterbox Nano claims 3x realtime on 8-core CPU): it is **one
+execution system that understands multiple generative architectures,
+their physical representation, their state, and their composition** —
+plus the voice-as-data research (a 2026 study argues commercial
+"cloning" behaves like style transfer; the V-series asks what identity
+state actually is, which is better-timed than another clone API).
+
+The three proofs that change the story:
+
+1. **TTFA < 500 ms** while retaining the ~1.6x CPU steady-state class
+   (in flight: prefill bench done, Metal prefill is the lever, gated on
+   the gpu-build CPU regression #242).
+2. **Controlled blind clone comparison** — aru-12 versus Sonic 3.5,
+   Eleven v3, Fish S2, VoxCPM2, Qwen3-TTS, and MOSS-reference, scored
+   blind. Until this runs, no claim about voice quality, only about
+   engine performance.
+3. **A second, structurally different TTS architecture** through
+   LARQL/VINDEX3 — the model-independence claim made real (pairs with
+   the voice bank's Qwen3-TTS representation).
+
+Landed, they upgrade "MOSS runs very fast in Rust" to "a local
+generative speech runtime competitive with specialized stacks,
+model-independent, exposing model state hosted systems hide." The
+caveat to keep repeating until the audio-device path exists: current
+numbers are the token-generation path; end-to-end comparisons against
+vendor stacks wait for codec + ring + device integration.
+
+---
+
 ## P2 — Film checklist
 
 - [ ] Confirm Gemma 4 26B A4B public config (expert count, top-K, active-param figure, GQA ratio). Replace every `~` in `docs/demo-script-gemma4-moe.md`.

@@ -476,7 +476,9 @@ policy never enters the storage format.
 (KV continuation across turns — server-side home for a persistent
 engine); realtime axis (§5); the voice bank (`larql voice clone` —
 voices as first-class model-agnostic data; design in `ROADMAP.md`
-"Voice bank", gated on step 5, now open); codec-in-LARQL (§6).
+"Voice bank", gated on step 5, now open); codec-in-LARQL (§6); the
+FUSE ladder (LLM→speech via token piping, then latent composition —
+`ROADMAP.md` "Model-to-model fusion").
 
 **The perf phase's next gate (set 2026-08-09, after step 5):** first-turn
 TTFA **below 500 ms** without regressing the ~1.6x realtime steady-state
