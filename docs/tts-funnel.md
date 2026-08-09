@@ -122,6 +122,26 @@ Gate log:
   session and buffer/underrun measurements; then the perf phase (Metal,
   quantisation, fused depth frame) attacks a 2.4x gap, not 6x.
 
+- **Q4 frame prediction** (2026-08-09,
+  `larql-kv/tests/moss_q4_frame_bench.rs`) — the falsifiable bandwidth
+  experiment, run on the real checkpoint's per-frame op mix (240
+  matrices, 18.7 GB fp32 → 2.6 GB Q4_K). Three kernels tell the story:
+  the naive dequant-dot is 24x SLOWER than fp32 BLAS (3441 ms —
+  compute-bound, kernel not physics); the production Q4K·Q8K integer
+  dot recovers it (103 ms single-core); and row-parallel it lands at
+  **15.8 ms/frame of GEMV, 9.8x over fp32**. Substituted into the
+  measured frame band, predicted p50 = **51–91 ms against the 80 ms
+  budget**: quantisation alone is borderline-realtime, and any second
+  lever (parallel/Metal attention for the non-GEMV remainder, fused
+  depth locality) clears it with margin. Also measured while pinning
+  the oracle: CPU-build run-to-run drift is real (p50 190–230 ms across
+  runs; backbone 65–85, depth 125–148), so all comparisons quote the
+  band; the gpu-featured build's 508 ms CPU reading sits far outside it
+  and still needs a like-for-like A/B (the saved binary predated the
+  sampling flags). Next: wire Q4 into the speech path for real (not
+  just the kernel bench) and verify the quantised model still sounds
+  like Jarvis before trusting any speed number.
+
 This document plays the role `k3-funnel.md` plays for sparse execution: it
 names one model that cannot run, inventories exactly why, and commits to
 removing blockers one at a time. No abstraction gets built speculatively;
