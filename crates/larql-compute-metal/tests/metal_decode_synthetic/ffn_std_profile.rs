@@ -448,8 +448,18 @@ fn decode_token_with_q6k_non_gated_ffn_drives_standard_path() {
     let x = synth_input(HIDDEN, 0.9);
     let mut kv = metal.create_kv_cache(1, 64, NUM_KV_HEADS, HEAD_DIM);
     let out = larql_compute_metal::MetalBackend::decode_token(
-        &metal, &mut kv, &[layer], &x, HIDDEN, INTER, Q_DIM, KV_DIM, NUM_Q_HEADS, NUM_KV_HEADS,
-        HEAD_DIM, 10_000.0,
+        &metal,
+        &mut kv,
+        &[layer],
+        &x,
+        HIDDEN,
+        INTER,
+        Q_DIM,
+        KV_DIM,
+        NUM_Q_HEADS,
+        NUM_KV_HEADS,
+        HEAD_DIM,
+        10_000.0,
     );
     assert_eq!(out.len(), HIDDEN);
     assert!(out.iter().all(|v| v.is_finite()));
