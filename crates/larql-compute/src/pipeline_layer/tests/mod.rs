@@ -315,3 +315,68 @@ fn resolve_ffn_weights_returns_empty_stubs_when_q4_ffn_mmap_is_empty() {
     assert_eq!(up.format(), QuantFormat::Q4_K);
     assert_eq!(down.format(), QuantFormat::Q4_K);
 }
+
+// ── moe_build.rs: the Gemma 4 MoE fixture reaches the real branches ──
+//
+// The header note above predates `make_test_gemma4_moe_weights` being
+// reachable from this crate; the fixture IS available, so the MoE
+// construction paths are pinned here rather than only via larql-inference
+// integration tests.
+
+#[test]
+fn build_moe_weights_resolves_the_gemma4_fixture() {
+    let weights = larql_models::test_fixtures::make_test_gemma4_moe_weights();
+    let arch = &*weights.arch;
+    let moe = build_moe_weights(&weights, arch, 0).expect("fixture layer 0 is MoE");
+
+    assert_eq!(
+        moe.num_experts,
+        larql_models::test_fixtures::GEMMA4_MOE_NUM_EXPERTS
+    );
+    // Gemma declares no MoE biases; the resolution must produce the empty
+    // slices (pre-bias behaviour), not phantom vectors.
+    assert!(moe.router_bias.is_empty());
+    assert!(moe.experts_gate_up_bias.is_empty());
+    assert!(moe.experts_down_bias.is_empty());
+    assert_eq!(
+        moe.gate_rule,
+        crate::MoeGateRule::Gated(crate::Activation::GeluTanh)
+    );
+    // Packed BF16 monolith: stored row width == hidden (no block padding).
+    assert_eq!(moe.gate_up_cols(weights.hidden_size), weights.hidden_size);
+    // The block actually runs: finite output of the right width.
+    let h = vec![0.1f32; weights.hidden_size];
+    let out = crate::cpu::ops::moe::cpu_moe_forward(&h, &moe, 1.0, 1e-6);
+    assert_eq!(out.len(), weights.hidden_size);
+    assert!(out.iter().all(|v| v.is_finite()));
+}
+
+#[test]
+fn remote_moe_patching_builds_stubs_for_unserved_layers() {
+    let weights = larql_models::test_fixtures::make_test_gemma4_moe_weights();
+    // A remote-MoE client slice has no local expert bytes, so the builder
+    // leaves `moe: None`; patching must synthesise norm-carrying stubs for
+    // every routed layer rather than leaving the combine step un-normed.
+    let dummy = crate::QuantWeight::new(QuantFormat::Q4_K, &[], crate::QuantAux::None);
+    let mut layers: Vec<crate::FullPipelineLayer<'_>> = (0..weights.num_layers)
+        .map(|l| build_arch_params(&weights, l, dummy, dummy, dummy, dummy, dummy, dummy, dummy))
+        .collect();
+    for layer in &mut layers {
+        layer.moe = None;
+    }
+    patch_pipeline_layers_for_remote_moe(&mut layers, &weights);
+    for (l, layer) in layers.iter().enumerate() {
+        let moe = layer
+            .moe
+            .as_ref()
+            .unwrap_or_else(|| panic!("layer {l}: stub not patched in"));
+        assert!(
+            moe.experts_gate_up.is_empty(),
+            "stubs must carry no local expert bytes"
+        );
+        assert_eq!(
+            moe.gate_rule,
+            crate::MoeGateRule::Gated(crate::Activation::GeluTanh)
+        );
+    }
+}

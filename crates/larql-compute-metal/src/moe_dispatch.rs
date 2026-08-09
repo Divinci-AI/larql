@@ -50,6 +50,12 @@ pub struct MoeScratch {
     pub(super) inter: usize,
     pub(super) inter_padded: usize,
     pub(super) hidden: usize,
+    /// The expert store's weight format — sizes the row strides below and
+    /// selects the matvec pipelines at dispatch. Q4_K and Q6_K only.
+    pub(super) format: larql_compute::QuantFormat,
+    /// Gate/up STORED row width in elements (block-padded by the writer;
+    /// GPT-OSS 2880 → 3072, block-multiple hidden sizes unchanged).
+    pub(super) weight_cols: usize,
     pub(super) row_bytes: usize,
     pub(super) down_row_bytes: usize,
 
@@ -62,6 +68,11 @@ pub struct MoeScratch {
     pub(super) u_out: Buffer,
     pub(super) act_buf: Buffer,
     pub(super) expert_outs: Buffer,
+    /// De-interleaved per-selected-expert gate/up bias rows, `top_k × inter`
+    /// f32 each. Always allocated (small) so the activation kernel's bias
+    /// slots bind a real buffer; `has_bias` gates the read.
+    pub(super) gate_bias_buf: Buffer,
+    pub(super) up_bias_buf: Buffer,
 }
 
 // `Buffer` is `Send + Sync` on its own; the Metal types we hold here mirror
@@ -76,16 +87,48 @@ impl MoeScratch {
     /// can preallocate one scratch per (hidden, intermediate, top_k) shape on
     /// startup and reuse it for every incoming RPC.
     pub fn new_public(backend: &MetalBackend, top_k: usize, hidden: usize, inter: usize) -> Self {
-        Self::new(&backend.bufs, top_k, hidden, inter)
+        Self::new(
+            &backend.bufs,
+            top_k,
+            hidden,
+            inter,
+            larql_compute::QuantFormat::Q4_K,
+            hidden,
+        )
     }
 
-    pub(super) fn new(bufs: &BufferCache, top_k: usize, hidden: usize, inter: usize) -> Self {
-        let block = larql_models::quant::ggml::Q4_K_BLOCK_ELEMS;
-        let bytes_per_block = larql_models::quant::ggml::Q4_K_BLOCK_BYTES;
+    /// Format-aware public constructor: `format` sizes the row strides and
+    /// selects the matvec pipelines; `weight_cols` is the gate/up STORED
+    /// row width (`MoeLayerWeights::gate_up_cols`).
+    pub fn new_public_with_format(
+        backend: &MetalBackend,
+        top_k: usize,
+        hidden: usize,
+        inter: usize,
+        format: larql_compute::QuantFormat,
+        weight_cols: usize,
+    ) -> Self {
+        Self::new(&backend.bufs, top_k, hidden, inter, format, weight_cols)
+    }
+
+    pub(super) fn new(
+        bufs: &BufferCache,
+        top_k: usize,
+        hidden: usize,
+        inter: usize,
+        format: larql_compute::QuantFormat,
+        weight_cols: usize,
+    ) -> Self {
+        let (block, bytes_per_block) = format
+            .packed_block_layout()
+            .expect("MoE expert scratch requires a block format (Q4_K/Q6_K)");
         let inter_padded = inter.div_ceil(block) * block;
-        // Q4_K row stride: one super-block per Q4_K_BLOCK_ELEMS elements,
-        // Q4_K_BLOCK_BYTES bytes per super-block.
-        let row_bytes = (hidden / block) * bytes_per_block;
+        // Row strides from the STORE's own geometry: gate/up rows at the
+        // writer-padded `weight_cols` (a truncating `hidden / block` here
+        // mis-strided every non-block-multiple model), down at
+        // `inter_padded` — both in this format's bytes per super-block.
+        debug_assert!(weight_cols.is_multiple_of(block));
+        let row_bytes = (weight_cols / block) * bytes_per_block;
         let down_row_bytes = (inter_padded / block) * bytes_per_block;
 
         let gate_buf = bufs.output((top_k * inter * row_bytes) as u64);
@@ -94,18 +137,25 @@ impl MoeScratch {
             .map(|_| bufs.output((hidden * down_row_bytes) as u64))
             .collect();
 
-        let x_buf = bufs.output((hidden * 4) as u64);
+        let x_buf = bufs.output((weight_cols * 4) as u64);
         let g_out = bufs.output((top_k * inter * 4) as u64);
         let u_out = bufs.output((top_k * inter * 4) as u64);
         let act_buf = bufs.output((top_k * inter_padded * 4) as u64);
         let expert_outs = bufs.output((top_k * hidden * 4) as u64);
 
+        let gate_bias_buf = bufs.output((top_k * inter * 4) as u64);
+        let up_bias_buf = bufs.output((top_k * inter * 4) as u64);
+
         // Zero the padding tails once. GEGLU writes only the first `inter`
         // floats of each expert's `inter_padded`-strided slice, so the
-        // remaining `inter_padded - inter` floats stay zero forever.
+        // remaining `inter_padded - inter` floats stay zero forever. The
+        // x_buf tail (`weight_cols - hidden`) likewise stays zero so the
+        // writer's row padding contributes nothing to any dot product.
         unsafe {
             let ptr = act_buf.contents() as *mut f32;
             std::ptr::write_bytes(ptr, 0, top_k * inter_padded);
+            let xp = x_buf.contents() as *mut f32;
+            std::ptr::write_bytes(xp, 0, weight_cols);
         }
 
         Self {
@@ -113,6 +163,8 @@ impl MoeScratch {
             inter,
             inter_padded,
             hidden,
+            format,
+            weight_cols,
             row_bytes,
             down_row_bytes,
             gate_buf,
@@ -123,6 +175,8 @@ impl MoeScratch {
             u_out,
             act_buf,
             expert_outs,
+            gate_bias_buf,
+            up_bias_buf,
         }
     }
 }
@@ -172,17 +226,23 @@ impl MetalBackend {
         // matches the `kv_cache` pattern above; concurrent decodes on
         // the same backend serialise here just as they do on KV.
         let mut scratch_guard = self.moe_scratch.lock().unwrap();
-        if let Some(shape) = layers
-            .iter()
-            .find_map(|l| l.moe.as_ref())
-            .map(|m| (m.top_k, hidden, m.intermediate_size))
-        {
+        if let Some(shape) = layers.iter().find_map(|l| l.moe.as_ref()).map(|m| {
+            (
+                m.top_k,
+                hidden,
+                m.intermediate_size,
+                m.expert_data_format,
+                m.gate_up_cols(hidden),
+            )
+        }) {
             let needs_alloc = match scratch_guard.as_ref() {
-                Some(s) => (s.top_k, s.hidden, s.inter) != shape,
+                Some(s) => (s.top_k, s.hidden, s.inter, s.format, s.weight_cols) != shape,
                 None => true,
             };
             if needs_alloc {
-                *scratch_guard = Some(MoeScratch::new(&self.bufs, shape.0, shape.1, shape.2));
+                *scratch_guard = Some(MoeScratch::new(
+                    &self.bufs, shape.0, shape.1, shape.2, shape.3, shape.4,
+                ));
             }
         }
         let scratch_ref = scratch_guard.as_ref();
@@ -221,6 +281,24 @@ impl MetalBackend {
             rope_base,
             Some(&mut moe_fn),
         ))
+    }
+
+    /// Public single-layer MoE block entry — the parity/test surface for
+    /// [`Self::gpu_moe_dispatch_with_scratch`], which stays `pub(super)`.
+    /// Runs the layer's full expert block (CPU routing + GPU experts +
+    /// CPU combine) exactly as the decode loop does.
+    pub fn moe_block_for_layer<'w, F>(
+        &self,
+        h_post_attn: &[f32],
+        moe: &MoeLayerWeights<'_>,
+        eps: f32,
+        scratch: &MoeScratch,
+        get_expert_bytes: F,
+    ) -> Vec<f32>
+    where
+        F: Fn(usize) -> Option<(&'w [u8], &'w [u8])>,
+    {
+        self.gpu_moe_dispatch_with_scratch(h_post_attn, moe, eps, scratch, get_expert_bytes)
     }
 
     /// GPU expert dispatch with pre-allocated scratch.
@@ -735,22 +813,22 @@ impl MetalBackend {
         let inter = moe.intermediate_size;
         let inter_padded = scratch.inter_padded;
         let top_k = moe.top_k;
-        // The expert shaders here implement the gated combine with no bias
-        // slots. Routing below is CPU-side, so the ROUTER bias is honoured —
-        // but a ClampedGlu layer or per-expert MLP biases (GPT-OSS) would
-        // silently run as bias-less GELU/SiLU, a plausible-looking wrong
-        // forward. Refuse until the shaders grow the rule and the slots.
+        // ClampedGlu (with its biases) has a dedicated activation kernel
+        // below. What has NO kernel is a Gated layer with expert biases —
+        // no current model ships that combination, and running it bias-less
+        // would be a plausible-looking wrong forward. Refuse it loudly.
         assert!(
-            !matches!(moe.gate_rule, larql_compute::MoeGateRule::ClampedGlu { .. }),
-            "Metal MoE dispatch has no ClampedGlu expert kernel; this layer \
-             ({:?}) must run on the CPU path",
-            moe.gate_rule
+            matches!(moe.gate_rule, larql_compute::MoeGateRule::ClampedGlu { .. })
+                || (moe.experts_gate_up_bias.is_empty() && moe.experts_down_bias.is_empty()),
+            "Metal MoE dispatch has no biased-Gated expert kernel; this \
+             layer's biased experts must run on the CPU path"
         );
-        assert!(
-            moe.experts_gate_up_bias.is_empty() && moe.experts_down_bias.is_empty(),
-            "Metal MoE dispatch has no expert-bias slots; this layer's biased \
-             experts must run on the CPU path"
+        debug_assert_eq!(
+            moe.gate_up_cols(hidden),
+            scratch.weight_cols,
+            "MoE scratch was sized for a different gate/up row width"
         );
+        debug_assert_eq!(moe.expert_data_format, scratch.format);
         debug_assert_eq!(top_k, scratch.top_k, "MoE top_k drift across layers");
         debug_assert_eq!(
             inter, scratch.inter,
@@ -778,7 +856,9 @@ impl MetalBackend {
         let up_ptr = scratch.up_buf.contents() as *mut u8;
 
         let mut valid_weights: Vec<f32> = Vec::with_capacity(top_k);
+        let mut valid_ids: Vec<usize> = Vec::with_capacity(top_k);
         let mut valid_count = 0usize;
+        let stage_biases = !moe.experts_gate_up_bias.is_empty();
 
         for (k, &ei) in expert_indices.iter().enumerate() {
             // Scratch is sized for `scratch.top_k` experts; without this
@@ -828,7 +908,26 @@ impl MetalBackend {
                 }
             }
 
+            // De-interleave this expert's fused gate/up bias row into the
+            // staging buffers at the same slot the weights landed in, so
+            // the activation kernel reads slot-aligned bias vectors. The
+            // interleave convention is owned by `ExpertMlp::{gate,up}_bias`
+            // (FusedHalf), not re-derived here.
+            if stage_biases {
+                let mlp = moe.expert_mlp(ei);
+                unsafe {
+                    let gb =
+                        (scratch.gate_bias_buf.contents() as *mut f32).add(valid_count * inter);
+                    let ub = (scratch.up_bias_buf.contents() as *mut f32).add(valid_count * inter);
+                    for j in 0..inter {
+                        *gb.add(j) = mlp.gate_bias(j);
+                        *ub.add(j) = mlp.up_bias(j);
+                    }
+                }
+            }
+
             valid_weights.push(expert_weights[k]);
+            valid_ids.push(ei);
             valid_count += 1;
         }
 
@@ -837,6 +936,8 @@ impl MetalBackend {
         }
 
         // ── 3. Stage router-normed input into pre-allocated x_buf ─────────
+        // The buffer is `weight_cols` wide with a permanently-zero tail, so
+        // the writer's row padding contributes nothing to any dot product.
         unsafe {
             let x_ptr = scratch.x_buf.contents() as *mut f32;
             std::ptr::copy_nonoverlapping(expert_input.as_ptr(), x_ptr, hidden);
@@ -845,42 +946,99 @@ impl MetalBackend {
         let cmd = self.queue.new_command_buffer();
         let enc = cmd.new_compute_command_encoder();
 
-        // ── 4. q4k_ffn_gate_up over all valid_count experts at once ──────
-        // Geometry travels with the `KernelHandle`; no shader-module
-        // ROWS_PER_TG/THREADS_PER_TG re-imports.
-        let gate_up_kh = &self.ffn.q4k_ffn_gate_up_pipeline;
+        // ── 4. Gate + up matvecs over all valid_count experts at once ────
+        // Both staging buffers are one uniform-stride matrix of
+        // `valid_count × inter` rows at `weight_cols` columns, so a single
+        // dispatch (per projection) covers every selected expert.
         let n_rows = (valid_count * inter) as u32;
-        let k_cols = hidden as u32;
-        let tgs = (valid_count as u64 * inter as u64).div_ceil(gate_up_kh.rows_per_tg);
+        let k_cols = scratch.weight_cols as u32;
+        match scratch.format {
+            larql_compute::QuantFormat::Q6_K => {
+                // Two plain q6k_matvec dispatches. A fused Q6_K gate+up twin
+                // of `q4k_ffn_gate_up` does not exist yet; at these shapes
+                // the second dispatch costs ~µs against ~44 MB of weight
+                // reads, so fusion is a tuning item, not a correctness one.
+                let kh = &self.quant.q6k_matvec_pipeline;
+                let tgs = (valid_count as u64 * inter as u64).div_ceil(kh.rows_per_tg);
+                for (w_buf, out_buf) in [
+                    (&scratch.gate_buf, &scratch.g_out),
+                    (&scratch.up_buf, &scratch.u_out),
+                ] {
+                    enc.set_compute_pipeline_state(&kh.state);
+                    enc.set_buffer(0, Some(w_buf), 0);
+                    enc.set_buffer(1, Some(&scratch.x_buf), 0);
+                    enc.set_buffer(2, Some(out_buf), 0);
+                    enc.set_bytes(3, 4, &n_rows as *const u32 as *const c_void);
+                    enc.set_bytes(4, 4, &k_cols as *const u32 as *const c_void);
+                    enc.dispatch_thread_groups(
+                        MTLSize::new(tgs, 1, 1),
+                        MTLSize::new(kh.threads_per_tg, 1, 1),
+                    );
+                }
+            }
+            _ => {
+                // Q4_K: the fused gate+up kernel. Geometry travels with the
+                // `KernelHandle`; no shader-module ROWS_PER_TG re-imports.
+                let gate_up_kh = &self.ffn.q4k_ffn_gate_up_pipeline;
+                let tgs = (valid_count as u64 * inter as u64).div_ceil(gate_up_kh.rows_per_tg);
+                enc.set_compute_pipeline_state(&gate_up_kh.state);
+                enc.set_buffer(0, Some(&scratch.gate_buf), 0);
+                enc.set_buffer(1, Some(&scratch.up_buf), 0);
+                enc.set_buffer(2, Some(&scratch.x_buf), 0);
+                enc.set_buffer(3, Some(&scratch.g_out), 0);
+                enc.set_buffer(4, Some(&scratch.u_out), 0);
+                enc.set_bytes(5, 4, &n_rows as *const u32 as *const c_void);
+                enc.set_bytes(6, 4, &k_cols as *const u32 as *const c_void);
+                enc.dispatch_thread_groups(
+                    MTLSize::new(tgs * 2, 1, 1),
+                    MTLSize::new(gate_up_kh.threads_per_tg, 1, 1),
+                );
+            }
+        }
 
-        enc.set_compute_pipeline_state(&gate_up_kh.state);
-        enc.set_buffer(0, Some(&scratch.gate_buf), 0);
-        enc.set_buffer(1, Some(&scratch.up_buf), 0);
-        enc.set_buffer(2, Some(&scratch.x_buf), 0);
-        enc.set_buffer(3, Some(&scratch.g_out), 0);
-        enc.set_buffer(4, Some(&scratch.u_out), 0);
-        enc.set_bytes(5, 4, &n_rows as *const u32 as *const c_void);
-        enc.set_bytes(6, 4, &k_cols as *const u32 as *const c_void);
-        enc.dispatch_thread_groups(
-            MTLSize::new(tgs * 2, 1, 1),
-            MTLSize::new(gate_up_kh.threads_per_tg, 1, 1),
-        );
-
-        // ── 5. GELU-tanh activation per expert (strided to inter_padded) ──
+        // ── 5. Gate-rule activation per expert (strided to inter_padded) ──
         // Gate/up output is packed at stride `inter`; activation must land at
         // stride `inter_padded` because down reads `K = inter_padded`. One
         // small dispatch per expert with the right offsets gets us strided
         // output without a new shader. valid_count × ~5µs ≪ allocation cost.
+        //
+        // The kernel comes from the layer's typed `MoeGateRule` — the same
+        // authority the CPU paths combine under — so a Silu model can no
+        // longer silently run the GELU kernel, and ClampedGlu (GPT-OSS)
+        // gets its own kernel with the bias slots bound.
         let inter_u32 = inter as u32;
         for e in 0..valid_count {
             let g_offset = (e * inter * 4) as u64;
             let u_offset = (e * inter * 4) as u64;
             let a_offset = (e * inter_padded * 4) as u64;
-            enc.set_compute_pipeline_state(&self.ffn.geglu_gelu_tanh_pipeline);
-            enc.set_buffer(0, Some(&scratch.g_out), g_offset);
-            enc.set_buffer(1, Some(&scratch.u_out), u_offset);
-            enc.set_buffer(2, Some(&scratch.act_buf), a_offset);
-            enc.set_bytes(3, 4, &inter_u32 as *const u32 as *const c_void);
+            match moe.gate_rule {
+                larql_compute::MoeGateRule::ClampedGlu { limit, alpha } => {
+                    let has_bias: u32 = u32::from(stage_biases);
+                    let b_offset = (e * inter * 4) as u64;
+                    enc.set_compute_pipeline_state(&self.ffn.clamped_glu_bias_pipeline);
+                    enc.set_buffer(0, Some(&scratch.g_out), g_offset);
+                    enc.set_buffer(1, Some(&scratch.u_out), u_offset);
+                    enc.set_buffer(2, Some(&scratch.act_buf), a_offset);
+                    enc.set_bytes(3, 4, &inter_u32 as *const u32 as *const c_void);
+                    enc.set_buffer(4, Some(&scratch.gate_bias_buf), b_offset);
+                    enc.set_buffer(5, Some(&scratch.up_bias_buf), b_offset);
+                    enc.set_bytes(6, 4, &has_bias as *const u32 as *const c_void);
+                    enc.set_bytes(7, 4, &limit as *const f32 as *const c_void);
+                    enc.set_bytes(8, 4, &alpha as *const f32 as *const c_void);
+                }
+                larql_compute::MoeGateRule::Gated(activation) => {
+                    let pipeline = if activation.gate_up_is_gelu_tanh() {
+                        &self.ffn.geglu_gelu_tanh_pipeline
+                    } else {
+                        &self.ffn.geglu_pipeline
+                    };
+                    enc.set_compute_pipeline_state(pipeline);
+                    enc.set_buffer(0, Some(&scratch.g_out), g_offset);
+                    enc.set_buffer(1, Some(&scratch.u_out), u_offset);
+                    enc.set_buffer(2, Some(&scratch.act_buf), a_offset);
+                    enc.set_bytes(3, 4, &inter_u32 as *const u32 as *const c_void);
+                }
+            }
             enc.dispatch_threads(
                 MTLSize::new(inter as u64, 1, 1),
                 MTLSize::new(
@@ -895,19 +1053,21 @@ impl MetalBackend {
         let n_out = hidden as u32;
         let k_in = inter_padded as u32;
         // Pull dispatch geometry from the bound pipeline so this works for
-        // both the 4sg and 8sg variants of `q4k_matvec` — hardcoding the
+        // both the 4sg and 8sg variants of the matvec — hardcoding the
         // 4sg constants while dispatching the 8sg pipeline (the production
         // default since 2026-04-28) leaves simdgroups 4..7 unscheduled and
         // only writes rows 0..3 of each TG's 8-row range. See the matching
         // fix in `trait_impl/quant_matvec.rs::q4k_matvec`.
-        let down_rows_per_tg = self.quant.q4k_matvec_pipeline.rows_per_tg;
-        let down_threads_per_tg = self.quant.q4k_matvec_pipeline.threads_per_tg;
-        let down_tgs = (hidden as u64).div_ceil(down_rows_per_tg);
+        let down_kh = match scratch.format {
+            larql_compute::QuantFormat::Q6_K => &self.quant.q6k_matvec_pipeline,
+            _ => &self.quant.q4k_matvec_pipeline,
+        };
+        let down_tgs = (hidden as u64).div_ceil(down_kh.rows_per_tg);
 
         for e in 0..valid_count {
             let act_offset = (e * inter_padded * 4) as u64;
             let out_offset = (e * hidden * 4) as u64;
-            enc.set_compute_pipeline_state(&self.quant.q4k_matvec_pipeline.state);
+            enc.set_compute_pipeline_state(&down_kh.state);
             enc.set_buffer(0, Some(&scratch.down_bufs[e]), 0);
             enc.set_buffer(1, Some(&scratch.act_buf), act_offset);
             enc.set_buffer(2, Some(&scratch.expert_outs), out_offset);
@@ -915,7 +1075,7 @@ impl MetalBackend {
             enc.set_bytes(4, 4, &k_in as *const u32 as *const c_void);
             enc.dispatch_thread_groups(
                 MTLSize::new(down_tgs, 1, 1),
-                MTLSize::new(down_threads_per_tg, 1, 1),
+                MTLSize::new(down_kh.threads_per_tg, 1, 1),
             );
         }
         enc.end_encoding();
@@ -923,13 +1083,25 @@ impl MetalBackend {
         cmd.wait_until_completed();
 
         // ── 7. CPU weighted sum + post-experts norm ──────────────────────
+        // The down bias joins each expert's output BEFORE the routing
+        // weight, matching the reference (`ExpertWeightFfn::run_expert`
+        // adds it inside the expert, then the caller weights). Applied here
+        // on readback rather than in a shader: it is `hidden` adds per
+        // expert against ~22 MB of weight reads.
         let all_expert_outputs = read_buffer_f32(&scratch.expert_outs, valid_count * hidden);
         let mut moe_out = vec![0.0f32; hidden];
         for e in 0..valid_count {
             let w = valid_weights[e];
+            let mlp = moe.expert_mlp(valid_ids[e]);
             let out_slice = &all_expert_outputs[e * hidden..(e + 1) * hidden];
-            for (acc, &v) in moe_out.iter_mut().zip(out_slice) {
-                *acc += v * w;
+            if mlp.down_bias.is_empty() {
+                for (acc, &v) in moe_out.iter_mut().zip(out_slice) {
+                    *acc += v * w;
+                }
+            } else {
+                for ((acc, &v), &b) in moe_out.iter_mut().zip(out_slice).zip(mlp.down_bias) {
+                    *acc += (v + b) * w;
+                }
             }
         }
 
