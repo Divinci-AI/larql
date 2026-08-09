@@ -800,7 +800,17 @@ impl MetalBackend {
             // on CPU (direct shared-memory access), then restart for the next layer.
             // layer_scalar is applied AFTER MoE so it scales the combined output
             // (dense + MoE). Applying it before would leave the MoE contribution unscaled.
-            if has_moe {
+            //
+            // Branch on THIS LAYER being a MoE/remote layer, not on the
+            // model-level `has_moe`: with the model-level test, a dense
+            // layer of a hybrid-MoE model entered `handle_moe_interleave`
+            // (which returns immediately for dense layers) and the
+            // `else` arm's layer_scalar was never applied — the same
+            // mis-scaling class as the 14x incident recorded in
+            // `moe_combine.rs`. Capability audit F9. MoE layers get
+            // their scalar inside `moe_combine::apply_outer_combine`.
+            let layer_is_moe = layer.moe.is_some() || layer.ffn_is_remote;
+            if layer_is_moe {
                 self.handle_moe_interleave(
                     layer,
                     moe_interleave::MoeInterleaveCtx {

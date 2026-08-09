@@ -196,7 +196,9 @@ impl MetalBackend {
         } else {
             // Q8 path
             let q8_buf = self.bufs.output(hidden as u64);
-            let q8s_buf = self.bufs.output((hidden / LEGACY_BLOCK_ELEMS * 4) as u64);
+            let q8s_buf = self
+                .bufs
+                .output((hidden.div_ceil(LEGACY_BLOCK_ELEMS) * 4) as u64);
 
             enc_a.set_compute_pipeline_state(&self.norms.rms_norm_q8_pipeline);
             enc_a.set_buffer(0, Some(&h_buf), 0);
@@ -216,6 +218,12 @@ impl MetalBackend {
             );
 
             let total_rows = (q_dim + kv_dim + kv_dim) as u32;
+            assert!(
+                hidden <= crate::shaders::q8_attn_proj::MAX_K,
+                "q8_qkv_proj stages its input in threadgroup memory capped at K = {}; \
+                 hidden {hidden} would corrupt it (audit F13)",
+                crate::shaders::q8_attn_proj::MAX_K,
+            );
             enc_a.set_compute_pipeline_state(&self.attention.q8_qkv_proj_pipeline.state);
             enc_a.set_buffer(0, Some(&wq_buf), 0);
             enc_a.set_buffer(1, Some(&wk_buf), 0);
@@ -455,11 +463,11 @@ impl MetalBackend {
             let o_q8 = self.bufs.output(layer_q_dim as u64);
             let o_q8s = self
                 .bufs
-                .output((layer_q_dim / LEGACY_BLOCK_ELEMS * 4) as u64);
+                .output((layer_q_dim.div_ceil(LEGACY_BLOCK_ELEMS) * 4) as u64);
             let o_out = self.bufs.output((hidden * 4) as u64);
 
             let dim_val = layer_q_dim as u32;
-            let blocks = (layer_q_dim / LEGACY_BLOCK_ELEMS) as u32;
+            let blocks = layer_q_dim.div_ceil(LEGACY_BLOCK_ELEMS) as u32;
             enc_c.set_compute_pipeline_state(&self.quant.q8_quant_pipeline);
             enc_c.set_buffer(0, Some(&attn_out), 0);
             enc_c.set_buffer(1, Some(&o_q8), 0);
@@ -476,6 +484,12 @@ impl MetalBackend {
 
             let o_rows = hidden as u32;
             let o_k = layer_q_dim as u32;
+            assert!(
+                layer_q_dim <= crate::shaders::q8_matvec::MAX_K,
+                "q8_matvec stages its Q8 input in threadgroup memory capped at K = {}; \
+                 layer_q_dim {layer_q_dim} would corrupt it (audit F13)",
+                crate::shaders::q8_matvec::MAX_K,
+            );
             enc_c.set_compute_pipeline_state(&self.quant.q8_matvec_pipeline.state);
             enc_c.set_buffer(0, Some(&wo_buf), 0);
             enc_c.set_buffer(1, Some(&o_q8), 0);

@@ -59,6 +59,7 @@ kernel void attn_fused(
     constant float*     sinks      [[buffer(18)]],  // per-Q-head attention sink logits
     constant uint&      has_sinks  [[buffer(19)]],
     constant float&     amplitude  [[buffer(20)]],  // cos/sin scalar (YaRN); 1.0 otherwise  // 0 = no sinks (slot is a placeholder)
+    constant uint&      abs_pos    [[buffer(21)]],  // ABSOLUTE stream position for RoPE
     uint tg_id  [[threadgroup_position_in_grid]],
     uint tid    [[thread_index_in_threadgroup]],
     uint tg_sz  [[threads_per_threadgroup]],
@@ -68,6 +69,12 @@ kernel void attn_fused(
     uint head = tg_id;
     if (head >= num_q) return;
     uint kv_head = head / (num_q / num_kv);
+    // Cache ROW is occupancy-indexed (matches kv_cache_append's row
+    // choice); the RoPE ANGLE uses the absolute stream position. They
+    // are equal only until a sliding window evicts — deriving the
+    // angle from T (as `T - 1`) roped at a rewound position after
+    // compaction while every other decode path used abs_position
+    // (capability audit F11).
     uint pos = T - 1u;
 
     threadgroup float tg_q[256];
@@ -124,7 +131,7 @@ kernel void attn_fused(
     // rope passes.
     uint cache_off = pos * num_kv * head_dim + kv_head * head_dim;
     for (uint d = tid; d < hdim; d += tg_sz) {
-        float angle = float(pos) * inv_freq[d];
+        float angle = float(abs_pos) * inv_freq[d];
         float cos_a = cos(angle) * amplitude;
         float sin_a = sin(angle) * amplitude;
 
@@ -150,7 +157,11 @@ kernel void attn_fused(
         V_cache[cache_off + d] = V_in[kv_head * head_dim + d];
     }
 
-    threadgroup_barrier(mem_flags::mem_device);
+    // Orders BOTH memory spaces: phase 5 reads K from device
+    // (K_cache) and Q from threadgroup (tg_q). mem_device alone
+    // synchronised execution but did not fence the tg_q writes
+    // (capability audit F11).
+    threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
 
     // ── Phase 5: scores. Reads Q from tg_q, K from K_cache. ──
     uint t_start = (window_size > 0u && T > window_size) ? T - window_size : 0u;
@@ -189,6 +200,12 @@ kernel void attn_fused(
     }
 
     {
+        // tg_red still holds the per-simdgroup maxima read above; a
+        // fast simdgroup must not overwrite a slot a slow one has not
+        // read. This is the same read->write reuse race fixed in
+        // kv_attention and kv_append_attend_fused — this kernel never
+        // received that fix (capability audit F11).
+        threadgroup_barrier(mem_flags::mem_threadgroup);
         float sg_sum = simd_sum(local_sum);
         if (lane == 0) tg_red[sg_id] = sg_sum;
         threadgroup_barrier(mem_flags::mem_threadgroup);

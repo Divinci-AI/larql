@@ -765,6 +765,17 @@ impl MetalBackend {
         let mut valid_count = 0usize;
 
         for (k, &ei) in expert_indices.iter().enumerate() {
+            // Scratch is sized for `scratch.top_k` experts; without this
+            // guard a caller passing more indices than the scratch was
+            // built for writes past `gate_buf`/`up_buf` (and would only
+            // panic later on the `down_bufs` index). Bound against the
+            // ALLOCATION, not `moe.top_k` — the two are only
+            // debug_assert-ed equal, so in release they can drift. The
+            // sibling staging loop in `run_experts_preselected_metal`
+            // has carried this bound all along. Capability audit F10.
+            if valid_count >= scratch.top_k {
+                break;
+            }
             let Some((gu_bytes, dn_bytes)) = get_expert_bytes(ei) else {
                 continue;
             };
@@ -775,8 +786,10 @@ impl MetalBackend {
             // Q4_K layout: gate || up, each `inter * row_bytes` bytes.
             // SAFETY: gate_ptr / up_ptr are StorageModeShared Metal buffer
             // contents; offsets are bounded by `top_k * gate_half_bytes`
-            // allocated up front (see `MoeScratch::new`). Writes complete
-            // before the encoder dispatches the matvec that reads them.
+            // allocated up front (see `MoeScratch::new`), and the
+            // `valid_count >= top_k` guard above enforces that bound.
+            // Writes complete before the encoder dispatches the matvec
+            // that reads them.
             unsafe {
                 std::ptr::copy_nonoverlapping(
                     gu_bytes.as_ptr(),
