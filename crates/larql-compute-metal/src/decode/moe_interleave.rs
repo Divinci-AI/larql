@@ -18,7 +18,6 @@ pub(super) struct MoeInterleaveCtx<'a> {
     pub hidden: usize,
     pub inter: usize,
     pub inter_padded: usize,
-    pub ffn_uses_kquant: bool,
     pub defer_ffn_for_split: bool,
     pub stage_timing_split: bool,
     pub layer_in_snapshot: Option<&'a [f32]>,
@@ -122,7 +121,6 @@ impl MetalBackend {
                     inter: ctx.inter,
                     inter_padded: ctx.inter_padded,
                 },
-                ctx.ffn_uses_kquant,
             );
 
             // Always unfused here: this preserves the previous split-MoE path.

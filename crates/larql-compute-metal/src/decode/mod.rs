@@ -310,6 +310,20 @@ impl MetalBackend {
         mut state_dump: Option<&mut larql_compute::DecodeStateDump>,
         state_dump_mask: larql_compute::StateDumpMask,
     ) -> Vec<f32> {
+        // Refuse unroutable FFN formats BEFORE any command buffer or
+        // encoder exists: a panic that unwinds past a live Metal
+        // encoder trips the ObjC "released without endEncoding"
+        // assertion and turns a clean refusal into a process-killing
+        // SIGTRAP (the failure mode that hid #229 behind an earlier
+        // test's abort). `encode_ffn_step` re-checks as defence in
+        // depth for callers that bypass this entry point.
+        for layer in layers {
+            // A fully-remote FFN never runs locally; its dense weight
+            // slots may be placeholders and are not validated.
+            if !layer.ffn_is_remote {
+                encode_ffn::validate_ffn_formats(layer);
+            }
+        }
         // W10 Phase B/C: capture flags. `dump_kv` controls the K/V
         // staging + readback (skipped under HOnly + None — Metal's own
         // kv cache still receives the K/V as a side effect for
@@ -690,7 +704,7 @@ impl MetalBackend {
                     encoder_ended = false;
                 } else {
                     // Production path: whole FFN in one encoder block.
-                    self.encode_ffn_step(&enc, layer, ffn_bufs, ffn_dims, ffn_uses_kquant);
+                    self.encode_ffn_step(&enc, layer, ffn_bufs, ffn_dims);
                     self.encode_post_ffn_residual(
                         &enc,
                         layer,
@@ -795,7 +809,6 @@ impl MetalBackend {
                         hidden,
                         inter,
                         inter_padded,
-                        ffn_uses_kquant,
                         defer_ffn_for_split,
                         stage_timing_split,
                         layer_in_snapshot: layer_in_snapshot.as_deref(),
