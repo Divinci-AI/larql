@@ -176,3 +176,92 @@ fn prefill_mixed_q4k_q6k_v_seq4_runs_fused_mixed_kernel() {
         "mixed prefill magnitude {max_abs} unreasonable"
     );
 }
+
+/// Uniform Q6_K attention routes PerProjection at prefill (no fused
+/// uniform-Q6_K kernel exists). This coverage previously came from the
+/// mixed Gemma triple as a side effect; once the plan routes that
+/// triple to the fused mixed kernel, the per-projection prefill arm
+/// needs its own exercise.
+#[test]
+fn prefill_uniform_q6k_seq2_runs_per_projection() {
+    let Some(metal) = larql_compute_metal::MetalBackend::new() else {
+        return;
+    };
+    use larql_compute::cpu::ops::q4_common::{quantize_q4_0, quantize_q6_k};
+
+    let wq_data = quantize_q6_k(&synth_weight_f32(Q_DIM * HIDDEN, 3.1));
+    let wk_data = quantize_q6_k(&synth_weight_f32(KV_DIM * HIDDEN, 3.2));
+    let wv_data = quantize_q6_k(&synth_weight_f32(KV_DIM * HIDDEN, 3.3));
+    let wo_data = quantize_q6_k(&synth_weight_f32(HIDDEN * Q_DIM, 3.4));
+    let gate_data = quantize_q4_0(&synth_weight_f32(INTER * HIDDEN, 3.5));
+    let up_data = quantize_q4_0(&synth_weight_f32(INTER * HIDDEN, 3.6));
+    let down_data = quantize_q4_0(&synth_weight_f32(HIDDEN * INTER, 3.7));
+    let norm_w: Vec<f32> = (0..HIDDEN).map(|i| 1.0 + (i as f32 * 0.0008)).collect();
+
+    let mut layer = build_synth_layer(
+        &wq_data, &wk_data, &wv_data, &wo_data, &gate_data, &up_data, &down_data, &norm_w,
+    );
+    layer.wq = QuantWeight::new(QuantFormat::Q6_K, &wq_data, larql_compute::QuantAux::None);
+    layer.wk = QuantWeight::new(QuantFormat::Q6_K, &wk_data, larql_compute::QuantAux::None);
+    layer.wv = QuantWeight::new(QuantFormat::Q6_K, &wv_data, larql_compute::QuantAux::None);
+    layer.wo = QuantWeight::new(QuantFormat::Q6_K, &wo_data, larql_compute::QuantAux::None);
+
+    let seq_len = 2usize;
+    let x: Vec<f32> = (0..seq_len * HIDDEN)
+        .map(|i| ((i as f32 * 0.011 + 3.9).sin()) * 0.4)
+        .collect();
+    let result = (&metal as &dyn ComputeBackend)
+        .as_any()
+        .downcast_ref::<larql_compute_metal::MetalBackend>()
+        .unwrap()
+        .prefill_kquant(&[layer], &x, HIDDEN, INTER, seq_len, false, 0.0);
+    let Some(result) = result else {
+        panic!("prefill_kquant returned None for uniform Q6_K");
+    };
+    assert_eq!(result.len(), seq_len * HIDDEN);
+    assert!(result.iter().all(|v| v.is_finite()));
+    assert!(result.iter().any(|v| v.abs() > 1e-6));
+}
+
+/// Uniform Q4_KF attention at prefill drives the Q4_KF fused arm.
+/// The bytes are standard 144-byte GGUF Q4_K — the Q4_KF tag selects
+/// the llama.cpp-exact kernel, not a different layout — so the retag
+/// from Q4_K is an inline-to-inline `with_format`.
+#[test]
+fn prefill_uniform_q4kf_seq2_runs_fused_kernel() {
+    let Some(metal) = larql_compute_metal::MetalBackend::new() else {
+        return;
+    };
+    use larql_compute::cpu::ops::q4_common::{quantize_q4_0, quantize_q4_k};
+
+    let wq_data = quantize_q4_k(&synth_weight_f32(Q_DIM * HIDDEN, 3.1));
+    let wk_data = quantize_q4_k(&synth_weight_f32(KV_DIM * HIDDEN, 3.2));
+    let wv_data = quantize_q4_k(&synth_weight_f32(KV_DIM * HIDDEN, 3.3));
+    let wo_data = quantize_q4_k(&synth_weight_f32(HIDDEN * Q_DIM, 3.4));
+    let gate_data = quantize_q4_0(&synth_weight_f32(INTER * HIDDEN, 3.5));
+    let up_data = quantize_q4_0(&synth_weight_f32(INTER * HIDDEN, 3.6));
+    let down_data = quantize_q4_0(&synth_weight_f32(HIDDEN * INTER, 3.7));
+    let norm_w: Vec<f32> = (0..HIDDEN).map(|i| 1.0 + (i as f32 * 0.0008)).collect();
+
+    let mut layer = build_synth_layer(
+        &wq_data, &wk_data, &wv_data, &wo_data, &gate_data, &up_data, &down_data, &norm_w,
+    );
+    layer.wq = layer.wq.with_format(QuantFormat::Q4_KF);
+    layer.wk = layer.wk.with_format(QuantFormat::Q4_KF);
+    layer.wv = layer.wv.with_format(QuantFormat::Q4_KF);
+
+    let seq_len = 2usize;
+    let x: Vec<f32> = (0..seq_len * HIDDEN)
+        .map(|i| ((i as f32 * 0.011 + 3.9).sin()) * 0.4)
+        .collect();
+    let result = (&metal as &dyn ComputeBackend)
+        .as_any()
+        .downcast_ref::<larql_compute_metal::MetalBackend>()
+        .unwrap()
+        .prefill_kquant(&[layer], &x, HIDDEN, INTER, seq_len, false, 0.0);
+    let Some(result) = result else {
+        panic!("prefill_kquant returned None for uniform Q4_KF");
+    };
+    assert_eq!(result.len(), seq_len * HIDDEN);
+    assert!(result.iter().all(|v| v.is_finite()));
+}
