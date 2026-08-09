@@ -3344,6 +3344,35 @@ the EXP-V ladder experiments (and eventual `voice compare`) one-liners.
 
 ---
 
+## Standing execution rule — physical planning (extracted 2026-08-10)
+
+> **A logical operator must be physically planned from
+> `(format, operation, shape, hardware)`, never selected from tensor
+> format alone.**
+
+Extracted after the TTS funnel's TTFA work found the same pathology
+three times in one day — a decode-shaped primitive applied repeatedly
+to a prefill-shaped workload (FFN row-at-a-time; the blocked integer
+GEMM in three loop structures; attention position-at-a-time gemv +
+scalar softmax) — and measured the correct plans diverging by 1.6-4x
+(`docs/tts-funnel.md`, 2026-08-10 entries). One logical operator,
+multiple physical plans selected by execution phase:
+
+```text
+ATTENTION / FFN (logical)
+├─ decode:  packed Q4K×Q8K matvec (bandwidth/issue-oriented)
+├─ prefill: dequant-once + GEMM, batched softmax (compute-oriented)
+└─ future:  long-context, resident-KV, speculative variants
+```
+
+Applies beyond speech: K3, dense vindex prefill, speculative branches,
+multimodal prompt ingestion. Corollary for placement: not "a GPU
+model" but per-phase operator routing (CPU attention + Metal FFN GEMM
+is a legitimate plan). This is the query-optimizer half of the
+model-as-database thesis, now empirical.
+
+---
+
 ## P1 — Model-to-model fusion: the FUSE ladder (added 2026-08-09)
 
 The principle to lock in now: **text is one interoperability layer, not
