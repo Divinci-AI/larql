@@ -167,15 +167,13 @@ Gate log:
   run band), p50 35 ms / p95 37 ms / max 93 ms, TTFA 2.0 s
   (prefill-dominated: prefill 1.97 s), and the streaming verdict:
   **min stable pre-buffer 0 ms, cold-start underruns 0**, buffer
-  growing +1.25 s audio per second of playback. Same command on the
-  gpu-featured build — the like-for-like A/B the previous entry owed —
-  reads 5.17 frames/s, prefill 8.8 s (~3.8x slower on the Q4 path, worse
-  than the 2.7x fp32 reading): the CPU-path regression in the gpu build
-  is confirmed with sampling flags matched, still to be filed and fixed
-  separately. Not in scope here, deliberately: an actual audio-device
-  ring buffer (the §5 runtime shape) and the incremental codec — the
-  session emits frames through the same `on_frame` seam either will
-  consume.
+  growing +1.25 s audio per second of playback. Not in scope here,
+  deliberately: an actual audio-device ring buffer (the §5 runtime
+  shape) and the incremental codec — the session emits frames through
+  the same `on_frame` seam either will consume.
+  *Correction (2026-08-10):* this entry originally reported the
+  gpu-featured build's CPU path ~3.8x slower on the same command; the
+  #242 investigation falsified that — see the entry below.
 
 This document plays the role `k3-funnel.md` plays for sparse execution: it
 names one model that cannot run, inventories exactly why, and commits to
@@ -500,11 +498,32 @@ AMX); fp32 BLAS GEMM 456 ms (2.1 TFLOPS); dequant-whole+BLAS 922 ms.
 Consequences: (1) the best CPU prefill lands ≈ 1.0 s (BLAS + overhead,
 needing an fp32 shadow ~5 GB) or ≈ 1.5 s allocation-free
 (dequant-per-layer + BLAS) — CPU wiring halves TTFA but cannot reach
-the 500 ms gate; **the gate's lever is Metal prefill**, which makes the
-gpu-build CPU-path regression (#242) a prerequisite for honest mixed
-measurements. (2) Spillover: the vindex serving path prefills dense
-models through this same amortised matmul — if it reads 212 GFLOPS
-there too, that path carries the same defect; check separately.
+the 500 ms gate; **the gate's lever is Metal prefill**. (2) Spillover:
+the vindex serving path prefills dense models through this same
+amortised matmul — if it reads 212 GFLOPS there too, that path carries
+the same defect; check separately.
+
+**The #242 verdict** (2026-08-10) — the "gpu-build CPU regression" is
+**falsified as a build effect**. Evidence, in strength order: the
+frame-shape kernel bench under a gpu-featured build reads 16.8 ms/frame
+against the cpu build's 15.8-16.8 band (no feature effect on the
+kernels); the *same* gpu-featured CLI binary ran the identical sampled
+command at 4.6 fps (prefill 12.8 s) and 19.1 fps (prefill 2.4 s)
+minutes apart; four interleaved A/B pairs put slow episodes on **both**
+binaries (cpu-only build: 11.8 fps with a 707 ms max frame; gpu build:
+6.3 fps with an 883 ms max frame) with clean-run medians
+indistinguishable (~±10%); no pageouts, no thermal warnings. The
+original evidence was contaminated: the first "2.7x" reading came from
+a stale saved binary, and both of today's slow readings ran immediately
+after multi-GB cargo builds (post-build host churn — plausibly
+indexing). Two real lessons replace the phantom: (a) **never trust a
+single benchmark run adjacent to a build** — interleave A/B trials on
+a quiet machine (the run-band discipline this doc already applies to
+frame times applies doubly across binaries); (b) the host serves
+**episodic multi-hundred-ms stalls** (p95 spiking 34 → 503 ms) that a
+realtime speech runtime must survive — that is a §5 deadline-robustness
+requirement (QoS pinning, buffer sizing against measured host jitter),
+not a build defect. Metal prefill is unblocked.
 
 ---
 
