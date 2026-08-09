@@ -87,9 +87,9 @@ built from a six-family audit of every MSL entry point in
       `q8_matvec`) asserted nowhere.
 - [x] **F14** (fixed 4408d18a) `fused_attention` head≤512 / seq≤4096 unasserted;
       `kv_attention_long` unguarded past its 4096 scratch.
-- [ ] **F15** `Q4_KF_BLOCK_BYTES = 160` (host) vs 144 (both Q4_KF
+- [x] **F15** (fixed on fix/metal-audit-f15-f16-f22) `Q4_KF_BLOCK_BYTES = 160` (host) vs 144 (both Q4_KF
       shaders) — establish which is real, fix the other.
-- [ ] **F16** `gate_out`/`up_out` sized `inter` while fused Q4_K down
+- [x] **F16** (fixed on fix/metal-audit-f15-f16-f22) `gate_out`/`up_out` sized `inter` while fused Q4_K down
       reads `inter_padded`; unify the `inter` vs `inter_padded` K
       convention across the five down dispatch variants.
 - [ ] **F17** K-alignment asserted in 2 of ~30 quant kernels; GQA
@@ -106,7 +106,7 @@ built from a six-family audit of every MSL entry point in
       the shader-retention policy each needs a revival-story check before
       deletion, not a bulk purge; `q6k_..._cached` additionally caches
       nothing despite its module doc.
-- [ ] **F22** doc/code mismatches: `LARQL_FUSED_Q6K_DOWN` names the wrong
+- [x] **F22** (fixed on fix/metal-audit-f15-f16-f22) doc/code mismatches: `LARQL_FUSED_Q6K_DOWN` names the wrong
       kernel, `LARQL_F16_ACC` co-requirement undocumented, stride32
       "not wired" doc stale, `Q4K_GU_MAX_K` test comment references a
       removed constant.

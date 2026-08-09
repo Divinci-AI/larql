@@ -146,7 +146,11 @@ fn quant_format_classifiers() {
 fn quant_format_reports_packed_matrix_bytes() {
     assert_eq!(QuantFormat::Q4_0.packed_matrix_bytes(2, 32), Some(36));
     assert_eq!(QuantFormat::Q4_K.packed_matrix_bytes(2, 256), Some(288));
-    assert_eq!(QuantFormat::Q4_KF.packed_matrix_bytes(2, 256), Some(320));
+    // Q4_KF packs identically to Q4_K (144 B/super-block): the tag
+    // selects the llama.cpp-exact kernels, not a storage layout. The
+    // previous pinned value (320 = 2 x 160) described the experimental
+    // pre-baked layout no kernel reads — capability audit F15.
+    assert_eq!(QuantFormat::Q4_KF.packed_matrix_bytes(2, 256), Some(288));
     assert_eq!(QuantFormat::Q6_K.packed_matrix_bytes(2, 256), Some(420));
     assert_eq!(QuantFormat::F16.packed_matrix_bytes(2, 256), None);
 }

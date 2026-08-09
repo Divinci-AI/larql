@@ -17,7 +17,7 @@ fn main() {
 
     #[cfg(target_os = "macos")]
     {
-        use larql_compute::cpu::ops::q4_common::{quantize_q4_k, quantize_q4_kf, quantize_to_q8};
+        use larql_compute::cpu::ops::q4_common::{quantize_q4_k, quantize_to_q8};
         use larql_compute::prelude::*;
         use std::time::Instant;
 
@@ -96,12 +96,16 @@ fn main() {
                         wk: quantize_q4_k(&pad(&wk_f)),
                         wv: quantize_q4_k(&pad(&wv_f)),
                         wo: quantize_q4_k(&pad(&wo_f)),
-                        // Q4_KF byte layout (160B/256 — pre-baked half scales)
-                        // for the all-Q4_KF attention variant.
-                        wq_kf: quantize_q4_kf(&pad(&wq_f)),
-                        wk_kf: quantize_q4_kf(&pad(&wk_f)),
-                        wv_kf: quantize_q4_kf(&pad(&wv_f)),
-                        wo_kf: quantize_q4_kf(&pad(&wo_f)),
+                        // The Q4_KF kernels read standard 144-byte GGUF
+                        // Q4_K blocks (the tag selects the llama.cpp-exact
+                        // inner loop, not a layout — audit F15). This
+                        // example previously fed them the experimental
+                        // 160-byte pre-baked layout, so its Q4_KF arm
+                        // measured garbage numerics.
+                        wq_kf: quantize_q4_k(&pad(&wq_f)),
+                        wk_kf: quantize_q4_k(&pad(&wk_f)),
+                        wv_kf: quantize_q4_k(&pad(&wv_f)),
+                        wo_kf: quantize_q4_k(&pad(&wo_f)),
                         wq8: q8q.iter().map(|&x| x as u8).collect(),
                         wk8: q8k.iter().map(|&x| x as u8).collect(),
                         wv8: q8v.iter().map(|&x| x as u8).collect(),

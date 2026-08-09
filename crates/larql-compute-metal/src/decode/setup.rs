@@ -166,23 +166,33 @@ impl DecodeScratch {
         let h_post_attn = bufs.output((hidden * 4) as u64);
         let ffn_norm_out = bufs.output((hidden * 4) as u64);
         let ffn_q8 = bufs.output(hidden as u64);
-        let ffn_q8s = bufs.output((hidden / LEGACY_BLOCK_ELEMS * 4) as u64);
-        let up_out = bufs.output((inter * 4) as u64);
-        let act_buf = bufs.output((inter_padded * 4) as u64);
-        {
-            let ptr = act_buf.contents() as *mut f32;
-            // SAFETY: `act_buf` is a freshly-allocated shared-storage
-            // Metal buffer with `inter_padded * 4` bytes. We zero its
-            // entire f32 capacity before any layer writes the live
-            // `inter` columns; the trailing `inter_padded - inter`
-            // columns stay zero for the remainder of the decode.
+        let ffn_q8s = bufs.output((hidden.div_ceil(LEGACY_BLOCK_ELEMS) * 4) as u64);
+        // `up_out`, `act_buf` and `gate_out_scratch` are all sized (and
+        // tail-zeroed) at `inter_padded`, not `inter`: the fused Q4_K
+        // GEGLU+down kernel reads gate/up over K = inter_padded, so
+        // `inter`-sized buffers were an out-of-bounds read for any
+        // model with inter % 256 != 0 (capability audit F16 — latent,
+        // since all shipped shapes are 256-aligned). The zeroed tail is
+        // mathematically inert: gelu(0) (or silu(0)) × 0 contributes
+        // nothing to the down matvec.
+        let zeroed_padded = |buf: &metal::Buffer| {
+            let ptr = buf.contents() as *mut f32;
+            // SAFETY: freshly-allocated shared-storage Metal buffer with
+            // `inter_padded * 4` bytes; zeroed before any layer writes
+            // the live `inter` columns, so the trailing columns stay
+            // zero for the remainder of the decode.
             unsafe { std::ptr::write_bytes(ptr, 0, inter_padded) };
-        }
+        };
+        let up_out = bufs.output((inter_padded * 4) as u64);
+        zeroed_padded(&up_out);
+        let act_buf = bufs.output((inter_padded * 4) as u64);
+        zeroed_padded(&act_buf);
         let down_out = bufs.output((hidden * 4) as u64);
-        let gate_out_scratch = bufs.output((inter * 4) as u64);
+        let gate_out_scratch = bufs.output((inter_padded * 4) as u64);
+        zeroed_padded(&gate_out_scratch);
         let normed_scratch = bufs.output((hidden * 4) as u64);
         let o_q8_scratch = bufs.output(max_q_dim as u64);
-        let o_q8s_scratch = bufs.output((max_q_dim / LEGACY_BLOCK_ELEMS * 4) as u64);
+        let o_q8s_scratch = bufs.output((max_q_dim.div_ceil(LEGACY_BLOCK_ELEMS) * 4) as u64);
         let scaled_scratch = bufs.output((hidden * 4) as u64);
 
         let has_moe = layers.iter().any(|l| l.moe.is_some() || l.ffn_is_remote);

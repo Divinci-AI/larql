@@ -1,5 +1,15 @@
-/// Bytes per Q4_KF pre-baked super-block. Q4_KF keeps the 256-element
-/// Q4_K block shape but expands packed scale/min metadata for faster decode.
+/// Bytes per super-block of the EXPERIMENTAL 160-byte "pre-baked"
+/// layout that `cpu::ops::q4_common::quantize_q4_kf` produces.
+///
+/// **No Metal kernel reads this layout.** Every live `Q4_KF`-tagged
+/// kernel (`q4kf_qkv_proj`, `q4kf_proj`, `q4kf_ffn_gate_up`) hardcodes
+/// the standard 144-byte GGUF Q4_K block and differs from the `Q4_K`
+/// kernels only in its llama.cpp-exact inner loop. The capability audit
+/// (F15) found this constant feeding `packed_block_layout`, so any
+/// caller sizing a Q4_KF buffer through it disagreed with the shaders'
+/// row stride by 16 bytes per super-block. `packed_block_layout` now
+/// answers 144; this constant remains only for the CPU-side pre-baked
+/// experiment and its tests.
 pub const Q4_KF_BLOCK_BYTES: usize = 160;
 
 /// Quantization format for a weight tensor.
@@ -9,7 +19,7 @@ pub const Q4_KF_BLOCK_BYTES: usize = 160;
 pub enum QuantFormat {
     Q4_0,  // 18 bytes per 32 values (one f16 scale)
     Q4_K,  // 144 bytes per 256 values (GGUF-canonical, Ollama-compatible)
-    Q4_KF, // 160 bytes per 256 values (pre-baked half scales — fast decode)
+    Q4_KF, // 144-byte GGUF Q4_K bytes decoded by the llama.cpp-exact kernels
     Q6_K,  // 210 bytes per 256 values (6-bit with sub-block scales)
     Q8_0,  // int8 values + separate f32 scales
     BF16,  // raw bfloat16 (2 bytes per value, no quantization scales)
@@ -37,7 +47,13 @@ impl QuantFormat {
         match self {
             Self::Q4_0 => Some((ggml::Q4_0_BLOCK_ELEMS, ggml::Q4_0_BLOCK_BYTES)),
             Self::Q4_K => Some((ggml::Q4_K_BLOCK_ELEMS, ggml::Q4_K_BLOCK_BYTES)),
-            Self::Q4_KF => Some((ggml::Q4_K_BLOCK_ELEMS, Q4_KF_BLOCK_BYTES)),
+            // Q4_KF is a KERNEL-ROUTE tag over standard 144-byte GGUF
+            // Q4_K bytes, not a distinct storage layout: all three live
+            // Q4_KF shaders hardcode 144 (audit F15). The 160-byte
+            // pre-baked layout (`Q4_KF_BLOCK_BYTES`) has no kernel
+            // consumer; answering 160 here mis-sized every buffer
+            // derived through this method by 16 bytes per super-block.
+            Self::Q4_KF => Some((ggml::Q4_K_BLOCK_ELEMS, ggml::Q4_K_BLOCK_BYTES)),
             Self::Q6_K => Some((ggml::Q6_K_BLOCK_ELEMS, ggml::Q6_K_BLOCK_BYTES)),
             _ => None,
         }
@@ -331,6 +347,24 @@ mod scale_storage_tests {
         for (f, expected) in table {
             assert_eq!(f.scale_storage(), expected, "{f:?}");
         }
+    }
+
+    /// Q4_KF's packed layout is the standard 144-byte GGUF Q4_K block —
+    /// the tag selects the llama.cpp-exact kernels, not a storage
+    /// format. The 160-byte pre-baked layout (`Q4_KF_BLOCK_BYTES`) has
+    /// no kernel consumer; answering it here mis-sized every derived
+    /// buffer by 16 bytes per super-block (capability audit F15).
+    #[test]
+    fn q4_kf_packed_layout_is_gguf_q4_k() {
+        use larql_models::quant::ggml;
+        assert_eq!(
+            QuantFormat::Q4_KF.packed_block_layout(),
+            Some((ggml::Q4_K_BLOCK_ELEMS, ggml::Q4_K_BLOCK_BYTES)),
+        );
+        assert_eq!(
+            QuantFormat::Q4_KF.packed_block_layout(),
+            QuantFormat::Q4_K.packed_block_layout(),
+        );
     }
 
     /// Inline formats are exactly the block-packed ones *today*. Asserted
