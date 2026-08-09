@@ -735,6 +735,22 @@ impl MetalBackend {
         let inter = moe.intermediate_size;
         let inter_padded = scratch.inter_padded;
         let top_k = moe.top_k;
+        // The expert shaders here implement the gated combine with no bias
+        // slots. Routing below is CPU-side, so the ROUTER bias is honoured —
+        // but a ClampedGlu layer or per-expert MLP biases (GPT-OSS) would
+        // silently run as bias-less GELU/SiLU, a plausible-looking wrong
+        // forward. Refuse until the shaders grow the rule and the slots.
+        assert!(
+            !matches!(moe.gate_rule, larql_compute::MoeGateRule::ClampedGlu { .. }),
+            "Metal MoE dispatch has no ClampedGlu expert kernel; this layer \
+             ({:?}) must run on the CPU path",
+            moe.gate_rule
+        );
+        assert!(
+            moe.experts_gate_up_bias.is_empty() && moe.experts_down_bias.is_empty(),
+            "Metal MoE dispatch has no expert-bias slots; this layer's biased \
+             experts must run on the CPU path"
+        );
         debug_assert_eq!(top_k, scratch.top_k, "MoE top_k drift across layers");
         debug_assert_eq!(
             inter, scratch.inter,

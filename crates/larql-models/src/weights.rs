@@ -155,6 +155,14 @@ pub struct ModelWeights {
     pub skipped_tensors: Vec<(String, String)>,
     /// Byte ranges into `packed_mmaps`: maps tensor key → (file_name, offset, length).
     pub packed_byte_ranges: HashMap<String, (String, usize, usize)>,
+    /// Registry tag of each per-layer FFN store's weight format, keyed by
+    /// layer, recorded from the `layers/layer_XX.weights` header at load
+    /// time. The header is the format authority; a consumer that assumes
+    /// Q4_K decodes a Q6_K store (MXFP4-transcoded experts, GPT-OSS) as
+    /// garbage. Empty for legacy vindexes and non-per-layer layouts —
+    /// consumers fall back to Q4_K, which is the only format those ever
+    /// carried.
+    pub per_layer_ffn_format: HashMap<usize, String>,
     pub embed: WeightArray,
     /// Output projection matrix. Same as embed if tie_word_embeddings=true,
     /// separate lm_head.weight otherwise.
@@ -227,6 +235,14 @@ impl ModelWeights {
             })
             .min()?;
         self.get_layer_entry_bytes(layer, entry)
+    }
+
+    /// Registry tag of the per-layer FFN store's format at `layer`, as
+    /// recorded from the store file's own header. `None` for legacy
+    /// vindexes loaded before the format was threaded through (Q4_K, the
+    /// only format they carried) and for non-per-layer layouts.
+    pub fn per_layer_ffn_format_tag(&self, layer: usize) -> Option<&str> {
+        self.per_layer_ffn_format.get(&layer).map(String::as_str)
     }
 
     /// Whether FFN weights are stored in the per-layer format (`layers/`).

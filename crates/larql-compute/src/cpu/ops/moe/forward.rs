@@ -8,7 +8,7 @@ use crate::MoeLayerWeights;
 
 use super::cache::try_cached_dequant;
 use super::expert::{run_single_expert_q4k_q8k_into, ExpertScratch};
-use super::math::{gelu_tanh, matmul_vec, silu, softmax};
+use super::math::{matmul_vec, softmax};
 use super::{
     moe_expert_input, moe_post_expert_output, moe_route_from_router_input, moe_router_input,
 };
@@ -94,7 +94,7 @@ pub fn cpu_moe_forward(
         let rscale_rms = (moe.router_scale.iter().map(|v| v * v).sum::<f32>()
             / moe.router_scale.len().max(1) as f32)
             .sqrt();
-        eprintln!("[L{layer_n:02}] h_rms={h_rms:.2} hn_rms={hn_rms:.2} router_in_rms={ri_rms:.2} | pnorm_rms={pnorm_rms:.2} rnorm_rms={rnorm_rms:.2} rscale_rms={rscale_rms:.2} scalar={:.4} | logits [{logit_min:.3}..{logit_max:.3}] | experts:{expert_indices:?}", moe.router_input_scalar);
+        eprintln!("[L{layer_n:02}] h_rms={h_rms:.2} hn_rms={hn_rms:.2} router_in_rms={ri_rms:.2} | pnorm_rms={pnorm_rms:.2} rnorm_rms={rnorm_rms:.2} rscale_rms={rscale_rms:.2} scalar={:.4} | fmt={:?} rule={:?} rbias={} gubias={} dbias={} | logits [{logit_min:.3}..{logit_max:.3}] | experts:{expert_indices:?}", moe.router_input_scalar, moe.expert_data_format, moe.gate_rule, moe.router_bias.len(), moe.experts_gate_up_bias.len(), moe.experts_down_bias.len(), );
     }
 
     // Run each selected expert's gated FFN (BF16 dequant on demand).
@@ -106,7 +106,6 @@ pub fn cpu_moe_forward(
     //
     //    gate_up layout: [num_experts, 2*inter, hidden]  (gate rows first, then up rows)
     //    down layout:    [num_experts, hidden, inter]
-    let activation = moe.activation;
     let format = moe.expert_data_format;
     // Storage layout per Gemma 4 26B-A4B (and the per-layer Q4_K writer):
     //   gate_up: [2*inter, hidden]              — never padded; quantises
@@ -160,6 +159,9 @@ pub fn cpu_moe_forward(
         let Some(&down_bytes) = moe.experts_down.get(ei) else {
             return;
         };
+        // This expert's combine rule + bias rows (empty slices when the
+        // architecture has none — the pre-bias behaviour, bit for bit).
+        let mlp = moe.expert_mlp(ei);
         SCRATCH.with(|cell| {
             let mut borrow = cell.borrow_mut();
             let scratch =
@@ -181,7 +183,7 @@ pub fn cpu_moe_forward(
                     gate_up_bytes,
                     down_bytes,
                     inter,
-                    activation,
+                    mlp,
                 );
                 for (a, &v) in dst.iter_mut().zip(h2.iter()) {
                     *a += w * v;
@@ -204,11 +206,10 @@ pub fn cpu_moe_forward(
             let gate_out = matmul_vec(&expert_input, gate_w, inter, hidden);
             let up_out = matmul_vec(&expert_input, up_w, inter, hidden);
 
-            let gelu = activation.gate_up_is_gelu_tanh();
             for j in 0..inter {
-                let g = gate_out[j];
-                let u = up_out[j];
-                scratch.act[j] = if gelu { gelu_tanh(g) * u } else { silu(g) * u };
+                let g = gate_out[j] + mlp.gate_bias(j);
+                let u = up_out[j] + mlp.up_bias(j);
+                scratch.act[j] = mlp.rule.combine(g, u);
             }
 
             // Within-expert feature routing (aim-validation probe); no-op
@@ -222,7 +223,8 @@ pub fn cpu_moe_forward(
             if down_w.is_empty() {
                 return;
             }
-            let expert_contribution = matmul_vec(&scratch.act, &down_w, hidden, inter_padded);
+            let mut expert_contribution = matmul_vec(&scratch.act, &down_w, hidden, inter_padded);
+            mlp.add_down_bias(&mut expert_contribution);
             for (a, &v) in dst.iter_mut().zip(expert_contribution.iter()) {
                 *a += w * v;
             }
@@ -371,7 +373,10 @@ mod tests {
             num_experts: 1,
             top_k: 1,
             intermediate_size: inter,
-            activation: Activation::Silu,
+            router_bias: &[],
+            experts_gate_up_bias: &[],
+            experts_down_bias: &[],
+            gate_rule: crate::MoeGateRule::Gated(Activation::Silu),
             expert_data_format: format,
         }
     }
@@ -445,7 +450,10 @@ mod tests {
             num_experts,
             top_k: 1,
             intermediate_size: inter,
-            activation: Activation::Silu,
+            router_bias: &[],
+            experts_gate_up_bias: &[],
+            experts_down_bias: &[],
+            gate_rule: crate::MoeGateRule::Gated(Activation::Silu),
             expert_data_format: QuantFormat::BF16,
         };
 

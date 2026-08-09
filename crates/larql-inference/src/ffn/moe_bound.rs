@@ -232,7 +232,20 @@ impl BoundMoeBackend {
                 experts,
                 intermediate_dim: inter,
                 hidden_dim: hidden,
-                activation: moe.activation,
+                // The bound path's expert kernels implement the gated
+                // combine only. A ClampedGlu layer (GPT-OSS) must refuse at
+                // bind — with the rule named — rather than run as SiLU and
+                // produce a plausible-looking wrong forward.
+                activation: match moe.gate_rule {
+                    larql_compute::MoeGateRule::Gated(a) => a,
+                    larql_compute::MoeGateRule::ClampedGlu { .. } => {
+                        return Err(ExecutionError::UnsupportedFormat {
+                            format: format!("{:?}", moe.gate_rule),
+                            operand: "expert gate rule (bound MoE kernels are gated-only)"
+                                .to_string(),
+                        })
+                    }
+                },
                 kernel: self.expert_kernel,
             }],
             reduction: BoundReduction::WeightedSum,
@@ -351,7 +364,10 @@ mod tests {
                 num_experts: POPULATION,
                 top_k: TOP_K,
                 intermediate_size: INTER,
-                activation: Activation::GeluTanh,
+                router_bias: &[],
+                experts_gate_up_bias: &[],
+                experts_down_bias: &[],
+                gate_rule: larql_compute::MoeGateRule::Gated(Activation::GeluTanh),
             }
         }
 

@@ -26,6 +26,12 @@ pub(super) fn write_norms_and_router(
     let norms_dtype = crate::config::dtype::StorageDtype::F32;
     let mut norms_offset: u64 = 0;
     let mut norm_entries: Vec<WeightEntry> = Vec::new();
+    // Accessors may legitimately alias one tensor — GPT-OSS's
+    // `moe_pre_experts_norm_key` IS its `post_attention_layernorm` — and a
+    // key must land in the file once, not once per accessor that names it.
+    // The loader's map would quietly last-win a duplicate; the bytes and
+    // manifest rows would still be doubled.
+    let mut written_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for layer in 0..num_layers {
         let keys: Vec<String> = [
@@ -70,7 +76,11 @@ pub(super) fn write_norms_and_router(
         .collect();
 
         for key in keys {
+            if written_keys.contains(&key) {
+                continue;
+            }
             if let Some(data) = source.get_vector(&key) {
+                written_keys.insert(key.clone());
                 let bytes = crate::config::dtype::encode_floats(&data, norms_dtype);
                 norms_file.write_all(&bytes)?;
                 norm_entries.push(WeightEntry {
@@ -95,9 +105,30 @@ pub(super) fn write_norms_and_router(
         // silently found no weights. The 1D keys below are Gemma-4-specific
         // and simply resolve to None elsewhere.
         if arch.is_moe() || arch.is_hybrid_moe() {
-            // 2D router projection — flatten
-            if let Some(key) = arch.moe_router_key(layer) {
+            // 2D tensors, stored flattened as "vectors". The router
+            // projection, plus the packed per-expert bias tensors —
+            // [experts, 2*inter] fused-interleaved gate/up and
+            // [experts, hidden] down — stored VERBATIM in checkpoint
+            // layout; the consumer de-interleaves per expert row exactly
+            // as the f32 reference does (`ExpertWeightFfn`), so there is
+            // no writer/reader layout transformation to drift on.
+            // Omitting these was §4.7.1 finding 6 surviving into serving:
+            // extraction succeeded, the forward ran, and every expert
+            // matmul was missing its bias.
+            let moe_tensor_keys: Vec<String> = [
+                arch.moe_router_key(layer),
+                arch.packed_gate_up_bias_key(layer),
+                arch.packed_down_bias_key(layer),
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
+            for key in moe_tensor_keys {
+                if written_keys.contains(&key) {
+                    continue;
+                }
                 if let Some((data, _, _)) = source.get_tensor(&key) {
+                    written_keys.insert(key.clone());
                     let bytes = crate::config::dtype::encode_floats(&data, norms_dtype);
                     norms_file.write_all(&bytes)?;
                     norm_entries.push(WeightEntry {
@@ -115,6 +146,9 @@ pub(super) fn write_norms_and_router(
             let moe_vec_keys: Vec<String> = [
                 arch.moe_router_scale_key(layer),
                 arch.moe_router_per_expert_scale_key(layer),
+                // Router bias joins the logits before selection; a router
+                // served without its bias picks different experts.
+                arch.moe_router_bias_key(layer),
                 arch.moe_router_norm_key(layer),
                 arch.moe_pre_experts_norm_key(layer),
                 arch.moe_post_ffn1_norm_key(layer),
@@ -128,7 +162,11 @@ pub(super) fn write_norms_and_router(
             .flatten()
             .collect();
             for key in moe_vec_keys {
+                if written_keys.contains(&key) {
+                    continue;
+                }
                 if let Some(data) = source.get_vector(&key) {
+                    written_keys.insert(key.clone());
                     let bytes = crate::config::dtype::encode_floats(&data, norms_dtype);
                     norms_file.write_all(&bytes)?;
                     norm_entries.push(WeightEntry {

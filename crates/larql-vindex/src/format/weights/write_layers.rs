@@ -40,6 +40,26 @@ impl LayerWeightFormat {
     pub fn as_u32(self) -> u32 {
         self as u32
     }
+
+    /// Canonical registry tag, matching the vocabulary
+    /// `larql-compute`'s `QuantFormat::from_registry_tag` accepts. This is
+    /// how the per-layer store's format survives loading: the loader
+    /// records it on `ModelWeights::per_layer_ffn_format` and the MoE
+    /// forward resolves it instead of assuming Q4_K — the assumption that
+    /// would have decoded a Q6_K (MXFP4-transcoded) expert store as
+    /// Q4_K garbage.
+    pub fn registry_tag(self) -> &'static str {
+        match self {
+            Self::F32 => "F32",
+            Self::F16 => "F16",
+            Self::BF16 => "BF16",
+            Self::Q4_0 => "Q4_0",
+            Self::Q4_K => "Q4_K",
+            Self::Q6_K => "Q6_K",
+            Self::Q8_0 => "Q8_0",
+            Self::FP4 => "FP4",
+        }
+    }
 }
 
 const MAGIC: u32 = u32::from_le_bytes(*b"LYRW");

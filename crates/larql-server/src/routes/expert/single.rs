@@ -125,7 +125,7 @@ pub fn run_expert(
             arch.norm_weight_offset(),
             arch.norm_eps(),
             format,
-            activation,
+            larql_compute::ExpertMlp::gated(activation),
         )
     } else {
         larql_inference::run_single_expert(
@@ -134,7 +134,7 @@ pub fn run_expert(
             down_bytes,
             inter,
             format,
-            activation,
+            larql_compute::ExpertMlp::gated(activation),
         )
     };
 

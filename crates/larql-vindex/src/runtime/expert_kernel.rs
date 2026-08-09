@@ -228,7 +228,7 @@ impl BankKernel {
         let padded = padded_intermediate(bank.intermediate_dim, block_elements());
         let input = &session.input;
         let intermediate = bank.intermediate_dim;
-        let activation = bank.activation;
+        let mlp = larql_compute::ExpertMlp::gated(bank.activation);
         let ops = &operands[..];
 
         if larql_compute::cpu::spin_pool::enabled() && experts.len() > 1 {
@@ -240,7 +240,7 @@ impl BankKernel {
                     ops[ci].gate_up.bytes,
                     ops[ci].down.bytes,
                     intermediate,
-                    activation,
+                    mlp,
                 );
                 slot.copy_from_slice(v);
             });
@@ -252,7 +252,7 @@ impl BankKernel {
                     ops[ci].gate_up.bytes,
                     ops[ci].down.bytes,
                     intermediate,
-                    activation,
+                    mlp,
                 );
                 slot.copy_from_slice(v);
             }

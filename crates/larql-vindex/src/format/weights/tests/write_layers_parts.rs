@@ -9,7 +9,7 @@
 //! consumer performs (`cpu/ops/moe/expert` slices at `inter * hidden`), not
 //! against a hand-written byte string.
 
-use super::write_layers::{quantize_dense_entry, LayerWeightFormat};
+use super::super::write_layers::{quantize_dense_entry, LayerWeightFormat};
 
 const INTER: usize = 2;
 const HIDDEN: usize = 256; // Q4_K needs a 256 multiple on the contracted dim

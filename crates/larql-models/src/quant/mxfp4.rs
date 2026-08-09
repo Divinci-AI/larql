@@ -16,6 +16,12 @@ pub const MXFP4_TABLE: [f32; 16] = [
     0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0,
 ];
 
+/// Elements sharing one E8M0 scale — the microscaling group.
+pub const MXFP4_GROUP_ELEMS: usize = 32;
+
+/// Packed bytes per group: two 4-bit values per byte.
+pub const MXFP4_GROUP_BYTES: usize = MXFP4_GROUP_ELEMS / 2;
+
 /// Convert e8m0 scale byte to float multiplier.
 /// e8m0 = pure exponent, no mantissa: value = 2^(exponent - 127)
 pub fn e8m0_to_f32(byte: u8) -> f32 {

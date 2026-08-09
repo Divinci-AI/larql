@@ -10,8 +10,8 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use super::super::write_f32::WeightSource;
-use super::moe_layers_per_expert::write_per_layer_moe_per_expert;
+use super::super::moe_layers_per_expert::write_per_layer_moe_per_expert;
+use crate::format::weights::write_f32::WeightSource;
 use crate::format::weights::write_layers::parse_layer_weights_header;
 
 const HIDDEN: usize = 256;
@@ -362,7 +362,247 @@ fn packed_mxfp4_experts_are_stored_exactly_as_q6k() {
     let (format, ..) = parse_layer_weights_header(&bytes).unwrap();
     assert_eq!(
         format,
-        super::super::write_layers::LayerWeightFormat::Q6_K,
+        crate::format::weights::write_layers::LayerWeightFormat::Q6_K,
         "MXFP4 experts were not stored as Q6_K, so the transcode is lossy"
+    );
+}
+
+/// A `WeightSource` shaped like `StreamingWeights` against a real GPT-OSS
+/// checkpoint: the synthesised per-expert keys resolve to nothing (no shard
+/// contains them) and only the raw packed `*_blocks`/`*_scales` answer.
+struct RawPackedSource {
+    arch: Box<dyn larql_models::ModelArchitecture>,
+    raw: HashMap<String, (Vec<u8>, Vec<usize>)>,
+}
+
+impl WeightSource for RawPackedSource {
+    fn get_tensor(&self, _key: &str) -> Option<(Vec<f32>, usize, usize)> {
+        None
+    }
+    fn get_vector(&self, _key: &str) -> Option<Vec<f32>> {
+        None
+    }
+    fn arch(&self) -> &dyn larql_models::ModelArchitecture {
+        &*self.arch
+    }
+    fn num_layers(&self) -> usize {
+        NUM_LAYERS
+    }
+    fn lm_head(&self) -> Option<(Vec<f32>, usize, usize)> {
+        None
+    }
+    fn vector_names(&self) -> Vec<String> {
+        Vec::new()
+    }
+    fn get_packed_bf16(&self, _key: &str) -> Option<Vec<u8>> {
+        None
+    }
+    fn get_raw_u8(&self, key: &str) -> Option<(Vec<u8>, Vec<usize>)> {
+        self.raw.get(key).cloned()
+    }
+}
+
+fn gpt_oss_arch() -> Box<dyn larql_models::ModelArchitecture> {
+    larql_models::detect_from_json(&serde_json::json!({
+        "model_type": "gpt_oss",
+        "hidden_size": HIDDEN,
+        "intermediate_size": INTER,
+        "num_hidden_layers": NUM_LAYERS,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 4,
+        "num_local_experts": NUM_EXPERTS,
+        "num_experts_per_tok": 2,
+    }))
+}
+
+/// Packed MXFP4 fixture tensors for one layer: fused gate_up
+/// `[E, 2*INTER, G, 16]` and down `[E, HIDDEN, G, 16]`, plus their scales.
+/// Nibble bytes vary with position so a permuted or mis-sliced decode
+/// cannot reproduce them, and scale bytes vary per group so a scale/block
+/// misalignment shows up in the values (a constant scale would forgive it).
+fn packed_layer_fixture(
+    arch: &dyn larql_models::ModelArchitecture,
+    layer: usize,
+    raw: &mut HashMap<String, (Vec<u8>, Vec<usize>)>,
+) {
+    let groups = HIDDEN / larql_models::quant::mxfp4::MXFP4_GROUP_ELEMS;
+    let gu_rows = 2 * INTER;
+    let fill = |n: usize, seed: usize| -> Vec<u8> {
+        (0..n).map(|i| ((i * 37 + seed * 11) % 251) as u8).collect()
+    };
+    // E8M0 scale bytes around 2^0 (127): keep within ±3 octaves so the
+    // dequantised magnitudes stay ordinary f32.
+    let scales = |n: usize, seed: usize| -> Vec<u8> {
+        (0..n).map(|i| 124 + ((i + seed) % 7) as u8).collect()
+    };
+    raw.insert(
+        arch.packed_gate_up_blocks_key(layer).unwrap(),
+        (
+            fill(
+                NUM_EXPERTS * gu_rows * groups * larql_models::quant::mxfp4::MXFP4_GROUP_BYTES,
+                layer,
+            ),
+            vec![
+                NUM_EXPERTS,
+                gu_rows,
+                groups,
+                larql_models::quant::mxfp4::MXFP4_GROUP_BYTES,
+            ],
+        ),
+    );
+    raw.insert(
+        arch.packed_gate_up_scales_key(layer).unwrap(),
+        (
+            scales(NUM_EXPERTS * gu_rows * groups, layer),
+            vec![NUM_EXPERTS, gu_rows, groups],
+        ),
+    );
+    let dn_groups = INTER / larql_models::quant::mxfp4::MXFP4_GROUP_ELEMS;
+    raw.insert(
+        arch.packed_down_blocks_key(layer).unwrap(),
+        (
+            fill(
+                NUM_EXPERTS * HIDDEN * dn_groups * larql_models::quant::mxfp4::MXFP4_GROUP_BYTES,
+                layer + 100,
+            ),
+            vec![
+                NUM_EXPERTS,
+                HIDDEN,
+                dn_groups,
+                larql_models::quant::mxfp4::MXFP4_GROUP_BYTES,
+            ],
+        ),
+    );
+    raw.insert(
+        arch.packed_down_scales_key(layer).unwrap(),
+        (
+            scales(NUM_EXPERTS * HIDDEN * dn_groups, layer + 100),
+            vec![NUM_EXPERTS, HIDDEN, dn_groups],
+        ),
+    );
+}
+
+/// The defect this file exists for, fourth appearance: the capability gate
+/// passed (GPT-OSS advertises per-expert keys) but the *streaming* source
+/// cannot answer them — they name tensors synthesised by the in-RAM loader,
+/// present in no shard. The writer skipped every layer and reported success,
+/// so a real `larql extract` produced a vindex with no `layers/` directory
+/// at all (observed 2026-08-09 on openai/gpt-oss-20b).
+///
+/// The store must instead be synthesised from the raw packed blocks — and
+/// synthesised *identically* to what the per-expert-key path produces from
+/// the same dequantised planes, so the two build paths cannot drift.
+#[test]
+fn a_streaming_shaped_source_synthesises_the_store_from_packed_blocks() {
+    let arch = gpt_oss_arch();
+    let mut raw = HashMap::new();
+    for layer in 0..NUM_LAYERS {
+        packed_layer_fixture(&*arch, layer, &mut raw);
+    }
+    let source = RawPackedSource { arch, raw };
+
+    let dir = temp_dir("streaming_packed");
+    let written = write_per_layer_moe_per_expert(&source, &dir, NUM_LAYERS).unwrap();
+    assert_eq!(
+        written, NUM_LAYERS,
+        "raw packed blocks did not synthesise an expert store"
+    );
+
+    // Reference arm: dequantise the same packed bytes through the same
+    // public helpers and feed the result through the per-expert-key path.
+    let arch2 = gpt_oss_arch();
+    let mut tensors = HashMap::new();
+    for layer in 0..NUM_LAYERS {
+        let (gu_blocks, _) = source
+            .get_raw_u8(&arch2.packed_gate_up_blocks_key(layer).unwrap())
+            .unwrap();
+        let (gu_scales, _) = source
+            .get_raw_u8(&arch2.packed_gate_up_scales_key(layer).unwrap())
+            .unwrap();
+        let (dn_blocks, _) = source
+            .get_raw_u8(&arch2.packed_down_blocks_key(layer).unwrap())
+            .unwrap();
+        let (dn_scales, _) = source
+            .get_raw_u8(&arch2.packed_down_scales_key(layer).unwrap())
+            .unwrap();
+        let (gates, ups) = larql_models::quant::mxfp4::split_gate_up_experts(
+            &gu_blocks,
+            &gu_scales,
+            NUM_EXPERTS,
+            2 * INTER,
+            HIDDEN / 32,
+        )
+        .unwrap();
+        let downs = larql_models::quant::mxfp4::dequantize_all_experts(
+            &dn_blocks,
+            &dn_scales,
+            NUM_EXPERTS,
+            HIDDEN,
+            INTER / 32,
+        )
+        .unwrap();
+        for e in 0..NUM_EXPERTS {
+            let gate_key = arch2.expert_ffn_gate_key(layer, e).unwrap();
+            let up_key = arch2.expert_ffn_up_key(layer, e).unwrap();
+            let down_key = arch2.expert_ffn_down_key(layer, e).unwrap();
+            tensors.insert(gate_key, (gates[e].clone(), INTER, HIDDEN));
+            tensors.insert(up_key, (ups[e].clone(), INTER, HIDDEN));
+            tensors.insert(down_key, (downs[e].clone(), HIDDEN, INTER));
+        }
+    }
+    let reference = MapSource {
+        arch: arch2,
+        tensors,
+    };
+    let ref_dir = temp_dir("streaming_packed_ref");
+    write_per_layer_moe_per_expert(&reference, &ref_dir, NUM_LAYERS).unwrap();
+
+    for layer in 0..NUM_LAYERS {
+        let a = std::fs::read(layer_file(&dir, layer)).unwrap();
+        let b = std::fs::read(layer_file(&ref_dir, layer)).unwrap();
+        assert_eq!(
+            a, b,
+            "layer {layer}: packed-fallback store differs from the \
+             per-expert-key store built from the same dequantised planes"
+        );
+    }
+}
+
+/// The other half of the fix: an arch that passes the capability gate but a
+/// source that can answer neither the per-expert keys nor the raw packed
+/// tensors used to produce `Ok(0)` — success, no store, unservable model.
+/// It must now be a build error that names the condition.
+#[test]
+fn a_capability_declaring_source_that_resolves_nothing_is_an_error() {
+    let source = RawPackedSource {
+        arch: gpt_oss_arch(),
+        raw: HashMap::new(),
+    };
+    let dir = temp_dir("resolves_nothing");
+    let err = write_per_layer_moe_per_expert(&source, &dir, NUM_LAYERS).unwrap_err();
+    let s = err.to_string();
+    assert!(
+        s.contains("no layer yielded an expert store"),
+        "error must name the silent-0-byte condition, got: {s}"
+    );
+    assert!(!layer_file(&dir, 0).exists());
+}
+
+/// Blocks present with scales absent is a malformed checkpoint, not a dense
+/// layer — the exporter writes the pair together. Skipping it would be the
+/// silent-0-byte failure again with a different cause.
+#[test]
+fn packed_blocks_without_scales_is_refused() {
+    let arch = gpt_oss_arch();
+    let mut raw = HashMap::new();
+    packed_layer_fixture(&*arch, 0, &mut raw);
+    let scales_key = arch.packed_gate_up_scales_key(0).unwrap();
+    raw.remove(&scales_key);
+    let source = RawPackedSource { arch, raw };
+    let dir = temp_dir("blocks_no_scales");
+    let err = write_per_layer_moe_per_expert(&source, &dir, NUM_LAYERS).unwrap_err();
+    assert!(
+        err.to_string().contains("scales"),
+        "error should name the missing side: {err}"
     );
 }

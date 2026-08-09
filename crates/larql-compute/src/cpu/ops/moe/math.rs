@@ -53,13 +53,13 @@ pub(super) fn rms_norm_no_weight(x: &[f32], eps: f32) -> Vec<f32> {
 
 /// SiLU activation: x * sigmoid(x)
 #[inline]
-pub(super) fn silu(x: f32) -> f32 {
+pub(crate) fn silu(x: f32) -> f32 {
     x / (1.0 + (-x).exp())
 }
 
 /// GELU with tanh approximation (Gemma 4 expert FFN activation).
 #[inline]
-pub(super) fn gelu_tanh(x: f32) -> f32 {
+pub(crate) fn gelu_tanh(x: f32) -> f32 {
     let c = 0.797_884_6_f32;
     0.5 * x * (1.0 + (c * (x + 0.044715 * x * x * x)).tanh())
 }

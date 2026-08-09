@@ -29,15 +29,8 @@ pub fn run_single_expert_with_norm(
     norm_offset: f32,
     eps: f32,
     format: crate::QuantFormat,
-    activation: crate::Activation,
+    mlp: crate::ExpertMlp<'_>,
 ) -> Vec<f32> {
     let h_norm = rms_norm(h, pre_experts_norm, eps, norm_offset);
-    run_single_expert(
-        &h_norm,
-        gate_up_bytes,
-        down_bytes,
-        inter,
-        format,
-        activation,
-    )
+    run_single_expert(&h_norm, gate_up_bytes, down_bytes, inter, format, mlp)
 }

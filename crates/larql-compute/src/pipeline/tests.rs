@@ -106,7 +106,10 @@ fn is_hybrid_moe_reflects_option() {
         num_experts: 2,
         top_k: 1,
         intermediate_size: 4,
-        activation: Activation::Silu,
+        router_bias: &[],
+        experts_gate_up_bias: &[],
+        experts_down_bias: &[],
+        gate_rule: crate::MoeGateRule::Gated(Activation::Silu),
         expert_data_format: QuantFormat::BF16,
     };
     let with_moe = minimal_layer(&[], &norms, FfnType::Gated, Some(moe));

@@ -442,7 +442,10 @@ fn decode_token_q4k_moe_with_real_moe_layer_drives_gpu_dispatch() {
         num_experts,
         top_k,
         intermediate_size: inter,
-        activation: Activation::GeluTanh,
+        router_bias: &[],
+        experts_gate_up_bias: &[],
+        experts_down_bias: &[],
+        gate_rule: larql_compute::MoeGateRule::Gated(Activation::GeluTanh),
     };
 
     let layer = FullPipelineLayer {

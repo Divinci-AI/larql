@@ -530,6 +530,7 @@ pub(crate) fn load_gguf_filtered_with_validation_and_keep(
         skipped_tensors: Vec::new(),
         packed_mmaps: std::collections::HashMap::new(),
         packed_byte_ranges: std::collections::HashMap::new(),
+        per_layer_ffn_format: Default::default(),
         embed,
         lm_head,
         position_embed,

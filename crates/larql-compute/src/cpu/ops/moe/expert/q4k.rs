@@ -1,4 +1,3 @@
-use super::super::math::{gelu_tanh, silu};
 use super::scratch::ExpertScratch;
 use crate::cpu::ops::q4k_q8k_dot::{
     q4k_q8k_matvec_into, quantize_x_to_q8k, quantize_x_to_q8k_into, Q8KActivation,
@@ -44,7 +43,7 @@ pub fn run_single_expert_q4k_q8k_into<'s>(
     gate_up_bytes: &[u8],
     down_bytes: &[u8],
     inter: usize,
-    activation: crate::Activation,
+    mlp: crate::ExpertMlp<'_>,
 ) -> &'s [f32] {
     // Per-stage timing for kernel diagnosis.  Enable with
     // `LARQL_KERNEL_TIMING=1`.  Cached in TLS to avoid syscall per call.
@@ -96,14 +95,14 @@ pub fn run_single_expert_q4k_q8k_into<'s>(
         t = std::time::Instant::now();
     }
 
-    // GELU/SiLU(gate) ⊙ up.  Padding columns (`inter..inter_padded`) stay
-    // at their zero-initialised value across reuses (we never write them),
-    // matching the existing convention in `run_single_expert_into`.
-    let gelu = activation.gate_up_is_gelu_tanh();
+    // Combine gate ⊙ up under the layer's rule, biases first.  Padding
+    // columns (`inter..inter_padded`) stay at their zero-initialised value
+    // across reuses (we never write them), matching the existing
+    // convention in `run_single_expert_into`.
     for j in 0..inter {
-        let g = scratch.gate_out[j];
-        let u = scratch.up_out[j];
-        scratch.act[j] = if gelu { gelu_tanh(g) * u } else { silu(g) * u };
+        let g = scratch.gate_out[j] + mlp.gate_bias(j);
+        let u = scratch.up_out[j] + mlp.up_bias(j);
+        scratch.act[j] = mlp.rule.combine(g, u);
     }
     let t_act = if timing { Some(t.elapsed()) } else { None };
     if timing {
@@ -134,6 +133,7 @@ pub fn run_single_expert_q4k_q8k_into<'s>(
         hidden,
         inter_padded,
     );
+    mlp.add_down_bias(&mut scratch.out);
     let t_down = if timing { Some(t.elapsed()) } else { None };
 
     if timing {

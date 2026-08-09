@@ -1,5 +1,5 @@
 use super::super::cache::{try_cached_dequant, ExpertF32};
-use super::super::math::{gelu_tanh, matmul_vec, matmul_vec_into, silu};
+use super::super::math::{matmul_vec, matmul_vec_into};
 use super::q4k::run_single_expert_q4k_q8k_into;
 use super::scratch::ExpertScratch;
 use crate::cpu::ops::q4_common::q4k_matvec_into;
@@ -21,7 +21,7 @@ pub fn run_single_expert(
     down_bytes: &[u8],
     inter: usize,
     format: crate::QuantFormat,
-    activation: crate::Activation,
+    mlp: crate::ExpertMlp<'_>,
 ) -> Vec<f32> {
     let hidden = h_norm.len();
     if inter == 0 || hidden == 0 {
@@ -30,17 +30,16 @@ pub fn run_single_expert(
 
     // Storage layout (matches `format/weights/write_layers.rs::quantize_moe_entries`):
     //   gate_up: [2*inter, hidden]              never padded
-    //   down:    [hidden, inter_padded]         Q4_K pads inter→256 multiple
-    // BF16 has no padding for either. See `forward::cpu_moe_forward` for the
-    // expanded explanation; this single-expert path mirrors it exactly so the
-    // remote-expert HTTP endpoint and local in-process MoE share the same
-    // numerics.
-    let inter_padded = match format {
-        crate::QuantFormat::Q4_K => {
-            let block = larql_models::quant::ggml::Q4_K_BLOCK_ELEMS;
-            inter.div_ceil(block) * block
-        }
-        _ => inter,
+    //   down:    [hidden, inter_padded]         block formats pad inter→block multiple
+    // BF16/F32 have no padding for either. The padding rule is the same
+    // authority the writer uses (`MoeWeightLayout::down_cols` goes through
+    // `packed_block_layout` too), so a new block format cannot pad on one
+    // side only. See `forward::cpu_moe_forward` for the expanded explanation;
+    // this single-expert path mirrors it exactly so the remote-expert HTTP
+    // endpoint and local in-process MoE share the same numerics.
+    let inter_padded = match format.packed_block_layout() {
+        Some((block_elems, _)) => inter.div_ceil(block_elems) * block_elems,
+        None => inter,
     };
 
     // Q4_K direct-from-mmap path (NEON SDOT on aarch64).  Routes through
@@ -86,7 +85,7 @@ pub fn run_single_expert(
                     gate_up_bytes,
                     down_bytes,
                     inter,
-                    activation,
+                    mlp,
                 );
                 h2.to_vec()
             })
@@ -105,13 +104,14 @@ pub fn run_single_expert(
     let up_out = matmul_vec(h_norm, up_w, inter, hidden);
 
     // Build inner activation at `inter_padded` so the down matmul (which
-    // expects `inter_padded` columns under Q4_K) sees zero in the padding.
+    // expects `inter_padded` columns under block formats) sees zero in the
+    // padding. Biases join before the combine, matching the reference
+    // (`ExpertWeightFfn::run_expert` adds them right after the matmuls).
     let mut hidden_state: Vec<f32> = vec![0.0f32; inter_padded];
-    let gelu = activation.gate_up_is_gelu_tanh();
     for j in 0..inter {
-        let g = gate_out[j];
-        let u = up_out[j];
-        hidden_state[j] = if gelu { gelu_tanh(g) * u } else { silu(g) * u };
+        let g = gate_out[j] + mlp.gate_bias(j);
+        let u = up_out[j] + mlp.up_bias(j);
+        hidden_state[j] = mlp.rule.combine(g, u);
     }
 
     let down_w = try_cached_dequant(down_bytes, format, hidden * inter_padded)
@@ -119,7 +119,9 @@ pub fn run_single_expert(
     if down_w.is_empty() {
         return vec![0.0f32; hidden];
     }
-    matmul_vec(&hidden_state, &down_w, hidden, inter_padded)
+    let mut out = matmul_vec(&hidden_state, &down_w, hidden, inter_padded);
+    mlp.add_down_bias(&mut out);
+    out
 }
 
 /// Allocation-free variant of `run_single_expert`: writes into the caller's
@@ -138,7 +140,7 @@ pub fn run_single_expert_into<'s>(
     down_bytes: &[u8],
     inter: usize,
     format: crate::QuantFormat,
-    activation: crate::Activation,
+    mlp: crate::ExpertMlp<'_>,
 ) -> &'s [f32] {
     let hidden = h_norm.len();
     if inter == 0 || hidden == 0 {
@@ -148,12 +150,9 @@ pub fn run_single_expert_into<'s>(
         return &scratch.out;
     }
 
-    let inter_padded = match format {
-        crate::QuantFormat::Q4_K => {
-            let block = larql_models::quant::ggml::Q4_K_BLOCK_ELEMS;
-            inter.div_ceil(block) * block
-        }
-        _ => inter,
+    let inter_padded = match format.packed_block_layout() {
+        Some((block_elems, _)) => inter.div_ceil(block_elems) * block_elems,
+        None => inter,
     };
     debug_assert_eq!(scratch.gate_out.len(), inter);
     debug_assert_eq!(scratch.up_out.len(), inter);
@@ -220,11 +219,10 @@ pub fn run_single_expert_into<'s>(
         if timing {
             t = std::time::Instant::now();
         }
-        let gelu = activation.gate_up_is_gelu_tanh();
         for j in 0..inter {
-            let g = scratch.gate_out[j];
-            let u = scratch.up_out[j];
-            scratch.act[j] = if gelu { gelu_tanh(g) * u } else { silu(g) * u };
+            let g = scratch.gate_out[j] + mlp.gate_bias(j);
+            let u = scratch.up_out[j] + mlp.up_bias(j);
+            scratch.act[j] = mlp.rule.combine(g, u);
         }
         let t_act = if timing { Some(t.elapsed()) } else { None };
         if timing {
@@ -237,6 +235,7 @@ pub fn run_single_expert_into<'s>(
             hidden,
             inter_padded,
         );
+        mlp.add_down_bias(&mut scratch.out);
         let t_down = if timing { Some(t.elapsed()) } else { None };
         if timing {
             eprintln!(
@@ -275,11 +274,10 @@ pub fn run_single_expert_into<'s>(
     // Build inner activation at `inter_padded`; padding columns
     // (`inter..inter_padded`) stay at their zero-initialised value across
     // reuses since we never write them.
-    let gelu = activation.gate_up_is_gelu_tanh();
     for j in 0..inter {
-        let g = scratch.gate_out[j];
-        let u = scratch.up_out[j];
-        scratch.act[j] = if gelu { gelu_tanh(g) * u } else { silu(g) * u };
+        let g = scratch.gate_out[j] + mlp.gate_bias(j);
+        let u = scratch.up_out[j] + mlp.up_bias(j);
+        scratch.act[j] = mlp.rule.combine(g, u);
     }
     let t_act = if timing { Some(t.elapsed()) } else { None };
     if timing {
@@ -306,6 +304,7 @@ pub fn run_single_expert_into<'s>(
         hidden,
         inter_padded,
     );
+    mlp.add_down_bias(&mut scratch.out);
     let t_down = if timing { Some(t.elapsed()) } else { None };
 
     if timing {

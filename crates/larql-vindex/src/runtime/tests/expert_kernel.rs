@@ -257,7 +257,7 @@ impl Fixture {
             &self.gate_up,
             &self.down,
             INTERMEDIATE,
-            ACTIVATION,
+            larql_compute::ExpertMlp::gated(ACTIVATION),
         )
         .to_vec()
     }

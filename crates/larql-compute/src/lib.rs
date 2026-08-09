@@ -109,10 +109,10 @@ pub use per_layer_decode_state::PerLayerDecodeState;
 // ── Re-exports: pipeline types ──
 
 pub use pipeline::{
-    Activation, AttentionSpec, AttentionWeights, ExternalScaleKind, FfnSpec, FfnType, FfnWeights,
-    FullPipelineLayer, LayerNorms, LayerWeights, MoeDownPaddingPolicy, MoeExpertScalePolicy,
-    MoeInputSource, MoeLayerWeights, MoePostExpertNormPolicy, MoeRouterNormPolicy,
-    MoeRoutingPolicy, MoeSpec, MoeTopKWeightPolicy, MoeWeightLayout, NormType,
+    Activation, AttentionSpec, AttentionWeights, ExpertMlp, ExternalScaleKind, FfnSpec, FfnType,
+    FfnWeights, FullPipelineLayer, LayerNorms, LayerWeights, MoeDownPaddingPolicy,
+    MoeExpertScalePolicy, MoeGateRule, MoeInputSource, MoeLayerWeights, MoePostExpertNormPolicy,
+    MoeRouterNormPolicy, MoeRoutingPolicy, MoeSpec, MoeTopKWeightPolicy, MoeWeightLayout, NormType,
     PositionEncodingType, QuantAux, QuantFormat, QuantWeight, RemoteFfnSpec, ScaleStorage,
     RMSNORM_EPSILON_DEFAULT, ROPE_BASE_DEFAULT, ROPE_BASE_GLOBAL,
 };

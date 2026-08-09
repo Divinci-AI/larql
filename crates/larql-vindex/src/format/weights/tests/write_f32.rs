@@ -14,8 +14,8 @@ use ndarray::Array2;
 
 use larql_models::ModelWeights;
 
-use super::load::load_model_weights;
-use super::write_f32::*;
+use super::super::load::load_model_weights;
+use super::super::write_f32::*;
 use crate::config::dtype::{encode_floats, StorageDtype};
 use crate::config::types::QuantFormat;
 use crate::config::{VindexConfig, VindexLayerInfo};
@@ -71,6 +71,7 @@ fn empty_model_weights(arch_json: &serde_json::Value) -> ModelWeights {
         skipped_tensors: Vec::new(),
         packed_mmaps: HashMap::new(),
         packed_byte_ranges: HashMap::new(),
+        per_layer_ffn_format: Default::default(),
         embed: embed.into_shared(),
         lm_head: lm_head.into_shared(),
         position_embed: None,
@@ -811,5 +812,57 @@ mod streaming {
             "f32 is not packed bf16"
         );
         assert!(source.get_packed_bf16("missing").is_none());
+    }
+
+    /// `get_raw_u8` is what lets the per-expert writer reach a packed
+    /// MXFP4 layer's `*_blocks`/`*_scales` on the streaming path — without
+    /// it the synthesised per-expert keys miss and the expert store is
+    /// silently absent (the 2026-08-09 gpt-oss-20b extraction).
+    #[test]
+    fn streaming_raw_u8_returns_bytes_and_shape_for_u8_only() {
+        let u8_data = vec![7u8; 12];
+        let f32_data: Vec<u8> = [1.0f32, 2.0].iter().flat_map(|v| v.to_le_bytes()).collect();
+        let views = vec![
+            (
+                "blocks",
+                safetensors::tensor::TensorView::new(
+                    safetensors::Dtype::U8,
+                    vec![1, 3, 4],
+                    &u8_data,
+                )
+                .unwrap(),
+            ),
+            (
+                "floats",
+                safetensors::tensor::TensorView::new(
+                    safetensors::Dtype::F32,
+                    vec![1, 2],
+                    &f32_data,
+                )
+                .unwrap(),
+            ),
+        ];
+        let blob = safetensors::serialize(views, None).unwrap();
+        let index: HashMap<String, (usize, String)> = ["blocks", "floats"]
+            .into_iter()
+            .map(|k| (k.to_string(), (0usize, k.to_string())))
+            .collect();
+        let arch = larql_models::detect_from_json(&qwen2_arch_json());
+        let shards: Vec<&[u8]> = vec![&blob];
+        let source = StreamingWeights {
+            shard_mmaps: &shards,
+            tensor_index: &index,
+            arch: &*arch,
+            num_layers: 1,
+        };
+
+        let (bytes, shape) = source.get_raw_u8("blocks").expect("u8 tensor");
+        assert_eq!(bytes, u8_data);
+        assert_eq!(shape, vec![1, 3, 4], "shape must survive for layout checks");
+        assert!(
+            source.get_raw_u8("floats").is_none(),
+            "non-U8 dtypes are not raw quantised blocks"
+        );
+        assert!(source.get_raw_u8("missing").is_none());
     }
 }

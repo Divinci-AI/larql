@@ -124,7 +124,10 @@ fn run_case(case: &Case, seed: u64) {
         num_experts,
         top_k,
         intermediate_size: 1,
-        activation: Activation::Silu,
+        router_bias: &[],
+        experts_gate_up_bias: &[],
+        experts_down_bias: &[],
+        gate_rule: larql_compute::MoeGateRule::Gated(Activation::Silu),
     };
 
     for sample in 0..8 {
