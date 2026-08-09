@@ -1,6 +1,6 @@
 use super::super::cache::{try_cached_dequant, ExpertF32};
 use super::super::math::{matmul_vec, matmul_vec_into};
-use super::q4k::run_single_expert_q4k_q8k_into;
+use super::q4k::run_single_expert_kq_q8k_into;
 use super::scratch::ExpertScratch;
 use crate::cpu::ops::q4_common::q4k_matvec_into;
 use crate::cpu::ops::q4k_q8k_dot::{quantize_x_to_q8k_into, Q8KActivation};
@@ -41,17 +41,27 @@ pub fn run_single_expert(
         Some((block_elems, _)) => inter.div_ceil(block_elems) * block_elems,
         None => inter,
     };
+    // The gate/up matrices' STORED row width (block-padded by the writer).
+    // Both paths read rows at this stride and pad the input to match.
+    let weight_cols = crate::stored_gate_up_cols(gate_up_bytes.len(), inter, format, hidden);
+    let h_w: std::borrow::Cow<'_, [f32]> = if weight_cols == hidden {
+        std::borrow::Cow::Borrowed(h_norm)
+    } else {
+        let mut padded = vec![0.0f32; weight_cols];
+        padded[..hidden].copy_from_slice(h_norm);
+        std::borrow::Cow::Owned(padded)
+    };
 
-    // Q4_K direct-from-mmap path (NEON SDOT on aarch64).  Routes through
-    // `run_single_expert_q4k_q8k_into` with a thread-local `ExpertScratch`
-    // so the per-call allocations of gate_out / up_out / act / act_q8k go
-    // away — only the final `Vec<f32>` output is allocated for the
-    // function's return type.  Profiling (2026-05-01) showed K=8 × per-call
-    // allocs as the dominant HTTP-path bottleneck once the kernel itself
-    // got below ~80 µs.  Set `LARQL_DISABLE_Q4K_DIRECT=1` to opt out
-    // (kernel-debug A/B).
-    if matches!(format, crate::QuantFormat::Q4_K)
-        && hidden.is_multiple_of(256)
+    // Integer direct-from-mmap path (NEON SDOT on aarch64), Q4_K or Q6_K.
+    // Routes through `run_single_expert_kq_q8k_into` with a thread-local
+    // `ExpertScratch` so the per-call allocations of gate_out / up_out /
+    // act / act_q8k go away — only the final `Vec<f32>` output is
+    // allocated for the function's return type.  Profiling (2026-05-01)
+    // showed K=8 × per-call allocs as the dominant HTTP-path bottleneck
+    // once the kernel itself got below ~80 µs.  Set
+    // `LARQL_DISABLE_Q4K_DIRECT=1` to opt out (kernel-debug A/B).
+    if matches!(format, crate::QuantFormat::Q4_K | crate::QuantFormat::Q6_K)
+        && weight_cols.is_multiple_of(256)
         && !super::super::q4k_direct_disabled()
     {
         thread_local! {
@@ -78,13 +88,14 @@ pub fn run_single_expert(
             }
             H_Q8K.with(|hcell| {
                 let mut hb = hcell.borrow_mut();
-                quantize_x_to_q8k_into(&mut hb, h_norm);
-                let h2 = run_single_expert_q4k_q8k_into(
+                quantize_x_to_q8k_into(&mut hb, &h_w);
+                let h2 = run_single_expert_kq_q8k_into(
                     scratch,
                     &hb,
                     gate_up_bytes,
                     down_bytes,
                     inter,
+                    format,
                     mlp,
                 );
                 h2.to_vec()
@@ -92,16 +103,16 @@ pub fn run_single_expert(
         });
     }
 
-    let gate_up_w = try_cached_dequant(gate_up_bytes, format, 2 * inter * hidden)
+    let gate_up_w = try_cached_dequant(gate_up_bytes, format, 2 * inter * weight_cols)
         .unwrap_or_else(|err| panic!("{err}"));
     if gate_up_w.is_empty() {
         return vec![0.0f32; hidden];
     }
-    let gate_w = &gate_up_w[..inter * hidden];
-    let up_w = &gate_up_w[inter * hidden..2 * inter * hidden];
+    let gate_w = &gate_up_w[..inter * weight_cols];
+    let up_w = &gate_up_w[inter * weight_cols..2 * inter * weight_cols];
 
-    let gate_out = matmul_vec(h_norm, gate_w, inter, hidden);
-    let up_out = matmul_vec(h_norm, up_w, inter, hidden);
+    let gate_out = matmul_vec(&h_w, gate_w, inter, weight_cols);
+    let up_out = matmul_vec(&h_w, up_w, inter, weight_cols);
 
     // Build inner activation at `inter_padded` so the down matmul (which
     // expects `inter_padded` columns under block formats) sees zero in the
@@ -154,6 +165,16 @@ pub fn run_single_expert_into<'s>(
         Some((block_elems, _)) => inter.div_ceil(block_elems) * block_elems,
         None => inter,
     };
+    // Stored gate/up row width (block-padded by the writer); the input is
+    // zero-padded to match when they differ. See `run_single_expert`.
+    let weight_cols = crate::stored_gate_up_cols(gate_up_bytes.len(), inter, format, hidden);
+    let h_w: std::borrow::Cow<'_, [f32]> = if weight_cols == hidden {
+        std::borrow::Cow::Borrowed(h_norm)
+    } else {
+        let mut padded = vec![0.0f32; weight_cols];
+        padded[..hidden].copy_from_slice(h_norm);
+        std::borrow::Cow::Owned(padded)
+    };
     debug_assert_eq!(scratch.gate_out.len(), inter);
     debug_assert_eq!(scratch.up_out.len(), inter);
     debug_assert_eq!(scratch.act.len(), inter_padded);
@@ -180,7 +201,7 @@ pub fn run_single_expert_into<'s>(
     let q4k_direct = Q4K_DIRECT.with(|v| *v);
     let q4k_path = q4k_direct && matches!(format, crate::QuantFormat::Q4_K);
 
-    let gate_w_size = inter * hidden;
+    let gate_w_size = inter * weight_cols;
     // f32 path: hold the cached Arc for the duration of the call so the
     // gate_w / up_w slices below borrow into the cache's payload directly.
     // The previous `v.to_vec()` here copied ~12 MB per call on cache hit,
@@ -188,7 +209,7 @@ pub fn run_single_expert_into<'s>(
     let gate_up_w_arc: Option<ExpertF32> = if q4k_path {
         None
     } else {
-        let v = try_cached_dequant(gate_up_bytes, format, 2 * inter * hidden)
+        let v = try_cached_dequant(gate_up_bytes, format, 2 * inter * weight_cols)
             .unwrap_or_else(|err| panic!("{err}"));
         if v.is_empty() {
             for v in scratch.out.iter_mut() {
@@ -204,17 +225,17 @@ pub fn run_single_expert_into<'s>(
     }
 
     if q4k_path {
-        let row_block_bytes = (hidden / larql_models::quant::ggml::Q4_K_BLOCK_ELEMS)
+        let row_block_bytes = (weight_cols / larql_models::quant::ggml::Q4_K_BLOCK_ELEMS)
             * larql_models::quant::ggml::Q4_K_BLOCK_BYTES;
         let half = inter * row_block_bytes;
         let gate_bytes = &gate_up_bytes[..half];
         let up_bytes = &gate_up_bytes[half..2 * half];
-        q4k_matvec_into(&mut scratch.gate_out, h_norm, gate_bytes, inter, hidden);
+        q4k_matvec_into(&mut scratch.gate_out, &h_w, gate_bytes, inter, weight_cols);
         let t_gate = if timing { Some(t.elapsed()) } else { None };
         if timing {
             t = std::time::Instant::now();
         }
-        q4k_matvec_into(&mut scratch.up_out, h_norm, up_bytes, inter, hidden);
+        q4k_matvec_into(&mut scratch.up_out, &h_w, up_bytes, inter, weight_cols);
         let t_up = if timing { Some(t.elapsed()) } else { None };
         if timing {
             t = std::time::Instant::now();
@@ -259,13 +280,13 @@ pub fn run_single_expert_into<'s>(
         .expect("gate_up_w_arc populated on f32 path");
     let gate_w = &gate_up_w_f32[..gate_w_size];
     let up_w = &gate_up_w_f32[gate_w_size..2 * gate_w_size];
-    matmul_vec_into(&mut scratch.gate_out, h_norm, gate_w, inter, hidden);
+    matmul_vec_into(&mut scratch.gate_out, &h_w, gate_w, inter, weight_cols);
     let t_gate = if timing { Some(t.elapsed()) } else { None };
     if timing {
         t = std::time::Instant::now();
     }
 
-    matmul_vec_into(&mut scratch.up_out, h_norm, up_w, inter, hidden);
+    matmul_vec_into(&mut scratch.up_out, &h_w, up_w, inter, weight_cols);
     let t_up = if timing { Some(t.elapsed()) } else { None };
     if timing {
         t = std::time::Instant::now();

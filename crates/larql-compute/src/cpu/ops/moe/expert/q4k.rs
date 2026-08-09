@@ -1,8 +1,39 @@
 use super::scratch::ExpertScratch;
 use crate::cpu::ops::q4k_q8k_dot::{
-    q4k_q8k_matvec_into, quantize_x_to_q8k, quantize_x_to_q8k_into, Q8KActivation,
+    q4k_q8k_matvec_into, q6k_q8k_matvec_into, quantize_x_to_q8k, quantize_x_to_q8k_into,
+    Q8KActivation,
 };
 use crate::options;
+
+/// One integer matvec, dispatched by the store's weight format. The two
+/// kernels share the Q8_K activation and differ only in super-block
+/// decode; naming the dispatch once keeps the three call sites below from
+/// each re-spelling the format match.
+#[inline]
+fn kq_q8k_matvec_into(
+    out: &mut [f32],
+    q8k_x: &Q8KActivation,
+    w: &[u8],
+    rows: usize,
+    cols: usize,
+    format: crate::QuantFormat,
+) {
+    match format {
+        crate::QuantFormat::Q6_K => q6k_q8k_matvec_into(out, q8k_x, w, rows, cols),
+        _ => q4k_q8k_matvec_into(out, q8k_x, w, rows, cols),
+    }
+}
+
+/// Bytes per weight row at `cols` elements under `format`. `cols` must be
+/// a whole number of super-blocks — the padded-row invariant the writer
+/// guarantees and `MoeLayerWeights::gate_up_cols` derives.
+#[inline]
+fn row_block_bytes(cols: usize, format: crate::QuantFormat) -> usize {
+    let (block_elems, block_bytes) = format
+        .packed_block_layout()
+        .expect("integer expert path requires a block format");
+    cols / block_elems * block_bytes
+}
 // `q4k_q8k_gate_up_into` exists for future kernel exploration but is not
 // wired into the hot path — see comment in `run_single_expert_q4k_q8k_into`.
 
@@ -45,6 +76,33 @@ pub fn run_single_expert_q4k_q8k_into<'s>(
     inter: usize,
     mlp: crate::ExpertMlp<'_>,
 ) -> &'s [f32] {
+    run_single_expert_kq_q8k_into(
+        scratch,
+        h_norm_q8k,
+        gate_up_bytes,
+        down_bytes,
+        inter,
+        crate::QuantFormat::Q4_K,
+        mlp,
+    )
+}
+
+/// Format-general sibling of [`run_single_expert_q4k_q8k_into`]: the same
+/// integer expert kernel over Q4_K or Q6_K super-blocks.
+///
+/// `h_norm_q8k` is quantised at the gate/up matrices' STORED row width —
+/// padded to a super-block boundary by the writer — so `qs.len()` IS the
+/// weight column count; zero padding contributes zero to every dot.
+#[allow(clippy::too_many_arguments)]
+pub fn run_single_expert_kq_q8k_into<'s>(
+    scratch: &'s mut ExpertScratch,
+    h_norm_q8k: &Q8KActivation,
+    gate_up_bytes: &[u8],
+    down_bytes: &[u8],
+    inter: usize,
+    format: crate::QuantFormat,
+    mlp: crate::ExpertMlp<'_>,
+) -> &'s [f32] {
     // Per-stage timing for kernel diagnosis.  Enable with
     // `LARQL_KERNEL_TIMING=1`.  Cached in TLS to avoid syscall per call.
     thread_local! {
@@ -52,19 +110,24 @@ pub fn run_single_expert_q4k_q8k_into<'s>(
     }
     let timing = KERNEL_TIMING.with(|t| *t);
 
-    let hidden = h_norm_q8k.qs.len();
-    if inter == 0 || hidden == 0 {
+    // Gate/up column count = the activation's quantised width (the STORED,
+    // block-padded row width). The down matvec's output rows stay at the
+    // LOGICAL hidden — `scratch.out`'s length — which the padding never
+    // changes; conflating the two reads gate rows at the wrong stride.
+    let cols = h_norm_q8k.qs.len();
+    let hidden_out = scratch.out.len();
+    if inter == 0 || cols == 0 {
         for v in scratch.out.iter_mut() {
             *v = 0.0;
         }
         return &scratch.out;
     }
 
-    // Q4_K weight stride (in bytes) per row: ceil(hidden / Q4_K_BLOCK_ELEMS) * Q4_K_BLOCK_BYTES.
-    let block = larql_models::quant::ggml::Q4_K_BLOCK_ELEMS;
+    let (block, _) = format
+        .packed_block_layout()
+        .expect("integer expert path requires a block format");
     let inter_padded = inter.div_ceil(block) * block;
-    let row_block_bytes = (hidden / block) * larql_models::quant::ggml::Q4_K_BLOCK_BYTES;
-    let half = inter * row_block_bytes;
+    let half = inter * row_block_bytes(cols, format);
     if gate_up_bytes.len() < 2 * half {
         for v in scratch.out.iter_mut() {
             *v = 0.0;
@@ -83,13 +146,27 @@ pub fn run_single_expert_q4k_q8k_into<'s>(
     // / hurts the L1 prefetcher.  Fused entry point is kept in
     // `q4k_q8k_dot.rs` (with bit-exact parity test) for future
     // CPU profiles where the trade-off may flip.
-    q4k_q8k_matvec_into(&mut scratch.gate_out, h_norm_q8k, gate_bytes, inter, hidden);
+    kq_q8k_matvec_into(
+        &mut scratch.gate_out,
+        h_norm_q8k,
+        gate_bytes,
+        inter,
+        cols,
+        format,
+    );
     let t_gate = if timing { Some(t.elapsed()) } else { None };
     if timing {
         t = std::time::Instant::now();
     }
 
-    q4k_q8k_matvec_into(&mut scratch.up_out, h_norm_q8k, up_bytes, inter, hidden);
+    kq_q8k_matvec_into(
+        &mut scratch.up_out,
+        h_norm_q8k,
+        up_bytes,
+        inter,
+        cols,
+        format,
+    );
     let t_up = if timing { Some(t.elapsed()) } else { None };
     if timing {
         t = std::time::Instant::now();
@@ -126,12 +203,13 @@ pub fn run_single_expert_q4k_q8k_into<'s>(
     }
 
     // down matvec: out[hidden] = down_W[hidden, inter_padded] @ act
-    q4k_q8k_matvec_into(
+    kq_q8k_matvec_into(
         &mut scratch.out,
         &scratch.act_q8k,
         down_bytes,
-        hidden,
+        hidden_out,
         inter_padded,
+        format,
     );
     mlp.add_down_bias(&mut scratch.out);
     let t_down = if timing { Some(t.elapsed()) } else { None };

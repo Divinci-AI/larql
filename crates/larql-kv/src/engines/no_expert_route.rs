@@ -61,7 +61,7 @@ pub(crate) fn refuse_if_moe(
     because: &'static str,
     weights: &ModelWeights,
 ) -> Result<(), EngineError> {
-    if !weights.arch.is_hybrid_moe() {
+    if !(weights.arch.is_moe() || weights.arch.is_hybrid_moe()) {
         return Ok(());
     }
     Err(EngineError::Execution(Box::new(NoExpertDispatchPath {

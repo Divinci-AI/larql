@@ -606,3 +606,151 @@ fn packed_blocks_without_scales_is_refused() {
         "error should name the missing side: {err}"
     );
 }
+
+/// The padded-row round trip, pinned at a hidden size that is NOT a
+/// super-block multiple (288 → stores as 512). The writer pads each
+/// gate/up row; the integer expert kernel derives the stored width from
+/// the bytes and must reproduce an independent f32 computation over the
+/// dequantised store. Before the padding, this configuration was
+/// unreachable for every per-row integer kernel (GPT-OSS at hidden 2880
+/// fell back to ~10 GB of scalar dequant per token); a stride slip in
+/// either the writer or the reader moves every row after the first and
+/// fails the comparison loudly.
+#[test]
+fn non_block_multiple_hidden_round_trips_through_the_integer_kernel() {
+    use larql_compute::cpu::ops::moe::{quantize_h_norm_for_q4k, ExpertScratch};
+    use larql_models::quant::ggml::{Q4_K_BLOCK_BYTES, Q4_K_BLOCK_ELEMS};
+
+    const ODD_HIDDEN: usize = 288; // 1.125 super-blocks — pads to 512
+    const ODD_INTER: usize = 288;
+    let arch = larql_models::detect_from_json(&serde_json::json!({
+        "model_type": "olmoe",
+        "hidden_size": ODD_HIDDEN,
+        "intermediate_size": ODD_INTER,
+        "num_hidden_layers": 1,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 4,
+        "num_experts": 1,
+        "num_experts_per_tok": 1,
+    }));
+
+    // Deterministic non-smooth weights (hash-decorrelated — a smooth ramp
+    // survives permutations, per the M7 lesson).
+    let fill = |n: usize, seed: u32| -> Vec<f32> {
+        (0..n)
+            .map(|i| {
+                let h = (i as u32).wrapping_mul(2654435761).wrapping_add(seed);
+                ((h >> 16) as f32 / 65536.0) - 0.5
+            })
+            .collect()
+    };
+    let gate = fill(ODD_INTER * ODD_HIDDEN, 1);
+    let up = fill(ODD_INTER * ODD_HIDDEN, 2);
+    let down = fill(ODD_HIDDEN * ODD_INTER, 3);
+
+    let mut tensors = HashMap::new();
+    tensors.insert(
+        arch.expert_ffn_gate_key(0, 0).unwrap(),
+        (gate.clone(), ODD_INTER, ODD_HIDDEN),
+    );
+    tensors.insert(
+        arch.expert_ffn_up_key(0, 0).unwrap(),
+        (up.clone(), ODD_INTER, ODD_HIDDEN),
+    );
+    tensors.insert(
+        arch.expert_ffn_down_key(0, 0).unwrap(),
+        (down.clone(), ODD_HIDDEN, ODD_INTER),
+    );
+    let source = MapSource { arch, tensors };
+    let dir = temp_dir("odd_hidden_roundtrip");
+    assert_eq!(write_per_layer_moe_per_expert(&source, &dir, 1).unwrap(), 1);
+
+    let bytes = std::fs::read(layer_file(&dir, 0)).unwrap();
+    let (format, _, inter, hidden, offsets) = parse_layer_weights_header(&bytes).unwrap();
+    assert_eq!(
+        (inter, hidden),
+        (ODD_INTER, ODD_HIDDEN),
+        "header keeps LOGICAL dims"
+    );
+    let (gu_off, gu_len, dn_off, dn_len) = offsets[0];
+    let gu_bytes = &bytes[gu_off..gu_off + gu_len];
+    let dn_bytes = &bytes[dn_off..dn_off + dn_len];
+
+    // The stored row width must be the padded one, derivable from bytes.
+    let padded = ODD_HIDDEN.div_ceil(Q4_K_BLOCK_ELEMS) * Q4_K_BLOCK_ELEMS;
+    assert_eq!(
+        gu_len,
+        2 * ODD_INTER * (padded / Q4_K_BLOCK_ELEMS) * Q4_K_BLOCK_BYTES,
+        "gate_up rows are not stored block-padded"
+    );
+    assert_eq!(
+        larql_compute::stored_gate_up_cols(
+            gu_len,
+            ODD_INTER,
+            larql_compute::QuantFormat::from_registry_tag(format.registry_tag()).unwrap(),
+            ODD_HIDDEN
+        ),
+        padded
+    );
+
+    // Integer kernel over the store vs an independent f32 computation over
+    // the DEQUANTISED store (so the comparison isolates layout, not
+    // quantisation error).
+    let h = fill(ODD_HIDDEN, 7);
+    let mut h_padded = vec![0.0f32; padded];
+    h_padded[..ODD_HIDDEN].copy_from_slice(&h);
+    let q8k = quantize_h_norm_for_q4k(&h_padded).expect("padded width quantises");
+    let inter_padded = ODD_INTER.div_ceil(Q4_K_BLOCK_ELEMS) * Q4_K_BLOCK_ELEMS;
+    let mut scratch = ExpertScratch::new(ODD_HIDDEN, ODD_INTER, inter_padded);
+    let got = larql_compute::cpu::ops::moe::run_single_expert_kq_q8k_into(
+        &mut scratch,
+        &q8k,
+        gu_bytes,
+        dn_bytes,
+        ODD_INTER,
+        larql_compute::QuantFormat::from_registry_tag(format.registry_tag()).unwrap(),
+        larql_compute::ExpertMlp::gated(larql_compute::Activation::Silu),
+    )
+    .to_vec();
+
+    let deq_gu =
+        larql_models::quant::ggml::dequantize_q4_k(gu_bytes, 2 * ODD_INTER * padded).unwrap();
+    let deq_dn =
+        larql_models::quant::ggml::dequantize_q4_k(dn_bytes, ODD_HIDDEN * inter_padded).unwrap();
+    let silu = |x: f32| x / (1.0 + (-x).exp());
+    let mut act = vec![0.0f32; inter_padded];
+    for j in 0..ODD_INTER {
+        let g: f32 = (0..padded)
+            .map(|c| deq_gu[j * padded + c] * h_padded[c])
+            .sum();
+        let u: f32 = (0..padded)
+            .map(|c| deq_gu[(ODD_INTER + j) * padded + c] * h_padded[c])
+            .sum();
+        act[j] = silu(g) * u;
+    }
+    let expect: Vec<f32> = (0..ODD_HIDDEN)
+        .map(|r| {
+            (0..inter_padded)
+                .map(|c| deq_dn[r * inter_padded + c] * act[c])
+                .sum()
+        })
+        .collect();
+
+    // Vector-level relative RMS: the Q8_K activation step adds ~1%-scale
+    // noise per element, which explodes a per-element relative check on
+    // near-zero outputs while a layout slip (rows shifted by the padding)
+    // decorrelates the whole vector — rel_rms ~ O(1). 5% cleanly separates
+    // the two.
+    let num: f32 = got
+        .iter()
+        .zip(&expect)
+        .map(|(a, b)| (a - b) * (a - b))
+        .sum();
+    let den: f32 = expect.iter().map(|b| b * b).sum();
+    let rel_rms = (num / den.max(1e-12)).sqrt();
+    assert!(
+        rel_rms < 0.05,
+        "integer kernel diverges from the dequantised reference: rel_rms={rel_rms} \
+         (a stride/padding slip moves every row after the first)"
+    );
+}

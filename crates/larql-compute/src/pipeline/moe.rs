@@ -347,6 +347,61 @@ impl<'a> MoeLayerWeights<'a> {
             .checked_div(self.num_experts)
             .unwrap_or(0)
     }
+
+    /// The gate/up matrices' STORED row width in elements, derived from
+    /// expert 0's byte count.
+    ///
+    /// The writer pads each gate/up row to a super-block boundary so that
+    /// per-row integer kernels can index the store (GPT-OSS's hidden 2880
+    /// stores as 3072); block-multiple hidden sizes store unpadded and
+    /// this returns `hidden` exactly. The byte count is the authority —
+    /// deriving from `hidden` re-creates the assumption the padding
+    /// removes. Falls back to `hidden` when the bytes don't divide
+    /// (legacy monolith strides, synthetic fixtures).
+    pub fn gate_up_cols(&self, hidden: usize) -> usize {
+        let Some(&bytes) = self.experts_gate_up.first() else {
+            return hidden;
+        };
+        stored_gate_up_cols(
+            bytes.len(),
+            self.intermediate_size,
+            self.expert_data_format,
+            hidden,
+        )
+    }
+}
+
+/// Free-function form of [`MoeLayerWeights::gate_up_cols`] for callers that
+/// hold one expert's bytes without the struct (the single-expert entry
+/// points the HTTP expert server drives). One derivation, two shapes.
+pub fn stored_gate_up_cols(
+    gate_up_bytes_len: usize,
+    inter: usize,
+    format: QuantFormat,
+    hidden: usize,
+) -> usize {
+    if inter == 0 || !gate_up_bytes_len.is_multiple_of(2 * inter) {
+        return hidden;
+    }
+    let row_bytes = gate_up_bytes_len / (2 * inter);
+    let cols = match format.packed_block_layout() {
+        Some((block_elems, block_bytes)) => {
+            if !row_bytes.is_multiple_of(block_bytes) {
+                return hidden;
+            }
+            row_bytes / block_bytes * block_elems
+        }
+        None => match format {
+            QuantFormat::BF16 | QuantFormat::F16 => row_bytes / 2,
+            QuantFormat::F32 => row_bytes / 4,
+            _ => return hidden,
+        },
+    };
+    if cols >= hidden {
+        cols
+    } else {
+        hidden
+    }
 }
 
 /// Hybrid MoE behavior for one layer. The expert tensors remain in

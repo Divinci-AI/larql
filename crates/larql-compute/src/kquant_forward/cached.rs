@@ -75,7 +75,9 @@ impl CachedTimings {
 /// attention helper only knows the "this layer has its own K/V" case
 /// today).
 pub fn supports_cached_decode(weights: &ModelWeights) -> bool {
-    if weights.arch.is_hybrid_moe() {
+    // Pure MoE is exactly as unsupported here as hybrid — this loop's FFN
+    // is dense-only.
+    if weights.arch.is_moe() || weights.arch.is_hybrid_moe() {
         return false;
     }
     for layer in 0..weights.num_layers {

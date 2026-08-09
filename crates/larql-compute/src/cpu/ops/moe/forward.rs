@@ -7,7 +7,7 @@
 use crate::MoeLayerWeights;
 
 use super::cache::try_cached_dequant;
-use super::expert::{run_single_expert_q4k_q8k_into, ExpertScratch};
+use super::expert::{run_single_expert_kq_q8k_into, ExpertScratch};
 use super::math::{matmul_vec, softmax};
 use super::{
     moe_expert_input, moe_post_expert_output, moe_route_from_router_input, moe_router_input,
@@ -120,20 +120,33 @@ pub fn cpu_moe_forward(
     // the matmul reads `inter_padded` columns with the padding
     // contributing zero.
     let inter_padded = moe.inter_padded();
+    // The gate/up matrices' STORED row width — block-padded by the writer
+    // (GPT-OSS 2880 → 3072), equal to `hidden` everywhere else. Both the
+    // integer and f32 paths must read rows at this stride; the activation
+    // is zero-padded to match, contributing zero to every dot product.
+    let weight_cols = moe.gate_up_cols(hidden);
+    let expert_input_w: std::borrow::Cow<'_, [f32]> = if weight_cols == hidden {
+        std::borrow::Cow::Borrowed(&expert_input)
+    } else {
+        let mut padded = vec![0.0f32; weight_cols];
+        padded[..hidden].copy_from_slice(&expert_input);
+        std::borrow::Cow::Owned(padded)
+    };
 
     let t_pre_par = t_start.elapsed();
 
-    // Q4_K direct-from-mmap path: quantise expert_input to Q8_K once per layer
-    // (shared across all K active experts) and use the SDOT-based integer
-    // matvec.  Bypasses the f32 dequant cache entirely — at Gemma 4 26B-A4B
-    // sizes the f32 cache is 5.7 GB walked per token and DRAM-bandwidth
-    // bound; direct-Q4K is ~1.4 GB.  Set `LARQL_DISABLE_Q4K_DIRECT=1` to
-    // fall back to the BLAS-on-cached-f32 path for kernel-debug A/B runs.
-    let q4k_direct = matches!(format, crate::QuantFormat::Q4_K)
-        && hidden.is_multiple_of(256)
+    // Integer direct-from-mmap path: quantise expert_input to Q8_K once per
+    // layer (shared across all K active experts) and use the SDOT-based
+    // matvec — Q4_K or Q6_K by the store's format.  Bypasses the f32
+    // dequant cache entirely — at Gemma 4 26B-A4B sizes the f32 cache is
+    // 5.7 GB walked per token and DRAM-bandwidth bound; direct reads are
+    // 4-2.4× smaller.  Set `LARQL_DISABLE_Q4K_DIRECT=1` to fall back to
+    // the BLAS-on-cached-f32 path for kernel-debug A/B runs.
+    let kq_direct = matches!(format, crate::QuantFormat::Q4_K | crate::QuantFormat::Q6_K)
+        && weight_cols.is_multiple_of(256)
         && !super::q4k_direct_disabled();
     let t_q8k_quant_start = std::time::Instant::now();
-    let expert_input_q8k = q4k_direct.then(|| quantize_x_to_q8k(&expert_input));
+    let expert_input_q8k = kq_direct.then(|| quantize_x_to_q8k(&expert_input_w));
     let t_q8k_quant = t_q8k_quant_start.elapsed();
     let t_par_start = std::time::Instant::now();
 
@@ -174,15 +187,16 @@ pub fn cpu_moe_forward(
             }
 
             if let Some(q8k) = expert_input_q8k.as_ref() {
-                // Q4_K direct path — single source of truth in
-                // `expert::run_single_expert_q4k_q8k_into`.  Reuses the
+                // Integer direct path — single source of truth in
+                // `expert::run_single_expert_kq_q8k_into`.  Reuses the
                 // scratch's act_q8k buffer too.
-                let h2 = run_single_expert_q4k_q8k_into(
+                let h2 = run_single_expert_kq_q8k_into(
                     scratch,
                     q8k,
                     gate_up_bytes,
                     down_bytes,
                     inter,
+                    format,
                     mlp,
                 );
                 for (a, &v) in dst.iter_mut().zip(h2.iter()) {
@@ -195,16 +209,16 @@ pub fn cpu_moe_forward(
             // path.  Inlined here to avoid pulling the per-call rms_norm /
             // format dispatch from the legacy `run_single_expert_into` that
             // doesn't share scratch.
-            let gate_up_w = try_cached_dequant(gate_up_bytes, format, 2 * inter * hidden)
+            let gate_up_w = try_cached_dequant(gate_up_bytes, format, 2 * inter * weight_cols)
                 .unwrap_or_else(|err| panic!("{err}"));
             if gate_up_w.is_empty() {
                 return;
             }
-            let gate_w = &gate_up_w[..inter * hidden];
-            let up_w = &gate_up_w[inter * hidden..2 * inter * hidden];
+            let gate_w = &gate_up_w[..inter * weight_cols];
+            let up_w = &gate_up_w[inter * weight_cols..2 * inter * weight_cols];
 
-            let gate_out = matmul_vec(&expert_input, gate_w, inter, hidden);
-            let up_out = matmul_vec(&expert_input, up_w, inter, hidden);
+            let gate_out = matmul_vec(&expert_input_w, gate_w, inter, weight_cols);
+            let up_out = matmul_vec(&expert_input_w, up_w, inter, weight_cols);
 
             for j in 0..inter {
                 let g = gate_out[j] + mlp.gate_bias(j);
