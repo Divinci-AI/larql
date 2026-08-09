@@ -1,6 +1,6 @@
 # The TTS funnel — audio-token output as a forcing function
 
-Status: steps 0-1 green. Branch `worktree-tts-audio-tokens`, started 2026-08-09.
+Status: steps 0-2 green. Branch `worktree-tts-audio-tokens`, started 2026-08-09.
 
 Gate log:
 
@@ -29,6 +29,21 @@ Gate log:
   0 unexplained / 0 missing. Real-checkpoint aux load passes in ~6 s with
   the pad-row-zero and duplication assertions running on real bytes
   (`real_checkpoint_aux_load`, ignored in CI).
+
+- **Step 2 PASS** (2026-08-09) — the first non-text input algebra executes
+  with parity. `embed_tables_sum` (larql-compute, generic multi-table
+  summed embedding — one id column per table, ascending-order sum, no
+  scaling) over the reference's exact `[343, 17]` prefill matrix is
+  **bit-identical** to the reference's summed input embeddings: max |Δ|
+  = 0 across all 343×2048 values. Feeding those embeddings through the
+  UNCHANGED Qwen3 path (`StandardEngine::prefill_from_hidden` + final
+  norm) reproduces the reference backbone hidden at the last position to
+  max |Δ| 7.6e-6, cosine 1.00000000 — fp32 accumulation-order noise.
+  Gate test: `larql-kv/tests/moss_prefill_parity.rs` (ignored in CI;
+  reads the step-0 dump's flat-binary export). The significance: LARQL's
+  Qwen3 execution is now demonstrably independent of where its input
+  embeddings came from — the boundary between "LLM engine" and
+  "generative-model engine" is crossed at prefill.
 
 This document plays the role `k3-funnel.md` plays for sparse execution: it
 names one model that cannot run, inventories exactly why, and commits to
