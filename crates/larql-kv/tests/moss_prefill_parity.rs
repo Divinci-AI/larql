@@ -25,11 +25,13 @@
 //! `moss_parity_dump.py --export-bin` (jarvis-voice), shapes in
 //! `manifest.json` alongside them.
 
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+mod common;
+
+use std::path::Path;
 
 use ndarray::Array2;
 
+use common::{max_abs_diff, model_dir_from_env, row_cosine, BinFixtures};
 use larql_compute::forward::ops::apply_norm;
 use larql_inference::ffn::WeightFfn;
 use larql_inference::larql_models::loading::safetensors::load_model_dir;
@@ -39,9 +41,6 @@ use larql_inference::larql_models::speech::moss_tts_realtime::{
 use larql_inference::KvEngine;
 use larql_kv::engines::standard::StandardEngine;
 
-const ENV_MODEL_DIR: &str = "MOSS_TTS_REALTIME_DIR";
-const ENV_BIN_DIR: &str = "MOSS_PARITY_BIN_DIR";
-
 /// Bit-exactness is not expected across engines (accumulation order in
 /// fp32 GEMMs differs); these bounds are the "first gate" tolerances and
 /// exist to be tightened, not relaxed.
@@ -49,94 +48,11 @@ const EMBED_MAX_ABS: f32 = 1e-5;
 const HIDDEN_MAX_ABS: f32 = 1e-2;
 const HIDDEN_MIN_COSINE: f64 = 0.999_99;
 
-struct BinFixtures {
-    shapes: HashMap<String, Vec<usize>>,
-    dir: PathBuf,
-}
-
-impl BinFixtures {
-    fn open(dir: &Path) -> Self {
-        let manifest: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(dir.join("manifest.json")).expect("bin manifest"),
-        )
-        .expect("bin manifest json");
-        let shapes = manifest
-            .as_object()
-            .expect("manifest object")
-            .iter()
-            .map(|(key, meta)| {
-                let shape = meta["shape"]
-                    .as_array()
-                    .expect("shape array")
-                    .iter()
-                    .map(|v| v.as_u64().expect("dim") as usize)
-                    .collect();
-                (key.clone(), shape)
-            })
-            .collect();
-        Self {
-            shapes,
-            dir: dir.to_path_buf(),
-        }
-    }
-
-    fn shape(&self, key: &str) -> &[usize] {
-        self.shapes
-            .get(key)
-            .unwrap_or_else(|| panic!("no fixture {key}"))
-    }
-
-    fn f32_matrix(&self, key: &str) -> Array2<f32> {
-        let shape = self.shape(key).to_vec();
-        assert_eq!(shape.len(), 2, "{key} is not rank-2");
-        let bytes = std::fs::read(self.dir.join(format!("{key}.bin"))).expect(key);
-        let values: Vec<f32> = bytes
-            .chunks_exact(std::mem::size_of::<f32>())
-            .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
-            .collect();
-        Array2::from_shape_vec((shape[0], shape[1]), values).expect(key)
-    }
-
-    fn i64_matrix_as_u32(&self, key: &str) -> Array2<u32> {
-        let shape = self.shape(key).to_vec();
-        assert_eq!(shape.len(), 2, "{key} is not rank-2");
-        let bytes = std::fs::read(self.dir.join(format!("{key}.bin"))).expect(key);
-        let values: Vec<u32> = bytes
-            .chunks_exact(std::mem::size_of::<i64>())
-            .map(|c| {
-                let v = i64::from_le_bytes(c.try_into().unwrap());
-                u32::try_from(v).expect("id fits in u32")
-            })
-            .collect();
-        Array2::from_shape_vec((shape[0], shape[1]), values).expect(key)
-    }
-}
-
-fn max_abs_diff(a: &Array2<f32>, b: &Array2<f32>) -> f32 {
-    a.iter()
-        .zip(b.iter())
-        .map(|(x, y)| (x - y).abs())
-        .fold(0.0, f32::max)
-}
-
-fn row_cosine(a: &Array2<f32>, b: &Array2<f32>, row: usize) -> f64 {
-    let (mut dot, mut na, mut nb) = (0.0f64, 0.0f64, 0.0f64);
-    for (x, y) in a.row(row).iter().zip(b.row(row).iter()) {
-        dot += *x as f64 * *y as f64;
-        na += (*x as f64).powi(2);
-        nb += (*y as f64).powi(2);
-    }
-    dot / (na.sqrt() * nb.sqrt())
-}
-
 #[test]
 #[ignore]
 fn moss_prefill_matches_reference_dump() {
-    let model_dir = std::env::var(ENV_MODEL_DIR)
-        .unwrap_or_else(|_| panic!("set {ENV_MODEL_DIR} to the checkpoint snapshot"));
-    let bin_dir = std::env::var(ENV_BIN_DIR)
-        .unwrap_or_else(|_| panic!("set {ENV_BIN_DIR} to the parity-dump bin directory"));
-    let fixtures = BinFixtures::open(Path::new(&bin_dir));
+    let model_dir = model_dir_from_env();
+    let fixtures = BinFixtures::open_from_env();
 
     // ── Load: backbone through the normal path, audio side through the
     // speech loader ──

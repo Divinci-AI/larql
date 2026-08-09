@@ -16,12 +16,14 @@
 //! load is wrong — there is no silent remainder (the GPT-OSS lesson,
 //! AGENTS.md "a tensor the extractor doesn't name is silently dropped").
 
+mod adapter;
 mod config;
 mod coverage;
 mod keys;
 mod loader;
 mod weights;
 
+pub use adapter::{depth_transformer_model, DepthTransformerModel};
 pub use config::{LocalTransformerConfig, MossTtsRealtimeConfig};
 pub use coverage::{classify_checkpoint_keys, CheckpointCoverage, JustifiedSkip};
 pub use loader::load_moss_tts_aux_from_safetensors;

@@ -352,6 +352,48 @@ fn loader_rejects_broken_text_table_duplication() {
     assert!(err.to_string().contains("byte-identical"), "got: {err}");
 }
 
+// ── Adapter: the depth transformer as an ordinary Qwen3 model ────────────
+
+#[test]
+fn adapter_reexpresses_local_transformer_as_qwen3() {
+    let dir = tempfile::tempdir().unwrap();
+    let tensors = synth_checkpoint(SYNTH_HIDDEN, SYNTH_RVQ, SYNTH_AUDIO_VOCAB, SYNTH_PAD);
+    write_checkpoint(dir.path(), &tensors);
+    let (arch, config) = synth_setup();
+    let aux =
+        load_moss_tts_aux_from_safetensors(dir.path(), arch.as_ref(), config.clone()).unwrap();
+
+    let depth = super::adapter::depth_transformer_model(aux.local, &config).unwrap();
+
+    assert_eq!(depth.weights.arch.family(), "qwen3");
+    assert_eq!(depth.weights.num_layers, config.local.num_layers);
+    assert_eq!(depth.weights.hidden_size, config.local.hidden_size);
+    assert_eq!(depth.weights.vocab_size, config.audio_vocab_size);
+    // The core is addressable through the synthesized arch's own keys.
+    let inner_arch = &depth.weights.arch;
+    assert!(depth
+        .weights
+        .tensors
+        .contains_key(&inner_arch.attn_q_key(0)));
+    assert!(depth
+        .weights
+        .tensors
+        .contains_key(&inner_arch.ffn_down_key(0)));
+    assert!(depth
+        .weights
+        .vectors
+        .contains_key(&inner_arch.attn_q_norm_key(0).unwrap()));
+    assert!(depth
+        .weights
+        .vectors
+        .contains_key(inner_arch.final_norm_key()));
+    // The audio boundary stays outside the core.
+    assert_eq!(depth.embed_tables.len(), config.local_embed_tables());
+    assert_eq!(depth.lm_heads.len(), config.lm_heads());
+    // Placeholders are zero-valued: accidental use is conspicuous.
+    assert!(depth.weights.embed.iter().all(|&v| v == 0.0));
+}
+
 /// Full load of the real checkpoint — assertions (text-table duplication,
 /// pad-row zero) run on real bytes. NOT FOR CI: needs the ~4.3 GB local
 /// snapshot. Run with:

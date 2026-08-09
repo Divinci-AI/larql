@@ -1,6 +1,6 @@
 # The TTS funnel — audio-token output as a forcing function
 
-Status: steps 0-2 green. Branch `worktree-tts-audio-tokens`, started 2026-08-09.
+Status: steps 0-3 green. Branch `worktree-tts-audio-tokens`, started 2026-08-09.
 
 Gate log:
 
@@ -44,6 +44,23 @@ Gate log:
   Qwen3 execution is now demonstrably independent of where its input
   embeddings came from — the boundary between "LLM engine" and
   "generative-model engine" is crossed at prefill.
+
+- **Step 3 PASS** (2026-08-09) — nested generation executes with no new
+  runtime machinery. The depth transformer is re-expressed as an ordinary
+  4-layer Qwen3 `ModelWeights` (`depth_transformer_model`; per-codebook
+  tables and heads stay outside as the audio-domain boundary) and each
+  teacher-forced micro-step prefix runs through the same
+  `prefill_from_hidden` the backbone used — causal attention makes the
+  prefix forward equal to the reference's cached micro-step decode.
+  Against the dump's 138×16×1027 logits: worst |Δ| = 1.75e-4, and all
+  2,208 greedy codebook argmaxes identical
+  (`larql-kv/tests/moss_depth_parity.rs`, ignored in CI). The finding:
+  "one outer generation step contains an inner autoregressive programme"
+  reduces, in LARQL terms, to *the inner programme is another model* —
+  no nested-decode concept was needed at parity level. What remains
+  step-4 work is the loop itself: sampling, EOS on codebook 0, the typed
+  output seam, and cached (rather than recomputed-prefix) micro-steps
+  for performance.
 
 This document plays the role `k3-funnel.md` plays for sparse execution: it
 names one model that cannot run, inventories exactly why, and commits to
