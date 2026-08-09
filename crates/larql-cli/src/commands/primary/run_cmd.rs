@@ -326,6 +326,16 @@ pub struct RunArgs {
     /// Frame cap for `--speak` (12.5 frames per second of audio).
     #[arg(long, default_value = "1500")]
     pub max_frames: usize,
+
+    /// Greedy decoding for `--speak` (parity/debug). Default is the
+    /// reference's sampled mode — greedy does not terminate reliably on
+    /// novel text.
+    #[arg(long)]
+    pub greedy: bool,
+
+    /// RNG seed for `--speak` sampled mode (reproducible synthesis).
+    #[arg(long, default_value = "0")]
+    pub seed: u64,
 }
 
 pub fn run(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {

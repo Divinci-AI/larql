@@ -18,7 +18,8 @@ use std::time::Instant;
 
 use larql_inference::ffn::WeightFfn;
 use larql_inference::speech::moss_prompt::build_prompt;
-use larql_inference::speech::moss_realtime::generate_frames_greedy_streaming;
+use larql_inference::speech::moss_realtime::generate_frames_streaming;
+use larql_inference::speech::moss_sampling::{DecodeMode, MossSampling};
 use larql_inference::tokenizer::load_tokenizer;
 use larql_kv::engines::standard::StandardEngine;
 use larql_models::loading::safetensors::load_model_dir;
@@ -92,11 +93,23 @@ pub fn run_speak(args: &RunArgs) -> Result<(), BoxErr> {
     );
 
     // ── Generate, timing every frame ──
-    let mut engine = StandardEngine::new(None);
+    // `--metal` routes the backbone through the default backend
+    // composition (Metal + CPU fallback when built with the gpu
+    // feature); the depth transformer stays on CPU either way for now.
+    let mut engine = if args.metal {
+        StandardEngine::with_backend(None, larql_inference::default_engine_backend())
+    } else {
+        StandardEngine::new(None)
+    };
     let ffn = WeightFfn { weights: &weights };
     let generation_start = Instant::now();
     let mut frame_instants: Vec<f64> = Vec::new();
-    let generation = generate_frames_greedy_streaming(
+    let mode = if args.greedy {
+        DecodeMode::Greedy
+    } else {
+        DecodeMode::Sampled(MossSampling::default())
+    };
+    let generation = generate_frames_streaming(
         &mut engine,
         &weights,
         &ffn,
@@ -107,6 +120,8 @@ pub fn run_speak(args: &RunArgs) -> Result<(), BoxErr> {
         &prompt.text_queue,
         prompt.text_pad_id,
         args.max_frames,
+        mode,
+        args.seed,
         |index, _codes| {
             frame_instants.push(generation_start.elapsed().as_secs_f64());
             if (index + 1) % 25 == 0 {
@@ -190,6 +205,36 @@ pub fn run_speak(args: &RunArgs) -> Result<(), BoxErr> {
             percentile(50.0) * 1000.0,
             percentile(95.0) * 1000.0,
             frame_durations.last().unwrap() * 1000.0
+        );
+    }
+    // Stage split: where a frame's milliseconds actually go.
+    let stages = &generation.stage_timings;
+    if !stages.is_empty() {
+        let mut backbone: Vec<f64> = stages
+            .iter()
+            .map(|s| s.backbone_seconds)
+            .filter(|&s| s > 0.0)
+            .collect();
+        let mut depth: Vec<f64> = stages.iter().map(|s| s.depth_seconds).collect();
+        backbone.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        depth.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let mid = |v: &[f64]| v[v.len() / 2] * 1000.0;
+        println!(
+            "prefill               {:.2}s ({} rows)",
+            generation.prefill_seconds,
+            prompt.prefill_matrix.nrows()
+        );
+        if !backbone.is_empty() {
+            println!(
+                "  backbone step       p50 {:.0} ms | max {:.0} ms per frame",
+                mid(&backbone),
+                backbone.last().unwrap() * 1000.0
+            );
+        }
+        println!(
+            "  depth (16 micro)    p50 {:.0} ms | max {:.0} ms per frame",
+            mid(&depth),
+            depth.last().unwrap() * 1000.0
         );
     }
     if let Some(seconds) = codec_seconds {

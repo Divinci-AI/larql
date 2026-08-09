@@ -31,12 +31,28 @@ use larql_compute::forward::ops::apply_norm;
 use larql_models::speech::moss_tts_realtime::{DepthTransformerModel, MossTtsRealtimeConfig};
 use larql_models::ModelWeights;
 
+use rand::rngs::StdRng;
+use rand::SeedableRng;
+
 use crate::ffn::{FfnBackend, WeightFfn};
 use crate::kv_dispatch::helpers::{
     kv_decode_step_from_hidden_via_dispatch, kv_prefill_from_hidden_via_dispatch,
 };
 use crate::kv_engine::EngineError;
+use crate::speech::moss_sampling::{
+    apply_repetition_penalty, filter_logits, sample_multinomial, DecodeMode,
+};
 use crate::KvEngine;
+
+/// Where one frame's compute went — the step-5 performance surface.
+#[derive(Debug, Clone, Copy)]
+pub struct FrameStages {
+    /// The backbone decode step (absent for frame 0, which rides the
+    /// prefill).
+    pub backbone_seconds: f64,
+    /// The 16 depth micro-steps + heads.
+    pub depth_seconds: f64,
+}
 
 /// A completed (or frame-capped) generation.
 #[derive(Debug)]
@@ -45,6 +61,10 @@ pub struct MossGeneration {
     pub frames: Vec<Vec<u32>>,
     /// Index of the frame whose codebook 0 was audio EOS, if reached.
     pub eos_at: Option<usize>,
+    /// Seconds spent in the prefill forward.
+    pub prefill_seconds: f64,
+    /// Per-frame stage split, one entry per frame.
+    pub stage_timings: Vec<FrameStages>,
 }
 
 impl MossGeneration {
@@ -114,8 +134,45 @@ pub fn generate_frames_greedy_streaming(
     text_queue: &[u32],
     text_pad_id: u32,
     max_frames: usize,
+    on_frame: impl FnMut(usize, &[u32]),
+) -> Result<MossGeneration, EngineError> {
+    generate_frames_streaming(
+        engine,
+        backbone,
+        backbone_ffn,
+        audio_tables,
+        depth,
+        config,
+        prefill_matrix,
+        text_queue,
+        text_pad_id,
+        max_frames,
+        DecodeMode::Greedy,
+        0,
+        on_frame,
+    )
+}
+
+/// The general form: greedy or sampled ([`DecodeMode`]), seeded for
+/// reproducibility in sampled mode (the reference's operating mode —
+/// greedy does not terminate on novel text).
+#[allow(clippy::too_many_arguments)]
+pub fn generate_frames_streaming(
+    engine: &mut dyn KvEngine,
+    backbone: &ModelWeights,
+    backbone_ffn: &dyn FfnBackend,
+    audio_tables: &[Array2<f32>],
+    depth: &DepthTransformerModel,
+    config: &MossTtsRealtimeConfig,
+    prefill_matrix: &Array2<u32>,
+    text_queue: &[u32],
+    text_pad_id: u32,
+    max_frames: usize,
+    mode: DecodeMode,
+    seed: u64,
     mut on_frame: impl FnMut(usize, &[u32]),
 ) -> Result<MossGeneration, EngineError> {
+    let mut rng = StdRng::seed_from_u64(seed);
     let rvq = config.rvq;
     assert_eq!(
         prefill_matrix.ncols(),
@@ -134,14 +191,23 @@ pub fn generate_frames_greedy_streaming(
 
     // ── Prefill, and the first frame off its last hidden ──
     let embeds = embed_tables_sum(&backbone_tables, prefill_matrix);
+    let prefill_start = std::time::Instant::now();
     let last = engine.prefill_from_hidden(backbone, backbone_ffn, &embeds)?;
+    let prefill_seconds = prefill_start.elapsed().as_secs_f64();
     let mut frames: Vec<Vec<u32>> = Vec::new();
+    let mut stage_timings: Vec<FrameStages> = Vec::new();
     let mut eos_at = None;
     let mut text_cursor = 0usize;
+    let mut backbone_seconds = 0.0f64;
 
     let mut hidden = backbone_final_norm(backbone, &last);
     loop {
-        let frame = depth_frame_greedy(depth, &hidden)?;
+        let depth_start = std::time::Instant::now();
+        let frame = depth_frame(depth, &hidden, mode, &frames, &mut rng)?;
+        stage_timings.push(FrameStages {
+            backbone_seconds,
+            depth_seconds: depth_start.elapsed().as_secs_f64(),
+        });
         let is_eos = frame[0] as usize == config.audio_eos_token();
         on_frame(frames.len(), &frame);
         frames.push(frame);
@@ -165,18 +231,32 @@ pub fn generate_frames_greedy_streaming(
             step_ids[[0, column + 1]] = code;
         }
         let step_embed = embed_tables_sum(&backbone_tables, &step_ids);
+        let backbone_start = std::time::Instant::now();
         let step_hidden = engine.decode_step_from_hidden(backbone, backbone_ffn, &step_embed)?;
+        backbone_seconds = backbone_start.elapsed().as_secs_f64();
         hidden = backbone_final_norm(backbone, &step_hidden);
     }
 
-    Ok(MossGeneration { frames, eos_at })
+    Ok(MossGeneration {
+        frames,
+        eos_at,
+        prefill_seconds,
+        stage_timings,
+    })
 }
 
 /// One frame through the depth transformer: cached micro-steps over a
-/// per-frame handle set, greedy per head.
-fn depth_frame_greedy(
+/// per-frame handle set, one codebook per head.
+///
+/// `prior_frames` is the per-codebook repetition history (frame-major);
+/// empty on the first frame, which matches the reference disabling the
+/// penalty for the prefill frame.
+fn depth_frame(
     depth: &DepthTransformerModel,
     backbone_hidden: &Array2<f32>,
+    mode: DecodeMode,
+    prior_frames: &[Vec<u32>],
+    rng: &mut StdRng,
 ) -> Result<Vec<u32>, EngineError> {
     let weights = &depth.weights;
     let ffn = WeightFfn { weights };
@@ -202,7 +282,7 @@ fn depth_frame_greedy(
     })?;
 
     for micro in 0..rvq {
-        let code = head_argmax(depth, micro, weights, &hidden);
+        let code = pick_code(depth, micro, weights, &hidden, mode, prior_frames, rng);
         frame.push(code);
         if micro + 1 == rvq {
             break;
@@ -233,23 +313,45 @@ fn depth_frame_greedy(
     Ok(frame)
 }
 
-fn head_argmax(
+fn pick_code(
     depth: &DepthTransformerModel,
     head: usize,
     weights: &ModelWeights,
     hidden: &Array2<f32>,
+    mode: DecodeMode,
+    prior_frames: &[Vec<u32>],
+    rng: &mut StdRng,
 ) -> u32 {
     let normed = backbone_final_norm(weights, hidden);
-    let logits = normed.dot(&depth.lm_heads[head].t());
+    let logits_row = normed.dot(&depth.lm_heads[head].t());
+    let mut logits: Vec<f32> = logits_row.row(0).to_vec();
+    match mode {
+        DecodeMode::Greedy => argmax(&logits) as u32,
+        DecodeMode::Sampled(sampling) => {
+            // Codebook `head`'s own history across prior frames.
+            let history: Vec<u32> = prior_frames.iter().map(|frame| frame[head]).collect();
+            apply_repetition_penalty(
+                &mut logits,
+                &history,
+                sampling.repetition_penalty,
+                sampling.repetition_window,
+            );
+            filter_logits(&mut logits, &sampling);
+            sample_multinomial(&logits, rng) as u32
+        }
+    }
+}
+
+fn argmax(logits: &[f32]) -> usize {
     let mut best = 0usize;
     let mut best_value = f32::NEG_INFINITY;
-    for (index, &value) in logits.row(0).iter().enumerate() {
+    for (index, &value) in logits.iter().enumerate() {
         if value > best_value {
             best_value = value;
             best = index;
         }
     }
-    best as u32
+    best
 }
 
 fn backbone_final_norm(weights: &ModelWeights, hidden: &Array2<f32>) -> Array2<f32> {

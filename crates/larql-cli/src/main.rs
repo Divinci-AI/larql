@@ -366,6 +366,8 @@ impl From<ChatArgs> for run_cmd::RunArgs {
             speech_out: None,
             play: false,
             max_frames: 0,
+            greedy: false,
+            seed: 0,
         }
     }
 }

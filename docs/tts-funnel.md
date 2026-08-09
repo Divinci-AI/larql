@@ -103,6 +103,25 @@ Gate log:
   push-text session (batch-vs-incremental token equality), and the
   buffer/underrun measurements.
 
+- **Step 5 sampled mode + stage split** (2026-08-09) — the reference's
+  sampler replicated literally (`speech/moss_sampling.rs`: ascending-sort
+  top-p, strict-less top-k ties, once-per-unique-id repetition penalty
+  per codebook, never on the prefill frame), unit-tested against fixture
+  outputs produced by the reference's own functions. Sampled is now the
+  CLI default (`--greedy` for parity, `--seed` for reproducibility) and
+  the novel text that ran to the frame cap under greedy terminates
+  cleanly (86 frames, EOS). The benchmark table gained a per-frame
+  backbone/depth split, which corrected the performance picture twice:
+  the clean CPU-build baseline is p50 190 ms/frame = backbone 65 ms +
+  depth 125 ms (gap to the 80 ms budget ~2.4x, depth-dominated exactly
+  as the bandwidth math predicts — 16 micro-steps re-read the full 1.06
+  GB depth weights, ~17 GB/frame vs the backbone's 6.8 GB), and the
+  earlier 508 ms figure came from a gpu-featured build whose CPU path is
+  ~2.7x slower across both stages — a real regression to file
+  separately. Remaining for the step-5 gate: the incremental push-text
+  session and buffer/underrun measurements; then the perf phase (Metal,
+  quantisation, fused depth frame) attacks a 2.4x gap, not 6x.
+
 This document plays the role `k3-funnel.md` plays for sparse execution: it
 names one model that cannot run, inventories exactly why, and commits to
 removing blockers one at a time. No abstraction gets built speculatively;
