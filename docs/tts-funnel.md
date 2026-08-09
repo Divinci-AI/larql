@@ -81,6 +81,28 @@ Gate log:
   Remaining from the step-4 list: sampled mode (the non-standard top-p),
   and retrofitting the ids-preserved seam into the text decode paths.
 
+- **Step 5 FIRST LIGHT** (2026-08-09) — `larql run <model> --speak "text"`
+  speaks: prompt built from scratch in Rust
+  (`speech/moss_prompt.rs` — system prompt byte-exact, voice-clone
+  splice, 12-token lead), streaming per-frame callback on the driver,
+  external codec via `--codec-cmd` / `$LARQL_MOSS_CODEC_CMD`
+  (`jarvis-voice/.engines/moss_codec_cli.py`), `--play` for audio out.
+  Chain validation at the strongest level: the CLI's emitted tokens for
+  the parity fixture are **identical** to the reference dump's — prompt
+  construction through generation, from raw text + reference codes, all
+  in LARQL. First measured benchmark (cpu/fp32, wholly unoptimised):
+  5.0 frames/s on the fixture (12.5 needed), RTF 0.40, TTFA 1.34 s
+  (343-row prefill included), p50 frame 189 ms against the 80 ms budget
+  — ~2.5x short of realtime with Metal, quantisation, and the fused
+  depth kernel all untouched. **Gating discovery:** greedy decoding does
+  not terminate on novel text (hit the 1500-frame cap; 120 s of audio
+  for sixteen words) — the reference's operating mode is sampled
+  (temperature 0.8, top-p 0.6, repetition penalty 1.1 per codebook), so
+  sampled mode is required for arbitrary-text TTS, not optional. Still
+  open for the full step-5 gate: sampled mode, the incremental
+  push-text session (batch-vs-incremental token equality), and the
+  buffer/underrun measurements.
+
 This document plays the role `k3-funnel.md` plays for sparse execution: it
 names one model that cannot run, inventories exactly why, and commits to
 removing blockers one at a time. No abstraction gets built speculatively;

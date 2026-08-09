@@ -82,6 +82,40 @@ pub fn generate_frames_greedy(
     text_pad_id: u32,
     max_frames: usize,
 ) -> Result<MossGeneration, EngineError> {
+    generate_frames_greedy_streaming(
+        engine,
+        backbone,
+        backbone_ffn,
+        audio_tables,
+        depth,
+        config,
+        prefill_matrix,
+        text_queue,
+        text_pad_id,
+        max_frames,
+        |_, _| {},
+    )
+}
+
+/// [`generate_frames_greedy`] with a per-frame observer: `on_frame(index,
+/// codes)` fires the moment each frame exists, before the next backbone
+/// step — the streaming surface. Frames are the model's realtime unit
+/// (80 ms each at 12.5 Hz), so a consumer feeding a codec + ring buffer
+/// hangs directly off this callback.
+#[allow(clippy::too_many_arguments)]
+pub fn generate_frames_greedy_streaming(
+    engine: &mut dyn KvEngine,
+    backbone: &ModelWeights,
+    backbone_ffn: &dyn FfnBackend,
+    audio_tables: &[Array2<f32>],
+    depth: &DepthTransformerModel,
+    config: &MossTtsRealtimeConfig,
+    prefill_matrix: &Array2<u32>,
+    text_queue: &[u32],
+    text_pad_id: u32,
+    max_frames: usize,
+    mut on_frame: impl FnMut(usize, &[u32]),
+) -> Result<MossGeneration, EngineError> {
     let rvq = config.rvq;
     assert_eq!(
         prefill_matrix.ncols(),
@@ -109,6 +143,7 @@ pub fn generate_frames_greedy(
     loop {
         let frame = depth_frame_greedy(depth, &hidden)?;
         let is_eos = frame[0] as usize == config.audio_eos_token();
+        on_frame(frames.len(), &frame);
         frames.push(frame);
         if is_eos {
             eos_at = Some(frames.len() - 1);

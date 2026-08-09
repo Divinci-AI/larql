@@ -7,4 +7,5 @@
 //! and interpretation (text detokenisation, codec decode) belongs to
 //! whatever consumes them.
 
+pub mod moss_prompt;
 pub mod moss_realtime;
