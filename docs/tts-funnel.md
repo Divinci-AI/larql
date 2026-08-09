@@ -549,6 +549,31 @@ GEMM — cuts the 1.4 s row-path term and the sync waste; (2) the
 simdgroup-matrix Metal GEMM — the gate-crosser, also the fix the
 vindex dense-prefill path was already diagnosed as needing.
 
+**CPU prefill re-planned: dequant + BLAS wired, integer GEMM falsified**
+(2026-08-10). The blocked integer GEMM was built and lost in all three
+loop structures at the real shapes (per-pair dots 2202 ms /
+weight-chunk + transpose 2095 ms / activation-parallel 1499 ms vs the
+row path's 1390 ms — the Q4K·Q8K kernel is issue-bound at ~650-700
+GFLOPS whatever the granularity, and the 67k-dispatch hypothesis was
+wrong: the spin pool's dispatch cost is negligible on a quiet machine).
+Kept as recorded negative evidence (`q4k_q8k_dot::gemm`, the
+`q4k_matmul` shader precedent). What DID win: **dequant-whole + fp32
+AMX BLAS at 863 ms — 1.6x over the row path** — the decode doctrine
+("dequant-then-BLAS is dramatically slower") is a one-row truth that
+inverts at prefill shape. `Q4kFfn::forward` now routes multi-row
+inputs through dequant + BLAS (single-row decode unchanged;
+batch ≡ incremental unaffected — both sessions share the path).
+Measured end-to-end on the fixture: **prefill 1.97 → 1.50 s, TTFA
+2006 → 1530 ms**, steady-state 23.3 fps / RTF 1.85 (clean run), p50
+31 ms. TTFA budget now: ~0.86 s GEMM (Metal simdgroup target
+~0.2 s) + ~0.64 s non-GEMM overhead (next dissection target). Bonus
+diagnostic, twice confirmed: during stall episodes the BLAS-phase
+prefill holds (1.58 s) while spin-pool decode collapses (9.4 fps, max
+frame 1008 ms) — the episodic interference selectively degrades
+spin-pool execution, pointing at scheduling/QoS of the spin threads
+(E-core placement suspected), never AMX. That is now the sharpest
+lead for the §5 deadline-robustness work.
+
 ---
 
 ## 4. The voice-as-data ladder (EXP-V, runs in parallel)

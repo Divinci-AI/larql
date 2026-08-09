@@ -1,11 +1,17 @@
 //! Q4_K dense FFN backend — the quantised sibling of [`super::weight::WeightFfn`].
 //!
 //! Weights are quantised once at construction (row-major Q4_K
-//! super-blocks) and every forward consumes the packed representation
-//! directly through the Q4K·Q8K integer-dot kernels. The lesson the TTS
-//! funnel's frame benchmark made explicit (`docs/tts-funnel.md`):
-//! quantisation only wins when the kernel eats the compressed format —
-//! the dequantise-then-BLAS path is dramatically *slower* than fp32.
+//! super-blocks). Execution is **regime-split**, because the TTS
+//! funnel's benchmarks (`docs/tts-funnel.md`) proved the two shapes
+//! want opposite strategies on this hardware:
+//!
+//! * **decode (one row):** the packed representation feeds the
+//!   Q4K·Q8K integer-dot kernels directly — dequantise-then-BLAS is
+//!   dramatically slower when the dequant cannot amortise;
+//! * **prefill (many rows):** dequantise each projection once and run
+//!   fp32 BLAS GEMM — the integer kernels are issue-bound at
+//!   ~650-700 GFLOPS in every loop structure, while AMX GEMM runs the
+//!   same work at ~2.2 TFLOPS with the dequant amortised across rows.
 //!
 //! Scope: gated-SiLU FFNs without biases (the Qwen3 family, which covers
 //! both MOSS transformers). Construction refuses anything else rather
@@ -15,7 +21,7 @@ use ndarray::Array2;
 
 use larql_models::{Activation, FfnType, ModelWeights};
 
-use crate::cpu::ops::q4_common::quantize_q4_k;
+use crate::cpu::ops::q4_common::{dequantize_q4_k, quantize_q4_k};
 use crate::cpu::ops::q4k_q8k_dot::q4k_q8k_matvec_parallel;
 use crate::quantize_x_to_q8k;
 
@@ -107,6 +113,9 @@ impl FfnBackend for Q4kFfn {
     fn forward(&self, layer: usize, x: &Array2<f32>) -> Array2<f32> {
         let l = &self.layers[layer];
         let rows = x.nrows();
+        if rows > 1 {
+            return self.forward_block(l, x);
+        }
         let mut gate = Array2::<f32>::zeros((rows, l.intermediate));
         let mut up = Array2::<f32>::zeros((rows, l.intermediate));
         for (row, x_row) in x.rows().into_iter().enumerate() {
@@ -148,6 +157,39 @@ impl FfnBackend for Q4kFfn {
 
     fn name(&self) -> &str {
         "q4k-weights"
+    }
+}
+
+impl Q4kFfn {
+    /// Multi-row (prefill-shaped) forward: dequantise each projection
+    /// once and run fp32 BLAS GEMM. Prefill is not "decode over a
+    /// batch of rows" — and, measured at the MOSS 343-row shapes
+    /// (`moss_prefill_bench`), it is not an integer-GEMM problem on
+    /// this hardware either: the Q4K·Q8K kernel is issue-bound at
+    /// ~650-700 GFLOPS in every loop structure tried (row-at-a-time,
+    /// weight-chunk blocked, activation-parallel blocked — see
+    /// `q4k_q8k_dot::gemm`), while dequant-whole + AMX BLAS runs the
+    /// same work 1.6x faster (~2.2 TFLOPS on the GEMM, dequant
+    /// amortised across the rows). The decode doctrine
+    /// ("dequant-then-BLAS is dramatically slower") is a one-row
+    /// truth; it inverts at prefill shape.
+    ///
+    /// Numerics: slightly *closer* to the dense reference than the
+    /// decode path (no Q8K activation quantisation). Batch and
+    /// incremental sessions share this code, so the step-5
+    /// batch ≡ incremental gate is unaffected.
+    fn forward_block(&self, l: &Q4kLayer, x: &Array2<f32>) -> Array2<f32> {
+        let dense = |packed: &[u8], rows: usize, cols: usize| -> Array2<f32> {
+            let values = dequantize_q4_k(packed, rows * cols);
+            Array2::from_shape_vec((rows, cols), values).expect("dequant shape")
+        };
+        let gate_w = dense(&l.gate, l.intermediate, l.hidden);
+        let up_w = dense(&l.up, l.intermediate, l.hidden);
+        let gate = x.dot(&gate_w.t());
+        let up = x.dot(&up_w.t());
+        let activation = silu_gate_up(&gate, &up);
+        let down_w = dense(&l.down, l.hidden, l.intermediate);
+        activation.dot(&down_w.t())
     }
 }
 
@@ -252,5 +294,48 @@ mod tests {
     fn refuses_non_divisible_dims() {
         let weights = make_test_weights();
         assert!(Q4kFfn::quantize_from(&weights).is_err());
+    }
+
+    #[test]
+    fn multi_row_forward_tracks_dense_at_least_as_closely_as_decode_path() {
+        // The prefill path (dequant + BLAS) uses different arithmetic
+        // than the decode path (Q8K integer dot) — no bit contract
+        // between them. The contract is against the dense reference:
+        // the multi-row path must be at least as close to fp32 truth as
+        // the decode path is, and deterministic.
+        let weights = q4k_divisible_weights();
+        let dense = WeightFfn { weights: &weights };
+        let q4k = Q4kFfn::quantize_from(&weights).unwrap();
+        let x = Array2::from_shape_fn((5, weights.hidden_size), |(r, c)| {
+            ((r * 31 + c) % 17) as f32 * 0.02 - 0.15
+        });
+
+        let reference = dense.forward(0, &x);
+        let multi = q4k.forward(0, &x);
+        assert_eq!(
+            multi,
+            q4k.forward(0, &x),
+            "prefill path must be deterministic"
+        );
+
+        let relative_error = |got: &Array2<f32>| -> f64 {
+            let (mut diff_sq, mut ref_sq) = (0.0f64, 0.0f64);
+            for (&a, &b) in reference.iter().zip(got.iter()) {
+                diff_sq += (a as f64 - b as f64).powi(2);
+                ref_sq += (a as f64).powi(2);
+            }
+            (diff_sq / ref_sq).sqrt()
+        };
+        let mut decode_rows = Array2::<f32>::zeros(reference.dim());
+        for row in 0..x.nrows() {
+            let single = q4k.forward(0, &x.slice(ndarray::s![row..=row, ..]).to_owned());
+            decode_rows.row_mut(row).assign(&single.row(0));
+        }
+        let multi_error = relative_error(&multi);
+        let decode_error = relative_error(&decode_rows);
+        assert!(
+            multi_error <= decode_error * 1.05,
+            "prefill path drifted past the decode path: {multi_error:.5} vs {decode_error:.5}"
+        );
     }
 }

@@ -40,7 +40,7 @@ mod common;
 use std::time::Instant;
 
 use larql_compute::cpu::ops::q4_common::{dequantize_q4_k, q4k_matmul_into, quantize_q4_k};
-use larql_compute::cpu::ops::q4k_q8k_dot::q4k_q8k_matvec_parallel;
+use larql_compute::cpu::ops::q4k_q8k_dot::{q4k_q8k_gemm_into, q4k_q8k_matvec_parallel};
 use larql_compute::quantize_x_to_q8k;
 use ndarray::Array2;
 
@@ -155,6 +155,24 @@ fn q4_prefill_prediction() {
         sink
     });
 
+    // ── 2b. Blocked Q4K×Q8K GEMM: one dispatch per matrix, L1-hot
+    // weight rows, activations quantised once (the granularity fix the
+    // row path's ~67k fork/joins demanded) ──
+    let blocked = best_seconds(|| {
+        let mut sink = 0.0f32;
+        for (op, x) in ops.iter().zip(&activations) {
+            let q8k: Vec<_> = x
+                .rows()
+                .into_iter()
+                .map(|row| quantize_x_to_q8k(row.as_slice().unwrap()))
+                .collect();
+            let mut out = vec![0.0f32; SEQ * op.rows];
+            q4k_q8k_gemm_into(&mut out, &q8k, &op.packed, op.rows, op.cols);
+            sink += out[0];
+        }
+        sink
+    });
+
     // ── 3. fp32 BLAS GEMM: the fp32-resident oracle ──
     let f32_gemm = best_seconds(|| {
         let mut sink = 0.0f32;
@@ -212,6 +230,12 @@ fn q4_prefill_prediction() {
         row_path / amortised
     );
     println!(
+        "blocked q4k·q8k gemm  {:.0} ms  ({:.0} GFLOPS, {:.1}x vs row path)",
+        blocked * 1000.0,
+        flops / blocked / 1e9,
+        row_path / blocked
+    );
+    println!(
         "fp32 BLAS GEMM        {:.0} ms  ({:.0} GFLOPS)",
         f32_gemm * 1000.0,
         flops / f32_gemm / 1e9
@@ -227,7 +251,7 @@ fn q4_prefill_prediction() {
         row_path, overhead
     );
     for (name, candidate) in [
-        ("amortised q4 matmul", amortised),
+        ("blocked q4k·q8k gemm", blocked),
         ("fp32 BLAS GEMM", f32_gemm),
     ] {
         println!(
