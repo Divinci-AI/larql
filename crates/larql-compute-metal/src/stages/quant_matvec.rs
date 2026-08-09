@@ -410,24 +410,22 @@ mod tests {
         }
     }
 
-    /// Float formats are no-ops — the dispatcher silently returns
-    /// without setting any pipeline (line 222-227).  We pre-bind a
-    /// dummy dispatch to the encoder before calling `encode`, because
-    /// Metal panics on a release of a "naked" command encoder with
-    /// zero dispatches.  Production callers always feed a hot encoder
-    /// here.
+    /// Float formats refuse loudly (capability audit F4). This test
+    /// previously pinned the opposite: a silent no-op that encoded no
+    /// dispatch and left whatever the pooled scratch last held as the
+    /// "result". Same hand-unwind discipline as the Q8_0 test above —
+    /// the panic fires before `end_encoding`, and Metal aborts the
+    /// process if the encoder drops without one.
     #[test]
-    fn float_formats_are_dispatch_noops() {
+    fn float_formats_refuse_loudly() {
         let m = backend();
         let pipes = pipelines(&m);
         for fmt in [QuantFormat::F32, QuantFormat::F16, QuantFormat::BF16] {
             let (w, f32_in, q8_in, q8s_in, out, n, k) = fixture(&m);
             let cmd = m.queue.new_command_buffer();
             let enc = cmd.new_compute_command_encoder();
-            // Hot-start the encoder with a Q4_K dispatch so its drop
-            // (after end_encoding below) doesn't hit Metal's
-            // "released without endEncoding" assertion when `encode`
-            // is a no-op for the float branch.
+            // Hot-start the encoder with a Q4_K dispatch so end_encoding
+            // below isn't closing a naked encoder.
             encode(
                 enc,
                 QuantFormat::Q4_K,
@@ -444,13 +442,24 @@ mod tests {
                 n,
                 k,
             );
-            // Now exercise the float-format no-op branch on the same encoder.
-            encode(
-                enc, fmt, &w, &f32_in, 0, &q8_in, 0, &q8s_in, 0, &out, 0, &pipes, n, k,
-            );
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                encode(
+                    enc, fmt, &w, &f32_in, 0, &q8_in, 0, &q8s_in, 0, &out, 0, &pipes, n, k,
+                );
+            }));
             enc.end_encoding();
             cmd.commit();
             cmd.wait_until_completed();
+            let payload = result.expect_err("float formats must refuse, not no-op");
+            let msg = payload
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
+                .unwrap_or_default();
+            assert!(
+                msg.contains("not dispatchable"),
+                "{fmt:?} panic message: {msg}"
+            );
         }
     }
 }
