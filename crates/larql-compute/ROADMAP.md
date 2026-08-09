@@ -61,28 +61,31 @@ built from a six-family audit of every MSL entry point in
       loudly.
 - [x] **F4** (fixed bc2b429f) float weights (BF16/F16/F32) in `quant_matvec::encode` are a
       silent no-op with stale scratch output — panic loudly.
-- [ ] **F5** `q6k_matvec` trait dispatch hardcodes 4sg geometry against a
+- [x] **F5** (fixed 4408d18a) `q6k_matvec` trait dispatch hardcodes 4sg geometry against a
       pipeline alias that can be 8sg — read the `KernelHandle`.
-- [ ] **F6** `quantize_q8` host `div_ceil` vs shader truncating `K/32` —
+- [x] **F6** (fixed 4408d18a) `quantize_q8` host `div_ceil` vs shader truncating `K/32` —
       unwritten tail scale; make the kernel handle partial blocks.
 - [ ] **F7** sinks silently dropped by `kv_attention`/`_long` fallbacks —
       add sink buffers (join max + denominator) so fallback preserves the
       feature set.
 - [ ] **F8** softcap exists only in prefill `fused_attention` — decode
       refuses or supports; no silent cap-drop.
-- [ ] **F9** dense layers of hybrid-MoE models never get `layer_scalar`
+- [x] **F9** (fixed 4408d18a) dense layers of hybrid-MoE models never get `layer_scalar`
       (`decode/mod.rs:789` model-level branch vs layer-level apply).
-- [ ] **F10** `gpu_moe_dispatch_with_scratch` staging loop missing
+- [x] **F10** (fixed 4408d18a) `gpu_moe_dispatch_with_scratch` staging loop missing
       `valid_count >= top_k` guard (sibling has it) — release-mode
       buffer overflow.
-- [ ] **F11** `attn_fused` tg_red max→sum reuse unfenced + `tg_q` handoff
+- [x] **F11** (fixed 4408d18a) `attn_fused` tg_red max→sum reuse unfenced + `tg_q` handoff
       fenced `mem_device`-only + ropes at occupancy not stream position.
-- [ ] **F12** `q4k_ffn_gate_up_coop` divergent threadgroup barriers on odd
-      `K/256` and `N%4 != 0` (both occur in shipped shapes).
-- [ ] **F13** `q8_qkv_proj`/`q8_proj_rope` early-return before barrier;
+- [x] **F12** (fixed 4408d18a) `q4k_ffn_gate_up_coop` divergent threadgroup barriers on odd
+      `K/256` and `N%4 != 0` (both occur in shipped shapes). The fix's
+      new parity test also found the kernel numerically broken outright
+      (16-slot scale staging mixed superblock parities; cos 0.52 vs
+      CPU) — rewritten with parity-indexed staging, pinned even+odd.
+- [x] **F13** (fixed 4408d18a) `q8_qkv_proj`/`q8_proj_rope` early-return before barrier;
       K ≤ 8192 threadgroup-scratch ceiling (shared with `q4_matvec_v4`,
       `q8_matvec`) asserted nowhere.
-- [ ] **F14** `fused_attention` head≤512 / seq≤4096 unasserted;
+- [x] **F14** (fixed 4408d18a) `fused_attention` head≤512 / seq≤4096 unasserted;
       `kv_attention_long` unguarded past its 4096 scratch.
 - [ ] **F15** `Q4_KF_BLOCK_BYTES = 160` (host) vs 144 (both Q4_KF
       shaders) — establish which is real, fix the other.
@@ -91,12 +94,12 @@ built from a six-family audit of every MSL entry point in
       convention across the five down dispatch variants.
 - [ ] **F17** K-alignment asserted in 2 of ~30 quant kernels; GQA
       divisibility asserted nowhere — add dispatch-time checks.
-- [ ] **F18** `residual_multiplier == 1.0` guard missing on
+- [x] **F18** (fixed 4408d18a) `residual_multiplier == 1.0` guard missing on
       `post_attn_residual_norm_store` selection and the PLE reuse of
       `post_ffn_norm_residual_add` (siblings have it).
-- [ ] **F19** `encode_fused_q8` prefill site dispatches `total_rows` TGs
+- [x] **F19** (fixed 4408d18a) `encode_fused_q8` prefill site dispatches `total_rows` TGs
       instead of `div_ceil(total_rows, 8)` — 8× over-dispatch.
-- [ ] **F20** legacy `append_and_attend` passes `None` for the long
+- [x] **F20** (fixed 4408d18a) legacy `append_and_attend` passes `None` for the long
       pipeline → `tg_scores[1024]` overflow past span 1024; hardcodes
       window 0.
 - [ ] **F21** dead-but-compiled inventory (see capability doc §8) — per
