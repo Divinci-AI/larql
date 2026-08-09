@@ -531,3 +531,110 @@ fn decode_token_q4k_moe_with_real_moe_layer_drives_gpu_dispatch() {
     assert_eq!(out.len(), hidden);
     assert!(out.iter().all(|v| v.is_finite()));
 }
+
+/// Zero-copy expert dispatch vs the staged path — bit-level parity.
+///
+/// Same expert bytes, same input, same kernels; the only difference is the
+/// binding (region buffer + byte offset vs staged memcpy into scratch).
+/// The bytes live in an anonymous mmap — page-aligned by construction,
+/// exactly the production contract (`register_weight_region` over a
+/// layer-weights mmap). Controls: before registration the resolve MUST
+/// miss (staged arm is real), after registration it MUST hit (zero-copy
+/// arm is real) — without these, `A == B` could be two staged runs.
+#[test]
+fn zero_copy_expert_dispatch_matches_staged_path() {
+    use larql_compute::{
+        Activation, MoeLayerWeights, MoeRoutingPolicy, MoeWeightLayout, QuantFormat,
+    };
+    let metal = get_metal();
+    let hidden = 256usize;
+    let inter = 256usize;
+    let top_k = 2usize;
+    let num_experts = 4usize;
+
+    let (expert_gu, expert_down) = make_q4k_experts(hidden, inter, num_experts);
+
+    // Lay the experts out in one anonymous mmap: [gu0 | dn0 | gu1 | dn1 | …].
+    let total: usize = expert_gu
+        .iter()
+        .zip(expert_down.iter())
+        .map(|(g, d)| g.len() + d.len())
+        .sum();
+    let mut region = memmap2::MmapMut::map_anon(total).expect("anon mmap");
+    let mut offsets = Vec::with_capacity(num_experts);
+    let mut cursor = 0usize;
+    for (g, d) in expert_gu.iter().zip(expert_down.iter()) {
+        region[cursor..cursor + g.len()].copy_from_slice(g);
+        let g_off = cursor;
+        cursor += g.len();
+        region[cursor..cursor + d.len()].copy_from_slice(d);
+        offsets.push((g_off, g.len(), cursor, d.len()));
+        cursor += d.len();
+    }
+    let region = region.make_read_only().expect("read-only mmap");
+
+    let router_w: Vec<f32> = (0..num_experts * hidden)
+        .map(|i| (i as f32 * 0.0003).sin() * 0.05)
+        .collect();
+    let pre_norm_w: Vec<f32> = (0..hidden).map(|i| 1.0 + (i as f32 * 0.0005)).collect();
+    let router_scale: Vec<f32> = vec![1.0f32; hidden];
+    let router_per_expert_scale: Vec<f32> = vec![1.0f32; num_experts];
+    let moe = MoeLayerWeights {
+        experts_gate_up: expert_gu.iter().map(|v| v.as_slice()).collect(),
+        experts_down: expert_down.iter().map(|v| v.as_slice()).collect(),
+        routing_policy: MoeRoutingPolicy::default(),
+        weight_layout: MoeWeightLayout::default(),
+        expert_data_format: QuantFormat::Q4_K,
+        router_proj: &router_w,
+        router_scale: &router_scale,
+        router_per_expert_scale: &router_per_expert_scale,
+        router_norm: &[],
+        router_norm_parameter_free: true,
+        router_input_scalar: 1.0,
+        pre_experts_norm: &pre_norm_w,
+        post_ffn1_norm: &pre_norm_w,
+        post_experts_norm: &pre_norm_w,
+        num_experts,
+        top_k,
+        intermediate_size: inter,
+        router_bias: &[],
+        experts_gate_up_bias: &[],
+        experts_down_bias: &[],
+        gate_rule: larql_compute::MoeGateRule::Gated(Activation::GeluTanh),
+    };
+
+    let scratch = MoeScratch::new_public(&metal, top_k, hidden, inter);
+    let h_post_attn = synth_values(hidden, 0.9, 0.5);
+    let get_expert = |e: usize| -> Option<(&[u8], &[u8])> {
+        let (g_off, g_len, d_off, d_len) = offsets[e];
+        Some((&region[g_off..g_off + g_len], &region[d_off..d_off + d_len]))
+    };
+
+    // Control: unregistered → resolve misses → this run is the STAGED arm.
+    assert!(
+        metal.bufs().resolve_region(&region[..64]).is_none(),
+        "region resolved before registration — staged control arm is not staged"
+    );
+    let staged = metal.moe_block_for_layer(&h_post_attn, &moe, 1e-6, &scratch, get_expert);
+
+    // Register, control that resolution now hits → ZERO-COPY arm.
+    assert!(metal.bufs().register_region(&region[..]));
+    assert!(
+        metal.bufs().resolve_region(&region[..64]).is_some(),
+        "region did not resolve after registration — zero-copy arm is staged"
+    );
+    let zero_copy = metal.moe_block_for_layer(&h_post_attn, &moe, 1e-6, &scratch, get_expert);
+
+    assert_eq!(staged.len(), zero_copy.len());
+    for (i, (a, b)) in staged.iter().zip(zero_copy.iter()).enumerate() {
+        assert_eq!(
+            a.to_bits(),
+            b.to_bits(),
+            "element {i}: staged={a} zero_copy={b} — the binding must not change the math"
+        );
+    }
+    assert!(
+        staged.iter().any(|v| v.abs() > 0.0),
+        "both arms produced all zeros — vacuous parity"
+    );
+}

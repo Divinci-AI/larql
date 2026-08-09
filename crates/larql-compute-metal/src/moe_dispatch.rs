@@ -852,6 +852,60 @@ impl MetalBackend {
         let up_half_bytes = inter * row_bytes;
         let down_expert_bytes = hidden * scratch.down_row_bytes;
 
+        // ── 1.5 Zero-copy fast path ──────────────────────────────────────
+        // When every selected expert's byte slices resolve inside a
+        // registered mmap region (`register_weight_region` at engine
+        // setup), bind them as region offsets and skip the staging
+        // memcpys entirely — they are ~2 GB/token of CPU bandwidth on
+        // GPT-OSS-class models. Any miss (unregistered region, short
+        // slice) falls through to the staged path below unchanged.
+        {
+            let mut resolved = Vec::with_capacity(top_k);
+            let mut all_resolved = true;
+            for (k, &ei) in expert_indices.iter().enumerate() {
+                if resolved.len() >= scratch.top_k {
+                    break;
+                }
+                let Some((gu_bytes, dn_bytes)) = get_expert_bytes(ei) else {
+                    continue;
+                };
+                // The zero-copy path reads the full extents in place, so
+                // both slices must actually hold them — a short down slice
+                // would make the GPU read the NEXT expert's bytes where
+                // the staged path zero-pads.
+                if gu_bytes.len() < 2 * gate_half_bytes || dn_bytes.len() < down_expert_bytes {
+                    all_resolved = false;
+                    break;
+                }
+                match (
+                    self.bufs.resolve_region(gu_bytes),
+                    self.bufs.resolve_region(dn_bytes),
+                ) {
+                    (Some(gate_up), Some(down)) => {
+                        resolved.push(crate::moe_zero_copy::ResolvedExpert {
+                            gate_up,
+                            down,
+                            expert_id: ei,
+                            weight: expert_weights[k],
+                        })
+                    }
+                    _ => {
+                        all_resolved = false;
+                        break;
+                    }
+                }
+            }
+            if all_resolved && !resolved.is_empty() {
+                return self.dispatch_experts_zero_copy(
+                    &expert_input,
+                    moe,
+                    eps,
+                    scratch,
+                    &resolved,
+                );
+            }
+        }
+
         let gate_ptr = scratch.gate_buf.contents() as *mut u8;
         let up_ptr = scratch.up_buf.contents() as *mut u8;
 

@@ -26,6 +26,12 @@ impl ComputeBackend for MetalBackend {
         self
     }
 
+    fn register_weight_region(&self, region: &[u8]) {
+        // Non-page-aligned bases can't alias zero-copy; resolution simply
+        // misses and the MoE dispatch keeps its staged-copy path.
+        let _ = self.bufs.register_region(region);
+    }
+
     fn supports(&self, cap: Capability) -> bool {
         // Metal accelerates everything in the menu.
         matches!(
