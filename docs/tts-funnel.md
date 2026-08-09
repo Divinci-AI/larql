@@ -1,6 +1,6 @@
 # The TTS funnel — audio-token output as a forcing function
 
-Status: step 0 green. Branch `worktree-tts-audio-tokens`, started 2026-08-09.
+Status: steps 0-1 green. Branch `worktree-tts-audio-tokens`, started 2026-08-09.
 
 Gate log:
 
@@ -14,6 +14,21 @@ Gate log:
   emitted tokens). Dumps in
   `jarvis-voice/renders/moss-realtime/parity-dump/` (run manifest records
   versions and hashes). Steps 2–4 compare against `run1.npz`.
+
+- **Step 1 PASS** (2026-08-09) — MOSS loads in LARQL with full tensor
+  accounting. `MossTtsRealtimeArch` (detection via nested
+  `language_config`, `language_model.` prefix strip, `has_lm_head=false` —
+  a new arch capability, since the backbone genuinely has no output
+  projection and the untied-but-missing error is a text-LM invariant);
+  auxiliary weights (per-codebook embedding tables + depth transformer +
+  16 heads) side-load via `larql_models::speech::moss_tts_realtime`,
+  every count config-derived. The coverage audit is bidirectional and
+  derives its expected sets from the arch's own key methods: on the real
+  403-tensor inventory it reports 310 backbone / 92 aux / 1 justified
+  skip (the byte-identical text-table duplicate, asserted at load) /
+  0 unexplained / 0 missing. Real-checkpoint aux load passes in ~6 s with
+  the pad-row-zero and duplication assertions running on real bytes
+  (`real_checkpoint_aux_load`, ignored in CI).
 
 This document plays the role `k3-funnel.md` plays for sparse execution: it
 names one model that cannot run, inventories exactly why, and commits to

@@ -343,6 +343,11 @@ fn load_model_dir_filtered_with_validation(
     // fluent text. GPT-OSS and OLMoE both declare `false`.
     let lm_head = match tensors.get(LM_HEAD_KEY) {
         Some(t) => t.clone(),
+        // No text head exists in this architecture (`has_lm_head` false):
+        // the embedding is stored as a placeholder so `ModelWeights` keeps
+        // its shape, and must never be sampled from. The untied-but-missing
+        // error below is a text-LM invariant and does not apply.
+        None if !arch.has_lm_head() => embed.clone(),
         None if cfg_declares_untied(arch.as_ref()) => {
             return Err(ModelError::MissingTensor(format!(
                 "{LM_HEAD_KEY} (config declares tie_word_embeddings: false, so it \

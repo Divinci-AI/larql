@@ -7,6 +7,7 @@ pub mod encoders;
 pub mod loading;
 pub mod multimodal;
 pub mod quant;
+pub mod speech;
 pub(crate) mod tensor_keys;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_fixtures;
@@ -41,6 +42,7 @@ pub use architectures::granite::GraniteArch;
 pub use architectures::llama::LlamaArch;
 pub use architectures::mistral::MistralArch;
 pub use architectures::mixtral::MixtralArch;
+pub use architectures::moss_tts_realtime::MossTtsRealtimeArch;
 pub use architectures::qwen::QwenArch;
 pub use architectures::starcoder2::StarCoder2Arch;
 pub use architectures::tinymodel::TinyModelArch;
