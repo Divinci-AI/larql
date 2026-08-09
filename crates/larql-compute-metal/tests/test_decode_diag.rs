@@ -61,6 +61,7 @@ fn decode_token_with_decode_debug_env_first_call_executes_log_body() {
 
     let layer = FullPipelineLayer {
         attn_sinks: None,
+        attn_softcap: 0.0,
         wq: QuantWeight::new(QuantFormat::Q4_K, &wq, larql_compute::QuantAux::None),
         wk: QuantWeight::new(QuantFormat::Q4_K, &wk, larql_compute::QuantAux::None),
         wv: QuantWeight::new(QuantFormat::Q4_K, &wv, larql_compute::QuantAux::None),

@@ -65,10 +65,10 @@ built from a six-family audit of every MSL entry point in
       pipeline alias that can be 8sg — read the `KernelHandle`.
 - [x] **F6** (fixed 4408d18a) `quantize_q8` host `div_ceil` vs shader truncating `K/32` —
       unwritten tail scale; make the kernel handle partial blocks.
-- [ ] **F7** sinks silently dropped by `kv_attention`/`_long` fallbacks —
+- [x] **F7** (fixed, slice 3: feature-aware attention) sinks silently dropped by `kv_attention`/`_long` fallbacks —
       add sink buffers (join max + denominator) so fallback preserves the
       feature set.
-- [ ] **F8** softcap exists only in prefill `fused_attention` — decode
+- [x] **F8** (fixed, slice 3: feature-aware attention) softcap exists only in prefill `fused_attention` — decode
       refuses or supports; no silent cap-drop.
 - [x] **F9** (fixed 4408d18a) dense layers of hybrid-MoE models never get `layer_scalar`
       (`decode/mod.rs:789` model-level branch vs layer-level apply).

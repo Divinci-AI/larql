@@ -146,6 +146,7 @@ fn build_layer(w: &SynthWeights, sliding_window: usize) -> FullPipelineLayer<'_>
     }
     FullPipelineLayer {
         attn_sinks: None,
+        attn_softcap: 0.0,
         wq: q4k(&w.wq),
         wk: q4k(&w.wk),
         wv: q4k(&w.wv),

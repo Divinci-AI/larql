@@ -388,6 +388,8 @@ impl MetalBackend {
                 layer_num_q_heads,
                 scale,
                 window_size,
+                layer.attn_sinks,
+                layer.attn_softcap,
             );
             enc_b.end_encoding();
         }

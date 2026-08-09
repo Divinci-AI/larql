@@ -200,6 +200,7 @@ mod tests {
         let empty_q4 = QuantWeight::new(QuantFormat::Q4_K, &[], larql_compute::QuantAux::None);
         FullPipelineLayer {
             attn_sinks: None,
+            attn_softcap: 0.0,
             wq: empty_q4,
             wk: empty_q4,
             wv: empty_q4,

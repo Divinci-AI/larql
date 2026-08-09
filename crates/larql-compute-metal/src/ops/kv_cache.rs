@@ -338,6 +338,8 @@ pub fn encode_kv_attend(
     num_q_heads: usize,
     scale: f32,
     window_size: u32,
+    sinks: Option<&[f32]>,
+    softcap: f32,
 ) {
     let t_val = (cache.current_len + 1) as u32;
     let hd = cache.head_dim as u32;
@@ -378,6 +380,11 @@ pub fn encode_kv_attend(
     enc.set_bytes(7, 4, &num_kv as *const u32 as *const c_void);
     enc.set_bytes(8, 4, &scale as *const f32 as *const c_void);
     enc.set_bytes(9, 4, &window_size as *const u32 as *const c_void);
+    // Feature buffers the fallback must carry (audit F7/F8): a fallback
+    // kernel that drops sinks or softcap changes the softmax semantics
+    // relative to the fused path it replaced.
+    crate::stages::sinks::bind(enc, 10, sinks, num_q_heads);
+    enc.set_bytes(12, 4, &softcap as *const f32 as *const c_void);
     enc.dispatch_thread_groups(
         MTLSize::new(num_q_heads as u64, 1, 1),
         MTLSize::new(
@@ -425,6 +432,9 @@ pub fn append_and_attend(
             num_q_heads,
             scale,
             0,
+            // Legacy bench API: no layer in scope, no sinks/softcap.
+            None,
+            0.0,
         );
         enc.end_encoding();
     }
@@ -766,6 +776,8 @@ mod tests {
             num_kv,
             (head_dim as f32).sqrt().recip(),
             0,
+            None,
+            0.0,
         );
         enc.end_encoding();
         cmd.commit();
@@ -811,6 +823,8 @@ mod tests {
             num_kv,
             (head_dim as f32).sqrt().recip(),
             0,
+            None,
+            0.0,
         );
         enc.end_encoding();
         cmd.commit();

@@ -154,7 +154,9 @@ kernel void fused_attention(
 
         // Optional softcap
         if (softcap > 0.0f) {
-            dot = tanh(dot / softcap) * softcap;
+            // Clamped like every other tanh in this crate: Apple's tanh
+            // is (exp(2y)-1)/(exp(2y)+1) and NaNs past |y| ~ 44.
+            dot = tanh(clamp(dot / softcap, -15.0f, 15.0f)) * softcap;
         }
 
         tg_scores[k] = dot;

@@ -137,6 +137,7 @@ fn main() {
             .iter()
             .map(|l| larql_compute::FullPipelineLayer {
                 attn_sinks: None,
+                attn_softcap: 0.0,
                 wq: larql_compute::QuantWeight::new(
                     larql_compute::QuantFormat::Q4_K,
                     &l.wq,
@@ -230,6 +231,7 @@ fn main() {
             .iter()
             .map(|l| larql_compute::FullPipelineLayer {
                 attn_sinks: None,
+                attn_softcap: 0.0,
                 wq: larql_compute::QuantWeight::new(
                     larql_compute::QuantFormat::Q8_0,
                     &l.wq8,
@@ -324,6 +326,7 @@ fn main() {
             .iter()
             .map(|l| larql_compute::FullPipelineLayer {
                 attn_sinks: None,
+                attn_softcap: 0.0,
                 wq: larql_compute::QuantWeight::new(
                     larql_compute::QuantFormat::Q4_K,
                     &l.wq,
@@ -425,6 +428,7 @@ fn main() {
             .iter()
             .map(|l| larql_compute::FullPipelineLayer {
                 attn_sinks: None,
+                attn_softcap: 0.0,
                 wq: larql_compute::QuantWeight::new(
                     larql_compute::QuantFormat::Q4_KF,
                     &l.wq_kf,
@@ -516,6 +520,7 @@ fn main() {
             .iter()
             .map(|l| larql_compute::FullPipelineLayer {
                 attn_sinks: None,
+                attn_softcap: 0.0,
                 wq: larql_compute::QuantWeight::new(
                     larql_compute::QuantFormat::Q4_KF,
                     &l.wq_kf,

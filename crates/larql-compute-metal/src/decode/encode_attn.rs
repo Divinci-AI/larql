@@ -41,6 +41,12 @@ const ATTN_FUSED_INV_FREQ_INDEX: u64 = 16;
 /// `amplitude` slot on `attn_fused`, appended after the sinks pair.
 const ATTN_FUSED_AMPLITUDE_INDEX: u64 = 20;
 
+/// `softcap` slot on `attn_fused` (0.0 = disabled).
+const ATTN_FUSED_SOFTCAP_INDEX: u64 = 22;
+
+/// `softcap` slot on `kv_append_attend_fused` (0.0 = disabled).
+const KV_APPEND_ATTEND_SOFTCAP_INDEX: u64 = 14;
+
 /// Absolute stream position for RoPE on `attn_fused`. The kernel's cache
 /// row stays occupancy-indexed; only the rotation angle uses this. The
 /// two diverge once a sliding window compacts (audit F11).
@@ -264,6 +270,11 @@ impl MetalBackend {
                 4,
                 &pos as *const u32 as *const std::ffi::c_void,
             );
+            enc.set_bytes(
+                ATTN_FUSED_SOFTCAP_INDEX,
+                4,
+                &layer.attn_softcap as *const f32 as *const std::ffi::c_void,
+            );
             enc.dispatch_thread_groups(
                 MTLSize::new(layer_num_q_heads as u64, 1, 1),
                 MTLSize::new(tg_w, 1, 1),
@@ -417,6 +428,11 @@ impl MetalBackend {
                 layer.attn_sinks,
                 layer_num_q_heads,
             );
+            enc.set_bytes(
+                KV_APPEND_ATTEND_SOFTCAP_INDEX,
+                4,
+                &layer.attn_softcap as *const f32 as *const std::ffi::c_void,
+            );
             enc.dispatch_thread_groups(
                 MTLSize::new(layer_num_q_heads as u64, 1, 1),
                 MTLSize::new(
@@ -454,6 +470,12 @@ impl MetalBackend {
             enc.set_bytes(7, 4, &num_kv_u as *const u32 as *const std::ffi::c_void);
             enc.set_bytes(8, 4, &scale as *const f32 as *const std::ffi::c_void);
             enc.set_bytes(9, 4, &window_size as *const u32 as *const std::ffi::c_void);
+            crate::stages::sinks::bind(enc, 10, layer.attn_sinks, layer_num_q_heads);
+            enc.set_bytes(
+                12,
+                4,
+                &layer.attn_softcap as *const f32 as *const std::ffi::c_void,
+            );
             enc.dispatch_thread_groups(
                 MTLSize::new(layer_num_q_heads as u64, 1, 1),
                 MTLSize::new(
@@ -480,6 +502,8 @@ impl MetalBackend {
                 layer_num_q_heads,
                 scale,
                 window_size,
+                layer.attn_sinks,
+                layer.attn_softcap,
             );
         }
         // Only own-cache layers advance current_len; shared layers leave
