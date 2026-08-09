@@ -187,10 +187,38 @@ fn main() -> Result<(), String> {
     let _ = index.load_lm_head_kquant(path);
     let tokenizer =
         larql_vindex::load_vindex_tokenizer(path).map_err(|e| format!("tokenizer: {e}"))?;
-    let encoding = tokenizer
-        .encode(prompt.as_str(), true)
+
+    // Encode exactly as `larql run` does — chat template, then
+    // `encode_prompt`, which prepends BOS via `arch.bos_token_id()`.
+    //
+    // This example previously called `tokenizer.encode(..)` and used the ids
+    // directly. That silently dropped BOS (Gemma 4 declares `Some(2)`; the
+    // trait default is `None`) and skipped the instruct template, so an
+    // instruction-tuned model was driven as a raw completion model and looped:
+    // "The capital of France is" continued as "capital of France is capital
+    // of", where `larql run` on the same vindex answers "Paris."
+    //
+    // Parity was never affected — both routes read the same ids — but a
+    // decode-parity harness whose input no production path would ever
+    // construct cannot support "generates the same text" as a claim about
+    // serving. Same shape as ROADMAP M5: a knob that never bit.
+    let cfg = larql_vindex::load_vindex_config(path).ok();
+    let wrap = larql_inference::wrap_chat_prompt(
+        path,
+        cfg.as_ref().map(|c| c.model.as_str()),
+        prompt.as_str(),
+    );
+    let prompt_ids = larql_inference::encode_prompt(&tokenizer, &*weights.arch, &wrap.prompt)
         .map_err(|e| format!("encode prompt: {e}"))?;
-    let prompt_ids: Vec<u32> = encoding.get_ids().to_vec();
+    println!(
+        "  chat template          {}",
+        if wrap.applied {
+            "applied"
+        } else {
+            "NOT applied (raw prompt)"
+        }
+    );
+    println!("  prompt tokens          {}", prompt_ids.len());
 
     // Attention and the dense FFN slab, dequantised f32-resident for every
     // layer — what the engine's resident path expects. Experts stay mapped;
