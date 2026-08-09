@@ -525,6 +525,30 @@ realtime speech runtime must survive — that is a §5 deadline-robustness
 requirement (QoS pinning, buffer sizing against measured host jitter),
 not a build defect. Metal prefill is unblocked.
 
+**The Metal prefill probe** (2026-08-10,
+`larql-compute-metal/examples/moss_prefill_gemm_probe.rs`; the four
+distinct MOSS projection shapes at seq 343, cache-warm, best-of-5) —
+both existing Metal kernels are **falsified for the <500 ms gate**:
+the 32×32-tile f32 `sgemm` totals 738 ms (1.26 TFLOPS — loses to CPU
+AMX's 456 ms), `q4k_matmul` totals 1327 ms (698 GFLOPS; consistent
+with its two Gemma-prefill falsifications, whose diagnosis already
+prescribed the fix: **a K-tiled / `simdgroup_matrix` GEMM kernel**,
+llama.cpp's `mul_mm` class, predicted 150-250 ms at these shapes).
+Supporting findings from the same session: the CPU row path's floor is
+partly *synchronisation*, not arithmetic — ~67k spin-pool fork/joins
+per prefill (one per activation row per matrix), so a blocked CPU
+GEMM (single parallel region per matrix, inner loop over all 343
+activations, amortising both the super-block unpack and the pool
+round-trip) is the CPU-side counterpart worth building regardless;
+`VECLIB_MAXIMUM_THREADS=1` changed nothing (Accelerate thread
+contention falsified); a `sample`-instrumented run showed a cvwait
+storm but the sampler itself perturbs a spin-pool process — the stall
+episodes need in-process phase timing to be caught honestly. The TTFA
+attack is therefore two bounded kernel tasks: (1) blocked Q4K×Q8K CPU
+GEMM — cuts the 1.4 s row-path term and the sync waste; (2) the
+simdgroup-matrix Metal GEMM — the gate-crosser, also the fix the
+vindex dense-prefill path was already diagnosed as needing.
+
 ---
 
 ## 4. The voice-as-data ladder (EXP-V, runs in parallel)
