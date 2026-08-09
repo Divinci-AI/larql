@@ -464,3 +464,93 @@ fn decode_token_with_q6k_non_gated_ffn_drives_standard_path() {
     assert_eq!(out.len(), HIDDEN);
     assert!(out.iter().all(|v| v.is_finite()));
 }
+
+/// Profile-split with Q6_K gate/up/down. The split phases previously
+/// branched on the kquant family boolean and sent a Q6_K gate to the
+/// Q4_K pipelines under `LARQL_PROFILE_SPLIT=1`; they now consult the
+/// same per-operand route as `encode_ffn_step` (slice 2).
+#[test]
+fn decode_token_with_profile_split_and_q6k_gated_ffn() {
+    decode_with_profile_split_synth(|layer| {
+        set_q6k_ffn(layer);
+    });
+}
+
+#[test]
+fn decode_token_with_profile_split_and_q6k_non_gated_ffn() {
+    decode_with_profile_split_synth(|layer| {
+        set_q6k_ffn(layer);
+        layer.ffn_type = FfnType::Standard;
+    });
+}
+
+/// `LARQL_FUSED_Q6K_DOWN=1` equivalent via BackendOptions: Q4_K
+/// gate/up with a Q6_K GELU-tanh down drives the opt-in fused Q6_K
+/// down kernel (which now carries the tanh clamp from F1).
+#[test]
+#[ignore = "reproducer for the fused-Q6K-down decode-integration NaN: the kernel \
+passes isolation parity at this exact shape, but the decode dispatch \
+produces 256/256 NaN. Arm hard-disabled in encode_ffn.rs until root-caused."]
+fn decode_token_with_q4k_ffn_and_fused_q6k_down_option() {
+    let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut opts = larql_compute_metal::BackendOptions::default();
+    opts.decode_flags.fused_q6k_down = true;
+    let Some(metal) = larql_compute_metal::MetalBackend::with_options(opts) else {
+        return;
+    };
+    use larql_compute::cpu::ops::q4_common::{quantize_q4_k, quantize_q6_k};
+    let wq = quantize_q4_k(&synth_weight_f32(Q_DIM * HIDDEN, 0.1));
+    let wk = quantize_q4_k(&synth_weight_f32(KV_DIM * HIDDEN, 0.2));
+    let wv = quantize_q4_k(&synth_weight_f32(KV_DIM * HIDDEN, 0.3));
+    let wo = quantize_q4_k(&synth_weight_f32(HIDDEN * Q_DIM, 0.4));
+    let gate = quantize_q4_k(&synth_weight_f32(INTER * HIDDEN, 0.5));
+    let up = quantize_q4_k(&synth_weight_f32(INTER * HIDDEN, 0.6));
+    let down = quantize_q6_k(&synth_weight_f32(HIDDEN * INTER, 0.7));
+    let norm_w: Vec<f32> = (0..HIDDEN).map(|i| 1.0 + (i as f32 * 0.001)).collect();
+    let mut layer = build_synth_layer(&wq, &wk, &wv, &wo, &gate, &up, &down, &norm_w);
+    layer.down = QuantWeight::new(QuantFormat::Q6_K, &down, larql_compute::QuantAux::None);
+    layer.activation = Activation::GeluTanh;
+
+    let x = synth_input(HIDDEN, 0.9);
+    let mut kv = metal.create_kv_cache(1, 64, NUM_KV_HEADS, HEAD_DIM);
+    let out = larql_compute_metal::MetalBackend::decode_token(
+        &metal,
+        &mut kv,
+        &[layer],
+        &x,
+        HIDDEN,
+        INTER,
+        Q_DIM,
+        KV_DIM,
+        NUM_Q_HEADS,
+        NUM_KV_HEADS,
+        HEAD_DIM,
+        10_000.0,
+    );
+    assert_eq!(out.len(), HIDDEN);
+    let n_nan = out.iter().filter(|v| v.is_nan()).count();
+    let n_inf = out.iter().filter(|v| v.is_infinite()).count();
+    assert!(
+        out.iter().all(|v| v.is_finite()),
+        "fused q6k down: {n_nan} NaN, {n_inf} inf of {}; first vals {:?}",
+        out.len(),
+        &out[..4]
+    );
+}
+
+/// Shared Q6_K FFN fixture mutation for the split tests above. The
+/// weight bytes were built as Q4_K/Q4_0 by `build_synth_layer`'s
+/// defaults, so requantize each matrix as genuine Q6_K.
+fn set_q6k_ffn(layer: &mut FullPipelineLayer) {
+    use larql_compute::cpu::ops::q4_common::quantize_q6_k;
+    use std::sync::OnceLock;
+    static GATE: OnceLock<Vec<u8>> = OnceLock::new();
+    static UP: OnceLock<Vec<u8>> = OnceLock::new();
+    static DOWN: OnceLock<Vec<u8>> = OnceLock::new();
+    let gate = GATE.get_or_init(|| quantize_q6_k(&synth_weight_f32(INTER * HIDDEN, 0.5)));
+    let up = UP.get_or_init(|| quantize_q6_k(&synth_weight_f32(INTER * HIDDEN, 0.6)));
+    let down = DOWN.get_or_init(|| quantize_q6_k(&synth_weight_f32(HIDDEN * INTER, 0.7)));
+    layer.gate = QuantWeight::new(QuantFormat::Q6_K, gate, larql_compute::QuantAux::None);
+    layer.up = QuantWeight::new(QuantFormat::Q6_K, up, larql_compute::QuantAux::None);
+    layer.down = QuantWeight::new(QuantFormat::Q6_K, down, larql_compute::QuantAux::None);
+}

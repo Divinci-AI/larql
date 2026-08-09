@@ -319,3 +319,12 @@ fn q6k_geglu_gelu_tanh_down_survives_large_gate_values() {
     let cos = cos_sim(&cpu_ref, &fused);
     assert!(cos > 0.999, "large-gate parity: cos={cos:.6}");
 }
+
+/// The synthetic decode suite's exact FFN shape (hidden=256,
+/// inter=512). Pinned because the decode INTEGRATION of this kernel
+/// produces all-NaN at this shape while this isolation test passes —
+/// keeping the shape here proves any future NaN is not the kernel's.
+#[test]
+fn q6k_geglu_gelu_tanh_down_decode_suite_shape() {
+    assert_fused_q6k_geglu_down_matches_separated("decode-suite shape 512->256", 256, 512, false);
+}

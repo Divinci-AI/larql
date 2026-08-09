@@ -111,6 +111,15 @@ built from a six-family audit of every MSL entry point in
       "not wired" doc stale, `Q4K_GU_MAX_K` test comment references a
       removed constant.
 
+**New finding (2026-08-09, slice 2):** the fused Q6_K down decode
+integration produces all-NaN output even though the kernel now passes
+isolation parity at the exact decode shape (planar bytes, 512→256) —
+the historical "layout drift" hypothesis is falsified; the defect is in
+what the decode dispatch binds or sequences. `LARQL_FUSED_Q6K_DOWN` is
+hard-disabled at both dispatch sites; reproducer test
+`decode_token_with_q4k_ffn_and_fused_q6k_down_option` is `#[ignore]`d
+with the finding. Root-cause before re-engaging.
+
 The structural target (capability doc §9): one authority table consumed by
 the QKV/FFN/O-proj/attention dispatchers — per-operand format rows instead
 of `is_kquant_family()` tests, every silently-assumed dim promoted to a
