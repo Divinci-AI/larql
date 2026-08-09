@@ -90,6 +90,30 @@ pub trait KvEngine: Send {
         );
     }
 
+    /// One decode step whose new position is a pre-built hidden row —
+    /// the decode-time peer of [`prefill_from_hidden`], closing the seam
+    /// ADR-0023 deferred ("decode is text-out by definition"). Models
+    /// whose step input is not a text-token lookup (MOSS-TTS-Realtime:
+    /// a 17-table summed embedding per step) decode through this.
+    ///
+    /// Same contract as [`decode_step`]: appends exactly one position to
+    /// the cache and returns its final hidden state. Same capability
+    /// rule as [`prefill_from_hidden`]: callers MUST check
+    /// [`supports_multimodal`] first; the default panic is
+    /// defense-in-depth, not an error path.
+    fn decode_step_from_hidden(
+        &mut self,
+        _weights: &ModelWeights,
+        _ffn: &dyn FfnBackend,
+        _hidden_row: &Array2<f32>,
+    ) -> Result<Array2<f32>, EngineError> {
+        panic!(
+            "engine {:?} does not support multi-modal input; \
+             check supports_multimodal() before calling decode_step_from_hidden",
+            self.name()
+        );
+    }
+
     /// Per-layer K/V row access, for policy wrappers that rewrite the
     /// cache. Default `None` — an engine opts in only when its cache is
     /// genuinely per-layer. See [`PerLayerKvAccess`] for why offering

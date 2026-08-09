@@ -69,6 +69,7 @@ pub mod model;
 pub mod prompt;
 pub mod residual;
 pub mod residual_diff;
+pub mod speech;
 pub mod ternary;
 pub mod test_utils;
 pub mod tokenizer;

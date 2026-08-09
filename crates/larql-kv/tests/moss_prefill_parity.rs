@@ -77,10 +77,10 @@ fn moss_prefill_matches_reference_dump() {
     assert_eq!(reference_hidden.nrows(), rows);
 
     // ── Gate 1: the 17-way summed embedding ──
-    let mut tables: Vec<&Array2<f32>> = Vec::with_capacity(1 + aux.audio_embed_tables.len());
-    let embed_owned = weights.embed.to_owned();
-    tables.push(&embed_owned);
-    tables.extend(aux.audio_embed_tables.iter());
+    let mut tables: Vec<ndarray::ArrayView2<f32>> =
+        Vec::with_capacity(1 + aux.audio_embed_tables.len());
+    tables.push(weights.embed.view());
+    tables.extend(aux.audio_embed_tables.iter().map(|t| t.view()));
     let embeds = larql_compute::forward::embed::embed_tables_sum(&tables, &prefill_ids);
 
     let embed_diff = max_abs_diff(&embeds, &reference_embeds);

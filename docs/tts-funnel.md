@@ -1,6 +1,7 @@
 # The TTS funnel — audio-token output as a forcing function
 
-Status: steps 0-3 green. Branch `worktree-tts-audio-tokens`, started 2026-08-09.
+Status: steps 0-4 green — Milestone A: LARQL speaks in tokens. Branch
+`worktree-tts-audio-tokens`, started 2026-08-09.
 
 Gate log:
 
@@ -61,6 +62,24 @@ Gate log:
   step-4 work is the loop itself: sampling, EOS on codebook 0, the typed
   output seam, and cached (rather than recomputed-prefix) micro-steps
   for performance.
+
+- **Step 4 PASS** (2026-08-09) — **Milestone A: the first complete
+  self-generated utterance of audio tokens.** The full greedy loop
+  (`larql-inference/src/speech/moss_realtime.rs::generate_frames_greedy`)
+  chains everything with no teacher forcing: prefill from the reference's
+  exact prompt, then per frame one backbone `decode_step_from_hidden` —
+  the new `KvEngine` method closing the decode-time seam ADR-0023
+  deferred — followed by *cached* depth micro-steps (per-frame handle
+  set, one appended position per micro-step, exactly the reference's
+  frame-lifetime cache), audio EOS detected on codebook 0 via the
+  config-derived id. No tokenizer exists anywhere in the loop: ids in,
+  ids out — the output-adapter invariant realised in the first non-text
+  generation path. Gate: all 138 frames × 16 codebooks identical to the
+  dump, EOS on the reference's final frame, emitted crop identical
+  (`larql-kv/tests/moss_full_loop_parity.rs`; a single divergent
+  codebook anywhere would cascade, so exact equality closes the chain).
+  Remaining from the step-4 list: sampled mode (the non-standard top-p),
+  and retrofitting the ids-preserved seam into the text decode paths.
 
 This document plays the role `k3-funnel.md` plays for sparse execution: it
 names one model that cannot run, inventories exactly why, and commits to
@@ -341,12 +360,26 @@ the emitted tokens; is the aru-12 clone audibly the same speaker as the
 reference implementation's output?) is recorded as a separate integration
 observation, never as parity evidence.
 
+**Step 6 — VINDEX3-native MOSS** (gated on steps 4–5). The safetensors
+side-load is the oracle implementation, not the destination: once the
+execution semantics stop moving, the model moves into the vindex whole.
+Gate, brutally simple: *delete the original-safetensors requirement —
+open only the vindex artefact and reproduce the already-green step 2–5
+parity tests.* No side-load flag, no HF-directory dependency. The format
+lesson MOSS teaches is not "support TTS fields": it is that a model is
+**named executable tensor regions with explicit architectural roles**
+(K3's expert banks, MOSS's embedding banks / depth transformer / sixteen
+heads, the vision tower — regions, not exceptions). Three ownerships stay
+separate: VINDEX3 describes and carries the model (regions, domains,
+vocabularies, capabilities); the architecture owns the algorithm (sum 17
+tables, run backbone, 16 micro-steps, sample heads); the runtime owns
+temporal policy (12-token lead, 80 ms clock, turn KV, barge-in). Temporal
+policy never enters the storage format.
+
 **Later, in rough order, each gated on the above:** sampled mode (replicate
 the non-standard top-p; validate against raw logits, not tokens);
 session/turn state (KV continuation across turns — server-side home for a
-persistent engine); vindex format extension for auxiliary tensor groups
-(PLE-sidecar pattern) so extraction stops refusing the model; realtime
-axis (§5); codec-in-LARQL (§6).
+persistent engine); realtime axis (§5); codec-in-LARQL (§6).
 
 ---
 
@@ -420,6 +453,22 @@ real frames; then the jarvis-voice t0–t4 timeline (token commit → commit
 latency → TTS TTFA → first playable frame → audible) becomes the
 measurement surface, and backlog-vs-drain becomes measurable instead of
 inferred from batch RTF.
+
+The realtime unit is friendly: one frame = 80 ms, so sustainability is
+12.5 frames/s — and at ~2.3 B parameters the whole working set can
+plausibly stay resident on this hardware, which inverts K3's problem
+("predict what comes off SSD next" becomes "keep the speech machine hot
+and make every 80 ms deadline"). The depth loop is a specialisation
+target the reference cannot exploit: sequence ≤ 16, fixed hidden, cache
+lifetime exactly one frame, known head per position, one new row per
+micro-step — `moss_depth_frame(hidden) → [16 ids]` as a fused kernel
+eventually. The step-5 benchmark table (all measured, no vendor claims):
+acoustic frames/s; realtime factor; first audio-token frame (ms); first
+decoded PCM (ms); steady-state buffer growth (ms/s); p99 frame compute
+(ms); underruns per 60 s. The bar that matters is p99 frame compute
+< 80 ms; comfortably past it, buffering works *for* us, and multiples of
+realtime open speculative synthesis (likely acknowledgements prepared
+before they are needed) — predictive execution, speech-flavoured.
 
 ## 6. Codec-in-LARQL (explicitly deferred)
 

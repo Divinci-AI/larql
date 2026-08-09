@@ -123,7 +123,7 @@ pub fn embed_plan(weights: &ModelWeights, plan: &EmbeddingPlan) -> Array2<f32> {
 /// Panics (loudly, with context) on: no tables, id-column/table-count
 /// mismatch, hidden-size mismatch between tables, or an id outside its
 /// table — each of which is a caller bug, not a data condition.
-pub fn embed_tables_sum(tables: &[&Array2<f32>], ids: &Array2<u32>) -> Array2<f32> {
+pub fn embed_tables_sum(tables: &[ndarray::ArrayView2<f32>], ids: &Array2<u32>) -> Array2<f32> {
     assert!(!tables.is_empty(), "embed_tables_sum: no embedding tables");
     assert_eq!(
         tables.len(),
@@ -447,7 +447,7 @@ mod tests {
     fn tables_sum_sums_one_row_per_column() {
         let (a, b) = two_tables();
         let ids = ndarray::arr2(&[[1u32, 2], [3, 0]]);
-        let out = embed_tables_sum(&[&a, &b], &ids);
+        let out = embed_tables_sum(&[a.view(), b.view()], &ids);
         assert_eq!(out.shape(), &[2, 3]);
         assert_eq!(out[[0, 0]], 10.0 + 0.2);
         assert_eq!(out[[1, 0]], 30.0 + 0.0);
@@ -457,7 +457,7 @@ mod tests {
     fn tables_sum_single_table_is_plain_lookup() {
         let (a, _) = two_tables();
         let ids = ndarray::arr2(&[[2u32], [0]]);
-        let out = embed_tables_sum(&[&a], &ids);
+        let out = embed_tables_sum(&[a.view()], &ids);
         assert_eq!(out[[0, 0]], 20.0);
         assert_eq!(out[[1, 0]], 0.0);
     }
@@ -466,7 +466,7 @@ mod tests {
     fn tables_sum_zero_rows() {
         let (a, b) = two_tables();
         let ids = Array2::<u32>::zeros((0, 2));
-        let out = embed_tables_sum(&[&a, &b], &ids);
+        let out = embed_tables_sum(&[a.view(), b.view()], &ids);
         assert_eq!(out.shape(), &[0, 3]);
     }
 
@@ -475,7 +475,7 @@ mod tests {
         // Bit-stability contract: identical to a manual ascending-order sum.
         let (a, b) = two_tables();
         let ids = ndarray::arr2(&[[3u32, 4]]);
-        let out = embed_tables_sum(&[&a, &b], &ids);
+        let out = embed_tables_sum(&[a.view(), b.view()], &ids);
         for j in 0..3 {
             let manual = a[[3, j]] + b[[4, j]];
             assert_eq!(out[[0, j]], manual);
@@ -487,7 +487,7 @@ mod tests {
     fn tables_sum_rejects_column_mismatch() {
         let (a, b) = two_tables();
         let ids = ndarray::arr2(&[[1u32, 2, 3]]);
-        embed_tables_sum(&[&a, &b], &ids);
+        embed_tables_sum(&[a.view(), b.view()], &ids);
     }
 
     #[test]
@@ -495,7 +495,7 @@ mod tests {
     fn tables_sum_rejects_out_of_range_id() {
         let (a, b) = two_tables();
         let ids = ndarray::arr2(&[[9u32, 0]]);
-        embed_tables_sum(&[&a, &b], &ids);
+        embed_tables_sum(&[a.view(), b.view()], &ids);
     }
 
     #[test]
@@ -504,7 +504,7 @@ mod tests {
         let (a, _) = two_tables();
         let narrow = Array2::<f32>::zeros((4, 2));
         let ids = ndarray::arr2(&[[0u32, 0]]);
-        embed_tables_sum(&[&a, &narrow], &ids);
+        embed_tables_sum(&[a.view(), narrow.view()], &ids);
     }
 
     #[test]

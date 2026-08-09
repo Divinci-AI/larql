@@ -108,6 +108,22 @@ impl MossTtsRealtimeConfig {
     pub fn lm_heads(&self) -> usize {
         self.rvq
     }
+
+    // ── Audio special ids. `config.json` names only the pad token; BOS
+    // and EOS are the next two ids by the reference processor's layout
+    // (`audio_vocab_size` = codebook size + 3 specials), and both live
+    // on codebook 0 only. A checkpoint convention, spelled once here.
+
+    /// Audio beginning-of-speech id (codebook 0 only).
+    pub fn audio_bos_token(&self) -> usize {
+        self.audio_pad_token + 1
+    }
+
+    /// Audio end-of-speech id (codebook 0 only) — the generation stop
+    /// condition.
+    pub fn audio_eos_token(&self) -> usize {
+        self.audio_pad_token + 2
+    }
 }
 
 fn missing(key: &str) -> ModelError {
