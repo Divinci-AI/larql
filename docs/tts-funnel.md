@@ -486,6 +486,24 @@ per row) where the shape wants GEMM — so the levers are quantized GEMM
 / tiled dequant+BLAS / Metal prefill, chosen by a falsifiable prefill
 benchmark before any implementation.
 
+**The prefill prediction** (2026-08-09,
+`larql-kv/tests/moss_prefill_bench.rs`; real backbone matrices, seq 343,
+0.97 TFLOP, best-of-3): row path 1396 ms (693 GFLOPS — matches the
+measured 1.97 s prefill minus ~570 ms non-GEMM overhead); **the
+amortised `q4k_matmul_into` is FALSIFIED as the lever — 4555 ms, 3.3x
+slower than the row path it was meant to replace** (its inner loop
+strides across all 343 activation rows per decoded super-block, and its
+f32-FMA loop is no match for the tuned Q8K integer kernels, let alone
+AMX); fp32 BLAS GEMM 456 ms (2.1 TFLOPS); dequant-whole+BLAS 922 ms.
+Consequences: (1) the best CPU prefill lands ≈ 1.0 s (BLAS + overhead,
+needing an fp32 shadow ~5 GB) or ≈ 1.5 s allocation-free
+(dequant-per-layer + BLAS) — CPU wiring halves TTFA but cannot reach
+the 500 ms gate; **the gate's lever is Metal prefill**, which makes the
+gpu-build CPU-path regression (#242) a prerequisite for honest mixed
+measurements. (2) Spillover: the vindex serving path prefills dense
+models through this same amortised matmul — if it reads 212 GFLOPS
+there too, that path carries the same defect; check separately.
+
 ---
 
 ## 4. The voice-as-data ladder (EXP-V, runs in parallel)
