@@ -1549,6 +1549,49 @@ recognised** — see item 2.
    [larql-vindex]
 
 
+### K3 expert transport codec — CLOSED, cross-expert redundancy is nil (2026-08-10)
+
+Registry: `dec8-13-cross-expert-conditional-census` (programme `dec`), completed
+and refuted. Rule **R15** added to [`docs/dec-funnel.md`](docs/dec-funnel.md) §1.
+
+The previous rung measured each expert's MXFP4 symbols *on their own* (3.7525 of
+4.0 bits — near-optimal). It conditioned on nothing, leaving open whether the 896
+experts in a layer share structure that per-expert coding discards. They do not.
+`larql k3-ledger cond-census` conditions one expert's **untouched packed
+nibbles** on a leave-one-out bank prototype, an out-of-sample-selected coding
+parent, a random parent, and a permutation-invariant per-input-channel profile:
+**mutual information 0.0000 bits on all three GLU branches**, every arm sitting
+on top of its own marginal-preserving shuffled null. Agreement is 0.086–0.109
+against a 1/16 chance floor, so the runnable match/escape code prices at
+**4.56–4.66 bpw — worse than shipping the raw 4.25**.
+
+**The controls are the result.** A self control reads exactly 0.0000 with
+agreement 1.0000 on the same bytes; the marginal reproduces the banked 3.7525 to
+1e-4; and an adjacent-row control *within one expert* also reads 3.7527 — so
+there is nothing aligned to find, not merely no correspondence between experts.
+Mechanism: MXFP4's per-32 e8m0 scale already absorbs per-channel magnitude,
+leaving residual nibbles near-i.i.d. A format that spends its bits well leaves
+no cross-object redundancy for a dictionary to collect.
+
+**Closed with it:** entropy coding MXFP4 symbols, dictionary coding aligned
+expert symbols, resident-parent lossless delta coding, adaptive symbol
+alphabets, and **ETC-0B** (a specific parent adds 0.0007 bits over the
+prototype; selection beats random by −0.0000, so there are no edge weights to
+route around and the DEC-0 traces need not be opened for coding parents). R4 had
+capped the whole idea at **1.87×** before the fetch anyway; the measured floor is
+worth **1.06×** end-to-end.
+
+**Still open, deliberately deprioritised:** a permutation-*aligned* comparison
+(assignment over 3072 rows — poor prior from the adjacent-row control), and
+lossy value-space decomposition, which is **approximate expert factorisation,
+not compression** — approximate lane, scored on induced bits/token and route
+stability, and this lossless result must not be cited for or against it.
+
+Consequence: the routing graph and the compression graph are different objects.
+Effort returns to access structure — residency, owner grouping, prefetch,
+avoidance — where the route-aware hot-cache rung already measured **1.80×** from
+grouping work by physical owner.
+
 ### K3 serving-format ladder + efficiency re-bank (2026-08-01)
 
 Two rungs closed and one measurement corrected. Registry: `dec8-11`, `dec8-12`

@@ -62,6 +62,11 @@ pub enum K3LedgerCmd {
     /// Measured MXFP4 symbol distribution: is an exact VARIABLE-rate code below
     /// 4 payload bits available? Reads real packed nibbles by range request.
     SymbolCensus(SymbolCensusArgs),
+    /// ETC-0A — is an expert cheaper to send GIVEN another expert? Conditional
+    /// entropy and mutual information on the untouched MXFP4 symbol streams,
+    /// against a marginal-preserving shuffled null, priced straight into
+    /// effective transport bpw and tok/s on both arms.
+    CondCensus(CondCensusArgs),
     /// Trace which KDA projections read the same hidden state, and what a shared
     /// input rotation would have to be folded into. Reads the real tensor table.
     KdaGraph(KdaGraphArgs),
@@ -131,6 +136,45 @@ pub struct SymbolCensusArgs {
     /// Tile sizes to report cardinality and local entropy at.
     #[arg(long, num_args = 1.., default_values_t = [32usize, 64, 256, 512])]
     pub blocks: Vec<usize>,
+}
+
+#[derive(Debug, Args)]
+pub struct CondCensusArgs {
+    /// Experts to sample, taken from index 0 upward. The leave-one-out
+    /// prototype is built from exactly this set, so a wider bank is a better
+    /// prototype *and* more candidate parents — but also quadratic selection
+    /// cost. Traffic is `experts * rows * row_bytes`, a few MB at the default.
+    #[arg(long, default_value_t = 16)]
+    pub experts: usize,
+
+    /// Rows read from each expert tensor. A row is one weight vector; the
+    /// census aligns by coordinate, so every expert must read the same rows.
+    #[arg(long, default_value_t = 256)]
+    pub rows: usize,
+
+    /// Which GLU branch to census. `w1` is the gate, `w3` the up, `w2` the down
+    /// — they are equal to the byte, but they are not the same matrices, and a
+    /// result on one is not a result on the others.
+    #[arg(long, default_value = "w1")]
+    pub branch: String,
+
+    /// Fraction of coordinates used to CHOOSE coding parents. The rest are
+    /// scored. Selecting and scoring on the same coordinates turns the parent
+    /// arm into an oracle.
+    #[arg(long, default_value_t = super::cond_arms::DEFAULT_FIT_FRACTION)]
+    pub fit_fraction: f64,
+
+    /// Seed for the marginal-preserving shuffled nulls.
+    #[arg(long, default_value_t = super::cond_arms::DEFAULT_NULL_SEED)]
+    pub seed: u64,
+
+    /// Conditional payload rates to price in the kill table, in bits per weight.
+    #[arg(long, num_args = 1.., default_values_t = [3.0f64, 2.5, 2.0, 1.5, 1.0, 0.75])]
+    pub payload_grid: Vec<f64>,
+
+    /// Link throughput for the external-expert arm, GB/s.
+    #[arg(long, default_value_t = 3.5)]
+    pub link_gb_s: f64,
 }
 
 #[derive(Debug, Args)]

@@ -23,6 +23,17 @@
 //!   scenario  — the premises a `frontier` row is conditional on (pure).
 //!   serving_format — which containers hold MXFP4 exactly, by counting (pure).
 //!   symbol_census  — is there an exact VARIABLE-rate code below 4 bits (pure).
+//!   cond_census    — ETC-0A statistics: is an expert cheaper GIVEN another
+//!                  expert? Conditional entropy on untouched symbols (pure).
+//!   cond_arms — ETC-0A arm design: prototype, parents, and the nulls (pure).
+//!   column_profile — the one conditioning context that survives the expert
+//!                  row permutation; read its header before trusting any
+//!                  coordinate-aligned negative result (pure).
+//!   transport_bpw  — what a conditional bit-rate is worth on each arm, with
+//!                  R4 applied before the codec exists (pure).
+//!   scale_stream   — fold the e8m0 scale channel into the census alphabet, so
+//!                  the ledger prices payload AND metadata together (pure).
+//!   rng       — reproducible PRNG shared by every null in the ladder (pure).
 //!   fetch     — HTTP range-GET geometry loading (I/O, excluded).
 //!   report    — human-readable rendering (I/O-adjacent, excluded).
 //!
@@ -34,6 +45,10 @@ pub mod args;
 pub mod block;
 pub mod budget;
 pub mod classes;
+pub mod column_profile;
+pub mod cond_arms;
+pub mod cond_census;
+mod cond_report;
 pub mod fetch;
 pub mod freqmass;
 #[cfg(test)]
@@ -43,6 +58,8 @@ pub mod geometry;
 pub mod kda_a_log;
 pub mod kda_graph;
 mod report;
+pub mod rng;
+pub mod scale_stream;
 pub mod scenario;
 pub mod selection_trace;
 pub mod serving_format;
@@ -50,6 +67,7 @@ pub mod symbol_census;
 pub mod symbol_mass;
 pub mod touch;
 pub mod transcode;
+pub mod transport_bpw;
 
 pub use args::K3LedgerArgs;
 
@@ -91,6 +109,9 @@ pub fn run(args: K3LedgerArgs) -> Result<(), Box<dyn std::error::Error>> {
         }
         args::K3LedgerCmd::SymbolCensus(a) => {
             report::symbol_census(&repo, &args.kda_shard, a, args.json)
+        }
+        args::K3LedgerCmd::CondCensus(a) => {
+            cond_report::run(&repo, &geom, &premises, &args.kda_shard, a, args.json)
         }
         args::K3LedgerCmd::KdaGraph(a) => report::kda_graph(&repo, &args.kda_shard, a, args.json),
     }
