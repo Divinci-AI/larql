@@ -3295,6 +3295,55 @@ Details in `larql-inference/ROADMAP.md` and `larql-cli/ROADMAP.md`.
 
 ---
 
+## P1 — Voice bank: voices as first-class data (added 2026-08-09)
+
+Gated on TTS funnel step 5 (green) — the speech engine is real enough
+that maintaining `aru-12.tokens` as a manually prepared magic file is
+beneath the abstraction level of the rest of the system.
+
+**The design choice that matters: the asset is the *voice*, not "a MOSS
+token file."** One logical voice accumulates model-specific
+representations — MOSS conditions on spliced RVQ reference tokens,
+Qwen3-TTS on a pooled ECAPA speaker vector, a future model on whatever
+it requires. Same `--voice aru-12` resolves the representation the
+target model needs. This is the CLI face of the voice-as-data ladder
+(`docs/tts-funnel.md` §4): `clone` is the user's goal; *materialising a
+voice identity into a representation usable by a particular model* is
+what LARQL actually does (`voice derive` may become the truer verb).
+
+```bash
+larql voice clone reference.wav --name aru-12 --model moss-realtime
+larql voice list
+larql voice inspect aru-12
+larql voice clone reference.wav --name aru-12 --model qwen3-tts-1.7b  # second representation
+larql speak --voice aru-12 "Good evening."
+larql voice compare aru-12 aru-03        # eventually
+```
+
+Voice package: derived representations + provenance, NOT the source
+recording (originals stay where they belong):
+
+```text
+voices/aru-12/
+├── voice.toml            # name, source sha256/duration/rate, representation manifest
+└── representations/
+    └── moss-realtime.tokens
+```
+
+Boundaries, pinned now: voice identity is user/runtime data; model
+weights are model data. Voices are **never** bundled into a model's
+vindex — 1 speech model × 100 local voices with no duplication. VINDEX3
+interaction is resolution only: speech model + voice bank → resolved
+conditioning representation → speech session.
+
+Sequencing: `voice clone --model moss-realtime` is mechanically almost
+available (WAV → MOSS codec encode → 16-channel token rows → package);
+the Qwen3-TTS representation is the abstraction's first real test.
+A practical dividend: `larql speak --voice aru-N` across a bank makes
+the EXP-V ladder experiments (and eventual `voice compare`) one-liners.
+
+---
+
 ## P2 — Film checklist
 
 - [ ] Confirm Gemma 4 26B A4B public config (expert count, top-K, active-param figure, GQA ratio). Replace every `~` in `docs/demo-script-gemma4-moe.md`.

@@ -472,10 +472,19 @@ tables, run backbone, 16 micro-steps, sample heads); the runtime owns
 temporal policy (12-token lead, 80 ms clock, turn KV, barge-in). Temporal
 policy never enters the storage format.
 
-**Later, in rough order, each gated on the above:** sampled mode (replicate
-the non-standard top-p; validate against raw logits, not tokens);
-session/turn state (KV continuation across turns — server-side home for a
-persistent engine); realtime axis (§5); codec-in-LARQL (§6).
+**Later, in rough order, each gated on the above:** session/turn state
+(KV continuation across turns — server-side home for a persistent
+engine); realtime axis (§5); the voice bank (`larql voice clone` —
+voices as first-class model-agnostic data; design in `ROADMAP.md`
+"Voice bank", gated on step 5, now open); codec-in-LARQL (§6).
+
+**The perf phase's next gate (set 2026-08-09, after step 5):** first-turn
+TTFA **below 500 ms** without regressing the ~1.6x realtime steady-state
+class. The 2.0 s TTFA is prefill-dominated and the Q4 prefill is a
+row-oriented path (343 sequential GEMVs re-reading the packed weights
+per row) where the shape wants GEMM — so the levers are quantized GEMM
+/ tiled dequant+BLAS / Metal prefill, chosen by a falsifiable prefill
+benchmark before any implementation.
 
 ---
 
