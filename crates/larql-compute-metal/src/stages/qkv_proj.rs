@@ -217,6 +217,12 @@ pub fn encode_fused_q8(
     kv_rows: usize,
     hidden: usize,
 ) {
+    assert!(
+        hidden <= crate::shaders::q8_attn_proj::MAX_K,
+        "q8_qkv_proj stages its input in threadgroup memory capped at K = {}; \
+         hidden {hidden} would corrupt threadgroup memory (audit F13)",
+        crate::shaders::q8_attn_proj::MAX_K,
+    );
     let q_rows_val = q_rows as u32;
     let k_rows_val = kv_rows as u32;
     let v_rows_val = kv_rows as u32;
@@ -238,7 +244,17 @@ pub fn encode_fused_q8(
     enc.set_bytes(12, 4, &k_rows_val as *const u32 as *const c_void);
     enc.set_bytes(13, 4, &v_rows_val as *const u32 as *const c_void);
     enc.set_bytes(14, 4, &k_val as *const u32 as *const c_void);
-    enc.dispatch_thread_groups(MTLSize::new(total_rows, 1, 1), MTLSize::new(256, 1, 1));
+    // One threadgroup covers ROWS_PER_TG rows (one per simdgroup); the
+    // previous `total_rows` grid over-dispatched 8x, with every excess
+    // TG re-staging the Q8 input into threadgroup memory before its
+    // simdgroups discovered they were all out of range (capability
+    // audit F19). Geometry from the shader module the pipeline was
+    // built from, not a literal.
+    use crate::shaders::q8_attn_proj as q8;
+    enc.dispatch_thread_groups(
+        MTLSize::new(total_rows.div_ceil(q8::ROWS_PER_TG), 1, 1),
+        MTLSize::new(q8::THREADS_PER_TG, 1, 1),
+    );
 }
 
 #[cfg(test)]

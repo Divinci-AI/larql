@@ -41,6 +41,11 @@ const ATTN_FUSED_INV_FREQ_INDEX: u64 = 16;
 /// `amplitude` slot on `attn_fused`, appended after the sinks pair.
 const ATTN_FUSED_AMPLITUDE_INDEX: u64 = 20;
 
+/// Absolute stream position for RoPE on `attn_fused`. The kernel's cache
+/// row stays occupancy-indexed; only the rotation angle uses this. The
+/// two diverge once a sliding window compacts (audit F11).
+const ATTN_FUSED_ABS_POS_INDEX: u64 = 21;
+
 /// First of the two consecutive `kv_append_attend_fused` slots carrying
 /// attention sinks; the `has_sinks` flag follows in slot 13.
 const KV_APPEND_ATTEND_SINKS_INDEX: u64 = 12;
@@ -253,6 +258,11 @@ impl MetalBackend {
                 layer_rope_plan,
                 layer_head_dim,
                 layer.rotary_dim,
+            );
+            enc.set_bytes(
+                ATTN_FUSED_ABS_POS_INDEX,
+                4,
+                &pos as *const u32 as *const std::ffi::c_void,
             );
             enc.dispatch_thread_groups(
                 MTLSize::new(layer_num_q_heads as u64, 1, 1),
@@ -529,7 +539,7 @@ impl MetalBackend {
             // at buffer index 2.
             larql_compute::QuantFormat::Q8_0 => {
                 let dim_val = layer_q_dim as u32;
-                let blocks = (layer_q_dim / LEGACY_BLOCK_ELEMS) as u32;
+                let blocks = layer_q_dim.div_ceil(LEGACY_BLOCK_ELEMS) as u32;
                 enc.set_compute_pipeline_state(&self.quant.q8_quant_pipeline);
                 enc.set_buffer(0, Some(bufs.attn_out_buf), 0);
                 enc.set_buffer(1, Some(bufs.o_q8_scratch), 0);
@@ -546,6 +556,12 @@ impl MetalBackend {
 
                 let o_rows = hidden as u32;
                 let o_k = layer_q_dim as u32;
+                assert!(
+                    layer_q_dim <= crate::shaders::q8_matvec::MAX_K,
+                    "q8_matvec stages its Q8 input in threadgroup memory capped at \
+                     K = {}; layer_q_dim {layer_q_dim} would corrupt it (audit F13)",
+                    crate::shaders::q8_matvec::MAX_K,
+                );
                 enc.set_compute_pipeline_state(&self.quant.q8_matvec_pipeline.state);
                 enc.set_buffer(0, Some(bufs.wo), 0);
                 enc.set_buffer(1, Some(bufs.o_q8_scratch), 0);
@@ -584,7 +600,13 @@ impl MetalBackend {
             } else {
                 bufs.post_attn_norm.clone()
             };
-            if use_fused_post_attn && ffn_uses_kquant {
+            // The triple-fused kernel has no `b_scale` slot, so a
+            // Granite-style `residual_multiplier != 1.0` must take the
+            // unfused chain below, which binds it. The equivalent guards
+            // in `encode_post_ffn.rs` existed for exactly this reason;
+            // this site lacked one (capability audit F18).
+            let fusable_residual = layer.residual_multiplier == 1.0;
+            if use_fused_post_attn && ffn_uses_kquant && fusable_residual {
                 // Triple-fused: post_attn_norm + residual_norm + h_post_attn
                 // store in ONE dispatch.
                 enc.set_compute_pipeline_state(&self.norms.post_attn_residual_norm_store_pipeline);

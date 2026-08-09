@@ -214,6 +214,14 @@ kernel void fused_attention(
 }
 "#;
 
+/// Rust mirror of the MSL `MAX_FUSED_ATTENTION_SEQ_LEN` constant in
+/// [`SHADER`] — the `tg_scores` threadgroup scratch bound. The scratch
+/// is indexed by ABSOLUTE key position (not window-relative), so a
+/// sliding window does not reduce the requirement; seq_len past this
+/// writes out of bounds. Host dispatch asserts against it
+/// (`stages/attention.rs`).
+pub const MAX_FUSED_ATTENTION_SEQ_LEN: usize = 4096;
+
 pub struct Kernel;
 impl crate::kernels::ShaderKernel for Kernel {
     const KERNEL_NAME: &'static str = "fused_attention";

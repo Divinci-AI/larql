@@ -10,6 +10,11 @@ use crate::buffers::BufferCache;
 
 pub const SHORT_ATTENTION_SPAN: u32 = 1024;
 
+/// `kv_attention_long`'s threadgroup scratch bound — mirrors the MSL
+/// `tg_scores[4096]` in `shaders/kv_attention.rs`. Spans past this
+/// overflow threadgroup memory; the dispatch asserts against it.
+pub const LONG_ATTENTION_SPAN: usize = 4096;
+
 /// Maximum head_dim supported by kernels that dispatch exactly one simdgroup
 /// per head (32 lanes × 8 elements = 256). Layers with head_dim above this
 /// must use the two-simdgroup path or the unfused fallback.
@@ -340,10 +345,27 @@ pub fn encode_kv_attend(
     let num_kv = cache.num_kv_heads as u32;
     let span = attention_span(t_val, window_size);
     let pipeline = if span > SHORT_ATTENTION_SPAN {
-        attend_long_pipeline.unwrap_or(attend_pipeline)
+        // No silent fallback to the short kernel: `kv_attention`'s
+        // tg_scores holds SHORT_ATTENTION_SPAN entries, and a span past
+        // it overflows threadgroup memory. Previously
+        // `unwrap_or(attend_pipeline)` let a caller that supplied no
+        // long pipeline do exactly that (capability audit F20).
+        attend_long_pipeline.expect(
+            "attention span exceeds SHORT_ATTENTION_SPAN and no long-attention \
+             pipeline was supplied; the short kernel's threadgroup scratch \
+             cannot hold this span",
+        )
     } else {
         attend_pipeline
     };
+    // `kv_attention_long`'s own scratch bound. Until now this held only
+    // because the KV cache's default allocation happens to match —
+    // an allocation coincidence, not a checked invariant (F14).
+    assert!(
+        span as usize <= LONG_ATTENTION_SPAN,
+        "attention span {span} exceeds kv_attention_long's threadgroup scratch \
+         bound ({LONG_ATTENTION_SPAN})"
+    );
 
     enc.set_compute_pipeline_state(pipeline);
     enc.set_buffer(0, Some(q), 0);

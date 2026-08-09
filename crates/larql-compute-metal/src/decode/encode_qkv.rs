@@ -392,6 +392,12 @@ impl MetalBackend {
             // same fix class as the decode_hybrid Q4_K geometry bug.
             // q8_qkv_proj is currently 8 rows/TG, 256 threads; if a
             // future bump changes the variant, the dispatch follows.
+            assert!(
+                hidden <= crate::shaders::q8_attn_proj::MAX_K,
+                "q8_qkv_proj stages its input in threadgroup memory capped at \
+                 K = {}; hidden {hidden} would corrupt it (audit F13)",
+                crate::shaders::q8_attn_proj::MAX_K,
+            );
             let kh = &self.attention.q8_qkv_proj_pipeline;
             enc.set_compute_pipeline_state(&kh.state);
             enc.set_buffer(0, Some(bufs.wq), 0);
