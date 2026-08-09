@@ -41,6 +41,35 @@ from them are still load-bearing and worth restating:
 
 ## P0: Metal kernel capability audit findings (2026-08-09)
 
+**PROGRAMME CLOSED 2026-08-09** — all 22 findings resolved across PRs
+#231 (audit doc + F1–F4), #233 (guard batch), #234 (slice 1: one QKV
+plan for decode/prefill/hybrid), #235 (F15 verdict: Q4_KF is a
+kernel-route tag over 144-byte GGUF blocks; F16; F22), #236 (slice 2:
+per-operand FFN everywhere incl. profile-split), #237 (slice 3: sinks
+and softcap travel with every attention path). Only F17's per-kernel
+tail and F21 (retention-gated) remain open below.
+
+Performance: **neutral** — canonical baseline in
+[`CHANGELOG.md`](CHANGELOG.md) 2026-08-09 (10 paired alternating
+rounds on gemma4-26b-a4b: median paired Δ +0.54% decode p50, GPU
+fraction unchanged at 95.2%).
+
+Three kernels found broken-since-written along the way:
+`q4k_ffn_gate_up_coop` (parity-mixed scale staging, cos 0.52 vs CPU —
+fixed), the fused-Q6K-down **decode integration** (all-NaN while the
+kernel passes isolation parity at the exact shape — hard-disabled,
+`#[ignore]`d reproducer, open thread below), and the `attn_fused`
+test runner (scalar bound into the inv_freq table slot — fixed).
+
+**Open threads out of the programme:** the fused-Q6K-down integration
+NaN root-cause; `norm_type` honoured only at the decode input norm
+(LayerNorm archs silently get RMS for post-attn/pre-FFN/post-FFN and
+all of prefill — no guard); `MAX_FUSED_GEGLU_DOWN_INTER` possibly
+removable now the tanh clamp landed (untested); the bench's
+EOS-vs-GPU-fallback ambiguity (instrument note below); production MoE
+still routes on CPU with per-expert down loops (perf, deliberately
+sequenced after dispatch authority).
+
 Source of truth: [`docs/metal-kernel-capabilities.md`](../../docs/metal-kernel-capabilities.md)
 — the Phase B per-kernel capability table (formats, reduction unit, legal
 dims asserted-vs-assumed, aux buffers, dispatch geometry, fallback chain)
@@ -92,7 +121,12 @@ built from a six-family audit of every MSL entry point in
 - [x] **F16** (fixed on fix/metal-audit-f15-f16-f22) `gate_out`/`up_out` sized `inter` while fused Q4_K down
       reads `inter_padded`; unify the `inter` vs `inter_padded` K
       convention across the five down dispatch variants.
-- [ ] **F17** K-alignment asserted in 2 of ~30 quant kernels; GQA
+- [ ] **F17** (narrowed by the selector slices: `plan_qkv` asserts
+      hidden%256 at the fused f32 QKV dispatch, GQA divisibility is
+      asserted in `stages/attention.rs`, and the K≤8192 staging
+      ceilings are asserted at every production site — remaining scope
+      is the per-kernel K%256/%32 truncation checks in the matvec/FFN
+      dispatchers) K-alignment asserted in 2 of ~30 quant kernels; GQA
       divisibility asserted nowhere — add dispatch-time checks.
 - [x] **F18** (fixed 4408d18a) `residual_multiplier == 1.0` guard missing on
       `post_attn_residual_norm_store` selection and the PLE reuse of

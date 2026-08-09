@@ -508,6 +508,41 @@ risk/leverage; the first is a live correctness bug.
    `KvCacheKind` duplicate. The larger refactors (DecodeOptions threading, the
    engine-walk collapse, the kernel-fn table) are scoped follow-ups.
 
+   **INVESTIGATED 2026-06-19 — this item is over-scoped; most sub-tasks are NOT
+   clean wins.** Three angles checked against the actual code:
+   - **`KvCacheKind` delete — entangled, low value.** `EngineKind::from_name`
+     collapses `standard` and `markov-bounded` to the *same* `Standard{window}`,
+     so it can't recover the distinction the legacy flag needs to apply
+     `--context-window` (which is sliding-only). Routing `--kv-cache` straight
+     through `from_name` silently breaks that semantic. And `KvCacheKind` is a
+     *frozen* 3-variant legacy flag — new engines go through `--engine`, so it
+     never grows per-engine. Not the registration burden it was billed as.
+   - **`SKIP_MOE` fold — touches a contract.** The unprefixed `SKIP_MOE` (and
+     `MOE_TOP_K`/`MOE_NO_SPLIT`) are *intentional* grid-tooling names on
+     `GridRuntimeConfig`, arguably a different flag from compute's
+     `LARQL_SKIP_MOE` (grid-bypass vs local-decode-skip). Not a trivial alias.
+   - **`AnyEngine` → enum_dispatch — doesn't fit, and it's already fine.**
+     `AnyEngine` is a 2-variant *family* enum over *two different traits*
+     (`KvEngine` / `RetrievalEngine`), with intentionally **asymmetric**
+     forwarders (`prefill` passes `ffn` for `Kv` only; `supports_multimodal` is
+     `Kv`-only; `prefill_from_hidden` panics on `Retrieval`). `enum_dispatch`
+     needs one shared trait + uniform signatures, so it can't apply, and a macro
+     would only obscure the explicit 2-arm matches. It grows per *family* (rare),
+     not per *engine* — so it's not the boilerplate driver.
+
+   **Reality:** the only genuine per-engine cost is the `lib.rs` registration
+   (`EngineKind` variant + `from_name` + `display_name` + `supported_names` +
+   `build_with_profiling`), and even that resists a clean `register_engine!`
+   macro because each engine parses *different* params (`window`/`bits`/`layer`/
+   `coef`/`top_k`) and constructs a different type. A data-driven table could
+   drive `display_name`/`supported_names` (and kill
+   `engine_kind_supported_names_covers_every_variant`), but `from_name` +
+   `build_with_profiling` stay hand-written. **Recommendation: DE-PRIORITIZE.**
+   The `LayerExecutor`/`decode_step_walk` collapse (the 8-method override
+   cross-product) is the one part with real leverage left, but it's a scoped
+   refactor, not a quick win. Prefer quant Step 2 (timed with BitNet) or the P0
+   perf frontier (W1-GPU Metal matvecs) for higher return.
+
 ### P1 — MoE-aware KV engines (C1) — new 2026-05-28
 
 The KvEngine layer is **dense-only today**: `do_prefill` / `do_decode_step`
