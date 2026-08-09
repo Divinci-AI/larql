@@ -124,3 +124,55 @@ fn decode_token_with_q4_0_qkv_drives_q4_0_norm_qkv_path() {
     );
     assert_eq!(out.len(), HIDDEN);
 }
+
+/// Prefill with the production Gemma 3/4 attention shape — Q4_K Q/K +
+/// Q6_K V — now runs the fused mixed kernel (slice 1 of the capability
+/// selector). Before the QKV plan, prefill's `all_same_format` gate
+/// could not reach `q4k_q6k_qkv_proj` at all and this triple silently
+/// degraded to three per-projection dispatches. Same assertion set as
+/// `prefill_q4_seq4_synthetic_smoke`.
+#[test]
+fn prefill_mixed_q4k_q6k_v_seq4_runs_fused_mixed_kernel() {
+    let Some(metal) = larql_compute_metal::MetalBackend::new() else {
+        return;
+    };
+    use larql_compute::cpu::ops::q4_common::{quantize_q4_0, quantize_q4_k, quantize_q6_k};
+
+    let wq_data = quantize_q4_k(&synth_weight_f32(Q_DIM * HIDDEN, 3.1));
+    let wk_data = quantize_q4_k(&synth_weight_f32(KV_DIM * HIDDEN, 3.2));
+    let wv_data = quantize_q6_k(&synth_weight_f32(KV_DIM * HIDDEN, 3.3));
+    let wo_data = quantize_q4_k(&synth_weight_f32(HIDDEN * Q_DIM, 3.4));
+    let gate_data = quantize_q4_0(&synth_weight_f32(INTER * HIDDEN, 3.5));
+    let up_data = quantize_q4_0(&synth_weight_f32(INTER * HIDDEN, 3.6));
+    let down_data = quantize_q4_0(&synth_weight_f32(HIDDEN * INTER, 3.7));
+    let norm_w: Vec<f32> = (0..HIDDEN).map(|i| 1.0 + (i as f32 * 0.0008)).collect();
+
+    let mut layer = build_synth_layer(
+        &wq_data, &wk_data, &wv_data, &wo_data, &gate_data, &up_data, &down_data, &norm_w,
+    );
+    layer.wv = QuantWeight::new(QuantFormat::Q6_K, &wv_data, larql_compute::QuantAux::None);
+
+    let seq_len = 4usize;
+    let x: Vec<f32> = (0..seq_len * HIDDEN)
+        .map(|i| ((i as f32 * 0.011 + 3.9).sin()) * 0.4)
+        .collect();
+
+    let result = (&metal as &dyn ComputeBackend)
+        .as_any()
+        .downcast_ref::<larql_compute_metal::MetalBackend>()
+        .unwrap()
+        .prefill_kquant(&[layer], &x, HIDDEN, INTER, seq_len, false, 0.0);
+
+    let Some(result) = result else {
+        panic!("prefill_kquant returned None for the mixed Q4_K/Q6_K-V triple");
+    };
+    assert_eq!(result.len(), seq_len * HIDDEN);
+    assert_eq!(result.iter().filter(|v| v.is_nan()).count(), 0);
+    assert_eq!(result.iter().filter(|v| v.is_infinite()).count(), 0);
+    let max_abs = result.iter().fold(0.0f32, |a, &b| a.max(b.abs()));
+    assert!(max_abs > 0.0, "mixed prefill output is all-zero");
+    assert!(
+        max_abs < 1e6,
+        "mixed prefill magnitude {max_abs} unreasonable"
+    );
+}

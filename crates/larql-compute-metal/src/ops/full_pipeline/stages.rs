@@ -33,6 +33,10 @@ pub(super) struct InputNormQkvPipes<'a> {
     pub q8_qkv_proj: &'a ComputePipelineState,
     pub q4kf_qkv_proj: Option<&'a ComputePipelineState>,
     pub q4k_qkv_proj: Option<&'a ComputePipelineState>,
+    /// Mixed Q4_K Q/K + Q6_K V fused kernel (the production Gemma 3/4
+    /// shape). Absent → the mixed route degrades to per-projection, as
+    /// it always silently did before the QKV plan landed.
+    pub q4k_q6k_qkv_proj: Option<&'a crate::kernels::KernelHandle>,
     pub qm_pipes: quant_matvec::Pipelines<'a>,
 }
 
@@ -53,13 +57,16 @@ pub(super) fn encode_input_norm_and_qkv(
     lb: &LayerBuffers,
 ) {
     let l = layer_idx;
-    let attn_format = layer.wq.format();
-    let uses_f32_input = matches!(
-        attn_format,
-        larql_compute::QuantFormat::Q4_K
-            | larql_compute::QuantFormat::Q6_K
-            | larql_compute::QuantFormat::Q4_KF
-    );
+    // The QKV plan — kernel route + required input encoding — from the
+    // full (wq, wk, wv) triple. This replaces two single-operand gates
+    // (`uses_f32_input` keyed on wq alone; `all_same_format` + a
+    // two-arm format match) and the hand-written Q8_0 triple check
+    // below, all of which could disagree with each other and with the
+    // decode path's route table (capability audit, slice 1). It also
+    // makes the mixed Q4_K/Q6_K-V kernel reachable at prefill for the
+    // first time — a Gemma 3/4 layer previously degraded to three
+    // per-projection dispatches here.
+    let plan = qkv_proj::plan_qkv(layer.wq.format(), layer.wk.format(), layer.wv.format());
 
     let h_off = |p: usize| (p * hidden * 4) as u64;
     let q_off = |p: usize| (p * ctx.layer_q_dim * 4) as u64;
@@ -67,33 +74,29 @@ pub(super) fn encode_input_norm_and_qkv(
     let q8_off = |p: usize| (p * ctx.q8_row_max) as u64;
     let q8s_off = |p: usize| (p * ctx.q8s_row_bytes) as u64;
 
-    let all_same_format =
-        layer.wq.format() == layer.wk.format() && layer.wk.format() == layer.wv.format();
-    // Pick the fused kernel whose host-side TG geometry matches the
-    // shader being dispatched. The two shaders use different rows/TG and
-    // threads/TG counts; getting them out of sync silently leaves rows
-    // unwritten because the kernel's `if (global_row >= total_rows)`
-    // guard hides the under-coverage. Encoded as a (pipeline, kernel)
-    // pair so the dispatcher can't use one without the other.
-    let fused_qkv_pipe: Option<(&ComputePipelineState, qkv_proj::FusedQkvKernel)> =
-        if all_same_format {
-            match layer.wq.format() {
-                larql_compute::QuantFormat::Q4_KF => pipes
-                    .q4kf_qkv_proj
-                    .map(|p| (p, qkv_proj::FusedQkvKernel::Q4kf))
-                    .or_else(|| {
-                        pipes
-                            .q4k_qkv_proj
-                            .map(|p| (p, qkv_proj::FusedQkvKernel::Q4k))
-                    }),
-                larql_compute::QuantFormat::Q4_K => pipes
+    // Fused-kernel availability per route. Encoded as a
+    // (pipeline, kernel) pair so the dispatcher can't use a pipeline
+    // with another kernel's TG geometry — desync silently leaves rows
+    // unwritten behind the kernels' row guards. A route whose pipeline
+    // is absent degrades to per-projection.
+    let fused_qkv_pipe: Option<(&ComputePipelineState, qkv_proj::FusedQkvKernel)> = match plan.route
+    {
+        qkv_proj::QkvFormatRoute::UniformQ4Kf => pipes
+            .q4kf_qkv_proj
+            .map(|p| (p, qkv_proj::FusedQkvKernel::Q4kf))
+            .or_else(|| {
+                pipes
                     .q4k_qkv_proj
-                    .map(|p| (p, qkv_proj::FusedQkvKernel::Q4k)),
-                _ => None,
-            }
-        } else {
-            None
-        };
+                    .map(|p| (p, qkv_proj::FusedQkvKernel::Q4k))
+            }),
+        qkv_proj::QkvFormatRoute::UniformQ4K => pipes
+            .q4k_qkv_proj
+            .map(|p| (p, qkv_proj::FusedQkvKernel::Q4k)),
+        qkv_proj::QkvFormatRoute::MixedQ4kQ6kV => pipes
+            .q4k_q6k_qkv_proj
+            .map(|kh| (&kh.state, qkv_proj::FusedQkvKernel::Q4kQ6kV)),
+        qkv_proj::QkvFormatRoute::FusedQ8 | qkv_proj::QkvFormatRoute::PerProjection => None,
+    };
 
     // Encoder coalescing: hoist `cmd.new_compute_command_encoder()` and
     // `enc.end_encoding()` out of the per-position loop so we pay one
@@ -103,7 +106,7 @@ pub(super) fn encode_input_norm_and_qkv(
     // so they run back-to-back on the GPU. Saves ~5 µs × seq_len per layer
     // on prefill — see ROADMAP P0 "Prefill: per-position matvec → matmul"
     // entry, 2026-04-27.
-    if uses_f32_input {
+    if plan.input == qkv_proj::QkvInputEncoding::F32 {
         // Q4_K / Q6_K / Q4_KF: f32 norm output, then either fused or
         // per-projection QKV matvec.
         let enc = cmd.new_compute_command_encoder();
@@ -202,10 +205,7 @@ pub(super) fn encode_input_norm_and_qkv(
                 ctx.eps,
                 ctx.norm_offset,
             );
-            if layer.wq.format() == larql_compute::QuantFormat::Q8_0
-                && layer.wk.format() == larql_compute::QuantFormat::Q8_0
-                && layer.wv.format() == larql_compute::QuantFormat::Q8_0
-            {
+            if plan.route == qkv_proj::QkvFormatRoute::FusedQ8 {
                 qkv_proj::encode_fused_q8(
                     enc,
                     pipes.q8_qkv_proj,
