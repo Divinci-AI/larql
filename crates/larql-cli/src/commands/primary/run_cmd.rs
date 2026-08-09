@@ -336,6 +336,12 @@ pub struct RunArgs {
     /// RNG seed for `--speak` sampled mode (reproducible synthesis).
     #[arg(long, default_value = "0")]
     pub seed: u64,
+
+    /// Quantise FFN weights to Q4_K for `--speak` (both transformers;
+    /// attention stays fp32). The realtime experiment of
+    /// docs/tts-funnel.md — check voice quality before trusting speed.
+    #[arg(long)]
+    pub q4: bool,
 }
 
 pub fn run(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {

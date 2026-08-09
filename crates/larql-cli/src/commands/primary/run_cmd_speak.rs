@@ -16,7 +16,8 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use larql_inference::ffn::WeightFfn;
+use larql_compute::ffn::q4k_weight::Q4kFfn;
+use larql_inference::ffn::{FfnBackend, WeightFfn};
 use larql_inference::speech::moss_prompt::build_prompt;
 use larql_inference::speech::moss_realtime::generate_frames_streaming;
 use larql_inference::speech::moss_sampling::{DecodeMode, MossSampling};
@@ -101,7 +102,26 @@ pub fn run_speak(args: &RunArgs) -> Result<(), BoxErr> {
     } else {
         StandardEngine::new(None)
     };
-    let ffn = WeightFfn { weights: &weights };
+    let backbone_dense = WeightFfn { weights: &weights };
+    let depth_dense = WeightFfn {
+        weights: &depth.weights,
+    };
+    let (ffn, depth_ffn): (&dyn FfnBackend, &dyn FfnBackend);
+    let (backbone_q4, depth_q4);
+    if args.q4 {
+        let quant_start = Instant::now();
+        backbone_q4 = Q4kFfn::quantize_from(&weights)?;
+        depth_q4 = Q4kFfn::quantize_from(&depth.weights)?;
+        eprintln!(
+            "FFNs quantised to Q4_K in {:.1}s (attention stays fp32)",
+            quant_start.elapsed().as_secs_f64()
+        );
+        ffn = &backbone_q4;
+        depth_ffn = &depth_q4;
+    } else {
+        ffn = &backbone_dense;
+        depth_ffn = &depth_dense;
+    }
     let generation_start = Instant::now();
     let mut frame_instants: Vec<f64> = Vec::new();
     let mode = if args.greedy {
@@ -112,9 +132,10 @@ pub fn run_speak(args: &RunArgs) -> Result<(), BoxErr> {
     let generation = generate_frames_streaming(
         &mut engine,
         &weights,
-        &ffn,
+        ffn,
         &audio_tables,
         &depth,
+        depth_ffn,
         &config,
         &prompt.prefill_matrix,
         &prompt.text_queue,

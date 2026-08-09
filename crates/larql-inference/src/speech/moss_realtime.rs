@@ -34,7 +34,7 @@ use larql_models::ModelWeights;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 
-use crate::ffn::{FfnBackend, WeightFfn};
+use crate::ffn::FfnBackend;
 use crate::kv_dispatch::helpers::{
     kv_decode_step_from_hidden_via_dispatch, kv_prefill_from_hidden_via_dispatch,
 };
@@ -96,6 +96,7 @@ pub fn generate_frames_greedy(
     backbone_ffn: &dyn FfnBackend,
     audio_tables: &[Array2<f32>],
     depth: &DepthTransformerModel,
+    depth_ffn: &dyn FfnBackend,
     config: &MossTtsRealtimeConfig,
     prefill_matrix: &Array2<u32>,
     text_queue: &[u32],
@@ -108,6 +109,7 @@ pub fn generate_frames_greedy(
         backbone_ffn,
         audio_tables,
         depth,
+        depth_ffn,
         config,
         prefill_matrix,
         text_queue,
@@ -129,6 +131,7 @@ pub fn generate_frames_greedy_streaming(
     backbone_ffn: &dyn FfnBackend,
     audio_tables: &[Array2<f32>],
     depth: &DepthTransformerModel,
+    depth_ffn: &dyn FfnBackend,
     config: &MossTtsRealtimeConfig,
     prefill_matrix: &Array2<u32>,
     text_queue: &[u32],
@@ -142,6 +145,7 @@ pub fn generate_frames_greedy_streaming(
         backbone_ffn,
         audio_tables,
         depth,
+        depth_ffn,
         config,
         prefill_matrix,
         text_queue,
@@ -163,6 +167,7 @@ pub fn generate_frames_streaming(
     backbone_ffn: &dyn FfnBackend,
     audio_tables: &[Array2<f32>],
     depth: &DepthTransformerModel,
+    depth_ffn: &dyn FfnBackend,
     config: &MossTtsRealtimeConfig,
     prefill_matrix: &Array2<u32>,
     text_queue: &[u32],
@@ -203,7 +208,7 @@ pub fn generate_frames_streaming(
     let mut hidden = backbone_final_norm(backbone, &last);
     loop {
         let depth_start = std::time::Instant::now();
-        let frame = depth_frame(depth, &hidden, mode, &frames, &mut rng)?;
+        let frame = depth_frame(depth, depth_ffn, &hidden, mode, &frames, &mut rng)?;
         stage_timings.push(FrameStages {
             backbone_seconds,
             depth_seconds: depth_start.elapsed().as_secs_f64(),
@@ -253,13 +258,13 @@ pub fn generate_frames_streaming(
 /// penalty for the prefill frame.
 fn depth_frame(
     depth: &DepthTransformerModel,
+    ffn: &dyn FfnBackend,
     backbone_hidden: &Array2<f32>,
     mode: DecodeMode,
     prior_frames: &[Vec<u32>],
     rng: &mut StdRng,
 ) -> Result<Vec<u32>, EngineError> {
     let weights = &depth.weights;
-    let ffn = WeightFfn { weights };
     let view = larql_models::WeightsView::dense(weights);
     let backend = crate::cpu_engine_backend();
     let rvq = depth.lm_heads.len();
@@ -270,7 +275,7 @@ fn depth_frame(
     let (mut hidden, mut handles) = kv_prefill_from_hidden_via_dispatch(
         backend.as_ref(),
         view,
-        &ffn,
+        ffn,
         backbone_hidden,
         None,
         None,
@@ -297,7 +302,7 @@ fn depth_frame(
         hidden = kv_decode_step_from_hidden_via_dispatch(
             backend.as_ref(),
             view,
-            &ffn,
+            ffn,
             &mut handles,
             &embed_row,
             micro + 1,

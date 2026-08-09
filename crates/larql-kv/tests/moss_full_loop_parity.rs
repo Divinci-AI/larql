@@ -86,12 +86,16 @@ fn moss_full_greedy_loop_matches_reference_dump() {
 
     let mut engine = StandardEngine::new(None);
     let ffn = WeightFfn { weights: &weights };
+    let depth_ffn = WeightFfn {
+        weights: &depth.weights,
+    };
     let generation = generate_frames_greedy(
         &mut engine,
         &weights,
         &ffn,
         &audio_tables,
         &depth,
+        &depth_ffn,
         &config,
         &prefill_ids,
         text_queue,
