@@ -49,17 +49,17 @@ built from a six-family audit of every MSL entry point in
 
 **Fix checklist** (live correctness first):
 
-- [ ] **F1** clamp tanh arg ±15 in `q4k_geglu_gelu_tanh_down`,
+- [x] **F1** (fixed c3688d38) clamp tanh arg ±15 in `q4k_geglu_gelu_tanh_down`,
       `q6k_geglu_gelu_tanh_down`, `q6k_..._cached` — matches `geglu.rs:39`;
       explains both recorded fused-path NaN incidents.
-- [ ] **F2** hybrid QKV (`decode_hybrid.rs:145`) selects kernel on `wq`
+- [x] **F2** (fixed ac8168ec) hybrid QKV (`decode_hybrid.rs:145`) selects kernel on `wq`
       alone — route (Q4_K,Q4_K,Q6_K) to the mixed kernel, refuse other
       mismatches loudly.
-- [ ] **F3** FFN decode branch keys on `gate.format()` family only —
+- [x] **F3** (fixed 0f5a73e0) FFN decode branch keys on `gate.format()` family only —
       Q6_K gate mis-decoded as Q4_K, Q8_0 as Q4_0, `up.format()` never
       read. Route Q6_K via per-format matvecs; refuse Q8_0/float/mixed
       loudly.
-- [ ] **F4** float weights (BF16/F16/F32) in `quant_matvec::encode` are a
+- [x] **F4** (fixed bc2b429f) float weights (BF16/F16/F32) in `quant_matvec::encode` are a
       silent no-op with stale scratch output — panic loudly.
 - [ ] **F5** `q6k_matvec` trait dispatch hardcodes 4sg geometry against a
       pipeline alias that can be 8sg — read the `KernelHandle`.
