@@ -591,7 +591,6 @@ impl MetalBackend {
                 },
             );
             let new_h = if l % 2 == 0 { &h_a } else { &h_b };
-            let ffn_uses_kquant = layer.gate.format().is_kquant_family();
 
             // ── Steps 6-7: FFN + post-FFN residual ──
             //
@@ -670,13 +669,7 @@ impl MetalBackend {
                 if stage_timing_split && !has_moe {
                     // Fine split: gate+up in one CB, act+down+residual in another.
                     // Step 6a: gate+up
-                    self.encode_ffn_gate_up_phase(
-                        &enc,
-                        layer,
-                        &ffn_bufs,
-                        ffn_dims,
-                        ffn_uses_kquant,
-                    );
+                    self.encode_ffn_gate_up_phase(&enc, layer, &ffn_bufs, ffn_dims);
                     enc.end_encoding();
                     cmd.commit();
                     cmd.wait_until_completed();
@@ -684,7 +677,7 @@ impl MetalBackend {
                     cmd = self.queue.new_command_buffer().to_owned();
                     enc = cmd.new_compute_command_encoder().to_owned();
                     // Step 6b + 7: activation+down + post-FFN residual
-                    self.encode_ffn_down_phase(&enc, layer, &ffn_bufs, ffn_dims, ffn_uses_kquant);
+                    self.encode_ffn_down_phase(&enc, layer, &ffn_bufs, ffn_dims);
                     self.encode_post_ffn_residual(
                         &enc,
                         layer,
