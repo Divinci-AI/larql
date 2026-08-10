@@ -24,6 +24,7 @@
 
 mod common;
 
+use std::collections::BTreeMap;
 use std::time::Instant;
 
 use larql_compute::cpu::ops::q4_common::quantize_q4_k;
@@ -109,15 +110,28 @@ fn q4_frame_prediction() {
         });
     }
 
-    let total_bytes_f32: usize = ops
-        .iter()
-        .map(|op| op.matrix.len() * std::mem::size_of::<f32>() * op.uses_per_frame)
-        .sum();
+    let op_bytes = |op: &FrameOp| op.matrix.len() * std::mem::size_of::<f32>() * op.uses_per_frame;
+    let total_bytes_f32: usize = ops.iter().map(op_bytes).sum();
     println!(
         "frame op mix: {} matrices, {:.1} GB fp32 moved per frame",
         ops.len(),
         total_bytes_f32 as f64 / 1e9
     );
+    // Which op class carries the mass — the bandwidth model above claims the
+    // depth transformer's ×rvq reuse dominates, and this is where that shows.
+    let mut by_class: BTreeMap<&'static str, (usize, usize)> = BTreeMap::new();
+    for op in &ops {
+        let entry = by_class.entry(op.name).or_insert((0, 0));
+        entry.0 += 1;
+        entry.1 += op_bytes(op);
+    }
+    for (name, (count, bytes)) in &by_class {
+        println!(
+            "  {name:<8} {count:>3} matrices  {:.2} GB/frame  ({:.1}%)",
+            *bytes as f64 / 1e9,
+            100.0 * *bytes as f64 / total_bytes_f32 as f64
+        );
+    }
 
     // ── fp32 GEMV timing (BLAS via ndarray dot) ──
     let frame_f32 = best_frame_seconds(|| {
