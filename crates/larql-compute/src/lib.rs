@@ -93,6 +93,7 @@ pub mod kv_index;
 pub mod options;
 pub mod packed_attn_index;
 pub mod per_layer_decode_state;
+pub mod phase_timing;
 pub mod pipeline;
 pub mod pipeline_layer;
 pub mod quant_route;

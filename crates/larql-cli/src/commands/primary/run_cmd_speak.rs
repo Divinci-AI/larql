@@ -131,6 +131,10 @@ pub fn run_speak(args: &RunArgs) -> Result<(), BoxErr> {
     }
     let generation_start = Instant::now();
     let mut frame_instants: Vec<f64> = Vec::new();
+    // With LARQL_PHASE_TIMING set, snapshot the accumulated phase split
+    // at first frame — bounding it to prefill + one depth frame, the
+    // TTFA-relevant region.
+    let mut phase_split: Vec<(&'static str, f64)> = Vec::new();
     let mode = if args.greedy {
         DecodeMode::Greedy
     } else {
@@ -154,6 +158,9 @@ pub fn run_speak(args: &RunArgs) -> Result<(), BoxErr> {
         depth_attn,
         |index, _codes| {
             frame_instants.push(generation_start.elapsed().as_secs_f64());
+            if index == 0 {
+                phase_split = larql_compute::phase_timing::snapshot_and_reset();
+            }
             if (index + 1) % 25 == 0 {
                 eprintln!(
                     "  {} frames ({:.1}s audio)…",
@@ -285,6 +292,18 @@ pub fn run_speak(args: &RunArgs) -> Result<(), BoxErr> {
     }
     if let Some(seconds) = codec_seconds {
         println!("codec decode          {seconds:.2}s (external, includes model load)");
+    }
+    if !phase_split.is_empty() {
+        let accounted: f64 = phase_split.iter().map(|(_, s)| s).sum();
+        println!(
+            "\nprefill phase split   ({} set; prefill + depth frame 0; {:.0} ms accounted)",
+            larql_compute::phase_timing::ENV_VAR,
+            accounted * 1000.0
+        );
+        phase_split.sort_by(|a, b| b.1.partial_cmp(&a.1).expect("finite phase times"));
+        for (name, seconds) in &phase_split {
+            println!("  {name:<22}{:6.0} ms", seconds * 1000.0);
+        }
     }
     Ok(())
 }

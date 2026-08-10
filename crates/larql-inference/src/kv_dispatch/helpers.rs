@@ -84,6 +84,7 @@ fn ffn_or_moe_layer(
     ffn: &dyn FfnBackend,
     ple_input: Option<&Array2<f32>>,
 ) -> Result<Array2<f32>, BoxRefusal> {
+    let phase = larql_compute::phase_timing::start();
     // Pure MoE (GPT-OSS, GraniteMoE, OLMoE) takes this hook exactly as
     // hybrid does — its FFN *is* the expert block. Gating on hybrid alone
     // sent pure-MoE layers to the dense `run_ffn` below, which asks for
@@ -93,12 +94,14 @@ fn ffn_or_moe_layer(
         // backend does not serve the layer and the local dispatch below is the
         // correct answer — never a refusal wearing its shape.
         if let Some(h_out) = ffn.forward_moe_full_layer(layer, h_post_attn)? {
+            larql_compute::phase_timing::finish(phase, "layer.ffn_block");
             return Ok(h_out);
         }
     }
     let (h_post_ffn, _) = run_ffn(&weights, h_post_attn, layer, ffn, false);
     let mut h_out = apply_per_layer_embedding(&weights, &h_post_ffn, layer, ple_input);
     apply_layer_scalar(&weights, &mut h_out, layer);
+    larql_compute::phase_timing::finish(phase, "layer.ffn_block");
     Ok(h_out)
 }
 

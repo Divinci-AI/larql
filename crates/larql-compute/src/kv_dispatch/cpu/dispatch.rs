@@ -180,10 +180,13 @@ impl KvDispatch for CpuBackend {
         // See `attention_step` doc for the `_index` convention.
         let (h_post_attn, k_rope, v) =
             run_attention_with_kv_backend(weights, tokens_embedded, layer, Some(self), None)?;
+        let phase = crate::phase_timing::start();
         let kv_dim = k_rope.shape()[1];
         let mut handle = CpuKvHandle::new(layer, kv_dim);
         handle.replace_state((k_rope, v));
-        Some((h_post_attn, KvHandle::new(handle)))
+        let handle = KvHandle::new(handle);
+        crate::phase_timing::finish(phase, "attn.kv_handle_write");
+        Some((h_post_attn, handle))
     }
 
     fn upload_boundary_residual(&self, residual: &Array2<f32>) -> Option<ResidualHandle> {

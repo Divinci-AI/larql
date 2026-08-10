@@ -623,7 +623,25 @@ for the gate: Metal on the FFN alone projects only ~0.76 s TTFA —
 **crossing 500 ms needs Metal to take the attention projections too,
 and/or the 0.36 s remainder to shrink**. Next move is an instrumented
 prefill phase split — measure, don't estimate; the last two rungs both
-said so. Bonus
+said so.
+
+**The phase split** (2026-08-10, `larql_compute::phase_timing`, env
+`LARQL_PHASE_TIMING=1`, reported by `--speak` at first frame): 1243 ms
+of the ~1250 ms TTFA region accounted — `layer.ffn_block` **904 ms**;
+attention projections 82 + 49 ms (qkv, o+residual); `attn.core` 84 ms
+(the batching held); rope 68; norms 49; embed 5; KV write 2. Two
+corrections fall out: (a) the hypothesised "360 ms glue" bucket
+**dissolved** — real glue is ~124 ms and there is no fourth
+shape-mismatch hiding in it; (b) the FFN block costs 904 ms in
+production against ~660 ms bench-predicted — the gap is suspected
+allocation churn (`forward_block` allocates three fresh ~50 MB dequant
+buffers per layer, ~4 GB of fresh pages per prefill; a reusable
+scratch + `dequantize_into` is the cheap next fix, hypothesis to
+falsify by measurement). Gate arithmetic, now from a fully accounted
+budget: Metal FFN (904 → ~200) alone ⇒ TTFA ≈ 550 ms; plus the
+attention projections (131 → ~40) ⇒ **≈ 460 ms — under the gate with
+rope/norms untouched**. The Metal kernel's scope is exactly these GEMM
+sites, nothing else. Bonus
 diagnostic, twice confirmed: during stall episodes the BLAS-phase
 prefill holds (1.58 s) while spin-pool decode collapses (9.4 fps, max
 frame 1008 ms) — the episodic interference selectively degrades

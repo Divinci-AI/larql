@@ -275,7 +275,9 @@ impl<'a> MossSession<'a> {
 
         let speech = self.speech;
         let backbone_tables = backbone_tables(speech);
+        let phase = larql_compute::phase_timing::start();
         let embeds = embed_tables_sum(&backbone_tables, &matrix);
+        larql_compute::phase_timing::finish(phase, "prefill.embed_sum");
         let prefill_start = std::time::Instant::now();
         let (last, handles) = kv_prefill_from_hidden_via_dispatch(
             speech.backend,
