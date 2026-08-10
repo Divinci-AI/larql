@@ -472,6 +472,24 @@ mod tests {
             "page-aligned anon mmap must register"
         );
 
+        // `moe.experts_gate_up`/`experts_down` MUST be slices into the
+        // registered `region`, not the original `expert_gu`/`expert_down`
+        // vectors those bytes were copied from — those still live at a
+        // different, unregistered address. Passing the originals here was
+        // the actual bug this test spent several CI round-trips finding:
+        // every precondition matched, but `resolve_selected_experts`
+        // still failed because `moe`'s own byte slices didn't point into
+        // the region `register_region` was called on, so `resolve_region`
+        // correctly reported no match for either selected expert.
+        let experts_gate_up: Vec<&[u8]> = offsets
+            .iter()
+            .map(|&(g_off, g_len, _, _)| &region[g_off..g_off + g_len])
+            .collect();
+        let experts_down: Vec<&[u8]> = offsets
+            .iter()
+            .map(|&(_, _, d_off, d_len)| &region[d_off..d_off + d_len])
+            .collect();
+
         let router_w: Vec<f32> = (0..num_experts * hidden)
             .map(|i| (i as f32 * 0.0003).sin() * 0.05)
             .collect();
@@ -479,8 +497,8 @@ mod tests {
         let router_scale: Vec<f32> = vec![1.0f32; hidden];
         let router_per_expert_scale: Vec<f32> = vec![1.0f32; num_experts];
         let moe = MoeLayerWeights {
-            experts_gate_up: expert_gu.iter().map(|v| v.as_slice()).collect(),
-            experts_down: expert_down.iter().map(|v| v.as_slice()).collect(),
+            experts_gate_up,
+            experts_down,
             // `top_k_softmax`, NOT the crate default (`gemma4_hybrid`):
             // the default's `post_expert_norm: RmsNorm` fails this
             // function's identity-combine precondition outright.
@@ -527,65 +545,6 @@ mod tests {
         };
         let ictx = InlineMoeCtx::new(&scratch, 1e-6);
 
-        // Temporary diagnostic: replicate every `try_inline_zero_copy_moe`
-        // precondition by hand and print the verdict, because manual
-        // arithmetic on the Q4_K block sizing (row_bytes/gate_up_cols) kept
-        // checking out on paper while the real function still bailed to
-        // `false` on CI — something in this reasoning chain is wrong and
-        // hand-deriving it further is no longer trustworthy. This block is
-        // removed once the actual mismatch is identified.
-        {
-            let moe_ref = layer.moe.as_ref().unwrap();
-            eprintln!("DIAG layer.ffn_is_remote={}", layer.ffn_is_remote);
-            eprintln!("DIAG ctx.defer_ffn_for_split={}", ctx.defer_ffn_for_split);
-            eprintln!("DIAG ctx.stage_timing_split={}", ctx.stage_timing_split);
-            eprintln!("DIAG layer.has_dense_ffn()={}", layer.has_dense_ffn());
-            eprintln!(
-                "DIAG post_expert_norm={:?}",
-                moe_ref.routing_policy.post_expert_norm
-            );
-            eprintln!(
-                "DIAG layer.moe_combined_output_norm={}",
-                layer.moe_combined_output_norm
-            );
-            eprintln!("DIAG layer.layer_scalar={}", layer.layer_scalar);
-            eprintln!(
-                "DIAG ctx.layer_in_snapshot.is_some()={}",
-                ctx.layer_in_snapshot.is_some()
-            );
-            eprintln!(
-                "DIAG ctx.dump_l0_dir.is_some()={}",
-                ctx.dump_l0_dir.is_some()
-            );
-            eprintln!("DIAG moe.gate_rule={:?}", moe_ref.gate_rule);
-            eprintln!(
-                "DIAG experts_gate_up_bias.is_empty()={} experts_down_bias.is_empty()={}",
-                moe_ref.experts_gate_up_bias.is_empty(),
-                moe_ref.experts_down_bias.is_empty()
-            );
-            eprintln!(
-                "DIAG moe.top_k={} scratch.top_k={}",
-                moe_ref.top_k, scratch.top_k
-            );
-            eprintln!(
-                "DIAG moe.intermediate_size={} scratch.inter={}",
-                moe_ref.intermediate_size, scratch.inter
-            );
-            eprintln!(
-                "DIAG ctx.hidden={} scratch.hidden={}",
-                ctx.hidden, scratch.hidden
-            );
-            eprintln!(
-                "DIAG moe.expert_data_format={:?} scratch.format={:?}",
-                moe_ref.expert_data_format, scratch.format
-            );
-            eprintln!(
-                "DIAG moe.gate_up_cols(hidden)={} scratch.weight_cols={}",
-                moe_ref.gate_up_cols(hidden),
-                scratch.weight_cols
-            );
-        }
-
         let h_post_attn_data = synth(hidden, 0.9);
         let h_post_attn_buf = m.bufs.transient_from_f32(&h_post_attn_data);
         let new_h_buf = m.bufs.transient_from_f32(&vec![0.0f32; hidden]);
@@ -608,44 +567,6 @@ mod tests {
             normed_scratch: &dummy,
             new_h: &new_h_buf,
         };
-
-        // Every precondition checked above matched exactly — the mismatch
-        // must be in `resolve_selected_experts` itself (the one call this
-        // diagnostic hasn't replicated yet). Mirror its inputs exactly
-        // (the same CPU-routing helpers `try_inline_zero_copy_moe` calls)
-        // and invoke it directly to see whether it's the router or the
-        // region-resolve that's failing.
-        {
-            use larql_compute::cpu::ops::moe::{
-                moe_expert_input, moe_route_from_router_input, moe_router_input,
-            };
-            let moe_ref = layer.moe.as_ref().unwrap();
-            let expert_input = moe_expert_input(&h_post_attn_data, moe_ref, 0.0, ictx.eps);
-            let router_in =
-                moe_router_input(&h_post_attn_data, &expert_input, moe_ref, 0.0, ictx.eps);
-            let (expert_indices, expert_weights) = moe_route_from_router_input(&router_in, moe_ref);
-            eprintln!("DIAG expert_indices={expert_indices:?}");
-            eprintln!("DIAG expert_weights={expert_weights:?}");
-            for &ei in &expert_indices {
-                let gu = expert_gu[ei].as_slice();
-                let dn = expert_down[ei].as_slice();
-                eprintln!(
-                    "DIAG expert {ei}: gu.len()={} dn.len()={} resolve_region(gu)={} resolve_region(dn)={}",
-                    gu.len(),
-                    dn.len(),
-                    m.bufs.resolve_region(gu).is_some(),
-                    m.bufs.resolve_region(dn).is_some()
-                );
-            }
-            let resolved =
-                m.resolve_selected_experts(&scratch, &expert_indices, &expert_weights, |ei| {
-                    Some((expert_gu[ei].as_slice(), expert_down[ei].as_slice()))
-                });
-            eprintln!(
-                "DIAG resolve_selected_experts.is_some()={}",
-                resolved.is_some()
-            );
-        }
 
         let mut cmd = m.queue.new_command_buffer().to_owned();
         let mut enc = cmd.new_compute_command_encoder().to_owned();
