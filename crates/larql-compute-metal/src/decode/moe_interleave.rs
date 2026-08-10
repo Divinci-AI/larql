@@ -611,6 +611,165 @@ mod tests {
         );
     }
 
+    /// The test above puts every expert in ONE registered region, so
+    /// `encode_experts_zero_copy`'s `single_base` check is always true and
+    /// only the grouped-kernel arms run. Registering each expert in its
+    /// OWN region instead forces `single_base` to false for both the
+    /// gate/up and down dispatches regardless of which two experts the
+    /// router selects, driving the per-expert (non-grouped) fused Q4_K
+    /// kernel and per-expert down-matvec fallback arms — the other half
+    /// of that function's dispatch-shape branching. Also sets non-empty
+    /// `experts_gate_up_bias`/`experts_down_bias` to drive the bias-staging
+    /// block here and the `has_bias` combine arm in
+    /// `encode_experts_and_combine_zero_copy`, neither of which the
+    /// bias-free test above reaches.
+    #[test]
+    fn try_inline_zero_copy_moe_uses_non_grouped_dispatch_across_separate_regions() {
+        let m = backend();
+        let hidden = 256usize;
+        let inter = 256usize;
+        let top_k = 2usize;
+        let num_experts = 4usize;
+
+        let (expert_gu, expert_down) = make_q4k_experts(hidden, inter, num_experts);
+
+        // One page-aligned anonymous mmap PER expert — `resolve_region`
+        // returns the same Metal buffer for any two sub-slices of the same
+        // registered region, so this is what actually forces
+        // `single_base` to observe distinct base buffers.
+        let mut regions = Vec::with_capacity(num_experts);
+        for (g, d) in expert_gu.iter().zip(expert_down.iter()) {
+            let mut region = memmap2::MmapMut::map_anon(g.len() + d.len()).expect("anon mmap");
+            region[..g.len()].copy_from_slice(g);
+            region[g.len()..].copy_from_slice(d);
+            let region = region.make_read_only().expect("read-only mmap");
+            assert!(
+                m.bufs.register_region(&region[..]),
+                "page-aligned anon mmap must register"
+            );
+            regions.push(region);
+        }
+        let experts_gate_up: Vec<&[u8]> = regions
+            .iter()
+            .zip(expert_gu.iter())
+            .map(|(region, g)| &region[..g.len()])
+            .collect();
+        let experts_down: Vec<&[u8]> = regions
+            .iter()
+            .zip(expert_gu.iter())
+            .map(|(region, g)| &region[g.len()..])
+            .collect();
+
+        let router_w: Vec<f32> = (0..num_experts * hidden)
+            .map(|i| (i as f32 * 0.0003).sin() * 0.05)
+            .collect();
+        let pre_norm_w: Vec<f32> = (0..hidden).map(|i| 1.0 + (i as f32 * 0.0005)).collect();
+        let router_scale: Vec<f32> = vec![1.0f32; hidden];
+        let router_per_expert_scale: Vec<f32> = vec![1.0f32; num_experts];
+        // Non-empty so `expert_mlp(..).gate_up_bias`/`down_bias` are
+        // non-empty too — `ExpertMlp::expert_mlp` slices these per-expert
+        // at strides `2 * inter` and `hidden` respectively.
+        let experts_gate_up_bias = vec![0.1f32; num_experts * 2 * inter];
+        let experts_down_bias = vec![0.05f32; num_experts * hidden];
+        let moe = MoeLayerWeights {
+            experts_gate_up,
+            experts_down,
+            routing_policy: MoeRoutingPolicy::top_k_softmax(),
+            weight_layout: MoeWeightLayout::default(),
+            expert_data_format: QuantFormat::Q4_K,
+            router_proj: &router_w,
+            router_scale: &router_scale,
+            router_per_expert_scale: &router_per_expert_scale,
+            router_norm: &[],
+            router_norm_parameter_free: true,
+            router_input_scalar: 1.0,
+            pre_experts_norm: &pre_norm_w,
+            post_ffn1_norm: &pre_norm_w,
+            post_experts_norm: &pre_norm_w,
+            num_experts,
+            top_k,
+            intermediate_size: inter,
+            router_bias: &[],
+            experts_gate_up_bias: &experts_gate_up_bias,
+            experts_down_bias: &experts_down_bias,
+            gate_rule: MoeGateRule::Gated(Activation::GeluTanh),
+        };
+
+        let scratch = MoeScratch::new_public(&m, top_k, hidden, inter);
+        let layer = FullPipelineLayer {
+            moe: Some(moe),
+            ..Default::default()
+        };
+        let ctx = MoeInterleaveCtx {
+            layer_idx: 0,
+            num_layers: 1,
+            hidden,
+            inter,
+            inter_padded: inter,
+            defer_ffn_for_split: false,
+            stage_timing_split: false,
+            layer_in_snapshot: None,
+            dump_l0_dir: None,
+        };
+        let ictx = InlineMoeCtx::new(&scratch, 1e-6);
+
+        let h_post_attn_data = synth(hidden, 0.4);
+        let h_post_attn_buf = m.bufs.transient_from_f32(&h_post_attn_data);
+        let new_h_buf = m.bufs.transient_from_f32(&vec![0.0f32; hidden]);
+        let dummy = m.bufs.transient_from_f32(&[0.0f32; 4]);
+        let bufs = MoeInterleaveBufs {
+            gate_w: &dummy,
+            up_w: &dummy,
+            down_w: &dummy,
+            h_post_attn: &h_post_attn_buf,
+            ffn_norm_out: &dummy,
+            ffn_q8: &dummy,
+            ffn_q8s: &dummy,
+            gate_out_scratch: &dummy,
+            up_out: &dummy,
+            act_buf: &dummy,
+            down_out: &dummy,
+            normed_scratch: &dummy,
+            new_h: &new_h_buf,
+        };
+
+        let mut cmd = m.queue.new_command_buffer().to_owned();
+        let mut enc = cmd.new_compute_command_encoder().to_owned();
+        let mut encoder_ended = true;
+        enc.end_encoding();
+        cmd.commit();
+        cmd.wait_until_completed();
+        let took_zero_copy_path = m.try_inline_zero_copy_moe(
+            &layer,
+            &ctx,
+            &bufs,
+            &ictx,
+            &h_post_attn_data,
+            &mut cmd,
+            &mut enc,
+            &mut encoder_ended,
+        );
+        assert!(
+            took_zero_copy_path,
+            "every precondition was satisfied; the merged-CB fast path must fire"
+        );
+        assert!(!encoder_ended);
+
+        enc.end_encoding();
+        cmd.commit();
+        cmd.wait_until_completed();
+
+        let out = unsafe { std::slice::from_raw_parts(new_h_buf.contents() as *const f32, hidden) };
+        assert!(
+            out.iter().all(|v| v.is_finite()),
+            "non-finite combine output"
+        );
+        assert!(
+            out.iter().any(|&v| v.abs() > 1e-6),
+            "combine wrote an all-zero buffer — vacuous dispatch"
+        );
+    }
+
     /// `layer.moe.is_none()` is the first precondition check — must
     /// bail out before touching the command buffer/encoder at all.
     #[test]
