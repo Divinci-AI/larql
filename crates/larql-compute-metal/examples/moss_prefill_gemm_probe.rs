@@ -24,7 +24,7 @@ fn main() {
 
 #[cfg(target_os = "macos")]
 fn main() {
-    use larql_compute::backend::{ComputeBackend, MatMul, QuantMatVec};
+    use larql_compute::backend::{MatMul, QuantMatVec};
     use larql_compute::cpu::ops::q4_common::quantize_q4_k;
     use ndarray::Array2;
     use std::time::Instant;

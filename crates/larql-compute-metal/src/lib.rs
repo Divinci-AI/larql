@@ -88,6 +88,7 @@ mod direct_ops;
 mod f32_ops;
 #[cfg(target_os = "macos")]
 mod moe_dispatch;
+#[cfg(target_os = "macos")]
 mod moe_zero_copy;
 #[cfg(target_os = "macos")]
 mod pipeline;
