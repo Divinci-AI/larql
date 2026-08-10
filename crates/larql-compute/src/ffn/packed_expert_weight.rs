@@ -342,23 +342,20 @@ mod tests {
         assert!(out.iter().all(|v| v.is_finite()));
     }
 
-    /// **The layout declaration is load-bearing, not metadata.**
+    /// Fingerprint every axis of the fused operand.
     ///
-    /// Same expert bytes, same router, same experts selected — only the rule
-    /// for which fused row is gate and which is up differs. On the real model
-    /// this separates 0.002% agreement with the HF reference from 89.7%
-    /// disagreement, and note what it does *not* do: the wrong reading stays
-    /// finite. It does not crash, it computes a different model. That is why
-    /// this has to be declared rather than inferred.
-    /// Give every fused row its own constant value, so gate rows and up rows
-    /// are distinguishable.
+    /// A representation test has to contain data that separates every
+    /// hypothesis it claims to discriminate. The shared fixture fills
+    /// `gate_up` from `i & 0xff`, which is periodic across the row block, so
+    /// contiguous and interleaved read *identical numbers* through it — the
+    /// first version of the control below passed with `max|delta| == 0`,
+    /// proving nothing at all.
     ///
-    /// The shared fixture fills `gate_up` from `i & 0xff`, which is periodic
-    /// across the row block — under that pattern both layouts read the *same*
-    /// numbers and this test passes while proving nothing. A fixture too
-    /// regular to separate the hypotheses is an absent test, so the bytes are
-    /// replaced here rather than borrowed.
-    fn stamp_rows_per_value(weights: &mut larql_models::ModelWeights) {
+    /// A value that varies only with `(expert, row)` fixes that one case and
+    /// still cannot see a transpose or a column-stride error, so the stamp is
+    /// a function of all three axes. Accidental symmetry in a fixture is how
+    /// a permutation, stride, transpose or interleave mistake stays invisible.
+    fn stamp_per_axis_fingerprint(weights: &mut larql_models::ModelWeights) {
         let arch = &*weights.arch;
         let (hidden, inter, experts) = (
             weights.hidden_size,
@@ -370,13 +367,23 @@ mod tests {
             .raw_bytes
             .get_mut(&key)
             .expect("fixture stores gate_up in raw_bytes");
+        let rows = FUSED_BRANCHES * inter;
         for e in 0..experts {
-            for r in 0..FUSED_BRANCHES * inter {
-                // Distinct per (expert, row); small so the block stays finite.
-                let v = 0.05 + 0.01 * ((e * FUSED_BRANCHES * inter + r) % 17) as f32;
-                let be = ((v.to_bits() >> 16) as u16).to_le_bytes();
+            for r in 0..rows {
                 for j in 0..hidden {
-                    let idx = ((e * FUSED_BRANCHES * inter + r) * hidden + j) * BF16_BYTES;
+                    // Multiplicative, so each axis leaves a signature the
+                    // others cannot mask. A purely additive stamp fails here:
+                    // summed over `hidden`, every row's dot product comes out
+                    // nearly equal and permuting rows moves the result by
+                    // 0.03% — under the bar, and the control goes green while
+                    // barely discriminating. Row amplitude therefore spans ~3x
+                    // (so a row permutation is unmissable) while the column
+                    // term keeps a stride or transpose error visible.
+                    let row_amp = 0.02 + 0.04 * ((e * 5 + r * 13) % 11) as f32 / 11.0;
+                    let col_sig = 0.6 + 0.8 * ((j * 7) % 13) as f32 / 13.0;
+                    let v = row_amp * col_sig;
+                    let be = ((v.to_bits() >> 16) as u16).to_le_bytes();
+                    let idx = ((e * rows + r) * hidden + j) * BF16_BYTES;
                     blob[idx] = be[0];
                     blob[idx + 1] = be[1];
                 }
@@ -384,10 +391,18 @@ mod tests {
         }
     }
 
+    /// **The layout declaration is load-bearing, not metadata.**
+    ///
+    /// Same expert bytes, same router, same experts selected — only the rule
+    /// for which fused row is gate and which is up differs. On the real model
+    /// this separates 0.002% agreement with the HF reference from 89.7%
+    /// disagreement, and note what it does *not* do: the wrong reading stays
+    /// finite. It does not crash, it computes a different model. That is why
+    /// this has to be declared rather than inferred.
     #[test]
     fn reading_the_wrong_fused_layout_changes_the_result() {
         let mut weights = make_test_gemma4_moe_weights();
-        stamp_rows_per_value(&mut weights);
+        stamp_per_axis_fingerprint(&mut weights);
         let ffn = PackedExpertWeightFfn { weights: &weights };
         let x = input(&weights, 3);
 
