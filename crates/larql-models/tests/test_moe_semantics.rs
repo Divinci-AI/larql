@@ -7,7 +7,7 @@
 //! These tests make the declarations mandatory and pin the specific inference
 //! rule that broke.
 
-use larql_models::{detect_from_json, ExpertFormat, ModelArchitecture};
+use larql_models::{detect_from_json, ExpertFormat, ModelArchitecture, MoeRouterKind};
 use serde_json::json;
 
 /// The Gemma-spelled substrings the safetensors loader used to match on when
@@ -123,5 +123,18 @@ fn granite_packed_keys_are_invisible_to_the_gemma_substring_rule() {
         !gate_up.contains(GEMMA_GATE_UP_SUBSTRING) && !down.contains(GEMMA_DOWN_SUBSTRING),
         "granite keys must not be reachable by Gemma's spelling — that they \
          are not is exactly why a substring rule silently dropped them"
+    );
+}
+
+/// `GraniteMoeTopKGating` selects then softmaxes over the selection, so the
+/// chosen weights sum to 1. The inherited default softmaxes over all experts
+/// and takes the top-k as they are. On the real 1B-A400M that difference is
+/// 49.762% of bits/char against the HF reference, with *identical* expert
+/// selection on all 294 tokens — the weights alone.
+#[test]
+fn granite_declares_select_then_normalise_routing() {
+    assert_eq!(
+        granite_moe().moe_router_kind(),
+        MoeRouterKind::TopKThenSoftmax
     );
 }
