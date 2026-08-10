@@ -527,6 +527,65 @@ mod tests {
         };
         let ictx = InlineMoeCtx::new(&scratch, 1e-6);
 
+        // Temporary diagnostic: replicate every `try_inline_zero_copy_moe`
+        // precondition by hand and print the verdict, because manual
+        // arithmetic on the Q4_K block sizing (row_bytes/gate_up_cols) kept
+        // checking out on paper while the real function still bailed to
+        // `false` on CI — something in this reasoning chain is wrong and
+        // hand-deriving it further is no longer trustworthy. This block is
+        // removed once the actual mismatch is identified.
+        {
+            let moe_ref = layer.moe.as_ref().unwrap();
+            eprintln!("DIAG layer.ffn_is_remote={}", layer.ffn_is_remote);
+            eprintln!("DIAG ctx.defer_ffn_for_split={}", ctx.defer_ffn_for_split);
+            eprintln!("DIAG ctx.stage_timing_split={}", ctx.stage_timing_split);
+            eprintln!("DIAG layer.has_dense_ffn()={}", layer.has_dense_ffn());
+            eprintln!(
+                "DIAG post_expert_norm={:?}",
+                moe_ref.routing_policy.post_expert_norm
+            );
+            eprintln!(
+                "DIAG layer.moe_combined_output_norm={}",
+                layer.moe_combined_output_norm
+            );
+            eprintln!("DIAG layer.layer_scalar={}", layer.layer_scalar);
+            eprintln!(
+                "DIAG ctx.layer_in_snapshot.is_some()={}",
+                ctx.layer_in_snapshot.is_some()
+            );
+            eprintln!(
+                "DIAG ctx.dump_l0_dir.is_some()={}",
+                ctx.dump_l0_dir.is_some()
+            );
+            eprintln!("DIAG moe.gate_rule={:?}", moe_ref.gate_rule);
+            eprintln!(
+                "DIAG experts_gate_up_bias.is_empty()={} experts_down_bias.is_empty()={}",
+                moe_ref.experts_gate_up_bias.is_empty(),
+                moe_ref.experts_down_bias.is_empty()
+            );
+            eprintln!(
+                "DIAG moe.top_k={} scratch.top_k={}",
+                moe_ref.top_k, scratch.top_k
+            );
+            eprintln!(
+                "DIAG moe.intermediate_size={} scratch.inter={}",
+                moe_ref.intermediate_size, scratch.inter
+            );
+            eprintln!(
+                "DIAG ctx.hidden={} scratch.hidden={}",
+                ctx.hidden, scratch.hidden
+            );
+            eprintln!(
+                "DIAG moe.expert_data_format={:?} scratch.format={:?}",
+                moe_ref.expert_data_format, scratch.format
+            );
+            eprintln!(
+                "DIAG moe.gate_up_cols(hidden)={} scratch.weight_cols={}",
+                moe_ref.gate_up_cols(hidden),
+                scratch.weight_cols
+            );
+        }
+
         let h_post_attn_data = synth(hidden, 0.9);
         let h_post_attn_buf = m.bufs.transient_from_f32(&h_post_attn_data);
         let new_h_buf = m.bufs.transient_from_f32(&vec![0.0f32; hidden]);
@@ -598,7 +657,11 @@ mod tests {
     #[test]
     fn try_inline_zero_copy_moe_returns_false_without_moe_layer() {
         let m = backend();
-        let hidden = 64usize;
+        // `MoeScratch::new` debug-asserts `weight_cols.is_multiple_of(block)`
+        // (Q4_K block = 256 elements) unconditionally, before this test's
+        // early-return path is ever reached — must be a block multiple even
+        // though the actual dispatch never runs.
+        let hidden = 256usize;
         let layer = FullPipelineLayer {
             moe: None,
             ..Default::default()
