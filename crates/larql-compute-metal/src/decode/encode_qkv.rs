@@ -72,6 +72,11 @@ impl MetalBackend {
         bufs: QkvBufs<'_>,
         dims: QkvDims,
         input_already_normed: bool,
+        // True when `attn_fused_will_fire` says the fused attention
+        // kernel will apply the Q/K/V projection biases itself — the
+        // separate bias_add dispatches below must then be SKIPPED or the
+        // biases apply twice. Same shared authority both sites consult.
+        qkv_bias_deferred: bool,
     ) {
         // The QKV plan (kernel route + input encoding) from the full
         // (wq, wk, wv) triple — the same authority the prefill and
@@ -158,6 +163,9 @@ impl MetalBackend {
         // append downstream read the biased values — the same points the
         // CPU reference (`forward::add_bias`) applies them. Dispatched
         // only when present; bias-free layers encode nothing extra.
+        if qkv_bias_deferred {
+            return;
+        }
         for (bias, out, n) in [
             (layer.attn_q_bias, bufs.q_out, dims.layer_q_dim),
             (layer.attn_k_bias, bufs.k_out, dims.layer_kv_dim),

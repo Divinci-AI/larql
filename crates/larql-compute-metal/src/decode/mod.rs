@@ -525,6 +525,12 @@ impl MetalBackend {
             // shaders (uniform / mixed Q4K+Q6K-V / per-projection
             // fallback); Q4_0 routes through fused norm+Q8 then
             // Q8 QKV. Implementation lives in `encode_qkv.rs`.
+            //
+            // When the fully-fused attention kernel will fire, it applies
+            // the Q/K/V projection biases itself — the QKV stage must
+            // skip its bias dispatches (shared `attn_fused_will_fire`
+            // authority; disagreement = biases applied twice).
+            let qkv_bias_deferred = self.attn_fused_will_fire(layer, kv_cache, l);
             self.encode_input_norm_and_qkv(
                 &enc,
                 layer,
@@ -553,6 +559,7 @@ impl MetalBackend {
                     norm_offset,
                 },
                 prelayer_norm_active,
+                qkv_bias_deferred,
             );
 
             // ── Steps 1.5–5: attention block ──
