@@ -174,6 +174,59 @@ fn window_start(causal_len: usize, window: Option<usize>) -> usize {
     }
 }
 
+/// The prefill-shaped GQA plan: per head, one `[S, d] × [d, S]` scores
+/// GEMM, causal (optionally windowed) row-wise softmax, one
+/// `[S, S] × [S, d]` output GEMM.
+///
+/// Numerics relative to the per-position loop: the softmax is the
+/// *identical* function on identically-ordered slices; only the two
+/// GEMMs may reorder their `d`-length accumulations relative to the
+/// loop's gemvs. Rows outside `[window_start, qi]` are zeroed after
+/// the softmax so the output GEMM never reads them.
+#[allow(clippy::too_many_arguments)]
+fn gqa_attention_batched(
+    q: &Array2<f32>,
+    k: &Array2<f32>,
+    v: &Array2<f32>,
+    num_q: usize,
+    head_dim: usize,
+    reps: usize,
+    scale: f64,
+    seq_len: usize,
+    softcap: Option<f32>,
+    window: Option<usize>,
+) -> Array2<f32> {
+    let mut out = Array2::<f32>::zeros((seq_len, num_q * head_dim));
+    let scale_f32 = scale as f32;
+    for h in 0..num_q {
+        let kv_h = h / reps;
+        let q_off = h * head_dim;
+        let kv_off = kv_h * head_dim;
+        let q_head = q.slice(ndarray::s![.., q_off..q_off + head_dim]);
+        let k_head = k.slice(ndarray::s![.., kv_off..kv_off + head_dim]);
+        let v_head = v.slice(ndarray::s![.., kv_off..kv_off + head_dim]);
+
+        let mut scores = q_head.dot(&k_head.t());
+        match softcap {
+            Some(cap) => scores.mapv_inplace(|s| (s * scale_f32 / cap).tanh() * cap),
+            None => scores.mapv_inplace(|s| s * scale_f32),
+        }
+        for qi in 0..seq_len {
+            let causal_len = qi + 1;
+            let start = window_start(causal_len, window);
+            let mut row = scores.row_mut(qi);
+            let row_slice = row.as_slice_mut().expect("row-major scores");
+            super::softmax::softmax_in_place(&mut row_slice[start..causal_len], None);
+            row_slice[..start].fill(0.0);
+            row_slice[causal_len..].fill(0.0);
+        }
+        let head_out = scores.dot(&v_head);
+        out.slice_mut(ndarray::s![.., q_off..q_off + head_dim])
+            .assign(&head_out);
+    }
+    out
+}
+
 /// Shared body for every causal-GQA entry point. `pub(crate)` so the
 /// per-layer prefill seam in [`super::block`] can pass a sliding
 /// `window` without another public overload per capture mode.
@@ -197,6 +250,23 @@ pub(crate) fn gqa_attention_capture(
     Option<AttentionWeights>,
     Option<AttentionAllWeights>,
 ) {
+    // Prefill fast path — the physical-planning rule (`ROADMAP.md`)
+    // applied to attention: at multi-row shape the per-position gemv
+    // loop below costs one BLAS call per (head × position) twice over
+    // (~300k calls on a 343-row prefill); batched it is two GEMMs per
+    // head. Semantics preserved exactly — the softmax runs the same
+    // element order on the same slices, and sliding windows mask rows
+    // of the same GEMM (which keeps the SWA bit contract: a windowed
+    // and unwindowed prefill share one physical plan, so a non-binding
+    // window changes nothing). Diagnostic/capture, sink, and decode
+    // (seq 1) cases keep the loop unchanged.
+    if !capture_last && !capture_all && sinks.is_none() && seq_len > 1 {
+        let out = gqa_attention_batched(
+            q, k, v, num_q, head_dim, reps, scale, seq_len, softcap, window,
+        );
+        return (out, None, None);
+    }
+
     let mut out = Array2::<f32>::zeros((seq_len, num_q * head_dim));
     let mut captured_heads: Vec<Vec<f32>> = if capture_last {
         Vec::with_capacity(num_q)

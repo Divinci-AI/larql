@@ -578,7 +578,31 @@ row-vectorised f32 softmax, one [S,S]·[S,d] output GEMM — ~27 GFLOP
 at BLAS rates ≈ tens of ms) is the next implementation. Caution
 pinned in advance: any accumulation-order change must re-pass the
 step-4 dump gate (token-exact greedy parity), so the batched path
-lands behind that verification, not alongside it. Bonus
+lands behind that verification, not alongside it.
+
+**Batched attention prefill landed, token-exact** (2026-08-10,
+`attention/gqa::gqa_attention_batched`). Per head: one scores GEMM,
+causal/windowed row-wise softmax (the *same* f64 softmax on the same
+slices — parity-first, per the contract ladder), one output GEMM;
+sliding windows mask rows of the same GEMM, which keeps the SWA bit
+contract (a windowed and unwindowed prefill share one physical plan —
+the two SWA bit-identity tests caught exactly this before the window
+support was added, and pass with it). Capture/sink/decode shapes keep
+the loop. Gates: full attention suite (162), full crate suites, and
+**the step-4 dump gate token-exact — all 138 frames identical**
+through the GEMM reordering; no ladder-rung retreat needed. Measured
+(interleaved, clean runs): prefill 1.50 → **1.27-1.29 s**, TTFA
+1530 → **~1.32 s**, steady-state p50 33 ms / RTF 1.73. The surviving
+term inside attention is the f64-`exp` softmax kept for parity
+(~26M exps ≈ 0.3 s): the next rung is a vectorised f32 softmax,
+admitted only through another dump-gate re-pass — if exactness breaks
+there, the contract ladder (logit tolerance + same greedy choices)
+gets its first real decision. Also re-read honestly: yesterday's
+86.4 s dump-gate wall time was a contaminated reading — today's
+clean 28.9 s is the fp32 loop's true rate (decode untouched by this
+change). TTFA budget now: ~0.86 s FFN GEMM (Metal simdgroup target
+~0.2 s) + ~0.3 s f64 softmax (f32 vectorisation next) + ~0.15 s
+remainder. Bonus
 diagnostic, twice confirmed: during stall episodes the BLAS-phase
 prefill holds (1.58 s) while spin-pool decode collapses (9.4 fps, max
 frame 1008 ms) — the episodic interference selectively degrades
