@@ -21,6 +21,7 @@ pub mod recipe_cmd;
 pub mod rm_cmd;
 pub mod run_cmd;
 pub mod run_cmd_image;
+pub mod run_cmd_speak;
 pub mod shannon_cmd;
 pub mod shannon_trace;
 pub mod show_cmd;

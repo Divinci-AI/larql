@@ -11,6 +11,7 @@ pub mod expert_weight;
 pub mod observe;
 #[cfg(test)]
 mod observe_tests;
+pub mod q4k_weight;
 pub mod weight;
 
 pub use expert_weight::ExpertWeightFfn;

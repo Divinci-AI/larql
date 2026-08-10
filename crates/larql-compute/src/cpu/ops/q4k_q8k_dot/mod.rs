@@ -34,6 +34,7 @@
 mod common;
 mod dispatch;
 mod gate_up;
+mod gemm;
 #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
 mod q4k_asm;
 #[cfg(target_arch = "x86_64")]
@@ -53,6 +54,7 @@ pub use dispatch::{q4k_q8k_matvec_into, q4k_q8k_matvec_parallel};
 pub use gate_up::q4k_q8k_gate_up_into;
 #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
 pub use gate_up::{q4k_q8k_gate_up_asm, q4k_q8k_gate_up_neon};
+pub use gemm::q4k_q8k_gemm_into;
 #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
 #[doc(hidden)]
 pub use q4k_asm::q4k_sb_sum1_asm;

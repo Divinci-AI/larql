@@ -358,6 +358,17 @@ impl From<ChatArgs> for run_cmd::RunArgs {
             // ChatArgs struct will grow its own --image flag.
             image: Vec::new(),
             mm_weights: None,
+            // Chat is text-only today; speech arrives via `run --speak`
+            // (and later a chat session feeding the speech stream).
+            speak: false,
+            voice: None,
+            codec_cmd: None,
+            speech_out: None,
+            play: false,
+            max_frames: 0,
+            greedy: false,
+            seed: 0,
+            q4: false,
         }
     }
 }

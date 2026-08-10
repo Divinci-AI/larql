@@ -14,6 +14,60 @@ fn small(rows: usize, cols: usize, scale: f32) -> Array2<f32> {
     Array2::from_shape_vec((rows, cols), data).unwrap()
 }
 
+/// Deterministic pseudo-random matrix with sign variation (the `small`
+/// helper is monotone, which softmax flattens — parity needs contrast).
+fn varied(rows: usize, cols: usize, seed: u32) -> Array2<f32> {
+    Array2::from_shape_fn((rows, cols), |(r, c)| {
+        let x = (r as u32)
+            .wrapping_mul(31)
+            .wrapping_add((c as u32).wrapping_mul(7))
+            .wrapping_add(seed)
+            .wrapping_mul(2654435761);
+        (x >> 16) as f32 / 65536.0 - 0.5
+    })
+}
+
+/// The batched prefill plan must match the per-position loop. The loop
+/// is forced by requesting capture (which the fast path declines), so
+/// the two physical plans of the same logical operator face each other.
+fn assert_batched_matches_loop(seq: usize, nq: usize, nkv: usize, hd: usize, softcap: Option<f32>) {
+    let reps = nq / nkv;
+    let scale = 1.0 / (hd as f64).sqrt();
+    let q = varied(seq, nq * hd, 1);
+    let k = varied(seq, nkv * hd, 2);
+    let v = varied(seq, nkv * hd, 3);
+
+    let (batched, none_weights, _) = gqa_attention_capture(
+        &q, &k, &v, nq, hd, reps, scale, seq, false, false, softcap, None, None,
+    );
+    assert!(none_weights.is_none(), "fast path captures nothing");
+    let (looped, _, _) = gqa_attention_capture(
+        &q, &k, &v, nq, hd, reps, scale, seq, true, false, softcap, None, None,
+    );
+
+    let mut worst = 0.0f32;
+    for (&a, &b) in batched.iter().zip(looped.iter()) {
+        worst = worst.max((a - b).abs());
+    }
+    assert!(
+        worst < 1e-5,
+        "batched vs loop drifted: worst |delta| = {worst:e} \
+         (seq {seq}, nq {nq}, nkv {nkv}, hd {hd}, softcap {softcap:?})"
+    );
+}
+
+#[test]
+fn batched_prefill_matches_loop_across_shapes() {
+    assert_batched_matches_loop(9, 4, 2, 8, None);
+    assert_batched_matches_loop(17, 2, 1, 4, None);
+    assert_batched_matches_loop(5, 3, 3, 8, None); // MHA (reps 1)
+}
+
+#[test]
+fn batched_prefill_matches_loop_with_softcap() {
+    assert_batched_matches_loop(11, 4, 2, 8, Some(30.0));
+}
+
 // seq=4, num_q=2, head_dim=4, num_kv=1, reps=2
 fn run(seq: usize) -> Array2<f32> {
     let hd = 4usize;

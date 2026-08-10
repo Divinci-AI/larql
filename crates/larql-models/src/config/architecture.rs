@@ -58,6 +58,20 @@ pub trait ModelArchitecture: Send + Sync {
         "embed_tokens.weight"
     }
 
+    /// Whether the model has a text output projection at all — a
+    /// standalone `lm_head.weight` or one tied to the embedding matrix.
+    /// `true` for every text LM. `false` for models whose backbone's only
+    /// product is its final hidden state (MOSS-TTS-Realtime: the output
+    /// heads live in a side-loaded audio depth transformer, and
+    /// `tie_word_embeddings` semantics do not apply). When `false`, the
+    /// safetensors loader stores the embedding as a placeholder head that
+    /// must never be sampled from; it becomes properly optional when
+    /// generation output moves behind the output-adapter seam
+    /// (`docs/tts-funnel.md` §3 step 4).
+    fn has_lm_head(&self) -> bool {
+        true
+    }
+
     /// Learned positional-embedding tensor key, when the architecture uses
     /// absolute learned position embeddings added to the token embedding at
     /// the input (GPT-2). Architectures that use rotary or no positional

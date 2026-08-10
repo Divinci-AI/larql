@@ -47,6 +47,7 @@ larql> INFER "The capital of France is" TOP 3;
 - [Patches](#patches)
 - [Vindexfile](#vindexfile)
 - [Model Support](#model-support)
+- [Realtime speech (MOSS-TTS-Realtime)](#realtime-speech-moss-tts-realtime)
 - [Benchmarks](#benchmarks)
     - [Vindex Operations](#vindex-operations)
     - [Inference Engine (Gemma 3 4B, Apple Silicon M3 Max)](#inference-engine-gemma-3-4b-apple-silicon-m3-max)
@@ -673,6 +674,7 @@ Input formats: **safetensors** (HuggingFace), **GGUF** (llama.cpp, dequantized t
 | DeepSeek | DeepSeek V2/V3 | MoE (shared + routed) |
 | GPT-OSS | GPT-OSS-20B/120B | MoE (32/128 experts, MXFP4 → Q6_K lossless) |
 | GPT-2 | GPT-2 (117M-1.5B) | Standard (GELU-tanh, vindex extraction only) |
+| MOSS-TTS-Realtime | 2.3B speech (RVQ audio tokens out) | Gated (SiLU) ×2 + depth transformer — see [Realtime speech](#realtime-speech-moss-tts-realtime) |
 
 Dense and full-precision MoE models support all operations (DESCRIBE, WALK, INFER). MXFP4-quantized MoE models (GPT-OSS) can be extracted and served but DESCRIBE/WALK produce noisy results due to 4-bit weight precision — use INFER for accurate knowledge queries. See [operations spec](crates/larql-vindex/docs/operations-spec.md) for details.
 
@@ -696,6 +698,48 @@ the fused `attn_qkv` projection into per-head q/k/v, and surfaces learned
 inference still requires wiring `position_embed` into the residual init and
 the LayerNorm-with-bias / FFN-with-bias paths through the run-time stack;
 extraction-only flows (DESCRIBE, KNN, vindex publish) work today.
+
+## Realtime speech (MOSS-TTS-Realtime)
+
+LARQL executes the generative half of
+[MOSS-TTS-Realtime](https://github.com/OpenMOSS/MOSS-TTS) — text tokens
+in, 16-codebook RVQ audio tokens out — as an ordinary model in the same
+engine, **with per-token parity against the reference implementation**
+(the full greedy 138-frame fixture replays token-exactly; the sampler
+replicates the reference's non-standard top-p literally). The codec
+stays external: LARQL emits audio tokens, `--codec-cmd` turns them into
+a WAV.
+
+```bash
+# Speak, cloning the voice in aru-12.tokens (codec-encoded reference audio)
+larql run <moss-tts-realtime-dir> --speak "Good evening. All systems are normal." \
+  --voice aru-12.tokens --q4 \
+  --codec-cmd 'python moss_codec_cli.py {tokens} {wav}' --play
+```
+
+Measured on M3 Max CPU (Q4_K weights, quiet machine, interleaved runs —
+see `docs/tts-funnel.md` for the full gate log and methodology):
+
+| Metric | Value |
+|---|---|
+| Steady-state generation | ~31 ms/frame p50 vs the 80 ms frame budget (**~1.9× realtime**) |
+| First-turn TTFA | ~1.25 s (prefill-dominated; `<500 ms` gate in progress) |
+| Streaming envelope | 0 ms minimum pre-buffer, zero cold-start underruns |
+| Incremental ≡ batch | token-identical at every text chunking (gated in CI + on-checkpoint) |
+
+The incremental session (`MossSession`) implements the reference's
+push-text protocol — text ids in as they become available, frames out as
+they are earned — so an LLM's token stream and a typed prompt are the
+same input. Honest scope note: these are speech-**token** generation
+numbers; end-to-end audio (incremental codec + PCM ring + device
+output) is tracked separately on the roadmap.
+
+Speech also drove a general engine rule now used across LARQL
+(`ROADMAP.md`, "physical planning"): the same logical operator gets
+different physical plans per execution phase — packed Q4K·Q8K integer
+matvec for single-row decode, dequant-once + BLAS GEMM and batched
+attention for multi-row prefill — selected by measured shape, not
+tensor format. All of it behind the same token-exact parity oracle.
 
 ## Benchmarks
 

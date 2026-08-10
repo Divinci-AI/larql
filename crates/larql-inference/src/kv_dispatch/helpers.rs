@@ -84,6 +84,7 @@ fn ffn_or_moe_layer(
     ffn: &dyn FfnBackend,
     ple_input: Option<&Array2<f32>>,
 ) -> Result<Array2<f32>, BoxRefusal> {
+    let phase = larql_compute::phase_timing::start();
     // Pure MoE (GPT-OSS, GraniteMoE, OLMoE) takes this hook exactly as
     // hybrid does — its FFN *is* the expert block. Gating on hybrid alone
     // sent pure-MoE layers to the dense `run_ffn` below, which asks for
@@ -93,12 +94,14 @@ fn ffn_or_moe_layer(
         // backend does not serve the layer and the local dispatch below is the
         // correct answer — never a refusal wearing its shape.
         if let Some(h_out) = ffn.forward_moe_full_layer(layer, h_post_attn)? {
+            larql_compute::phase_timing::finish(phase, "layer.ffn_block");
             return Ok(h_out);
         }
     }
     let (h_post_ffn, _) = run_ffn(&weights, h_post_attn, layer, ffn, false);
     let mut h_out = apply_per_layer_embedding(&weights, &h_post_ffn, layer, ple_input);
     apply_layer_scalar(&weights, &mut h_out, layer);
+    larql_compute::phase_timing::finish(phase, "layer.ffn_block");
     Ok(h_out)
 }
 
@@ -127,7 +130,15 @@ pub fn kv_prefill_via_dispatch(
         return Ok(None);
     }
     let h = embed_tokens_pub(&weights, prompt_ids);
-    kv_prefill_from_hidden_via_dispatch(backend, weights, ffn, &h, Some(prompt_ids), window, index)
+    kv_prefill_from_hidden_via_dispatch(
+        backend,
+        weights,
+        ffn,
+        &h,
+        Some(prompt_ids),
+        window,
+        index.map(|v| v as &dyn larql_compute::KvIndex),
+    )
 }
 
 /// Multi-modal-aware peer of [`kv_prefill_via_dispatch`]. Takes
@@ -154,7 +165,7 @@ pub fn kv_prefill_from_hidden_via_dispatch(
     initial_hidden: &Array2<f32>,
     token_ids: Option<&[u32]>,
     window: Option<usize>,
-    index: Option<&larql_vindex::VectorIndex>,
+    index: Option<&dyn larql_compute::KvIndex>,
 ) -> DispatchOutcome<PrefilledCache> {
     if initial_hidden.nrows() == 0 {
         return Ok(None);
@@ -173,13 +184,9 @@ pub fn kv_prefill_from_hidden_via_dispatch(
         let _t_attn = std::time::Instant::now();
         // A declining backend is not a refusal — it is this dispatch having no
         // answer, which is what `Ok(None)` has always meant to the engine.
-        let Some((h_post_attn, mut handle)) = backend.attention_prefill(
-            weights,
-            &h,
-            layer,
-            window,
-            index.map(|v| v as &dyn larql_compute::KvIndex),
-        ) else {
+        let Some((h_post_attn, mut handle)) =
+            backend.attention_prefill(weights, &h, layer, window, index)
+        else {
             return Ok(None);
         };
         crate::decode_stages::record_attn(_t_attn.elapsed().as_nanos());
@@ -249,6 +256,58 @@ pub fn kv_decode_step_via_dispatch(
     Ok(Some(h_step))
 }
 
+/// Run one autoregressive decode step whose input is a pre-built hidden
+/// row rather than a token id — the decode-time peer of
+/// [`kv_prefill_from_hidden_via_dispatch`], closing the seam ADR-0023
+/// deferred ("decode is text-out by definition" stopped being true with
+/// MOSS-TTS-Realtime, whose step input is a 17-table summed embedding).
+///
+/// Identical to [`kv_decode_step_via_dispatch`] except the embedding
+/// lookup is the caller's, and there are no PLE inputs: per-layer
+/// embeddings are token-keyed, so an architecture with
+/// `has_per_layer_embeddings` cannot take this path (callers must not
+/// route PLE models here).
+#[allow(clippy::too_many_arguments)]
+pub fn kv_decode_step_from_hidden_via_dispatch(
+    backend: &dyn EngineBackend,
+    weights: larql_models::WeightsView,
+    ffn: &dyn FfnBackend,
+    handles: &mut [KvHandle],
+    hidden_row: &Array2<f32>,
+    abs_position: usize,
+    window: Option<usize>,
+    index: Option<&dyn larql_compute::KvIndex>,
+) -> DispatchOutcome<Array2<f32>> {
+    let num_layers = weights.num_layers;
+    debug_assert_eq!(
+        handles.len(),
+        num_layers,
+        "kv_decode_step_from_hidden_via_dispatch: handles.len() must equal weights.num_layers"
+    );
+    debug_assert_eq!(
+        hidden_row.nrows(),
+        1,
+        "kv_decode_step_from_hidden_via_dispatch: expects exactly one new row"
+    );
+    let mut h_step = hidden_row.clone();
+
+    for (layer, handle) in handles.iter_mut().enumerate().take(num_layers) {
+        let _t_attn = std::time::Instant::now();
+        let Some(h_post_attn) =
+            backend.attention_step(weights, &h_step, handle, layer, abs_position, index)
+        else {
+            return Ok(None);
+        };
+        crate::decode_stages::record_attn(_t_attn.elapsed().as_nanos());
+        if let Some(w) = window {
+            backend.clip_kv(handle, w);
+        }
+        h_step = ffn_or_moe_layer(weights, &h_post_attn, layer, ffn, None)?;
+    }
+
+    Ok(Some(h_step))
+}
+
 // ── Async variants ──────────────────────────────────────────────────
 //
 // Mirror the sync helpers above but drive the per-layer loop through
@@ -286,7 +345,7 @@ pub fn kv_prefill_via_dispatch_async(
         &h,
         Some(prompt_ids),
         window,
-        index,
+        index.map(|v| v as &dyn larql_compute::KvIndex),
     )
 }
 
@@ -306,7 +365,7 @@ pub fn kv_prefill_from_hidden_via_dispatch_async(
     initial_hidden: &Array2<f32>,
     token_ids: Option<&[u32]>,
     window: Option<usize>,
-    index: Option<&larql_vindex::VectorIndex>,
+    index: Option<&dyn larql_compute::KvIndex>,
 ) -> DispatchOutcome<PrefilledCache> {
     if initial_hidden.nrows() == 0 {
         return Ok(None);
@@ -322,13 +381,8 @@ pub fn kv_prefill_from_hidden_via_dispatch_async(
     };
 
     for layer in 0..num_layers {
-        let (h_post_attn_handle, mut handle) = backend.attention_prefill_async(
-            weights,
-            &h,
-            layer,
-            window,
-            index.map(|v| v as &dyn larql_compute::KvIndex),
-        );
+        let (h_post_attn_handle, mut handle) =
+            backend.attention_prefill_async(weights, &h, layer, window, index);
         if let Some(w) = window {
             // Sync clip — backends with deferred dispatch must flush
             // before clip per spec §11.3.
@@ -388,6 +442,44 @@ pub fn kv_decode_step_via_dispatch_async(
         }
         let h_post_attn = backend.read_hidden(h_post_attn_handle);
         h_step = ffn_or_moe_layer(weights, &h_post_attn, layer, ffn, ple_inputs.get(layer))?;
+    }
+
+    if backend.flush().is_err() {
+        return Ok(None);
+    }
+    Ok(Some(h_step))
+}
+
+/// Async mirror of [`kv_decode_step_from_hidden_via_dispatch`] — same
+/// contract, driven through [`AsyncComputeBackend`]. No PLE inputs, as
+/// with the sync variant.
+#[allow(clippy::too_many_arguments)]
+pub fn kv_decode_step_from_hidden_via_dispatch_async(
+    backend: &dyn AsyncComputeBackend,
+    weights: larql_models::WeightsView,
+    ffn: &dyn FfnBackend,
+    handles: &mut [KvHandle],
+    hidden_row: &Array2<f32>,
+    abs_position: usize,
+    window: Option<usize>,
+    index: Option<&dyn larql_compute::KvIndex>,
+) -> DispatchOutcome<Array2<f32>> {
+    let num_layers = weights.num_layers;
+    debug_assert_eq!(
+        handles.len(),
+        num_layers,
+        "kv_decode_step_from_hidden_via_dispatch_async: handles.len() must equal weights.num_layers"
+    );
+    let mut h_step = hidden_row.clone();
+
+    for (layer, handle) in handles.iter_mut().enumerate().take(num_layers) {
+        let h_post_attn_handle =
+            backend.attention_step_async(weights, &h_step, handle, layer, abs_position, index);
+        if let Some(w) = window {
+            backend.clip_kv(handle, w);
+        }
+        let h_post_attn = backend.read_hidden(h_post_attn_handle);
+        h_step = ffn_or_moe_layer(weights, &h_post_attn, layer, ffn, None)?;
     }
 
     if backend.flush().is_err() {
