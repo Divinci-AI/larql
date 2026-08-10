@@ -591,8 +591,10 @@ support was added, and pass with it). Capture/sink/decode shapes keep
 the loop. Gates: full attention suite (162), full crate suites, and
 **the step-4 dump gate token-exact — all 138 frames identical**
 through the GEMM reordering; no ladder-rung retreat needed. Measured
-(interleaved, clean runs): prefill 1.50 → **1.27-1.29 s**, TTFA
-1530 → **~1.32 s**, steady-state p50 33 ms / RTF 1.73. The surviving
+(three quiet-machine runs after the first set proved contaminated by
+concurrent user work — the discipline pays again): prefill 1.50 →
+**1.21-1.25 s**, TTFA 1530 → **~1.25 s**, steady-state p50 31 ms /
+RTF 1.91-1.96. The surviving
 term inside attention is the f64-`exp` softmax kept for parity
 (~26M exps ≈ 0.3 s): the next rung is a vectorised f32 softmax,
 admitted only through another dump-gate re-pass — if exactness breaks
