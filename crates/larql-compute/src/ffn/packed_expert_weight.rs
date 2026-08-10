@@ -30,6 +30,7 @@
 
 use larql_models::{GateUpBranch, GateUpLayout, ModelArchitecture, ModelWeights};
 use ndarray::{s, Array2, Axis};
+use std::path::PathBuf;
 
 use super::expert_weight::{gate, router};
 use super::{FfnActivations, FfnBackend};
@@ -250,6 +251,7 @@ impl<'a> PackedExpertWeightFfn<'a> {
 /// show that selection was innocent.
 struct RouteLog {
     layer: usize,
+    sink: Option<PathBuf>,
     rows: Option<Vec<String>>,
 }
 
@@ -257,9 +259,17 @@ impl RouteLog {
     fn open(layer: usize) -> Self {
         // Layer 0 only: the first routed FFN is where a router defect must
         // first appear, and later layers are downstream of it.
-        let on = layer == 0 && std::env::var_os(ROUTE_LOG_ENV).is_some();
+        Self::to_sink(layer, std::env::var_os(ROUTE_LOG_ENV).map(PathBuf::from))
+    }
+
+    /// The sink as a parameter rather than read from the environment, so a
+    /// test can drive the capture without mutating process-global state that
+    /// every other test in the binary shares.
+    fn to_sink(layer: usize, sink: Option<PathBuf>) -> Self {
+        let on = layer == 0 && sink.is_some();
         Self {
             layer,
+            sink,
             rows: on.then(Vec::new),
         }
     }
@@ -277,7 +287,7 @@ impl RouteLog {
     }
 
     fn flush(self, policy: larql_models::ExpertRoutingPolicy) {
-        let (Some(rows), Some(path)) = (self.rows, std::env::var_os(ROUTE_LOG_ENV)) else {
+        let (Some(rows), Some(path)) = (self.rows, self.sink) else {
             return;
         };
         let header = format!("{{\"layer\":{},\"policy\":\"{:?}\"}}", self.layer, policy);
@@ -458,5 +468,102 @@ mod tests {
             seen.sort_unstable();
             assert_eq!(seen, (0..8).collect::<Vec<_>>());
         }
+    }
+
+    /// The router also arrives as a `[experts, hidden]` tensor rather than a
+    /// flattened vector, depending on the loader path. Both readings must give
+    /// the same block — a row-major/column-major slip here would reroute every
+    /// token while still producing a finite result.
+    #[test]
+    fn router_resolves_identically_from_tensors_or_vectors() {
+        let from_vectors = make_test_gemma4_moe_weights();
+        let key = from_vectors.arch.moe_router_key(0).expect("router key");
+        let flat = from_vectors
+            .vectors
+            .get(&key)
+            .expect("fixture uses vectors")
+            .clone();
+
+        let mut from_tensors = make_test_gemma4_moe_weights();
+        let hidden = from_tensors.hidden_size;
+        let experts = flat.len() / hidden;
+        from_tensors.vectors.remove(&key);
+        from_tensors.tensors.insert(
+            key,
+            Array2::from_shape_vec((experts, hidden), flat)
+                .expect("router reshapes to [experts, hidden]")
+                .into_shared(),
+        );
+
+        let x = input(&from_vectors, 2);
+        let a = PackedExpertWeightFfn {
+            weights: &from_vectors,
+        }
+        .moe_block(0, &x)
+        .expect("vector router resolves");
+        let b = PackedExpertWeightFfn {
+            weights: &from_tensors,
+        }
+        .moe_block(0, &x)
+        .expect("tensor router resolves");
+        assert_eq!(a, b, "the two router homes must be the same matrix");
+    }
+
+    /// The `FfnBackend` surface itself — `forward` is what the scorer calls.
+    #[test]
+    fn forward_matches_the_block_and_reports_its_name() {
+        let weights = make_test_gemma4_moe_weights();
+        let ffn = PackedExpertWeightFfn { weights: &weights };
+        let x = input(&weights, 2);
+        assert_eq!(ffn.forward(0, &x), ffn.moe_block(0, &x).expect("resolves"));
+        let (observed, acts) = ffn.forward_observed(0, &x);
+        assert_eq!(observed, ffn.forward(0, &x));
+        assert!(matches!(acts, FfnActivations::Absent { .. }));
+        assert_eq!(ffn.name(), "packed-expert-weight-f32");
+    }
+
+    /// The router capture records ids *and* weights, and only for layer 0.
+    ///
+    /// This is the instrument that showed selection was innocent while the
+    /// weights moved, so it is worth pinning that it emits both — an id-only
+    /// capture would have missed the entire GraniteMoe effect.
+    #[test]
+    fn route_log_captures_ids_and_weights_for_layer_zero_only() {
+        let dir = std::env::temp_dir().join("larql_route_log_test");
+        std::fs::create_dir_all(&dir).expect("tmp dir");
+        let path = dir.join("layer0.jsonl");
+        let _ = std::fs::remove_file(&path);
+
+        let mut log = RouteLog::to_sink(0, Some(path.clone()));
+        log.record(0, &[(3usize, 0.75f32), (1, 0.25)]);
+        log.flush(larql_models::ExpertRoutingPolicy::NormalisedOverSelected);
+
+        let body = std::fs::read_to_string(&path).expect("capture written");
+        let mut lines = body.lines();
+        assert!(lines
+            .next()
+            .expect("header")
+            .contains("NormalisedOverSelected"));
+        let row = lines.next().expect("one token row");
+        assert!(row.contains("\"experts\":[3,1]"), "{row}");
+        assert!(
+            row.contains("0.750000000") && row.contains("0.250000000"),
+            "{row}"
+        );
+
+        // A later layer is downstream of the first router decision, so it is
+        // deliberately not captured even with a sink configured.
+        let path2 = dir.join("layer3.jsonl");
+        let _ = std::fs::remove_file(&path2);
+        let mut off = RouteLog::to_sink(3, Some(path2.clone()));
+        off.record(0, &[(1usize, 1.0f32)]);
+        off.flush(larql_models::ExpertRoutingPolicy::SoftmaxThenSelect);
+        assert!(!path2.exists(), "non-zero layers must not write a capture");
+
+        // No sink configured is the default path: nothing is written at all.
+        let mut none = RouteLog::to_sink(0, None);
+        none.record(0, &[(1usize, 1.0f32)]);
+        none.flush(larql_models::ExpertRoutingPolicy::SoftmaxThenSelect);
+        let _ = std::fs::remove_file(&path);
     }
 }
