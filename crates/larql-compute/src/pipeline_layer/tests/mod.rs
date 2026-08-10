@@ -7,6 +7,8 @@ use super::moe_build::moe_routing_policy;
 use super::*;
 use larql_models::test_fixtures::make_test_weights;
 
+mod moe_store;
+
 /// Capacity must accommodate the compaction trigger, not merely the
 /// window: occupancy is allowed to reach `SLACK * W` before
 /// compaction reclaims it, so a capacity of `W` would be an overrun
@@ -314,6 +316,39 @@ fn resolve_ffn_weights_returns_empty_stubs_when_q4_ffn_mmap_is_empty() {
     assert_eq!(gate.format(), QuantFormat::Q4_K);
     assert_eq!(up.format(), QuantFormat::Q4_K);
     assert_eq!(down.format(), QuantFormat::Q4_K);
+}
+
+/// The ordinary dense case: a non-empty interleaved mmap is cut into three
+/// equal per-matrix slices at `layer * 3 * per_matrix`.
+///
+/// Pinning the *offsets* rather than just the lengths is the point — the
+/// gate/up/down order and the per-layer stride are what a reader has to
+/// agree with, and a stride bug yields correctly-sized garbage.
+#[test]
+fn resolve_ffn_weights_slices_gate_up_down_at_the_layer_stride() {
+    struct EmptyIdx;
+    impl crate::KvIndex for EmptyIdx {}
+    let idx = EmptyIdx;
+    let per_matrix = 4usize;
+    // Three matrices per layer, two layers' worth.
+    let mmap: Vec<u8> = (0..(per_matrix * 3 * 2) as u8).collect();
+
+    let (gate, up, down) = resolve_ffn_weights(&idx, 1, &mmap, per_matrix, QuantFormat::Q4_K);
+
+    // Layer 1 starts one full layer (12 bytes) in.
+    assert_eq!(gate.data, &[12u8, 13, 14, 15]);
+    assert_eq!(up.data, &[16u8, 17, 18, 19]);
+    assert_eq!(down.data, &[20u8, 21, 22, 23]);
+
+    // Layer 0 is the first stride, and the format is carried through rather
+    // than re-derived per matrix.
+    let (gate0, up0, down0) = resolve_ffn_weights(&idx, 0, &mmap, per_matrix, QuantFormat::Q6_K);
+    assert_eq!(gate0.data, &[0u8, 1, 2, 3]);
+    assert_eq!(up0.data, &[4u8, 5, 6, 7]);
+    assert_eq!(down0.data, &[8u8, 9, 10, 11]);
+    assert_eq!(gate0.format(), QuantFormat::Q6_K);
+    assert_eq!(up0.format(), QuantFormat::Q6_K);
+    assert_eq!(down0.format(), QuantFormat::Q6_K);
 }
 
 // ── moe_build.rs: the Gemma 4 MoE fixture reaches the real branches ──
