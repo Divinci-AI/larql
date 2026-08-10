@@ -28,8 +28,8 @@ pub mod weight;
 
 pub use larql_compute::ffn::{
     expert_weight::resolvable as expert_weights_resolvable, gelu_tanh, gelu_tanh_gate_up, sigmoid,
-    silu_gate_up, ExpertWeightFfn, FfnActivations, FfnBackend, SparseActivations,
-    Q4K_Q8K_SUPERBLOCK_ELEMS,
+    silu_gate_up, ExpertWeightFfn, FfnActivations, FfnBackend, PackedExpertWeightFfn,
+    SparseActivations, Q4K_Q8K_SUPERBLOCK_ELEMS,
 };
 
 // ── Re-exports ──

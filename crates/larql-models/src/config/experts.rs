@@ -18,6 +18,62 @@ pub enum ExpertFormat {
     PackedBF16,
 }
 
+/// Which rows of a fused `gate_up` operand belong to the gate branch and
+/// which to the up branch.
+///
+/// **Orthogonal to [`ExpertFormat`], and deliberately so.** Two packed
+/// architectures already disagree, so "packed" cannot imply a layout:
+///
+/// | family     | reference split                        | layout             |
+/// |------------|----------------------------------------|--------------------|
+/// | GraniteMoE | `hidden_states.chunk(2, dim=-1)`       | `ContiguousHalves` |
+/// | GPT-OSS    | `gate_up[..., ::2], gate_up[..., 1::2]`| `Interleaved`      |
+///
+/// Reading one as the other does not fail — it silently mixes the two
+/// branches and produces plausible garbage, which is why this is a
+/// declaration rather than something a reader infers from a shape. It is
+/// also distinct from [`MoeWeightLayout`](../../../larql_compute/index.html),
+/// which describes down-projection *padding*; keeping the two names
+/// semantically narrow is deliberate.
+///
+/// This describes the **checkpoint's** operand. A representation transform
+/// (e.g. K3's MXFP4→Q6_K transcode) may canonicalise it on the way to an
+/// execution operand; when that happens the transform owns the invariant,
+/// not this declaration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GateUpLayout {
+    /// `[all gate rows | all up rows]` — the first half is gate.
+    ContiguousHalves,
+    /// `gate = rows[0], rows[2], …`, `up = rows[1], rows[3], …`.
+    Interleaved,
+}
+
+/// Which branch of a fused `gate_up` operand a row belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GateUpBranch {
+    Gate,
+    Up,
+}
+
+impl GateUpLayout {
+    /// Row index, within one expert's fused `gate_up` operand, holding
+    /// element `i` of `branch` — where the operand has `half` rows per
+    /// branch.
+    ///
+    /// This is the **entire** shared surface between the reference tier and
+    /// any execution path: an indexing rule, not an operation. Sharing a
+    /// `compute_gate_up()` helper instead would let one addressing bug make
+    /// oracle and engine agree with each other and disagree with reality.
+    pub const fn row(self, branch: GateUpBranch, i: usize, half: usize) -> usize {
+        match (self, branch) {
+            (Self::ContiguousHalves, GateUpBranch::Gate) => i,
+            (Self::ContiguousHalves, GateUpBranch::Up) => half + i,
+            (Self::Interleaved, GateUpBranch::Gate) => 2 * i,
+            (Self::Interleaved, GateUpBranch::Up) => 2 * i + 1,
+        }
+    }
+}
+
 /// How an expert's fused gate/up projection becomes the down projection's
 /// input.
 ///

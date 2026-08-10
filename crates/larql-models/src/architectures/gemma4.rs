@@ -15,7 +15,7 @@
 //! 2. `sliding_window_pattern` field (every Nth layer is full)
 //! 3. Default pattern of 6 (every 6th layer is full)
 
-use crate::config::{Activation, ExpertFormat, ModelArchitecture, ModelConfig};
+use crate::config::{Activation, ExpertFormat, GateUpLayout, ModelArchitecture, ModelConfig};
 use crate::tensor_keys::qk_norm;
 
 /// Layer type string used in Gemma 4 `layer_types` config field.
@@ -239,6 +239,12 @@ impl ModelArchitecture for Gemma4Arch {
 
     fn expert_format(&self) -> ExpertFormat {
         ExpertFormat::PackedBF16
+    }
+
+    /// Stacked `[num_experts, 2 * moe_intermediate, hidden]` with the gate
+    /// rows first — the layout the packed f32 expert path already assumes.
+    fn gate_up_layout(&self) -> Option<GateUpLayout> {
+        Some(GateUpLayout::ContiguousHalves)
     }
 
     fn num_experts(&self) -> usize {

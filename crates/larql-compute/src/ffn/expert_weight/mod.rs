@@ -20,8 +20,8 @@
 //! instrument for the entire model class the K3 ladder is built on. See
 //! `docs/k3-funnel.md` §4.7.
 
-mod gate;
-mod router;
+pub(crate) mod gate;
+pub(crate) mod router;
 // Public for the `tests/test_moe_route_trace_*.rs` end-to-end exercises:
 // the env-resolved sink is process-global (`OnceLock`), so each scenario
 // needs its own test binary, and those binaries can only reach a `pub` path.

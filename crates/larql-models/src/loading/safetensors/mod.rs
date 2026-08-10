@@ -192,12 +192,40 @@ fn load_model_dir_filtered_with_validation(
     let is_packed_bf16 = expert_format == crate::ExpertFormat::PackedBF16;
 
     // Keys that must be preserved as raw bytes rather than converted to f32.
-    // For PackedBF16 (Gemma 4 26B A4B): experts.gate_up_proj and experts.down_proj
-    // are 3D tensors [num_experts, out_dim, in_dim] in BF16. Converting them to f32
-    // would double their memory footprint; the compute path dequantizes per-expert on demand.
+    // For PackedBF16: the expert operands are 3-D tensors
+    // `[num_experts, out_dim, in_dim]` in BF16. Converting them to f32 would
+    // double their footprint; the compute path dequantises per expert on demand.
+    //
+    // **The architecture names them; a substring rule does not.** Gemma 4
+    // calls them `experts.{gate_up,down}_proj` while GraniteMoE calls them
+    // `block_sparse_moe.{input,output}_linear.weight`, so matching on Gemma's
+    // spelling silently excluded Granite — and an excluded 3-D tensor is not
+    // an error, it falls through to the `_ => {}` arm below and is *dropped*,
+    // leaving a model that loads cleanly with no experts. Asking
+    // `packed_experts_*_key` makes the arch the authority, the same way the
+    // readers already resolve them.
+    //
+    // The substring test is retained as a union member, not a fallback: it can
+    // only widen what is kept raw, and it keeps any packed family whose keys
+    // are not yet arch-declared working exactly as before.
+    let packed_expert_keys: std::collections::HashSet<String> = if is_packed_bf16 {
+        (0..arch.config().num_layers)
+            .flat_map(|l| {
+                [
+                    arch.packed_experts_gate_up_key(l),
+                    arch.packed_experts_down_key(l),
+                ]
+            })
+            .flatten()
+            .collect()
+    } else {
+        std::collections::HashSet::new()
+    };
     let should_keep_raw = |key: &str| -> bool {
         is_packed_bf16
-            && (key.contains(PACKED_EXPERTS_GATE_UP_PROJ) || key.contains(PACKED_EXPERTS_DOWN_PROJ))
+            && (packed_expert_keys.contains(key)
+                || key.contains(PACKED_EXPERTS_GATE_UP_PROJ)
+                || key.contains(PACKED_EXPERTS_DOWN_PROJ))
     };
 
     for st_path in &st_files {

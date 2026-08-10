@@ -125,6 +125,14 @@ impl ModelArchitecture for GraniteArch {
         }
     }
 
+    /// `GraniteMoeMoE.forward` splits with `hidden_states.chunk(2, dim=-1)`
+    /// — the leading half is gate. Not inferable from `PackedBF16`: GPT-OSS
+    /// is equally packed and interleaved.
+    fn gate_up_layout(&self) -> Option<crate::config::GateUpLayout> {
+        self.is_moe()
+            .then_some(crate::config::GateUpLayout::ContiguousHalves)
+    }
+
     fn moe_router_key(&self, layer: usize) -> Option<String> {
         if !self.is_moe() {
             return None;

@@ -169,10 +169,21 @@ pub(super) fn print_score_summary(summary: &ScoreSummary, bytes: usize, chars: u
 /// falls through to the dense path and fails with its own error rather than
 /// half-resolving here.
 pub(super) fn score_ffn(weights: &ModelWeights) -> Box<dyn FfnBackend + '_> {
-    if weights.arch.is_moe() && expert_weights_resolvable(weights, 0) {
-        Box::new(ExpertWeightFfn { weights })
-    } else {
-        Box::new(WeightFfn { weights })
+    let arch = &*weights.arch;
+    if !arch.is_moe() {
+        return Box::new(WeightFfn { weights });
+    }
+    match arch.expert_format() {
+        // Separate tensors per expert, as loaded.
+        larql_models::ExpertFormat::PerExpert => Box::new(ExpertWeightFfn { weights }),
+        // Stacked BF16 operands, read in place.
+        larql_models::ExpertFormat::PackedBF16 => Box::new(PackedExpertWeightFfn { weights }),
+        // Packed in the *checkpoint* only: `load_mxfp4_expert_tensors`
+        // dequantises blocks+scales into per-expert tensors at load, so the
+        // operand this tier sees is `PerExpert`. The declaration describes the
+        // source; the loader owns the transform. If that transform ever stops
+        // running eagerly, this arm is where it shows.
+        larql_models::ExpertFormat::PackedMxfp4 => Box::new(ExpertWeightFfn { weights }),
     }
 }
 

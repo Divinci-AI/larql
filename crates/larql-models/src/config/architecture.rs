@@ -18,7 +18,7 @@ use crate::validation::ConfigValidationResult;
 
 use super::{
     layer_types, rope_types, Activation, ExpertFormat, ExpertGatePolicy, ExpertRoutingPolicy,
-    FfnType, Llama3RopeScaling, ModelConfig, NormType, QkNormScope, YarnRopeScaling,
+    FfnType, GateUpLayout, Llama3RopeScaling, ModelConfig, NormType, QkNormScope, YarnRopeScaling,
 };
 
 /// Architecture-specific behavior. Describes how a model is structured
@@ -537,6 +537,19 @@ pub trait ModelArchitecture: Send + Sync {
     /// How expert weights are stored in this model.
     fn expert_format(&self) -> ExpertFormat {
         ExpertFormat::PerExpert
+    }
+
+    /// How this checkpoint's fused `gate_up` operand splits into the gate and
+    /// up branches, or `None` where no fused operand exists (dense models and
+    /// per-expert MoE, which store `gate_proj`/`up_proj` separately).
+    ///
+    /// `None` is *not* a usable default for a packed architecture: readers
+    /// must refuse rather than guess, because the two layouts differ by a
+    /// silent permutation of rows rather than by anything a shape check
+    /// could catch. See [`GateUpLayout`] for the two families that already
+    /// disagree.
+    fn gate_up_layout(&self) -> Option<GateUpLayout> {
+        None
     }
 
     /// Whether this model uses Mixture of Experts.

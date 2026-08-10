@@ -15,8 +15,8 @@ use indicatif::{ProgressBar, ProgressStyle};
 use larql_inference::attention::SharedKV;
 use larql_inference::forward::{apply_norm, dot_proj};
 use larql_inference::{
-    encode_prompt, expert_weights_resolvable, ExpertWeightFfn, FfnBackend, InferenceModel,
-    ModelWeights, WeightFfn,
+    encode_prompt, ExpertWeightFfn, FfnBackend, InferenceModel, ModelWeights,
+    PackedExpertWeightFfn, WeightFfn,
 };
 use ndarray::{s, Array2};
 
