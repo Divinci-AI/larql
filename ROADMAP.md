@@ -3347,8 +3347,8 @@ the EXP-V ladder experiments (and eventual `voice compare`) one-liners.
 ## Standing execution rule — physical planning (extracted 2026-08-10)
 
 > **A logical operator must be physically planned from
-> `(format, operation, shape, hardware)`, never selected from tensor
-> format alone.**
+> `(format, operation, shape, hardware, workspace lifetime)`, never
+> selected from tensor format alone.**
 
 Extracted after the TTS funnel's TTFA work found the same pathology
 three times in one day — a decode-shaped primitive applied repeatedly
@@ -3370,6 +3370,16 @@ multimodal prompt ingestion. Corollary for placement: not "a GPU
 model" but per-phase operator routing (CPU attention + Metal FFN GEMM
 is a legitimate plan). This is the query-optimizer half of the
 model-as-database thesis, now empirical.
+
+The *workspace lifetime* term earned its place empirically too
+(2026-08-10): the production prefill FFN ran ~250 ms over its own
+bench prediction because each layer allocated three fresh ~50 MB
+dequant buffers (~4 GB of page traffic per prefill the warm-allocator
+bench never paid). Kernel choice and shape were right; the workspace
+policy wasn't. Measurement instrument for all of this:
+`LARQL_PHASE_TIMING=1` (`larql_compute::phase_timing`) — the
+production-path phase split that repeatedly outperformed arithmetic
+estimates at finding the real bottleneck.
 
 ---
 
@@ -3473,9 +3483,14 @@ state actually is, which is better-timed than another clone API).
 
 The three proofs that change the story:
 
-1. **TTFA < 500 ms** while retaining the ~1.6x CPU steady-state class
-   (in flight: prefill bench done, Metal prefill is the lever, gated on
-   the gpu-build CPU regression #242).
+1. **TTFA < 500 ms** while retaining the CPU steady-state class
+   (in flight, 2026-08-10: TTFA 2.0 → **~1.25 s** and steady state
+   1.6 → **~1.9x** via three CPU replanning steps, all token-exact
+   through the dump oracle; the prefill budget is 99%-accounted by
+   phase split — FFN block 904 ms + attention projections 131 ms are
+   the Metal `simdgroup_matrix` scope, and the measured operators
+   alone are sufficient to cross the gate at ~460 ms projected.
+   #242 was falsified — no build fix was needed).
 2. **Controlled blind clone comparison** — aru-12 versus Sonic 3.5,
    Eleven v3, Fish S2, VoxCPM2, Qwen3-TTS, and MOSS-reference, scored
    blind. Until this runs, no claim about voice quality, only about

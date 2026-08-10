@@ -1,8 +1,13 @@
 # The TTS funnel — audio-token output as a forcing function
 
-Status: **steps 0-5 green**; speaks at **1.6-1.7x realtime on CPU**,
-incremental and batch token-identical, zero-pre-buffer stable.
-Branch `worktree-tts-audio-tokens`, started 2026-08-09.
+Status: **steps 0-5 green**; speaks at **~1.9x realtime on CPU**
+(p50 31 ms/frame), incremental and batch token-identical,
+zero-pre-buffer stable. First-turn **TTFA ~1.25 s** (from 2.0 s at
+step-5 close) with the remaining budget 99%-accounted by phase split;
+the <500 ms gate's scope is the FFN block + attention projections on
+Metal. Every replanning step so far has stayed token-exact through
+the step-4 dump oracle. Branch `worktree-tts-audio-tokens`, started
+2026-08-09.
 
 Gate log:
 
