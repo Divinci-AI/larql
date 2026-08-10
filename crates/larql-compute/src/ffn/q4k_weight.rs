@@ -243,6 +243,7 @@ mod tests {
             packed_mmaps: HashMap::new(),
             skipped_tensors: Vec::new(),
             packed_byte_ranges: HashMap::new(),
+            per_layer_ffn_format: HashMap::new(),
             embed: embed.clone(),
             lm_head: embed,
             position_embed: None,

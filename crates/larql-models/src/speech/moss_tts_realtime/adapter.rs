@@ -123,6 +123,7 @@ pub fn depth_transformer_model(
         packed_mmaps: Default::default(),
         skipped_tensors: Vec::new(),
         packed_byte_ranges: Default::default(),
+        per_layer_ffn_format: Default::default(),
         embed: placeholder.clone(),
         lm_head: placeholder,
         position_embed: None,
