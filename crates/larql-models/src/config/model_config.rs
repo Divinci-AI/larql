@@ -27,6 +27,13 @@ pub struct ModelConfig {
     pub rope_base: f64,
     /// RoPE base for local/sliding window layers (Gemma3: 10,000).
     pub rope_local_base: Option<f64>,
+    /// Per-layer declared rope theta (`layer_rope_theta` in `config.json`),
+    /// verbatim including the upstream `0.0` NoPE sentinel. Interpretation
+    /// happens once, in
+    /// [`ModelArchitecture::position_policy_for_layer`](super::ModelArchitecture::position_policy_for_layer)
+    /// via [`PositionPolicy::from_declared_theta`](super::PositionPolicy::from_declared_theta) —
+    /// nothing else may read this array's zeros as numbers.
+    pub layer_rope_theta: Option<Vec<f64>>,
     pub sliding_window: Option<usize>,
     // MoE fields
     pub num_experts: Option<usize>,
@@ -101,4 +108,51 @@ pub struct ModelConfig {
     /// skip filter, a bad shard) would silently run with the wrong output
     /// projection. Untied-but-missing is now an error.
     pub tie_word_embeddings: Option<bool>,
+
+    // ── Attention/output scaling and norm shape (declared, per-checkpoint) ──
+    /// Extra multiplier on attention scores on top of `1/sqrt(head_dim)`
+    /// (`qk_scale_factor`). Distinct from `query_pre_attn_scalar`, which
+    /// *replaces* the denominator.
+    pub qk_scale_factor: Option<f64>,
+    /// Multiplier applied to the model output / hidden state before the
+    /// vocabulary projection (`output_multiplier`).
+    pub output_multiplier: Option<f64>,
+    /// Epsilon for post-norms when it differs from `rms_norm_eps`
+    /// (`post_norm_eps`). `None` = post-norms share `norm_eps`.
+    pub post_norm_eps: Option<f64>,
+    /// Whether attention projections carry bias terms (`attention_bias`).
+    /// `None` = the config is silent and the family default answers.
+    pub attention_bias: Option<bool>,
+    /// FFN activation name, verbatim (`hidden_act` / `hidden_activation`).
+    /// Mapped to [`Activation`](super::Activation) by
+    /// `ModelArchitecture::activation`; an unrecognised spelling must fail
+    /// there, not default.
+    pub hidden_act: Option<String>,
+    /// Declared context bound (`max_position_embeddings`).
+    pub max_position_embeddings: Option<usize>,
+
+    // ── Multimodal protocol + adapter geometry (root-level HF fields) ──
+    /// Token id standing in for an image patch (`image_token_id`).
+    pub image_token_id: Option<u64>,
+    /// Token id standing in for a video segment (`video_token_id`).
+    pub video_token_id: Option<u64>,
+    /// Vision-adapter output width into the language model (`out_hidden_size`).
+    pub out_hidden_size: Option<usize>,
+    /// Vision-adapter hidden width (`projector_hidden_size`).
+    pub projector_hidden_size: Option<usize>,
+    /// Vision-adapter activation name (`projector_hidden_act`).
+    pub projector_hidden_act: Option<String>,
+
+    // ── Drafter interface declaration (DFlash-style speculative sidecar) ──
+    /// Target-model layers whose hidden states this (drafter) checkpoint
+    /// consumes (`target_layer_ids`). Presence declares the artifact a
+    /// hidden-state consumer; the cross-component edge lives in the vindex3
+    /// system graph, this is its source declaration.
+    pub target_layer_ids: Option<Vec<usize>>,
+    /// Tokens proposed per drafter forward (`block_size`). Only read when
+    /// `target_layer_ids` is present — a bare `block_size` on a non-drafter
+    /// config is some other concept and must stay unjudged.
+    pub draft_block_size: Option<usize>,
+    /// Mask token the block-diffusion drafter fills (`mask_token_id`).
+    pub mask_token_id: Option<u64>,
 }

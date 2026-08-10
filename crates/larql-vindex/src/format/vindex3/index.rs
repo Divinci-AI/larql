@@ -37,6 +37,12 @@ pub struct Vindex3Index {
     pub num_layers: usize,
     /// Filename of the MoE programme manifest, relative to the root.
     pub moe_manifest: String,
+    /// Filename of the system-graph manifest
+    /// ([`super::graph::SystemGraph`]), relative to the root. Absent on
+    /// containers written before the graph existed — absence means "no
+    /// graph recorded", never "single-component assumed".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_graph: Option<String>,
     /// Profiles this container declares. Never empty: a container with no
     /// selectable profile cannot be served, and discovering that at bind time
     /// rather than at load time is the failure mode profiles exist to prevent.
@@ -72,6 +78,7 @@ impl Vindex3Index {
             hidden_size,
             num_layers,
             moe_manifest: moe_manifest.into(),
+            system_graph: None,
             profiles: vec![Profile::exact()],
             variants: VariantCatalogue::new(),
             segments,

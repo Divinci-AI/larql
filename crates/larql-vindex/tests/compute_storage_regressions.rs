@@ -192,6 +192,7 @@ fn moe_model_config() -> VindexModelConfig {
         attention_k_eq_v: false,
         num_kv_shared_layers: None,
         per_layer_embed_dim: None,
+        layer_rope_theta: None,
         rope_local_base: None,
         query_pre_attn_scalar: None,
         final_logit_softcapping: None,

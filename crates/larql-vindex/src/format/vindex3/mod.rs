@@ -37,8 +37,10 @@
 //! would look for it. Regions are placed exactly as their producer wrote them.
 
 pub mod build;
+pub mod graph;
 pub mod import;
 pub mod index;
+pub mod plan;
 pub mod profile;
 pub mod read;
 /// Conformance fixture A, public so integration tests and future gate arms can

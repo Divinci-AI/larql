@@ -66,8 +66,32 @@ pub(super) fn build_arch_json(
     if let Some(v) = model_cfg.rope_local_base {
         obj.insert("rope_local_base_freq".into(), v.into());
     }
+    if let Some(ref v) = model_cfg.layer_rope_theta {
+        obj.insert(
+            "layer_rope_theta".into(),
+            serde_json::to_value(v).unwrap_or_default(),
+        );
+    }
     if let Some(v) = model_cfg.query_pre_attn_scalar {
         obj.insert("query_pre_attn_scalar".into(), v.into());
+    }
+    if let Some(v) = model_cfg.qk_scale_factor {
+        obj.insert("qk_scale_factor".into(), v.into());
+    }
+    if let Some(v) = model_cfg.output_multiplier {
+        obj.insert("output_multiplier".into(), v.into());
+    }
+    if let Some(v) = model_cfg.post_norm_eps {
+        obj.insert("post_norm_eps".into(), v.into());
+    }
+    if let Some(v) = model_cfg.attention_bias {
+        obj.insert("attention_bias".into(), v.into());
+    }
+    if let Some(ref v) = model_cfg.hidden_act {
+        obj.insert("hidden_act".into(), v.clone().into());
+    }
+    if let Some(v) = model_cfg.max_position_embeddings {
+        obj.insert("max_position_embeddings".into(), v.into());
     }
     if let Some(v) = model_cfg.final_logit_softcapping {
         obj.insert("final_logit_softcapping".into(), v.into());
@@ -240,6 +264,7 @@ mod tests {
             attention_k_eq_v: false,
             num_kv_shared_layers: None,
             per_layer_embed_dim: None,
+            layer_rope_theta: None,
             rope_local_base: None,
             query_pre_attn_scalar: None,
             final_logit_softcapping: None,
@@ -335,6 +360,50 @@ mod tests {
         assert_eq!(obj["rope_local_base_freq"].as_f64().unwrap(), 10_000.0);
         assert_eq!(obj["query_pre_attn_scalar"].as_f64().unwrap(), 256.0);
         assert_eq!(obj["final_logit_softcapping"].as_f64().unwrap(), 30.0);
+    }
+
+    /// The reconstructed arch must answer the G2b declared scalars — the
+    /// emission path, not just struct persistence.
+    #[test]
+    fn build_arch_json_reconstructs_declared_scalars() {
+        let mut model_cfg = minimal_model_cfg();
+        model_cfg.qk_scale_factor = Some(3.87);
+        model_cfg.output_multiplier = Some(0.196);
+        model_cfg.post_norm_eps = Some(1e-8);
+        model_cfg.attention_bias = Some(false);
+        model_cfg.hidden_act = Some("gelu_pytorch_tanh".to_string());
+        model_cfg.max_position_embeddings = Some(131072);
+        let config = minimal_config(model_cfg.clone());
+
+        let v = build_arch_json(&config, &model_cfg);
+        let arch = larql_models::detect_from_json(&v);
+        assert_eq!(arch.qk_scale_factor(), Some(3.87));
+        assert_eq!(arch.output_multiplier(), Some(0.196));
+        assert_eq!(arch.post_norm_eps(), Some(1e-8));
+        assert_eq!(arch.attention_bias(), Some(false));
+        assert_eq!(
+            arch.activation(),
+            larql_models::config::Activation::GeluTanh
+        );
+        assert_eq!(arch.max_position_embeddings(), Some(131072));
+    }
+
+    /// The reconstructed arch must resolve NoPE on the sentinel layers —
+    /// the whole vindex round trip, not just field persistence.
+    #[test]
+    fn build_arch_json_reconstructs_nope_position_policy() {
+        use larql_models::config::PositionPolicy;
+        let mut model_cfg = minimal_model_cfg();
+        model_cfg.layer_rope_theta = Some(vec![10_000.0, 10_000.0, 10_000.0, 0.0]);
+        let config = minimal_config(model_cfg.clone());
+
+        let v = build_arch_json(&config, &model_cfg);
+        let arch = larql_models::detect_from_json(&v);
+        assert_eq!(
+            arch.position_policy_for_layer(0),
+            PositionPolicy::Rope { theta: 10_000.0 }
+        );
+        assert_eq!(arch.position_policy_for_layer(3), PositionPolicy::None);
     }
 
     #[test]

@@ -4,6 +4,7 @@ pub mod connectors;
 pub mod defaults;
 pub mod detect;
 pub mod encoders;
+pub mod inventory;
 pub mod loading;
 pub mod multimodal;
 pub mod quant;
