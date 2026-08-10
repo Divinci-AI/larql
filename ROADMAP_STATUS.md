@@ -4,7 +4,7 @@ Canonical rollup for the next execution slice. Keep the detailed design in
 `ROADMAP.md` and crate-local roadmaps; use this file to answer "what is active
 now?" without rereading every crate document.
 
-Last updated: 2026-08-06
+Last updated: 2026-08-10
 
 **Active slice: VINDEX3 container + execution binding**
 ([`ROADMAP.md` § VINDEX3](ROADMAP.md), spec
@@ -592,6 +592,26 @@ test is the one that covers what ships.
 ---
 
 ## Recently shipped (delta since last update)
+
+- **GPT-OSS-20B served end to end; Metal decode 10.2 → 59.8 tok/s (2026-08-09/10).**
+  K3 R1 P4/P5 closed on both backends — `larql run gpt-oss-20b-q4k.vindex --metal`
+  produces the **identical greedy trajectory to CPU at 16.7 ms/token**. Correctness
+  was six stacked hidden%256 defects (MoE norm topology, lm_head widths ×2, Metal
+  QKV/O stored-row width, missing Metal attention biases, dense-FFN encode over
+  empty pure-MoE slices), fixed generically: `QuantWeight::stored_cols` (byte count
+  is the width authority), bias threading via `build_arch_params`, `has_dense_ffn()`
+  as a representation fact. The perf ladder, each rung parity-gated: 97.8 ms staged
+  copies → 25.9 zero-copy mmap regions (`register_region` + experts as byte
+  offsets) → 22.7 grouped expert kernels (K3a, η 0.64→0.90) → 22.6 fused
+  no-QK-norm attention (**GPU 8→3.3 ms with the wall unmoved — the CB structure was
+  the term**) → **16.7 merged command buffers** (GPU `moe_weighted_combine`; a
+  layer's experts + the next layer's attention share one CB). Gemma hybrid rode
+  the first two rungs free (91.3 → ~30 ms/tok). Comparison framing pinned: the
+  ~85-90 tok/s oMLX reference is **native MXFP4** (~4.25 bpw experts); LARQL's
+  Q6_K carries ~1.54× the expert bytes, so 59.8 ≈ 92 tok/s byte-normalised — same
+  conventional-efficiency territory, and the MXFP4-native experiment (shaders
+  in-tree) now measures going *past* the reference. Write-up
+  [`docs/k3-funnel.md`](docs/k3-funnel.md) §4.11; ROADMAP §"K3 R1 P4/P5 CLOSED".
 
 - **VINDEX3 routes a real Gemma layer bit-identically to production (2026-08-02).**
   Three milestones, committed separately so a later disagreement cannot require
