@@ -592,3 +592,71 @@ fn auto_inplace_decode_step_returns_none_when_flag_disabled() {
     );
     assert!(out.is_none(), "flag off → None");
 }
+
+/// The padded-row-store case the width derivation exists for: rows are
+/// quantised at the next super-block boundary (the writer's
+/// `pad_rows_to_block` shape — GPT-OSS's hidden 2880 → 3072 at model
+/// scale), the activation is zero-padded to match, and the projection at
+/// the STORED width must equal the dequant reference over the LOGICAL
+/// width exactly-ish (f32 route) — the padded weight columns dequantise
+/// to zero, so they contribute nothing.
+#[test]
+fn direct_proj_on_padded_row_store_matches_dequant_reference() {
+    use super::q4k_direct::zero_pad_row;
+    use crate::cpu::ops::q4_common::{dequantize_q4_k, quantize_q4_k};
+    use crate::cpu::ops::q4k_q8k_dot::quantize_x_to_q8k;
+
+    let logical = 320usize; // % 256 != 0 — the awkward shape is the instrument
+    let stored = logical.div_ceil(256) * 256; // 512
+    let num_rows = 24usize;
+
+    // Rows laid out at the stored width, zeros in the pad columns.
+    let mut w = vec![0.0f32; num_rows * stored];
+    for r in 0..num_rows {
+        for c in 0..logical {
+            w[r * stored + c] = (((r * 7 + c) % 23) as f32) * 0.05 - 0.5;
+        }
+    }
+    let bytes = quantize_q4_k(&w);
+    let qw = crate::QuantWeight::new(crate::QuantFormat::Q4_K, &bytes, crate::QuantAux::None);
+    assert_eq!(qw.stored_cols(num_rows, logical), stored);
+
+    let x: Vec<f32> = (0..logical).map(|i| ((i as f32) * 0.013).sin()).collect();
+    let x_arr = Array2::from_shape_vec((1, logical), x.clone()).unwrap();
+    let x_padded = zero_pad_row(&x_arr, stored);
+    assert_eq!(x_padded.shape(), &[1, stored]);
+    assert_eq!(x_padded[[0, logical]], 0.0);
+
+    // Reference: dequantised stored rows · padded x over the stored width
+    // (equals the logical-width product because the pad columns are 0).
+    let deq = dequantize_q4_k(&bytes, num_rows * stored);
+    let reference: Vec<f32> = (0..num_rows)
+        .map(|r| {
+            (0..stored)
+                .map(|c| deq[r * stored + c] * x_padded[[0, c]])
+                .sum()
+        })
+        .collect();
+
+    // f32-activation route at the stored width.
+    let backend = crate::CpuBackend;
+    let out = q4k_direct_proj(&backend, &qw, &x_padded, num_rows, stored)
+        .expect("padded-store proj must run");
+    for (r, (&got, &want)) in out.iter().zip(reference.iter()).enumerate() {
+        assert!(
+            (got - want).abs() <= 1e-4 * want.abs().max(1.0),
+            "f32 route row {r}: got {got}, want {want}"
+        );
+    }
+
+    // Int8 route (Q8_K activation): the stored width is a 256-multiple,
+    // so the fast path engages; agreement within Q8_K activation noise.
+    let q8 = quantize_x_to_q8k(x_padded.as_slice().unwrap());
+    let out8 = q8k_direct_proj(&qw, &q8, num_rows, stored).expect("int8 padded proj must run");
+    for (r, (&got, &want)) in out8.iter().zip(reference.iter()).enumerate() {
+        assert!(
+            (got - want).abs() <= 2e-2 * want.abs().max(1.0),
+            "int8 route row {r}: got {got}, want {want}"
+        );
+    }
+}

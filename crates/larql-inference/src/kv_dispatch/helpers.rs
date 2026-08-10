@@ -84,7 +84,11 @@ fn ffn_or_moe_layer(
     ffn: &dyn FfnBackend,
     ple_input: Option<&Array2<f32>>,
 ) -> Result<Array2<f32>, BoxRefusal> {
-    if weights.arch.is_hybrid_moe() {
+    // Pure MoE (GPT-OSS, GraniteMoE, OLMoE) takes this hook exactly as
+    // hybrid does — its FFN *is* the expert block. Gating on hybrid alone
+    // sent pure-MoE layers to the dense `run_ffn` below, which asks for
+    // gate/up/down tensors those checkpoints do not have.
+    if weights.arch.is_moe() || weights.arch.is_hybrid_moe() {
         // `?` propagates; `None` falls through. Not applicable means this
         // backend does not serve the layer and the local dispatch below is the
         // correct answer — never a refusal wearing its shape.

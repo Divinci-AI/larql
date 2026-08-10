@@ -23,14 +23,28 @@ fn fill_bf16(len: usize, val: f32) -> Vec<u8> {
 #[test]
 fn zero_inter_returns_zero_vec() {
     let h = vec![1.0f32; 4];
-    let out = run_single_expert(&h, &[], &[], 0, QuantFormat::BF16, Activation::Silu);
+    let out = run_single_expert(
+        &h,
+        &[],
+        &[],
+        0,
+        QuantFormat::BF16,
+        crate::ExpertMlp::gated(Activation::Silu),
+    );
     assert_eq!(out, vec![0.0f32; 4]);
 }
 
 #[test]
 fn zero_hidden_returns_empty() {
     let h: Vec<f32> = vec![];
-    let out = run_single_expert(&h, &[], &[], 0, QuantFormat::BF16, Activation::Silu);
+    let out = run_single_expert(
+        &h,
+        &[],
+        &[],
+        0,
+        QuantFormat::BF16,
+        crate::ExpertMlp::gated(Activation::Silu),
+    );
     assert_eq!(out.len(), 0);
 }
 
@@ -68,7 +82,7 @@ fn nonzero_weights_produce_nonzero_output() {
         &down,
         inter,
         QuantFormat::BF16,
-        Activation::Silu,
+        crate::ExpertMlp::gated(Activation::Silu),
     );
     assert_eq!(out.len(), hidden);
     assert!(
@@ -90,7 +104,7 @@ fn run_single_expert_into_matches_allocating_path() {
         &down,
         inter,
         QuantFormat::BF16,
-        Activation::Silu,
+        crate::ExpertMlp::gated(Activation::Silu),
     );
     let mut scratch = ExpertScratch::new(hidden, inter, inter);
 
@@ -101,7 +115,7 @@ fn run_single_expert_into_matches_allocating_path() {
         &down,
         inter,
         QuantFormat::BF16,
-        Activation::Silu,
+        crate::ExpertMlp::gated(Activation::Silu),
     );
 
     for (actual, expected) in actual.iter().zip(expected.iter()) {
@@ -124,7 +138,7 @@ fn run_single_expert_into_zeroes_output_for_empty_weights() {
         &[],
         inter,
         QuantFormat::BF16,
-        Activation::Silu,
+        crate::ExpertMlp::gated(Activation::Silu),
     );
 
     assert_eq!(out, &[0.0, 0.0, 0.0, 0.0]);
@@ -147,8 +161,14 @@ fn run_single_expert_q4k_q8k_into_zeroes_output_for_short_gate_up() {
     scratch.out.fill(7.0);
     let h_q8 = quantize_h_norm_for_q4k(&vec![1.0f32; hidden]).unwrap();
 
-    let out =
-        run_single_expert_q4k_q8k_into(&mut scratch, &h_q8, &[], &[], inter, Activation::Silu);
+    let out = run_single_expert_q4k_q8k_into(
+        &mut scratch,
+        &h_q8,
+        &[],
+        &[],
+        inter,
+        crate::ExpertMlp::gated(Activation::Silu),
+    );
 
     assert!(out.iter().all(|v| *v == 0.0));
 }
@@ -177,7 +197,7 @@ fn run_single_expert_q4k_q8k_into_valid_weights_produces_finite_output() {
         &gate_up,
         &down,
         inter,
-        Activation::GeluTanh,
+        crate::ExpertMlp::gated(Activation::GeluTanh),
     );
 
     assert_eq!(out.len(), hidden);
@@ -209,7 +229,7 @@ fn run_single_expert_into_q4k_cached_dequant_path_runs() {
         &down,
         inter,
         QuantFormat::Q4_K,
-        Activation::Silu,
+        crate::ExpertMlp::gated(Activation::Silu),
     );
 
     assert_eq!(out.len(), hidden);
@@ -239,7 +259,7 @@ fn with_norm_matches_manual_prenorm() {
         &down,
         inter,
         QuantFormat::BF16,
-        Activation::Silu,
+        crate::ExpertMlp::gated(Activation::Silu),
     );
     let via_norm = run_single_expert_with_norm(
         &h,
@@ -250,7 +270,7 @@ fn with_norm_matches_manual_prenorm() {
         0.0,
         eps,
         QuantFormat::BF16,
-        Activation::Silu,
+        crate::ExpertMlp::gated(Activation::Silu),
     );
 
     let max_diff: f32 = direct
@@ -312,7 +332,7 @@ fn run_single_expert_into_q4k_direct_env_takes_direct_path() {
             &down,
             inter,
             QuantFormat::Q4_K,
-            Activation::GeluTanh,
+            crate::ExpertMlp::gated(Activation::GeluTanh),
         );
         out.to_vec()
     });
@@ -350,7 +370,7 @@ fn run_single_expert_into_q4k_direct_with_timing_prints_breakdown() {
                 &down,
                 inter,
                 QuantFormat::Q4_K,
-                Activation::Silu,
+                crate::ExpertMlp::gated(Activation::Silu),
             );
             out.to_vec()
         },
@@ -379,7 +399,7 @@ fn run_single_expert_into_timing_on_default_path_prints_breakdown() {
                 &down,
                 inter,
                 QuantFormat::BF16,
-                Activation::Silu,
+                crate::ExpertMlp::gated(Activation::Silu),
             );
             out.to_vec()
         },
@@ -400,7 +420,7 @@ fn gelu_tanh_differs_from_silu() {
         &down,
         inter,
         QuantFormat::BF16,
-        Activation::Silu,
+        crate::ExpertMlp::gated(Activation::Silu),
     );
     let gelu_out = run_single_expert(
         &h,
@@ -408,7 +428,7 @@ fn gelu_tanh_differs_from_silu() {
         &down,
         inter,
         QuantFormat::BF16,
-        Activation::GeluTanh,
+        crate::ExpertMlp::gated(Activation::GeluTanh),
     );
     let max_diff: f32 = silu_out
         .iter()
@@ -455,7 +475,7 @@ fn run_single_expert_q4k_routes_through_direct_path() {
         &down_bytes,
         inter,
         QuantFormat::Q4_K,
-        Activation::Silu,
+        crate::ExpertMlp::gated(Activation::Silu),
     );
     assert_eq!(out.len(), hidden);
     assert!(out.iter().all(|v| v.is_finite()));
@@ -488,7 +508,7 @@ fn run_single_expert_q4k_non_aligned_hidden_falls_back() {
         &down,
         inter,
         QuantFormat::BF16,
-        Activation::Silu,
+        crate::ExpertMlp::gated(Activation::Silu),
     );
     assert_eq!(out.len(), hidden);
 }
@@ -508,7 +528,7 @@ fn run_single_expert_into_zero_inter_returns_zeroed_out() {
         &[],
         0,
         QuantFormat::BF16,
-        Activation::Silu,
+        crate::ExpertMlp::gated(Activation::Silu),
     );
     assert_eq!(out, &[0.0f32; 4]);
 }
@@ -525,7 +545,7 @@ fn run_single_expert_into_zero_hidden_returns_zeroed_out() {
         &[],
         2,
         QuantFormat::BF16,
-        Activation::Silu,
+        crate::ExpertMlp::gated(Activation::Silu),
     );
     assert!(out.is_empty());
 }
@@ -538,8 +558,14 @@ fn run_single_expert_into_zero_hidden_returns_zeroed_out() {
 fn run_single_expert_q4k_q8k_into_zero_hidden_returns_zeroed() {
     let mut scratch = ExpertScratch::new(0, 4, 4);
     let empty_q8k = quantize_x_to_q8k(&[]);
-    let out =
-        run_single_expert_q4k_q8k_into(&mut scratch, &empty_q8k, &[], &[], 4, Activation::Silu);
+    let out = run_single_expert_q4k_q8k_into(
+        &mut scratch,
+        &empty_q8k,
+        &[],
+        &[],
+        4,
+        crate::ExpertMlp::gated(Activation::Silu),
+    );
     assert!(out.is_empty());
 }
 
@@ -551,7 +577,14 @@ fn run_single_expert_q4k_q8k_into_zero_inter_returns_zeroed() {
     let mut scratch = ExpertScratch::new(hidden, 0, 0);
     let h: Vec<f32> = (0..hidden).map(|i| (i as f32) * 0.001).collect();
     let h_q8k = quantize_x_to_q8k(&h);
-    let out = run_single_expert_q4k_q8k_into(&mut scratch, &h_q8k, &[], &[], 0, Activation::Silu);
+    let out = run_single_expert_q4k_q8k_into(
+        &mut scratch,
+        &h_q8k,
+        &[],
+        &[],
+        0,
+        crate::ExpertMlp::gated(Activation::Silu),
+    );
     assert_eq!(out, &[0.0f32; 256]);
 }
 
@@ -572,7 +605,7 @@ fn run_single_expert_q4k_q8k_into_short_bytes_returns_zeroed() {
         &short_gate_up,
         &[],
         inter,
-        Activation::Silu,
+        crate::ExpertMlp::gated(Activation::Silu),
     );
     assert_eq!(out, &[0.0f32; 256]);
 }
@@ -611,7 +644,7 @@ fn run_single_expert_q4k_q8k_into_gelu_tanh_activation() {
         &gate_up,
         &down,
         inter,
-        Activation::GeluTanh,
+        crate::ExpertMlp::gated(Activation::GeluTanh),
     );
     assert_eq!(out.len(), hidden);
     assert!(out.iter().all(|v| v.is_finite()));
@@ -674,7 +707,7 @@ fn run_single_expert_q4k_q8k_into_with_kernel_timing_env_matches_untimed() {
                 &gate_up,
                 &down,
                 inter,
-                Activation::Silu,
+                crate::ExpertMlp::gated(Activation::Silu),
             )
             .to_vec()
         }
@@ -687,3 +720,5 @@ fn run_single_expert_q4k_q8k_into_with_kernel_timing_env_matches_untimed() {
     let untimed = run();
     assert_eq!(timed, untimed, "timing instrumentation changed the output");
 }
+
+mod bias;

@@ -168,11 +168,22 @@ pub fn run_experts_cpu_batch(
                     }
                     let h2 = if let Some(q8k) = h_norm_q8k.as_ref() {
                         run_single_expert_q4k_q8k_into(
-                            scratch, q8k, gu_bytes, dn_bytes, inter, activation,
+                            scratch,
+                            q8k,
+                            gu_bytes,
+                            dn_bytes,
+                            inter,
+                            larql_compute::ExpertMlp::gated(activation),
                         )
                     } else {
                         run_single_expert_into(
-                            scratch, &h_norm, gu_bytes, dn_bytes, inter, format, activation,
+                            scratch,
+                            &h_norm,
+                            gu_bytes,
+                            dn_bytes,
+                            inter,
+                            format,
+                            larql_compute::ExpertMlp::gated(activation),
                         )
                     };
                     for (a, &v) in acc.iter_mut().zip(h2.iter()) {
@@ -267,7 +278,12 @@ pub fn run_experts_cpu_batch_q8k_prenormed(
                         *scratch = ExpertScratch::new(hidden, inter, inter_padded);
                     }
                     let h2 = run_single_expert_q4k_q8k_into(
-                        scratch, q8k, gu_bytes, dn_bytes, inter, activation,
+                        scratch,
+                        q8k,
+                        gu_bytes,
+                        dn_bytes,
+                        inter,
+                        larql_compute::ExpertMlp::gated(activation),
                     );
                     for (a, &v) in acc.iter_mut().zip(h2.iter()) {
                         *a += w * v;

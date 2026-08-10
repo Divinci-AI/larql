@@ -366,6 +366,7 @@ fn load_model_dir_filtered_with_validation(
         skipped_tensors,
         packed_mmaps,
         packed_byte_ranges,
+        per_layer_ffn_format: Default::default(),
         embed,
         lm_head,
         position_embed,

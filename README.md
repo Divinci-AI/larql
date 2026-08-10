@@ -51,6 +51,7 @@ larql> INFER "The capital of France is" TOP 3;
     - [Vindex Operations](#vindex-operations)
     - [Inference Engine (Gemma 3 4B, Apple Silicon M3 Max)](#inference-engine-gemma-3-4b-apple-silicon-m3-max)
     - [MoE / grid (Gemma 4 26B A4B, M3 Max)](#moe--grid-gemma-4-26b-a4b-m3-max)
+    - [Pure MoE (GPT-OSS-20B Q6_K, M3 Max)](#pure-moe-gpt-oss-20b-q6_k-m3-max)
     - [Load-bearing environment flags (serving & measurement)](#load-bearing-environment-flags-serving--measurement)
     - [Dense remote-FFN (Gemma 4 31B Q4K, M3 Max, localhost)](#dense-remote-ffn-gemma-4-31b-q4k-m3-max-localhost)
 - [Residual Stream Trace](#residual-stream-trace)
@@ -670,10 +671,19 @@ Input formats: **safetensors** (HuggingFace), **GGUF** (llama.cpp, dequantized t
 | Qwen | Qwen 2/2.5 (0.5B-72B) | Gated (SiLU) |
 | Phi | Phi 2/3 (2.7B-14B) | Gated |
 | DeepSeek | DeepSeek V2/V3 | MoE (shared + routed) |
-| GPT-OSS | GPT-OSS-120B | MoE (128 experts, MXFP4) |
+| GPT-OSS | GPT-OSS-20B/120B | MoE (32/128 experts, MXFP4 → Q6_K lossless) |
 | GPT-2 | GPT-2 (117M-1.5B) | Standard (GELU-tanh, vindex extraction only) |
 
 Dense and full-precision MoE models support all operations (DESCRIBE, WALK, INFER). MXFP4-quantized MoE models (GPT-OSS) can be extracted and served but DESCRIBE/WALK produce noisy results due to 4-bit weight precision — use INFER for accurate knowledge queries. See [operations spec](crates/larql-vindex/docs/operations-spec.md) for details.
+
+**GPT-OSS-20B is served end to end (2026-08-10).** `larql run
+gpt-oss-20b-q4k.vindex` generates coherent harmony-format output on CPU
+(~60 ms/token) and on Metal at **16.7 ms/token (59.8 tok/s)** with the
+identical greedy trajectory — see the [Pure MoE
+benchmark](#pure-moe-gpt-oss-20b-q6_k-m3-max) and
+[`docs/k3-funnel.md`](docs/k3-funnel.md) §4.11. The experts serve from a
+lossless MXFP4→Q6_K transcode; sliding-window + YaRN attention, per-layer
+sinks, and all four projection biases are applied on both backends.
 
 **GPT-OSS attention sinks (2026-07-29).** GPT-OSS attention uses a learned per-head *sink* logit that competes in the softmax and is then discarded, so attention weights over real positions deliberately sum to less than one. Until 2026-07-29 larql neither extracted nor applied it — along with all four projection biases — so 5 of 11 attention tensors per layer were silently dropped and the forward pass was systematically wrong. Both are now extracted and applied on the CPU and Metal paths, with numerical parity tests against the reference implementation. Details and the measured sink magnitudes are in [`docs/k3-funnel.md`](docs/k3-funnel.md) §4.6.
 
@@ -769,6 +779,28 @@ Walk is **faster than dense** (517ms vs 535ms). GPU Q4K decode is **23× faster*
 **DEC-0 arm M (2026-07-23, `docs/dec-funnel.md` §3)**: the loopback batch curve is measured — expert-tier step time is sub-linear through batch 32 (×1.6–1.8 on batch dispatch), aggregate tier throughput ~1,050 tok/s at B64 (~25× single-stream), movement ratio 1.2–1.9 × 10⁻³. Run records under `bench/dec0/`; system of record is the `dec0-loopback-mac` experiment in the registry.
 
 **Wire format (2026-05-07)**: grid traffic uses f16 by default (50% bandwidth). Set `LARQL_I8_WIRE=1` for i8 symmetric quantisation (75% bandwidth, opt-in). Both are architecture-agnostic — `hidden_size` is read from vindex config at runtime. Per-layer latency is tracked via `HeartbeatMsg.layer_stats` (EMA + p99); the router uses it to route replicated layers to the lowest-latency server. Use `make bench-wire` to measure codec throughput and `make bench-routing` for routing hot-path.
+
+### Pure MoE (GPT-OSS-20B Q6_K, M3 Max)
+
+`larql run gpt-oss-20b-q4k.vindex --metal` — single stream, greedy, short
+context; experts are the lossless MXFP4→Q6_K transcode (6.56 bpw). Metal
+produces the **identical greedy trajectory to CPU** — parity re-verified at
+every rung of this ladder (2026-08-10, `docs/k3-funnel.md` §4.11):
+
+| ms/token | tok/s | Rung |
+|---:|---:|---|
+| 97.8 | 10.2 | staged expert copies — top-4 × ~22 MB × 24 layers ≈ 2.1 GB/token of CPU memcpy |
+| 25.9 | 38.7 | **zero-copy expert regions** — each layer mmap bound once (`newBufferWithBytesNoCopy`), experts addressed as byte offsets |
+| 22.7 | 44.0 | **grouped expert kernels** — all selected experts in one 2-D dispatch (η 0.64→0.90) |
+| 22.6 | — | **fused attention** (no-QK-norm + QKV biases in `attn_fused`): attention GPU 8→3.3 ms, wall unmoved — the sync structure was the term |
+| 16.7 | **59.8** | **merged command buffers** — GPU MoE combine; a layer's experts + the next layer's attention share one CB (one wait/layer) |
+
+CPU decode on the same vindex: ~60 ms/token (15-17 tok/s). Comparison
+framing: native-MXFP4 engines (oMLX, ~4.25 bpw experts) report ~85-90 tok/s
+on this class of machine at 1k-4k context — LARQL is moving ~1.54× the expert
+bytes, so 59.8 tok/s is ≈92 tok/s byte-normalised. The remaining budget is
+~11.5 ms MoE (bandwidth), ~3.3 ms attention, ~2 ms sync residue; the
+MXFP4-native path (shaders already in-tree) is the open experiment.
 
 ### Load-bearing environment flags (serving & measurement)
 

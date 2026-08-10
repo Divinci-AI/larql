@@ -157,11 +157,40 @@ impl DecodeScratch {
         // Pre-allocate scratch buffers reused across layers.
         // GPU processes layers sequentially within one cmd buffer, so
         // these buffers are never read and written simultaneously.
+        //
+        // The QKV and O-projection kernels read their input at the
+        // STORE's row width, which may be padded past the logical dim
+        // (GPT-OSS: hidden 2880 → 3072-wide rows). Size those inputs to
+        // the max stored width across layers and zero them once — the
+        // padded weight columns dequantise to exactly zero, so the
+        // zeroed slack is mathematically inert (the F17 analog of the
+        // F16 gate/up fix below).
+        let max_qkv_k = layers
+            .iter()
+            .map(|l| l.wq.stored_cols(l.num_q_heads * l.head_dim, hidden))
+            .max()
+            .unwrap_or(hidden)
+            .max(hidden);
+        let max_o_k = layers
+            .iter()
+            .map(|l| l.wo.stored_cols(hidden, l.num_q_heads * l.head_dim))
+            .max()
+            .unwrap_or(max_q_dim)
+            .max(max_q_dim);
+        let zeroed_f32 = |buf: &metal::Buffer, n: usize| {
+            let ptr = buf.contents() as *mut f32;
+            // SAFETY: freshly-allocated shared-storage Metal buffer with
+            // `n * 4` bytes; zeroed before any dispatch writes the live
+            // columns, so the trailing slack stays zero for the decode.
+            unsafe { std::ptr::write_bytes(ptr, 0, n) };
+        };
         let q_out = bufs.output((max_q_dim * 4) as u64);
         let k_out = bufs.output((max_kv_dim * 4) as u64);
         let v_out = bufs.output((max_kv_dim * 4) as u64);
-        let norm_f32_buf = bufs.output((hidden * 4) as u64);
-        let attn_out_buf = bufs.output((max_q_dim * 4) as u64);
+        let norm_f32_buf = bufs.output((max_qkv_k * 4) as u64);
+        zeroed_f32(&norm_f32_buf, max_qkv_k);
+        let attn_out_buf = bufs.output((max_o_k * 4) as u64);
+        zeroed_f32(&attn_out_buf, max_o_k);
         let o_out_buf = bufs.output((hidden * 4) as u64);
         let h_post_attn = bufs.output((hidden * 4) as u64);
         let ffn_norm_out = bufs.output((hidden * 4) as u64);

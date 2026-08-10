@@ -30,6 +30,13 @@ pub struct FfnKernels {
     // Gated FFN activations (`act(gate) * up`).
     pub geglu_pipeline: ComputePipelineState,
     pub geglu_gelu_tanh_pipeline: ComputePipelineState,
+    /// GPT-OSS's clamped GLU with fused gate/up bias adds — the MoE
+    /// expert activation for `MoeGateRule::ClampedGlu` layers.
+    pub clamped_glu_bias_pipeline: ComputePipelineState,
+    /// GPU weighted MoE combine (`new_h = h_post_attn + Σ w·(out+bias)`)
+    /// for identity-combine policies — lets experts + next-layer
+    /// attention share one command buffer.
+    pub moe_weighted_combine_pipeline: ComputePipelineState,
 
     // Standard (non-gated) FFN activations.
     pub silu_pipeline: ComputePipelineState,
@@ -77,6 +84,10 @@ impl FfnKernels {
         Self {
             geglu_pipeline: r::<shaders::geglu::SiluKernel>(device, library),
             geglu_gelu_tanh_pipeline: r::<shaders::geglu::GeluTanhKernel>(device, library),
+            clamped_glu_bias_pipeline: r::<shaders::geglu::ClampedGluBiasKernel>(device, library),
+            moe_weighted_combine_pipeline: r::<shaders::moe_weighted_combine::Kernel>(
+                device, library,
+            ),
 
             silu_pipeline: r::<shaders::activation::SiluKernel>(device, library),
             gelu_tanh_pipeline: r::<shaders::activation::GeluTanhKernel>(device, library),

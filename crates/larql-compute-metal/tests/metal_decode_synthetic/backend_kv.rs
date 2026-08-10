@@ -320,7 +320,10 @@ fn decode_backend_decode_token_with_moe_split_runs() {
         num_experts: 0,
         top_k: 1,
         intermediate_size: INTER,
-        activation: Activation::Silu,
+        router_bias: &[],
+        experts_gate_up_bias: &[],
+        experts_down_bias: &[],
+        gate_rule: larql_compute::MoeGateRule::Gated(Activation::Silu),
         expert_data_format: QuantFormat::BF16,
     };
     let mut layer = build_synth_layer(&wq, &wk, &wv, &wo, &gate, &up, &down, &norm_w);

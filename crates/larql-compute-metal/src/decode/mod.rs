@@ -19,6 +19,7 @@ mod moe_interleave;
 pub mod profile;
 mod setup;
 
+pub(crate) use moe_interleave::InlineMoeCtx;
 pub use profile::ProfileTimings;
 
 pub(crate) const DEFAULT_KV_CACHE_MAX_SEQ: usize = 4096;
@@ -200,6 +201,7 @@ impl MetalBackend {
             None,
             None,
             larql_compute::StateDumpMask::Full,
+            None,
         )
     }
 
@@ -285,6 +287,7 @@ impl MetalBackend {
             None,
             Some(state),
             mask,
+            None,
         )
     }
 
@@ -309,6 +312,7 @@ impl MetalBackend {
         mut moe_collect_fn: Option<&mut dyn FnMut(usize) -> Vec<f32>>,
         mut state_dump: Option<&mut larql_compute::DecodeStateDump>,
         state_dump_mask: larql_compute::StateDumpMask,
+        inline_moe: Option<&moe_interleave::InlineMoeCtx<'_>>,
     ) -> Vec<f32> {
         // Refuse unroutable FFN formats BEFORE any command buffer or
         // encoder exists: a panic that unwinds past a live Metal
@@ -525,6 +529,12 @@ impl MetalBackend {
             // shaders (uniform / mixed Q4K+Q6K-V / per-projection
             // fallback); Q4_0 routes through fused norm+Q8 then
             // Q8 QKV. Implementation lives in `encode_qkv.rs`.
+            //
+            // When the fully-fused attention kernel will fire, it applies
+            // the Q/K/V projection biases itself — the QKV stage must
+            // skip its bias dispatches (shared `attn_fused_will_fire`
+            // authority; disagreement = biases applied twice).
+            let qkv_bias_deferred = self.attn_fused_will_fire(layer, kv_cache, l);
             self.encode_input_norm_and_qkv(
                 &enc,
                 layer,
@@ -553,6 +563,7 @@ impl MetalBackend {
                     norm_offset,
                 },
                 prelayer_norm_active,
+                qkv_bias_deferred,
             );
 
             // ── Steps 1.5–5: attention block ──
@@ -605,6 +616,14 @@ impl MetalBackend {
             // is no local FFN work to encode on the GPU.
             let defer_ffn_for_split = split_mode && layer.moe.is_some();
 
+            // Pure-MoE layers extract no dense FFN weights — encoding the
+            // dense branch would run the kernels over empty slices and
+            // poison `new_h` with garbage that the expert add can't
+            // recover. Their FFN is the expert block alone; the MoE
+            // interleave below writes `new_h = h_post_attn + moe_out`
+            // directly (same combine as the remote-FFN arm).
+            let layer_runs_dense_ffn = layer.has_dense_ffn() || layer.moe.is_none();
+
             // Stage-timing boundary: when LARQL_PROFILE_SPLIT=1 (or the legacy
             // alias LARQL_DECODE_STAGE_TIMING=1), close the encoder here so
             // attention CB time can be recorded separately from FFN CB time.
@@ -622,7 +641,7 @@ impl MetalBackend {
                 encoder_ended = false;
             }
 
-            if !defer_ffn_for_split && !layer.ffn_is_remote {
+            if !defer_ffn_for_split && !layer.ffn_is_remote && layer_runs_dense_ffn {
                 let ffn_bufs = encode_ffn::FfnBufs {
                     gate_w: &gate_bufs[l],
                     up_w: &up_bufs[l],
@@ -839,6 +858,7 @@ impl MetalBackend {
                     },
                     &mut moe_fn,
                     &mut moe_collect_fn,
+                    inline_moe,
                 );
             } else {
                 // ── Step 8: Optional layer scalar (non-MoE layers) ──

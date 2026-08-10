@@ -813,7 +813,7 @@ That verdict was an artifact of **scoring a causal chain as independent draws.**
 |---|---|---|
 | `linear` (per-layer, global only) | `google/gemma-3-4b-it`, `gemma-3-12b-it`, `gemma-3-4b-pt` | **live** — the repo's primary model |
 | `llama3` | `meta-llama/Llama-3.2-1B` | **live** |
-| `yarn` | `openai/gpt-oss-20b` | live once GPT-OSS is Metal-servable |
+| `yarn` | `openai/gpt-oss-20b` | **live** — Metal-served since 2026-08-10 (§4.11) |
 
 **This is a known bug class, fixed once already, in the other engine.** `kquant_forward/cached.rs` carries the comment: *"The unscaled `apply_rope_partial_at` here was the direct-path divergence on gemma3-4b (global-layer K/Q rope'd at 8× the position the prefill cache used)."* That is this defect, on the CPU direct path, found and fixed — and the identical defect sat untouched in the Metal kernels because the fix was applied where the bug was seen rather than to every path that ropes.
 
@@ -826,6 +826,67 @@ That verdict was an artifact of **scoring a causal chain as independent draws.**
 **The GPU suite is what made this safe: 551 Metal tests pass, and they caught 16 distinct binding mistakes on the way.** Every one was a raw-dispatch site still writing a bare `rope_base` float into what had become a pointer slot; each showed up as `cos = 0.000000` against the CPU reference rather than as a compile error, because Metal bindings are untyped. Two more surfaced as `Command encoder released without endEncoding` — the geometry assert firing *inside* a live encoder, which Metal reports as an abort rather than a readable panic. One of those was a genuine latent hazard: a test mutating `layer.rotary_dim` after the plan was built, desynchronising the two. That now goes through `set_rotary_dim_unscaled`, which moves both together.
 
 **Still owed:** `residual_diff.rs` covers prefill only, so the CPU-vs-Metal *decode* comparison that would have caught this in the first place still does not exist — tracked as **M3/M5** in [`ROADMAP.md`](../ROADMAP.md). The kernel-level parity tests now pin each rope kernel against the CPU reference across Llama-2, Gemma 3, Gemma 4 sliding and Gemma 4 global-partial geometries, which is a sharper instrument than the end-to-end diff but not a substitute for it. `AttentionSpan` is still absent from the Metal attention kernels (**M4**).
+
+### 4.11 R1 P4/P5 closed — GPT-OSS served from its vindex, then made fast on Metal (2026-08-09/10)
+
+Registry `k3r1-gptoss-pipeline`. **P4 extract and P5 serve are closed on both
+backends.** `larql run gpt-oss-20b-q4k.vindex` generates coherent
+harmony-format output on CPU, and `--metal` produces the **identical 32-token
+greedy trajectory** — re-verified after every change below.
+
+**Correctness first (2026-08-09/10, commits 04addd27…19cbefd6).** Serving took
+six stacked defects, every one invisible on hidden%256==0 models (GPT-OSS is
+2880): the MoE norm topology (`PreExpertsNorm`, not `Residual`), the lm_head
+matvec and loader widths, the Metal QKV/O stored-row width (superblock
+truncation — the Mixed route had no assert and truncated silently), missing
+attention-projection biases on Metal (Q/K/V/O — no support existed at all), and
+the dense-FFN branch encoded over a pure-MoE layer's empty weight slices
+(NaN poisoning, found by `LARQL_DECODE_DIAG_LAYER=0`). The generic fixes:
+`QuantWeight::stored_cols` (byte count is the width authority, the
+`stored_gate_up_cols` contract), bias threading through `build_arch_params`
+(the sinks pattern), and `has_dense_ffn()` — dense-branch presence is a
+representation fact, not an architecture flag.
+
+**Then the decode ladder (2026-08-10), each rung parity-gated:**
+
+| ms/token | tok/s | Rung | Commit |
+|---:|---:|---|---|
+| 97.8 | 10.2 | staged expert copies (top-4 × ~22 MB × 24 layers ≈ 2.1 GB/token of CPU memcpy) | — |
+| 25.9 | 38.7 | **zero-copy regions** — each layer-weights mmap bound once via `newBufferWithBytesNoCopy`; experts are byte offsets into the region buffer | 3ed9623f |
+| 22.7 | 44.0 | **grouped experts** — K3a's `q6k_grouped_experts` (η 0.64→0.90) over the offset table; Q4_K sibling wired for Gemma | a07cf870 |
+| 22.6 | — | **fused attention** — `attn_fused` gains no-QK-norm + QKV-bias slots; attention GPU 8→3.3 ms but the wall barely moved: the CBs cost ~8 ms of wall regardless of occupancy | 1d171d08 |
+| 16.7 | **59.8** | **merged command buffers** — `moe_weighted_combine` moves the combine on-GPU (identity-combine class) so a layer's experts + the next layer's attention share one CB; one wait/layer, not two | f557cec9 |
+
+The fused-attention rung is the diagnostic gem: **faster kernels ≠ faster
+decode when command-buffer structure dominates the wall** — it isolated the
+sync term that the merge rung then deleted. Gemma 26B A4B hybrid rode the
+zero-copy + grouped rungs for free (91.3 → ~30 ms/tok); every precondition
+miss falls back to the prior path byte-for-byte.
+
+**Honest external comparison** (recorded so nobody cites the wrong ratio):
+oMLX runs `gpt-oss-20b-MXFP4-Q8` — **native ~4.25 bpw experts** — at ~85-90
+tok/s (best ~100) on an M3 Max 40c at 1k-4k context. LARQL carries the
+lossless MXFP4→Q6_K transcode at 6.56 bpw, ~1.54× the expert bytes, at short
+context. 59.8 tok/s × 1.54 ≈ 92 byte-normalised: the engines are in the same
+conventional-efficiency territory; the residual difference is representation,
+which is a choice, not a gap. The MXFP4-native experiment (shaders
+`mxfp4_matvec` / `mxfp4_grouped_experts` already exist) is now about going
+*past* the reference, not reaching it.
+
+**Remaining budget at 16.7 ms:** ~11.5 ms MoE (genuine bandwidth — the next
+MoE win is representation or η, not scheduling), ~3.3 ms attention GPU, ~2 ms
+in the remaining 24 per-layer waits (GPU routing + the offset tables the
+grouped kernels already read from device buffers would take this near zero).
+
+**K3 consequence.** The substrate the residency/prediction work assumed now
+exists and is measured: vindex-resident weight regions directly addressable by
+GPU execution, expert offset tables, grouped sparse execution, and a
+cross-layer command-buffer structure. The graph/residency work gets to be an
+accelerator, not a rescue operation.
+
+**Still open from P5:** `predict_kquant_metal` (the max-tokens-1 predict path)
+panics on pure MoE — a separate dense-assuming path; GB-style bits/token
+scoring of the served vindex (§4.6.8's scorer gap) remains unbuilt.
 
 ## 5. Claims under test
 

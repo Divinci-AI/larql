@@ -35,5 +35,6 @@ mod env_diag_paths;
 mod ffn_ple_routes;
 mod ffn_std_profile;
 mod moe;
+mod padded_attn;
 mod qkv_routes;
 mod state_dump;

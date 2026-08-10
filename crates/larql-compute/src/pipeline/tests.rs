@@ -106,7 +106,10 @@ fn is_hybrid_moe_reflects_option() {
         num_experts: 2,
         top_k: 1,
         intermediate_size: 4,
-        activation: Activation::Silu,
+        router_bias: &[],
+        experts_gate_up_bias: &[],
+        experts_down_bias: &[],
+        gate_rule: crate::MoeGateRule::Gated(Activation::Silu),
         expert_data_format: QuantFormat::BF16,
     };
     let with_moe = minimal_layer(&[], &norms, FfnType::Gated, Some(moe));
@@ -306,4 +309,34 @@ fn moe_weight_layout_down_cols_policies() {
     assert_eq!(padded.down_cols(704, QuantFormat::Q4_K), 768);
     // Already block-aligned stays put.
     assert_eq!(padded.down_cols(512, QuantFormat::Q4_K), 512);
+}
+
+/// `has_dense_ffn` is a representation fact: present up/down weights ⇒
+/// dense branch exists; empty slices (the pure-MoE extraction shape) ⇒
+/// it doesn't, and consumers must not encode the dense kernels.
+#[test]
+fn has_dense_ffn_reflects_weight_presence() {
+    let data = [0u8; 18];
+    let norms = [1.0f32; 4];
+    let dense = minimal_layer(&data, &norms, FfnType::Gated, None);
+    assert!(dense.has_dense_ffn());
+
+    let empty = FullPipelineLayer {
+        input_norm: &norms,
+        post_attn_norm: &norms,
+        ..FullPipelineLayer::default()
+    };
+    assert!(
+        !empty.has_dense_ffn(),
+        "empty up/down slices are the pure-MoE shape — no dense branch"
+    );
+
+    // One present, one absent is still not a runnable dense branch.
+    let half = FullPipelineLayer {
+        up: minimal_qw(&data),
+        input_norm: &norms,
+        post_attn_norm: &norms,
+        ..FullPipelineLayer::default()
+    };
+    assert!(!half.has_dense_ffn());
 }

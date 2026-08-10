@@ -137,6 +137,23 @@ impl ModelArchitecture for GptOssArch {
         ExpertRoutingPolicy::NormalisedOverSelected
     }
 
+    /// The MLP-input norm, for serving paths where the norm is the MoE
+    /// block's responsibility rather than the caller's.
+    ///
+    /// In the reference, `post_attention_layernorm` runs inside the layer
+    /// before the router and experts, and GPT-OSS has no separate
+    /// pre-experts tensor — so this *aliases* the post-attention norm
+    /// rather than naming a new one. The f32 tier applies that norm in
+    /// `run_ffn` before the FFN backend is called; the quantised block
+    /// path hands the MoE the raw residual and resolves the norm through
+    /// this key (`MoeRoutingPolicy::top_k_then_softmax` declares
+    /// `PreExpertsNorm`). Without it, every router and expert ran on the
+    /// un-normed stream and generation was incoherent while nothing
+    /// crashed.
+    fn moe_pre_experts_norm_key(&self, layer: usize) -> Option<String> {
+        Some(self.post_attention_layernorm_key(layer))
+    }
+
     // ── Attention biases + sinks ──
     //
     // The module header has claimed "attention has biases, sinks" since
@@ -403,6 +420,20 @@ mod tests {
         .flatten()
         .collect();
         assert_eq!(named.len(), 8, "named tensors: {named:?}");
+    }
+
+    /// The MoE pre-experts norm ALIASES the post-attention norm — GPT-OSS
+    /// has no separate tensor, and the reference applies
+    /// `post_attention_layernorm` to the tensor the router and experts
+    /// both read. A drift here (its own spelling, or `None`) puts the
+    /// quantised MoE path back on the un-normed residual.
+    #[test]
+    fn moe_pre_experts_norm_aliases_the_post_attention_norm() {
+        let a = arch();
+        assert_eq!(
+            a.moe_pre_experts_norm_key(3).as_deref(),
+            Some(a.post_attention_layernorm_key(3).as_str()),
+        );
     }
 
     #[test]

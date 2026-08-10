@@ -16,6 +16,7 @@ pub mod sgemm_transb;
 // it by *path*, not by hand-typed string.
 pub mod activation;
 pub mod attn_fused;
+pub mod bias_add;
 pub mod causal_attention;
 pub mod f16_gemv;
 pub mod f32_gemv;
@@ -26,6 +27,7 @@ pub mod graph_walk_knn;
 pub mod kv_append_attend_fused;
 pub mod kv_attention;
 pub mod layer_norm;
+pub mod moe_weighted_combine;
 pub mod mxfp4_grouped_experts;
 pub mod mxfp4_matvec;
 pub mod per_layer_embed;
@@ -90,6 +92,8 @@ pub fn all_shaders() -> String {
     src.push_str(q8_matvec::SHADER);
     // Element-wise
     src.push_str(geglu::SHADER);
+    src.push_str(bias_add::SHADER);
+    src.push_str(moe_weighted_combine::SHADER);
     src.push_str(quantize_q8::SHADER);
     src.push_str(residual_inject::SHADER);
     // Attention

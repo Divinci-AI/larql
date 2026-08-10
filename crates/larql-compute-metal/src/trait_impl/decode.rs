@@ -83,6 +83,7 @@ impl DecodeBackend for MetalBackend {
             Some(&self.attention.q4kf_qkv_proj_pipeline.state),
             Some(&self.attention.q4k_q6k_qkv_proj_pipeline),
             Some(&self.attention.q4kf_proj_pipeline.state),
+            Some(&self.attention.bias_add_pipeline),
             None,
             Some(&self.norms.qk_norm_pipeline),
             Some(&self.norms.scale_vector_pipeline),
@@ -171,6 +172,7 @@ impl DecodeBackend for MetalBackend {
             Some(&self.attention.q4kf_qkv_proj_pipeline.state),
             Some(&self.attention.q4k_q6k_qkv_proj_pipeline),
             Some(&self.attention.q4kf_proj_pipeline.state),
+            Some(&self.attention.bias_add_pipeline),
             Some(&self.attention.rope_at_pos_pipeline), // per-position RoPE — required for seq_len > 1
             Some(&self.norms.qk_norm_pipeline),
             Some(&self.norms.scale_vector_pipeline),
@@ -266,6 +268,7 @@ impl DecodeBackend for MetalBackend {
                     Some(&self.attention.q4kf_qkv_proj_pipeline.state),
                     Some(&self.attention.q4k_q6k_qkv_proj_pipeline),
                     Some(&self.attention.q4kf_proj_pipeline.state),
+                    Some(&self.attention.bias_add_pipeline),
                     Some(&self.attention.rope_at_pos_pipeline),
                     Some(&self.norms.qk_norm_pipeline),
                     Some(&self.norms.scale_vector_pipeline),
@@ -420,6 +423,7 @@ impl DecodeBackend for MetalBackend {
             Some(&self.attention.q4kf_qkv_proj_pipeline.state),
             Some(&self.attention.q4k_q6k_qkv_proj_pipeline),
             Some(&self.attention.q4kf_proj_pipeline.state),
+            Some(&self.attention.bias_add_pipeline),
             Some(&self.attention.rope_at_pos_pipeline),
             Some(&self.norms.qk_norm_pipeline),
             Some(&self.norms.scale_vector_pipeline),
@@ -524,6 +528,7 @@ impl DecodeBackend for MetalBackend {
             Some(&self.attention.q4kf_qkv_proj_pipeline.state),
             Some(&self.attention.q4k_q6k_qkv_proj_pipeline),
             Some(&self.attention.q4kf_proj_pipeline.state),
+            Some(&self.attention.bias_add_pipeline),
             Some(&self.attention.rope_at_pos_pipeline),
             Some(&self.norms.qk_norm_pipeline),
             Some(&self.norms.scale_vector_pipeline),
@@ -839,6 +844,7 @@ impl DecodeBackend for MetalBackend {
             Some(moe_collect_fn),
             None, // no state capture on split fire/collect MoE path
             larql_compute::StateDumpMask::Full,
+            None,
         ))
     }
 

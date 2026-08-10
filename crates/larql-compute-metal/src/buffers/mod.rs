@@ -10,6 +10,8 @@ use std::sync::Mutex;
 
 use metal::*;
 
+mod regions;
+
 /// Cache key: (pointer address, byte length) of the source data.
 type CacheKey = (usize, usize);
 
@@ -30,6 +32,9 @@ pub struct BufferCache {
     /// Each entry is a Vec of available (not currently in use) buffers.
     /// Grows on first use; reused on subsequent decode steps.
     scratch_pool: Mutex<HashMap<u64, Vec<Buffer>>>,
+    /// Registered whole-mmap weight regions for zero-copy sub-slice
+    /// resolution — see `regions.rs`.
+    regions: Mutex<Vec<regions::Region>>,
 }
 
 impl BufferCache {
@@ -38,6 +43,7 @@ impl BufferCache {
             device: device.clone(),
             cache: Mutex::new(HashMap::new()),
             scratch_pool: Mutex::new(HashMap::new()),
+            regions: Mutex::new(Vec::new()),
         }
     }
 

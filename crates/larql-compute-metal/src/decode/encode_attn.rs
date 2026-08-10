@@ -44,6 +44,16 @@ const ATTN_FUSED_AMPLITUDE_INDEX: u64 = 20;
 /// `softcap` slot on `attn_fused` (0.0 = disabled).
 const ATTN_FUSED_SOFTCAP_INDEX: u64 = 22;
 
+/// `has_qk_norm` slot on `attn_fused` — 0 lets no-QK-norm archs
+/// (GPT-OSS) take the single-dispatch path with Q/K passed through raw.
+const ATTN_FUSED_HAS_QK_NORM_INDEX: u64 = 23;
+
+/// First of the four consecutive `attn_fused` slots carrying the Q/K/V
+/// projection biases: q_bias(24), k_bias(25), v_bias(26), then the
+/// `has_qkv_bias` flag (27). Sinks convention — stub buffers bound when
+/// absent, flag gates the read.
+const ATTN_FUSED_QKV_BIAS_INDEX: u64 = 24;
+
 /// `softcap` slot on `kv_append_attend_fused` (0.0 = disabled).
 const KV_APPEND_ATTEND_SOFTCAP_INDEX: u64 = 14;
 
@@ -90,6 +100,51 @@ pub(super) struct AttnDims {
 }
 
 impl MetalBackend {
+    /// Whether this layer's decode step will take the fully-fused
+    /// `attn_fused` path (QK-norm/passthrough + RoPE + KV-append +
+    /// attend + optional QKV biases, ONE dispatch).
+    ///
+    /// The SINGLE authority for that decision: `encode_input_norm_and_qkv`
+    /// consults it to skip the separate Q/K/V `bias_add` dispatches (the
+    /// fused kernel applies them on load), and `encode_attention_block`
+    /// consults it to pick the dispatch. Two sites re-deriving this
+    /// independently is the dispatch-geometry-disagreement defect class —
+    /// a bias applied twice or not at all, silently.
+    pub(super) fn attn_fused_will_fire(
+        &self,
+        layer: &FullPipelineLayer,
+        kv_cache: &ops::kv_cache::KVCache,
+        layer_idx: usize,
+    ) -> bool {
+        let attn_spec = layer.attention_spec();
+        if layer.kv_shared_source.is_some()
+            || !self.decode_flags.fused_attn
+            || attn_spec.head_dim > MAX_HEAD_DIM_SINGLE_SG
+            || attn_spec.has_v_norm
+        {
+            return false;
+        }
+        // QK-norm must be both-or-neither: the kernel norms Q and K under
+        // one flag. A half-normed arch takes the unfused chain.
+        if attn_spec.q_norm_enabled != attn_spec.k_norm_enabled {
+            return false;
+        }
+        // Same all-or-nothing rule for the projection biases: the kernel
+        // reads all three under one flag, and a partially-biased layer
+        // bound with stub buffers would read out of bounds. The unfused
+        // chain's per-site bias_add dispatches handle mixed presence.
+        let n_bias = [layer.attn_q_bias, layer.attn_k_bias, layer.attn_v_bias]
+            .iter()
+            .filter(|b| b.is_some())
+            .count();
+        if n_bias != 0 && n_bias != 3 {
+            return false;
+        }
+        let window_size = self.effective_window_for(attn_spec.sliding_window as u32);
+        let t_val = (kv_cache.layers[layer_idx].current_len + 1) as u32;
+        ops::kv_cache::attention_span(t_val, window_size) <= ops::kv_cache::SHORT_ATTENTION_SPAN
+    }
+
     /// Encode the per-layer attention block (Steps 1.5–5). See the module
     /// doc-comment for the full input/output contract.
     #[allow(clippy::too_many_arguments)]
@@ -196,32 +251,23 @@ impl MetalBackend {
             && kv_shared_source.is_none();
         let use_fused_post_attn = self.decode_flags.fused_post_attn_norm;
 
-        // Path 1: full attention fusion. Skips both qk_norm_rope dispatch AND
-        // kv_append_attend_fused dispatch — handles them in `attn_fused`.
-        // M2: `has_v_norm` and `q_norm_enabled` / `k_norm_enabled` come
-        // from the structured AttentionSpec; the actual `q_norm_weight`
-        // / `k_norm_weight` slices stay as direct layer reads because
-        // the spec only carries presence flags, not the weight bytes.
-        let did_fused_attn = use_fused_attn
-            && layer_head_dim <= MAX_HEAD_DIM_SINGLE_SG
-            && attn_span <= ops::kv_cache::SHORT_ATTENTION_SPAN
-            && attn_spec.q_norm_enabled
-            && attn_spec.k_norm_enabled
-            && !attn_spec.has_v_norm
-            // attn_fused writes the layer's own K/V cache; shared layers
-            // must not, so we fall through to the manual qk_norm + RoPE
-            // branch. The K-side work is wasted on shared layers (the
-            // result is discarded), but correctness > 35-layer dispatch
-            // saving on a non-default opt-in path.
-            && kv_shared_source.is_none();
+        // Path 1: full attention fusion. Skips the qk_norm_rope dispatch,
+        // the kv_append_attend_fused dispatch, AND the three Q/K/V
+        // bias_add dispatches (when the layer has biases) — all handled
+        // inside `attn_fused`. The decision comes from the shared
+        // `attn_fused_will_fire` authority, which `encode_input_norm_and_qkv`
+        // also consulted to skip its bias dispatches — the two sites must
+        // agree or a bias is applied twice / dropped.
+        let did_fused_attn = self.attn_fused_will_fire(layer, kv_cache, layer_idx);
+        let _ = use_fused_attn;
 
         // ── Step 1.5 + 2: QK-norm + RoPE ──
         if did_fused_attn {
             let cache = &kv_cache.layers[layer_idx];
-            let q_w = layer.q_norm_weight.unwrap();
-            let k_w = layer.k_norm_weight.unwrap();
-            let q_w_buf = self.bufs.get_f32(q_w);
-            let k_w_buf = self.bufs.get_f32(k_w);
+            // No-QK-norm archs bind the shared empty-slice stub; the
+            // has_qk_norm flag gates the read (sinks convention).
+            let q_w_buf = self.bufs.get_f32(layer.q_norm_weight.unwrap_or(&[]));
+            let k_w_buf = self.bufs.get_f32(layer.k_norm_weight.unwrap_or(&[]));
             let t_val = (cache.current_len + 1) as u32;
             let hd_val = layer_head_dim as u32;
             let nq_val = layer_num_q_heads as u32;
@@ -274,6 +320,28 @@ impl MetalBackend {
                 ATTN_FUSED_SOFTCAP_INDEX,
                 4,
                 &layer.attn_softcap as *const f32 as *const std::ffi::c_void,
+            );
+            // QK-norm flag + Q/K/V projection biases (GPT-OSS). Presence
+            // is all-or-nothing here by `attn_fused_will_fire`'s gate;
+            // absent slots bind the empty-slice stub, unread under the
+            // flags.
+            let has_qk_norm: u32 = u32::from(attn_spec.q_norm_enabled);
+            enc.set_bytes(
+                ATTN_FUSED_HAS_QK_NORM_INDEX,
+                4,
+                &has_qk_norm as *const u32 as *const std::ffi::c_void,
+            );
+            let has_qkv_bias: u32 = u32::from(layer.attn_q_bias.is_some());
+            let qb_buf = self.bufs.get_f32(layer.attn_q_bias.unwrap_or(&[]));
+            let kb_buf = self.bufs.get_f32(layer.attn_k_bias.unwrap_or(&[]));
+            let vb_buf = self.bufs.get_f32(layer.attn_v_bias.unwrap_or(&[]));
+            enc.set_buffer(ATTN_FUSED_QKV_BIAS_INDEX, Some(&qb_buf), 0);
+            enc.set_buffer(ATTN_FUSED_QKV_BIAS_INDEX + 1, Some(&kb_buf), 0);
+            enc.set_buffer(ATTN_FUSED_QKV_BIAS_INDEX + 2, Some(&vb_buf), 0);
+            enc.set_bytes(
+                ATTN_FUSED_QKV_BIAS_INDEX + 3,
+                4,
+                &has_qkv_bias as *const u32 as *const std::ffi::c_void,
             );
             enc.dispatch_thread_groups(
                 MTLSize::new(layer_num_q_heads as u64, 1, 1),
@@ -538,6 +606,12 @@ impl MetalBackend {
                     q4_matvec: &self.q4.matvec,
                     q4k_matmul: None,
                 };
+                // K from the store's own row width, not the logical
+                // `layer_q_dim` — O rows may be padded to the quant block
+                // (same audit-F17 hazard as the QKV kernels; the padded
+                // columns dequantise to zero, so the stored width is
+                // exact given the input buffer's zeroed slack).
+                let o_k_store = layer.wo.stored_cols(hidden, layer_q_dim);
                 crate::stages::o_proj::encode(
                     enc,
                     &pipes,
@@ -552,7 +626,7 @@ impl MetalBackend {
                     0,
                     bufs.o_out_buf,
                     0,
-                    layer_q_dim,
+                    o_k_store,
                     hidden,
                 );
             }
@@ -614,6 +688,28 @@ impl MetalBackend {
                 "O projection has no dispatch for {format:?}; supported: \
                  Q4_0, Q4_K, Q4_KF, Q6_K (o_proj::encode) and Q8_0 (legacy q8_matvec)"
             ),
+        }
+
+        // O-projection bias (GPT-OSS) joins before the residual add —
+        // the same point the CPU reference (`forward::add_bias`) applies
+        // it. Dispatched only when the layer carries the bias.
+        if let Some(b) = layer.attn_o_bias {
+            assert_eq!(
+                b.len(),
+                hidden,
+                "O projection bias has {} entries but hidden is {hidden} — \
+                 the extracted tensor does not match this model",
+                b.len()
+            );
+            let b_buf = self.bufs.get_f32(b);
+            crate::stages::bias_add::encode(
+                enc,
+                &self.attention.bias_add_pipeline,
+                bufs.o_out_buf,
+                0,
+                &b_buf,
+                hidden,
+            );
         }
 
         // ── Step 5b: Residual + post-attn norm + ffn-input norm ──

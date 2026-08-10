@@ -35,6 +35,17 @@
 //!  - tg_red[8]         = 32 B
 //!
 //!  Total ~6 KB — well within 32 KB/TG.
+//!
+//! **No-QK-norm models (GPT-OSS)**: `has_qk_norm = 0` skips phases 1–2's
+//! normalisation (Q/K pass through raw) so architectures without QK-norm
+//! can still take this single-dispatch path — RMS-norming with weight 1
+//! is NOT the identity, so this must be a flag, not a unit-weight bind.
+//! The projection biases (GPT-OSS Q/K/V) ride along the same way:
+//! `has_qkv_bias = 1` adds them on load, before norm/RoPE — the same
+//! point the CPU reference and the unfused `bias_add` dispatches apply
+//! them — collapsing bias×3 + rope + append/attend into this one kernel.
+//! Both flag slots follow the sinks convention: real (stub) buffers are
+//! always bound; the flag gates the read.
 
 pub const SHADER: &str = r#"
 kernel void attn_fused(
@@ -61,6 +72,11 @@ kernel void attn_fused(
     constant float&     amplitude  [[buffer(20)]],  // cos/sin scalar (YaRN); 1.0 otherwise  // 0 = no sinks (slot is a placeholder)
     constant uint&      abs_pos    [[buffer(21)]],  // ABSOLUTE stream position for RoPE
     constant float&     softcap    [[buffer(22)]],  // 0.0 = disabled
+    constant uint&      has_qk_norm[[buffer(23)]],  // 0 = raw Q/K (no-QK-norm archs)
+    device const float* q_bias     [[buffer(24)]],  // [num_q  * head_dim]
+    device const float* k_bias     [[buffer(25)]],  // [num_kv * head_dim]
+    device const float* v_bias     [[buffer(26)]],  // [num_kv * head_dim]
+    constant uint&      has_qkv_bias[[buffer(27)]], // 0 = slots are placeholders
     uint tg_id  [[threadgroup_position_in_grid]],
     uint tid    [[thread_index_in_threadgroup]],
     uint tg_sz  [[threads_per_threadgroup]],
@@ -89,40 +105,61 @@ kernel void attn_fused(
     // ── Phase 1: parallel RMS for Q[head] AND K[kv_head] in one pass ──
     // Each thread accumulates two squares (one for Q, one for K). We use
     // simdgroup reduction and re-use tg_red as a tiny buffer for both.
-    float partial_q = 0.0f;
-    float partial_k = 0.0f;
-    for (uint d = tid; d < head_dim; d += tg_sz) {
-        float vq = Q_in[head    * head_dim + d];
-        float vk = K_in[kv_head * head_dim + d];
-        partial_q += vq * vq;
-        partial_k += vk * vk;
-    }
-    // Reduce Q
-    {
-        float sg = simd_sum(partial_q);
-        if (lane == 0) tg_red[sg_id] = sg;
+    // Projection biases (has_qkv_bias) join on load, BEFORE the norm —
+    // the same order as the CPU reference and the unfused bias_add path.
+    // `has_qk_norm`/`has_qkv_bias` are uniform constants, so the barriers
+    // inside the conditional are uniformly executed across the TG.
+    float inv_rms_q = 1.0f;
+    float inv_rms_k = 1.0f;
+    if (has_qk_norm != 0u) {
+        float partial_q = 0.0f;
+        float partial_k = 0.0f;
+        for (uint d = tid; d < head_dim; d += tg_sz) {
+            float vq = Q_in[head    * head_dim + d];
+            float vk = K_in[kv_head * head_dim + d];
+            if (has_qkv_bias != 0u) {
+                vq += q_bias[head    * head_dim + d];
+                vk += k_bias[kv_head * head_dim + d];
+            }
+            partial_q += vq * vq;
+            partial_k += vk * vk;
+        }
+        // Reduce Q
+        {
+            float sg = simd_sum(partial_q);
+            if (lane == 0) tg_red[sg_id] = sg;
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+        float ss_q = tg_red[0];
+        for (uint i = 1u; i < n_sg; i++) ss_q += tg_red[i];
         threadgroup_barrier(mem_flags::mem_threadgroup);
+        // Reduce K
+        {
+            float sg = simd_sum(partial_k);
+            if (lane == 0) tg_red[sg_id] = sg;
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+        float ss_k = tg_red[0];
+        for (uint i = 1u; i < n_sg; i++) ss_k += tg_red[i];
+        inv_rms_q = 1.0f / sqrt(ss_q / float(head_dim) + eps);
+        inv_rms_k = 1.0f / sqrt(ss_k / float(head_dim) + eps);
     }
-    float ss_q = tg_red[0];
-    for (uint i = 1u; i < n_sg; i++) ss_q += tg_red[i];
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    // Reduce K
-    {
-        float sg = simd_sum(partial_k);
-        if (lane == 0) tg_red[sg_id] = sg;
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-    }
-    float ss_k = tg_red[0];
-    for (uint i = 1u; i < n_sg; i++) ss_k += tg_red[i];
-    float inv_rms_q = 1.0f / sqrt(ss_q / float(head_dim) + eps);
-    float inv_rms_k = 1.0f / sqrt(ss_k / float(head_dim) + eps);
 
-    // ── Phase 2: write normed Q,K to TG memory ──
+    // ── Phase 2: write (biased,) normed Q,K to TG memory ──
     for (uint d = tid; d < head_dim; d += tg_sz) {
         float vq = Q_in[head    * head_dim + d];
         float vk = K_in[kv_head * head_dim + d];
-        tg_q[d]        = (vq * inv_rms_q) * (qk_offset + q_weight[d]);
-        tg_k_normed[d] = (vk * inv_rms_k) * (qk_offset + k_weight[d]);
+        if (has_qkv_bias != 0u) {
+            vq += q_bias[head    * head_dim + d];
+            vk += k_bias[kv_head * head_dim + d];
+        }
+        if (has_qk_norm != 0u) {
+            tg_q[d]        = (vq * inv_rms_q) * (qk_offset + q_weight[d]);
+            tg_k_normed[d] = (vk * inv_rms_k) * (qk_offset + k_weight[d]);
+        } else {
+            tg_q[d]        = vq;
+            tg_k_normed[d] = vk;
+        }
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -155,7 +192,11 @@ kernel void attn_fused(
 
     // ── Phase 4: stream V[kv_head] to V_cache[pos][kv_head] ──
     for (uint d = tid; d < head_dim; d += tg_sz) {
-        V_cache[cache_off + d] = V_in[kv_head * head_dim + d];
+        float vv = V_in[kv_head * head_dim + d];
+        if (has_qkv_bias != 0u) {
+            vv += v_bias[kv_head * head_dim + d];
+        }
+        V_cache[cache_off + d] = vv;
     }
 
     // Orders BOTH memory spaces: phase 5 reads K from device

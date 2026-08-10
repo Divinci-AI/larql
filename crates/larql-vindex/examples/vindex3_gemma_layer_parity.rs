@@ -380,7 +380,14 @@ fn bind_operation<'a>(
             experts,
             intermediate_dim: moe.intermediate_size,
             hidden_dim: hidden,
-            activation: moe.activation,
+            activation: match moe.gate_rule {
+                larql_compute::MoeGateRule::Gated(a) => a,
+                rule => {
+                    return Err(format!(
+                        "bound MoE kernels are gated-only, layer declares {rule:?}"
+                    ))
+                }
+            },
             kernel,
         }],
         reduction: BoundReduction::WeightedSum,
@@ -416,7 +423,7 @@ fn incumbent_expert_outputs(
                 gate_up,
                 down,
                 inter,
-                moe.activation,
+                moe.expert_mlp(e),
             )
             .to_vec())
         })

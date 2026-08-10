@@ -29,7 +29,10 @@ pub use enums::{
     PositionEncodingType,
 };
 pub use layer::FullPipelineLayer;
-pub use moe::{MoeLayerWeights, MoeRoutingPolicy, MoeSpec, MoeWeightLayout};
+pub use moe::{
+    stored_gate_up_cols, ExpertMlp, MoeGateRule, MoeLayerWeights, MoeRoutingPolicy, MoeSpec,
+    MoeWeightLayout,
+};
 pub use quant_format::{
     ExternalScaleKind, QuantAux, QuantFormat, QuantWeight, ScaleStorage, Q4_KF_BLOCK_BYTES,
 };

@@ -37,9 +37,9 @@ mod ffn;
 mod lm_head;
 mod moe_layers;
 mod moe_layers_per_expert;
-#[cfg(test)]
-mod moe_layers_per_expert_tests;
 mod norms;
+#[cfg(test)]
+mod tests;
 
 pub mod feature_major_down;
 
