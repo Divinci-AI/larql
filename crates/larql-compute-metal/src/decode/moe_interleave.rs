@@ -609,6 +609,44 @@ mod tests {
             new_h: &new_h_buf,
         };
 
+        // Every precondition checked above matched exactly — the mismatch
+        // must be in `resolve_selected_experts` itself (the one call this
+        // diagnostic hasn't replicated yet). Mirror its inputs exactly
+        // (the same CPU-routing helpers `try_inline_zero_copy_moe` calls)
+        // and invoke it directly to see whether it's the router or the
+        // region-resolve that's failing.
+        {
+            use larql_compute::cpu::ops::moe::{
+                moe_expert_input, moe_route_from_router_input, moe_router_input,
+            };
+            let moe_ref = layer.moe.as_ref().unwrap();
+            let expert_input = moe_expert_input(&h_post_attn_data, moe_ref, 0.0, ictx.eps);
+            let router_in =
+                moe_router_input(&h_post_attn_data, &expert_input, moe_ref, 0.0, ictx.eps);
+            let (expert_indices, expert_weights) = moe_route_from_router_input(&router_in, moe_ref);
+            eprintln!("DIAG expert_indices={expert_indices:?}");
+            eprintln!("DIAG expert_weights={expert_weights:?}");
+            for &ei in &expert_indices {
+                let gu = expert_gu[ei].as_slice();
+                let dn = expert_down[ei].as_slice();
+                eprintln!(
+                    "DIAG expert {ei}: gu.len()={} dn.len()={} resolve_region(gu)={} resolve_region(dn)={}",
+                    gu.len(),
+                    dn.len(),
+                    m.bufs.resolve_region(gu).is_some(),
+                    m.bufs.resolve_region(dn).is_some()
+                );
+            }
+            let resolved =
+                m.resolve_selected_experts(&scratch, &expert_indices, &expert_weights, |ei| {
+                    Some((expert_gu[ei].as_slice(), expert_down[ei].as_slice()))
+                });
+            eprintln!(
+                "DIAG resolve_selected_experts.is_some()={}",
+                resolved.is_some()
+            );
+        }
+
         let mut cmd = m.queue.new_command_buffer().to_owned();
         let mut enc = cmd.new_compute_command_encoder().to_owned();
         let mut encoder_ended = true;
