@@ -1589,6 +1589,16 @@ the grouped kernels already read — take it near zero).
 command-buffer structure dominates the wall; measure the wall against the
 CB-window sum before optimising a kernel.
 
+**Follow-ups (tracked here, not just in PR #241's notes):**
+
+| # | Item | Crate | Status |
+|---|---|---|---|
+| P5-F1 | **Native-MXFP4 expert execution** — the apples-to-apples experiment. Shaders `mxfp4_matvec` + `mxfp4_grouped_experts` already exist; the work is the store path (serve MXFP4 bytes without the Q6_K transcode) + wiring them into the zero-copy/grouped dispatch. First-order budget from the measured profile: MoE 11.5 ms / 1.54 ≈ 7.5 + 3.3 attention + ~2 residue ≈ **~78 tok/s** before any tuning — the ~85-90 reference falls out of the remaining milliseconds, not a miracle. Run it as *going past* the baseline, not reaching it. | larql-compute-metal, larql-vindex | open |
+| P5-F2 | **GPU routing + device-side offset tables** — kill the remaining 24 per-layer waits (~2 ms). Router matvec (32×2880) + policy top-k as a kernel writing the weights/offsets buffers the grouped kernels ALREADY read from device memory (their offset tables were designed for this — "K3b … without a signature change"). Gets decode to one command buffer per token. Policy scope: start with GPT-OSS's `top_k_then_softmax`; others keep the CPU route. | larql-compute-metal | open |
+| P5-F3 | **`predict_kquant_metal` panics on pure MoE** ("ffn Q4K slices missing for layer") — the max-tokens-1 predict path is a separate dense-assuming forward; either route it through the MoE-aware decode or refuse with the typed capability error. | larql-inference | open |
+| P5-F4 | **`metal_decode_synthetic` parallel-run flake** — pre-existing (clean-tree reproducible, ~2/5 parallel runs, victim varies, prefill NaN; single-threaded always green; CI blind — runners have no Metal device). Cross-test interaction under concurrent GPU load, mechanism unidentified; suspect list starts at pooled-buffer recycling vs in-flight command buffers under parallel backends. Until fixed, local red on this suite means: re-run single-threaded before diagnosing. | larql-compute-metal | open |
+| P5-F5 | **GB-style bits/token scoring of the served vindex** — `shannon score` still can't load vindexes (raw-model only), so the serve path's quality gate is greedy-trajectory parity, not measured bits/token (§4.6.8's scorer gap, still open). | larql-cli, larql-inference | open |
+
 ---
 
 ### K3 expert transport codec — CLOSED, cross-expert redundancy is nil (2026-08-10)
