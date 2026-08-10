@@ -36,8 +36,52 @@ pub(super) struct ResolvedExpert {
 }
 
 impl MetalBackend {
-    /// Run `resolved` experts over `expert_input` and return the weighted,
-    /// post-normed MoE output. Caller guarantees:
+    /// Resolve the router's selected experts to zero-copy region bindings.
+    ///
+    /// Returns `Some(resolved)` only when EVERY selected expert's byte
+    /// slices lie inside registered regions AND hold their full extents
+    /// (a short down slice would make the GPU read the next expert's
+    /// bytes where the staged path zero-pads); any miss returns `None`
+    /// and the caller stays on its staged/callback path.
+    pub(super) fn resolve_selected_experts<'w>(
+        &self,
+        scratch: &MoeScratch,
+        expert_indices: &[usize],
+        expert_weights: &[f32],
+        get_expert_bytes: impl Fn(usize) -> Option<(&'w [u8], &'w [u8])>,
+    ) -> Option<Vec<ResolvedExpert>> {
+        let gate_half_bytes = scratch.inter * scratch.row_bytes;
+        let down_expert_bytes = scratch.hidden * scratch.down_row_bytes;
+        let mut resolved = Vec::with_capacity(scratch.top_k);
+        for (k, &ei) in expert_indices.iter().enumerate() {
+            if resolved.len() >= scratch.top_k {
+                break;
+            }
+            let (gu_bytes, dn_bytes) = get_expert_bytes(ei)?;
+            if gu_bytes.len() < 2 * gate_half_bytes || dn_bytes.len() < down_expert_bytes {
+                return None;
+            }
+            let gate_up = self.bufs.resolve_region(gu_bytes)?;
+            let down = self.bufs.resolve_region(dn_bytes)?;
+            resolved.push(ResolvedExpert {
+                gate_up,
+                down,
+                expert_id: ei,
+                weight: expert_weights[k],
+            });
+        }
+        if resolved.is_empty() {
+            return None;
+        }
+        Some(resolved)
+    }
+
+    /// Encode the expert dispatches (bias/x staging + gate/up +
+    /// activation + down) into `enc` — no command-buffer lifecycle, no
+    /// readback. Shared by the commit-and-CPU-combine wrapper below and
+    /// the merged-CB path (`encode_experts_and_combine_zero_copy`).
+    ///
+    /// Caller guarantees:
     /// - `resolved.len() <= scratch.top_k` (output offsets are bounded by
     ///   the scratch allocation),
     /// - every `gate_up` slice held ≥ `2 × inter × row_bytes` bytes and
@@ -45,23 +89,19 @@ impl MetalBackend {
     ///   (offsets stay in-bounds of the registered region's buffer),
     /// - the biased-Gated refusal already ran (shared assert at the top of
     ///   `gpu_moe_dispatch_with_scratch`).
-    pub(super) fn dispatch_experts_zero_copy(
+    pub(super) fn encode_experts_zero_copy(
         &self,
+        enc: &metal::ComputeCommandEncoderRef,
         expert_input: &[f32],
         moe: &MoeLayerWeights<'_>,
-        eps: f32,
         scratch: &MoeScratch,
         resolved: &[ResolvedExpert],
-    ) -> Vec<f32> {
+    ) {
         let hidden = scratch.hidden;
         let inter = scratch.inter;
         let inter_padded = scratch.inter_padded;
         let valid_count = resolved.len();
         debug_assert!(valid_count <= scratch.top_k);
-
-        let timing_enabled =
-            larql_compute::options::env_flag(larql_compute::options::ENV_METAL_MOE_TIMING);
-        let t_start = std::time::Instant::now();
 
         // ── ClampedGlu gate/up biases: slot-aligned staging (small — the
         // weights stay zero-copy; the bias rows are `inter` f32 each).
@@ -90,9 +130,6 @@ impl MetalBackend {
             let x_ptr = scratch.x_buf.contents() as *mut f32;
             std::ptr::copy_nonoverlapping(expert_input.as_ptr(), x_ptr, hidden);
         }
-
-        let cmd = self.queue.new_command_buffer();
-        let enc = cmd.new_compute_command_encoder();
 
         // ── Gate + up per expert, at the expert's region offset.
         let gate_half_bytes = (inter * scratch.row_bytes) as u64;
@@ -323,6 +360,29 @@ impl MetalBackend {
                 );
             }
         }
+    }
+
+    /// Run `resolved` experts and return the weighted, post-normed MoE
+    /// output — the standalone form: own command buffer, one commit+wait,
+    /// CPU combine. The merged-CB decode path uses
+    /// [`Self::encode_experts_and_combine_zero_copy`] instead.
+    pub(super) fn dispatch_experts_zero_copy(
+        &self,
+        expert_input: &[f32],
+        moe: &MoeLayerWeights<'_>,
+        eps: f32,
+        scratch: &MoeScratch,
+        resolved: &[ResolvedExpert],
+    ) -> Vec<f32> {
+        let hidden = scratch.hidden;
+        let valid_count = resolved.len();
+        let timing_enabled =
+            larql_compute::options::env_flag(larql_compute::options::ENV_METAL_MOE_TIMING);
+        let t_start = std::time::Instant::now();
+
+        let cmd = self.queue.new_command_buffer();
+        let enc = cmd.new_compute_command_encoder();
+        self.encode_experts_zero_copy(enc, expert_input, moe, scratch, resolved);
         enc.end_encoding();
         cmd.commit();
         cmd.wait_until_completed();
@@ -358,5 +418,85 @@ impl MetalBackend {
         }
 
         moe_post_expert_output(&moe_out, moe, 0.0, eps)
+    }
+
+    /// Merged-CB form: encode the expert dispatches AND the weighted
+    /// combine (`new_h = h_post_attn + Σ w·(out + down_bias)`) into `enc`,
+    /// with NO command-buffer lifecycle — the caller lets the next
+    /// layer's attention ride the same buffer, halving per-layer waits.
+    ///
+    /// Valid ONLY for the identity-combine policy class
+    /// (`MoePostExpertNormPolicy::None`, no combined-output norm, no
+    /// layer scalar, unit residual multiplier) — the caller gates on
+    /// that; this function debug-asserts it.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn encode_experts_and_combine_zero_copy(
+        &self,
+        enc: &metal::ComputeCommandEncoderRef,
+        expert_input: &[f32],
+        moe: &MoeLayerWeights<'_>,
+        scratch: &MoeScratch,
+        resolved: &[ResolvedExpert],
+        h_post_attn: &Buffer,
+        new_h: &Buffer,
+    ) {
+        debug_assert!(matches!(
+            moe.routing_policy.post_expert_norm,
+            larql_compute::MoePostExpertNormPolicy::None
+        ));
+        let hidden = scratch.hidden;
+        let valid_count = resolved.len();
+
+        self.encode_experts_zero_copy(enc, expert_input, moe, scratch, resolved);
+
+        // Stage the selected experts' down-bias rows slot-aligned with
+        // `expert_outs` (small — k × hidden f32 against ~22 MB/expert of
+        // weight reads). All-or-nothing per layer: `expert_mlp` yields an
+        // empty bias exactly when the layer has none.
+        let has_bias = resolved
+            .first()
+            .is_some_and(|r| !moe.expert_mlp(r.expert_id).down_bias.is_empty());
+        if has_bias {
+            for (slot, r) in resolved.iter().enumerate() {
+                let bias = moe.expert_mlp(r.expert_id).down_bias;
+                debug_assert_eq!(bias.len(), hidden);
+                // SAFETY: shared-storage scratch sized `top_k × hidden`
+                // f32; `slot < valid_count <= top_k`. CPU writes complete
+                // before commit (the caller commits after encoding).
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        bias.as_ptr(),
+                        (scratch.down_bias_staged.contents() as *mut f32).add(slot * hidden),
+                        hidden,
+                    );
+                }
+            }
+        }
+
+        let weights: Vec<f32> = resolved.iter().map(|r| r.weight).collect();
+        let hidden_u = hidden as u32;
+        let k_u = valid_count as u32;
+        let has_bias_u: u32 = u32::from(has_bias);
+        enc.set_compute_pipeline_state(&self.ffn.moe_weighted_combine_pipeline);
+        enc.set_buffer(0, Some(&scratch.expert_outs), 0);
+        enc.set_buffer(1, Some(h_post_attn), 0);
+        enc.set_buffer(2, Some(new_h), 0);
+        enc.set_bytes(3, 4, &hidden_u as *const u32 as *const c_void);
+        enc.set_bytes(4, 4, &k_u as *const u32 as *const c_void);
+        enc.set_bytes(
+            5,
+            (weights.len() * 4) as u64,
+            weights.as_ptr() as *const c_void,
+        );
+        enc.set_buffer(6, Some(&scratch.down_bias_staged), 0);
+        enc.set_bytes(7, 4, &has_bias_u as *const u32 as *const c_void);
+        enc.dispatch_threads(
+            MTLSize::new(hidden as u64, 1, 1),
+            MTLSize::new(
+                crate::kernels::DISPATCH_TG_MAX_THREADS.min(hidden as u64),
+                1,
+                1,
+            ),
+        );
     }
 }

@@ -19,6 +19,7 @@ mod moe_interleave;
 pub mod profile;
 mod setup;
 
+pub(crate) use moe_interleave::InlineMoeCtx;
 pub use profile::ProfileTimings;
 
 pub(crate) const DEFAULT_KV_CACHE_MAX_SEQ: usize = 4096;
@@ -200,6 +201,7 @@ impl MetalBackend {
             None,
             None,
             larql_compute::StateDumpMask::Full,
+            None,
         )
     }
 
@@ -285,6 +287,7 @@ impl MetalBackend {
             None,
             Some(state),
             mask,
+            None,
         )
     }
 
@@ -309,6 +312,7 @@ impl MetalBackend {
         mut moe_collect_fn: Option<&mut dyn FnMut(usize) -> Vec<f32>>,
         mut state_dump: Option<&mut larql_compute::DecodeStateDump>,
         state_dump_mask: larql_compute::StateDumpMask,
+        inline_moe: Option<&moe_interleave::InlineMoeCtx<'_>>,
     ) -> Vec<f32> {
         // Refuse unroutable FFN formats BEFORE any command buffer or
         // encoder exists: a panic that unwinds past a live Metal
@@ -854,6 +858,7 @@ impl MetalBackend {
                     },
                     &mut moe_fn,
                     &mut moe_collect_fn,
+                    inline_moe,
                 );
             } else {
                 // ── Step 8: Optional layer scalar (non-MoE layers) ──

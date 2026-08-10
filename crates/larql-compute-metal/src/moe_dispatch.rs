@@ -73,6 +73,10 @@ pub struct MoeScratch {
     /// slots bind a real buffer; `has_bias` gates the read.
     pub(super) gate_bias_buf: Buffer,
     pub(super) up_bias_buf: Buffer,
+    /// Selected experts' down-bias rows for the GPU weighted combine,
+    /// `top_k × hidden` f32, slot-aligned with `expert_outs`. Staged by
+    /// the inline-combine path only; the CPU-combine paths never read it.
+    pub(super) down_bias_staged: Buffer,
 }
 
 // `Buffer` is `Send + Sync` on its own; the Metal types we hold here mirror
@@ -145,6 +149,7 @@ impl MoeScratch {
 
         let gate_bias_buf = bufs.output((top_k * inter * 4) as u64);
         let up_bias_buf = bufs.output((top_k * inter * 4) as u64);
+        let down_bias_staged = bufs.output((top_k * hidden * 4) as u64);
 
         // Zero the padding tails once. GEGLU writes only the first `inter`
         // floats of each expert's `inter_padded`-strided slice, so the
@@ -177,6 +182,7 @@ impl MoeScratch {
             expert_outs,
             gate_bias_buf,
             up_bias_buf,
+            down_bias_staged,
         }
     }
 }
@@ -266,8 +272,13 @@ impl MetalBackend {
             }
         };
 
-        Some(MetalBackend::decode_token_with_moe_fn(
-            self,
+        // Merged-CB context: per-layer preconditions permitting, the
+        // interleave routes on CPU and encodes experts + combine into the
+        // command buffer the next layer's attention rides — the moe_fn
+        // closure above stays as the per-layer fallback.
+        let inline_ctx = scratch_ref.map(|s| super::decode::InlineMoeCtx::new(s, norm_eps));
+
+        Some(self.decode_token_with_moe_split_fn(
             kv,
             layers,
             x,
@@ -280,6 +291,10 @@ impl MetalBackend {
             head_dim,
             rope_base,
             Some(&mut moe_fn),
+            None,
+            None,
+            larql_compute::StateDumpMask::Full,
+            inline_ctx.as_ref(),
         ))
     }
 
@@ -859,51 +874,12 @@ impl MetalBackend {
         // memcpys entirely — they are ~2 GB/token of CPU bandwidth on
         // GPT-OSS-class models. Any miss (unregistered region, short
         // slice) falls through to the staged path below unchanged.
+        if let Some(resolved) =
+            self.resolve_selected_experts(scratch, &expert_indices, &expert_weights, |ei| {
+                get_expert_bytes(ei)
+            })
         {
-            let mut resolved = Vec::with_capacity(top_k);
-            let mut all_resolved = true;
-            for (k, &ei) in expert_indices.iter().enumerate() {
-                if resolved.len() >= scratch.top_k {
-                    break;
-                }
-                let Some((gu_bytes, dn_bytes)) = get_expert_bytes(ei) else {
-                    continue;
-                };
-                // The zero-copy path reads the full extents in place, so
-                // both slices must actually hold them — a short down slice
-                // would make the GPU read the NEXT expert's bytes where
-                // the staged path zero-pads.
-                if gu_bytes.len() < 2 * gate_half_bytes || dn_bytes.len() < down_expert_bytes {
-                    all_resolved = false;
-                    break;
-                }
-                match (
-                    self.bufs.resolve_region(gu_bytes),
-                    self.bufs.resolve_region(dn_bytes),
-                ) {
-                    (Some(gate_up), Some(down)) => {
-                        resolved.push(crate::moe_zero_copy::ResolvedExpert {
-                            gate_up,
-                            down,
-                            expert_id: ei,
-                            weight: expert_weights[k],
-                        })
-                    }
-                    _ => {
-                        all_resolved = false;
-                        break;
-                    }
-                }
-            }
-            if all_resolved && !resolved.is_empty() {
-                return self.dispatch_experts_zero_copy(
-                    &expert_input,
-                    moe,
-                    eps,
-                    scratch,
-                    &resolved,
-                );
-            }
+            return self.dispatch_experts_zero_copy(&expert_input, moe, eps, scratch, &resolved);
         }
 
         let gate_ptr = scratch.gate_buf.contents() as *mut u8;
