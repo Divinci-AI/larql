@@ -116,6 +116,21 @@ mod tests {
         assert!(any.downcast_ref::<MetalBackend>().is_some());
     }
 
+    /// `register_weight_region` is a thin delegator to
+    /// `BufferCache::register_region` — pin that the trait method
+    /// actually reaches it (a page-aligned anon mmap registers) rather
+    /// than silently no-op-ing.
+    #[test]
+    fn register_weight_region_delegates_to_buffer_cache() {
+        let m = backend();
+        let mut region = memmap2::MmapMut::map_anon(8192).expect("anon mmap");
+        region.fill(0);
+        let region = region.make_read_only().expect("read-only mmap");
+        let before = m.bufs.region_count();
+        m.register_weight_region(&region[..]);
+        assert_eq!(m.bufs.region_count(), before + 1);
+    }
+
     /// `supports` accepts every capability MetalBackend claims —
     /// exercising every match arm in the `matches!` expression.
     /// Any future variant added to `Capability` will silently default
