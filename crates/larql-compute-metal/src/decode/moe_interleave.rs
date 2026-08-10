@@ -622,7 +622,11 @@ mod tests {
     /// `experts_gate_up_bias`/`experts_down_bias` to drive the bias-staging
     /// block here and the `has_bias` combine arm in
     /// `encode_experts_and_combine_zero_copy`, neither of which the
-    /// bias-free test above reaches.
+    /// bias-free test above reaches. Non-empty biases force
+    /// `gate_rule: ClampedGlu` too — `biased_gated_servable` requires
+    /// either ClampedGlu or both bias arrays empty, since a `Gated`
+    /// layer with expert biases has no kernel — which additionally
+    /// covers the ClampedGlu activation arm the first test never takes.
     #[test]
     fn try_inline_zero_copy_moe_uses_non_grouped_dispatch_across_separate_regions() {
         let m = backend();
@@ -692,7 +696,17 @@ mod tests {
             router_bias: &[],
             experts_gate_up_bias: &experts_gate_up_bias,
             experts_down_bias: &experts_down_bias,
-            gate_rule: MoeGateRule::Gated(Activation::GeluTanh),
+            // `biased_gated_servable` requires EITHER ClampedGlu OR both
+            // bias arrays empty — "a Gated layer with expert biases has
+            // no kernel" (see try_inline_zero_copy_moe's own comment).
+            // Non-empty biases with `Gated` here made the function bail
+            // at that check on the first attempt; this is also the
+            // combination that drives the ClampedGlu activation arm
+            // (limit/alpha values match tests/test_moe_clamped_glu_q6k.rs).
+            gate_rule: MoeGateRule::ClampedGlu {
+                limit: 7.0,
+                alpha: 1.702,
+            },
         };
 
         let scratch = MoeScratch::new_public(&m, top_k, hidden, inter);
