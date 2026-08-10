@@ -553,6 +553,16 @@ mod tests {
         let mut cmd = m.queue.new_command_buffer().to_owned();
         let mut enc = cmd.new_compute_command_encoder().to_owned();
         let mut encoder_ended = false;
+        // `try_inline_zero_copy_moe` REPLACES `*enc`/`*cmd` in place on the
+        // fast-path hit — it assumes the caller already ended/committed
+        // the incoming encoder (exactly what `handle_moe_interleave` does
+        // right before calling it). Skipping this crashes the whole test
+        // binary: Metal fatally asserts on dropping a command encoder
+        // that was never `end_encoding()`'d.
+        enc.end_encoding();
+        cmd.commit();
+        cmd.wait_until_completed();
+        encoder_ended = true;
 
         let took_zero_copy_path = m.try_inline_zero_copy_moe(
             &layer,
@@ -628,6 +638,16 @@ mod tests {
         let mut cmd = m.queue.new_command_buffer().to_owned();
         let mut enc = cmd.new_compute_command_encoder().to_owned();
         let mut encoder_ended = false;
+        // `try_inline_zero_copy_moe` REPLACES `*enc`/`*cmd` in place on the
+        // fast-path hit — it assumes the caller already ended/committed
+        // the incoming encoder (exactly what `handle_moe_interleave` does
+        // right before calling it). Skipping this crashes the whole test
+        // binary: Metal fatally asserts on dropping a command encoder
+        // that was never `end_encoding()`'d.
+        enc.end_encoding();
+        cmd.commit();
+        cmd.wait_until_completed();
+        encoder_ended = true;
 
         let took_zero_copy_path = m.try_inline_zero_copy_moe(
             &layer,
@@ -640,10 +660,13 @@ mod tests {
             &mut encoder_ended,
         );
         assert!(!took_zero_copy_path);
+        // Early-return arms never touch `*encoder_ended` — it must come
+        // back exactly as the caller left it (already ended, per the
+        // real `handle_moe_interleave` calling convention above), not
+        // flipped to `false` as the success path would.
         assert!(
-            !encoder_ended,
+            encoder_ended,
             "must leave caller state untouched on bail-out"
         );
-        enc.end_encoding();
     }
 }
