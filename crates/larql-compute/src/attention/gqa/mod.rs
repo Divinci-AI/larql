@@ -216,7 +216,7 @@ fn gqa_attention_batched(
             let start = window_start(causal_len, window);
             let mut row = scores.row_mut(qi);
             let row_slice = row.as_slice_mut().expect("row-major scores");
-            super::softmax::softmax_in_place(&mut row_slice[start..causal_len], None);
+            super::softmax::softmax_in_place_f32(&mut row_slice[start..causal_len]);
             row_slice[..start].fill(0.0);
             row_slice[causal_len..].fill(0.0);
         }

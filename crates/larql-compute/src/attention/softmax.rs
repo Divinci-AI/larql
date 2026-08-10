@@ -63,6 +63,97 @@ pub fn softmax_in_place(scores: &mut [f32], sink: Option<f32>) {
     }
 }
 
+/// Vectorised f32 softmax for the prefill-shaped batched attention —
+/// the physical-plan sibling of [`softmax_in_place`].
+///
+/// The f64 per-element `exp` above is the right call on the decode
+/// path (one short row per step, accuracy over throughput at long
+/// context), but a 343-row prefill runs ~26M of them and they were
+/// measured as ~0.3 s of TTFA (`docs/tts-funnel.md` 2026-08-10). This
+/// variant exponentiates in f32 via Accelerate's `vvexpf` on macOS
+/// (SIMD, ~1 ulp of `expf`) with a scalar `f32::exp` fallback
+/// elsewhere, and accumulates the denominator in f64 exactly like the
+/// reference softmax, keeping the tail-weight drift property.
+///
+/// No sink support by design: the batched prefill path excludes sinks
+/// (they keep the loop + [`softmax_in_place`]). Admission to the
+/// speech path is gated on the step-4 token-exact dump replay, not on
+/// closeness alone.
+pub fn softmax_in_place_f32(scores: &mut [f32]) {
+    if scores.is_empty() {
+        return;
+    }
+    let max_val = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    for score in scores.iter_mut() {
+        *score -= max_val;
+    }
+    exp_f32_in_place(scores);
+    let sum: f64 = scores.iter().map(|&e| e as f64).sum();
+    let inv_sum = (1.0 / sum) as f32;
+    for score in scores.iter_mut() {
+        *score *= inv_sum;
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn exp_f32_in_place(values: &mut [f32]) {
+    // vForce (Accelerate framework, already linked for BLAS): SIMD
+    // elementwise expf, documented safe in place.
+    unsafe extern "C" {
+        fn vvexpf(out: *mut f32, x: *const f32, n: *const i32);
+    }
+    let n = values.len() as i32;
+    unsafe { vvexpf(values.as_mut_ptr(), values.as_ptr(), &n) };
+}
+
+#[cfg(not(target_os = "macos"))]
+fn exp_f32_in_place(values: &mut [f32]) {
+    for value in values.iter_mut() {
+        *value = value.exp();
+    }
+}
+
+#[cfg(test)]
+mod tests_f32 {
+    use super::*;
+
+    #[test]
+    fn f32_softmax_tracks_f64_reference() {
+        // Deterministic logits with realistic attention-score spread.
+        let mut scores: Vec<f32> = (0..343)
+            .map(|i| ((i * 37 + 11) % 89) as f32 * 0.25 - 11.0)
+            .collect();
+        let mut reference = scores.clone();
+        softmax_in_place(&mut reference, None);
+        softmax_in_place_f32(&mut scores);
+
+        let sum: f64 = scores.iter().map(|&v| v as f64).sum();
+        assert!((sum - 1.0).abs() < 1e-5, "must normalise: sum {sum}");
+        let worst = scores
+            .iter()
+            .zip(&reference)
+            .map(|(&a, &b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            worst < 1e-6,
+            "f32 softmax drifted from the f64 reference: worst |delta| {worst:e}"
+        );
+    }
+
+    #[test]
+    fn f32_softmax_handles_edge_shapes() {
+        softmax_in_place_f32(&mut []);
+        let mut one = [3.5f32];
+        softmax_in_place_f32(&mut one);
+        assert_eq!(one, [1.0]);
+        // Large logits stay finite through the max-subtraction.
+        let mut hot = [900.0f32, 899.0, 100.0];
+        softmax_in_place_f32(&mut hot);
+        assert!(hot.iter().all(|v| v.is_finite()));
+        assert!(hot[0] > hot[1] && hot[1] > hot[2]);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -604,7 +604,26 @@ gets its first real decision. Also re-read honestly: yesterday's
 clean 28.9 s is the fp32 loop's true rate (decode untouched by this
 change). TTFA budget now: ~0.86 s FFN GEMM (Metal simdgroup target
 ~0.2 s) + ~0.3 s f64 softmax (f32 vectorisation next) + ~0.15 s
-remainder. Bonus
+remainder.
+
+**f32 softmax: admitted token-exact, banked ~nothing — the cost model
+was wrong** (2026-08-10, `softmax_in_place_f32`: Accelerate `vvexpf`
++ f64 denominator, batched prefill path only; decode/capture keep the
+f64 reference). The 138-frame dump replay stayed **token-exact through
+both physical-plan changes** — the contract ladder's strongest rung
+has now admitted a GEMM reordering and an f32 exponential without
+retreat. But TTFA measured 1232-1290 ms vs 1245-1286 before: the
+"~0.3 s of f64 exp" estimate was wrong (real exp throughput puts it
+nearer ~0.1 s, and much of it overlapped BLAS threads). Kept anyway —
+same tokens, strictly cheaper plan. Corrected budget, from measurement
+not estimate: prefill ≈ 1.22 s = ~0.66 s FFN dequant+BLAS + ~0.11 s
+attention-projection BLAS + ~0.36 s unprofiled per-layer machinery
+(rope, QK-norm, embeds, KV handle writes, norms) + small. Consequence
+for the gate: Metal on the FFN alone projects only ~0.76 s TTFA —
+**crossing 500 ms needs Metal to take the attention projections too,
+and/or the 0.36 s remainder to shrink**. Next move is an instrumented
+prefill phase split — measure, don't estimate; the last two rungs both
+said so. Bonus
 diagnostic, twice confirmed: during stall episodes the BLAS-phase
 prefill holds (1.58 s) while spin-pool decode collapses (9.4 fps, max
 frame 1008 ms) — the episodic interference selectively degrades
