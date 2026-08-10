@@ -552,7 +552,7 @@ mod tests {
 
         let mut cmd = m.queue.new_command_buffer().to_owned();
         let mut enc = cmd.new_compute_command_encoder().to_owned();
-        let mut encoder_ended = false;
+        let mut encoder_ended = true;
         // `try_inline_zero_copy_moe` REPLACES `*enc`/`*cmd` in place on the
         // fast-path hit — it assumes the caller already ended/committed
         // the incoming encoder (exactly what `handle_moe_interleave` does
@@ -562,8 +562,6 @@ mod tests {
         enc.end_encoding();
         cmd.commit();
         cmd.wait_until_completed();
-        encoder_ended = true;
-
         let took_zero_copy_path = m.try_inline_zero_copy_moe(
             &layer,
             &ctx,
@@ -637,7 +635,7 @@ mod tests {
         };
         let mut cmd = m.queue.new_command_buffer().to_owned();
         let mut enc = cmd.new_compute_command_encoder().to_owned();
-        let mut encoder_ended = false;
+        let mut encoder_ended = true;
         // `try_inline_zero_copy_moe` REPLACES `*enc`/`*cmd` in place on the
         // fast-path hit — it assumes the caller already ended/committed
         // the incoming encoder (exactly what `handle_moe_interleave` does
@@ -647,8 +645,6 @@ mod tests {
         enc.end_encoding();
         cmd.commit();
         cmd.wait_until_completed();
-        encoder_ended = true;
-
         let took_zero_copy_path = m.try_inline_zero_copy_moe(
             &layer,
             &ctx,
