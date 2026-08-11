@@ -21,6 +21,38 @@ pub enum Vindex3Command {
     /// `inspect-hf` inventory JSONs, treated together as one model system.
     /// Exits non-zero when the plan is inadmissible.
     Plan(PlanArgs),
+    /// Encode the system into a self-contained container (G3). Refuses an
+    /// inadmissible plan; consumes the built graph, never re-interprets
+    /// the checkpoint.
+    Encode(EncodeArgs),
+    /// Reconstruct and check a container solely from its own contents —
+    /// no source checkpoint, no architecture registry (the G3 gate).
+    Inspect(InspectArgs),
+}
+
+#[derive(Args)]
+pub struct EncodeArgs {
+    /// Checkpoint directories or inventory JSON files (one per artifact).
+    #[arg(required = true)]
+    pub artifacts: Vec<PathBuf>,
+
+    /// Container directory to write.
+    #[arg(long)]
+    pub output: PathBuf,
+}
+
+#[derive(Args)]
+pub struct InspectArgs {
+    /// Container directory.
+    pub container: PathBuf,
+
+    /// Additionally re-hash every segment against the directory.
+    #[arg(long)]
+    pub verify: bool,
+
+    /// Print the full reconstruction as JSON instead of the summary.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Args)]
@@ -37,6 +69,86 @@ pub struct PlanArgs {
 pub fn run(cmd: Vindex3Command) -> Result<(), Box<dyn std::error::Error>> {
     match cmd {
         Vindex3Command::Plan(args) => run_plan(args),
+        Vindex3Command::Encode(args) => run_encode(args),
+        Vindex3Command::Inspect(args) => run_inspect(args),
+    }
+}
+
+fn run_encode(args: EncodeArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let mut named = Vec::new();
+    for path in &args.artifacts {
+        named.push((artifact_name(path), load_artifact(path)?));
+    }
+    let outcome = larql_vindex::format::vindex3::encode::encode_system(&named, &args.output)?;
+    eprintln!(
+        "encoded {} representation(s), {:.2} GB payload → {}",
+        outcome.representations,
+        outcome.total_payload_bytes as f64 / 1e9,
+        outcome.container.display(),
+    );
+    Ok(())
+}
+
+fn run_inspect(args: InspectArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let inspection =
+        larql_vindex::format::vindex3::inspect::inspect_container(&args.container, args.verify)?;
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&inspection)?);
+    } else {
+        println!("components:");
+        for c in &inspection.components {
+            let policy = match (c.sliding_layers, c.full_layers, c.nope_layers) {
+                (Some(s), Some(f), Some(n)) => {
+                    format!(", {s} sliding / {f} full, {n} NoPE, window {:?}", c.window)
+                }
+                _ => ", (no per-layer table)".to_string(),
+            };
+            println!(
+                "  {:8} {:12} {} layers, hidden {}{policy}",
+                c.id, c.role, c.num_layers, c.hidden_size
+            );
+        }
+        println!("objects:");
+        for (id, entry) in &inspection.index.representations {
+            println!(
+                "  {:40} {:8.3} GB  {} tensors  sha256 {}…",
+                id,
+                entry.payload_bytes as f64 / 1e9,
+                entry.tensor_count,
+                &entry.payload_sha256[..12],
+            );
+        }
+        println!("edges:");
+        for e in &inspection.graph.edges {
+            println!(
+                "  {}.hidden{:?} -> {} via {} (block {:?})",
+                e.producer_component,
+                e.producer_layers,
+                e.consumer_component,
+                e.consumer_object,
+                e.block_size,
+            );
+        }
+    }
+    if inspection.is_coherent() {
+        eprintln!(
+            "container coherent{}",
+            if args.verify {
+                " (payloads verified)"
+            } else {
+                ""
+            }
+        );
+        Ok(())
+    } else {
+        for defect in &inspection.defects {
+            eprintln!("defect: {defect:?}");
+        }
+        Err(format!(
+            "container incoherent: {} defect(s)",
+            inspection.defects.len()
+        )
+        .into())
     }
 }
 

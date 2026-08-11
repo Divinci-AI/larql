@@ -10,7 +10,9 @@ use larql_models::inventory::{build_inventory, ArchitectureInventory};
 /// Number of layers in the fixture target model.
 pub const FIXTURE_LAYERS: usize = 8;
 
-/// Write a config + one shard and build its inventory.
+/// Write a config + one shard (with real payload bytes) and build its
+/// inventory. Payloads are a deterministic per-offset pattern so encode
+/// tests can compare bytes end to end, not just counts.
 fn inventory_from(
     dir: &Path,
     config: &serde_json::Value,
@@ -22,7 +24,23 @@ fn inventory_from(
     file.write_all(&(header_bytes.len() as u64).to_le_bytes())
         .unwrap();
     file.write_all(&header_bytes).unwrap();
+    let payload_len = header
+        .as_object()
+        .unwrap()
+        .values()
+        .filter_map(|d| d["data_offsets"].as_array())
+        .filter_map(|offs| offs.get(1)?.as_u64())
+        .max()
+        .unwrap_or(0);
+    file.write_all(&payload_pattern(payload_len)).unwrap();
     build_inventory(dir).unwrap()
+}
+
+/// Deterministic payload bytes for fixture shards: `f(i) = (i * 31 + 7) mod 251`.
+pub fn payload_pattern(len: u64) -> Vec<u8> {
+    (0..len)
+        .map(|i| ((i.wrapping_mul(31).wrapping_add(7)) % 251) as u8)
+        .collect()
 }
 
 /// A Glimmer-shaped target: unknown family, hybrid attention, per-layer

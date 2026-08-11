@@ -37,9 +37,11 @@
 //! would look for it. Regions are placed exactly as their producer wrote them.
 
 pub mod build;
+pub mod encode;
 pub mod graph;
 pub mod import;
 pub mod index;
+pub mod inspect;
 pub mod plan;
 pub mod profile;
 pub mod read;
