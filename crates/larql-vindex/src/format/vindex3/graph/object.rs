@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 /// architectural, not familial — any decoder has a stack, most have an
 /// embedding and a head; a perception component has a tower and an adapter;
 /// a drafter has a feature projector implementing its tap interface.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ObjectKind {
     /// Token embedding table.

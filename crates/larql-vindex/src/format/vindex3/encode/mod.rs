@@ -120,22 +120,12 @@ pub fn encode_system(
             |source_name, write, observe| {
                 // Bindings within one object may span artifacts; resolve the
                 // owning source per tensor.
-                let owner = object
-                    .source_bindings
-                    .iter()
-                    .find(|b| {
-                        source_name == b.tensor_prefix
-                            || source_name
-                                .strip_prefix(&b.tensor_prefix)
-                                .is_some_and(|rest| rest.starts_with('.'))
-                    })
-                    .map(|b| b.artifact.as_str())
-                    .ok_or_else(|| {
-                        VindexError::Parse(format!(
-                            "tensor `{source_name}` matches no binding of `{}`",
-                            object.id
-                        ))
-                    })?;
+                let owner = binding_owner(object, source_name).ok_or_else(|| {
+                    VindexError::Parse(format!(
+                        "tensor `{source_name}` matches no binding of `{}`",
+                        object.id
+                    ))
+                })?;
                 sources[owner].stream_payload(source_name, write, observe)
             },
         )?;
@@ -174,10 +164,26 @@ pub fn encode_system(
     })
 }
 
+/// The artifact owning `source_name` under one of `object`'s bindings —
+/// the single definition of binding membership, shared with the G4
+/// re-hash so the two can never drift.
+pub(crate) fn binding_owner<'a>(object: &'a LogicalObject, source_name: &str) -> Option<&'a str> {
+    object
+        .source_bindings
+        .iter()
+        .find(|b| {
+            source_name == b.tensor_prefix
+                || source_name
+                    .strip_prefix(&b.tensor_prefix)
+                    .is_some_and(|rest| rest.starts_with('.'))
+        })
+        .map(|b| b.artifact.as_str())
+}
+
 /// Plan the tensor table for one object: every source tensor under its
 /// bindings, named relative to the bindings' common segment-prefix so no
 /// artifact-global name survives into the container.
-fn plan_object_tensors(
+pub(crate) fn plan_object_tensors(
     object: &LogicalObject,
     inventories: &BTreeMap<&str, &ArchitectureInventory>,
 ) -> Result<Vec<PlannedTensor>, VindexError> {

@@ -1,7 +1,10 @@
 //! Normalisation kinds and the scope their statistic reduces over.
 
+use serde::{Deserialize, Serialize};
+
 /// Normalization type used by the model.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum NormType {
     /// RMSNorm (Gemma, Llama)
     RmsNorm,
@@ -24,7 +27,8 @@ pub enum NormType {
 /// Getting it wrong rescales every head to a common norm, which discards the
 /// relative magnitude *between* heads — a structural change to attention, not
 /// a rounding one. See `docs/k3-funnel.md` §4.7.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum QkNormScope {
     /// RMS over each head's `head_dim` slice independently.
     /// `Qwen3RMSNorm(head_dim)` — Qwen3, Gemma 3/4.

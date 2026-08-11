@@ -66,6 +66,13 @@ pub struct WrittenSegment {
     pub segment_sha256: String,
 }
 
+/// Deterministic payload order: sorted by object-relative name. The single
+/// definition of segment order, shared by the writer and the G4 source-side
+/// re-hash so the two can never disagree about what "the same bytes" means.
+pub fn sort_into_payload_order(tensors: &mut [PlannedTensor]) {
+    tensors.sort_by(|a, b| a.relative_name.cmp(&b.relative_name));
+}
+
 /// Write one segment file: header first (offsets are known from the plan),
 /// then every payload streamed through both hashers.
 pub fn write_segment(
@@ -78,8 +85,7 @@ pub fn write_segment(
         &mut dyn FnMut(&[u8]),
     ) -> Result<u64, VindexError>,
 ) -> Result<WrittenSegment, VindexError> {
-    // Deterministic order: sorted by relative name; offsets follow.
-    tensors.sort_by(|a, b| a.relative_name.cmp(&b.relative_name));
+    sort_into_payload_order(&mut tensors);
     let mut offset = 0u64;
     let table: Vec<SegmentTensor> = tensors
         .iter()

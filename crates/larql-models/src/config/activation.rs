@@ -1,7 +1,10 @@
 //! FFN activation functions and the gated/standard FFN shape.
 
+use serde::{Deserialize, Serialize};
+
 /// Activation function used in the FFN.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Activation {
     /// SiLU / Swish (Gemma, Llama)
     Silu,
@@ -66,7 +69,8 @@ impl Activation {
 }
 
 /// Whether the FFN uses a gated architecture.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum FfnType {
     /// Gated: SiLU(x @ gate.T) * (x @ up.T) @ down.T (Gemma, Llama)
     Gated,

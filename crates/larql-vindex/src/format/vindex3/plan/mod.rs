@@ -102,6 +102,7 @@ fn plan_artifact(
     findings.extend(placed_object_findings(name, built));
     findings.extend(unplaced_group_findings(name, built));
     findings.extend(attention_policy_findings(name, built));
+    findings.extend(execution_surface_findings(name, built));
     findings.extend(unresolved_interface_findings(name, built));
     ArtifactPlan {
         name: name.to_string(),
@@ -232,6 +233,59 @@ fn attention_policy_findings(artifact: &str, built: &BuiltGraph) -> Vec<Finding>
             })
         })
         .collect()
+}
+
+/// Execution-surface verdict per component this artifact sourced: a
+/// representable finding when the surface is complete, a blocking one
+/// itemising the missing source facts when it is not (V3-G5a). An
+/// executor with a partial surface would have to default, which G5
+/// forbids — so incompleteness refuses conversion up front.
+fn execution_surface_findings(artifact: &str, built: &BuiltGraph) -> Vec<Finding> {
+    let mut findings: Vec<Finding> = built
+        .graph
+        .components
+        .iter()
+        .filter(|c| c.source_artifact == artifact && c.execution.is_some())
+        .map(|component| Finding {
+            category: FindingCategory::Representable,
+            class: SemanticClass::ExecutionSemantic,
+            component: component.id.clone(),
+            subject: format!("{}.execution_surface", component.id),
+            declared: None,
+            resolved: None,
+            detail: format!(
+                "execution surface complete (attention, ffn, norm{})",
+                if component
+                    .execution
+                    .as_ref()
+                    .is_some_and(|s| s.head.is_some())
+                {
+                    ", head"
+                } else {
+                    ""
+                }
+            ),
+        })
+        .collect();
+    findings.extend(
+        built
+            .incomplete_surfaces
+            .iter()
+            .filter(|s| s.artifact == artifact)
+            .map(|s| Finding {
+                category: FindingCategory::Unrepresented,
+                class: SemanticClass::ExecutionSemantic,
+                component: s.component.clone(),
+                subject: format!("{}.execution_surface", s.component),
+                declared: None,
+                resolved: None,
+                detail: format!(
+                    "execution surface incomplete — missing: {}",
+                    s.missing.join(", ")
+                ),
+            }),
+    );
+    findings
 }
 
 /// Blocking finding per interface the builder could not resolve.

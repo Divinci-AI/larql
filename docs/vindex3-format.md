@@ -1,8 +1,8 @@
 # VINDEX3 — Model-System Container Format
 
-Status: **living spec**. §1–§5 describe what is implemented and gated as of
-2026-08-11 (branch `feat/vindex3-glimmer-g0-g2`); §6–§8 pin the design for
-the rungs currently being built (G3–G5). The experimental programme,
+Status: **living spec**. §1–§7 describe what is implemented and gated as of
+2026-08-11 (branch `feat/vindex3-glimmer-g0-g2`); §8 pins the design for
+the rung currently being built (G5). The experimental programme,
 gates and run order live in `docs/vindex3-experiments.md`; the LYRW v2
 routed-layer physical layout lives in `docs/lyrw-v2.md` and is incorporated
 here by reference as one segment family.
@@ -332,9 +332,14 @@ objects:    …with sizes, encodings and hashes
 
 ---
 
-## 7. G4 — verification (pinned design)
+## 7. G4 — verification
 
-Four explicit authorities, compared structurally and semantically:
+```bash
+larql vindex3 verify <artifact>… --container <container>/
+```
+
+Implemented in `format/vindex3/verify_system/`. Four explicit authorities,
+compared structurally and semantically:
 
 | Authority | Source |
 |---|---|
@@ -356,30 +361,188 @@ Encoded   target.attention[3].position = none        PASS
 Two equivalence claims are kept **separate**, because each can fail while
 the other holds:
 
-- **semantic equivalence** — the four-authority structural comparison;
-- **byte payload equivalence** — source-binding payload hash ==
-  encoded canonical segment hash, per representation.
+- **semantic equivalence** — the four-authority structural comparison,
+  checked as three pairwise links (Declared ≡ Resolved via the plan's value
+  comparators; Resolved ≡ Graph by independent re-derivation, not a call
+  into the builder's own mapping; Graph ≡ Encoded element-by-element against
+  the persisted graph) so a failure names the two authorities that disagree;
+- **byte payload equivalence** — per representation, **both ends re-hashed
+  at verify time**: the source payload hash (recomputed from the checkpoint,
+  in segment order), the encoded payload-region hash (recomputed from the
+  container) and the hash the directory recorded must all agree. A drifted
+  checkpoint therefore fails differently (`source ≠ recorded`) from a
+  corrupted container (`encoded ≠ recorded`).
 
 "Tensor count before == after" is not verification and does not appear in
-this format.
+this format. The tensor *table* (name, dtype, shape, offset, length) is
+compared entry by entry instead, because a dtype or shape relabel over
+identical bytes is invisible to every hash in the container — the gate
+includes a mutation test for exactly that case.
 
 ---
 
-## 8. G5 — execution contract (pinned design)
+## 8. G5 — execution contract (5a + 5b-1 implemented; 5b-2–5e pinned design)
 
 Execute the system **using only semantic information present in the
-container**. The executor owns kernels (attention, matvec, norm,
-activation, drafter verification); it must not own architecture:
+container**. The executor owns *generic operations* — embedding, norms,
+attention, RoPE/NoPE, sliding/full span, FFN activations, linear,
+perception transformer, projection, drafter verification. It must not
+own architecture:
 
 - no `if family == X` branches — span/window/position come from
   `AttentionLayerPolicy`, scaling scalars from the persisted config
   surface;
+- no layer-pattern arithmetic (`layer % 4 == 3`) — the interleave is
+  already unrolled into the per-layer table;
 - no hardcoded tap constants — the drafter discovers
   `target.hidden[…] → draft.feature_projector` from the
   `HiddenStateEdge`, block size included.
 
-When G5 holds, an architecture is an **instance** the container
-describes, not an implementation the executor contains.
+**The deletion invariant.** Removing the original checkpoint,
+`config.json`, HF model type and architecture name must not change
+execution. The runtime sees `container → system graph → operation plan →
+generic kernels`, nothing else.
+
+### 8.0 The execution surface (5a — implemented)
+
+`Component` answers *what part of the system this is*; its
+`ExecutionSurface` (`graph/surface.rs`, graph schema v2) answers *what
+the generic operations need to run it* — grouped by op (`attention`,
+`ffn`, `norm`, optional `head`), every value **fully resolved** at
+build/judgment time: an absent `hidden_act`, a shared post-norm epsilon
+and canonical 1/√d scaling are decided once, by the same detection
+surface the serving path runs, and persisted. An executor reads; it
+never defaults.
+
+The **completeness contract** derives from the operations a component's
+objects imply, never from what any architecture declares:
+
+```text
+DecoderStack / PerceptionTower object  →  attention + ffn + norm surface
+Embedding / OutputHead object          →  head surface
+```
+
+It is enforced twice: at plan time an incomplete surface is a blocking
+finding (encode refuses — a missing `intermediate_size` is a schema
+refusal, not a mid-forward-pass discovery), and on the container
+`larql vindex3 inspect --execution-complete` re-answers the question
+from the persisted graph alone. Perception surfaces are derived from the
+nested config reading plus **tensor evidence** (FFN gating from the
+presence of gate weights under the tower — whoever ships them), and a
+per-layer head-geometry variation is refused as a schema gap, never
+averaged away. G4 covers the surface automatically: link 2 re-derives it
+from today's source, link 3 compares it element-wise against the
+persisted graph.
+
+Two facts were moved out of family defaults by the first real
+four-norm stack (whose generic fallback claimed `post_norms = false`
+while shipping four norms per layer):
+
+- **Norm placement is operand evidence** (`graph/roles.rs`): the norm
+  roles present across a stack's layers decide `PreOnly` vs `PrePost`;
+  a mixed estate refuses. When an execution-semantic structural fact can
+  be established from unambiguous operand topology, tensor evidence
+  outranks a family/default assumption. Count is not semantics —
+  placement is: under two norms, `post_attention_layernorm` *is* the
+  pre-FFN norm; under four it normalises the attention output.
+- **Attention output gating is a generic primitive**
+  (`AttentionSurface.output_gate` + `OperandRole::AttnOutputGate`), not
+  a family feature. Its judged semantics stay `None` until a model's
+  gate behaviour is actually judged — a stack shipping the operand
+  meanwhile fails operand closure with the primitive named.
+
+### 8.2 Operand closure and the operation plan (5b-1 — implemented)
+
+G4 proves *consistency* across the four authorities; it cannot prove
+*sufficiency* — all four can faithfully agree on an under-specified
+execution model. The physical operand estate is the independent
+structural witness that closes that hole:
+
+```text
+consistency  (Declared ≡ Resolved ≡ Graph ≡ Encoded)
++ operand closure  (every executable tensor ↔ a generic op)
+= execution sufficiency
+```
+
+`larql vindex3 ops <container> --component <id>` (`format/vindex3/opplan/`)
+emits the component's **generic operation program** solely from the
+container — per-layer norm sites, attention geometry/scale/span/position
+(from the policy table, never an index pattern), FFN shape, embedding
+and head ops, every operand a logical-object id plus segment-relative
+tensor. The closure gate requires, before any plan exists:
+
+- every stack tensor classifies into an [`OperandRole`] — an
+  unclassified operand blocks;
+- every operand's op is declared by the surface — an operand implying an
+  absent op blocks **naming the required primitive** (the real Glimmer
+  target currently refuses on exactly `self_attn.gate_proj` × 52
+  layers: `required primitive: attention output gate`);
+- every op the surface implies has its operands, with the stored shapes
+  the surface's geometry states;
+- per-layer accounting is total (`N/N operands accounted`) — counts or
+  family defaults are not sufficient.
+
+The real assistant closes completely (5 layers, 11/11: two-norm
+placement, per-head QK-norms, gated FFN) — the first real component
+whose full generic program derives from its container alone.
+
+### 8.3 Next rungs (pinned)
+
+**Seal 5b-1.** Judge the semantics of the attention output gate — *what
+generic attention operation does this operand implement*, never *how
+does one family's attention work* — encode it in
+`AttentionSurface.output_gate` (kind/activation/placement as the judged
+behaviour requires), re-encode, and the target must close:
+52 layers, 12/12, 0 defects. No numerical work before that.
+
+**5b-2 — causal authority of the emitted program.** Parity
+(hidden-state and logit, not argmax) against the checkpoint-driven
+fixture path, then three positive controls proving three independent
+semantic pathways drive computation — a container fact must not merely
+survive serialization:
+
+```text
+scalar execution fact      mutate persisted attention scale   → output changes
+layer policy fact          mutate one layer's None → RoPE     → output changes
+operand/op semantic fact   mutate/remove judged gate semantics → diverge or refuse
+```
+
+The third exists because of the gate discovery: the two pieces the
+generic fallback failed to capture (NoPE layers, attention gating) are
+exactly the two that make the strongest controls.
+
+**The naming-convention trap.** Dispatching on object-id *strings*
+(`if object_id.contains("perception_tower")`) technically avoids a
+family branch but is the same defect laundered through a name: the
+convention becomes an undeclared schema. Object ids identify; they never
+encode execution rules. Dispatch reads typed semantics only —
+`ObjectKind`, `ComponentRole`, `AttentionLayerPolicy`, `HiddenStateEdge`
+fields — so a renamed id changes nothing and a new architecture whose
+graph carries the same kinds executes with zero runtime edits.
+
+### 8.1 The G5 gate — five proofs
+
+1. **Text forward from graph semantics** — the target component executes
+   from the container, output-identical to the checkpoint-driven path.
+2. **Position/span behaviour exclusively from `AttentionLayerPolicy`** —
+   NoPE/global vs RoPE/sliding per layer is a table read; mutating one
+   row of the persisted table provably changes execution (the positive
+   control), and no other source of that fact exists to consult.
+3. **Perception from the component, not family wiring** — the vision
+   tower and adapter run because a `perception` component with its
+   objects is present, not because the runtime knows Glimmer has one.
+4. **Drafter capture exclusively from the `HiddenStateEdge`** — which
+   hidden states are tapped, and the block protocol, are edge reads;
+   editing the edge redirects the capture.
+5. **Lookup by logical object id only** — operand resolution goes
+   `object id → representation → segment`; no original HF tensor name
+   appears anywhere on the execution path (they were already stripped at
+   encode).
+
+When the five hold, an architecture is an **instance** the container
+describes, not an implementation the executor contains: an architecture
+is *supported* when its execution semantics can be expressed in the
+model-system IR — not when its name has been added to the runtime.
 
 ---
 

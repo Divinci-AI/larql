@@ -32,8 +32,8 @@ use crate::detect::ModelError;
 
 pub use report::{
     ArchitectureInventory, AttentionSummary, ConfigKeyFact, Detection, Identity, InterfaceFact,
-    KeyStatus, LayerPolicy, ResolvedTopology, TensorFact, TensorGroup, TensorInventory,
-    INVENTORY_SCHEMA,
+    KeyStatus, LayerPolicy, ResolvedExecution, ResolvedTopology, TensorFact, TensorGroup,
+    TensorInventory, INVENTORY_SCHEMA,
 };
 
 /// Filename of the config an HF checkpoint directory carries.

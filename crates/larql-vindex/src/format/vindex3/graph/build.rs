@@ -15,6 +15,10 @@ use super::component::{Component, ComponentRole};
 use super::edge::HiddenStateEdge;
 use super::object::{Fidelity, LogicalObject, ObjectKind, Representation, SourceBinding};
 use super::policy::{AttentionLayerPolicy, AttentionSpan};
+use super::surface::{
+    attach_stack_evidence, gate_evidence, head_from_resolved, surface_from_nested,
+    surface_from_resolved,
+};
 use super::{SystemGraph, GRAPH_SCHEMA};
 
 /// Sliding-layer label in the inventory's resolved table.
@@ -46,11 +50,22 @@ pub struct UnresolvedInterface {
     pub reason: String,
 }
 
+/// A component whose execution surface could not be completed — the
+/// missing source facts, as data. Blocking downstream: an executor with a
+/// partial surface would have to default, which G5 forbids.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IncompleteSurface {
+    pub artifact: String,
+    pub component: String,
+    pub missing: Vec<String>,
+}
+
 /// The build result: the graph plus everything that did not fit.
 pub struct BuiltGraph {
     pub graph: SystemGraph,
     pub unplaced: Vec<UnplacedGroup>,
     pub unresolved_interfaces: Vec<UnresolvedInterface>,
+    pub incomplete_surfaces: Vec<IncompleteSurface>,
 }
 
 /// Name-fragment vocabulary for classifying tensor groups into object
@@ -107,6 +122,10 @@ pub fn build_from_inventories(named: &[(String, ArchitectureInventory)]) -> Buil
     let mut edges: Vec<HiddenStateEdge> = Vec::new();
     let mut unplaced: Vec<UnplacedGroup> = Vec::new();
     let mut unresolved_interfaces: Vec<UnresolvedInterface> = Vec::new();
+    let mut nested_by_component: BTreeMap<
+        String,
+        &larql_models::inventory::components::ComponentTopology,
+    > = BTreeMap::new();
 
     // Pass 1: components. Roles from evidence: a declared tap interface
     // makes a drafter; a nested component with perception geometry makes a
@@ -131,9 +150,11 @@ pub fn build_from_inventories(named: &[(String, ArchitectureInventory)]) -> Buil
             num_layers: inventory.resolved.num_layers,
             hidden_size: inventory.resolved.hidden_size,
             attention: Some(attention_table(inventory)),
+            execution: None, // attached in pass 3, once objects are known
         });
         for nested in &inventory.nested_components {
             let id = unique_id(&nested.name, &components);
+            nested_by_component.insert(id.clone(), nested);
             components.push(Component {
                 id,
                 role: ComponentRole::Perception,
@@ -143,6 +164,7 @@ pub fn build_from_inventories(named: &[(String, ArchitectureInventory)]) -> Buil
                 // No per-layer resolution exists for nested components yet;
                 // absent is honest, a fabricated table would not be.
                 attention: None,
+                execution: None, // attached in pass 3
             });
         }
     }
@@ -224,6 +246,58 @@ pub fn build_from_inventories(named: &[(String, ArchitectureInventory)]) -> Buil
         }
     }
 
+    // Pass 3: execution surfaces, now that objects are known (a head
+    // surface exists iff the component owns embedding/head objects; a
+    // perception FFN's gating is tensor evidence under the tower). A
+    // surface that cannot be completed is recorded as missing facts —
+    // blocking downstream — never filled with defaults.
+    let mut incomplete_surfaces: Vec<IncompleteSurface> = Vec::new();
+    for component in &mut components {
+        let Some((_, inventory)) = named.iter().find(|(n, _)| *n == component.source_artifact)
+        else {
+            continue;
+        };
+        let result = match component.role {
+            ComponentRole::Perception => match nested_by_component.get(&component.id) {
+                Some(nested) => {
+                    let has_gate_tensors = objects.values().any(|object| {
+                        object.component == component.id
+                            && object.kind == ObjectKind::PerceptionTower
+                            && gate_evidence(inventory, object)
+                    });
+                    surface_from_nested(nested, has_gate_tensors)
+                }
+                None => Err(vec!["nested component reading".to_string()]),
+            },
+            ComponentRole::PrimaryText | ComponentRole::Drafter => surface_from_resolved(inventory)
+                .and_then(|mut surface| {
+                    let owns_head = objects.values().any(|object| {
+                        object.component == component.id
+                            && matches!(object.kind, ObjectKind::Embedding | ObjectKind::OutputHead)
+                    });
+                    if owns_head {
+                        surface.head = Some(head_from_resolved(inventory)?);
+                    }
+                    // Facts only the operand estate can state (norm
+                    // placement) — evidence outranks family defaults.
+                    if let Some(stack) = objects.values().find(|object| {
+                        object.component == component.id && object.kind == ObjectKind::DecoderStack
+                    }) {
+                        attach_stack_evidence(&mut surface, inventory, stack)?;
+                    }
+                    Ok(surface)
+                }),
+        };
+        match result {
+            Ok(surface) => component.execution = Some(surface),
+            Err(missing) => incomplete_surfaces.push(IncompleteSurface {
+                artifact: component.source_artifact.clone(),
+                component: component.id.clone(),
+                missing,
+            }),
+        }
+    }
+
     components.sort_by(|a, b| a.id.cmp(&b.id));
     BuiltGraph {
         graph: SystemGraph {
@@ -234,6 +308,7 @@ pub fn build_from_inventories(named: &[(String, ArchitectureInventory)]) -> Buil
         },
         unplaced,
         unresolved_interfaces,
+        incomplete_surfaces,
     }
 }
 

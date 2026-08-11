@@ -25,7 +25,12 @@ use serde::{Deserialize, Serialize};
 /// v2: [`LayerPolicy`] carries a [`PositionPolicy`](crate::config::PositionPolicy)
 /// instead of a bare `rope_base` — NoPE layers are a policy variant, not a
 /// numeric sentinel.
-pub const INVENTORY_SCHEMA: u32 = 2;
+///
+/// v3: [`ResolvedTopology`] carries [`ResolvedExecution`] — the execution
+/// scalars a generic executor reads, fully resolved. A v2 inventory
+/// deserialises with `execution: None`, which downstream completeness
+/// gates treat as *incomplete*, never as defaults.
+pub const INVENTORY_SCHEMA: u32 = 3;
 
 /// Machine-readable architecture inventory of one HF checkpoint directory.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -97,6 +102,51 @@ pub struct ResolvedTopology {
     pub attention: AttentionSummary,
     /// One entry per layer, in layer order.
     pub layers: Vec<LayerPolicy>,
+    /// Execution scalars, fully resolved. `None` only when read from a
+    /// pre-v3 inventory JSON — a fact for completeness gates, not a
+    /// licence to default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution: Option<ResolvedExecution>,
+}
+
+/// The execution-scalar surface resolution produces: everything a generic
+/// executor reads beyond topology and the per-layer table, **fully
+/// resolved**. Every defaulting decision (an absent `hidden_act`, a shared
+/// post-norm epsilon) is applied here, once, by the same detection surface
+/// the serving path runs — an executor consuming these values never
+/// defaults anything.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResolvedExecution {
+    /// Final multiplier on QK^T scores: the base scale
+    /// (`query_pre_attn_scalar` or `head_dim`)^-0.5 times any declared
+    /// `qk_scale_factor` extra multiplier.
+    pub attention_scale: f64,
+    /// Attention-logit softcap; `None` = the op is absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attn_logit_softcapping: Option<f32>,
+    /// Scope of QK normalisation, when QK-norm weights exist in the stack.
+    pub qk_norm_scope: crate::config::QkNormScope,
+    /// Offset added to QK-norm weights at runtime (Gemma 2/3: 1.0).
+    pub qk_norm_weight_offset: f32,
+    pub activation: crate::config::Activation,
+    pub ffn_type: crate::config::FfnType,
+    pub norm_kind: crate::config::NormType,
+    pub norm_eps: f64,
+    /// Post-norm epsilon; equals [`Self::norm_eps`] unless the checkpoint
+    /// declared its own.
+    pub post_norm_eps: f64,
+    /// Whether layers carry separate post-norms around attention/FFN
+    /// (Gemma-style four-norm layers) in addition to pre-norms.
+    pub post_norms: bool,
+    /// Offset added to norm weights at runtime (Gemma: 1.0).
+    pub norm_weight_offset: f32,
+    /// Multiplier applied to embeddings after lookup; 1.0 = identity.
+    pub embed_scale: f32,
+    /// Multiplier applied before the vocabulary projection; 1.0 = identity.
+    pub output_multiplier: f64,
+    /// Final-logit softcap; `None` = the op is absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_logit_softcapping: Option<f32>,
 }
 
 /// Counts over [`ResolvedTopology::layers`].

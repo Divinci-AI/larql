@@ -12,7 +12,9 @@ use serde_json::Value;
 
 use crate::detect::{detect_from_json, find_architecture};
 
-use super::report::{AttentionSummary, Detection, Identity, LayerPolicy, ResolvedTopology};
+use super::report::{
+    AttentionSummary, Detection, Identity, LayerPolicy, ResolvedExecution, ResolvedTopology,
+};
 
 /// Attention-kind labels for [`Detection::attention_kind`].
 const ATTENTION_SLIDING: &str = "sliding";
@@ -107,6 +109,26 @@ pub fn resolve(config: &Value, identity: &Identity) -> (Detection, ResolvedTopol
         .iter()
         .filter(|l| l.attention == ATTENTION_SLIDING)
         .count();
+    // Every defaulting decision the serving path would make, applied once
+    // and recorded — the executor downstream reads, never defaults.
+    let execution = ResolvedExecution {
+        attention_scale: arch.attention_scale() * arch.qk_scale_factor().unwrap_or(1.0),
+        attn_logit_softcapping: arch.attn_logit_softcapping(),
+        qk_norm_scope: arch.qk_norm_scope(),
+        qk_norm_weight_offset: arch.qk_norm_weight_offset(),
+        activation: arch.activation(),
+        ffn_type: arch.ffn_type(),
+        norm_kind: arch.norm_type(),
+        norm_eps: arch.norm_eps() as f64,
+        post_norm_eps: arch
+            .post_norm_eps()
+            .unwrap_or_else(|| arch.norm_eps() as f64),
+        post_norms: arch.has_post_norms(),
+        norm_weight_offset: arch.norm_weight_offset(),
+        embed_scale: arch.embed_scale(),
+        output_multiplier: arch.output_multiplier().unwrap_or(1.0),
+        final_logit_softcapping: arch.final_logit_softcapping(),
+    };
     let topology = ResolvedTopology {
         num_layers: cfg.num_layers,
         hidden_size: cfg.hidden_size,
@@ -121,6 +143,7 @@ pub fn resolve(config: &Value, identity: &Identity) -> (Detection, ResolvedTopol
             full_layers: cfg.num_layers - sliding_layers,
         },
         layers,
+        execution: Some(execution),
     };
     (detection, topology)
 }

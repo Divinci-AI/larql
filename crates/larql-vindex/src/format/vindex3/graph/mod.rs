@@ -32,24 +32,35 @@
 //!   both, separately, linked by id.
 
 pub mod build;
+pub mod complete;
 pub mod component;
 pub mod edge;
 pub mod object;
 pub mod policy;
+pub mod roles;
+pub mod surface;
 
 #[cfg(test)]
 mod tests;
 
 use serde::{Deserialize, Serialize};
 
-pub use build::{build_from_inventories, BuiltGraph, UnplacedGroup};
+pub use build::{build_from_inventories, BuiltGraph, IncompleteSurface, UnplacedGroup};
+pub use complete::{execution_completeness, CompletenessDefect};
 pub use component::{Component, ComponentRole};
 pub use edge::HiddenStateEdge;
 pub use object::{LogicalObject, ObjectKind, Representation, SourceBinding};
 pub use policy::AttentionLayerPolicy;
+pub use roles::{NormPlacement, OperandRole};
+pub use surface::ExecutionSurface;
 
 /// Current system-graph schema. Bump on any breaking change.
-pub const GRAPH_SCHEMA: u32 = 1;
+///
+/// v2: [`Component`] carries an [`ExecutionSurface`] (V3-G5a) — the
+/// deletion invariant's missing half. A v1 graph deserialises with
+/// `execution: None`, which [`execution_completeness`] reports as
+/// incomplete.
+pub const GRAPH_SCHEMA: u32 = 2;
 
 /// The complete executable-system description.
 #[derive(Debug, Clone, Serialize, Deserialize)]

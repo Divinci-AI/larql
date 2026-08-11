@@ -37,6 +37,12 @@ pub struct Component {
     /// perception tower carries `None` until its resolution exists.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attention: Option<Vec<AttentionLayerPolicy>>,
+    /// The execution surface: everything generic operations read beyond
+    /// topology and the per-layer table (V3-G5a). `None` only in graphs
+    /// persisted before the surface existed — execution-completeness
+    /// gates treat that as incomplete, never as defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution: Option<super::surface::ExecutionSurface>,
 }
 
 impl Component {

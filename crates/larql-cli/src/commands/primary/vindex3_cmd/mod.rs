@@ -28,6 +28,49 @@ pub enum Vindex3Command {
     /// Reconstruct and check a container solely from its own contents —
     /// no source checkpoint, no architecture registry (the G3 gate).
     Inspect(InspectArgs),
+    /// Prove source ≡ encoded (the G4 gate): four-authority semantic
+    /// comparison plus per-representation byte equivalence, both ends
+    /// re-hashed now. Exits non-zero on any disagreement.
+    Verify(VerifyArgs),
+    /// Emit the generic operation plan of one component, solely from the
+    /// container (G5b-1). Operand closure is the gate: every stack tensor
+    /// must classify into a role a declared op consumes, with the
+    /// geometry the surface states. Exits non-zero on any closure defect.
+    Ops(OpsArgs),
+}
+
+#[derive(Args)]
+pub struct OpsArgs {
+    /// Container directory.
+    pub container: PathBuf,
+
+    /// Component to plan.
+    #[arg(long, default_value = "target")]
+    pub component: String,
+
+    /// Print one layer's full program instead of the per-layer summary.
+    #[arg(long)]
+    pub layer: Option<usize>,
+
+    /// Print the full plan as JSON instead of the summary.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args)]
+pub struct VerifyArgs {
+    /// Checkpoint directories or inventory JSON files — the same artifact
+    /// set the container was encoded from.
+    #[arg(required = true)]
+    pub artifacts: Vec<PathBuf>,
+
+    /// Container directory to verify against.
+    #[arg(long)]
+    pub container: PathBuf,
+
+    /// Print the full report as JSON instead of the summary.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Args)]
@@ -50,6 +93,12 @@ pub struct InspectArgs {
     #[arg(long)]
     pub verify: bool,
 
+    /// Additionally require execution completeness (the G5a gate): every
+    /// component with executable objects must carry the surface those
+    /// operations read. Exits non-zero when incomplete.
+    #[arg(long)]
+    pub execution_complete: bool,
+
     /// Print the full reconstruction as JSON instead of the summary.
     #[arg(long)]
     pub json: bool,
@@ -71,6 +120,67 @@ pub fn run(cmd: Vindex3Command) -> Result<(), Box<dyn std::error::Error>> {
         Vindex3Command::Plan(args) => run_plan(args),
         Vindex3Command::Encode(args) => run_encode(args),
         Vindex3Command::Inspect(args) => run_inspect(args),
+        Vindex3Command::Verify(args) => run_verify(args),
+        Vindex3Command::Ops(args) => run_ops(args),
+    }
+}
+
+mod ops;
+use ops::run_ops;
+
+fn run_verify(args: VerifyArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let mut named = Vec::new();
+    for path in &args.artifacts {
+        named.push((artifact_name(path), load_artifact(path)?));
+    }
+    let verification =
+        larql_vindex::format::vindex3::verify_system::verify_system(&named, &args.container)?;
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&verification)?);
+    } else {
+        for defect in &verification.container_defects {
+            println!("container defect: {defect}");
+        }
+        let semantic_pass = verification.semantic.iter().filter(|c| c.pass).count();
+        println!(
+            "semantic: {semantic_pass}/{} authority checks pass",
+            verification.semantic.len()
+        );
+        for failure in verification.semantic_failures() {
+            println!(
+                "  FAIL {} ≡ {}  {}: {}",
+                failure.left, failure.right, failure.subject, failure.detail
+            );
+        }
+        println!("payloads:");
+        for check in &verification.payloads {
+            println!(
+                "  {} {:40} {:8.3} GB  {}",
+                if check.pass { "PASS" } else { "FAIL" },
+                check.representation,
+                check.payload_bytes as f64 / 1e9,
+                if check.pass {
+                    format!(
+                        "sha256 {}…",
+                        &check.recorded_sha256[..12.min(check.recorded_sha256.len())]
+                    )
+                } else {
+                    check.detail.clone()
+                },
+            );
+        }
+    }
+    if verification.verified {
+        eprintln!("verified: Declared ≡ Resolved ≡ Graph ≡ Encoded; payloads byte-equal");
+        Ok(())
+    } else {
+        Err(format!(
+            "NOT verified: {} semantic failure(s), {} payload failure(s), {} container defect(s)",
+            verification.semantic_failures().count(),
+            verification.payload_failures().count(),
+            verification.container_defects.len(),
+        )
+        .into())
     }
 }
 
@@ -129,6 +239,53 @@ fn run_inspect(args: InspectArgs) -> Result<(), Box<dyn std::error::Error>> {
                 e.block_size,
             );
         }
+    }
+    let surface_defects = if args.execution_complete {
+        let defects = inspection.execution_completeness();
+        if !args.json {
+            println!("execution surfaces:");
+            for component in &inspection.graph.components {
+                match &component.execution {
+                    Some(surface) => println!(
+                        "  {:8} attention {}q/{}kv head {} scale {:.4}, \
+                         ffn {:?} {:?} {}, norm {:?} eps {:e}{}",
+                        component.id,
+                        surface.attention.num_q_heads,
+                        surface.attention.num_kv_heads,
+                        surface.attention.head_dim,
+                        surface.attention.scale,
+                        surface.ffn.activation,
+                        surface.ffn.ffn_type,
+                        surface.ffn.intermediate_size,
+                        surface.norm.kind,
+                        surface.norm.eps,
+                        match &surface.head {
+                            Some(head) => format!(", head vocab {}", head.vocab_size),
+                            None => String::new(),
+                        },
+                    ),
+                    None => println!("  {:8} (no execution surface)", component.id),
+                }
+            }
+            for defect in &defects {
+                println!("  defect: {defect}");
+            }
+            println!(
+                "executable: {}",
+                if defects.is_empty() { "yes" } else { "NO" }
+            );
+        }
+        defects
+    } else {
+        Vec::new()
+    };
+
+    if !surface_defects.is_empty() {
+        return Err(format!(
+            "container not executable: {} execution-completeness defect(s)",
+            surface_defects.len()
+        )
+        .into());
     }
     if inspection.is_coherent() {
         eprintln!(
@@ -206,101 +363,4 @@ fn run_plan(args: PlanArgs) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::io::Write;
-
-    /// `judged` controls whether the config carries a key no registry has
-    /// seen — the difference between an admissible and a blocked plan.
-    fn fixture_dir(judged: bool) -> tempfile::TempDir {
-        let dir = tempfile::tempdir().unwrap();
-        let mut text_config = serde_json::json!({
-            "model_type": "muse_glimmer_text",
-            "hidden_size": 64,
-            "num_hidden_layers": 2,
-            "intermediate_size": 256,
-            "num_attention_heads": 8,
-            "num_key_value_heads": 2,
-            "qk_scale_factor": 3.87
-        });
-        if !judged {
-            text_config["some_future_field_nobody_reviewed"] = serde_json::json!(1.5);
-        }
-        std::fs::write(
-            dir.path().join("config.json"),
-            serde_json::json!({
-                "model_type": "muse_glimmer",
-                "text_config": text_config
-            })
-            .to_string(),
-        )
-        .unwrap();
-        let header = serde_json::json!({
-            "model.layers.0.mlp.gate_proj.weight":
-                {"dtype": "BF16", "shape": [2, 2], "data_offsets": [0, 8]}
-        });
-        let header_bytes = serde_json::to_vec(&header).unwrap();
-        let mut f = std::fs::File::create(dir.path().join("model.safetensors")).unwrap();
-        f.write_all(&(header_bytes.len() as u64).to_le_bytes())
-            .unwrap();
-        f.write_all(&header_bytes).unwrap();
-        dir
-    }
-
-    #[test]
-    fn inadmissible_plan_is_an_error_and_still_writes_the_report() {
-        let dir = fixture_dir(false);
-        let out = dir.path().join("plan.json");
-        let result = run(Vindex3Command::Plan(PlanArgs {
-            artifacts: vec![dir.path().to_path_buf()],
-            output: Some(out.clone()),
-        }));
-        assert!(result.is_err(), "an unjudged key must block");
-        let plan: larql_vindex::format::vindex3::plan::SystemPlan =
-            serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
-        assert!(!plan.admissible);
-        assert!(plan.summary.blocking > 0);
-    }
-
-    #[test]
-    fn admissible_plan_exits_clean() {
-        let dir = fixture_dir(true);
-        let out = dir.path().join("plan.json");
-        let result = run(Vindex3Command::Plan(PlanArgs {
-            artifacts: vec![dir.path().to_path_buf()],
-            output: Some(out.clone()),
-        }));
-        assert!(
-            result.is_ok(),
-            "fully judged artifact must pass: {result:?}"
-        );
-        let plan: larql_vindex::format::vindex3::plan::SystemPlan =
-            serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
-        assert!(plan.admissible);
-        assert_eq!(plan.summary.blocking, 0);
-    }
-
-    #[test]
-    fn accepts_a_saved_inventory_json() {
-        let dir = fixture_dir(false);
-        let inventory = larql_models::inventory::build_inventory(dir.path()).unwrap();
-        let saved = dir.path().join("inventory.json");
-        std::fs::write(&saved, serde_json::to_string(&inventory).unwrap()).unwrap();
-        let out = dir.path().join("plan.json");
-        let result = run(Vindex3Command::Plan(PlanArgs {
-            artifacts: vec![saved],
-            output: Some(out.clone()),
-        }));
-        assert!(result.is_err()); // same artifact, same verdict
-        assert!(out.exists());
-    }
-
-    #[test]
-    fn missing_artifact_errors_before_planning() {
-        let result = run(Vindex3Command::Plan(PlanArgs {
-            artifacts: vec![PathBuf::from("/nonexistent/model")],
-            output: None,
-        }));
-        assert!(result.is_err());
-    }
-}
+mod tests;

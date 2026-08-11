@@ -42,6 +42,7 @@ pub mod graph;
 pub mod import;
 pub mod index;
 pub mod inspect;
+pub mod opplan;
 pub mod plan;
 pub mod profile;
 pub mod read;
@@ -50,6 +51,7 @@ pub mod read;
 pub mod test_support;
 pub mod variants;
 pub mod verify;
+pub mod verify_system;
 pub mod write;
 
 pub use build::ContainerBuilder;

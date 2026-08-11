@@ -57,6 +57,13 @@ impl SystemInspection {
     pub fn is_coherent(&self) -> bool {
         self.defects.is_empty()
     }
+
+    /// Execution completeness of the persisted graph (the V3-G5a gate):
+    /// every component with executable objects carries the surface those
+    /// operations read — answered from the container alone.
+    pub fn execution_completeness(&self) -> Vec<super::graph::CompletenessDefect> {
+        super::graph::execution_completeness(&self.graph)
+    }
 }
 
 /// Inspect a container. `verify_payloads` additionally re-hashes every

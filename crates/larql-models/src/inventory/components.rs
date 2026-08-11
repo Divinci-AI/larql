@@ -42,6 +42,11 @@ pub struct ComponentTopology {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub layer_types: Option<Vec<String>>,
     pub norm_eps: Option<f64>,
+    /// Norm kind, named by which epsilon spelling the component declares
+    /// (`layer_norm_eps` → LayerNorm, `rms_norm_eps` → RMSNorm). Absent
+    /// when neither is declared — a fact, not a default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub norm_kind: Option<crate::config::NormType>,
     pub hidden_act: Option<String>,
     pub rope_theta: Option<f64>,
     pub rope_type: Option<String>,
@@ -165,6 +170,14 @@ fn read_component(root_key: &str, object: &Value) -> ComponentReading {
         norm_eps: cursor
             .f64_at("layer_norm_eps")
             .or_else(|| cursor.f64_at("rms_norm_eps")),
+        // The spelling that matched names the kind; read order above.
+        norm_kind: if cursor.f64_at("layer_norm_eps").is_some() {
+            Some(crate::config::NormType::LayerNorm)
+        } else if cursor.f64_at("rms_norm_eps").is_some() {
+            Some(crate::config::NormType::RmsNorm)
+        } else {
+            None
+        },
         hidden_act: cursor
             .string_at("hidden_act")
             .or_else(|| cursor.string_at("hidden_activation")),
