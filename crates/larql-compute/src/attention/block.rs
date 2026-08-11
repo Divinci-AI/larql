@@ -311,7 +311,7 @@ fn run_attention_block_core(
     Option<AttentionAllWeights>,
 )> {
     use crate::forward::{add_bias, dot_proj};
-    use crate::residual::{rms_norm_heads, rms_norm_heads_no_weight};
+    use crate::residual::{rms_norm_heads_no_weight, rms_norm_qk_for_arch};
 
     let arch = &*weights.arch;
     let head_dim = arch.head_dim_for_layer(layer);
@@ -368,7 +368,7 @@ fn run_attention_block_core(
         .attn_q_norm_key(layer)
         .and_then(|k| weights.vectors.get(&k))
     {
-        Some(norm_w) => rms_norm_heads(&q_full, norm_w, num_q, head_dim, qk_norm_off),
+        Some(norm_w) => rms_norm_qk_for_arch(&q_full, norm_w, num_q, head_dim, qk_norm_off, arch),
         None => q_full,
     };
     dump_f32("q_out_after_qk_norm", &q_normed);
@@ -410,7 +410,9 @@ fn run_attention_block_core(
             .attn_k_norm_key(layer)
             .and_then(|k| weights.vectors.get(&k))
         {
-            Some(norm_w) => rms_norm_heads(&k_full, norm_w, num_kv, head_dim, qk_norm_off),
+            Some(norm_w) => {
+                rms_norm_qk_for_arch(&k_full, norm_w, num_kv, head_dim, qk_norm_off, arch)
+            }
             None => k_full.clone(),
         };
 

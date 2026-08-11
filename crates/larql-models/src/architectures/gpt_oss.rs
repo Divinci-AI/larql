@@ -20,7 +20,8 @@
 //! - YaRN RoPE scaling
 
 use crate::config::{
-    ExpertFormat, ExpertGatePolicy, ExpertRoutingPolicy, ModelArchitecture, ModelConfig,
+    ExpertFormat, ExpertGatePolicy, ExpertRoutingPolicy, GateUpLayout, ModelArchitecture,
+    ModelConfig,
 };
 use crate::tensor_keys::{attn_bias, mxfp4_dequantised};
 
@@ -90,6 +91,15 @@ impl ModelArchitecture for GptOssArch {
 
     fn expert_format(&self) -> ExpertFormat {
         ExpertFormat::PackedMxfp4
+    }
+
+    /// `GptOssExperts` splits with `gate_up[..., ::2], gate_up[..., 1::2]`
+    /// — interleaved, unlike every other packed family here. This describes
+    /// the *checkpoint*; the MXFP4→Q6_K transcode canonicalises the operand
+    /// it hands the execution path, and that transform owns its own
+    /// invariant rather than inheriting this one.
+    fn gate_up_layout(&self) -> Option<GateUpLayout> {
+        Some(GateUpLayout::Interleaved)
     }
 
     fn num_experts(&self) -> usize {
