@@ -192,4 +192,46 @@ mod tests {
             i.row(GateUpBranch::Up, 0, HALF)
         );
     }
+
+    /// Where an expert format keeps its scales, asked of the format rather
+    /// than inferred from a model family.
+    ///
+    /// Exhaustive by construction: a new `ExpertFormat` must answer, rather
+    /// than inheriting whichever value happened to suit the formats that
+    /// existed when native extraction was written.
+    #[test]
+    fn scale_stream_arrangement_is_answered_by_every_format() {
+        let table = [
+            // `*_blocks` alongside `*_scales` — the only split form today.
+            (ExpertFormat::PackedMxfp4, true),
+            // Unquantised; there are no scales at all, which is not the
+            // same fact as "they are inline" but answers the same question.
+            (ExpertFormat::PackedBF16, false),
+            // Reaches a `WeightSource` already dequantised, so no separate
+            // stream survives to be carried.
+            (ExpertFormat::PerExpert, false),
+        ];
+        for (format, expected) in table {
+            assert_eq!(
+                format.has_split_scale_streams(),
+                expected,
+                "{format:?} answered the wrong scale arrangement"
+            );
+        }
+    }
+
+    /// Scale arrangement and fused row layout are independent axes: knowing
+    /// one tells you nothing about the other. `PackedMxfp4` is split-scale
+    /// *and* interleaved; `PackedBF16` is inline *and* contiguous — a pair
+    /// that would let a reader conflate them if only these two existed.
+    #[test]
+    fn scale_arrangement_does_not_imply_a_row_layout() {
+        assert!(ExpertFormat::PackedMxfp4.has_split_scale_streams());
+        assert!(!ExpertFormat::PackedBF16.has_split_scale_streams());
+        // Both layouts remain expressible under either arrangement; nothing
+        // in `ExpertFormat` narrows the choice.
+        for layout in [GateUpLayout::ContiguousHalves, GateUpLayout::Interleaved] {
+            assert_eq!(layout.row(GateUpBranch::Gate, 0, 4), 0);
+        }
+    }
 }
