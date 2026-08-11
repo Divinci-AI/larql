@@ -138,3 +138,32 @@ fn granite_declares_select_then_normalise_routing() {
         MoeRouterKind::TopKThenSoftmax
     );
 }
+
+/// Mixtral renormalises too, by a different spelling: `softmax` over all,
+/// `topk`, then `/= sum`. That is algebraically softmax over the selected
+/// logits, so it is the same declaration as GraniteMoe — and unlike Granite
+/// it is asserted from the reference source rather than from a measurement,
+/// because the smallest of the family is 8x7B.
+#[test]
+fn mixtral_declares_select_then_normalise_routing() {
+    let arch = detect_from_json(&json!({
+        "model_type": "mixtral",
+        "hidden_size": 512,
+        "intermediate_size": 1024,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 8,
+        "num_key_value_heads": 2,
+        "num_local_experts": 8,
+        "num_experts_per_tok": 2,
+        "vocab_size": 1024,
+    }));
+    assert!(arch.is_moe());
+    assert_eq!(arch.moe_router_kind(), MoeRouterKind::TopKThenSoftmax);
+    assert_eq!(
+        arch.expert_routing_policy(),
+        larql_models::ExpertRoutingPolicy::NormalisedOverSelected
+    );
+    // Per-expert storage, so no fused operand and no layout to declare.
+    assert_eq!(arch.expert_format(), ExpertFormat::PerExpert);
+    assert!(arch.gate_up_layout().is_none());
+}

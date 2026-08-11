@@ -122,3 +122,55 @@ pub enum ExpertRoutingPolicy {
     /// `softmax(l)_i / Σ_{j∈topk} softmax(l)_j = exp(l_i) / Σ_{j∈topk} exp(l_j)`.
     NormalisedOverSelected,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The indexing rule against both reference splits, and the property that
+    /// makes a wrong declaration dangerous: each layout is a *permutation* of
+    /// the same row block, so no bounds or shape check can catch the wrong
+    /// one — every row is visited exactly once either way.
+    #[test]
+    fn gate_up_row_maps_each_branch_and_stays_a_permutation() {
+        const HALF: usize = 4;
+
+        // GraniteMoe: `hidden_states.chunk(2, dim=-1)` — leading half is gate.
+        let c = GateUpLayout::ContiguousHalves;
+        assert_eq!(c.row(GateUpBranch::Gate, 0, HALF), 0);
+        assert_eq!(c.row(GateUpBranch::Gate, 3, HALF), 3);
+        assert_eq!(c.row(GateUpBranch::Up, 0, HALF), 4);
+        assert_eq!(c.row(GateUpBranch::Up, 3, HALF), 7);
+
+        // GPT-OSS: `gate_up[..., ::2]` / `[..., 1::2]` — even gate, odd up.
+        let i = GateUpLayout::Interleaved;
+        assert_eq!(i.row(GateUpBranch::Gate, 0, HALF), 0);
+        assert_eq!(i.row(GateUpBranch::Gate, 3, HALF), 6);
+        assert_eq!(i.row(GateUpBranch::Up, 0, HALF), 1);
+        assert_eq!(i.row(GateUpBranch::Up, 3, HALF), 7);
+
+        for layout in [c, i] {
+            let mut rows: Vec<usize> = (0..HALF)
+                .flat_map(|k| {
+                    [
+                        layout.row(GateUpBranch::Gate, k, HALF),
+                        layout.row(GateUpBranch::Up, k, HALF),
+                    ]
+                })
+                .collect();
+            rows.sort_unstable();
+            assert_eq!(rows, (0..2 * HALF).collect::<Vec<_>>());
+        }
+
+        // The two disagree everywhere except the first gate row — which is
+        // why a probe at index 0 alone would not distinguish them.
+        assert_eq!(
+            c.row(GateUpBranch::Gate, 0, HALF),
+            i.row(GateUpBranch::Gate, 0, HALF)
+        );
+        assert_ne!(
+            c.row(GateUpBranch::Up, 0, HALF),
+            i.row(GateUpBranch::Up, 0, HALF)
+        );
+    }
+}
