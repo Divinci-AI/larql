@@ -55,7 +55,7 @@ pub mod verify_system;
 pub mod write;
 
 pub use build::ContainerBuilder;
-pub use import::{import_one_layer, write_segment_file, MoeLayerSource};
+pub use import::{import_one_layer, write_segment_file, ExpertScaleStreams, MoeLayerSource};
 pub use index::{Vindex3Index, PROFILE_EXACT};
 pub use profile::{Profile, ProfileSelectionError, ResolvedProfile};
 pub use read::Vindex3Container;

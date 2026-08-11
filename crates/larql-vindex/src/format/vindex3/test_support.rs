@@ -204,14 +204,20 @@ fn fused_bank() -> BankDescriptor {
 
 fn fused_schemas() -> Vec<RegionSchema> {
     vec![
-        RegionSchema::unpaired(
-            SCHEMA_GATE,
-            RegionRole::GateUpFused,
-            RegionFormat::F32,
-            Packing::RowMajor,
-            FUSED_PROJECTION_HALVES * FIXTURE_A_INTERMEDIATE,
-            FIXTURE_A_HIDDEN,
-        ),
+        // A fused operand must declare its row arrangement — `unpaired`
+        // defaults to `Unspecified`, which is right for a legacy container
+        // being read and refused for one being written.
+        RegionSchema {
+            layout: crate::format::lyrw2::region_layout::RegionLayout::ContiguousHalves,
+            ..RegionSchema::unpaired(
+                SCHEMA_GATE,
+                RegionRole::GateUpFused,
+                RegionFormat::F32,
+                Packing::RowMajor,
+                FUSED_PROJECTION_HALVES * FIXTURE_A_INTERMEDIATE,
+                FIXTURE_A_HIDDEN,
+            )
+        },
         RegionSchema::unpaired(
             SCHEMA_UP,
             RegionRole::Down,

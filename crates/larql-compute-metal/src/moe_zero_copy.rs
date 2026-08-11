@@ -314,10 +314,21 @@ impl MetalBackend {
             // Grouped down: each slot reads its OWN activation
             // (`XSTRIDE = inter_padded` — the strided act_buf layout the
             // activation stage wrote above).
-            let kh = match scratch.format {
-                larql_compute::QuantFormat::Q6_K => &self.quant.q6k_grouped_experts_pipeline,
-                _ => &self.quant.q4k_grouped_experts_pipeline,
-            };
+            use crate::kernels::quant::ExpertScaleBinding;
+            let (kh, binding) = self.quant.grouped_experts_for(scratch.format);
+            // This site encodes the inline-scale binding shape below
+            // (W(0) offsets(1) X(2) out(3) …). A split-scale arm expects
+            // an e8m0 stream at buffer(2), which the zero-copy scratch
+            // does not carry yet — binding X there would decode every
+            // group against activation bytes. Refuse instead.
+            assert_eq!(
+                binding,
+                ExpertScaleBinding::InlineScales,
+                "moe_zero_copy: {:?} needs a split e8m0 binding, which this \
+                 path does not yet plumb; select an inline-scale arm or wait \
+                 for the native MXFP4 expert store",
+                scratch.format,
+            );
             let row_tiles = (hidden as u64).div_ceil(kh.rows_per_tg);
             let base = &resolved[0].down.0;
             let offsets: Vec<u32> = resolved.iter().map(|r| r.down.1 as u32).collect();
@@ -339,10 +350,14 @@ impl MetalBackend {
                 MTLSize::new(kh.threads_per_tg, 1, 1),
             );
         } else {
-            let down_kh = match scratch.format {
-                larql_compute::QuantFormat::Q6_K => &self.quant.q6k_matvec_pipeline,
-                _ => &self.quant.q4k_matvec_pipeline,
-            };
+            let (down_kh, down_binding) = self.quant.expert_matvec_for(scratch.format);
+            assert_eq!(
+                down_binding,
+                crate::kernels::quant::ExpertScaleBinding::InlineScales,
+                "moe_zero_copy: {:?} needs a split e8m0 binding on the ragged \
+                 down path, which this site does not yet plumb",
+                scratch.format,
+            );
             let down_tgs = (hidden as u64).div_ceil(down_kh.rows_per_tg);
             for (e, r) in resolved.iter().enumerate() {
                 let (buf, off) = &r.down;

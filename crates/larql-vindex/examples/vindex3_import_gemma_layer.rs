@@ -34,7 +34,10 @@
 //! cargo run --release --example vindex3_import_gemma_layer -- <vindex-dir> [layer] [out-dir]
 //! ```
 
-use larql_vindex::format::vindex3::import::{import_one_layer, routed_storage_key, MoeLayerSource};
+use larql_vindex::format::lyrw2::region_layout::RegionLayout;
+use larql_vindex::format::vindex3::import::{
+    import_one_layer, routed_storage_key, ExpertScaleStreams, MoeLayerSource,
+};
 use larql_vindex::format::vindex3::{write_container, Vindex3Container};
 
 use larql_compute::pipeline_layer::build_moe_weights;
@@ -87,6 +90,14 @@ fn main() -> Result<(), String> {
         experts_gate_up: moe.experts_gate_up.clone(),
         experts_down: moe.experts_down.clone(),
         format: region_format_for(moe.expert_data_format)?,
+        // Gemma's expert banks are BF16 / k-quant — scales inline.
+        scales: ExpertScaleStreams::Inline,
+        // A fact about the **VINDEX2 store being read**, not about the
+        // checkpoint: its per-layer writer emits `[all gate | all up]`
+        // (`moe_layers_per_expert.rs` — "gate rows first, then up rows").
+        // The container records what these bytes are, so a consumer never
+        // has to ask the architecture what the storage looks like.
+        gate_up_layout: RegionLayout::ContiguousHalves,
         hidden_size: hidden,
         // gate_up is never padded; only down is. See `MoeLayerSource`.
         gate_up_stored_intermediate: semantic,

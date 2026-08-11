@@ -317,6 +317,72 @@ arm!(KernelInterBits, "mxfp4g_inter_bits");
 arm!(KernelInterAffine, "mxfp4g_inter_affine");
 arm!(KernelInterNoX, "mxfp4g_inter_nox");
 
+/// Which tournament arm serves the production MXFP4 expert path.
+///
+/// Names the four *candidate* arms only — the three ceiling probes
+/// (`InterBits`, `InterAffine`, `InterNoX`) are diagnostics that do not
+/// compute a correct product and are deliberately unselectable here.
+///
+/// **Fidelity, not throughput, sets the default.** The interleaved layout
+/// carries a 1-bit exponent delta per group, so a superblock's eight
+/// exponents must span at most one step; that holds for 97.12% of real
+/// expert superblocks and the remaining 2.88% can only be encoded by
+/// clamping, which alters weights. [`Self::SplitLut16`] stores the
+/// checkpoint's own two streams and is exact — which is what lets the
+/// native path be parity-gated against the lossless MXFP4→Q6_K transcode
+/// it replaces.
+///
+/// The interleaved arms stay selectable because which is *fastest* is an
+/// end-to-end question, not an isolated-kernel one, and they buy 4.0625
+/// bpw against arm A's 4.25 — a 4.6% byte difference to weigh against
+/// needing a wide-superblock escape hatch to stay exact.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
+pub enum Mxfp4Arm {
+    /// Arm A — separate packed/scale streams, 4.25 bpw, **exact**.
+    #[default]
+    SplitLut16,
+    /// Arm B — interleaved superblock, 16-entry LUT decode.
+    InterLut16,
+    /// Arm C — interleaved, 256-entry byte-pair LUT decode.
+    InterPair,
+    /// Arm D — interleaved, 8-entry magnitude + sign decode.
+    InterMagSign,
+}
+
+impl Mxfp4Arm {
+    /// Parse an arm name or its tournament letter, case-insensitively.
+    ///
+    /// `None` for anything unrecognised, so a typo falls back to the
+    /// exact default rather than silently selecting a lossy arm.
+    pub fn from_name(name: &str) -> Option<Self> {
+        Some(match name.to_ascii_lowercase().as_str() {
+            "split_lut16" | "a" => Self::SplitLut16,
+            "inter_lut16" | "b" => Self::InterLut16,
+            "inter_pair" | "c" => Self::InterPair,
+            "inter_magsign" | "d" => Self::InterMagSign,
+            _ => return None,
+        })
+    }
+
+    /// Whether this arm reconstructs every MXFP4 codepoint exactly.
+    ///
+    /// An inexact arm may not be parity-gated against the Q6_K transcode,
+    /// and may not serve a model claiming lossless expert weights.
+    pub fn is_exact(self) -> bool {
+        matches!(self, Self::SplitLut16)
+    }
+
+    /// Whether this arm's kernel takes the e8m0 exponents as a **separate**
+    /// binding rather than interleaved into the weight stream.
+    ///
+    /// Deliberately a bool rather than a binding type: `shaders` must not
+    /// depend on `kernels`, so the mapping to a binding shape is made one
+    /// level up, where the pipelines live.
+    pub fn is_split_scale(self) -> bool {
+        matches!(self, Self::SplitLut16)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

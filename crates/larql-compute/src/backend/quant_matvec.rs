@@ -58,6 +58,11 @@ pub trait QuantMatVec {
         match format {
             QuantFormat::Q4_K | QuantFormat::Q4_KF => self.q4k_matvec(weights, x, num_rows, hidden),
             QuantFormat::Q6_K => self.q6k_matvec(weights, x, num_rows, hidden),
+            // Q5_K is expressible as a container (it is the cheapest
+            // exact one for MXFP4 weights) but has no kernel on any
+            // backend yet. `None` is the established "loud missing
+            // capability" answer here, same as Q8_0's.
+            QuantFormat::Q5_K => None,
             QuantFormat::Q4_0 => {
                 let (q8_x, q8_scales) = crate::cpu::ops::q4_common::quantize_to_q8(x);
                 self.q4_matvec(weights, &q8_x, &q8_scales, num_rows, hidden)
@@ -80,6 +85,14 @@ pub trait QuantMatVec {
             // `&[u8]`-only signature, so `quant_matvec` returns `None` (loud
             // missing capability), same as Q8_0's dedicated-kernel story.
             QuantFormat::I2S => None,
+            // MXFP4 is the same story as I2S: its e8m0 exponent stream is
+            // external, and this `&[u8]`-only signature has nowhere to put
+            // it. Served by the dedicated `mxfp4_matvec` /
+            // `mxfp4_grouped_experts` kernels, which take the packed and
+            // scale streams as separate bindings. Returning `None` keeps
+            // the missing capability loud rather than letting a caller
+            // reach a kernel that reads scales it was never handed.
+            QuantFormat::MXFP4 => None,
             QuantFormat::BF16 | QuantFormat::F16 | QuantFormat::F32 => None,
         }
     }
@@ -118,10 +131,21 @@ pub trait QuantMatVec {
                 let x_f32 = dequantise_q8(q8_x, q8_scales);
                 self.quant_matvec(format, weights, &x_f32, num_rows, hidden)
             }
+            // No kernel yet — see the note on `quant_matvec`. Routed
+            // through the same f32 path so it starts working the moment
+            // one lands, rather than needing a second edit here.
+            QuantFormat::Q5_K => {
+                let x_f32 = dequantise_q8(q8_x, q8_scales);
+                self.quant_matvec(format, weights, &x_f32, num_rows, hidden)
+            }
             // Ternary has its own int8-activation (A8) quantisation and weight
             // container — it doesn't consume the legacy block-32 Q8 input.
             // Use [`Self::ternary_matvec`] with a `BitLinearWeight`.
             QuantFormat::I2S => None,
+            // Nor does MXFP4 consume the legacy block-32 Q8 input: its
+            // weights need the external e8m0 stream this signature cannot
+            // carry. See the note on `quant_matvec`.
+            QuantFormat::MXFP4 => None,
             QuantFormat::BF16 | QuantFormat::F16 | QuantFormat::F32 => None,
         }
     }

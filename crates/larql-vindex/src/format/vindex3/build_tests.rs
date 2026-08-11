@@ -8,7 +8,9 @@
 use super::*;
 use crate::format::generation::{detect_generation, ContainerGeneration};
 use crate::format::lyrw2::region_format::RegionFormat;
+use crate::format::lyrw2::region_layout::RegionLayout;
 use crate::format::lyrw2::region_role::RegionRole;
+use crate::format::vindex3::import::ExpertScaleStreams;
 use crate::format::vindex3::read::Vindex3Container;
 use tempfile::tempdir;
 
@@ -58,6 +60,8 @@ fn source(layer: u32, o: &Owned) -> MoeLayerSource<'_> {
         experts_gate_up: o.gate_up.iter().map(|v| v.as_slice()).collect(),
         experts_down: o.down.iter().map(|v| v.as_slice()).collect(),
         format: RegionFormat::F32,
+        scales: ExpertScaleStreams::Inline,
+        gate_up_layout: RegionLayout::ContiguousHalves,
         hidden_size: HIDDEN,
         gate_up_stored_intermediate: SEMANTIC_INTER,
         down_stored_intermediate: STORED_INTER,

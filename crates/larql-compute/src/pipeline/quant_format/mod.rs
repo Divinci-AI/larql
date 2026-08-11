@@ -20,11 +20,22 @@ pub enum QuantFormat {
     Q4_0,  // 18 bytes per 32 values (one f16 scale)
     Q4_K,  // 144 bytes per 256 values (GGUF-canonical, Ollama-compatible)
     Q4_KF, // 144-byte GGUF Q4_K bytes decoded by the llama.cpp-exact kernels
-    Q6_K,  // 210 bytes per 256 values (6-bit with sub-block scales)
-    Q8_0,  // int8 values + separate f32 scales
-    BF16,  // raw bfloat16 (2 bytes per value, no quantization scales)
-    F16,   // raw float16  (2 bytes per value)
-    F32,   // raw float32  (4 bytes per value)
+    /// 176 bytes per 256 values (5-bit with sub-block scales).
+    ///
+    /// Carried because it is the cheapest **exact** container for MXFP4
+    /// weights: reconstructing the fp4 alphabet on an affine grid needs
+    /// 25 levels, Q5_K has 32, and Q4_K's 16 is why the transcode cannot
+    /// simply drop to Q4_K. At 5.5 bpw against Q6_K's 6.5625 it is the
+    /// lossless fallback if the native MXFP4 path does not pay off.
+    ///
+    /// **No Metal kernel exists yet** — the format is expressible and
+    /// routes fail loudly rather than silently falling through to Q4_K.
+    Q5_K,
+    Q6_K, // 210 bytes per 256 values (6-bit with sub-block scales)
+    Q8_0, // int8 values + separate f32 scales
+    BF16, // raw bfloat16 (2 bytes per value, no quantization scales)
+    F16,  // raw float16  (2 bytes per value)
+    F32,  // raw float32  (4 bytes per value)
     /// BitNet 1.58-bit ternary (GGML I2_S, type 36): 4 trits/byte packed
     /// row-major (`cols/4` bytes per row) plus a separate per-channel f32
     /// scale array. Unlike the block-quant formats, the weight is NOT a
@@ -33,6 +44,21 @@ pub enum QuantFormat {
     /// and served by the dedicated `ternary_matvec` dispatch, not the
     /// block-quant `quant_matvec` path (which has no per-channel-scale input).
     I2S,
+    /// MXFP4 (OCP microscaling FP4), as GPT-OSS ships it: a 4-bit LUT index
+    /// per weight plus **one e8m0 exponent byte per 32-element group**, held
+    /// in a separate stream. 4.25 bpw all-in.
+    ///
+    /// The first format here that is block-packed *and* carries external
+    /// scales — the combination [`ScaleStorage`]'s doc anticipated. Its
+    /// scales are `u8` exponents, not `f32`: widening them to f32 would
+    /// take the format from 4.25 to 5.0 bpw and throw away a third of the
+    /// bandwidth win that is the entire reason to serve MXFP4 natively.
+    /// That is why [`ExternalScaleKind::PerGroupE8M0`] exists rather than
+    /// reusing `PerBlockF32`.
+    ///
+    /// Not a member of [`Self::is_kquant_family`]: that names the GGUF
+    /// 256-element super-block family, and MXFP4's group is 32.
+    MXFP4,
 }
 
 impl QuantFormat {
@@ -42,7 +68,7 @@ impl QuantFormat {
     /// the quantizers. Callers that need byte offsets should ask the format
     /// instead of spelling `256 * 144` or `32 * 18` locally.
     pub fn packed_block_layout(self) -> Option<(usize, usize)> {
-        use larql_models::quant::ggml;
+        use larql_models::quant::{ggml, mxfp4};
 
         match self {
             Self::Q4_0 => Some((ggml::Q4_0_BLOCK_ELEMS, ggml::Q4_0_BLOCK_BYTES)),
@@ -54,7 +80,16 @@ impl QuantFormat {
             // consumer; answering 160 here mis-sized every buffer
             // derived through this method by 16 bytes per super-block.
             Self::Q4_KF => Some((ggml::Q4_K_BLOCK_ELEMS, ggml::Q4_K_BLOCK_BYTES)),
+            Self::Q5_K => Some((ggml::Q5_K_BLOCK_ELEMS, ggml::Q5_K_BLOCK_BYTES)),
             Self::Q6_K => Some((ggml::Q6_K_BLOCK_ELEMS, ggml::Q6_K_BLOCK_BYTES)),
+            // The PACKED stream only — 32 weights in 16 nibble-bytes. The
+            // e8m0 scale stream is external and deliberately not counted
+            // here, so `packed_matrix_bytes` answers payload bytes and a
+            // caller sizing the scale buffer must ask `scale_storage`.
+            // Answering `None` instead would have been the conservative
+            // choice, but it also forfeits `stored_cols`' padded-row
+            // derivation, which GPT-OSS's hidden 2880 → 3072 shape needs.
+            Self::MXFP4 => Some((mxfp4::MXFP4_GROUP_ELEMS, mxfp4::MXFP4_GROUP_BYTES)),
             _ => None,
         }
     }
@@ -81,7 +116,7 @@ impl QuantFormat {
     /// is the contained step that addresses the user-visible code-duplication
     /// cost without rippling through 49 files.
     pub fn is_kquant_family(self) -> bool {
-        matches!(self, Self::Q4_K | Self::Q4_KF | Self::Q6_K)
+        matches!(self, Self::Q4_K | Self::Q4_KF | Self::Q5_K | Self::Q6_K)
     }
 
     /// Whether this format uses the llama.cpp-exact "Q4_KF" pre-baked
@@ -114,6 +149,7 @@ impl QuantFormat {
             "Q4_0" => Self::Q4_0,
             "Q4_K" => Self::Q4_K,
             "Q4_KF" => Self::Q4_KF,
+            "Q5_K" => Self::Q5_K,
             "Q6_K" => Self::Q6_K,
             "Q8_0" => Self::Q8_0,
             "BF16" => Self::BF16,
@@ -122,6 +158,10 @@ impl QuantFormat {
             // BitNet ternary (GGML type 36). The vindex bitnet sidecar tags
             // its I2_S weight stream with this so the registry recognises it.
             "I2_S" => Self::I2S,
+            // Spelled as the OCP/GPT-OSS checkpoints spell it, and matched
+            // by `LayerWeightFormat::MXFP4`'s registry tag so a natively
+            // stored expert bank survives the writer → loader round trip.
+            "MXFP4" => Self::MXFP4,
             _ => return None,
         })
     }
@@ -135,13 +175,23 @@ impl QuantFormat {
             Self::Q4_0 => "Q4_0",
             Self::Q4_K => "Q4_K",
             Self::Q4_KF => "Q4_KF",
+            Self::Q5_K => "Q5_K",
             Self::Q6_K => "Q6_K",
             Self::Q8_0 => "Q8_0",
             Self::BF16 => "BF16",
             Self::F16 => "F16",
             Self::F32 => "F32",
             Self::I2S => "I2_S",
+            Self::MXFP4 => "MXFP4",
         }
+    }
+
+    /// Whether this format is MXFP4, served by the dedicated
+    /// `mxfp4_grouped_experts` / `mxfp4_matvec` kernels against a separate
+    /// e8m0 exponent stream. The MXFP4 sibling of [`Self::is_ternary`] —
+    /// both name "block-quant `quant_matvec` cannot serve this".
+    pub fn is_mxfp4(self) -> bool {
+        matches!(self, Self::MXFP4)
     }
 
     /// Whether this format is BitNet ternary (I2_S). Served by the dedicated
@@ -159,11 +209,13 @@ impl QuantFormat {
     pub fn scale_storage(self) -> ScaleStorage {
         match self {
             // Block-packed: the scale rides inside each block.
-            Self::Q4_0 | Self::Q4_K | Self::Q4_KF | Self::Q6_K => ScaleStorage::Inline,
+            Self::Q4_0 | Self::Q4_K | Self::Q4_KF | Self::Q5_K | Self::Q6_K => ScaleStorage::Inline,
             // "int8 values + separate f32 scales", per this enum's own doc.
             Self::Q8_0 => ScaleStorage::External(ExternalScaleKind::PerBlockF32),
             // Ternary carries a separate per-channel f32 array.
             Self::I2S => ScaleStorage::External(ExternalScaleKind::PerChannelF32),
+            // One e8m0 exponent byte per 32-weight group, external.
+            Self::MXFP4 => ScaleStorage::External(ExternalScaleKind::PerGroupE8M0),
             Self::BF16 | Self::F16 | Self::F32 => ScaleStorage::None,
         }
     }
@@ -197,6 +249,14 @@ pub enum ExternalScaleKind {
     PerBlockF32,
     /// One f32 per output channel (I2_S / BitNet ternary).
     PerChannelF32,
+    /// One **e8m0 exponent byte** per 32-weight group (MXFP4).
+    ///
+    /// Byte-valued, not f32, and that is load-bearing rather than a detail:
+    /// at one byte per 32 weights the scale stream costs 0.25 bpw, where an
+    /// f32 array would cost 1.0 and take MXFP4 from 4.25 bpw to 5.0 —
+    /// forfeiting a third of the reason to serve it natively. Decode is
+    /// `larql_models::quant::mxfp4::e8m0_to_f32`.
+    PerGroupE8M0,
 }
 
 /// Auxiliary material a caller supplies alongside the packed bytes.
@@ -210,8 +270,13 @@ pub enum QuantAux<'a> {
     /// is unquantised. Which of those it is, is the format's business.
     #[default]
     None,
-    /// An external scale array, required by `Q8_0` and `I2S`.
+    /// An external f32 scale array, required by `Q8_0` and `I2S`.
     ExternalScales(&'a [f32]),
+    /// An external **e8m0 exponent byte** stream, required by `MXFP4`.
+    ///
+    /// A separate variant rather than an f32 array the caller pre-decodes,
+    /// so the 0.25-bpw scale stream reaches the kernel in its stored width.
+    ExternalE8M0(&'a [u8]),
 }
 
 /// A quantized weight matrix — raw bytes with format tag.
@@ -247,17 +312,27 @@ pub struct QuantWeight<'a> {
 /// # Panics
 /// If `aux` disagrees with `format.scale_storage()`.
 fn check_aux_matches_format(format: QuantFormat, aux: QuantAux<'_>) {
+    use ExternalScaleKind::*;
     match (format.scale_storage(), aux) {
-        (ScaleStorage::External(_), QuantAux::ExternalScales(_))
+        // The external kinds are matched against the aux *width*, not just
+        // against "is external". Before MXFP4 every external format was
+        // f32-scaled, so `External(_)` paired with any array was sound;
+        // it no longer is, and the loose arm would have let an e8m0 byte
+        // stream bind where a kernel reads f32 (and the reverse).
+        (ScaleStorage::External(PerBlockF32 | PerChannelF32), QuantAux::ExternalScales(_))
+        | (ScaleStorage::External(PerGroupE8M0), QuantAux::ExternalE8M0(_))
         | (ScaleStorage::Inline, QuantAux::None)
         | (ScaleStorage::None, QuantAux::None) => {}
         (ScaleStorage::External(kind), QuantAux::None) => {
             panic!("{format:?} stores scales externally ({kind:?}) but none were supplied")
         }
-        (ScaleStorage::Inline, QuantAux::ExternalScales(_)) => panic!(
+        (ScaleStorage::External(kind), _) => panic!(
+            "{format:?} stores scales as {kind:?}; the supplied aux is a different width"
+        ),
+        (ScaleStorage::Inline, _) => panic!(
             "{format:?} packs its scales inline; an external scale array is not a                  thing it has"
         ),
-        (ScaleStorage::None, QuantAux::ExternalScales(_)) => {
+        (ScaleStorage::None, _) => {
             panic!("{format:?} is unquantised and has no scales")
         }
     }
@@ -307,7 +382,21 @@ impl<'a> QuantWeight<'a> {
     pub fn external_scales(&self) -> Option<&'a [f32]> {
         match self.aux {
             crate::QuantAux::ExternalScales(s) => Some(s),
-            crate::QuantAux::None => None,
+            crate::QuantAux::None | crate::QuantAux::ExternalE8M0(_) => None,
+        }
+    }
+
+    /// The external e8m0 exponent stream, when the format has one (MXFP4).
+    ///
+    /// Deliberately a separate accessor from [`Self::external_scales`]
+    /// rather than a decode-on-read: a caller that wants f32 scales for an
+    /// MXFP4 weight is asking the wrong question, and silently handing back
+    /// a converted array is how the stored width gets lost on the way to a
+    /// kernel that reads bytes.
+    pub fn external_e8m0(&self) -> Option<&'a [u8]> {
+        match self.aux {
+            crate::QuantAux::ExternalE8M0(s) => Some(s),
+            crate::QuantAux::None | crate::QuantAux::ExternalScales(_) => None,
         }
     }
 
@@ -365,283 +454,4 @@ impl Default for QuantWeight<'_> {
 }
 
 #[cfg(test)]
-mod scale_storage_tests {
-    use super::*;
-
-    /// Every format answers, and the answer matches the enum's own
-    /// documentation of how it stores scales.
-    #[test]
-    fn scale_storage_is_exhaustive_and_matches_the_documented_layout() {
-        use ExternalScaleKind::*;
-        use ScaleStorage::*;
-        let table = [
-            (QuantFormat::Q4_0, Inline),
-            (QuantFormat::Q4_K, Inline),
-            (QuantFormat::Q4_KF, Inline),
-            (QuantFormat::Q6_K, Inline),
-            (QuantFormat::Q8_0, External(PerBlockF32)),
-            (QuantFormat::I2S, External(PerChannelF32)),
-            (QuantFormat::BF16, None),
-            (QuantFormat::F16, None),
-            (QuantFormat::F32, None),
-        ];
-        for (f, expected) in table {
-            assert_eq!(f.scale_storage(), expected, "{f:?}");
-        }
-    }
-
-    /// Q4_KF's packed layout is the standard 144-byte GGUF Q4_K block —
-    /// the tag selects the llama.cpp-exact kernels, not a storage
-    /// format. The 160-byte pre-baked layout (`Q4_KF_BLOCK_BYTES`) has
-    /// no kernel consumer; answering it here mis-sized every derived
-    /// buffer by 16 bytes per super-block (capability audit F15).
-    #[test]
-    fn q4_kf_packed_layout_is_gguf_q4_k() {
-        use larql_models::quant::ggml;
-        assert_eq!(
-            QuantFormat::Q4_KF.packed_block_layout(),
-            Some((ggml::Q4_K_BLOCK_ELEMS, ggml::Q4_K_BLOCK_BYTES)),
-        );
-        assert_eq!(
-            QuantFormat::Q4_KF.packed_block_layout(),
-            QuantFormat::Q4_K.packed_block_layout(),
-        );
-    }
-
-    /// Inline formats are exactly the block-packed ones *today*. Asserted
-    /// as an observation, not used as the discriminator — representation
-    /// geometry and auxiliary storage are different properties that
-    /// merely correlate, and a future packed format with external scales
-    /// must break this test rather than silently misbehave.
-    #[test]
-    fn inline_and_block_packed_coincide_today() {
-        for f in [
-            QuantFormat::Q4_0,
-            QuantFormat::Q4_K,
-            QuantFormat::Q4_KF,
-            QuantFormat::Q6_K,
-        ] {
-            assert!(f.packed_block_layout().is_some());
-            assert_eq!(f.scale_storage(), ScaleStorage::Inline);
-        }
-    }
-
-    // ── the Phase A specification, as a matrix ──────────────────────
-    //
-    //                     no aux      external scales
-    //   Q4_0 / Q4_K         ok             panic
-    //   Q4_KF / Q6_K        ok             panic
-    //   Q8_0 / I2S        panic              ok
-    //   F16 / F32 / BF16    ok             panic
-
-    #[test]
-    fn inline_formats_accept_no_aux() {
-        for f in [
-            QuantFormat::Q4_0,
-            QuantFormat::Q4_K,
-            QuantFormat::Q4_KF,
-            QuantFormat::Q6_K,
-        ] {
-            let w = QuantWeight::new(f, &[0u8; 4], QuantAux::None);
-            assert!(w.external_scales().is_none(), "{f:?}");
-        }
-    }
-
-    #[test]
-    fn unquantised_formats_accept_no_aux() {
-        for f in [QuantFormat::BF16, QuantFormat::F16, QuantFormat::F32] {
-            let w = QuantWeight::new(f, &[0u8; 4], QuantAux::None);
-            assert!(w.external_scales().is_none(), "{f:?}");
-        }
-    }
-
-    #[test]
-    fn external_formats_accept_and_expose_their_scales() {
-        let s = [1.0f32, 2.0];
-        for f in [QuantFormat::Q8_0, QuantFormat::I2S] {
-            let w = QuantWeight::new(f, &[0u8; 4], QuantAux::ExternalScales(&s));
-            assert_eq!(w.external_scales(), Some(&s[..]), "{f:?}");
-        }
-    }
-
-    /// The state that produced the dead O-projection fixture and the 24
-    /// fabricated buffers: an inline format carrying external scales.
-    #[test]
-    #[should_panic(expected = "packs its scales inline")]
-    fn q4k_cannot_carry_external_scales() {
-        let s = [1.0f32];
-        let _ = QuantWeight::new(QuantFormat::Q4_K, &[0u8; 4], QuantAux::ExternalScales(&s));
-    }
-
-    /// Q4_0's 18-byte block *is* an f16 scale plus 16 bytes of nibbles.
-    /// A test fixture in this repository supplied external scales for it
-    /// and passed; that is now unrepresentable.
-    #[test]
-    #[should_panic(expected = "packs its scales inline")]
-    fn q4_0_cannot_carry_external_scales() {
-        let s = [1.0f32];
-        let _ = QuantWeight::new(QuantFormat::Q4_0, &[0u8; 4], QuantAux::ExternalScales(&s));
-    }
-
-    #[test]
-    #[should_panic(expected = "unquantised")]
-    fn unquantised_formats_cannot_carry_scales() {
-        let s = [1.0f32];
-        let _ = QuantWeight::new(QuantFormat::F32, &[0u8; 4], QuantAux::ExternalScales(&s));
-    }
-
-    /// The other half: a format that genuinely needs scales cannot exist
-    /// without them. Previously `scales: None` on a Q8_0 weight was a
-    /// silently-constructible state.
-    #[test]
-    #[should_panic(expected = "stores scales externally")]
-    fn q8_0_cannot_exist_without_scales() {
-        let _ = QuantWeight::new(QuantFormat::Q8_0, &[0u8; 4], QuantAux::None);
-    }
-
-    #[test]
-    #[should_panic(expected = "stores scales externally")]
-    fn i2s_cannot_exist_without_scales() {
-        let _ = QuantWeight::new(QuantFormat::I2S, &[0u8; 4], QuantAux::None);
-    }
-
-    /// The default is a valid state, not merely a zeroed one.
-    #[test]
-    fn default_weight_is_internally_consistent() {
-        let w = QuantWeight::default();
-        assert_eq!(w.format().scale_storage(), ScaleStorage::Inline);
-        assert!(w.external_scales().is_none());
-    }
-
-    // ── with_format: retagging within an aux class is fine; crossing
-    //    classes is the desynchronisation hole and must panic ─────────
-
-    #[test]
-    fn with_format_allows_retagging_within_the_inline_class() {
-        let w = QuantWeight::new(QuantFormat::Q4_K, &[0u8; 4], QuantAux::None);
-        let w = w.with_format(QuantFormat::Q4_KF);
-        assert_eq!(w.format(), QuantFormat::Q4_KF);
-        assert!(w.external_scales().is_none());
-    }
-
-    #[test]
-    fn with_format_allows_retagging_within_the_external_class() {
-        let s = [1.0f32, 2.0];
-        let w = QuantWeight::new(QuantFormat::Q8_0, &[0u8; 4], QuantAux::ExternalScales(&s));
-        let w = w.with_format(QuantFormat::I2S);
-        assert_eq!(w.format(), QuantFormat::I2S);
-        assert_eq!(w.external_scales(), Some(&s[..]));
-    }
-
-    /// The exact shape of the hole this closes: a weight built inline
-    /// (no scales) retagged to a format whose kernels read an external
-    /// scale buffer that does not exist.
-    #[test]
-    #[should_panic(expected = "stores scales externally")]
-    fn with_format_refuses_inline_to_external_retag() {
-        let w = QuantWeight::new(QuantFormat::Q4_K, &[0u8; 4], QuantAux::None);
-        let _ = w.with_format(QuantFormat::Q8_0);
-    }
-
-    #[test]
-    #[should_panic(expected = "packs its scales inline")]
-    fn with_format_refuses_external_to_inline_retag() {
-        let s = [1.0f32];
-        let w = QuantWeight::new(QuantFormat::Q8_0, &[0u8; 4], QuantAux::ExternalScales(&s));
-        let _ = w.with_format(QuantFormat::Q4_K);
-    }
-}
-
-#[cfg(test)]
-mod stored_cols_tests {
-    use super::*;
-    use crate::cpu::ops::q4_common::{quantize_q4_k, quantize_q6_k};
-
-    /// Quantise `rows` rows of `logical` values each, zero-padded to the
-    /// next super-block boundary — the writer's `pad_rows_to_block` shape.
-    fn padded_rows_q4k(rows: usize, logical: usize) -> Vec<u8> {
-        let (block, _) = QuantFormat::Q4_K.packed_block_layout().unwrap();
-        let padded = logical.div_ceil(block) * block;
-        let mut data = vec![0.0f32; rows * padded];
-        for (i, v) in data.iter_mut().enumerate() {
-            if i % padded < logical {
-                *v = ((i % 31) as f32) - 15.0;
-            }
-        }
-        quantize_q4_k(&data)
-    }
-
-    /// The padded-store case the derivation exists for: rows written at
-    /// the next block boundary (GPT-OSS's hidden 2880 → 3072 shape, here
-    /// at test scale) answer the STORED width, not the logical one.
-    #[test]
-    fn padded_q4k_rows_answer_the_stored_width() {
-        let (block, _) = QuantFormat::Q4_K.packed_block_layout().unwrap();
-        let (rows, logical) = (4usize, block + block / 4); // 320 → stored 512
-        let stored = logical.div_ceil(block) * block;
-        let bytes = padded_rows_q4k(rows, logical);
-        let w = QuantWeight::new(QuantFormat::Q4_K, &bytes, QuantAux::None);
-        assert_eq!(w.stored_cols(rows, logical), stored);
-    }
-
-    #[test]
-    fn padded_q6k_rows_answer_the_stored_width() {
-        let (block, _) = QuantFormat::Q6_K.packed_block_layout().unwrap();
-        let (rows, logical) = (3usize, block / 2); // 128 → stored 256
-        let stored = logical.div_ceil(block) * block;
-        let mut data = vec![0.0f32; rows * stored];
-        for (i, v) in data.iter_mut().enumerate() {
-            if i % stored < logical {
-                *v = (i % 17) as f32;
-            }
-        }
-        let bytes = quantize_q6_k(&data);
-        let w = QuantWeight::new(QuantFormat::Q6_K, &bytes, QuantAux::None);
-        assert_eq!(w.stored_cols(rows, logical), stored);
-    }
-
-    /// Block-aligned rows are their own stored width — the derivation is
-    /// the identity on every model that never needed padding.
-    #[test]
-    fn aligned_rows_are_a_no_op() {
-        let (block, _) = QuantFormat::Q4_K.packed_block_layout().unwrap();
-        let rows = 2usize;
-        let bytes = padded_rows_q4k(rows, block);
-        let w = QuantWeight::new(QuantFormat::Q4_K, &bytes, QuantAux::None);
-        assert_eq!(w.stored_cols(rows, block), block);
-    }
-
-    /// Bytes that don't divide by the row count aren't a row store of
-    /// this matrix — answer the caller's fallback, never a guess.
-    #[test]
-    fn indivisible_bytes_fall_back() {
-        let bytes = vec![0u8; 1001];
-        let w = QuantWeight::new(QuantFormat::Q4_K, &bytes, QuantAux::None);
-        assert_eq!(w.stored_cols(2, 96), 96);
-    }
-
-    /// Zero rows can't define a row width.
-    #[test]
-    fn zero_rows_fall_back() {
-        let w = QuantWeight::new(QuantFormat::Q4_K, &[], QuantAux::None);
-        assert_eq!(w.stored_cols(0, 64), 64);
-    }
-
-    /// A derivation NARROWER than the logical width means these bytes are
-    /// not a padded row store — the padding contract can only widen.
-    #[test]
-    fn narrower_than_logical_falls_back() {
-        let (block, _) = QuantFormat::Q4_K.packed_block_layout().unwrap();
-        let bytes = padded_rows_q4k(2, block); // stored width = 1 block
-        let w = QuantWeight::new(QuantFormat::Q4_K, &bytes, QuantAux::None);
-        assert_eq!(w.stored_cols(2, 3 * block), 3 * block);
-    }
-
-    /// Unquantised rows derive from their element size.
-    #[test]
-    fn f32_rows_derive_from_element_size() {
-        let bytes = vec![0u8; 2 * 96 * 4];
-        let w = QuantWeight::new(QuantFormat::F32, &bytes, QuantAux::None);
-        assert_eq!(w.stored_cols(2, 80), 96);
-    }
-}
+mod tests;

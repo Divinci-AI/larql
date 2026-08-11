@@ -18,6 +18,25 @@ pub enum ExpertFormat {
     PackedBF16,
 }
 
+impl ExpertFormat {
+    /// Whether this format keeps its dequantisation scales in a **separate**
+    /// stream from the packed values.
+    ///
+    /// A capability, not a model name: it is what decides whether a native
+    /// extraction has to carry partner scale regions, and it must be asked
+    /// of the format rather than inferred from the family. `PackedMxfp4`
+    /// ships `*_blocks` alongside `*_scales`; `PackedBF16` is unquantised
+    /// and has no scales at all; `PerExpert` tensors reach a
+    /// `WeightSource` already dequantised, so there is no separate stream
+    /// left to carry.
+    pub fn has_split_scale_streams(self) -> bool {
+        match self {
+            Self::PackedMxfp4 => true,
+            Self::PerExpert | Self::PackedBF16 => false,
+        }
+    }
+}
+
 /// Which rows of a fused `gate_up` operand belong to the gate branch and
 /// which to the up branch.
 ///

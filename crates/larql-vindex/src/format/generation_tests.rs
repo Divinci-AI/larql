@@ -6,8 +6,9 @@
 //! `version == generation` fails loudly.
 
 use super::generation::{
-    detect_generation, generation_for_schema, supported_schema_summary, ContainerGeneration,
-    IndexSchemaVersion, ALL_GENERATIONS, V2_CURRENT_SCHEMA, V2_MIN_SCHEMA, V3_CURRENT_SCHEMA,
+    detect_generation, generation_for_schema, schema_range_label, supported_schema_summary,
+    ContainerGeneration, IndexSchemaVersion, ALL_GENERATIONS, V2_CURRENT_SCHEMA, V2_MIN_SCHEMA,
+    V3_CURRENT_SCHEMA,
 };
 use crate::format::filenames::INDEX_JSON;
 use crate::VindexError;
@@ -47,16 +48,32 @@ fn schema_zero_is_unsupported_and_names_the_supported_sets() {
     let err = generation_for_schema(schema(0)).unwrap_err();
     let text = err.to_string();
     assert!(text.contains("1-2 (VINDEX2)"), "{text}");
-    assert!(text.contains("3 (VINDEX3)"), "{text}");
+    assert!(text.contains("3-4 (VINDEX3)"), "{text}");
 }
 
+/// Schema 4 is VINDEX3's current write target since `RegionSchema` gained
+/// its stored-layout declaration; 5 is the first beyond the frontier.
 #[test]
-fn schema_four_is_unsupported_and_names_the_supported_sets() {
-    let err = generation_for_schema(schema(4)).unwrap_err();
+fn a_schema_past_the_frontier_is_unsupported_and_names_the_supported_sets() {
+    let err = generation_for_schema(schema(5)).unwrap_err();
     let text = err.to_string();
-    assert!(text.contains('4'), "{text}");
+    assert!(text.contains('5'), "{text}");
     assert!(text.contains("VINDEX2"), "{text}");
     assert!(text.contains("VINDEX3"), "{text}");
+}
+
+/// The point of the bump: a binary that predates the layout field supports
+/// `3..=3` and therefore refuses a schema-4 container outright, rather than
+/// parsing it and ignoring a field that changes what the bytes mean.
+#[test]
+fn schema_four_is_read_by_the_successor_and_is_what_it_writes() {
+    let v3 = ContainerGeneration::V3;
+    assert_eq!(v3.current_schema_version(), schema(4));
+    assert!(
+        v3.reads_schema(schema(3)),
+        "legacy containers stay readable"
+    );
+    assert!(v3.reads_schema(schema(4)));
 }
 
 // ── Schema and generation are different things ─────────────────────────────
@@ -75,11 +92,21 @@ fn a_generation_spans_more_schemas_than_it_writes() {
     );
 }
 
+/// Both generations now span more schemas than they write.
+///
+/// This replaces `the_successor_currently_reads_exactly_one_schema`, whose
+/// premise the `RegionLayout` bump deliberately ended: VINDEX3 reads 3..=4
+/// exactly as VINDEX2 reads 1..=2. "Spans a range" is the steady state, and
+/// a singleton is only what a generation looks like before its first
+/// meaning-changing addition.
 #[test]
-fn the_successor_currently_reads_exactly_one_schema() {
+fn the_successor_spans_a_range_like_its_predecessor() {
     let v3 = ContainerGeneration::V3;
     assert_eq!(v3.current_schema_version(), schema(V3_CURRENT_SCHEMA));
-    assert_eq!(v3.supported_schema_versions().count(), 1);
+    assert!(
+        v3.supported_schema_versions().count() > 1,
+        "VINDEX3 reads legacy schema 3 alongside the schema 4 it writes"
+    );
 }
 
 #[test]
@@ -106,16 +133,32 @@ fn every_generation_reads_the_schema_it_writes() {
     }
 }
 
+/// The LYRW version identifies the **generation**, not the schema.
+///
+/// This replaces `the_lyrw_version_trails_the_current_schema_by_one`, which
+/// held only by coincidence: VINDEX2 was LYRW 1 / schema 2 and VINDEX3 was
+/// LYRW 2 / schema 3, so "lyrw + 1 == current_schema" and
+/// "lyrw + 1 == generation number" were indistinguishable. The `RegionLayout`
+/// bump separates them — VINDEX3 is LYRW 2 writing schema 4 — and the
+/// relation that actually matters is the one `container_generation_for` uses
+/// to tell a caller which loader to reach for.
 #[test]
-fn the_lyrw_version_trails_the_current_schema_by_one() {
-    for g in ALL_GENERATIONS {
-        assert_eq!(
-            g.lyrw_format_version() + 1,
-            g.current_schema_version().get(),
-            "{}",
-            g.name()
-        );
-    }
+fn the_lyrw_version_and_the_schema_are_no_longer_locked_in_step() {
+    // The relation that survives — LYRW version identifies the generation —
+    // is asserted by `lyrw_versions_map_back_to_their_generation` below and
+    // is not repeated here. What this pins is the *separation*: VINDEX3 is
+    // LYRW 2 writing schema 4, so a reader must not derive either from the
+    // other.
+    let v3 = ContainerGeneration::V3;
+    assert_ne!(
+        v3.lyrw_format_version() + 1,
+        v3.current_schema_version().get(),
+        "schema and LYRW version must no longer be locked in step"
+    );
+    // The LYRW container format itself did not change — only what a schema
+    // field means — which is why this is a schema bump and not a new
+    // generation.
+    assert_eq!(v3.lyrw_format_version(), 2);
 }
 
 #[test]
@@ -157,10 +200,24 @@ fn a_matching_loader_accepts() {
 }
 
 #[test]
-fn the_summary_lists_ranges_and_singletons_differently() {
+fn the_summary_lists_every_generations_range() {
     let s = supported_schema_summary();
     assert!(s.contains("1-2 (VINDEX2)"), "{s}");
-    assert!(s.contains("3 (VINDEX3)"), "{s}");
+    assert!(s.contains("3-4 (VINDEX3)"), "{s}");
+}
+
+/// Both renderings, tested directly.
+///
+/// This used to rely on VINDEX3 happening to span one schema, so the
+/// singleton branch lost its only cover the moment that stopped being
+/// true — the same "an invariant that held by coincidence" shape as the
+/// LYRW-version test above. A generation that has not yet made a
+/// meaning-changing addition still renders as a singleton, so the branch
+/// is live and now covered regardless of what the real generations span.
+#[test]
+fn a_range_and_a_singleton_render_differently() {
+    assert_eq!(schema_range_label(3..=4, "VINDEX3"), "3-4 (VINDEX3)");
+    assert_eq!(schema_range_label(7..=7, "VINDEX8"), "7 (VINDEX8)");
 }
 
 // ── Detection from disk ────────────────────────────────────────────────────

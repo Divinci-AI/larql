@@ -70,8 +70,22 @@ pub enum QkvInputEncoding {
 fn input_encoding_of(f: QuantFormat) -> Option<QkvInputEncoding> {
     match f {
         QuantFormat::Q4_K | QuantFormat::Q4_KF | QuantFormat::Q6_K => Some(QkvInputEncoding::F32),
+        // Q5_K is an f32-input k-quant like its siblings above, but no
+        // Metal kernel serves it yet. `None` keeps that a planning gap
+        // rather than a route that dispatches nothing.
+        QuantFormat::Q5_K => None,
         QuantFormat::Q4_0 | QuantFormat::Q8_0 => Some(QkvInputEncoding::Q8),
-        QuantFormat::BF16 | QuantFormat::F16 | QuantFormat::F32 | QuantFormat::I2S => None,
+        // MXFP4 joins the `None` set for a different reason than the
+        // floats: kernels exist, but they are expert kernels taking a
+        // separate e8m0 binding, and no QKV projection is MXFP4 in any
+        // supported checkpoint (attention weights sit outside the MoE
+        // quantisation in the OCP layout). If one ever is, this wants a
+        // real route, not a silent `Q8`.
+        QuantFormat::BF16
+        | QuantFormat::F16
+        | QuantFormat::F32
+        | QuantFormat::I2S
+        | QuantFormat::MXFP4 => None,
     }
 }
 

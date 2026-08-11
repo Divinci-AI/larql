@@ -1088,10 +1088,14 @@ impl MetalBackend {
         // default since 2026-04-28) leaves simdgroups 4..7 unscheduled and
         // only writes rows 0..3 of each TG's 8-row range. See the matching
         // fix in `trait_impl/quant_matvec.rs::q4k_matvec`.
-        let down_kh = match scratch.format {
-            larql_compute::QuantFormat::Q6_K => &self.quant.q6k_matvec_pipeline,
-            _ => &self.quant.q4k_matvec_pipeline,
-        };
+        let (down_kh, down_binding) = self.quant.expert_matvec_for(scratch.format);
+        assert_eq!(
+            down_binding,
+            crate::kernels::quant::ExpertScaleBinding::InlineScales,
+            "moe_dispatch: {:?} needs a split e8m0 binding on the down path, \
+             which this site does not yet plumb",
+            scratch.format,
+        );
         let down_tgs = (hidden as u64).div_ceil(down_kh.rows_per_tg);
 
         for e in 0..valid_count {
