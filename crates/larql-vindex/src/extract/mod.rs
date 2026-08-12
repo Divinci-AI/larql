@@ -12,6 +12,7 @@ pub mod coverage;
 pub mod metadata;
 pub mod moe_svd;
 pub mod native_moe;
+pub mod orchestrate;
 pub mod stage_labels;
 pub mod streaming;
 pub mod target;
