@@ -209,3 +209,14 @@ fn no_interfaces_when_none_declared() {
     let facts = classify_config(&config, &Default::default());
     assert!(find_interfaces(&facts).is_empty());
 }
+
+/// A non-object root has no key structure: one unconsumed fact, verbatim
+/// — the defensive arm a real config.json never reaches.
+#[test]
+fn a_non_object_root_is_one_unconsumed_fact() {
+    let config = json!("not an object");
+    let facts = classify_config(&config, &Default::default());
+    assert_eq!(facts.len(), 1);
+    assert_eq!(facts[0].status, KeyStatus::Unconsumed);
+    assert_eq!(facts[0].value, json!("not an object"));
+}
