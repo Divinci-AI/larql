@@ -28,7 +28,9 @@ pub mod build;
 #[cfg(test)]
 mod tests;
 
-use larql_models::config::{Activation, NormType, PositionPolicy, QkNormScope};
+use larql_models::config::{
+    Activation, AttentionGateSpec, NormType, ParameterFreeQkNorm, PositionPolicy, QkNormScope,
+};
 use serde::Serialize;
 
 use super::graph::policy::AttentionSpan;
@@ -65,10 +67,11 @@ pub struct QkNormOp {
     pub k: OperandRef,
 }
 
-/// The optional elementwise gate on attention output.
+/// The optional gate on attention output: the fully judged semantics
+/// plus the operand implementing it.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct GateOp {
-    pub activation: Activation,
+    pub spec: AttentionGateSpec,
     pub projection: OperandRef,
 }
 
@@ -80,7 +83,11 @@ pub struct AttentionOp {
     pub num_q_heads: usize,
     pub num_kv_heads: usize,
     pub head_dim: usize,
-    pub scale: f64,
+    /// Applied to the (normalised) query states before position encoding.
+    pub query_scale: f64,
+    /// The canonical score-time multiply — deliberately not folded into
+    /// [`Self::query_scale`] (algebra-equivalent, not fp-equivalent).
+    pub score_scale: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub logit_softcapping: Option<f32>,
     pub span: AttentionSpan,
@@ -89,6 +96,8 @@ pub struct AttentionOp {
     pub position: PositionPolicy,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub qk_norm: Option<QkNormOp>,
+    /// Weightless Q/K RMS normalisation, when the judged semantics say so.
+    pub parameter_free_qk_norm: ParameterFreeQkNorm,
     pub q: OperandRef,
     pub k: OperandRef,
     pub v: OperandRef,

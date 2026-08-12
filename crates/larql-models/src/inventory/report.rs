@@ -30,7 +30,16 @@ use serde::{Deserialize, Serialize};
 /// scalars a generic executor reads, fully resolved. A v2 inventory
 /// deserialises with `execution: None`, which downstream completeness
 /// gates treat as *incomplete*, never as defaults.
-pub const INVENTORY_SCHEMA: u32 = 3;
+///
+/// v4: attention scaling splits into `query_scale` (applied to the
+/// normalised query, as the reference implementations do) and
+/// `score_scale` (the canonical score-time multiply) — folding them is
+/// algebra-equivalent but not fp-equivalent, and moving a multiply
+/// across RoPE/matmul is exactly the kind of silent normalisation strict
+/// parity would later expose. Adds the judged attention-gate spec and
+/// parameter-free QK norm. A v3 inventory fails to parse rather than
+/// answering with a folded scale.
+pub const INVENTORY_SCHEMA: u32 = 4;
 
 /// Machine-readable architecture inventory of one HF checkpoint directory.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -117,10 +126,14 @@ pub struct ResolvedTopology {
 /// defaults anything.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResolvedExecution {
-    /// Final multiplier on QK^T scores: the base scale
-    /// (`query_pre_attn_scalar` or `head_dim`)^-0.5 times any declared
-    /// `qk_scale_factor` extra multiplier.
-    pub attention_scale: f64,
+    /// Multiplier applied to the (normalised) query states before
+    /// position encoding — a declared `qk_scale_factor`, or 1.0.
+    pub query_scale: f64,
+    /// Canonical score-time multiplier on QK^T:
+    /// (`query_pre_attn_scalar` or `head_dim`)^-0.5. Kept separate from
+    /// [`Self::query_scale`]: folding them is algebra-equivalent but not
+    /// fp-equivalent.
+    pub score_scale: f64,
     /// Attention-logit softcap; `None` = the op is absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attn_logit_softcapping: Option<f32>,
@@ -128,6 +141,14 @@ pub struct ResolvedExecution {
     pub qk_norm_scope: crate::config::QkNormScope,
     /// Offset added to QK-norm weights at runtime (Gemma 2/3: 1.0).
     pub qk_norm_weight_offset: f32,
+    /// Parameter-free QK normalisation (no weight tensors) — a judged
+    /// semantic fact no tensor evidence can reveal.
+    #[serde(default)]
+    pub parameter_free_qk_norm: crate::config::ParameterFreeQkNorm,
+    /// Judged attention-output-gate semantics; `None` = no judgment
+    /// exists (a shipped gate operand then fails operand closure).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attention_output_gate: Option<crate::config::AttentionGateSpec>,
     pub activation: crate::config::Activation,
     pub ffn_type: crate::config::FfnType,
     pub norm_kind: crate::config::NormType,

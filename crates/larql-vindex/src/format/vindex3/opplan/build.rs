@@ -290,18 +290,20 @@ pub fn plan_component_ops(
                 num_q_heads: attn.num_q_heads,
                 num_kv_heads: attn.num_kv_heads,
                 head_dim: attn.head_dim,
-                scale: attn.scale,
+                query_scale: attn.query_scale,
+                score_scale: attn.score_scale,
                 logit_softcapping: attn.logit_softcapping,
                 span: policy.span,
                 window: policy.window,
                 position: policy.position,
                 qk_norm,
+                parameter_free_qk_norm: attn.parameter_free_qk_norm,
                 q: operand(&stack_id, get(OperandRole::AttnQ)),
                 k: operand(&stack_id, get(OperandRole::AttnK)),
                 v: operand(&stack_id, get(OperandRole::AttnV)),
                 o: operand(&stack_id, get(OperandRole::AttnO)),
-                output_gate: attn.output_gate.as_ref().map(|gate| GateOp {
-                    activation: gate.activation,
+                output_gate: attn.output_gate.map(|spec| GateOp {
+                    spec,
                     projection: operand(&stack_id, get(OperandRole::AttnOutputGate)),
                 }),
             },
@@ -451,7 +453,7 @@ fn expected_shape(
         },
         OperandRole::FfnGate | OperandRole::FfnUp => Some(vec![intermediate, hidden]),
         OperandRole::FfnDown => Some(vec![hidden, intermediate]),
-        // Judged semantics pending; closure already reports the operand.
-        OperandRole::AttnOutputGate => None,
+        // Linear(hidden -> q_heads*head_dim), per the judged spec.
+        OperandRole::AttnOutputGate => Some(vec![q_rows, hidden]),
     }
 }

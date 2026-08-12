@@ -247,13 +247,19 @@ fn run_inspect(args: InspectArgs) -> Result<(), Box<dyn std::error::Error>> {
             for component in &inspection.graph.components {
                 match &component.execution {
                     Some(surface) => println!(
-                        "  {:8} attention {}q/{}kv head {} scale {:.4}, \
+                        "  {:8} attention {}q/{}kv head {} q-scale {:.4} s-scale {:.4}{}, \
                          ffn {:?} {:?} {}, norm {:?} eps {:e}{}",
                         component.id,
                         surface.attention.num_q_heads,
                         surface.attention.num_kv_heads,
                         surface.attention.head_dim,
-                        surface.attention.scale,
+                        surface.attention.query_scale,
+                        surface.attention.score_scale,
+                        if surface.attention.output_gate.is_some() {
+                            " gated"
+                        } else {
+                            ""
+                        },
                         surface.ffn.activation,
                         surface.ffn.ffn_type,
                         surface.ffn.intermediate_size,

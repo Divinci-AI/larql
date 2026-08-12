@@ -112,10 +112,13 @@ pub fn resolve(config: &Value, identity: &Identity) -> (Detection, ResolvedTopol
     // Every defaulting decision the serving path would make, applied once
     // and recorded — the executor downstream reads, never defaults.
     let execution = ResolvedExecution {
-        attention_scale: arch.attention_scale() * arch.qk_scale_factor().unwrap_or(1.0),
+        query_scale: arch.qk_scale_factor().unwrap_or(1.0),
+        score_scale: arch.attention_scale(),
         attn_logit_softcapping: arch.attn_logit_softcapping(),
         qk_norm_scope: arch.qk_norm_scope(),
         qk_norm_weight_offset: arch.qk_norm_weight_offset(),
+        parameter_free_qk_norm: arch.parameter_free_qk_norm(),
+        attention_output_gate: arch.attention_output_gate(),
         activation: arch.activation(),
         ffn_type: arch.ffn_type(),
         norm_kind: arch.norm_type(),

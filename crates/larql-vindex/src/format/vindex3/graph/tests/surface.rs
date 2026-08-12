@@ -51,9 +51,12 @@ fn builder_fills_every_component_surface() {
         .find(|c| c.id == "target")
         .unwrap();
     let surface = target.execution.as_ref().unwrap();
-    // Declared qk_scale_factor (3.87) times canonical head_dim^-0.5.
-    let expected_scale = (8f64).powf(-0.5) * 3.87;
-    assert!((surface.attention.scale - expected_scale).abs() < 1e-12);
+    // Scales stay separate: declared query factor, canonical score scale.
+    assert!((surface.attention.query_scale - 3.87).abs() < 1e-12);
+    assert!((surface.attention.score_scale - (8f64).powf(-0.5)).abs() < 1e-12);
+    // Judged semantics from the registered family.
+    assert!(surface.attention.output_gate.is_some());
+    assert!(surface.attention.parameter_free_qk_norm.q);
     assert_eq!(surface.attention.num_q_heads, 8);
     assert_eq!(surface.attention.num_kv_heads, 2);
     assert_eq!(surface.ffn.intermediate_size, 256);

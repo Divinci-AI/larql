@@ -381,7 +381,7 @@ includes a mutation test for exactly that case.
 
 ---
 
-## 8. G5 — execution contract (5a + 5b-1 implemented; 5b-2–5e pinned design)
+## 8. G5 — execution contract (5a + 5b-1 sealed; 5b-2–5e pinned design)
 
 Execute the system **using only semantic information present in the
 container**. The executor owns *generic operations* — embedding, norms,
@@ -474,26 +474,39 @@ tensor. The closure gate requires, before any plan exists:
 - every stack tensor classifies into an [`OperandRole`] — an
   unclassified operand blocks;
 - every operand's op is declared by the surface — an operand implying an
-  absent op blocks **naming the required primitive** (the real Glimmer
-  target currently refuses on exactly `self_attn.gate_proj` × 52
-  layers: `required primitive: attention output gate`);
+  absent op blocks **naming the required primitive** (before its gate
+  was judged, the real Glimmer target refused on exactly
+  `self_attn.gate_proj` × 52 layers: `required primitive: attention
+  output gate` — the discovery that forced the primitive into the IR);
 - every op the surface implies has its operands, with the stored shapes
   the surface's geometry states;
 - per-layer accounting is total (`N/N operands accounted`) — counts or
   family defaults are not sufficient.
 
-The real assistant closes completely (5 layers, 11/11: two-norm
-placement, per-head QK-norms, gated FFN) — the first real component
-whose full generic program derives from its container alone.
+**Sealed on the real pair**: the target closes at 52 layers × 12/12
+with zero defects once its gate semantics were judged from the upstream
+reference implementation (`sigmoid(gate_proj(attention_input))`
+multiplied into the aggregated head output before `o_proj`), and the
+assistant closes at 5 × 11/11 (two-norm placement, per-head QK-norms,
+gated FFN). The NoPE interleave reads directly off the persisted table
+— layers 3, 7, … 51 emit `Full / position None` with no layer
+arithmetic anywhere.
+
+Two judged facts arrived with the gate, both preserved unfolded because
+strict parity is next:
+
+- **Query and score scales are separate ops** — the declared
+  `qk_scale_factor` multiplies the normalised query before position
+  encoding; the canonical `head_dim^-0.5` is a score-time multiply.
+  Folding them is algebra-equivalent but not fp-equivalent, and moving a
+  multiply across RoPE/matmul is exactly the silent normalisation 5b-2
+  would otherwise surface as a parity mystery.
+- **Parameter-free QK normalisation** is a judged semantic no tensor
+  evidence can reveal: the reference normalises Q and K while the stack
+  ships no norm weights. It lives on the surface as
+  `parameter_free_qk_norm`, distinct from weighted QK-norm.
 
 ### 8.3 Next rungs (pinned)
-
-**Seal 5b-1.** Judge the semantics of the attention output gate — *what
-generic attention operation does this operand implement*, never *how
-does one family's attention work* — encode it in
-`AttentionSurface.output_gate` (kind/activation/placement as the judged
-behaviour requires), re-encode, and the target must close:
-52 layers, 12/12, 0 defects. No numerical work before that.
 
 **5b-2 — causal authority of the emitted program.** Parity
 (hidden-state and logit, not argmax) against the checkpoint-driven
@@ -510,6 +523,41 @@ operand/op semantic fact   mutate/remove judged gate semantics → diverge or re
 The third exists because of the gate discovery: the two pieces the
 generic fallback failed to capture (NoPE layers, attention gating) are
 exactly the two that make the strongest controls.
+
+Parity runs **layer by layer**, not final-logit-only: per layer
+`max_abs` / `mean_abs` / cosine on the hidden-state trace, then
+exact/near-exact logits per what the kernels actually promise. A
+divergence at layer N localises immediately to norm ordering, QK
+normalisation, scale placement, RoPE/NoPE, gate placement, residual or
+FFN ordering — and because `vindex3 ops` spells the generic program
+out, the debug object and the execution object are the same semantic
+representation. The bar 5b-2 enforces: **the operation plan is not
+documentation of execution; it is execution.**
+
+**The compiler boundary.** Some execution semantics cannot be inferred
+from bytes — a gate's activation, a parameter-free QK normalisation
+(there are no weights to find), the exact application point of a scale.
+Some authority must tell the *compiler* what they mean, and that
+authority is legitimately architecture-aware. The boundary is where
+family knowledge is allowed to live:
+
+```text
+SOURCE COMPILER / FRONT END          EXECUTION / BACK END
+HF model_type, upstream reference    VINDEX3 IR
+        ↓                                ↓
+architecture-specific judgment OK    generic op plan
+        ↓                                ↓
+generic VINDEX3 IR                   generic kernels
+                                     — no family knowledge here
+```
+
+A `muse_glimmer` source decoder is fine; `if family == muse_glimmer`
+after the vindex is produced is the violation. VINDEX3 permits
+**architecture-aware ingestion** and produces an
+**architecture-independent executable IR** — like language front ends
+compiling to one IR for one backend, it does not need every upstream
+checkpoint to be self-describing; it needs to *compile their semantics
+away*.
 
 **The naming-convention trap.** Dispatching on object-id *strings*
 (`if object_id.contains("perception_tower")`) technically avoids a

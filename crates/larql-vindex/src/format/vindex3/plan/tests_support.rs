@@ -127,8 +127,8 @@ pub fn glimmer_shaped_target(dir: &Path) -> ArchitectureInventory {
         }
     });
     // Full operand estate, mirroring the real four-norm Glimmer layer
-    // anatomy (minus the attention gate — this fixture is the
-    // representable happy path): 11 tensors per layer.
+    // anatomy, attention gate included (its semantics are judged on the
+    // registered family): 12 tensors per layer.
     let mut header = serde_json::Map::new();
     let mut offset = 0u64;
     push_tensor(
@@ -175,6 +175,12 @@ pub fn glimmer_shaped_target(dir: &Path) -> ArchitectureInventory {
             &mut header,
             &mut offset,
             &format!("{stack}.self_attn.o_proj.weight"),
+            &[64, 64],
+        );
+        push_tensor(
+            &mut header,
+            &mut offset,
+            &format!("{stack}.self_attn.gate_proj.weight"),
             &[64, 64],
         );
         push_tensor(

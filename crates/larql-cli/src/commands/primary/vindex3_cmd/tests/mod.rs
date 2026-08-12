@@ -61,6 +61,8 @@ fn fixture_dir(judged: bool) -> tempfile::TempDir {
             ("self_attn.k_proj.weight", vec![16, 64]),
             ("self_attn.v_proj.weight", vec![16, 64]),
             ("self_attn.o_proj.weight", vec![64, 64]),
+            // Judged on the registered family: the gate operand must ship.
+            ("self_attn.gate_proj.weight", vec![64, 64]),
             ("self_attn.q_norm.weight", vec![8]),
             ("self_attn.k_norm.weight", vec![8]),
             ("input_layernorm.weight", vec![64]),

@@ -53,7 +53,9 @@ fn builds_a_complete_inventory() {
     let inv = build_inventory(dir.path()).unwrap();
     assert_eq!(inv.schema, INVENTORY_SCHEMA);
     assert_eq!(inv.identity.model_type, "muse_glimmer_text");
-    assert!(inv.detection.generic_fallback);
+    // Glimmer is a registered family since its semantics were judged.
+    assert!(!inv.detection.generic_fallback);
+    assert_eq!(inv.detection.family, "muse_glimmer");
     assert_eq!(inv.resolved.num_layers, 4);
     assert_eq!(inv.resolved.attention.sliding_layers, 3);
     assert_eq!(inv.tensors.total_tensors, 1);

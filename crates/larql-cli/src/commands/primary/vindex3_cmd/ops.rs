@@ -82,7 +82,16 @@ fn print_layer(component: &str, layer: &LayerPlan) {
         "    geometry: {}q / {}kv, head_dim {}",
         attention.num_q_heads, attention.num_kv_heads, attention.head_dim
     );
-    println!("    scale {}", attention.scale);
+    println!(
+        "    query_scale {} score_scale {}",
+        attention.query_scale, attention.score_scale
+    );
+    if attention.parameter_free_qk_norm.q || attention.parameter_free_qk_norm.k {
+        println!(
+            "    parameter_free_qk_norm q={} k={}",
+            attention.parameter_free_qk_norm.q, attention.parameter_free_qk_norm.k
+        );
+    }
     println!(
         "    span {:?}{}",
         attention.span,
@@ -109,7 +118,7 @@ fn print_layer(component: &str, layer: &LayerPlan) {
     if let Some(gate) = &attention.output_gate {
         println!(
             "    output_gate {:?} = {}/{}",
-            gate.activation, gate.projection.object, gate.projection.tensor
+            gate.spec.activation, gate.projection.object, gate.projection.tensor
         );
     }
     println!("  residual");

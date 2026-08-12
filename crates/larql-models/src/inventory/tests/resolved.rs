@@ -31,6 +31,7 @@ fn glimmer_shaped() -> serde_json::Value {
             "sliding_window": 2048,
             "vocab_size": 202048,
             "rms_norm_eps": 1e-5,
+            "qk_scale_factor": 3.87,
             "layer_types": layer_types
         },
         "vision_config": { "hidden_size": 1536 }
@@ -67,15 +68,37 @@ fn identity_handles_flat_configs() {
 }
 
 /// The central finding for an unsupported family: detection succeeds via the
-/// generic fallback, and the report says so.
+/// generic fallback, and the report says so. (Glimmer graduated to a
+/// registered family, so the unknown here is genuinely unjudged.)
 #[test]
 fn unknown_model_type_reports_generic_fallback() {
-    let config = glimmer_shaped();
+    let mut config = glimmer_shaped();
+    config["model_type"] = serde_json::json!("unjudged_future_model");
+    config["text_config"]["model_type"] = serde_json::json!("unjudged_future_model_text");
     let identity = read_identity(&config);
     let (detection, _) = resolve(&config, &identity);
     assert!(detection.generic_fallback);
     assert_eq!(detection.family, "generic");
     assert!(detection.attention_kind.is_none());
+}
+
+/// The registered Glimmer target resolves with its judged semantics —
+/// the gate spec and parameter-free QK norm — while the assistant stays
+/// generic (unjudged).
+#[test]
+fn glimmer_target_resolves_with_judged_semantics() {
+    let config = glimmer_shaped();
+    let identity = read_identity(&config);
+    let (detection, topology) = resolve(&config, &identity);
+    assert!(!detection.generic_fallback);
+    assert_eq!(detection.family, "muse_glimmer");
+    let execution = topology.execution.unwrap();
+    assert!(execution.attention_output_gate.is_some());
+    assert!(execution.parameter_free_qk_norm.q);
+    assert!(execution.parameter_free_qk_norm.k);
+    // Scales stay separate: declared query factor, canonical score scale.
+    assert!((execution.query_scale - 3.87).abs() < 1e-12);
+    assert!(execution.score_scale < 1.0);
 }
 
 /// A known family does not trip the fallback flag.

@@ -94,7 +94,7 @@ fn a_mutated_persisted_attention_scale_is_caught() {
         .iter_mut()
         .find(|c| c["id"] == "target")
         .unwrap();
-    component["execution"]["attention"]["scale"] = serde_json::json!(1.0);
+    component["execution"]["attention"]["query_scale"] = serde_json::json!(1.0);
     std::fs::write(&graph_path, graph.to_string()).unwrap();
 
     let verification = verify_system(&system.named, system.container.path()).unwrap();

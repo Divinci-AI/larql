@@ -12,6 +12,17 @@ pub enum NormType {
     LayerNorm,
 }
 
+/// Parameter-free QK normalisation: RMS-normalise Q and/or K with no
+/// learned weight tensors. Distinct from weighted QK-norm (whose weights
+/// exist in the stack and carry [`QkNormScope`]) — a judged semantic
+/// fact, evidenced by an implementation that normalises while the
+/// operand estate ships no `q_norm`/`k_norm` weights.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ParameterFreeQkNorm {
+    pub q: bool,
+    pub k: bool,
+}
+
 /// The vector over which a QK-norm's RMS statistic is reduced.
 ///
 /// Both variants apply the *same* weight vector elementwise across the whole

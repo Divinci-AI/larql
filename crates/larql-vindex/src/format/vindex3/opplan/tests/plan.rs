@@ -44,8 +44,8 @@ fn target_plan_reads_span_and_position_from_the_table() {
 
     // Full accounting, every layer.
     for layer in &plan.layers {
-        assert_eq!(layer.operands_accounted, 11, "layer {}", layer.layer);
-        assert_eq!(layer.operands_present, 11);
+        assert_eq!(layer.operands_accounted, 12, "layer {}", layer.layer);
+        assert_eq!(layer.operands_present, 12);
     }
 
     // Ends of the program: embedding, final norm, head with the resolved
@@ -56,9 +56,13 @@ fn target_plan_reads_span_and_position_from_the_table() {
     let output = plan.output.as_ref().unwrap();
     assert!((output.multiplier - 0.196).abs() < 1e-12);
 
-    // The resolved attention scale reaches the kernel argument.
-    let expected_scale = (8f64).powf(-0.5) * 3.87;
-    assert!((layer0.attention.scale - expected_scale).abs() < 1e-12);
+    // Both scales reach the kernel arguments, unfolded.
+    assert!((layer0.attention.query_scale - 3.87).abs() < 1e-12);
+    assert!((layer0.attention.score_scale - (8f64).powf(-0.5)).abs() < 1e-12);
+    // The judged gate binds its operand.
+    let gate = layer0.attention.output_gate.as_ref().unwrap();
+    assert!(gate.projection.tensor.contains("self_attn.gate_proj"));
+    assert!(layer0.attention.parameter_free_qk_norm.q);
 }
 
 /// Drafter: two-norm placement — `post_attention_layernorm` *is* the

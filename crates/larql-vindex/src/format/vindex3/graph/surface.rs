@@ -19,7 +19,9 @@
 //! absent one — absence is a completeness defect that refuses encoding,
 //! not a branch at run time.
 
-use larql_models::config::{Activation, FfnType, NormType, QkNormScope};
+use larql_models::config::{
+    Activation, AttentionGateSpec, FfnType, NormType, ParameterFreeQkNorm, QkNormScope,
+};
 use larql_models::inventory::components::ComponentTopology;
 use larql_models::inventory::ArchitectureInventory;
 use serde::{Deserialize, Serialize};
@@ -53,30 +55,32 @@ pub struct AttentionSurface {
     pub num_q_heads: usize,
     pub num_kv_heads: usize,
     pub head_dim: usize,
-    /// Final multiplier on QK^T scores, fully resolved (base scale times
-    /// any declared extra factor).
-    pub scale: f64,
+    /// Multiplier on the (normalised) query states before position
+    /// encoding — a declared factor, or 1.0. Kept separate from
+    /// [`Self::score_scale`]: folding them is algebra-equivalent but not
+    /// fp-equivalent, and the executor must place each multiply where
+    /// the judged semantics put it.
+    pub query_scale: f64,
+    /// Canonical score-time multiplier on QK^T.
+    pub score_scale: f64,
     /// Attention-logit softcap; `None` = the op is absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub logit_softcapping: Option<f32>,
     /// QK-norm scope, read when QK-norm weights exist in the stack.
     pub qk_norm_scope: QkNormScope,
     pub qk_norm_weight_offset: f32,
-    /// Elementwise gate on attention output; `None` = the op is absent
-    /// **as judged semantics**. A stack shipping an
+    /// Parameter-free QK normalisation (no weight tensors) — judged
+    /// semantics no tensor evidence can reveal.
+    #[serde(default)]
+    pub parameter_free_qk_norm: ParameterFreeQkNorm,
+    /// Judged attention-output-gate semantics; `None` = no judgment
+    /// exists — **never "no gate"**. A stack shipping an
     /// [`OperandRole::AttnOutputGate`](super::roles::OperandRole) operand
     /// while this is `None` fails operand closure — the primitive exists
     /// in the IR, but its semantics for that model have not been judged,
     /// and closure refuses rather than guessing an activation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub output_gate: Option<AttentionGate>,
-}
-
-/// Judged semantics of an attention output gate.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct AttentionGate {
-    /// Gating nonlinearity applied to the gate projection.
-    pub activation: Activation,
+    pub output_gate: Option<AttentionGateSpec>,
 }
 
 /// What the FFN op reads.
@@ -167,12 +171,14 @@ pub fn surface_from_resolved(
             num_q_heads: resolved.num_q_heads,
             num_kv_heads: resolved.num_kv_heads,
             head_dim: resolved.head_dim,
-            scale: execution.attention_scale,
+            query_scale: execution.query_scale,
+            score_scale: execution.score_scale,
             logit_softcapping: execution.attn_logit_softcapping,
             qk_norm_scope: execution.qk_norm_scope,
             qk_norm_weight_offset: execution.qk_norm_weight_offset,
+            parameter_free_qk_norm: execution.parameter_free_qk_norm,
             // Judged per model; never inferred from operand presence.
-            output_gate: None,
+            output_gate: execution.attention_output_gate,
         },
         ffn: FfnSurface {
             intermediate_size: resolved.intermediate_size,
@@ -315,10 +321,12 @@ pub fn surface_from_nested(
             num_q_heads: heads,
             num_kv_heads: nested.num_key_value_heads.unwrap_or(heads),
             head_dim,
-            scale: (head_dim as f64).powf(-0.5),
+            query_scale: 1.0,
+            score_scale: (head_dim as f64).powf(-0.5),
             logit_softcapping: None,
             qk_norm_scope: QkNormScope::PerHead,
             qk_norm_weight_offset: 0.0,
+            parameter_free_qk_norm: ParameterFreeQkNorm::default(),
             output_gate: None,
         },
         ffn: FfnSurface {

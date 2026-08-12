@@ -277,6 +277,21 @@ pub trait ModelArchitecture: Send + Sync {
         0.0
     }
 
+    /// Judged semantics of an attention output gate, when this family
+    /// carries one. `None` means *no judgment exists* — never "no gate":
+    /// a stack shipping a gate operand while this is `None` must fail
+    /// operand closure downstream rather than run ungated.
+    fn attention_output_gate(&self) -> Option<crate::config::AttentionGateSpec> {
+        None
+    }
+
+    /// Parameter-free QK normalisation (RMS over Q/K with no learned
+    /// weights). Default: none — families that normalise without weights
+    /// declare it, because no tensor evidence can reveal a weightless op.
+    fn parameter_free_qk_norm(&self) -> crate::config::ParameterFreeQkNorm {
+        crate::config::ParameterFreeQkNorm::default()
+    }
+
     /// Embedding scaling factor applied after lookup.
     /// Gemma: sqrt(hidden_size), Granite: embedding_multiplier, Llama: 1.0.
     fn embed_scale(&self) -> f32 {
