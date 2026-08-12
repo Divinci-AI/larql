@@ -356,7 +356,8 @@ mod tests {
     use super::*;
     use crate::test_utils::make_test_gemma4_moe_weights;
     use larql_vindex::format::lyrw2::region_format::RegionFormat;
-    use larql_vindex::format::vindex3::{ContainerBuilder, MoeLayerSource};
+    use larql_vindex::format::lyrw2::region_layout::RegionLayout;
+    use larql_vindex::format::vindex3::{ContainerBuilder, ExpertScaleStreams, MoeLayerSource};
     use tempfile::TempDir;
 
     /// Build a container from the fixture model's own expert bytes.
@@ -381,6 +382,11 @@ mod tests {
                 experts_gate_up: moe.experts_gate_up.clone(),
                 experts_down: moe.experts_down.clone(),
                 format: RegionFormat::Q4K,
+                // Q4_K packs its scales inside each super-block.
+                scales: ExpertScaleStreams::Inline,
+                // A fact about the bytes this fixture writes, not about any
+                // checkpoint: `build_moe_weights` yields `[all gate | all up]`.
+                gate_up_layout: RegionLayout::ContiguousHalves,
                 hidden_size: weights.hidden_size as u32,
                 gate_up_stored_intermediate: moe.intermediate_size as u32,
                 down_stored_intermediate: moe.inter_padded() as u32,
