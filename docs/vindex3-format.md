@@ -506,9 +506,23 @@ strict parity is next:
   ships no norm weights. It lives on the surface as
   `parameter_free_qk_norm`, distinct from weighted QK-norm.
 
-### 8.3 Next rungs (pinned)
+### 8.3 Next rungs (pinned; Stage A implemented)
 
-**5b-2 — causal authority of the emitted program.** Parity
+**5b-2 Stage A — implemented** (`opplan/exec/`): a reference executor
+that consumes a `ComponentOpPlan` and nothing else — naive f32 loops
+(deliberately sharing no arithmetic with `larql-compute`), operands
+loaded only through the closure-verified
+`object → representation → segment` path, every judged enum matched
+exhaustively. Gate: on a dense F32 fixture, container-driven execution
+matches the checkpoint-driven production forward **layer by layer**
+(observed reassociation-only margins ~7e-8 hidden / ~2.4e-7 logits,
+asserted at 100× the noise floor), with a corrupted-operand negative
+control and a non-degeneracy check (independent arithmetic must not
+agree bit-for-bit). The judged Glimmer program shape — gate, weighted +
+parameter-free QK norm, four norms, hybrid span, both softcaps —
+executes finite end to end; its numerical reference is Stage B.
+
+**5b-2 Stage B/C — remaining.** Parity
 (hidden-state and logit, not argmax) against the checkpoint-driven
 fixture path, then three positive controls proving three independent
 semantic pathways drive computation — a container fact must not merely
