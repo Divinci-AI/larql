@@ -9,6 +9,8 @@
 //! about *semantics* — plan interpretation, operand binding, norm
 //! placement, RoPE convention, residual order — not shared arithmetic.
 
+mod controls;
+mod golden;
 mod kernels;
 mod parity;
 mod smoke;

@@ -522,7 +522,43 @@ agree bit-for-bit). The judged Glimmer program shape — gate, weighted +
 parameter-free QK norm, four norms, hybrid span, both softcaps —
 executes finite end to end; its numerical reference is Stage B.
 
-**5b-2 Stage B/C — remaining.** Parity
+**5b-2 Stage B — implemented.** The judged semantics against an
+independent golden implementation (`exec/tests/golden.rs`): a
+deliberately literal oracle sharing *nothing* with the execution stack —
+its own safetensors byte reader, plain hardcoded arithmetic, no plan, no
+surface, no shared enums — over a miniature Glimmer anatomy with
+deliberately awkward dimensions (hidden 12, 3q/1kv, head_dim 4, ffn 20,
+vocab 29, seq 5; layer 0 Sliding+RoPE+gated, layer 1 Full+NoPE+gated).
+Executor matches at ~5e-8 on logits; the trace checkpoints every novel
+boundary (post-pf-norm Q, post-scale Q, post-position Q, gate sigmoid,
+pre/post-gate attention) and self-checks its own semantics (NoPE is
+bit-identically a positional no-op; the gate strictly gates).
+
+**5b-2 Stage C — implemented.** The three causal controls
+(`exec/tests/controls.rs`), each mutating **only the persisted graph**:
+
+```text
+C1  query_scale 3.87 → 3.5   diverges from layer 0     scalar authority
+C2  layer 1 None → Rope      layer 0 identical,        layer-policy
+                             layer 1 diverges           authority
+C3  gate judgment removed    refuses, names primitive  op-semantic
+                                                        authority
+```
+
+A hidden default is precisely a fact whose mutation changes nothing;
+these controls are the search for hidden defaults, and they found none.
+The ladder's engineering contract, complete:
+
+```text
+four-authority consistency + operand closure   = execution sufficiency
+execution sufficiency + independent parity     = execution correctness
+execution correctness + causal mutation controls = semantic authority
+```
+
+Closure proves the program is complete; parity proves the program is
+correct; the controls prove the IR is in charge.
+
+**Remaining (5b-3).** Parity
 (hidden-state and logit, not argmax) against the checkpoint-driven
 fixture path, then three positive controls proving three independent
 semantic pathways drive computation — a container fact must not merely
