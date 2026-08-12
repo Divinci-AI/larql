@@ -18,6 +18,7 @@ pub mod llama;
 pub mod mistral;
 pub mod mixtral;
 pub mod moss_tts_realtime;
+pub mod muse_glimmer;
 pub mod olmoe;
 pub mod qwen;
 pub mod starcoder2;

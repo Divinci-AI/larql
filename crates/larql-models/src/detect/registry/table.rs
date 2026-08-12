@@ -43,6 +43,17 @@ pub static ARCHITECTURE_REGISTRY: &[ArchitectureEntry] = &[
         attention_kind: AttentionKind::Standard,
         quant_formats: STANDARD_QUANT_FORMATS,
     },
+    // The assistant model_type is deliberately absent: it stays on the
+    // generic path until its semantics are judged.
+    ArchitectureEntry {
+        model_type: "muse_glimmer",
+        patterns: &[
+            ModelTypeMatch::Exact("muse_glimmer"),
+            ModelTypeMatch::Exact("muse_glimmer_text"),
+        ],
+        attention_kind: AttentionKind::Standard,
+        quant_formats: STANDARD_QUANT_FORMATS,
+    },
     ArchitectureEntry {
         model_type: "mixtral",
         patterns: &[ModelTypeMatch::Exact("mixtral")],

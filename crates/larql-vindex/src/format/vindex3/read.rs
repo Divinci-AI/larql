@@ -86,8 +86,18 @@ impl Vindex3Container {
         let index: Vindex3Index = serde_json::from_str(&raw)
             .map_err(|e| VindexError::Parse(format!("parse VINDEX3 index.json: {e}")))?;
 
-        let manifest_raw = std::fs::read_to_string(root.join(&index.moe_manifest))
-            .map_err(|e| contextual_io(&index.moe_manifest, e))?;
+        // This is the routed-MoE open path; a system container without a
+        // routed programme is not openable here and says so precisely.
+        let manifest_name = index.moe_manifest.as_deref().ok_or_else(|| {
+            VindexError::Parse(
+                "container declares no MoE programme manifest — it is a system \
+                 container, not a routed-MoE container; open it via the system \
+                 graph (`larql vindex3 inspect`)"
+                    .into(),
+            )
+        })?;
+        let manifest_raw = std::fs::read_to_string(root.join(manifest_name))
+            .map_err(|e| contextual_io(manifest_name, e))?;
         // Deserialises *and* refuses a manifest that is not well formed —
         // duplicate layer, unsupported schema version, router without scores.
         let manifest = match manifest_policy {

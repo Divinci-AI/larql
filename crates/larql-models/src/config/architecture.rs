@@ -18,7 +18,8 @@ use crate::validation::ConfigValidationResult;
 
 use super::{
     layer_types, rope_types, Activation, ExpertFormat, ExpertGatePolicy, ExpertRoutingPolicy,
-    FfnType, GateUpLayout, Llama3RopeScaling, ModelConfig, NormType, QkNormScope, YarnRopeScaling,
+    FfnType, GateUpLayout, Llama3RopeScaling, ModelConfig, NormType, PositionPolicy, QkNormScope,
+    YarnRopeScaling,
 };
 
 /// Architecture-specific behavior. Describes how a model is structured
@@ -276,6 +277,21 @@ pub trait ModelArchitecture: Send + Sync {
         0.0
     }
 
+    /// Judged semantics of an attention output gate, when this family
+    /// carries one. `None` means *no judgment exists* — never "no gate":
+    /// a stack shipping a gate operand while this is `None` must fail
+    /// operand closure downstream rather than run ungated.
+    fn attention_output_gate(&self) -> Option<crate::config::AttentionGateSpec> {
+        None
+    }
+
+    /// Parameter-free QK normalisation (RMS over Q/K with no learned
+    /// weights). Default: none — families that normalise without weights
+    /// declare it, because no tensor evidence can reveal a weightless op.
+    fn parameter_free_qk_norm(&self) -> crate::config::ParameterFreeQkNorm {
+        crate::config::ParameterFreeQkNorm::default()
+    }
+
     /// Embedding scaling factor applied after lookup.
     /// Gemma: sqrt(hidden_size), Granite: embedding_multiplier, Llama: 1.0.
     fn embed_scale(&self) -> f32 {
@@ -299,8 +315,19 @@ pub trait ModelArchitecture: Send + Sync {
     }
 
     /// Activation function for the FFN.
+    ///
+    /// The default reads the checkpoint's declared `hidden_act` /
+    /// `hidden_activation` name when present (through the one mapping in
+    /// [`Activation::from_hf_name`]) and falls back to SiLU only when the
+    /// config is silent. A family override that ignores the config is
+    /// asserting it knows better than the checkpoint — every current
+    /// override's family also declares the matching name.
     fn activation(&self) -> Activation {
-        Activation::Silu
+        self.config()
+            .hidden_act
+            .as_deref()
+            .and_then(Activation::from_hf_name)
+            .unwrap_or(Activation::Silu)
     }
 
     /// FFN type (gated vs standard).
@@ -335,9 +362,37 @@ pub trait ModelArchitecture: Send + Sync {
 
     /// RoPE base frequency for a given layer.
     /// Gemma3 uses different bases for sliding vs global attention layers.
+    ///
+    /// Only meaningful on layers whose
+    /// [`position_policy_for_layer`](Self::position_policy_for_layer) is
+    /// rotary; the policy is the authority on *whether* a layer rotates.
     fn rope_base_for_layer(&self, layer: usize) -> f64 {
         let _ = layer;
         self.config().rope_base
+    }
+
+    /// Positional-encoding policy for a given layer.
+    ///
+    /// A checkpoint declaring `layer_rope_theta` states the policy per layer
+    /// — including intentional absence (NoPE), which the HF form spells as a
+    /// `0.0` sentinel honoured here and nowhere else. Without the array,
+    /// every layer rotates at [`rope_base_for_layer`](Self::rope_base_for_layer).
+    ///
+    /// The forward path for a family that declares NoPE layers must consume
+    /// this policy, not a raw theta — a zero base is degenerate
+    /// (`1/0^(i/d)`), never a parameter value.
+    fn position_policy_for_layer(&self, layer: usize) -> PositionPolicy {
+        match self
+            .config()
+            .layer_rope_theta
+            .as_ref()
+            .and_then(|thetas| thetas.get(layer))
+        {
+            Some(&declared) => PositionPolicy::from_declared_theta(declared),
+            None => PositionPolicy::Rope {
+                theta: self.rope_base_for_layer(layer),
+            },
+        }
     }
 
     /// Head dimension for a given layer. Models with different head dims for
@@ -498,6 +553,47 @@ pub trait ModelArchitecture: Send + Sync {
     /// Applied before softmax: scores = tanh(scores / cap) * cap
     fn attn_logit_softcapping(&self) -> Option<f32> {
         self.config().attn_logit_softcapping.map(|v| v as f32)
+    }
+
+    /// Extra multiplier on attention scores on top of `1/sqrt(head_dim)`
+    /// (`qk_scale_factor`). Distinct from
+    /// [`query_pre_attn_scalar`](Self::query_pre_attn_scalar), which
+    /// replaces the denominator instead. `None` = no extra scale.
+    fn qk_scale_factor(&self) -> Option<f64> {
+        self.config().qk_scale_factor
+    }
+
+    /// Multiplier on the final hidden state before the vocabulary
+    /// projection (`output_multiplier`). `None` = 1.0.
+    fn output_multiplier(&self) -> Option<f64> {
+        self.config().output_multiplier
+    }
+
+    /// Epsilon for post-norms when the checkpoint declares one distinct
+    /// from `rms_norm_eps`. `None` = post-norms share
+    /// [`norm_eps`](Self::norm_eps) — the two can differ by orders of
+    /// magnitude (1e-8 vs 1e-5 on the same checkpoint), which is the OLMoE
+    /// eps failure shape on a second axis.
+    fn post_norm_eps(&self) -> Option<f64> {
+        self.config().post_norm_eps
+    }
+
+    /// Whether attention projections carry biases, when the checkpoint
+    /// says so. `None` = the config is silent; the loader's
+    /// tensor-presence check answers.
+    fn attention_bias(&self) -> Option<bool> {
+        self.config().attention_bias
+    }
+
+    /// Declared context bound (`max_position_embeddings`).
+    fn max_position_embeddings(&self) -> Option<usize> {
+        self.config().max_position_embeddings
+    }
+
+    /// Target-model layers whose hidden states this artifact consumes —
+    /// present only on drafter-style checkpoints (`target_layer_ids`).
+    fn target_layer_ids(&self) -> Option<&[usize]> {
+        self.config().target_layer_ids.as_deref()
     }
 
     /// Final logit softcapping value (None = disabled).

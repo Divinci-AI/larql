@@ -72,9 +72,35 @@ pub struct VindexModelConfig {
     /// RoPE base for local/sliding window layers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rope_local_base: Option<f64>,
+    /// Per-layer declared rope theta, verbatim from `layer_rope_theta` —
+    /// `0.0` entries are the upstream NoPE sentinel, interpreted only by
+    /// `ModelArchitecture::position_policy_for_layer` after the round-trip.
+    /// Dropping this served every NoPE layer with full-strength rotation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layer_rope_theta: Option<Vec<f64>>,
     /// Query pre-attention scalar (overrides 1/sqrt(head_dim)).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub query_pre_attn_scalar: Option<f64>,
+    /// Extra attention-score multiplier on top of 1/sqrt(head_dim)
+    /// (`qk_scale_factor`). Distinct from `query_pre_attn_scalar`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qk_scale_factor: Option<f64>,
+    /// Multiplier on the final hidden state before the vocab projection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_multiplier: Option<f64>,
+    /// Post-norm epsilon when it differs from `norm_eps` (1e-8 vs 1e-5 on
+    /// the same checkpoint is a real shape).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_norm_eps: Option<f64>,
+    /// Whether attention projections carry biases, when declared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attention_bias: Option<bool>,
+    /// FFN activation name, verbatim (`hidden_act`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hidden_act: Option<String>,
+    /// Declared context bound (`max_position_embeddings`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_position_embeddings: Option<usize>,
     /// Final-logit tanh softcap (Gemma 2/3/4: 30.0). Applied to logits
     /// immediately before softmax in `logits_to_predictions`. Omitting it
     /// leaves logits uncapped — on E2B this peaked the softmax on the
@@ -210,7 +236,14 @@ impl VindexModelConfig {
             num_kv_shared_layers: cfg.num_kv_shared_layers,
             per_layer_embed_dim: cfg.per_layer_embed_dim,
             rope_local_base: cfg.rope_local_base,
+            layer_rope_theta: cfg.layer_rope_theta.clone(),
             query_pre_attn_scalar: cfg.query_pre_attn_scalar,
+            qk_scale_factor: cfg.qk_scale_factor,
+            output_multiplier: cfg.output_multiplier,
+            post_norm_eps: cfg.post_norm_eps,
+            attention_bias: cfg.attention_bias,
+            hidden_act: cfg.hidden_act.clone(),
+            max_position_embeddings: cfg.max_position_embeddings,
             final_logit_softcapping: cfg.final_logit_softcapping,
             attention_multiplier: cfg.attention_multiplier,
             residual_multiplier: cfg.residual_multiplier,
@@ -275,6 +308,22 @@ mod tests {
             // Vision tower presence. The multimodal path loads its own
             // config rather than reconstructing from the vindex.
             "has_vision_config",
+            // Multimodal protocol + adapter geometry + drafter interface.
+            // These describe cross-component structure — which token ids
+            // stand in for other modalities, what the adapter projects,
+            // which target layers a drafter taps. Their home is the
+            // VINDEX3 system graph (format::vindex3, G2c), which carries
+            // components and interface edges explicitly; duplicating them
+            // in the per-model config would put the system topology in
+            // two places. No vindex-served model consumes them today.
+            "image_token_id",
+            "video_token_id",
+            "out_hidden_size",
+            "projector_hidden_size",
+            "projector_hidden_act",
+            "target_layer_ids",
+            "draft_block_size",
+            "mask_token_id",
         ];
 
         let src = include_str!("../../../larql-models/src/config/model_config.rs");
@@ -355,6 +404,7 @@ mod tests {
             attention_k_eq_v: false,
             num_kv_shared_layers: None,
             per_layer_embed_dim: None,
+            layer_rope_theta: None,
             rope_local_base: None,
             query_pre_attn_scalar: None,
             final_logit_softcapping: None,
@@ -604,6 +654,62 @@ mod tests {
         assert_eq!(back.rope_local_base, Some(10_000.0));
         assert_eq!(back.query_pre_attn_scalar, Some(1.0));
         assert_eq!(back.final_logit_softcapping, Some(30.0));
+    }
+
+    /// The G2b declared scalars must survive the vindex round trip — same
+    /// contract as every other forward-affecting field.
+    #[test]
+    fn declared_scaling_scalars_round_trip() {
+        let mut cfg = minimal_model_config();
+        cfg.qk_scale_factor = Some(3.87);
+        cfg.output_multiplier = Some(0.196);
+        cfg.post_norm_eps = Some(1e-8);
+        cfg.attention_bias = Some(false);
+        cfg.hidden_act = Some("silu".to_string());
+        cfg.max_position_embeddings = Some(131072);
+
+        let json = serde_json::to_string(&cfg).unwrap();
+        let back: VindexModelConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.qk_scale_factor, Some(3.87));
+        assert_eq!(back.output_multiplier, Some(0.196));
+        assert_eq!(back.post_norm_eps, Some(1e-8));
+        assert_eq!(back.attention_bias, Some(false));
+        assert_eq!(back.hidden_act.as_deref(), Some("silu"));
+        assert_eq!(back.max_position_embeddings, Some(131072));
+    }
+
+    /// The per-layer position policy must survive the whole round trip:
+    /// checkpoint → arch → vindex `model_config` → reconstructed arch. A
+    /// NoPE layer (declared `layer_rope_theta[i] == 0`) that comes back
+    /// rotary is the served-with-full-rotation defect this field exists to
+    /// prevent — invisible to CPU-vs-Metal parity because both arms read
+    /// the same `index.json`.
+    #[test]
+    fn nope_position_policy_survives_the_vindex_round_trip() {
+        use larql_models::config::PositionPolicy;
+        let source = larql_models::detect_from_json(&serde_json::json!({
+            "model_type": "some_hybrid_nope_model",
+            "hidden_size": 64,
+            "num_hidden_layers": 4,
+            "intermediate_size": 256,
+            "num_attention_heads": 8,
+            "num_key_value_heads": 2,
+            "layer_rope_theta": [500000.0, 500000.0, 500000.0, 0.0]
+        }));
+        assert_eq!(
+            source.position_policy_for_layer(3),
+            PositionPolicy::None,
+            "precondition: the source arch resolves the sentinel"
+        );
+
+        let persisted = VindexModelConfig::from_arch(source.as_ref());
+        let json = serde_json::to_string(&persisted).unwrap();
+        let back: VindexModelConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            back.layer_rope_theta,
+            Some(vec![500000.0, 500000.0, 500000.0, 0.0]),
+            "array must persist verbatim, sentinel included"
+        );
     }
 
     #[test]

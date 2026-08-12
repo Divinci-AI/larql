@@ -25,6 +25,7 @@ use crate::architectures::llama::LlamaArch;
 use crate::architectures::mistral::MistralArch;
 use crate::architectures::mixtral::MixtralArch;
 use crate::architectures::moss_tts_realtime::{MossTtsRealtimeArch, MOSS_TTS_REALTIME_MODEL_TYPE};
+use crate::architectures::muse_glimmer::MuseGlimmerArch;
 use crate::architectures::olmoe::OlmoeArch;
 use crate::architectures::qwen::QwenArch;
 use crate::architectures::starcoder2::StarCoder2Arch;
@@ -125,6 +126,12 @@ pub fn detect_from_json(config: &serde_json::Value) -> Box<dyn ModelArchitecture
         t if t.starts_with("llama") => Box::new(LlamaArch::from_config(model_config)),
         // Mistral (dense)
         "mistral" => Box::new(MistralArch::from_config(model_config)),
+        // Muse-Glimmer target: config-driven defaults plus the judged
+        // gate/QK-norm semantics. The assistant is deliberately excluded
+        // (weighted QK norms, no gate, unjudged) and stays generic.
+        "muse_glimmer" | "muse_glimmer_text" => {
+            Box::new(MuseGlimmerArch::from_config(model_config))
+        }
         // Mixtral (MoE) — block_sparse_moe pattern
         "mixtral" => Box::new(MixtralArch::from_config(model_config)),
         // GPT-2 (non-gated FFN, LayerNorm, learned positional embeddings)

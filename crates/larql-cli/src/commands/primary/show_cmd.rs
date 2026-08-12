@@ -64,7 +64,13 @@ fn show_v3(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
     println!("Hidden:     {}", index.hidden_size);
     println!("Family:     {}", index.family);
     println!("Profiles:   {}", index.profile_names().join(", "));
-    println!("Manifest:   {}", index.moe_manifest);
+    println!(
+        "Manifest:   {}",
+        index
+            .moe_manifest
+            .as_deref()
+            .unwrap_or("(no MoE programme)")
+    );
 
     // §9.1: show what each profile actually selects, not just that it exists.
     // A container that carries alternative packs is exactly the one where

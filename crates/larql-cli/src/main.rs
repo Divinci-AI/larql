@@ -179,6 +179,17 @@ enum Commands {
     /// architectures it recognises and what each one supports.
     Capabilities,
 
+    #[command(next_help_heading = "Factory", name = "inspect-hf")]
+    /// Machine-readable architecture inventory of an HF checkpoint dir —
+    /// identity, per-layer attention policy, tensors, and every config key
+    /// this build does not consume.
+    InspectHf(inspect_hf_cmd::InspectHfArgs),
+
+    #[command(next_help_heading = "Factory", subcommand)]
+    /// VINDEX3 container programme verbs (`plan`: semantic
+    /// representability check before conversion).
+    Vindex3(vindex3_cmd::Vindex3Command),
+
     #[command(next_help_heading = "Factory", subcommand)]
     /// Render a Hub model card for a build (docs/vindex-factory.md §9).
     Card(card_cmd::CardCommand),
@@ -646,6 +657,8 @@ fn real_main() -> i32 {
         // ── Factory ──
         Commands::Recipe(cmd) => recipe_cmd::run(cmd),
         Commands::Capabilities => capabilities_cmd::run(),
+        Commands::InspectHf(args) => inspect_hf_cmd::run(args),
+        Commands::Vindex3(cmd) => vindex3_cmd::run(cmd),
         Commands::Card(cmd) => card_cmd::run(cmd),
 
         // ── Serve (exec into larql-server) ──
