@@ -31,6 +31,28 @@ pub mod dump;
 /// below it is a structural difference, not accumulation.
 pub const DEFAULT_DRIFT_COS: f64 = 0.9999;
 
+/// Relative-RMS error above which a capture counts as drifted.
+///
+/// Cosine alone cannot see a magnitude error: for `a = alpha * b` the
+/// cosine is exactly 1.0 for every positive `alpha`. Two real Glimmer
+/// defects were of precisely that form locally — a missing weightless
+/// embedding norm and a flattened centred-norm offset — and a
+/// cosine-only gate scored the guilty capture 1.000000000 and blamed
+/// the layer after it.
+///
+/// `rel_rms` is `||a - b|| / ||b||`, so for a pure rescale it reads
+/// `|1 - alpha|` directly: the missing embedding norm showed 0.9375,
+/// exactly `|1 - 1/16|`. The default sits well above genuine bf16-vs-f32
+/// accumulation (~0.008 measured over 52 layers) and well below any
+/// scale defect worth naming.
+///
+/// **This is a localisation threshold, not a correctness tolerance.**
+/// It exists to name the shallowest capture worth investigating. It does
+/// *not* assert that 0.049 is semantically safe — nothing here licenses
+/// a claim about agreement below it. The raw table stays authoritative:
+/// read the columns, not the verdict line.
+pub const DEFAULT_DRIFT_REL_RMS: f64 = 0.05;
+
 #[derive(Args)]
 pub struct LayerDumpArgs {
     /// Model path or HuggingFace model ID.
@@ -67,6 +89,11 @@ pub struct LayerDiffArgs {
     /// Cosine similarity below which a capture counts as drifted.
     #[arg(long, default_value_t = DEFAULT_DRIFT_COS)]
     pub threshold_cos: f64,
+
+    /// Relative RMS error above which a capture counts as drifted.
+    /// Catches magnitude errors cosine is blind to.
+    #[arg(long, default_value_t = DEFAULT_DRIFT_REL_RMS)]
+    pub threshold_rel_rms: f64,
 
     /// Emit a `RESULT {...}` JSON line after the table.
     #[arg(long)]
