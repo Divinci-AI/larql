@@ -88,6 +88,21 @@ pub trait WeightSource {
     /// Raw BF16 bytes for a packed expert tensor (e.g. Gemma 4 experts.gate_up_proj).
     /// Returns None if the key is absent or the tensor is not BF16.
     fn get_packed_bf16(&self, key: &str) -> Option<Vec<u8>>;
+
+    /// Raw U8 bytes plus shape for a quantised packed tensor (MXFP4
+    /// `*_blocks` / `*_scales`). Returns None if the key is absent or the
+    /// tensor is not U8.
+    ///
+    /// Default `None`: the in-RAM `ModelWeights` source never needs it —
+    /// its loader already dequantised packed experts into per-expert
+    /// tensors that `get_tensor` resolves. The streaming source overrides
+    /// it, because the synthesised per-expert keys name tensors that do
+    /// not exist in any shard, and without this raw access the per-expert
+    /// writer silently wrote no expert store at all (the fourth appearance
+    /// of that failure — see `write_kquant/moe_layers_per_expert.rs`).
+    fn get_raw_u8(&self, _key: &str) -> Option<(Vec<u8>, Vec<usize>)> {
+        None
+    }
 }
 
 // ── ModelWeights implementation ──
@@ -211,6 +226,16 @@ impl<'a> WeightSource for StreamingWeights<'a> {
             return None;
         }
         Some(view.data().to_vec())
+    }
+
+    fn get_raw_u8(&self, key: &str) -> Option<(Vec<u8>, Vec<usize>)> {
+        let (shard_idx, tensor_name) = self.tensor_index.get(key)?;
+        let st = safetensors::SafeTensors::deserialize(self.shard_mmaps[*shard_idx]).ok()?;
+        let view = st.tensor(tensor_name).ok()?;
+        if view.dtype() != safetensors::Dtype::U8 {
+            return None;
+        }
+        Some((view.data().to_vec(), view.shape().to_vec()))
     }
 }
 

@@ -125,6 +125,37 @@ impl ModelArchitecture for GraniteArch {
         }
     }
 
+    /// `GraniteMoeTopKGating.forward` selects *then* normalises:
+    ///
+    /// ```text
+    /// top_k_logits, top_k_indices = logits.topk(self.top_k, dim=1)
+    /// top_k_gates = torch.softmax(top_k_logits, dim=1)
+    /// ```
+    ///
+    /// so the chosen experts' weights sum to 1. The inherited default is
+    /// softmax-over-all-then-select, whose weights do not — on this model
+    /// that is a 49.8% bits/char disagreement with the reference, not a
+    /// rounding difference. Selection is unaffected (softmax is monotonic);
+    /// only the weights change.
+    fn moe_router_kind(&self) -> crate::config::MoeRouterKind {
+        crate::config::MoeRouterKind::TopKThenSoftmax
+    }
+
+    /// The reference tier's spelling of the same fact. `granitemoe` ships no
+    /// `norm_topk_prob`, so the config-reading default answers
+    /// `SoftmaxThenSelect` for a model that renormalises.
+    fn expert_routing_policy(&self) -> crate::config::ExpertRoutingPolicy {
+        crate::config::ExpertRoutingPolicy::NormalisedOverSelected
+    }
+
+    /// `GraniteMoeMoE.forward` splits with `hidden_states.chunk(2, dim=-1)`
+    /// — the leading half is gate. Not inferable from `PackedBF16`: GPT-OSS
+    /// is equally packed and interleaved.
+    fn gate_up_layout(&self) -> Option<crate::config::GateUpLayout> {
+        self.is_moe()
+            .then_some(crate::config::GateUpLayout::ContiguousHalves)
+    }
+
     fn moe_router_key(&self, layer: usize) -> Option<String> {
         if !self.is_moe() {
             return None;
@@ -173,6 +204,7 @@ mod tests {
             num_kv_heads: 8,
             vocab_size: Some(49152),
             rope_base: 10_000.0,
+            layer_rope_theta: None,
             rope_local_base: None,
             sliding_window: None,
             num_experts: None,
@@ -206,6 +238,20 @@ mod tests {
             num_kv_shared_layers: None,
             has_vision_config: false,
             tie_word_embeddings: None,
+            qk_scale_factor: None,
+            output_multiplier: None,
+            post_norm_eps: None,
+            attention_bias: None,
+            hidden_act: None,
+            max_position_embeddings: None,
+            image_token_id: None,
+            video_token_id: None,
+            out_hidden_size: None,
+            projector_hidden_size: None,
+            projector_hidden_act: None,
+            target_layer_ids: None,
+            draft_block_size: None,
+            mask_token_id: None,
         }
     }
 

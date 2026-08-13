@@ -39,6 +39,138 @@ from them are still load-bearing and worth restating:
 
 ---
 
+## P0: Metal kernel capability audit findings (2026-08-09)
+
+**PROGRAMME CLOSED 2026-08-09** — all 22 findings resolved across PRs
+#231 (audit doc + F1–F4), #233 (guard batch), #234 (slice 1: one QKV
+plan for decode/prefill/hybrid), #235 (F15 verdict: Q4_KF is a
+kernel-route tag over 144-byte GGUF blocks; F16; F22), #236 (slice 2:
+per-operand FFN everywhere incl. profile-split), #237 (slice 3: sinks
+and softcap travel with every attention path). Only F17's per-kernel
+tail and F21 (retention-gated) remain open below.
+
+Performance: **neutral** — canonical baseline in
+[`CHANGELOG.md`](CHANGELOG.md) 2026-08-09 (10 paired alternating
+rounds on gemma4-26b-a4b: median paired Δ +0.54% decode p50, GPU
+fraction unchanged at 95.2%).
+
+Three kernels found broken-since-written along the way:
+`q4k_ffn_gate_up_coop` (parity-mixed scale staging, cos 0.52 vs CPU —
+fixed), the fused-Q6K-down **decode integration** (all-NaN while the
+kernel passes isolation parity at the exact shape — hard-disabled,
+`#[ignore]`d reproducer, open thread below), and the `attn_fused`
+test runner (scalar bound into the inv_freq table slot — fixed).
+
+**Open threads out of the programme:** the fused-Q6K-down integration
+NaN root-cause; `norm_type` honoured only at the decode input norm
+(LayerNorm archs silently get RMS for post-attn/pre-FFN/post-FFN and
+all of prefill — no guard); `MAX_FUSED_GEGLU_DOWN_INTER` possibly
+removable now the tanh clamp landed (untested); the bench's
+EOS-vs-GPU-fallback ambiguity (instrument note below); production MoE
+still routes on CPU with per-expert down loops (perf, deliberately
+sequenced after dispatch authority).
+
+Source of truth: [`docs/metal-kernel-capabilities.md`](../../docs/metal-kernel-capabilities.md)
+— the Phase B per-kernel capability table (formats, reduction unit, legal
+dims asserted-vs-assumed, aux buffers, dispatch geometry, fallback chain)
+built from a six-family audit of every MSL entry point in
+`larql-compute-metal`. Finding numbers below (F1–F22) are that document's.
+
+**Fix checklist** (live correctness first):
+
+- [x] **F1** (fixed c3688d38) clamp tanh arg ±15 in `q4k_geglu_gelu_tanh_down`,
+      `q6k_geglu_gelu_tanh_down`, `q6k_..._cached` — matches `geglu.rs:39`;
+      explains both recorded fused-path NaN incidents.
+- [x] **F2** (fixed ac8168ec) hybrid QKV (`decode_hybrid.rs:145`) selects kernel on `wq`
+      alone — route (Q4_K,Q4_K,Q6_K) to the mixed kernel, refuse other
+      mismatches loudly.
+- [x] **F3** (fixed 0f5a73e0) FFN decode branch keys on `gate.format()` family only —
+      Q6_K gate mis-decoded as Q4_K, Q8_0 as Q4_0, `up.format()` never
+      read. Route Q6_K via per-format matvecs; refuse Q8_0/float/mixed
+      loudly.
+- [x] **F4** (fixed bc2b429f) float weights (BF16/F16/F32) in `quant_matvec::encode` are a
+      silent no-op with stale scratch output — panic loudly.
+- [x] **F5** (fixed 4408d18a) `q6k_matvec` trait dispatch hardcodes 4sg geometry against a
+      pipeline alias that can be 8sg — read the `KernelHandle`.
+- [x] **F6** (fixed 4408d18a) `quantize_q8` host `div_ceil` vs shader truncating `K/32` —
+      unwritten tail scale; make the kernel handle partial blocks.
+- [x] **F7** (fixed, slice 3: feature-aware attention) sinks silently dropped by `kv_attention`/`_long` fallbacks —
+      add sink buffers (join max + denominator) so fallback preserves the
+      feature set.
+- [x] **F8** (fixed, slice 3: feature-aware attention) softcap exists only in prefill `fused_attention` — decode
+      refuses or supports; no silent cap-drop.
+- [x] **F9** (fixed 4408d18a) dense layers of hybrid-MoE models never get `layer_scalar`
+      (`decode/mod.rs:789` model-level branch vs layer-level apply).
+- [x] **F10** (fixed 4408d18a) `gpu_moe_dispatch_with_scratch` staging loop missing
+      `valid_count >= top_k` guard (sibling has it) — release-mode
+      buffer overflow.
+- [x] **F11** (fixed 4408d18a) `attn_fused` tg_red max→sum reuse unfenced + `tg_q` handoff
+      fenced `mem_device`-only + ropes at occupancy not stream position.
+- [x] **F12** (fixed 4408d18a) `q4k_ffn_gate_up_coop` divergent threadgroup barriers on odd
+      `K/256` and `N%4 != 0` (both occur in shipped shapes). The fix's
+      new parity test also found the kernel numerically broken outright
+      (16-slot scale staging mixed superblock parities; cos 0.52 vs
+      CPU) — rewritten with parity-indexed staging, pinned even+odd.
+- [x] **F13** (fixed 4408d18a) `q8_qkv_proj`/`q8_proj_rope` early-return before barrier;
+      K ≤ 8192 threadgroup-scratch ceiling (shared with `q4_matvec_v4`,
+      `q8_matvec`) asserted nowhere.
+- [x] **F14** (fixed 4408d18a) `fused_attention` head≤512 / seq≤4096 unasserted;
+      `kv_attention_long` unguarded past its 4096 scratch.
+- [x] **F15** (fixed on fix/metal-audit-f15-f16-f22) `Q4_KF_BLOCK_BYTES = 160` (host) vs 144 (both Q4_KF
+      shaders) — establish which is real, fix the other.
+- [x] **F16** (fixed on fix/metal-audit-f15-f16-f22) `gate_out`/`up_out` sized `inter` while fused Q4_K down
+      reads `inter_padded`; unify the `inter` vs `inter_padded` K
+      convention across the five down dispatch variants.
+- [ ] **F17** (narrowed by the selector slices: `plan_qkv` asserts
+      hidden%256 at the fused f32 QKV dispatch, GQA divisibility is
+      asserted in `stages/attention.rs`, and the K≤8192 staging
+      ceilings are asserted at every production site — remaining scope
+      is the per-kernel K%256/%32 truncation checks in the matvec/FFN
+      dispatchers) K-alignment asserted in 2 of ~30 quant kernels; GQA
+      divisibility asserted nowhere — add dispatch-time checks.
+- [x] **F18** (fixed 4408d18a) `residual_multiplier == 1.0` guard missing on
+      `post_attn_residual_norm_store` selection and the PLE reuse of
+      `post_ffn_norm_residual_add` (siblings have it).
+- [x] **F19** (fixed 4408d18a) `encode_fused_q8` prefill site dispatches `total_rows` TGs
+      instead of `div_ceil(total_rows, 8)` — 8× over-dispatch.
+- [x] **F20** (fixed 4408d18a) legacy `append_and_attend` passes `None` for the long
+      pipeline → `tg_scores[1024]` overflow past span 1024; hardcodes
+      window 0.
+- [ ] **F21** dead-but-compiled inventory (see capability doc §8) — per
+      the shader-retention policy each needs a revival-story check before
+      deletion, not a bulk purge; `q6k_..._cached` additionally caches
+      nothing despite its module doc.
+- [x] **F22** (fixed on fix/metal-audit-f15-f16-f22) doc/code mismatches: `LARQL_FUSED_Q6K_DOWN` names the wrong
+      kernel, `LARQL_F16_ACC` co-requirement undocumented, stride32
+      "not wired" doc stale, `Q4K_GU_MAX_K` test comment references a
+      removed constant.
+
+**New finding (2026-08-09, slice 2):** the fused Q6_K down decode
+integration produces all-NaN output even though the kernel now passes
+isolation parity at the exact decode shape (planar bytes, 512→256) —
+the historical "layout drift" hypothesis is falsified; the defect is in
+what the decode dispatch binds or sequences. `LARQL_FUSED_Q6K_DOWN` is
+hard-disabled at both dispatch sites; reproducer test
+`decode_token_with_q4k_ffn_and_fused_q6k_down_option` is `#[ignore]`d
+with the finding. Root-cause before re-engaging.
+
+**Instrument note (2026-08-09, post-Phase-B benchmarking):** `larql
+bench` reports `early stop @N/50 (EOS or GPU fallback)` — it cannot
+distinguish a legitimate EOS from a silent GPU fallback. For a harness
+increasingly used as a correctness instrument that ambiguity is too
+coarse: granite-4.1-8b stops at 4/50 on Metal on both pre- and
+post-audit builds and the bench cannot say which of the two reasons
+applies. Surface the stop reason explicitly (token id vs backend
+fallback flag).
+
+The structural target (capability doc §9): one authority table consumed by
+the QKV/FFN/O-proj/attention dispatchers — per-operand format rows instead
+of `is_kquant_family()` tests, every silently-assumed dim promoted to a
+checked bound, feature sets (sinks/softcap/window/norm-type) that
+fallbacks must preserve or refuse.
+
+---
+
 ## Open defects
 
 From the 2026-05-28 whole-codebase review

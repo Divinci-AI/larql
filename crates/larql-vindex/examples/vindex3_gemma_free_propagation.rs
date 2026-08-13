@@ -235,10 +235,28 @@ fn main() -> Result<(), String> {
     let _ = index.load_lm_head_kquant(path);
     let tokenizer =
         larql_vindex::load_vindex_tokenizer(path).map_err(|e| format!("tokenizer: {e}"))?;
-    let encoding = tokenizer
-        .encode(prompt.as_str(), true)
+    // Encode as `larql run` does: chat template, then `encode_prompt`, which
+    // prepends BOS from `arch.bos_token_id()`. Hand-rolling `tokenizer.encode`
+    // drops BOS (Gemma 4 declares `Some(2)`) and skips the instruct template,
+    // which drives an instruction-tuned model as a raw completion model. That
+    // does not break composition parity — both paths read the same ids — but
+    // it means the harness composes over an input no production path builds.
+    let cfg = larql_vindex::load_vindex_config(path).ok();
+    let wrap = larql_inference::wrap_chat_prompt(
+        path,
+        cfg.as_ref().map(|c| c.model.as_str()),
+        prompt.as_str(),
+    );
+    let token_ids = larql_inference::encode_prompt(&tokenizer, &*weights.arch, &wrap.prompt)
         .map_err(|e| format!("encode prompt: {e}"))?;
-    let token_ids: Vec<u32> = encoding.get_ids().to_vec();
+    println!(
+        "  chat template  {}",
+        if wrap.applied {
+            "applied"
+        } else {
+            "NOT applied (raw prompt)"
+        }
+    );
     println!("  tokens  {}\n", token_ids.len());
 
     // ── The seam is falsifiable before anything is built on it ─────────────

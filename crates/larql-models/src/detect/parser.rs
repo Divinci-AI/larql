@@ -134,14 +134,33 @@ pub(super) fn parse_model_config(config: &serde_json::Value) -> ModelConfig {
     let num_kv_heads = text_config["num_key_value_heads"]
         .as_u64()
         .unwrap_or(DEFAULT_NUM_KV_HEADS) as usize;
-    // RoPE base: check rope_parameters.full_attention.rope_theta (Gemma 4),
-    // then top-level rope_theta, then default.
+    // RoPE base, in declaration-specificity order:
+    //  1. rope_parameters.full_attention.rope_theta — Gemma 4's structured
+    //     per-layer-type form;
+    //  2. rope_parameters.rope_theta — the transformers-5.x flat form
+    //     (`rope_parameters: {rope_theta: N, rope_type: "default"}`), which
+    //     replaces the legacy top-level field in new checkpoints;
+    //  3. rope_theta at the top level — the legacy flat form;
+    //  4. the architecture-class default.
+    //
+    // Form 2 was silently skipped until the Muse-Glimmer inventory caught the
+    // fallthrough: a checkpoint declaring θ=500000 in the flat 5.x form
+    // resolved to the 10000 default — the §4.7.8 shape on a brand-new key
+    // spelling. Any transformers-5.x checkpoint hits this, not one family.
     let rope_params = text_config.get("rope_parameters");
     let rope_base = rope_params
         .and_then(|rp| rp.get("full_attention"))
         .and_then(|fa| fa["rope_theta"].as_f64())
+        .or_else(|| rope_params.and_then(|rp| rp["rope_theta"].as_f64()))
         .or_else(|| text_config["rope_theta"].as_f64())
         .unwrap_or(rope_default);
+    // Per-layer declared theta array (`layer_rope_theta`), kept verbatim —
+    // including `0.0` NoPE sentinels. The sentinel is interpreted exactly
+    // once, in `ModelArchitecture::position_policy_for_layer`.
+    let layer_rope_theta = text_config.get("layer_rope_theta").and_then(|lt| {
+        lt.as_array()
+            .map(|arr| arr.iter().filter_map(serde_json::Value::as_f64).collect())
+    });
     // Local RoPE base for sliding window layers: check rope_parameters.sliding_attention,
     // then rope_local_base_freq.
     let rope_local_base = rope_params
@@ -323,6 +342,46 @@ pub(super) fn parse_model_config(config: &serde_json::Value) -> ModelConfig {
 
     let has_vision_config = config.get("vision_config").is_some();
 
+    // Attention/output scaling + norm shape. Declared per checkpoint;
+    // families that don't declare them get `None` and their own defaults.
+    let qk_scale_factor = text_config["qk_scale_factor"].as_f64();
+    let output_multiplier = text_config["output_multiplier"].as_f64();
+    let post_norm_eps = text_config["post_norm_eps"].as_f64();
+    let attention_bias = text_config["attention_bias"].as_bool();
+    // Both HF spellings; verbatim — the Activation mapping (and its failure
+    // on unrecognised names) lives on the architecture trait.
+    let hidden_act = text_config["hidden_act"]
+        .as_str()
+        .or_else(|| text_config["hidden_activation"].as_str())
+        .map(str::to_string);
+    let max_position_embeddings = text_config["max_position_embeddings"]
+        .as_u64()
+        .map(|v| v as usize);
+
+    // Multimodal protocol + adapter geometry — root-level HF fields.
+    let image_token_id = config["image_token_id"].as_u64();
+    let video_token_id = config["video_token_id"].as_u64();
+    let out_hidden_size = config["out_hidden_size"].as_u64().map(|v| v as usize);
+    let projector_hidden_size = config["projector_hidden_size"].as_u64().map(|v| v as usize);
+    let projector_hidden_act = config["projector_hidden_act"].as_str().map(str::to_string);
+
+    // Drafter interface declaration. `block_size` is read only alongside
+    // `target_layer_ids`: the pair is one declaration (a DFlash-style
+    // hidden-state consumer); a bare `block_size` elsewhere is a different
+    // concept and stays unconsumed rather than misread.
+    let target_layer_ids: Option<Vec<usize>> = text_config.get("target_layer_ids").and_then(|v| {
+        v.as_array().map(|arr| {
+            arr.iter()
+                .filter_map(serde_json::Value::as_u64)
+                .map(|v| v as usize)
+                .collect()
+        })
+    });
+    let draft_block_size = target_layer_ids
+        .as_ref()
+        .and_then(|_| text_config["block_size"].as_u64().map(|v| v as usize));
+    let mask_token_id = text_config["mask_token_id"].as_u64();
+
     ModelConfig {
         model_type,
         norm_eps,
@@ -335,6 +394,7 @@ pub(super) fn parse_model_config(config: &serde_json::Value) -> ModelConfig {
         vocab_size,
         rope_base,
         rope_local_base,
+        layer_rope_theta,
         sliding_window,
         num_experts,
         num_experts_per_token,
@@ -367,5 +427,19 @@ pub(super) fn parse_model_config(config: &serde_json::Value) -> ModelConfig {
         norm_topk_prob,
         has_vision_config,
         tie_word_embeddings,
+        qk_scale_factor,
+        output_multiplier,
+        post_norm_eps,
+        attention_bias,
+        hidden_act,
+        max_position_embeddings,
+        image_token_id,
+        video_token_id,
+        out_hidden_size,
+        projector_hidden_size,
+        projector_hidden_act,
+        target_layer_ids,
+        draft_block_size,
+        mask_token_id,
     }
 }

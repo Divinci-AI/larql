@@ -64,6 +64,28 @@ pub fn encode(
     flags: Flags,
     sinks: Option<&[f32]>,
 ) {
+    // The shader's threadgroup scratch fixes two hard ceilings that
+    // were previously silently assumed (capability audit F14):
+    // `tg_q[512]` caps head_dim, and `tg_scores[4096]` is indexed by
+    // ABSOLUTE key position (not `k - k_start`), so a sliding window
+    // does not shrink the footprint and seq_len past 4096 writes out
+    // of bounds. GQA divisibility is the kernel's head-mapping
+    // assumption (`head / (num_q / num_kv)`), asserted nowhere else.
+    assert!(
+        head_dim <= 512,
+        "fused_attention supports head_dim <= 512 (tg_q scratch); got {head_dim}"
+    );
+    assert!(
+        seq_len <= crate::shaders::fused_attention::MAX_FUSED_ATTENTION_SEQ_LEN,
+        "fused_attention supports seq_len <= {} (tg_scores is indexed by absolute \
+         position, so a window does not reduce this); got {seq_len}",
+        crate::shaders::fused_attention::MAX_FUSED_ATTENTION_SEQ_LEN,
+    );
+    assert!(
+        num_kv_heads > 0 && num_q_heads.is_multiple_of(num_kv_heads),
+        "fused_attention assumes num_q_heads ({num_q_heads}) divisible by \
+         num_kv_heads ({num_kv_heads})"
+    );
     let seq_val = seq_len as u32;
     let hd_val = head_dim as u32;
     let nq_val = num_q_heads as u32;

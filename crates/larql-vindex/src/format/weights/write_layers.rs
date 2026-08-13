@@ -40,6 +40,26 @@ impl LayerWeightFormat {
     pub fn as_u32(self) -> u32 {
         self as u32
     }
+
+    /// Canonical registry tag, matching the vocabulary
+    /// `larql-compute`'s `QuantFormat::from_registry_tag` accepts. This is
+    /// how the per-layer store's format survives loading: the loader
+    /// records it on `ModelWeights::per_layer_ffn_format` and the MoE
+    /// forward resolves it instead of assuming Q4_K — the assumption that
+    /// would have decoded a Q6_K (MXFP4-transcoded) expert store as
+    /// Q4_K garbage.
+    pub fn registry_tag(self) -> &'static str {
+        match self {
+            Self::F32 => "F32",
+            Self::F16 => "F16",
+            Self::BF16 => "BF16",
+            Self::Q4_0 => "Q4_0",
+            Self::Q4_K => "Q4_K",
+            Self::Q6_K => "Q6_K",
+            Self::Q8_0 => "Q8_0",
+            Self::FP4 => "FP4",
+        }
+    }
 }
 
 const MAGIC: u32 = u32::from_le_bytes(*b"LYRW");
@@ -227,9 +247,20 @@ pub fn quantize_dense_entry(
         )));
     }
 
-    let mut gate_up_f32 = Vec::with_capacity(2 * inter * hidden);
-    gate_up_f32.extend_from_slice(gate_f32);
-    gate_up_f32.extend_from_slice(up_f32);
+    // gate_up rows are padded to the super-block boundary exactly as down's
+    // columns always were. Quantising them flat left each row spanning
+    // 11.25 blocks at GPT-OSS's hidden 2880, which made the store
+    // unreachable for every per-row integer kernel — the expert path fell
+    // back to scalar dequant of ~10 GB per token (~13 s/token). Padding is
+    // a no-op for block-multiple hidden sizes, so Gemma-class stores are
+    // byte-identical. Consumers derive the stored row width from the entry
+    // byte count; the header keeps the logical `hidden`.
+    let (gate_padded, padded_hidden) = pad_cols_to_256(gate_f32, inter, hidden);
+    let (up_padded, up_padded_hidden) = pad_cols_to_256(up_f32, inter, hidden);
+    debug_assert_eq!(padded_hidden, up_padded_hidden);
+    let mut gate_up_f32 = Vec::with_capacity(2 * inter * padded_hidden);
+    gate_up_f32.extend_from_slice(&gate_padded);
+    gate_up_f32.extend_from_slice(&up_padded);
     let gate_up = quantize_f32(&gate_up_f32, format)?;
 
     // down: [hidden, inter] padded to 256-element column boundary
@@ -259,7 +290,12 @@ pub fn quantize_moe_entries(
         .map(|e| {
             let gu_bytes = &gate_up_bf16[e * gate_up_stride..(e + 1) * gate_up_stride];
             let gate_up_f32 = bf16_bytes_to_f32(gu_bytes);
-            let gate_up = quantize_f32(&gate_up_f32, format)?;
+            // Same row-padding rule as `quantize_dense_entry` — a no-op for
+            // every block-multiple hidden size (all current packed-BF16
+            // models), kept identical so the two writers cannot diverge on
+            // the stored row width.
+            let (gate_up_padded, _) = pad_cols_to_256(&gate_up_f32, 2 * moe_inter, hidden);
+            let gate_up = quantize_f32(&gate_up_padded, format)?;
 
             let dn_bytes = &down_bf16[e * down_stride..(e + 1) * down_stride];
             let down_f32_src = bf16_bytes_to_f32(dn_bytes);

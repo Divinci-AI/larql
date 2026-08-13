@@ -37,8 +37,13 @@
 //! would look for it. Regions are placed exactly as their producer wrote them.
 
 pub mod build;
+pub mod encode;
+pub mod graph;
 pub mod import;
 pub mod index;
+pub mod inspect;
+pub mod opplan;
+pub mod plan;
 pub mod profile;
 pub mod read;
 /// Conformance fixture A, public so integration tests and future gate arms can
@@ -46,6 +51,7 @@ pub mod read;
 pub mod test_support;
 pub mod variants;
 pub mod verify;
+pub mod verify_system;
 pub mod write;
 
 pub use build::ContainerBuilder;

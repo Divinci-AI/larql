@@ -18,6 +18,7 @@ use crate::{EngineInfo, KvEngine};
 use larql_inference::async_compute_backend::AsyncComputeBackend;
 use larql_inference::ffn::FfnBackend;
 use larql_inference::kv_dispatch::helpers::{
+    kv_decode_step_from_hidden_via_dispatch, kv_decode_step_from_hidden_via_dispatch_async,
     kv_decode_step_via_dispatch, kv_decode_step_via_dispatch_async,
     kv_prefill_from_hidden_via_dispatch, kv_prefill_from_hidden_via_dispatch_async,
     kv_prefill_via_dispatch, kv_prefill_via_dispatch_async,
@@ -25,6 +26,14 @@ use larql_inference::kv_dispatch::helpers::{
 use larql_inference::kv_engine::EngineError;
 use larql_inference::model::ModelWeights;
 use larql_inference::{cpu_engine_backend, EngineBackend, KvHandle};
+
+/// The new position's content for one decode step: a token id (text
+/// path — embedded inside the dispatch helper) or a pre-built hidden
+/// row (multi-modal / summed-embedding path, MOSS-TTS-Realtime).
+enum StepInput<'a> {
+    Token(u32),
+    Hidden(&'a Array2<f32>),
+}
 
 /// Backend slot — `StandardEngine` accepts either a synchronous
 /// [`EngineBackend`] (the default `--kv-cache standard` path) or an
@@ -312,6 +321,20 @@ impl StandardEngine {
         token_id: u32,
         index: Option<&larql_inference::larql_vindex::VectorIndex>,
     ) -> Result<Array2<f32>, EngineError> {
+        self.do_decode_step_input(weights, ffn, StepInput::Token(token_id), index)
+    }
+
+    /// One decode step whose new position is a pre-built hidden row —
+    /// the decode-time peer of `do_prefill_from_hidden`. Same rewind and
+    /// invalidation semantics as `do_decode_step`; only the dispatch
+    /// intent differs.
+    fn do_decode_step_input(
+        &mut self,
+        weights: &ModelWeights,
+        ffn: &dyn FfnBackend,
+        input: StepInput<'_>,
+        index: Option<&larql_inference::larql_vindex::VectorIndex>,
+    ) -> Result<Array2<f32>, EngineError> {
         if let Some(what) = &self.invalidated {
             return Err(EngineError::InvariantViolation {
                 what: format!("decode_step called on an invalidated engine: {what}"),
@@ -335,27 +358,53 @@ impl StandardEngine {
         let entry_lengths: Vec<usize> = handles.iter().map(|h| h.cached_len()).collect();
         let rewindable = Self::rewind_is_sound(window, &entry_lengths);
 
-        let outcome = match backend {
-            BackendSlot::Sync(b) => kv_decode_step_via_dispatch(
+        let outcome = match (backend, &input) {
+            (BackendSlot::Sync(b), StepInput::Token(token_id)) => kv_decode_step_via_dispatch(
                 b.as_ref(),
                 view,
                 ffn,
                 handles,
-                token_id,
+                *token_id,
                 abs_position,
                 window,
                 index,
             ),
-            BackendSlot::Async(b) => kv_decode_step_via_dispatch_async(
-                b.as_ref(),
-                view,
-                ffn,
-                handles,
-                token_id,
-                abs_position,
-                window,
-                index,
-            ),
+            (BackendSlot::Sync(b), StepInput::Hidden(hidden_row)) => {
+                kv_decode_step_from_hidden_via_dispatch(
+                    b.as_ref(),
+                    view,
+                    ffn,
+                    handles,
+                    hidden_row,
+                    abs_position,
+                    window,
+                    index.map(|v| v as &dyn larql_compute::KvIndex),
+                )
+            }
+            (BackendSlot::Async(b), StepInput::Token(token_id)) => {
+                kv_decode_step_via_dispatch_async(
+                    b.as_ref(),
+                    view,
+                    ffn,
+                    handles,
+                    *token_id,
+                    abs_position,
+                    window,
+                    index,
+                )
+            }
+            (BackendSlot::Async(b), StepInput::Hidden(hidden_row)) => {
+                kv_decode_step_from_hidden_via_dispatch_async(
+                    b.as_ref(),
+                    view,
+                    ffn,
+                    handles,
+                    hidden_row,
+                    abs_position,
+                    window,
+                    index.map(|v| v as &dyn larql_compute::KvIndex),
+                )
+            }
         };
 
         let failure = match outcome {
@@ -542,6 +591,15 @@ impl KvEngine for StandardEngine {
         token_id: u32,
     ) -> Result<Array2<f32>, EngineError> {
         self.do_decode_step(weights, ffn, token_id, None)
+    }
+
+    fn decode_step_from_hidden(
+        &mut self,
+        weights: &ModelWeights,
+        ffn: &dyn FfnBackend,
+        hidden_row: &Array2<f32>,
+    ) -> Result<Array2<f32>, EngineError> {
+        self.do_decode_step_input(weights, ffn, StepInput::Hidden(hidden_row), None)
     }
 
     fn prefill_quant(

@@ -188,7 +188,9 @@ pub fn run_attention_with_kv_backend(
     let seq_len = h.shape()[0];
     let norm_off = arch.norm_weight_offset();
 
+    let phase = crate::phase_timing::start();
     let h_norm = apply_norm(&weights, h, &arch.input_layernorm_key(layer), norm_off);
+    crate::phase_timing::finish(phase, "attn.input_norm");
 
     // q4k-direct: project from the raw Q4_K/Q6_K attn bytes (Q/K/O are Q4_K,
     // V is Q6_K in a default vindex) when an index is supplied; else read the
@@ -202,6 +204,7 @@ pub fn run_attention_with_kv_backend(
     let kv_dim = nkv * hd;
     let in_dim = h_norm.ncols();
 
+    let phase = crate::phase_timing::start();
     let (mut q, mut k, mut v) = if let Some(attn) = attn_q4k {
         (
             crate::ffn::weight::quant_proj(attn[0].0, attn[0].1, &h_norm, q_dim, in_dim, seq_len),
@@ -232,7 +235,9 @@ pub fn run_attention_with_kv_backend(
             add_bias(proj, b);
         }
     }
+    crate::phase_timing::finish(phase, "attn.qkv_proj");
 
+    let phase = crate::phase_timing::start();
     if arch.has_v_norm() {
         v = rms_norm_heads_no_weight(&v, nkv, hd);
     }
@@ -257,24 +262,15 @@ pub fn run_attention_with_kv_backend(
         None => k,
     };
 
+    crate::phase_timing::finish(phase, "attn.qk_v_norms");
+
     // RoPE must match the full-recompute path (block.rs core) and the
     // decode-step path (decode.rs): use the forward-override-effective base,
     // the per-layer-type position divisor, and llama3 scaling. The old
     // `apply_rope_partial` hardcoded position_divisor=1.0 / llama3=None, which
     // silently dropped Gemma 4's scaled global-layer RoPE — garbling decode
     // through the KvEngine prefill path while the decode-step path was correct.
-    // RoPE must match the full-recompute path (block.rs core) and the
-    // decode-step path (decode.rs): use the forward-override-effective base,
-    // the per-layer-type position divisor, and llama3 scaling. The old
-    // `apply_rope_partial` hardcoded position_divisor=1.0 / llama3=None, which
-    // silently dropped Gemma 4's scaled global-layer RoPE — garbling decode
-    // through the KvEngine prefill path while the decode-step path was correct.
-    // RoPE must match the full-recompute path (block.rs core) and the
-    // decode-step path (decode.rs): use the forward-override-effective base,
-    // the per-layer-type position divisor, and llama3 scaling. The old
-    // `apply_rope_partial` hardcoded position_divisor=1.0 / llama3=None, which
-    // silently dropped Gemma 4's scaled global-layer RoPE — garbling decode
-    // through the KvEngine prefill path while the decode-step path was correct.
+    let phase = crate::phase_timing::start();
     let rb = crate::forward_overrides::effective_rope_base_for_layer(arch, layer);
     let rf = arch.rotary_fraction_for_layer(layer);
     let pos_divisor =
@@ -282,7 +278,9 @@ pub fn run_attention_with_kv_backend(
     let rope_scaling = crate::forward_overrides::effective_rope_freq_scaling(arch);
     let q_r = apply_rope_partial_at_full(&q, nq, hd, rb, rf, 0, pos_divisor, rope_scaling);
     let k_r = apply_rope_partial_at_full(&k, nkv, hd, rb, rf, 0, pos_divisor, rope_scaling);
+    crate::phase_timing::finish(phase, "attn.rope");
 
+    let phase = crate::phase_timing::start();
     let (attn_out, _) = gqa_attention_with_weights(
         &q_r,
         &k_r,
@@ -296,6 +294,9 @@ pub fn run_attention_with_kv_backend(
         arch.attn_logit_softcapping(),
         None,
     );
+    crate::phase_timing::finish(phase, "attn.core");
+
+    let phase = crate::phase_timing::start();
     let mut o = if let Some(attn) = attn_q4k {
         crate::ffn::weight::quant_proj(attn[3].0, attn[3].1, &attn_out, in_dim, q_dim, seq_len)
     } else {
@@ -327,6 +328,7 @@ pub fn run_attention_with_kv_backend(
     } else {
         h + &o
     };
+    crate::phase_timing::finish(phase, "attn.o_proj_residual");
 
     Some((h_out, k_r, v))
 }

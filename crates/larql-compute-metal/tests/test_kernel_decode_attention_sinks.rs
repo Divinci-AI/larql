@@ -70,6 +70,7 @@ fn cpu_decode_reference(
     head_dim: usize,
     scale: f32,
     sinks: Option<&[f32]>,
+    softcap: f32,
 ) -> Vec<f32> {
     let mut out = vec![0.0f32; num_q * head_dim];
     for head in 0..num_q {
@@ -81,7 +82,11 @@ fn cpu_decode_reference(
                 dot += q[head * head_dim + d]
                     * k_cache[t * num_kv * head_dim + kv_head * head_dim + d];
             }
-            logits.push((dot * scale) as f64);
+            let mut logit = (dot * scale) as f64;
+            if softcap > 0.0 {
+                logit = softcap as f64 * (logit / softcap as f64).tanh();
+            }
+            logits.push(logit);
         }
         // Joint max over logits and the sink, exactly as the reference
         // does after concatenating.
@@ -125,6 +130,7 @@ fn run_kv_append_attend_fused(
     head_dim: u32,
     scale: f32,
     sinks: Option<&[f32]>,
+    softcap: f32,
 ) -> Vec<f32> {
     let pipeline = device
         .new_compute_pipeline_state_with_function(
@@ -173,6 +179,7 @@ fn run_kv_append_attend_fused(
         sink_vals.as_ptr() as *const c_void,
     );
     enc.set_bytes(13, 4, u(&has_sinks));
+    enc.set_bytes(14, 4, f(&softcap));
     enc.dispatch_thread_groups(
         metal::MTLSize::new(num_q as u64, 1, 1),
         metal::MTLSize::new(head_dim.min(256) as u64, 1, 1),
@@ -257,6 +264,7 @@ fn kv_append_attend_fused_with_sinks_matches_cpu_reference() {
         head_dim as u32,
         scale,
         Some(&SINKS),
+        0.0,
     );
     let cpu = cpu_decode_reference(
         &q,
@@ -268,6 +276,7 @@ fn kv_append_attend_fused_with_sinks_matches_cpu_reference() {
         head_dim,
         scale,
         Some(&SINKS),
+        0.0,
     );
 
     let diff = max_diff(&cpu, &gpu);
@@ -302,9 +311,10 @@ fn kv_append_attend_fused_without_sinks_is_unchanged() {
         head_dim as u32,
         scale,
         None,
+        0.0,
     );
     let cpu = cpu_decode_reference(
-        &q, &ref_k, &ref_v, t_len, num_q, num_kv, head_dim, scale, None,
+        &q, &ref_k, &ref_v, t_len, num_q, num_kv, head_dim, scale, None, 0.0,
     );
 
     let diff = max_diff(&cpu, &gpu);
@@ -342,6 +352,7 @@ fn kv_append_attend_fused_sinks_divert_attention_mass() {
             head_dim as u32,
             scale,
             sinks,
+            0.0,
         )
     };
     let plain = run(None);
@@ -385,6 +396,7 @@ fn kv_append_attend_fused_applies_each_heads_own_sink() {
         head_dim as u32,
         scale,
         Some(&[-40.0, 40.0]),
+        0.0,
     );
     let head0: f32 = out[..head_dim].iter().map(|x| x.abs()).sum();
     let head1: f32 = out[head_dim..].iter().map(|x| x.abs()).sum();
@@ -479,11 +491,22 @@ fn run_attn_fused(
     enc.set_bytes(10, 4, u(&num_q));
     enc.set_bytes(11, 4, u(&num_kv));
     enc.set_bytes(12, 4, f(&scale));
-    let (window, eps, qk_off, rope_base, rot) = (0u32, 1e-6f32, 0.0f32, 10000.0f32, 0u32);
+    let (window, eps, qk_off, rot) = (0u32, 1e-6f32, 0.0f32, 0u32);
     enc.set_bytes(13, 4, u(&window));
     enc.set_bytes(14, 4, f(&eps));
     enc.set_bytes(15, 4, f(&qk_off));
-    enc.set_bytes(16, 4, f(&rope_base));
+    // Buffer 16 is the host-computed inv_freq TABLE ([rotary_dim/2]
+    // floats), not the old scalar rope_base this runner used to bind —
+    // 4 bytes there was an out-of-bounds read for every d > 0. The
+    // prior assertions survived because they are rotation-invariant.
+    let inv_freq: Vec<f32> = (0..head_dim as usize / 2)
+        .map(|d| 1.0 / 10000.0f32.powf(2.0 * d as f32 / head_dim as f32))
+        .collect();
+    enc.set_bytes(
+        16,
+        std::mem::size_of_val(inv_freq.as_slice()) as u64,
+        inv_freq.as_ptr() as *const c_void,
+    );
     enc.set_bytes(17, 4, u(&rot));
     let placeholder = [0.0f32];
     let (sink_vals, has_sinks): (&[f32], u32) = match sinks {
@@ -496,6 +519,13 @@ fn run_attn_fused(
         sink_vals.as_ptr() as *const c_void,
     );
     enc.set_bytes(19, 4, u(&has_sinks));
+    let amplitude = 1.0f32;
+    enc.set_bytes(20, 4, f(&amplitude));
+    // RoPE at the absolute stream position of the appended row.
+    let abs_pos = t_len - 1;
+    enc.set_bytes(21, 4, u(&abs_pos));
+    let softcap = 0.0f32;
+    enc.set_bytes(22, 4, f(&softcap));
 
     let mut tg_w: u64 = 1;
     while tg_w < head_dim as u64 && tg_w < 32 {
@@ -640,4 +670,217 @@ fn attn_fused_without_sinks_is_unchanged_by_the_new_bindings() {
         diff < MAX_DIFF,
         "an unreachably-negative sink must match the no-sink path: max diff {diff}"
     );
+}
+
+// ── kv_attention (the non-fused fallback) — slice 3 (audit F7/F8) ────────
+//
+// `kv_attention` / `kv_attention_long` are the fallback for spans past
+// 1024, head_dim past 256, and KV-shared layers. Before slice 3 they
+// had no sink or softcap inputs, so falling off the fused path
+// silently changed the softmax semantics. These tests pin that the
+// fallback now reproduces the same reference the fused kernel does.
+
+/// Dispatch `kv_attention` (or `_long`) over a fully-populated cache.
+#[allow(clippy::too_many_arguments)]
+fn run_kv_attention(
+    device: &metal::Device,
+    lib: &metal::Library,
+    kernel_name: &str,
+    q: &[f32],
+    ref_k: &[f32],
+    ref_v: &[f32],
+    t_len: u32,
+    num_q: u32,
+    num_kv: u32,
+    head_dim: u32,
+    scale: f32,
+    sinks: Option<&[f32]>,
+    softcap: f32,
+) -> Vec<f32> {
+    let pipeline = device
+        .new_compute_pipeline_state_with_function(&lib.get_function(kernel_name, None).unwrap())
+        .unwrap();
+    let queue = device.new_command_queue();
+    let out_len = (num_q * head_dim) as usize;
+    let buf_q = shared_buffer(device, q);
+    let buf_k = shared_buffer(device, ref_k);
+    let buf_v = shared_buffer(device, ref_v);
+    let buf_out = device.new_buffer(
+        (out_len * std::mem::size_of::<f32>()) as u64,
+        metal::MTLResourceOptions::StorageModeShared,
+    );
+    let cmd = queue.new_command_buffer();
+    let enc = cmd.new_compute_command_encoder();
+    enc.set_compute_pipeline_state(&pipeline);
+    enc.set_buffer(0, Some(&buf_q), 0);
+    enc.set_buffer(1, Some(&buf_k), 0);
+    enc.set_buffer(2, Some(&buf_v), 0);
+    enc.set_buffer(3, Some(&buf_out), 0);
+    let u = |v: &u32| v as *const u32 as *const c_void;
+    let f = |v: &f32| v as *const f32 as *const c_void;
+    enc.set_bytes(4, 4, u(&t_len));
+    enc.set_bytes(5, 4, u(&head_dim));
+    enc.set_bytes(6, 4, u(&num_q));
+    enc.set_bytes(7, 4, u(&num_kv));
+    enc.set_bytes(8, 4, f(&scale));
+    let window = 0u32;
+    enc.set_bytes(9, 4, u(&window));
+    let placeholder = [0.0f32];
+    let (sink_vals, has_sinks): (&[f32], u32) = match sinks {
+        Some(s) => (s, 1),
+        None => (&placeholder, 0),
+    };
+    enc.set_bytes(
+        10,
+        std::mem::size_of_val(sink_vals) as u64,
+        sink_vals.as_ptr() as *const c_void,
+    );
+    enc.set_bytes(11, 4, u(&has_sinks));
+    enc.set_bytes(12, 4, f(&softcap));
+    enc.dispatch_thread_groups(
+        metal::MTLSize::new(num_q as u64, 1, 1),
+        metal::MTLSize::new(head_dim.min(256) as u64, 1, 1),
+    );
+    enc.end_encoding();
+    cmd.commit();
+    cmd.wait_until_completed();
+    read_back(&buf_out, out_len)
+}
+
+#[test]
+fn kv_attention_fallback_with_sinks_matches_cpu_reference() {
+    let Some((device, lib)) = device_and_lib() else {
+        return;
+    };
+    let (t_len, num_q, num_kv, head_dim) = (7usize, 2usize, 1usize, 32usize);
+    let scale = 1.0 / (head_dim as f32).sqrt();
+    let (q, _ck, _cv, _nk, _nv, ref_k, ref_v) = decode_fixture(t_len, num_q, num_kv, head_dim);
+    for kernel in ["kv_attention", "kv_attention_long"] {
+        let gpu = run_kv_attention(
+            &device,
+            &lib,
+            kernel,
+            &q,
+            &ref_k,
+            &ref_v,
+            t_len as u32,
+            num_q as u32,
+            num_kv as u32,
+            head_dim as u32,
+            scale,
+            Some(&SINKS),
+            0.0,
+        );
+        let cpu = cpu_decode_reference(
+            &q,
+            &ref_k,
+            &ref_v,
+            t_len,
+            num_q,
+            num_kv,
+            head_dim,
+            scale,
+            Some(&SINKS),
+            0.0,
+        );
+        let d = max_diff(&cpu, &gpu);
+        assert!(d < MAX_DIFF, "{kernel} sinks parity: max_diff={d:.3e}");
+    }
+}
+
+#[test]
+fn kv_attention_fallback_with_softcap_matches_cpu_reference() {
+    let Some((device, lib)) = device_and_lib() else {
+        return;
+    };
+    let (t_len, num_q, num_kv, head_dim) = (7usize, 2usize, 1usize, 32usize);
+    let scale = 1.0 / (head_dim as f32).sqrt();
+    let softcap = 0.5f32; // small cap so capping is strongly discriminating
+    let (q, _ck, _cv, _nk, _nv, ref_k, ref_v) = decode_fixture(t_len, num_q, num_kv, head_dim);
+    for kernel in ["kv_attention", "kv_attention_long"] {
+        let gpu = run_kv_attention(
+            &device,
+            &lib,
+            kernel,
+            &q,
+            &ref_k,
+            &ref_v,
+            t_len as u32,
+            num_q as u32,
+            num_kv as u32,
+            head_dim as u32,
+            scale,
+            None,
+            softcap,
+        );
+        let cpu = cpu_decode_reference(
+            &q, &ref_k, &ref_v, t_len, num_q, num_kv, head_dim, scale, None, softcap,
+        );
+        let d = max_diff(&cpu, &gpu);
+        assert!(d < MAX_DIFF, "{kernel} softcap parity: max_diff={d:.3e}");
+        // Control: the instrument must fail on a known-different input —
+        // capped output must differ from uncapped, or this test could
+        // pass with the cap silently dropped on both sides.
+        let uncapped = run_kv_attention(
+            &device,
+            &lib,
+            kernel,
+            &q,
+            &ref_k,
+            &ref_v,
+            t_len as u32,
+            num_q as u32,
+            num_kv as u32,
+            head_dim as u32,
+            scale,
+            None,
+            0.0,
+        );
+        assert!(
+            max_diff(&uncapped, &gpu) > 1e-3,
+            "{kernel}: softcap=0.5 output identical to uncapped — cap not applied"
+        );
+    }
+}
+
+#[test]
+fn kv_append_attend_fused_with_softcap_matches_cpu_reference() {
+    let Some((device, lib)) = device_and_lib() else {
+        return;
+    };
+    let (t_len, num_q, num_kv, head_dim) = (6usize, 2usize, 1usize, 32usize);
+    let scale = 1.0 / (head_dim as f32).sqrt();
+    let softcap = 0.5f32;
+    let (q, cache_k, cache_v, new_k, new_v, ref_k, ref_v) =
+        decode_fixture(t_len, num_q, num_kv, head_dim);
+    let gpu = run_kv_append_attend_fused(
+        &device,
+        &lib,
+        &q,
+        &cache_k,
+        &cache_v,
+        &new_k,
+        &new_v,
+        t_len as u32,
+        num_q as u32,
+        num_kv as u32,
+        head_dim as u32,
+        scale,
+        Some(&SINKS),
+        softcap,
+    );
+    let cpu = cpu_decode_reference(
+        &q,
+        &ref_k,
+        &ref_v,
+        t_len,
+        num_q,
+        num_kv,
+        head_dim,
+        scale,
+        Some(&SINKS),
+        softcap,
+    );
+    let d = max_diff(&cpu, &gpu);
+    assert!(d < MAX_DIFF, "fused softcap+sinks parity: max_diff={d:.3e}");
 }

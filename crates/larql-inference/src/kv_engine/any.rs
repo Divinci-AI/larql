@@ -147,6 +147,23 @@ impl AnyEngine {
         }
     }
 
+    /// MM decode forwarder — decode-time peer of [`Self::prefill_from_hidden`],
+    /// same capability rule.
+    pub fn decode_step_from_hidden(
+        &mut self,
+        weights: &ModelWeights,
+        ffn: &dyn FfnBackend,
+        hidden_row: &Array2<f32>,
+    ) -> Result<Array2<f32>, EngineError> {
+        match self {
+            Self::Kv(e) => e.decode_step_from_hidden(weights, ffn, hidden_row),
+            Self::Retrieval(_) => panic!(
+                "AnyEngine::Retrieval does not support decode_step_from_hidden — \
+                 check supports_multimodal() before calling"
+            ),
+        }
+    }
+
     /// Prefill against a quantised vindex. KvEngine variants take a
     /// `ComputeBackend` for kernel routing; retrieval variants ignore
     /// it (they dequantise + run on f32 internally).

@@ -288,3 +288,43 @@ fn q6k_geglu_gelu_tanh_down_gemma4_31b_ffn() {
         false,
     );
 }
+
+/// Regression for the missing tanh clamp (capability audit F1) — Q6_K
+/// twin of `q4k_geglu_gelu_tanh_down_survives_large_gate_values`.
+/// Gate magnitudes ~±12 push the GELU-tanh argument past Apple tanh's
+/// ≈44 NaN threshold; the clamp at ±15 keeps it finite with error
+/// below f32 precision. Rust's `tanh` is exact, so the CPU reference
+/// stays finite — pre-fix this test fails with NaN everywhere.
+#[test]
+fn q6k_geglu_gelu_tanh_down_survives_large_gate_values() {
+    let n = 32usize;
+    let inter = 256usize;
+    let metal = get_metal();
+
+    let down_f32 = synth_matrix_decorrelated(n, inter, 0.21);
+    let gate: Vec<f32> = (0..inter)
+        .map(|i| if i % 2 == 0 { 12.0 } else { -12.0 })
+        .collect();
+    let up = synth_vec(inter, 0.83);
+    let down_q6k = larql_compute::cpu::ops::q4_common::quantize_q6_k(&down_f32);
+    let cpu = larql_compute::cpu::CpuBackend;
+
+    let cpu_ref = cpu_geglu_then_q6k_matvec(&cpu, &down_q6k, &gate, &up, false, n, inter);
+    let fused = metal_fused_q6k_geglu_down(&metal, &down_q6k, &gate, &up, false, n, inter);
+
+    assert!(
+        fused.iter().all(|v| v.is_finite()),
+        "fused Q6_K GELU-tanh output contains non-finite values on large gates"
+    );
+    let cos = cos_sim(&cpu_ref, &fused);
+    assert!(cos > 0.999, "large-gate parity: cos={cos:.6}");
+}
+
+/// The synthetic decode suite's exact FFN shape (hidden=256,
+/// inter=512). Pinned because the decode INTEGRATION of this kernel
+/// produces all-NaN at this shape while this isolation test passes —
+/// keeping the shape here proves any future NaN is not the kernel's.
+#[test]
+fn q6k_geglu_gelu_tanh_down_decode_suite_shape() {
+    assert_fused_q6k_geglu_down_matches_separated("decode-suite shape 512->256", 256, 512, false);
+}

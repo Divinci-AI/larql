@@ -201,6 +201,7 @@ mod tests {
             num_kv_heads: 4,
             vocab_size: Some(256_000),
             rope_base: 1_000_000.0,
+            layer_rope_theta: None,
             rope_local_base: Some(10_000.0),
             sliding_window: Some(1024),
             num_experts: None,
@@ -234,6 +235,20 @@ mod tests {
             num_kv_shared_layers: None,
             has_vision_config: false,
             tie_word_embeddings: None,
+            qk_scale_factor: None,
+            output_multiplier: None,
+            post_norm_eps: None,
+            attention_bias: None,
+            hidden_act: None,
+            max_position_embeddings: None,
+            image_token_id: None,
+            video_token_id: None,
+            out_hidden_size: None,
+            projector_hidden_size: None,
+            projector_hidden_act: None,
+            target_layer_ids: None,
+            draft_block_size: None,
+            mask_token_id: None,
         }
     }
 

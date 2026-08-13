@@ -78,13 +78,26 @@ pub fn execute_with<S: TraceSink>(
         // bank's selected experts; quantising per expert would be binding a
         // differently-shaped call than production makes.
         let mut kernel = BankKernel::open(bank, &bank_input)?;
-        for choice in &selected {
-            let expert = bank.expert(choice.expert_id, operation.router.population())?;
-            let out = kernel.run(expert, bank, &bank_input)?;
-            sink.expert_output(choice.expert_id, &out);
+
+        // Experts run in parallel; the reduction stays serial and in
+        // selection order. Splitting it this way is what makes the speed-up
+        // free of numerical consequence: each expert writes only its own
+        // disjoint slot, and the float additions below happen in exactly the
+        // order the serial loop used, so every bit-exactness claim in the
+        // ladder still holds. Summing inside the pool would reorder them.
+        let experts = selected
+            .iter()
+            .map(|c| bank.expert(c.expert_id, operation.router.population()))
+            .collect::<Result<Vec<_>, _>>()?;
+        let hidden = bank.hidden_dim;
+        let mut outs = vec![0.0f32; experts.len() * hidden];
+        kernel.run_many_into(&experts, bank, &bank_input, hidden, &mut outs)?;
+
+        for (choice, out) in selected.iter().zip(outs.chunks(hidden)) {
+            sink.expert_output(choice.expert_id, out);
             operation
                 .reduction
-                .accumulate(&mut reduced, &out, choice.weight)?;
+                .accumulate(&mut reduced, out, choice.weight)?;
         }
     }
     sink.reduced(&reduced);

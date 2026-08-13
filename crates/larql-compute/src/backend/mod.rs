@@ -68,6 +68,20 @@ pub trait ComputeBackend: MatMul + QuantMatVec + DecodeBackend + Send + Sync {
         false
     }
 
+    /// Register a stable, page-granular weight allocation (an mmap'd
+    /// weight file) so the backend can alias sub-slices of it zero-copy
+    /// instead of staging per-call copies. GPU backends bind registered
+    /// regions as device buffers and resolve expert/tensor slices to
+    /// byte offsets; the default is a no-op — CPU reads host memory
+    /// directly and has nothing to stage.
+    ///
+    /// # Contract
+    ///
+    /// `region` must never move and must outlive the backend (the mmap
+    /// stability contract weight caches already rely on). Registering
+    /// the same base twice is a cheap no-op.
+    fn register_weight_region(&self, _region: &[u8]) {}
+
     /// Expose the concrete type for safe downcasting.
     fn as_any(&self) -> &dyn std::any::Any;
 

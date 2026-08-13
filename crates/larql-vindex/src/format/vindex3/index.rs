@@ -17,6 +17,27 @@ use super::profile::{Profile, ProfileSelectionError, ResolvedProfile};
 use super::variants::VariantCatalogue;
 use crate::format::generation::V3_CURRENT_SCHEMA;
 
+/// One encoded representation's physical location and integrity facts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepresentationEntry {
+    /// Logical object this representation materialises (a graph object id).
+    pub object: String,
+    /// Storage encoding, as the graph declares it (`BF16`, …).
+    pub encoding: String,
+    /// Segment file path relative to the container root.
+    pub segment: String,
+    /// Number of tensors in the segment's table.
+    pub tensor_count: usize,
+    /// Payload bytes (excluding the segment header framing).
+    pub payload_bytes: u64,
+    /// SHA-256 over the payload region, computed while copying from the
+    /// source — G4's byte-equivalence anchor on the source side.
+    pub payload_sha256: String,
+    /// SHA-256 over the whole segment file as written — detects
+    /// post-write corruption independently of source access.
+    pub segment_sha256: String,
+}
+
 pub use super::profile::PROFILE_EXACT;
 
 /// `index.json` as a VINDEX3 container writes it.
@@ -36,7 +57,24 @@ pub struct Vindex3Index {
     pub hidden_size: usize,
     pub num_layers: usize,
     /// Filename of the MoE programme manifest, relative to the root.
-    pub moe_manifest: String,
+    /// `None` on a system container with no routed programme — a dense
+    /// system has nothing for a MoE manifest to describe, and inventing an
+    /// empty one would be a fabricated authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub moe_manifest: Option<String>,
+    /// Filename of the system-graph manifest
+    /// ([`super::graph::SystemGraph`]), relative to the root. Absent on
+    /// containers written before the graph existed — absence means "no
+    /// graph recorded", never "single-component assumed".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_graph: Option<String>,
+    /// Representation directory: representation id
+    /// (`{object_id}@{encoding}`) → where its bytes physically live.
+    /// Graph edges and objects never reference source tensor names — once
+    /// encoded, the source checkpoint disappears as an authority, and this
+    /// directory is the only route from a logical representation to bytes.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub representations: BTreeMap<String, RepresentationEntry>,
     /// Profiles this container declares. Never empty: a container with no
     /// selectable profile cannot be served, and discovering that at bind time
     /// rather than at load time is the failure mode profiles exist to prevent.
@@ -71,7 +109,9 @@ impl Vindex3Index {
             family: family.into(),
             hidden_size,
             num_layers,
-            moe_manifest: moe_manifest.into(),
+            moe_manifest: Some(moe_manifest.into()),
+            system_graph: None,
+            representations: BTreeMap::new(),
             profiles: vec![Profile::exact()],
             variants: VariantCatalogue::new(),
             segments,

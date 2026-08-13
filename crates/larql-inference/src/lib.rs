@@ -69,6 +69,7 @@ pub mod model;
 pub mod prompt;
 pub mod residual;
 pub mod residual_diff;
+pub mod speech;
 pub mod ternary;
 pub mod test_utils;
 pub mod tokenizer;
@@ -187,9 +188,9 @@ pub use ffn::{
     decode_q8k_batch_response_entries, decode_single_response, encode_binary_request,
     encode_binary_request_as, encode_q8k_batch_request, expert_weights_resolvable, BackendFfn,
     ExpertWeightFfn, FfnBackend, LayerFfnRouter, LayerShardedBackend, MoeRouterWeights,
-    RemoteFfnConfig, RemoteFfnError, RemoteLatencyStats, RemoteMoeBackend, RemoteMoeError,
-    RemoteWalkBackend, ShardConfig, SparseFfn, WeightFfn, WireFormat, WirePreference, BINARY_CT,
-    F16_CT, I8_CT, Q8K_BATCH_CT,
+    PackedExpertWeightFfn, RemoteFfnConfig, RemoteFfnError, RemoteLatencyStats, RemoteMoeBackend,
+    RemoteMoeError, RemoteWalkBackend, ShardConfig, SparseFfn, WeightFfn, WireFormat,
+    WirePreference, BINARY_CT, F16_CT, I8_CT, Q8K_BATCH_CT,
 };
 pub use kv_dispatch::{
     CompressionCodec, EngineBackend, KvDispatch, KvHandle, KvHandleInner, PerLayerDecodeState,

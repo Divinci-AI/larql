@@ -81,7 +81,10 @@ pub(crate) fn layer_ffn_or_moe(
     moe_ffn: Option<&dyn FfnBackend>,
     ple_input: Option<&Array2<f32>>,
 ) -> Result<Array2<f32>, BoxRefusal> {
-    if weights.arch.is_hybrid_moe() {
+    // Pure MoE takes the hook exactly as hybrid does — its FFN *is* the
+    // expert block; the dense fallback below would ask for gate/up/down
+    // tensors the checkpoint does not have.
+    if weights.arch.is_moe() || weights.arch.is_hybrid_moe() {
         if let Some(mf) = moe_ffn {
             if let Some(h_out) = mf.forward_moe_full_layer(layer, h_post_attn)? {
                 // Returned as-is: `forward_moe_full_layer` is contracted to

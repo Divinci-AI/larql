@@ -1,7 +1,10 @@
 //! FFN activation functions and the gated/standard FFN shape.
 
+use serde::{Deserialize, Serialize};
+
 /// Activation function used in the FFN.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Activation {
     /// SiLU / Swish (Gemma, Llama)
     Silu,
@@ -13,7 +16,29 @@ pub enum Activation {
     Relu,
 }
 
+/// HF `hidden_act` / `hidden_activation` spellings, one row per variant.
+/// The single definition of the name↔variant mapping — parsers and
+/// inventory classification both read this table.
+const HF_ACTIVATION_NAMES: &[(&str, Activation)] = &[
+    ("silu", Activation::Silu),
+    ("swish", Activation::Silu),
+    ("gelu", Activation::Gelu),
+    ("gelu_new", Activation::GeluTanh),
+    ("gelu_pytorch_tanh", Activation::GeluTanh),
+    ("relu", Activation::Relu),
+];
+
 impl Activation {
+    /// Map an HF activation name to a variant. `None` for a spelling this
+    /// build has never judged — callers must not guess a default for an
+    /// unrecognised name.
+    pub fn from_hf_name(name: &str) -> Option<Self> {
+        HF_ACTIVATION_NAMES
+            .iter()
+            .find(|(hf_name, _)| name.eq_ignore_ascii_case(hf_name))
+            .map(|&(_, activation)| activation)
+    }
+
     /// Which of the two implemented gate/up FFN kernel families this
     /// activation dispatches to on the CPU walk / kquant paths:
     /// `true` = gelu-tanh, `false` = SiLU.
@@ -44,7 +69,8 @@ impl Activation {
 }
 
 /// Whether the FFN uses a gated architecture.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum FfnType {
     /// Gated: SiLU(x @ gate.T) * (x @ up.T) @ down.T (Gemma, Llama)
     Gated,

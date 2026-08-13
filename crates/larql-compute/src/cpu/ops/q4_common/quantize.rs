@@ -283,6 +283,10 @@ pub fn quantize_q6_k(data: &[f32]) -> Vec<u8> {
 ///   [0..15]    8 × f16 pre-computed d*scale_j (16 bytes)
 ///   [16..31]   8 × f16 pre-computed dmin*min_j (16 bytes)
 ///   [32..159]  128 bytes nibbles (unchanged)
+/// **No Metal kernel consumes this 160-byte layout** (capability audit
+/// F15): the live `Q4_KF`-tagged shaders read standard 144-byte GGUF
+/// Q4_K blocks. This conversion survives as the CPU-side pre-baked
+/// experiment only — do not feed its output to the Metal Q4_KF path.
 pub fn q4k_to_q4kf(q4k_data: &[u8], num_rows: usize, hidden: usize) -> Vec<u8> {
     let superblocks_per_row = hidden / 256;
     let q4k_bytes_per_row = superblocks_per_row * 144;

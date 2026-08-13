@@ -11,10 +11,13 @@ pub mod expert_weight;
 pub mod observe;
 #[cfg(test)]
 mod observe_tests;
+mod packed_expert_weight;
+pub mod q4k_weight;
 pub mod weight;
 
 pub use expert_weight::ExpertWeightFfn;
 pub use observe::{FfnActivations, SparseActivations, SparseEntry};
+pub use packed_expert_weight::PackedExpertWeightFfn;
 pub use weight::{
     dense_ffn_forward, dense_ffn_forward_backend, BackendFfn, NullFfn, Q4kMatmulFfn, ViewFfn,
     WeightFfn,

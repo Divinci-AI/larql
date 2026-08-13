@@ -294,9 +294,63 @@ pub struct RunArgs {
     /// key prefix.
     #[arg(long, value_name = "DIR")]
     pub mm_weights: Option<PathBuf>,
+
+    /// Speak the prompt: run the model as a speech generator
+    /// (MOSS-TTS-Realtime) and synthesise audio tokens instead of text.
+    /// Pure TTS — the prompt is what gets said, no chat LLM in front.
+    /// `model` is the checkpoint's safetensors directory until the model
+    /// moves into the vindex (TTS funnel step 6).
+    #[arg(long)]
+    pub speak: bool,
+
+    /// Voice reference for `--speak`: a token-rows file produced by the
+    /// external codec's encode mode (one frame per line). Omit for the
+    /// model's unconditioned voice.
+    #[arg(long, value_name = "TOKENS")]
+    pub voice: Option<PathBuf>,
+
+    /// External codec command for `--speak`, with `{tokens}` and `{wav}`
+    /// placeholders (falls back to $LARQL_MOSS_CODEC_CMD). Without it,
+    /// audio tokens are written and WAV synthesis is skipped.
+    #[arg(long, value_name = "CMD")]
+    pub codec_cmd: Option<String>,
+
+    /// Output WAV path for `--speak` (default: speech.wav).
+    #[arg(long, value_name = "WAV")]
+    pub speech_out: Option<PathBuf>,
+
+    /// Play the synthesised WAV after codec decode (`--speak`, macOS).
+    #[arg(long)]
+    pub play: bool,
+
+    /// Frame cap for `--speak` (12.5 frames per second of audio).
+    #[arg(long, default_value = "1500")]
+    pub max_frames: usize,
+
+    /// Greedy decoding for `--speak` (parity/debug). Default is the
+    /// reference's sampled mode — greedy does not terminate reliably on
+    /// novel text.
+    #[arg(long)]
+    pub greedy: bool,
+
+    /// RNG seed for `--speak` sampled mode (reproducible synthesis).
+    #[arg(long, default_value = "0")]
+    pub seed: u64,
+
+    /// Quantise FFN weights to Q4_K for `--speak` (both transformers;
+    /// attention stays fp32). The realtime experiment of
+    /// docs/tts-funnel.md — check voice quality before trusting speed.
+    #[arg(long)]
+    pub q4: bool,
 }
 
 pub fn run(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
+    // Speech mode routes before vindex resolution: the speech model lives
+    // in its safetensors directory until TTS funnel step 6.
+    if args.speak {
+        return super::run_cmd_speak::run_speak(&args);
+    }
+
     let vindex_path = cache::resolve_model(&args.model)?;
     if !vindex_path.is_dir() {
         return Err(format!(

@@ -43,6 +43,17 @@ pub static ARCHITECTURE_REGISTRY: &[ArchitectureEntry] = &[
         attention_kind: AttentionKind::Standard,
         quant_formats: STANDARD_QUANT_FORMATS,
     },
+    // The assistant model_type is deliberately absent: it stays on the
+    // generic path until its semantics are judged.
+    ArchitectureEntry {
+        model_type: "muse_glimmer",
+        patterns: &[
+            ModelTypeMatch::Exact("muse_glimmer"),
+            ModelTypeMatch::Exact("muse_glimmer_text"),
+        ],
+        attention_kind: AttentionKind::Standard,
+        quant_formats: STANDARD_QUANT_FORMATS,
+    },
     ArchitectureEntry {
         model_type: "mixtral",
         patterns: &[ModelTypeMatch::Exact("mixtral")],
@@ -58,6 +69,15 @@ pub static ARCHITECTURE_REGISTRY: &[ArchitectureEntry] = &[
     ArchitectureEntry {
         model_type: "gpt_oss",
         patterns: &[ModelTypeMatch::Exact("gpt_oss")],
+        attention_kind: AttentionKind::Standard,
+        quant_formats: STANDARD_QUANT_FORMATS,
+    },
+    // MOSS-TTS-Realtime — Qwen3 backbone nested under `language_config`;
+    // audio depth-transformer weights side-load via `larql_models::speech`.
+    // Listed before the `qwen` prefix entry to mirror the match-arm order.
+    ArchitectureEntry {
+        model_type: "moss_tts_realtime",
+        patterns: &[ModelTypeMatch::Exact("moss_tts_realtime")],
         attention_kind: AttentionKind::Standard,
         quant_formats: STANDARD_QUANT_FORMATS,
     },

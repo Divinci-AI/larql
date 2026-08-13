@@ -10,6 +10,11 @@ use crate::buffers::BufferCache;
 
 pub const SHORT_ATTENTION_SPAN: u32 = 1024;
 
+/// `kv_attention_long`'s threadgroup scratch bound — mirrors the MSL
+/// `tg_scores[4096]` in `shaders/kv_attention.rs`. Spans past this
+/// overflow threadgroup memory; the dispatch asserts against it.
+pub const LONG_ATTENTION_SPAN: usize = 4096;
+
 /// Maximum head_dim supported by kernels that dispatch exactly one simdgroup
 /// per head (32 lanes × 8 elements = 256). Layers with head_dim above this
 /// must use the two-simdgroup path or the unfused fallback.
@@ -155,6 +160,43 @@ impl KVCache {
         Self { layers }
     }
 
+    /// Allocate with a per-layer capacity as well as a per-layer shape.
+    ///
+    /// A sliding layer can never hold more than `SLACK * W` rows, so
+    /// sizing it for the global default is waste — on Gemma 3 4B, 29 of 34
+    /// layers at 4096 rows instead of 2048. `capacities[i]` pairs with
+    /// `shapes[i]`; a short `capacities` falls back to `default_capacity`
+    /// for the remainder rather than under-allocating, since an
+    /// under-sized buffer is an overrun and an over-sized one is only
+    /// waste.
+    pub fn new_per_layer_with_capacities(
+        bufs: &BufferCache,
+        shapes: &[(usize, usize)],
+        capacities: &[usize],
+        default_capacity: usize,
+    ) -> Self {
+        let layers = shapes
+            .iter()
+            .enumerate()
+            .map(|(i, &(num_kv, hd))| {
+                let cap = capacities.get(i).copied().unwrap_or(default_capacity);
+                LayerKVCache::new(bufs, cap, num_kv, hd)
+            })
+            .collect();
+        Self { layers }
+    }
+
+    /// Total bytes held by every layer's K and V buffers.
+    ///
+    /// Exists so a test can assert the allocation actually fell, rather
+    /// than asserting a row count and assuming the bytes followed.
+    pub fn allocated_bytes(&self) -> u64 {
+        self.layers
+            .iter()
+            .map(|l| l.k_cache.length() + l.v_cache.length())
+            .sum()
+    }
+
     /// Return true if any already-allocated layer disagrees with the
     /// corresponding expected `(num_kv_heads, head_dim)` shape.
     pub fn has_shape_mismatch(&self, shapes: &[(usize, usize)]) -> bool {
@@ -204,6 +246,38 @@ impl KVCache {
             let (num_kv_heads, head_dim) = shapes[self.layers.len()];
             self.layers
                 .push(LayerKVCache::new(bufs, max_seq, num_kv_heads, head_dim));
+        }
+    }
+
+    /// Grow each layer to its *own* capacity, preserving layers already
+    /// large enough.
+    ///
+    /// The capacity-aware twin of [`Self::grow_to_shapes`]. Growing every
+    /// layer to one `max_seq` would re-inflate a sliding layer that was
+    /// deliberately allocated at `SLACK * W`, so a per-layer bound is not
+    /// an optimisation here — it is what makes the smaller allocation
+    /// survive the first decode step.
+    pub fn grow_to_capacities(
+        &mut self,
+        bufs: &BufferCache,
+        shapes: &[(usize, usize)],
+        capacities: &[usize],
+        default_capacity: usize,
+    ) {
+        let cap_at = |i: usize| capacities.get(i).copied().unwrap_or(default_capacity);
+        for (i, (layer, &(num_kv_heads, head_dim))) in
+            self.layers.iter_mut().zip(shapes.iter()).enumerate()
+        {
+            let want = cap_at(i);
+            if layer.max_seq < want {
+                *layer = LayerKVCache::new(bufs, want, num_kv_heads, head_dim);
+            }
+        }
+        while self.layers.len() < shapes.len() {
+            let i = self.layers.len();
+            let (num_kv_heads, head_dim) = shapes[i];
+            self.layers
+                .push(LayerKVCache::new(bufs, cap_at(i), num_kv_heads, head_dim));
         }
     }
 
@@ -264,6 +338,8 @@ pub fn encode_kv_attend(
     num_q_heads: usize,
     scale: f32,
     window_size: u32,
+    sinks: Option<&[f32]>,
+    softcap: f32,
 ) {
     let t_val = (cache.current_len + 1) as u32;
     let hd = cache.head_dim as u32;
@@ -271,10 +347,27 @@ pub fn encode_kv_attend(
     let num_kv = cache.num_kv_heads as u32;
     let span = attention_span(t_val, window_size);
     let pipeline = if span > SHORT_ATTENTION_SPAN {
-        attend_long_pipeline.unwrap_or(attend_pipeline)
+        // No silent fallback to the short kernel: `kv_attention`'s
+        // tg_scores holds SHORT_ATTENTION_SPAN entries, and a span past
+        // it overflows threadgroup memory. Previously
+        // `unwrap_or(attend_pipeline)` let a caller that supplied no
+        // long pipeline do exactly that (capability audit F20).
+        attend_long_pipeline.expect(
+            "attention span exceeds SHORT_ATTENTION_SPAN and no long-attention \
+             pipeline was supplied; the short kernel's threadgroup scratch \
+             cannot hold this span",
+        )
     } else {
         attend_pipeline
     };
+    // `kv_attention_long`'s own scratch bound. Until now this held only
+    // because the KV cache's default allocation happens to match —
+    // an allocation coincidence, not a checked invariant (F14).
+    assert!(
+        span as usize <= LONG_ATTENTION_SPAN,
+        "attention span {span} exceeds kv_attention_long's threadgroup scratch \
+         bound ({LONG_ATTENTION_SPAN})"
+    );
 
     enc.set_compute_pipeline_state(pipeline);
     enc.set_buffer(0, Some(q), 0);
@@ -287,6 +380,11 @@ pub fn encode_kv_attend(
     enc.set_bytes(7, 4, &num_kv as *const u32 as *const c_void);
     enc.set_bytes(8, 4, &scale as *const f32 as *const c_void);
     enc.set_bytes(9, 4, &window_size as *const u32 as *const c_void);
+    // Feature buffers the fallback must carry (audit F7/F8): a fallback
+    // kernel that drops sinks or softcap changes the softmax semantics
+    // relative to the fused path it replaced.
+    crate::stages::sinks::bind(enc, 10, sinks, num_q_heads);
+    enc.set_bytes(12, 4, &softcap as *const f32 as *const c_void);
     enc.dispatch_thread_groups(
         MTLSize::new(num_q_heads as u64, 1, 1),
         MTLSize::new(
@@ -334,6 +432,9 @@ pub fn append_and_attend(
             num_q_heads,
             scale,
             0,
+            // Legacy bench API: no layer in scope, no sinks/softcap.
+            None,
+            0.0,
         );
         enc.end_encoding();
     }
@@ -675,6 +776,8 @@ mod tests {
             num_kv,
             (head_dim as f32).sqrt().recip(),
             0,
+            None,
+            0.0,
         );
         enc.end_encoding();
         cmd.commit();
@@ -720,6 +823,8 @@ mod tests {
             num_kv,
             (head_dim as f32).sqrt().recip(),
             0,
+            None,
+            0.0,
         );
         enc.end_encoding();
         cmd.commit();

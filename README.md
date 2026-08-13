@@ -26,6 +26,47 @@ larql> INFER "The capital of France is" TOP 3;
   3. a                    (0.31%)
 ```
 
+## Table of Contents
+
+- [Quick Start](#quick-start)
+    - [Serve it over HTTP + gRPC](#serve-it-over-http--grpc)
+    - [Run attention locally, FFN on another machine](#run-attention-locally-ffn-on-another-machine)
+    - [MoE expert sharding — experts on CPU-only remote machines](#moe-expert-sharding--experts-on-cpu-only-remote-machines)
+    - [Publish to HuggingFace — full + slices + collections](#publish-to-huggingface--full--slices--collections)
+    - [Vindex Factory — recipe-driven builds](#vindex-factory--recipe-driven-builds)
+    - [Pull with slice awareness](#pull-with-slice-awareness)
+    - [Query via LQL](#query-via-lql)
+    - [Research / interpretability tools](#research--interpretability-tools)
+- [What is a Vindex?](#what-is-a-vindex)
+- [Architecture](#architecture)
+    - [larql-vindex](#larql-vindex)
+    - [larql-kv](#larql-kv)
+    - [larql-lql](#larql-lql)
+- [LQL Reference](#lql-reference)
+    - [Key Statements](#key-statements)
+- [Patches](#patches)
+- [Vindexfile](#vindexfile)
+- [Model Support](#model-support)
+- [Realtime speech (MOSS-TTS-Realtime)](#realtime-speech-moss-tts-realtime)
+- [Benchmarks](#benchmarks)
+    - [Vindex Operations](#vindex-operations)
+    - [Inference Engine (Gemma 3 4B, Apple Silicon M3 Max)](#inference-engine-gemma-3-4b-apple-silicon-m3-max)
+    - [MoE / grid (Gemma 4 26B A4B, M3 Max)](#moe--grid-gemma-4-26b-a4b-m3-max)
+    - [Pure MoE (GPT-OSS-20B Q6_K, M3 Max)](#pure-moe-gpt-oss-20b-q6_k-m3-max)
+    - [Load-bearing environment flags (serving & measurement)](#load-bearing-environment-flags-serving--measurement)
+    - [Dense remote-FFN (Gemma 4 31B Q4K, M3 Max, localhost)](#dense-remote-ffn-gemma-4-31b-q4k-m3-max-localhost)
+- [Residual Stream Trace](#residual-stream-trace)
+    - [Tiered Context (infinite context without KV cache)](#tiered-context-infinite-context-without-kv-cache)
+- [Mechanistic interpretability surface](#mechanistic-interpretability-surface)
+- [Documentation](#documentation)
+- [Platform Support](#platform-support)
+- [Install](#install)
+- [Building & Testing](#building--testing)
+    - [Cross-engine correctness check](#cross-engine-correctness-check)
+- [License](#license)
+
+---
+
 ## Quick Start
 
 ```bash
@@ -631,10 +672,20 @@ Input formats: **safetensors** (HuggingFace), **GGUF** (llama.cpp, dequantized t
 | Qwen | Qwen 2/2.5 (0.5B-72B) | Gated (SiLU) |
 | Phi | Phi 2/3 (2.7B-14B) | Gated |
 | DeepSeek | DeepSeek V2/V3 | MoE (shared + routed) |
-| GPT-OSS | GPT-OSS-120B | MoE (128 experts, MXFP4) |
+| GPT-OSS | GPT-OSS-20B/120B | MoE (32/128 experts, MXFP4 → Q6_K lossless) |
 | GPT-2 | GPT-2 (117M-1.5B) | Standard (GELU-tanh, vindex extraction only) |
+| MOSS-TTS-Realtime | 2.3B speech (RVQ audio tokens out) | Gated (SiLU) ×2 + depth transformer — see [Realtime speech](#realtime-speech-moss-tts-realtime) |
 
 Dense and full-precision MoE models support all operations (DESCRIBE, WALK, INFER). MXFP4-quantized MoE models (GPT-OSS) can be extracted and served but DESCRIBE/WALK produce noisy results due to 4-bit weight precision — use INFER for accurate knowledge queries. See [operations spec](crates/larql-vindex/docs/operations-spec.md) for details.
+
+**GPT-OSS-20B is served end to end (2026-08-10).** `larql run
+gpt-oss-20b-q4k.vindex` generates coherent harmony-format output on CPU
+(~60 ms/token) and on Metal at **16.7 ms/token (59.8 tok/s)** with the
+identical greedy trajectory — see the [Pure MoE
+benchmark](#pure-moe-gpt-oss-20b-q6_k-m3-max) and
+[`docs/k3-funnel.md`](docs/k3-funnel.md) §4.11. The experts serve from a
+lossless MXFP4→Q6_K transcode; sliding-window + YaRN attention, per-layer
+sinks, and all four projection biases are applied on both backends.
 
 **GPT-OSS attention sinks (2026-07-29).** GPT-OSS attention uses a learned per-head *sink* logit that competes in the softmax and is then discarded, so attention weights over real positions deliberately sum to less than one. Until 2026-07-29 larql neither extracted nor applied it — along with all four projection biases — so 5 of 11 attention tensors per layer were silently dropped and the forward pass was systematically wrong. Both are now extracted and applied on the CPU and Metal paths, with numerical parity tests against the reference implementation. Details and the measured sink magnitudes are in [`docs/k3-funnel.md`](docs/k3-funnel.md) §4.6.
 
@@ -647,6 +698,48 @@ the fused `attn_qkv` projection into per-head q/k/v, and surfaces learned
 inference still requires wiring `position_embed` into the residual init and
 the LayerNorm-with-bias / FFN-with-bias paths through the run-time stack;
 extraction-only flows (DESCRIBE, KNN, vindex publish) work today.
+
+## Realtime speech (MOSS-TTS-Realtime)
+
+LARQL executes the generative half of
+[MOSS-TTS-Realtime](https://github.com/OpenMOSS/MOSS-TTS) — text tokens
+in, 16-codebook RVQ audio tokens out — as an ordinary model in the same
+engine, **with per-token parity against the reference implementation**
+(the full greedy 138-frame fixture replays token-exactly; the sampler
+replicates the reference's non-standard top-p literally). The codec
+stays external: LARQL emits audio tokens, `--codec-cmd` turns them into
+a WAV.
+
+```bash
+# Speak, cloning the voice in aru-12.tokens (codec-encoded reference audio)
+larql run <moss-tts-realtime-dir> --speak "Good evening. All systems are normal." \
+  --voice aru-12.tokens --q4 \
+  --codec-cmd 'python moss_codec_cli.py {tokens} {wav}' --play
+```
+
+Measured on M3 Max CPU (Q4_K weights, quiet machine, interleaved runs —
+see `docs/tts-funnel.md` for the full gate log and methodology):
+
+| Metric | Value |
+|---|---|
+| Steady-state generation | ~31 ms/frame p50 vs the 80 ms frame budget (**~1.9× realtime**) |
+| First-turn TTFA | ~1.25 s (prefill-dominated; `<500 ms` gate in progress) |
+| Streaming envelope | 0 ms minimum pre-buffer, zero cold-start underruns |
+| Incremental ≡ batch | token-identical at every text chunking (gated in CI + on-checkpoint) |
+
+The incremental session (`MossSession`) implements the reference's
+push-text protocol — text ids in as they become available, frames out as
+they are earned — so an LLM's token stream and a typed prompt are the
+same input. Honest scope note: these are speech-**token** generation
+numbers; end-to-end audio (incremental codec + PCM ring + device
+output) is tracked separately on the roadmap.
+
+Speech also drove a general engine rule now used across LARQL
+(`ROADMAP.md`, "physical planning"): the same logical operator gets
+different physical plans per execution phase — packed Q4K·Q8K integer
+matvec for single-row decode, dequant-once + BLAS GEMM and batched
+attention for multi-row prefill — selected by measured shape, not
+tensor format. All of it behind the same token-exact parity oracle.
 
 ## Benchmarks
 
@@ -730,6 +823,28 @@ Walk is **faster than dense** (517ms vs 535ms). GPU Q4K decode is **23× faster*
 **DEC-0 arm M (2026-07-23, `docs/dec-funnel.md` §3)**: the loopback batch curve is measured — expert-tier step time is sub-linear through batch 32 (×1.6–1.8 on batch dispatch), aggregate tier throughput ~1,050 tok/s at B64 (~25× single-stream), movement ratio 1.2–1.9 × 10⁻³. Run records under `bench/dec0/`; system of record is the `dec0-loopback-mac` experiment in the registry.
 
 **Wire format (2026-05-07)**: grid traffic uses f16 by default (50% bandwidth). Set `LARQL_I8_WIRE=1` for i8 symmetric quantisation (75% bandwidth, opt-in). Both are architecture-agnostic — `hidden_size` is read from vindex config at runtime. Per-layer latency is tracked via `HeartbeatMsg.layer_stats` (EMA + p99); the router uses it to route replicated layers to the lowest-latency server. Use `make bench-wire` to measure codec throughput and `make bench-routing` for routing hot-path.
+
+### Pure MoE (GPT-OSS-20B Q6_K, M3 Max)
+
+`larql run gpt-oss-20b-q4k.vindex --metal` — single stream, greedy, short
+context; experts are the lossless MXFP4→Q6_K transcode (6.56 bpw). Metal
+produces the **identical greedy trajectory to CPU** — parity re-verified at
+every rung of this ladder (2026-08-10, `docs/k3-funnel.md` §4.11):
+
+| ms/token | tok/s | Rung |
+|---:|---:|---|
+| 97.8 | 10.2 | staged expert copies — top-4 × ~22 MB × 24 layers ≈ 2.1 GB/token of CPU memcpy |
+| 25.9 | 38.7 | **zero-copy expert regions** — each layer mmap bound once (`newBufferWithBytesNoCopy`), experts addressed as byte offsets |
+| 22.7 | 44.0 | **grouped expert kernels** — all selected experts in one 2-D dispatch (η 0.64→0.90) |
+| 22.6 | — | **fused attention** (no-QK-norm + QKV biases in `attn_fused`): attention GPU 8→3.3 ms, wall unmoved — the sync structure was the term |
+| 16.7 | **59.8** | **merged command buffers** — GPU MoE combine; a layer's experts + the next layer's attention share one CB (one wait/layer) |
+
+CPU decode on the same vindex: ~60 ms/token (15-17 tok/s). Comparison
+framing: native-MXFP4 engines (oMLX, ~4.25 bpw experts) report ~85-90 tok/s
+on this class of machine at 1k-4k context — LARQL is moving ~1.54× the expert
+bytes, so 59.8 tok/s is ≈92 tok/s byte-normalised. The remaining budget is
+~11.5 ms MoE (bandwidth), ~3.3 ms attention, ~2 ms sync residue; the
+MXFP4-native path (shaders already in-tree) is the open experiment.
 
 ### Load-bearing environment flags (serving & measurement)
 
@@ -884,8 +999,9 @@ The full surface is documented in [crates/larql-inference/ROADMAP.md](crates/lar
 
 | Doc | Description |
 |---|---|
-| [crates/larql-lql/docs/spec.md](crates/larql-lql/docs/spec.md) | LQL language specification (v0.3) |
-| [crates/larql-vindex/docs/format-spec.md](crates/larql-vindex/docs/format-spec.md) | Vindex file format specification (v0.3, ~98% implemented) |
+| [crates/larql-lql/docs/spec.md](crates/larql-lql/docs/spec.md) | LQL language specification (v0.4) |
+| [crates/larql-vindex/docs/format-spec.md](crates/larql-vindex/docs/format-spec.md) | Vindex file format specification (v0.4, ~98% implemented) |
+| [crates/larql-vindex/docs/vindex3-format-spec.md](crates/larql-vindex/docs/vindex3-format-spec.md) | Vindex3 file format specification (v3.0-draft-2) |
 | [crates/larql-vindex/docs/operations-spec.md](crates/larql-vindex/docs/operations-spec.md) | Vindex operations, API, patches (~98% implemented) |
 | [crates/larql-vindex/docs/ecosystem-spec.md](crates/larql-vindex/docs/ecosystem-spec.md) | Distributed hosting, HuggingFace, Vindexfile (~85% implemented) |
 | [crates/larql-vindex-spec/SPEC.md](crates/larql-vindex-spec/SPEC.md) | Vindex v1 public contract — manifest schema, sharding rule, validation thresholds, model card tags |

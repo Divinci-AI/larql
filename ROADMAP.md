@@ -1549,6 +1549,101 @@ recognised** — see item 2.
    [larql-vindex]
 
 
+### K3 R1 P4/P5 CLOSED — GPT-OSS served from its vindex; Metal decode 10.2 → 59.8 tok/s (2026-08-09/10)
+
+Write-up [`docs/k3-funnel.md`](docs/k3-funnel.md) §4.11. Registry
+`k3r1-gptoss-pipeline`. Branch `feat/k3-r1-p5-moe-bias-gate-policy`, commits
+04addd27…f557cec9.
+
+**Serve is real on both backends.** `larql run gpt-oss-20b-q4k.vindex`
+generates coherent harmony-format output on CPU at ~60 ms/token, and `--metal`
+produces the **identical 32-token greedy trajectory at 16.7 ms/token
+(59.8 tok/s)** — parity re-verified after every rung. Correctness took six
+stacked hidden%256 defects (MoE norm topology, lm_head widths ×2, Metal QKV/O
+stored-row width, missing Metal attention biases, dense-FFN encode over empty
+pure-MoE slices); the fixes are all generic — `QuantWeight::stored_cols`
+(byte count is the width authority), bias threading via `build_arch_params`,
+`has_dense_ffn()` as a representation fact.
+
+**The decode ladder, each rung parity-gated:** 97.8 ms (staged expert
+memcpys, ~2.1 GB/token) → 25.9 (zero-copy mmap regions:
+`BufferCache::register_region` + experts as byte offsets) → 22.7 (K3a grouped
+expert kernels, η 0.64→0.90 as measured) → 22.6 (fused no-QK-norm attention +
+folded QKV biases — attention GPU 8→3.3 ms with the wall unmoved, isolating
+the sync term) → **16.7** (GPU `moe_weighted_combine`; a layer's experts and
+the next layer's attention share one command buffer — one wait/layer).
+Gemma 26B A4B hybrid rode the first two rungs free (91.3 → ~30 ms/tok).
+
+**Benchmark framing (pinned):** oMLX's ~85-90 tok/s reference is **native
+MXFP4** (~4.25 bpw experts); LARQL carries the lossless Q6_K transcode at
+6.56 bpw — ~1.54× the expert bytes. 59.8 × 1.54 ≈ 92 byte-normalised: same
+conventional-efficiency territory; the residual is representation, not
+runtime. The MXFP4-native experiment (shaders exist) now measures how far
+*past* the reference the engine goes.
+
+**Remaining budget at 16.7 ms:** ~11.5 MoE (bandwidth), ~3.3 attention GPU,
+~2 sync residue (24 waits; GPU routing + device-side offset tables — which
+the grouped kernels already read — take it near zero).
+
+**Standing lesson earned:** faster kernels ≠ faster decode when
+command-buffer structure dominates the wall; measure the wall against the
+CB-window sum before optimising a kernel.
+
+**Follow-ups (tracked here, not just in PR #241's notes):**
+
+| # | Item | Crate | Status |
+|---|---|---|---|
+| P5-F1 | **Native-MXFP4 expert execution** — the apples-to-apples experiment. Shaders `mxfp4_matvec` + `mxfp4_grouped_experts` already exist; the work is the store path (serve MXFP4 bytes without the Q6_K transcode) + wiring them into the zero-copy/grouped dispatch. First-order budget from the measured profile: MoE 11.5 ms / 1.54 ≈ 7.5 + 3.3 attention + ~2 residue ≈ **~78 tok/s** before any tuning — the ~85-90 reference falls out of the remaining milliseconds, not a miracle. Run it as *going past* the baseline, not reaching it. | larql-compute-metal, larql-vindex | open |
+| P5-F2 | **GPU routing + device-side offset tables** — kill the remaining 24 per-layer waits (~2 ms). Router matvec (32×2880) + policy top-k as a kernel writing the weights/offsets buffers the grouped kernels ALREADY read from device memory (their offset tables were designed for this — "K3b … without a signature change"). Gets decode to one command buffer per token. Policy scope: start with GPT-OSS's `top_k_then_softmax`; others keep the CPU route. | larql-compute-metal | open |
+| P5-F3 | **`predict_kquant_metal` panics on pure MoE** ("ffn Q4K slices missing for layer") — the max-tokens-1 predict path is a separate dense-assuming forward; either route it through the MoE-aware decode or refuse with the typed capability error. | larql-inference | open |
+| P5-F4 | **`metal_decode_synthetic` parallel-run flake** — pre-existing (clean-tree reproducible, ~2/5 parallel runs, victim varies, prefill NaN; single-threaded always green; CI blind — runners have no Metal device). Cross-test interaction under concurrent GPU load, mechanism unidentified; suspect list starts at pooled-buffer recycling vs in-flight command buffers under parallel backends. Until fixed, local red on this suite means: re-run single-threaded before diagnosing. | larql-compute-metal | open |
+| P5-F5 | **GB-style bits/token scoring of the served vindex** — `shannon score` still can't load vindexes (raw-model only), so the serve path's quality gate is greedy-trajectory parity, not measured bits/token (§4.6.8's scorer gap, still open). | larql-cli, larql-inference | open |
+
+---
+
+### K3 expert transport codec — CLOSED, cross-expert redundancy is nil (2026-08-10)
+
+Registry: `dec8-13-cross-expert-conditional-census` (programme `dec`), completed
+and refuted. Rule **R15** added to [`docs/dec-funnel.md`](docs/dec-funnel.md) §1.
+
+The previous rung measured each expert's MXFP4 symbols *on their own* (3.7525 of
+4.0 bits — near-optimal). It conditioned on nothing, leaving open whether the 896
+experts in a layer share structure that per-expert coding discards. They do not.
+`larql k3-ledger cond-census` conditions one expert's **untouched packed
+nibbles** on a leave-one-out bank prototype, an out-of-sample-selected coding
+parent, a random parent, and a permutation-invariant per-input-channel profile:
+**mutual information 0.0000 bits on all three GLU branches**, every arm sitting
+on top of its own marginal-preserving shuffled null. Agreement is 0.086–0.109
+against a 1/16 chance floor, so the runnable match/escape code prices at
+**4.56–4.66 bpw — worse than shipping the raw 4.25**.
+
+**The controls are the result.** A self control reads exactly 0.0000 with
+agreement 1.0000 on the same bytes; the marginal reproduces the banked 3.7525 to
+1e-4; and an adjacent-row control *within one expert* also reads 3.7527 — so
+there is nothing aligned to find, not merely no correspondence between experts.
+Mechanism: MXFP4's per-32 e8m0 scale already absorbs per-channel magnitude,
+leaving residual nibbles near-i.i.d. A format that spends its bits well leaves
+no cross-object redundancy for a dictionary to collect.
+
+**Closed with it:** entropy coding MXFP4 symbols, dictionary coding aligned
+expert symbols, resident-parent lossless delta coding, adaptive symbol
+alphabets, and **ETC-0B** (a specific parent adds 0.0007 bits over the
+prototype; selection beats random by −0.0000, so there are no edge weights to
+route around and the DEC-0 traces need not be opened for coding parents). R4 had
+capped the whole idea at **1.87×** before the fetch anyway; the measured floor is
+worth **1.06×** end-to-end.
+
+**Still open, deliberately deprioritised:** a permutation-*aligned* comparison
+(assignment over 3072 rows — poor prior from the adjacent-row control), and
+lossy value-space decomposition, which is **approximate expert factorisation,
+not compression** — approximate lane, scored on induced bits/token and route
+stability, and this lossless result must not be cited for or against it.
+
+Consequence: the routing graph and the compression graph are different objects.
+Effort returns to access structure — residency, owner grouping, prefetch,
+avoidance — where the route-aware hot-cache rung already measured **1.80×** from
+grouping work by physical owner.
+
 ### K3 serving-format ladder + efficiency re-bank (2026-08-01)
 
 Two rungs closed and one measurement corrected. Registry: `dec8-11`, `dec8-12`
@@ -3207,6 +3302,219 @@ Details in `larql-inference/ROADMAP.md` and `larql-cli/ROADMAP.md`.
 - OpenAI-compatible `/v1/chat/completions` (after streaming lands)
 - Auto-extract on `larql run hf://owner/name`
 - Gemma 3 4B regression smoke test (gate on `CI_INTEGRATION=1`)
+
+---
+
+## P1 — Voice bank: voices as first-class data (added 2026-08-09)
+
+Gated on TTS funnel step 5 (green) — the speech engine is real enough
+that maintaining `aru-12.tokens` as a manually prepared magic file is
+beneath the abstraction level of the rest of the system.
+
+**The design choice that matters: the asset is the *voice*, not "a MOSS
+token file."** One logical voice accumulates model-specific
+representations — MOSS conditions on spliced RVQ reference tokens,
+Qwen3-TTS on a pooled ECAPA speaker vector, a future model on whatever
+it requires. Same `--voice aru-12` resolves the representation the
+target model needs. This is the CLI face of the voice-as-data ladder
+(`docs/tts-funnel.md` §4): `clone` is the user's goal; *materialising a
+voice identity into a representation usable by a particular model* is
+what LARQL actually does (`voice derive` may become the truer verb).
+
+```bash
+larql voice clone reference.wav --name aru-12 --model moss-realtime
+larql voice list
+larql voice inspect aru-12
+larql voice clone reference.wav --name aru-12 --model qwen3-tts-1.7b  # second representation
+larql speak --voice aru-12 "Good evening."
+larql voice compare aru-12 aru-03        # eventually
+```
+
+Voice package: derived representations + provenance, NOT the source
+recording (originals stay where they belong):
+
+```text
+voices/aru-12/
+├── voice.toml            # name, source sha256/duration/rate, representation manifest
+└── representations/
+    └── moss-realtime.tokens
+```
+
+Boundaries, pinned now: voice identity is user/runtime data; model
+weights are model data. Voices are **never** bundled into a model's
+vindex — 1 speech model × 100 local voices with no duplication. VINDEX3
+interaction is resolution only: speech model + voice bank → resolved
+conditioning representation → speech session.
+
+Sequencing: `voice clone --model moss-realtime` is mechanically almost
+available (WAV → MOSS codec encode → 16-channel token rows → package);
+the Qwen3-TTS representation is the abstraction's first real test.
+A practical dividend: `larql speak --voice aru-N` across a bank makes
+the EXP-V ladder experiments (and eventual `voice compare`) one-liners.
+
+---
+
+## Standing execution rule — physical planning (extracted 2026-08-10)
+
+> **A logical operator must be physically planned from
+> `(format, operation, shape, hardware, workspace lifetime)`, never
+> selected from tensor format alone.**
+
+Extracted after the TTS funnel's TTFA work found the same pathology
+three times in one day — a decode-shaped primitive applied repeatedly
+to a prefill-shaped workload (FFN row-at-a-time; the blocked integer
+GEMM in three loop structures; attention position-at-a-time gemv +
+scalar softmax) — and measured the correct plans diverging by 1.6-4x
+(`docs/tts-funnel.md`, 2026-08-10 entries). One logical operator,
+multiple physical plans selected by execution phase:
+
+```text
+ATTENTION / FFN (logical)
+├─ decode:  packed Q4K×Q8K matvec (bandwidth/issue-oriented)
+├─ prefill: dequant-once + GEMM, batched softmax (compute-oriented)
+└─ future:  long-context, resident-KV, speculative variants
+```
+
+Applies beyond speech: K3, dense vindex prefill, speculative branches,
+multimodal prompt ingestion. Corollary for placement: not "a GPU
+model" but per-phase operator routing (CPU attention + Metal FFN GEMM
+is a legitimate plan). This is the query-optimizer half of the
+model-as-database thesis, now empirical.
+
+The *workspace lifetime* term earned its place empirically too
+(2026-08-10): the production prefill FFN ran ~250 ms over its own
+bench prediction because each layer allocated three fresh ~50 MB
+dequant buffers (~4 GB of page traffic per prefill the warm-allocator
+bench never paid). Kernel choice and shape were right; the workspace
+policy wasn't. Measurement instrument for all of this:
+`LARQL_PHASE_TIMING=1` (`larql_compute::phase_timing`) — the
+production-path phase split that repeatedly outperformed arithmetic
+estimates at finding the real bottleneck.
+
+---
+
+## P1 — Model-to-model fusion: the FUSE ladder (added 2026-08-09)
+
+The principle to lock in now: **text is one interoperability layer, not
+LARQL's model-to-model ABI.** Two models in the same runtime should
+exchange the cheapest useful materialisation of a computation —
+generated ids, residual state, KV state — with English text reserved
+for when text genuinely is the cheapest interchange format.
+
+The abstraction is model-to-model fusion, NOT "Qwen token sharing."
+Qwen→MOSS is only the first proving ground (shared tokenizer lineage
+makes the experiments easy); the architecture is:
+
+```text
+producer model → intermediate state / token domain / residual
+              → binding (model-specific; LARQL owns the mechanism)
+              → consumer model
+```
+
+Compatibility levels, weakest binding first:
+
+```text
+1. token-compatible      reuse ids directly
+2. vocabulary-mappable   cheap token-domain translation
+3. hidden-state          reuse residuals directly
+4. projectable           small learned/fixed projection
+5. state-composable      semantic state + target-specific state
+```
+
+The runtime consequence: a decode step exposes more than its final
+token — `GeneratedToken { id, hidden, kv_position, .. }` — and the
+consumer takes the view it needs (ids → text protocol, residual →
+conditioning). Generated text becomes one *view* of the computation.
+VINDEX3 eventually describes interfaces, not pairings: a model declares
+`output_domain` (token ids, semantic hidden) and `input_domain` (text
+tokens, hidden state, acoustic context); the binding
+(mapping/projection/adapter) is a separate, inspectable object.
+
+### The ladder (speech instance; each rung gated on the last)
+
+- **FUSE-0 — token pipe.** LLM-generated ids feed MOSS's text channel
+  directly (MOSS has no text head; text is already an input stream, and
+  the 12-token lead maps onto a generated-token queue naturally). Gate:
+  identical speech tokens to the encode(decode(ids)) round trip.
+  Stated precisely: *zero-copy token-domain forwarding when producer
+  and consumer domains happen to be compatible* — not "speech fusion
+  requires a Qwen LLM". Mostly an engineering cleanup; the value is the
+  primitive it installs: token-domain piping between models.
+- **FUSE-1 — residual comparison.** Same text prefix through a generic
+  Qwen LLM and the MOSS backbone; compare hiddens layer-by-layer.
+  Cosine is not enough (the voice ladder's lesson) — behavioural
+  probes and linear mappings too.
+- **FUSE-2 — direct residual substitution.** Replace a MOSS final
+  backbone hidden with a shape-compatible LLM residual; run the proven
+  depth transformer. Ask only: plausible codebooks? terminates? how far
+  do logits move? Cheap falsification — MOSS's backbone state carries
+  semantics + acoustic history + previous frame + conversation KV,
+  while an LLM residual carries semantics + LLM state, so straight
+  substitution *should* fail informatively.
+- **FUSE-3 — small bridge.** `H_llm → projection P → depth stage`,
+  acoustic conditioning preserved separately. The thesis test: how
+  little MOSS backbone computation is required once semantic state
+  already exists upstream?
+- **FUSE-4 — acoustic residual injection.**
+  `H_llm + A(previous audio tokens) → P → speech decoder`. If this
+  works, MOSS's backbone has been decomposed into semantic and
+  acoustic operands — and the steady-state frame stops paying for a
+  second full language-model pass.
+
+Prior art, tracked honestly: PRIME-Speech (HF 2606.30944) already
+drives a causal speech decoder from intermediate hidden states of a
+frozen LM — one specifically *trained* architecture. TADA (arXiv
+2602.23068) aligns text/acoustic representations. LARQL's differentiated
+claim is the **runtime composition primitive**: arbitrary producer →
+declared interface → binding → arbitrary consumer, across models that
+were never trained together. K3 → SpeechBinding → MOSS (or a small fast
+planner → speech model) is the long-term Jarvis pipeline this enables.
+
+---
+
+## Speech track — competitive position & the three proofs (added 2026-08-09)
+
+Position audit (2026-08-09, external claims are vendors'/leaderboards',
+not our measurements): LARQL's speech-token generator at Q4 on a laptop
+CPU (~RTF 0.63 conventional) sits in the same throughput order as the
+vendor's own MOSS figure on an L20 GPU (RTF 0.51, 180 ms TTFB) — as an
+inference-engine result, unusually strong. But the frontier is faster on
+cold latency (Fish S2 ~100 ms TTFA; Qwen3-TTS ~97 ms e2e claims;
+ElevenLabs Flash ~75 ms model inference), clone quality is externally
+unproven (top of Artificial Analysis is closed models; best open-weight
+~Fish S2 Pro), and `voice clone` as a product surface is table stakes.
+The moat is NOT "local TTS in Rust" (VoxCPM2 has GGUF/ONNX/ANE/Rust
+ports; Chatterbox Nano claims 3x realtime on 8-core CPU): it is **one
+execution system that understands multiple generative architectures,
+their physical representation, their state, and their composition** —
+plus the voice-as-data research (a 2026 study argues commercial
+"cloning" behaves like style transfer; the V-series asks what identity
+state actually is, which is better-timed than another clone API).
+
+The three proofs that change the story:
+
+1. **TTFA < 500 ms** while retaining the CPU steady-state class
+   (in flight, 2026-08-10: TTFA 2.0 → **~1.25 s** and steady state
+   1.6 → **~1.9x** via three CPU replanning steps, all token-exact
+   through the dump oracle; the prefill budget is 99%-accounted by
+   phase split — FFN block 904 ms + attention projections 131 ms are
+   the Metal `simdgroup_matrix` scope, and the measured operators
+   alone are sufficient to cross the gate at ~460 ms projected.
+   #242 was falsified — no build fix was needed).
+2. **Controlled blind clone comparison** — aru-12 versus Sonic 3.5,
+   Eleven v3, Fish S2, VoxCPM2, Qwen3-TTS, and MOSS-reference, scored
+   blind. Until this runs, no claim about voice quality, only about
+   engine performance.
+3. **A second, structurally different TTS architecture** through
+   LARQL/VINDEX3 — the model-independence claim made real (pairs with
+   the voice bank's Qwen3-TTS representation).
+
+Landed, they upgrade "MOSS runs very fast in Rust" to "a local
+generative speech runtime competitive with specialized stacks,
+model-independent, exposing model state hosted systems hide." The
+caveat to keep repeating until the audio-device path exists: current
+numbers are the token-generation path; end-to-end comparisons against
+vendor stacks wait for codec + ring + device integration.
 
 ---
 

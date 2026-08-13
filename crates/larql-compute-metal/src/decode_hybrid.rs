@@ -48,7 +48,69 @@ impl MetalBackend {
         } else {
             layer_head_dim
         };
-        let uses_kquant = layer.wq.format.is_kquant_family();
+        // Operand-local ABI selection. A single `uses_kquant` boolean read
+        // from `wq` used to route QKV, the O projection and their scale
+        // bindings alike — so one operand's representation decided how a
+        // different operand was interpreted. Q4_0 fell to the Q8 branches
+        // and had its 18-byte packed blocks handed to `q8_qkv_proj` /
+        // `q8_matvec` as though they were int8 rows, which only survived
+        // because callers fabricated an empty scale buffer.
+        //
+        // Q4_0 attention is not supported by any route here: the Q8
+        // kernels need int8 weights plus external scales, and Q4_0 has
+        // neither. Production cannot construct it either —
+        // `attn_str_to_format` admits only Q4_K and Q6_K. Refuse loudly
+        // rather than reinterpret the bytes.
+        assert_ne!(
+            layer.wq.format(),
+            larql_compute::QuantFormat::Q4_0,
+            "Q4_0 attention weights are not supported: the k-quant route does not \
+             handle Q4_0 QKV and the Q8 route needs external scales Q4_0 has no \
+             source for"
+        );
+        assert_ne!(
+            layer.wo.format(),
+            larql_compute::QuantFormat::Q4_0,
+            "Q4_0 O-projection weights are not supported on the hybrid path"
+        );
+        let o_uses_kquant = layer.wo.format().is_kquant_family();
+        // The QKV plan from the full (wq, wk, wv) triple — the same
+        // authority decode and prefill consult. Selecting on `wq` alone
+        // sent the production Gemma 3/4 shape (Q4_K Q/K + Q6_K V) to
+        // the uniform Q4_K kernel, which strides V at 144 bytes per
+        // superblock against Q6_K's 210-byte blocks — silent corruption
+        // of every V projection (audit F2; same operand-local-ABI
+        // lesson as the Phase A O-projection fix). Resolved HERE,
+        // before any command encoder exists: a refusal panic must not
+        // unwind past a live encoder, or Metal's "released without
+        // endEncoding" assertion turns it into a process-killing
+        // SIGTRAP.
+        use crate::stages::qkv_proj::{plan_qkv, QkvFormatRoute, QkvInputEncoding};
+        let qkv_plan = plan_qkv(layer.wq.format(), layer.wk.format(), layer.wv.format());
+        let qkv_uses_f32_input = qkv_plan.input == QkvInputEncoding::F32;
+        let qkv_kquant_pipeline = if qkv_uses_f32_input {
+            Some(match qkv_plan.route {
+                QkvFormatRoute::UniformQ4K => &self.attention.q4k_qkv_proj_pipeline,
+                QkvFormatRoute::UniformQ4Kf => &self.attention.q4kf_qkv_proj_pipeline,
+                QkvFormatRoute::MixedQ4kQ6kV => &self.attention.q4k_q6k_qkv_proj_pipeline,
+                // Q8 input encoding takes the else-branch below.
+                QkvFormatRoute::FusedQ8 => {
+                    unreachable!("FusedQ8 carries the Q8 input encoding")
+                }
+                // The hybrid path has no per-projection escape, and
+                // dispatching a fused kernel on a triple it does not
+                // decode reinterprets weight bytes. Refuse loudly.
+                QkvFormatRoute::PerProjection => panic!(
+                    "hybrid QKV has no fused kernel for (wq={:?}, wk={:?}, wv={:?}); \
+                     supported triples: Q4_K^3, Q4_KF^3, (Q4_K, Q4_K, Q6_K)",
+                    layer.wq.format(),
+                    layer.wk.format(),
+                    layer.wv.format(),
+                ),
+            })
+        } else {
+            None
+        };
         let layer_q_dim = layer_num_q_heads * layer_head_dim;
         let window_size = layer.sliding_window as u32;
 
@@ -57,10 +119,22 @@ impl MetalBackend {
         let wk_buf = self.bufs.get_bytes(layer.wk.data);
         let wv_buf = self.bufs.get_bytes(layer.wv.data);
         let wo_buf = self.bufs.get_bytes(layer.wo.data);
-        let wq_scale_buf = self.bufs.transient_from_f32(layer.wq.scales.unwrap_or(&[]));
-        let wk_scale_buf = self.bufs.transient_from_f32(layer.wk.scales.unwrap_or(&[]));
-        let wv_scale_buf = self.bufs.transient_from_f32(layer.wv.scales.unwrap_or(&[]));
-        let wo_scale_buf = self.bufs.transient_from_f32(layer.wo.scales.unwrap_or(&[]));
+        let wq_scale_buf = layer
+            .wq
+            .external_scales()
+            .map(|s| self.bufs.transient_from_f32(s));
+        let wk_scale_buf = layer
+            .wk
+            .external_scales()
+            .map(|s| self.bufs.transient_from_f32(s));
+        let wv_scale_buf = layer
+            .wv
+            .external_scales()
+            .map(|s| self.bufs.transient_from_f32(s));
+        let wo_scale_buf = layer
+            .wo
+            .external_scales()
+            .map(|s| self.bufs.transient_from_f32(s));
         let input_norm_buf = self.bufs.transient_from_f32(layer.input_norm);
         let post_attn_norm_buf = self.bufs.transient_from_f32(layer.post_attn_norm);
 
@@ -77,7 +151,7 @@ impl MetalBackend {
 
         let enc_a = cmd.new_compute_command_encoder();
 
-        if uses_kquant {
+        if qkv_uses_f32_input {
             use crate::ops::full_pipeline::encode_rms_norm;
             let norm_f32_buf = self.bufs.output((hidden * 4) as u64);
             let total_rows = (q_dim + kv_dim + kv_dim) as u32;
@@ -103,12 +177,10 @@ impl MetalBackend {
             // vs 4/64) — using one shader's constants while binding
             // the other's pipeline silently drops 75 % of QKV rows.
             // Same dispatch-geometry-mismatch class as the q4_matvec_v4
-            // ROADMAP ship-log entry.
-            let qkv_pipeline = if layer.wq.format == larql_compute::QuantFormat::Q4_KF {
-                &self.attention.q4kf_qkv_proj_pipeline
-            } else {
-                &self.attention.q4k_qkv_proj_pipeline
-            };
+            // ROADMAP ship-log entry. Route selection happened before
+            // the encoder was created (see `qkv_kquant_pipeline`).
+            let qkv_pipeline =
+                qkv_kquant_pipeline.expect("kquant QKV branch implies a routed fused pipeline");
             let num_tgs = (total_rows as u64).div_ceil(qkv_pipeline.rows_per_tg);
             enc_a.set_compute_pipeline_state(&qkv_pipeline.state);
             enc_a.set_buffer(0, Some(&wq_buf), 0);
@@ -129,7 +201,9 @@ impl MetalBackend {
         } else {
             // Q8 path
             let q8_buf = self.bufs.output(hidden as u64);
-            let q8s_buf = self.bufs.output((hidden / LEGACY_BLOCK_ELEMS * 4) as u64);
+            let q8s_buf = self
+                .bufs
+                .output((hidden.div_ceil(LEGACY_BLOCK_ELEMS) * 4) as u64);
 
             enc_a.set_compute_pipeline_state(&self.norms.rms_norm_q8_pipeline);
             enc_a.set_buffer(0, Some(&h_buf), 0);
@@ -149,14 +223,44 @@ impl MetalBackend {
             );
 
             let total_rows = (q_dim + kv_dim + kv_dim) as u32;
+            assert!(
+                hidden <= crate::shaders::q8_attn_proj::MAX_K,
+                "q8_qkv_proj stages its input in threadgroup memory capped at K = {}; \
+                 hidden {hidden} would corrupt it (audit F13)",
+                crate::shaders::q8_attn_proj::MAX_K,
+            );
             enc_a.set_compute_pipeline_state(&self.attention.q8_qkv_proj_pipeline.state);
             enc_a.set_buffer(0, Some(&wq_buf), 0);
             enc_a.set_buffer(1, Some(&wk_buf), 0);
             enc_a.set_buffer(2, Some(&wv_buf), 0);
             enc_a.set_buffer(3, Some(&q8_buf), 0);
-            enc_a.set_buffer(4, Some(&wq_scale_buf), 0);
-            enc_a.set_buffer(5, Some(&wk_scale_buf), 0);
-            enc_a.set_buffer(6, Some(&wv_scale_buf), 0);
+            enc_a.set_buffer(
+                4,
+                Some(
+                    wq_scale_buf
+                        .as_ref()
+                        .expect("legacy scale path requires an external-scale format"),
+                ),
+                0,
+            );
+            enc_a.set_buffer(
+                5,
+                Some(
+                    wk_scale_buf
+                        .as_ref()
+                        .expect("legacy scale path requires an external-scale format"),
+                ),
+                0,
+            );
+            enc_a.set_buffer(
+                6,
+                Some(
+                    wv_scale_buf
+                        .as_ref()
+                        .expect("legacy scale path requires an external-scale format"),
+                ),
+                0,
+            );
             enc_a.set_buffer(7, Some(&q8s_buf), 0);
             enc_a.set_buffer(8, Some(&q_out), 0);
             enc_a.set_buffer(9, Some(&k_out), 0);
@@ -284,6 +388,8 @@ impl MetalBackend {
                 layer_num_q_heads,
                 scale,
                 window_size,
+                layer.attn_sinks,
+                layer.attn_softcap,
             );
             enc_b.end_encoding();
         }
@@ -297,14 +403,14 @@ impl MetalBackend {
 
         let enc_c = cmd.new_compute_command_encoder();
 
-        // O projection
-        if uses_kquant {
+        // O projection — dispatched on `wo`'s own format.
+        if o_uses_kquant {
             let o_rows = hidden as u32;
             let o_k = layer_q_dim as u32;
             let o_out = self.bufs.output((hidden * 4) as u64);
-            let o_pipeline = if layer.wo.format == larql_compute::QuantFormat::Q4_KF {
+            let o_pipeline = if layer.wo.format() == larql_compute::QuantFormat::Q4_KF {
                 &self.attention.q4kf_proj_pipeline
-            } else if layer.wo.format == larql_compute::QuantFormat::Q6_K {
+            } else if layer.wo.format() == larql_compute::QuantFormat::Q6_K {
                 &self.quant.q6k_matvec_pipeline
             } else {
                 &self.quant.q4k_matvec_pipeline
@@ -364,11 +470,11 @@ impl MetalBackend {
             let o_q8 = self.bufs.output(layer_q_dim as u64);
             let o_q8s = self
                 .bufs
-                .output((layer_q_dim / LEGACY_BLOCK_ELEMS * 4) as u64);
+                .output((layer_q_dim.div_ceil(LEGACY_BLOCK_ELEMS) * 4) as u64);
             let o_out = self.bufs.output((hidden * 4) as u64);
 
             let dim_val = layer_q_dim as u32;
-            let blocks = (layer_q_dim / LEGACY_BLOCK_ELEMS) as u32;
+            let blocks = layer_q_dim.div_ceil(LEGACY_BLOCK_ELEMS) as u32;
             enc_c.set_compute_pipeline_state(&self.quant.q8_quant_pipeline);
             enc_c.set_buffer(0, Some(&attn_out), 0);
             enc_c.set_buffer(1, Some(&o_q8), 0);
@@ -385,10 +491,24 @@ impl MetalBackend {
 
             let o_rows = hidden as u32;
             let o_k = layer_q_dim as u32;
+            assert!(
+                layer_q_dim <= crate::shaders::q8_matvec::MAX_K,
+                "q8_matvec stages its Q8 input in threadgroup memory capped at K = {}; \
+                 layer_q_dim {layer_q_dim} would corrupt it (audit F13)",
+                crate::shaders::q8_matvec::MAX_K,
+            );
             enc_c.set_compute_pipeline_state(&self.quant.q8_matvec_pipeline.state);
             enc_c.set_buffer(0, Some(&wo_buf), 0);
             enc_c.set_buffer(1, Some(&o_q8), 0);
-            enc_c.set_buffer(2, Some(&wo_scale_buf), 0);
+            enc_c.set_buffer(
+                2,
+                Some(
+                    wo_scale_buf
+                        .as_ref()
+                        .expect("legacy scale path requires an external-scale format"),
+                ),
+                0,
+            );
             enc_c.set_buffer(3, Some(&o_q8s), 0);
             enc_c.set_buffer(4, Some(&o_out), 0);
             enc_c.set_bytes(5, 4, &o_rows as *const u32 as *const std::ffi::c_void);

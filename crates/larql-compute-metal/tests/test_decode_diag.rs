@@ -61,41 +61,18 @@ fn decode_token_with_decode_debug_env_first_call_executes_log_body() {
 
     let layer = FullPipelineLayer {
         attn_sinks: None,
-        wq: QuantWeight {
-            data: &wq,
-            scales: None,
-            format: QuantFormat::Q4_K,
-        },
-        wk: QuantWeight {
-            data: &wk,
-            scales: None,
-            format: QuantFormat::Q4_K,
-        },
-        wv: QuantWeight {
-            data: &wv,
-            scales: None,
-            format: QuantFormat::Q4_K,
-        },
-        wo: QuantWeight {
-            data: &wo,
-            scales: None,
-            format: QuantFormat::Q4_K,
-        },
-        gate: QuantWeight {
-            data: &gate,
-            scales: None,
-            format: QuantFormat::Q4_0,
-        },
-        up: QuantWeight {
-            data: &up,
-            scales: None,
-            format: QuantFormat::Q4_0,
-        },
-        down: QuantWeight {
-            data: &down,
-            scales: None,
-            format: QuantFormat::Q4_0,
-        },
+        attn_q_bias: None,
+        attn_k_bias: None,
+        attn_v_bias: None,
+        attn_o_bias: None,
+        attn_softcap: 0.0,
+        wq: QuantWeight::new(QuantFormat::Q4_K, &wq, larql_compute::QuantAux::None),
+        wk: QuantWeight::new(QuantFormat::Q4_K, &wk, larql_compute::QuantAux::None),
+        wv: QuantWeight::new(QuantFormat::Q4_K, &wv, larql_compute::QuantAux::None),
+        wo: QuantWeight::new(QuantFormat::Q4_K, &wo, larql_compute::QuantAux::None),
+        gate: QuantWeight::new(QuantFormat::Q4_0, &gate, larql_compute::QuantAux::None),
+        up: QuantWeight::new(QuantFormat::Q4_0, &up, larql_compute::QuantAux::None),
+        down: QuantWeight::new(QuantFormat::Q4_0, &down, larql_compute::QuantAux::None),
         input_norm: &norm_w,
         post_attn_norm: &norm_w,
         pre_ffn_norm: None,

@@ -9,7 +9,7 @@
 use larql_models::{Activation, ExpertGatePolicy};
 use ndarray::Array2;
 
-use crate::ffn::{gelu_tanh_gate_up, sigmoid, silu_gate_up};
+use crate::ffn::{gelu_tanh_gate_up, silu_gate_up};
 
 /// Combine `gate` and `up` into the activation fed to the down projection.
 ///
@@ -46,12 +46,15 @@ pub fn apply(
 /// no lower bound), `alpha` scales the sigmoid's argument rather than the
 /// value, and the up branch is offset by one — so an `up` of exactly zero
 /// still passes `glu` through instead of annihilating it.
+///
+/// The scalar math is owned by [`crate::MoeGateRule::combine`], which the
+/// quantised slice paths use directly — this wrapper only shapes it over
+/// `Array2`, so the PyTorch-pinned tests below cover both tiers.
 fn clamped_glu(gate: &Array2<f32>, up: &Array2<f32>, limit: f32, alpha: f32) -> Array2<f32> {
+    let rule = crate::MoeGateRule::ClampedGlu { limit, alpha };
     let mut out = Array2::<f32>::zeros(gate.raw_dim());
     for ((o, &g), &u) in out.iter_mut().zip(gate.iter()).zip(up.iter()) {
-        let g = g.min(limit);
-        let u = u.clamp(-limit, limit);
-        *o = (u + 1.0) * (g * sigmoid(g * alpha));
+        *o = rule.combine(g, u);
     }
     out
 }
@@ -59,6 +62,7 @@ fn clamped_glu(gate: &Array2<f32>, up: &Array2<f32>, limit: f32, alpha: f32) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ffn::sigmoid;
     use ndarray::arr2;
 
     const LIMIT: f32 = 7.0;

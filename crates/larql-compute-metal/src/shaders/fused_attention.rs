@@ -154,7 +154,9 @@ kernel void fused_attention(
 
         // Optional softcap
         if (softcap > 0.0f) {
-            dot = tanh(dot / softcap) * softcap;
+            // Clamped like every other tanh in this crate: Apple's tanh
+            // is (exp(2y)-1)/(exp(2y)+1) and NaNs past |y| ~ 44.
+            dot = tanh(clamp(dot / softcap, -15.0f, 15.0f)) * softcap;
         }
 
         tg_scores[k] = dot;
@@ -213,6 +215,14 @@ kernel void fused_attention(
     }
 }
 "#;
+
+/// Rust mirror of the MSL `MAX_FUSED_ATTENTION_SEQ_LEN` constant in
+/// [`SHADER`] — the `tg_scores` threadgroup scratch bound. The scratch
+/// is indexed by ABSOLUTE key position (not window-relative), so a
+/// sliding window does not reduce the requirement; seq_len past this
+/// writes out of bounds. Host dispatch asserts against it
+/// (`stages/attention.rs`).
+pub const MAX_FUSED_ATTENTION_SEQ_LEN: usize = 4096;
 
 pub struct Kernel;
 impl crate::kernels::ShaderKernel for Kernel {

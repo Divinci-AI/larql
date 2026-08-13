@@ -26,9 +26,9 @@ pub(super) fn q8k_direct_proj(
     // kernel below; gate on those two, but take the packed row stride from
     // the format helper instead of re-spelling `(in_dim/256)*144`/`*210`
     // (= `Q4_K_BLOCK_BYTES` / `Q6_K_BLOCK_BYTES` per 256-element block).
-    let bytes_per_row = match qw.format {
+    let bytes_per_row = match qw.format() {
         crate::QuantFormat::Q4_K | crate::QuantFormat::Q6_K => {
-            qw.format.packed_matrix_bytes(1, in_dim)?
+            qw.format().packed_matrix_bytes(1, in_dim)?
         }
         _ => return None,
     };
@@ -45,7 +45,7 @@ pub(super) fn q8k_direct_proj(
             return;
         }
         let w_chunk = &qw.data[row_start * bytes_per_row..(row_start + chunk_len) * bytes_per_row];
-        match qw.format {
+        match qw.format() {
             crate::QuantFormat::Q4_K => {
                 q4k_q8k_matvec_into(&mut chunk[..chunk_len], x_q8k, w_chunk, chunk_len, in_dim)
             }
@@ -103,8 +103,20 @@ pub(super) fn q4k_direct_proj(
     in_dim: usize,
 ) -> Option<Array2<f32>> {
     let x_slice = x.as_slice()?;
-    let out = backend.quant_matvec(qw.format, qw.data, x_slice, num_rows, in_dim)?;
+    let out = backend.quant_matvec(qw.format(), qw.data, x_slice, num_rows, in_dim)?;
     Array2::from_shape_vec((1, num_rows), out).ok()
+}
+
+/// Zero-pad a `[1, logical]` activation row out to `[1, stored]` so it can
+/// feed a matvec running at a padded store's row width. The pad region of
+/// every padded weight row dequantises to exactly zero, so the padded
+/// products contribute nothing — this is the same exactness argument the
+/// expert path pinned at hidden 288 (`stored_gate_up_cols`).
+pub(super) fn zero_pad_row(x: &Array2<f32>, stored: usize) -> Array2<f32> {
+    let logical = x.shape()[1];
+    let mut out = Array2::<f32>::zeros((1, stored));
+    out.slice_mut(ndarray::s![.., ..logical]).assign(x);
+    out
 }
 
 /// Projection half of the Q4K-direct decode step: input norm, Q/K/V
@@ -153,12 +165,30 @@ pub fn decode_step_project_q4k_direct(
         norm_offset,
     );
 
+    // The store's own row width — writers pad rows to the quant block
+    // (GPT-OSS: 2880 → 3072), and running the kernels at the logical
+    // `hidden` truncates the superblock count and desynchronises every
+    // row after the first. The three projections share one input, so an
+    // inconsistent triple means these bytes aren't a padded row store —
+    // fall back to the f32 dequant path rather than guess.
+    let k_store = wq.stored_cols(q_dim, hidden);
+    if k_store != wk.stored_cols(kv_dim, hidden) || k_store != wv.stored_cols(kv_dim, hidden) {
+        return None;
+    }
+    let h_padded;
+    let h_in: &Array2<f32> = if k_store == hidden {
+        &h_norm
+    } else {
+        h_padded = zero_pad_row(&h_norm, k_store);
+        &h_padded
+    };
+
     // Int8 route (`LARQL_Q4K_ATTN_INT8=1`): Q/K/V share one Q8_K quantisation
     // of `h_norm` (filled lazily by the first projection).
     let int8 = attn_int8_enabled();
     let mut h_norm_q8k: Option<crate::cpu::ops::q4k_q8k_dot::Q8KActivation> = None;
 
-    let mut q_full = direct_proj(backend, &wq, &h_norm, &mut h_norm_q8k, int8, q_dim, hidden)?;
+    let mut q_full = direct_proj(backend, &wq, h_in, &mut h_norm_q8k, int8, q_dim, k_store)?;
     if let Some(bias) = arch
         .attn_q_bias_key(layer)
         .and_then(|k| weights.vectors.get(&k))
@@ -195,8 +225,8 @@ pub fn decode_step_project_q4k_direct(
         rope_scaling,
     );
 
-    let mut k_full_new = direct_proj(backend, &wk, &h_norm, &mut h_norm_q8k, int8, kv_dim, hidden)?;
-    let mut v_full_new = direct_proj(backend, &wv, &h_norm, &mut h_norm_q8k, int8, kv_dim, hidden)?;
+    let mut k_full_new = direct_proj(backend, &wk, h_in, &mut h_norm_q8k, int8, kv_dim, k_store)?;
+    let mut v_full_new = direct_proj(backend, &wv, h_in, &mut h_norm_q8k, int8, kv_dim, k_store)?;
     if let Some(bias) = arch
         .attn_k_bias_key(layer)
         .and_then(|k| weights.vectors.get(&k))
@@ -291,15 +321,26 @@ pub fn decode_step_attend_q4k_direct(
         ),
     );
 
+    // Same stored-width contract as the projection half: the O rows may be
+    // padded past `q_dim`, and the padded columns dequantise to zero.
+    let o_k_store = wo.stored_cols(hidden, q_dim);
+    let attn_padded;
+    let attn_in: &Array2<f32> = if o_k_store == q_dim {
+        &attn_out
+    } else {
+        attn_padded = zero_pad_row(&attn_out, o_k_store);
+        &attn_padded
+    };
+
     let mut attn_out_q8k: Option<crate::cpu::ops::q4k_q8k_dot::Q8KActivation> = None;
     let mut attn_projected = direct_proj(
         backend,
         &wo,
-        &attn_out,
+        attn_in,
         &mut attn_out_q8k,
         int8,
         hidden,
-        q_dim,
+        o_k_store,
     )?;
     if let Some(bias) = arch
         .attn_o_bias_key(layer)
