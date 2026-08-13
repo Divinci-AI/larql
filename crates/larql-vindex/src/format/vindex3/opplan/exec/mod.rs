@@ -1,4 +1,4 @@
-//! The reference plan executor (V3-G5b-2 Stage A).
+//! The plan interpreter (V3-G5b-2 Stage A, V3-G5b-3b seam).
 //!
 //! Executes a [`ComponentOpPlan`] — and **nothing else**. Every argument
 //! comes from the plan (which came from the container); every operand
@@ -7,32 +7,31 @@
 //! is a compile error, not a guess. There is no family name, no layer
 //! arithmetic, no HF tensor name, and no default anywhere in this module.
 //!
-//! Deliberately naive f32 (see [`kernels`]): the operation plan is not
-//! documentation of execution — it *is* execution — and this module is
-//! the smallest thing that makes that sentence true. Performance comes
-//! later by lowering the same plan onto real kernels, not by changing
-//! what it means.
+//! This file owns *meaning*: operation ordering, residual ordering, layer
+//! traversal, whether an optional operation exists, and how position and
+//! span policy dispatch. A [`PlanBackend`] owns only arithmetic. One
+//! interpreter drives every backend, so a second implementation cannot
+//! quietly become a second reading of the model — see [`backend`].
 //!
 //! The trace mirrors the production forward's hook points
 //! (`post_attention` = after the attention residual add, `post_layer` =
-//! after the FFN residual add) so Stage A parity can compare layer by
-//! layer against the checkpoint-driven oracle.
+//! after the FFN residual add) so parity can compare layer by layer
+//! against a checkpoint-driven oracle.
 
+pub mod backend;
 pub mod kernels;
 pub mod operands;
+pub mod production;
+pub mod reference;
 
 #[cfg(test)]
 mod tests;
 
-use larql_models::config::{
-    GateActivation, GateCombine, GatePlacement, GateSource, PositionPolicy, QkNormScope,
-};
-
-use super::super::graph::policy::AttentionSpan;
-use super::{AttentionOp, ComponentOpPlan, FfnOp, LayerPlan, NormOp};
+use super::{AttentionOp, ComponentOpPlan, LayerPlan, NormOp};
 use crate::error::VindexError;
-use kernels::{activate, matvec, norm, rope_rotate, sigmoid, softcap, softmax};
+use backend::{AttentionCall, FfnCall, GateCall, NormCall, PlanBackend, ProjectCall, QkNormCall};
 use operands::OperandStore;
+use reference::ReferenceBackend;
 
 /// Per-layer hidden-state taps, mirroring the production hook points.
 #[derive(Debug)]
@@ -46,6 +45,15 @@ pub struct LayerTrace {
 /// The full execution record of one component over one token sequence.
 #[derive(Debug)]
 pub struct ExecutionTrace {
+    /// The residual *entering* layer 0, per position — everything the
+    /// embedding op produced and nothing else.
+    ///
+    /// Captured because a layer-by-layer comparison needs somewhere to
+    /// stand before layer 0: if the two sides already disagree here, no
+    /// per-layer margin below means what it appears to mean. It is the
+    /// same tap `scripts/dump_layers_hf.py` takes with a pre-hook on
+    /// layer 0.
+    pub embedded: Vec<Vec<f32>>,
     pub layers: Vec<LayerTrace>,
     /// Final-normed hidden state of the last position.
     pub final_hidden: Vec<f32>,
@@ -53,11 +61,28 @@ pub struct ExecutionTrace {
     pub logits: Option<Vec<f32>>,
 }
 
-/// Execute a text-component plan over `tokens`, tracing every layer.
+/// Execute a text-component plan on the reference backend.
+///
+/// The semantic anchor: naive f32, sharing no arithmetic with
+/// `larql-compute`.
 pub fn execute_text(
     plan: &ComponentOpPlan,
     store: &OperandStore,
     tokens: &[u32],
+) -> Result<ExecutionTrace, VindexError> {
+    execute_plan(plan, store, tokens, &ReferenceBackend::new())
+}
+
+/// Execute a text-component plan over `tokens` on `backend`, tracing
+/// every layer.
+///
+/// The backend is a parameter, not a branch: nothing below reads its
+/// identity, and swapping it must not change which operations run.
+pub fn execute_plan<B: PlanBackend + ?Sized>(
+    plan: &ComponentOpPlan,
+    store: &OperandStore,
+    tokens: &[u32],
+    backend: &B,
 ) -> Result<ExecutionTrace, VindexError> {
     let embedding = plan.embedding.as_ref().ok_or_else(|| {
         VindexError::Parse(format!(
@@ -69,43 +94,54 @@ pub fn execute_text(
     let hidden = embedding.table.shape[1];
     let mut h: Vec<Vec<f32>> = tokens
         .iter()
-        .map(|&t| {
-            table[t as usize * hidden..(t as usize + 1) * hidden]
-                .iter()
-                .map(|v| v * embedding.scale)
-                .collect()
-        })
+        .map(|&t| backend.embed(&table, hidden, t, embedding.scale))
         .collect();
+    // The judged embedding normalisation, when the plan carries one. It
+    // is weightless — no operand, hence the empty weight slice — and it
+    // runs *after* any embedding scale, matching the upstream order in
+    // which the scale belongs to the table and the norm to the lookup.
+    if let Some(norm) = embedding.norm {
+        for row in h.iter_mut() {
+            *row = backend.norm(NormCall {
+                kind: norm.kind,
+                x: row,
+                weight: &[],
+                weight_offset: 0.0,
+                eps: norm.eps,
+            });
+        }
+    }
+    let embedded = h.clone();
 
     let mut layers = Vec::with_capacity(plan.layers.len());
     for layer in &plan.layers {
-        let trace = execute_layer(layer, store, &mut h, hidden)?;
-        layers.push(trace);
+        layers.push(execute_layer(layer, store, &mut h, hidden, backend)?);
     }
 
     let last = h.last().ok_or_else(|| {
         VindexError::Parse("cannot execute over an empty token sequence".to_string())
     })?;
     let final_hidden = match &plan.final_norm {
-        Some(op) => apply_norm_op(op, store, last)?,
+        Some(op) => apply_norm_op(op, store, last, backend)?,
         None => last.clone(),
     };
     let logits = match &plan.output {
         Some(output) => {
             let weight = store.load(&output.projection)?;
             let vocab = output.projection.shape[0];
-            let mut logits = matvec(&weight, vocab, hidden, &final_hidden);
-            for logit in &mut logits {
-                *logit *= output.multiplier as f32;
-                if let Some(cap) = output.softcapping {
-                    *logit = softcap(*logit, cap);
-                }
-            }
-            Some(logits)
+            Some(backend.output_head(
+                &weight,
+                vocab,
+                hidden,
+                &final_hidden,
+                output.multiplier,
+                output.softcapping,
+            ))
         }
         None => None,
     };
     Ok(ExecutionTrace {
+        embedded,
         layers,
         final_hidden,
         logits,
@@ -114,40 +150,69 @@ pub fn execute_text(
 
 /// One decoder layer: norms and residuals exactly where the plan puts
 /// them — placement is data, not code structure.
-fn execute_layer(
+fn execute_layer<B: PlanBackend + ?Sized>(
     layer: &LayerPlan,
     store: &OperandStore,
     h: &mut [Vec<f32>],
     hidden: usize,
+    backend: &B,
 ) -> Result<LayerTrace, VindexError> {
+    // The attention input is normalised here, once, and handed to the
+    // backend — the judged gate reads the same vector, so producing it
+    // in one place is what keeps the two from drifting apart.
+    let mut inputs = Vec::with_capacity(h.len());
+    for row in h.iter() {
+        inputs.push(apply_norm_op(
+            &layer.pre_attention_norm,
+            store,
+            row,
+            backend,
+        )?);
+    }
     let attn_out = attention(
         &layer.attention,
-        &layer.pre_attention_norm,
+        &inputs,
+        layer.pre_attention_norm.eps,
         store,
-        h,
         hidden,
+        backend,
     )?;
     for (row, out) in h.iter_mut().zip(&attn_out) {
         let out = match &layer.post_attention_norm {
-            Some(op) => apply_norm_op(op, store, out)?,
+            Some(op) => apply_norm_op(op, store, out, backend)?,
             None => out.clone(),
         };
-        for (a, b) in row.iter_mut().zip(&out) {
-            *a += b;
-        }
+        backend.residual_add(row, &out);
     }
     let post_attention = h.to_vec();
 
+    // FFN operands load once per layer, not once per position. They are
+    // the bulk of a decoder layer's weight, and `OperandStore::load`
+    // allocates a fresh f32 copy per call — re-reading them for every
+    // token would dominate the run on a real model without changing a
+    // single number.
+    let up = store.load(&layer.ffn.up)?;
+    let down = store.load(&layer.ffn.down)?;
+    let gate = match &layer.ffn.gate {
+        Some(gate_ref) => Some(store.load(gate_ref)?),
+        None => None,
+    };
     for row in h.iter_mut() {
-        let normed = apply_norm_op(&layer.pre_ffn_norm, store, row)?;
-        let ffn_out = ffn(&layer.ffn, store, &normed, hidden)?;
+        let normed = apply_norm_op(&layer.pre_ffn_norm, store, row, backend)?;
+        let ffn_out = backend.ffn(FfnCall {
+            x: &normed,
+            hidden,
+            intermediate: layer.ffn.intermediate_size,
+            gate: gate.as_deref(),
+            up: &up,
+            down: &down,
+            activation: layer.ffn.activation,
+        })?;
         let ffn_out = match &layer.post_ffn_norm {
-            Some(op) => apply_norm_op(op, store, &ffn_out)?,
+            Some(op) => apply_norm_op(op, store, &ffn_out, backend)?,
             None => ffn_out,
         };
-        for (a, b) in row.iter_mut().zip(&ffn_out) {
-            *a += b;
-        }
+        backend.residual_add(row, &ffn_out);
     }
     Ok(LayerTrace {
         post_attention,
@@ -155,20 +220,16 @@ fn execute_layer(
     })
 }
 
-/// The attention op: geometry, scales, span, position, QK normalisation
-/// and the optional output gate — all plan arguments.
-fn attention(
+/// Load the attention operands and hand the backend a fully resolved
+/// call. Every judged fact travels as an argument; none is re-derived.
+fn attention<B: PlanBackend + ?Sized>(
     op: &AttentionOp,
-    pre_norm: &NormOp,
+    inputs: &[Vec<f32>],
+    qk_norm_eps: f64,
     store: &OperandStore,
-    h: &[Vec<f32>],
     hidden: usize,
+    backend: &B,
 ) -> Result<Vec<Vec<f32>>, VindexError> {
-    let head_dim = op.head_dim;
-    let q_rows = op.num_q_heads * head_dim;
-    let kv_rows = op.num_kv_heads * head_dim;
-    let group = op.num_q_heads / op.num_kv_heads;
-
     let w_q = store.load(&op.q)?;
     let w_k = store.load(&op.k)?;
     let w_v = store.load(&op.v)?;
@@ -181,177 +242,78 @@ fn attention(
         Some(gate) => Some(store.load(&gate.projection)?),
         None => None,
     };
-
-    // Projections per position, with QK normalisation, query scale and
-    // position encoding applied in the judged order.
-    let mut queries = Vec::with_capacity(h.len());
-    let mut keys = Vec::with_capacity(h.len());
-    let mut values = Vec::with_capacity(h.len());
-    let mut pre_rows = Vec::with_capacity(h.len());
-    for (position, row) in h.iter().enumerate() {
-        let pre = apply_norm_op(pre_norm, store, row)?;
-        let mut q = matvec(&w_q, q_rows, hidden, &pre);
-        let mut k = matvec(&w_k, kv_rows, hidden, &pre);
-        let v = matvec(&w_v, kv_rows, hidden, &pre);
-
-        apply_qk_norm(op, &qk_weights, pre_norm.eps, &mut q, &mut k, head_dim)?;
-        for value in &mut q {
-            *value *= op.query_scale as f32;
-        }
-        if let PositionPolicy::Rope { theta } = op.position {
-            for head in q.chunks_exact_mut(head_dim) {
-                rope_rotate(head, position, theta);
-            }
-            for head in k.chunks_exact_mut(head_dim) {
-                rope_rotate(head, position, theta);
-            }
-        }
-        queries.push(q);
-        keys.push(k);
-        values.push(v);
-        pre_rows.push(pre);
-    }
-
-    let mut out = Vec::with_capacity(h.len());
-    for position in 0..h.len() {
-        // Span: which key positions this query may attend to.
-        let start = match (op.span, op.window) {
-            (AttentionSpan::Sliding, Some(window)) => (position + 1).saturating_sub(window),
-            _ => 0,
-        };
-        let mut concat = vec![0.0f32; q_rows];
-        for q_head in 0..op.num_q_heads {
-            let kv_head = q_head / group;
-            let q_slice = &queries[position][q_head * head_dim..(q_head + 1) * head_dim];
-            let mut scores: Vec<f32> = (start..=position)
-                .map(|key_position| {
-                    let k_slice = &keys[key_position][kv_head * head_dim..(kv_head + 1) * head_dim];
-                    let mut dot = 0.0f32;
-                    for (a, b) in q_slice.iter().zip(k_slice) {
-                        dot += a * b;
-                    }
-                    let mut score = dot * op.score_scale as f32;
-                    if let Some(cap) = op.logit_softcapping {
-                        score = softcap(score, cap);
-                    }
-                    score
-                })
-                .collect();
-            softmax(&mut scores);
-            let head_out = &mut concat[q_head * head_dim..(q_head + 1) * head_dim];
-            for (offset, key_position) in (start..=position).enumerate() {
-                let v_slice = &values[key_position][kv_head * head_dim..(kv_head + 1) * head_dim];
-                let weight = scores[offset];
-                for (acc, v) in head_out.iter_mut().zip(v_slice) {
-                    *acc += weight * v;
-                }
-            }
-        }
-
-        if let (Some(gate), Some(w_gate)) = (&op.output_gate, &w_gate) {
-            // Exhaustive on the judged semantics: a new variant must be
-            // implemented here before it can execute.
-            let GateSource::AttentionInput = gate.spec.source;
-            let GateActivation::Sigmoid = gate.spec.activation;
-            let GateCombine::ElementwiseMultiply = gate.spec.combine;
-            let GatePlacement::AfterAggregationBeforeOutputProjection = gate.spec.placement;
-            let gate_values = matvec(w_gate, q_rows, hidden, &pre_rows[position]);
-            for (c, g) in concat.iter_mut().zip(&gate_values) {
-                *c *= sigmoid(*g);
-            }
-        }
-
-        out.push(matvec(&w_o, hidden, q_rows, &concat));
-    }
-    Ok(out)
-}
-
-/// QK normalisation: weighted per-head when the plan binds norm weights,
-/// parameter-free when the surface judged it. Epsilon rides with the
-/// layer's norm surface (`pre_norm.eps`) — neither QK form declares its
-/// own upstream.
-fn apply_qk_norm(
-    op: &AttentionOp,
-    qk_weights: &Option<(Vec<f32>, Vec<f32>)>,
-    eps: f64,
-    q: &mut [f32],
-    k: &mut [f32],
-    head_dim: usize,
-) -> Result<(), VindexError> {
-    if let (Some(qk), Some((q_weight, k_weight))) = (&op.qk_norm, qk_weights) {
-        match qk.scope {
-            QkNormScope::PerHead => {
-                for head in q.chunks_exact_mut(head_dim) {
-                    let normed = norm(
-                        larql_models::config::NormType::RmsNorm,
-                        head,
-                        q_weight,
-                        qk.weight_offset,
-                        eps,
-                    );
-                    head.copy_from_slice(&normed);
-                }
-                for head in k.chunks_exact_mut(head_dim) {
-                    let normed = norm(
-                        larql_models::config::NormType::RmsNorm,
-                        head,
-                        k_weight,
-                        qk.weight_offset,
-                        eps,
-                    );
-                    head.copy_from_slice(&normed);
-                }
-            }
-            QkNormScope::FullProjection => {
-                return Err(VindexError::Parse(
-                    "full-projection QK norm has no judged reference execution yet".to_string(),
-                ));
-            }
-        }
-    }
-    if op.parameter_free_qk_norm.q {
-        for head in q.chunks_exact_mut(head_dim) {
-            let normed = norm(larql_models::config::NormType::RmsNorm, head, &[], 0.0, eps);
-            head.copy_from_slice(&normed);
-        }
-    }
-    if op.parameter_free_qk_norm.k {
-        for head in k.chunks_exact_mut(head_dim) {
-            let normed = norm(larql_models::config::NormType::RmsNorm, head, &[], 0.0, eps);
-            head.copy_from_slice(&normed);
-        }
-    }
-    Ok(())
-}
-
-/// The FFN op: gated or standard per the plan.
-fn ffn(
-    op: &FfnOp,
-    store: &OperandStore,
-    x: &[f32],
-    hidden: usize,
-) -> Result<Vec<f32>, VindexError> {
-    let up = matvec(&store.load(&op.up)?, op.intermediate_size, hidden, x);
-    let inner: Vec<f32> = match &op.gate {
-        Some(gate_ref) => {
-            let gate = matvec(&store.load(gate_ref)?, op.intermediate_size, hidden, x);
-            gate.iter()
-                .zip(&up)
-                .map(|(g, u)| activate(op.activation, *g) * u)
-                .collect()
-        }
-        None => up.iter().map(|u| activate(op.activation, *u)).collect(),
+    let qk_norm = match (&op.qk_norm, &qk_weights) {
+        (Some(qk), Some((q_weight, k_weight))) => Some(QkNormCall {
+            scope: qk.scope,
+            weight_offset: qk.weight_offset,
+            q_weight,
+            k_weight,
+        }),
+        _ => None,
     };
-    Ok(matvec(
-        &store.load(&op.down)?,
+    let gate = match (&op.output_gate, &w_gate) {
+        (Some(gate), Some(weight)) => Some(GateCall {
+            spec: gate.spec,
+            weight,
+        }),
+        _ => None,
+    };
+    backend.attention(AttentionCall {
+        inputs,
         hidden,
-        op.intermediate_size,
-        &inner,
-    ))
+        num_q_heads: op.num_q_heads,
+        num_kv_heads: op.num_kv_heads,
+        head_dim: op.head_dim,
+        w_q: &w_q,
+        w_k: &w_k,
+        w_v: &w_v,
+        w_o: &w_o,
+        qk_norm,
+        parameter_free_qk_norm: op.parameter_free_qk_norm,
+        qk_norm_eps,
+        query_scale: op.query_scale,
+        score_scale: op.score_scale,
+        logit_softcapping: op.logit_softcapping,
+        position: op.position,
+        span: op.span,
+        window: op.window,
+        gate,
+    })
 }
 
 /// Apply one norm op to one vector.
-fn apply_norm_op(op: &NormOp, store: &OperandStore, x: &[f32]) -> Result<Vec<f32>, VindexError> {
+fn apply_norm_op<B: PlanBackend + ?Sized>(
+    op: &NormOp,
+    store: &OperandStore,
+    x: &[f32],
+    backend: &B,
+) -> Result<Vec<f32>, VindexError> {
     let weight = store.load(&op.weight)?;
-    Ok(norm(op.kind, x, &weight, op.weight_offset, op.eps))
+    Ok(backend.norm(NormCall {
+        kind: op.kind,
+        x,
+        weight: &weight,
+        weight_offset: op.weight_offset,
+        eps: op.eps,
+    }))
+}
+
+/// Project one vector through an `[out, in]` weight.
+///
+/// Kept as a named helper so the interpreter never open-codes a matvec:
+/// every projection in a plan goes through the backend.
+#[allow(dead_code)]
+fn project<B: PlanBackend + ?Sized>(
+    backend: &B,
+    weight: &[f32],
+    out_dim: usize,
+    in_dim: usize,
+    x: &[f32],
+) -> Vec<f32> {
+    backend.project(ProjectCall {
+        weight,
+        out_dim,
+        in_dim,
+        x,
+    })
 }

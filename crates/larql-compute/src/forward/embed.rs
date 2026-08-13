@@ -12,7 +12,7 @@ use ndarray::Array2;
 pub fn embed_tokens_pub(weights: &ModelWeights, token_ids: &[u32]) -> Array2<f32> {
     let seq_len = token_ids.len();
     let hidden = weights.hidden_size;
-    let scale = weights.arch.embed_scale();
+    let scale = weights.arch.embed_scale_multiplier();
 
     let mut h = Array2::<f32>::zeros((seq_len, hidden));
     for (i, &tok_id) in token_ids.iter().enumerate() {
@@ -67,7 +67,7 @@ pub fn embed_plan(weights: &ModelWeights, plan: &EmbeddingPlan) -> Array2<f32> {
     // Mixed-modality (or M-RoPE-positioned) path. Build chunks
     // independently then row-stack.
     let hidden = weights.hidden_size;
-    let scale = weights.arch.embed_scale();
+    let scale = weights.arch.embed_scale_multiplier();
     let precomputed_scaling = weights
         .arch
         .multimodal()
@@ -216,7 +216,7 @@ mod tests {
         // architectures that override the scale.
         let weights = make_test_weights();
         let out = embed_tokens_pub(&weights, &[2u32]);
-        let scale = weights.arch.embed_scale();
+        let scale = weights.arch.embed_scale_multiplier();
         let raw = weights.embed.row(2);
         for (j, v) in out.row(0).iter().enumerate() {
             assert!(

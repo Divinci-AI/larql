@@ -17,10 +17,17 @@
 use crate::validation::ConfigValidationResult;
 
 use super::{
-    layer_types, rope_types, Activation, ExpertFormat, ExpertGatePolicy, ExpertRoutingPolicy,
-    FfnType, GateUpLayout, Llama3RopeScaling, ModelConfig, NormType, PositionPolicy, QkNormScope,
-    YarnRopeScaling,
+    layer_types, rope_types, Activation, EmbeddingNorm, ExpertFormat, ExpertGatePolicy,
+    ExpertRoutingPolicy, FfnType, GateUpLayout, Llama3RopeScaling, ModelConfig, NormSpec, NormType,
+    PositionPolicy, PostNormEps, QkNormScope, YarnRopeScaling,
 };
+
+/// The multiplier that leaves a value unchanged.
+///
+/// Named so that lowering an absent operation to "multiply by one" reads
+/// as the deliberate identity it is, and cannot be mistaken for a magic
+/// constant standing in for an unread config fact.
+const IDENTITY_SCALE: f32 = 1.0;
 
 /// Architecture-specific behavior. Describes how a model is structured
 /// without performing any computation.
@@ -292,13 +299,30 @@ pub trait ModelArchitecture: Send + Sync {
         crate::config::ParameterFreeQkNorm::default()
     }
 
-    /// Embedding scaling factor applied after lookup.
-    /// Gemma: sqrt(hidden_size), Granite: embedding_multiplier, Llama: 1.0.
-    fn embed_scale(&self) -> f32 {
-        self.config()
-            .embedding_multiplier
-            .map(|v| v as f32)
-            .unwrap_or(1.0)
+    /// The embedding-scale *operation*, when the model has one.
+    /// Gemma: sqrt(hidden_size), Granite: `embedding_multiplier`.
+    ///
+    /// `None` means the model declares no embedding-scale operation — a
+    /// different claim from `Some(1.0)`, which means the source semantics
+    /// specify a multiply by one. Collapsing the two here would destroy
+    /// the distinction before inventory or vindex ever sees it, so the
+    /// front end preserves absence as absence and only
+    /// [`embed_scale_multiplier`](Self::embed_scale_multiplier) may turn
+    /// it into a number.
+    fn embed_scale(&self) -> Option<f32> {
+        self.config().embedding_multiplier.map(|v| v as f32)
+    }
+
+    /// The factor the forward path multiplies embeddings by.
+    ///
+    /// Executing "no embedding-scale operation" and "multiply by one"
+    /// coincide numerically, and execution must eventually produce a
+    /// number. This is the single, named place that coincidence is
+    /// allowed — a judgment about lowering, not a fallback that hides a
+    /// missing fact. Semantic consumers must read
+    /// [`embed_scale`](Self::embed_scale) instead.
+    fn embed_scale_multiplier(&self) -> f32 {
+        self.embed_scale().unwrap_or(IDENTITY_SCALE)
     }
 
     /// BOS token to prepend before inference when the tokenizer's
@@ -564,18 +588,72 @@ pub trait ModelArchitecture: Send + Sync {
     }
 
     /// Multiplier on the final hidden state before the vocabulary
-    /// projection (`output_multiplier`). `None` = 1.0.
+    /// projection (`output_multiplier`). `None` = the model declares no
+    /// output-multiplier operation, which is a different claim from
+    /// `Some(1.0)`.
     fn output_multiplier(&self) -> Option<f64> {
         self.config().output_multiplier
     }
 
-    /// Epsilon for post-norms when the checkpoint declares one distinct
-    /// from `rms_norm_eps`. `None` = post-norms share
-    /// [`norm_eps`](Self::norm_eps) — the two can differ by orders of
-    /// magnitude (1e-8 vs 1e-5 on the same checkpoint), which is the OLMoE
-    /// eps failure shape on a second axis.
-    fn post_norm_eps(&self) -> Option<f64> {
-        self.config().post_norm_eps
+    /// The complete normalisation applied at the *pre* sites — before
+    /// attention and before the FFN.
+    ///
+    /// The default composes this family's model-scope answers, which is
+    /// correct for the many architectures whose norm sites really are
+    /// uniform. A family whose sites differ overrides the site that
+    /// differs, rather than every consumer learning the exception.
+    fn pre_norm_spec(&self) -> NormSpec {
+        NormSpec {
+            kind: self.norm_type(),
+            eps: self.norm_eps() as f64,
+            weight_offset: self.norm_weight_offset(),
+        }
+    }
+
+    /// The complete normalisation applied at the *post* sites, when this
+    /// family has judged one. `None` = unjudged; a four-norm stack in
+    /// that state is refused rather than inheriting the pre-norm answer.
+    fn post_norm_spec(&self) -> Option<NormSpec> {
+        self.post_norm_eps().map(|eps| NormSpec {
+            kind: self.norm_type(),
+            eps: eps.resolve(self.norm_eps() as f64),
+            weight_offset: self.norm_weight_offset(),
+        })
+    }
+
+    /// The complete normalisation applied after the last block, before
+    /// the head. Defaults to the pre-norm spec — true wherever a family
+    /// uses one norm everywhere, and overridden where it does not.
+    fn final_norm_spec(&self) -> NormSpec {
+        self.pre_norm_spec()
+    }
+
+    /// The normalisation applied to embedding-table output, when this
+    /// family judges one.
+    ///
+    /// `None` = no such operation. Weightless, so no tensor can evidence
+    /// it and no gate below can infer it — a family that has one must say
+    /// so, exactly like [`attention_output_gate`](Self::attention_output_gate).
+    fn embedding_norm(&self) -> Option<EmbeddingNorm> {
+        None
+    }
+
+    /// Which epsilon this model's post-norms use, when that has been
+    /// established.
+    ///
+    /// `None` = unjudged: nothing has established what the post-norms use.
+    /// A four-norm stack in that state is not executable, and closure
+    /// refuses it rather than inheriting `norm_eps` — the two can differ by
+    /// orders of magnitude (1e-8 vs 1e-5 on the same checkpoint), which is
+    /// the OLMoE eps failure shape on a second axis.
+    ///
+    /// A checkpoint that declares `post_norm_eps` answers with
+    /// [`PostNormEps::Value`]. Families whose post-norms genuinely share
+    /// the pre-norm epsilon override this to say
+    /// [`PostNormEps::Shared`] explicitly, because "they share" is a
+    /// judgment the family makes, not a default the absence implies.
+    fn post_norm_eps(&self) -> Option<PostNormEps> {
+        self.config().post_norm_eps.map(PostNormEps::Value)
     }
 
     /// Whether attention projections carry biases, when the checkpoint

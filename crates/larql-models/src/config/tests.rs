@@ -463,3 +463,39 @@ fn tie_word_embeddings_is_read_from_the_outer_config_too() {
     }));
     assert_eq!(cfg.config().tie_word_embeddings, Some(false));
 }
+
+/// `Shared` and `Value` are different claims, and `resolve` is the only
+/// place either becomes a number.
+#[test]
+fn post_norm_eps_resolves_shared_and_distinct_differently() {
+    use crate::config::PostNormEps;
+    const PRE: f64 = 1e-5;
+    // Sharing takes the pre-norm epsilon it is handed — never one it
+    // read from somewhere else.
+    assert_eq!(PostNormEps::Shared.resolve(PRE), PRE);
+    assert_eq!(PostNormEps::Shared.resolve(1e-12), 1e-12);
+    // A declared value ignores the pre-norm epsilon entirely.
+    assert_eq!(PostNormEps::Value(1e-8).resolve(PRE), 1e-8);
+    assert_ne!(PostNormEps::Value(1e-8).resolve(PRE), PRE);
+}
+
+/// The four-norm Gemma families state the sharing judgment rather than
+/// leaving it to be inherited — the state VINDEX3 refuses.
+#[test]
+fn four_norm_gemma_families_declare_shared_post_norm_eps() {
+    use crate::config::PostNormEps;
+    for family in ["gemma2", "gemma3"] {
+        let arch = crate::detect::detect_from_json(&serde_json::json!({
+            "model_type": family,
+            "hidden_size": 8, "num_hidden_layers": 1,
+            "num_attention_heads": 2, "num_key_value_heads": 1,
+            "intermediate_size": 16,
+        }));
+        assert!(arch.has_post_norms(), "{family} is a four-norm family");
+        assert_eq!(
+            arch.post_norm_eps(),
+            Some(PostNormEps::Shared),
+            "{family} must declare sharing, not leave it unjudged"
+        );
+    }
+}

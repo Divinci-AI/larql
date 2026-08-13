@@ -126,9 +126,11 @@ pub struct ResolvedTopology {
 /// defaults anything.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResolvedExecution {
-    /// Multiplier applied to the (normalised) query states before
-    /// position encoding — a declared `qk_scale_factor`, or 1.0.
-    pub query_scale: f64,
+    /// The query-scale operation: a multiplier on the (normalised) query
+    /// states before position encoding. `None` = the model declares no
+    /// such operation, which is a different claim from `Some(1.0)`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query_scale: Option<f64>,
     /// Canonical score-time multiplier on QK^T:
     /// (`query_pre_attn_scalar` or `head_dim`)^-0.5. Kept separate from
     /// [`Self::query_scale`]: folding them is algebra-equivalent but not
@@ -151,20 +153,32 @@ pub struct ResolvedExecution {
     pub attention_output_gate: Option<crate::config::AttentionGateSpec>,
     pub activation: crate::config::Activation,
     pub ffn_type: crate::config::FfnType,
-    pub norm_kind: crate::config::NormType,
-    pub norm_eps: f64,
-    /// Post-norm epsilon; equals [`Self::norm_eps`] unless the checkpoint
-    /// declared its own.
-    pub post_norm_eps: f64,
+    /// Complete norm spec for the pre-attention / pre-FFN sites.
+    pub norm_pre: crate::config::NormSpec,
+    /// Complete norm spec for the post-attention / post-FFN sites.
+    /// `None` = unjudged; a four-norm stack in that state is refused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub norm_post: Option<crate::config::NormSpec>,
+    /// Complete norm spec for the final norm before the head. Separate
+    /// because a family may use a different convention there — Glimmer
+    /// uses a centred norm in its layers and an ordinary one here.
+    pub norm_final: crate::config::NormSpec,
+    /// Normalisation applied to embedding-table output. `None` = no such
+    /// operation. Weightless, so no operand evidences it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding_norm: Option<crate::config::EmbeddingNorm>,
     /// Whether layers carry separate post-norms around attention/FFN
     /// (Gemma-style four-norm layers) in addition to pre-norms.
     pub post_norms: bool,
-    /// Offset added to norm weights at runtime (Gemma: 1.0).
-    pub norm_weight_offset: f32,
-    /// Multiplier applied to embeddings after lookup; 1.0 = identity.
-    pub embed_scale: f32,
-    /// Multiplier applied before the vocabulary projection; 1.0 = identity.
-    pub output_multiplier: f64,
+    /// The embedding-scale operation, applied after lookup. `None` = the
+    /// model declares no such operation, distinct from `Some(1.0)`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embed_scale: Option<f32>,
+    /// The output-multiplier operation, applied before the vocabulary
+    /// projection. `None` = the model declares no such operation,
+    /// distinct from `Some(1.0)`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_multiplier: Option<f64>,
     /// Final-logit softcap; `None` = the op is absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub final_logit_softcapping: Option<f32>,

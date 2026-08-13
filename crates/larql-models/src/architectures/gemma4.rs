@@ -15,7 +15,9 @@
 //! 2. `sliding_window_pattern` field (every Nth layer is full)
 //! 3. Default pattern of 6 (every 6th layer is full)
 
-use crate::config::{Activation, ExpertFormat, GateUpLayout, ModelArchitecture, ModelConfig};
+use crate::config::{
+    Activation, ExpertFormat, GateUpLayout, ModelArchitecture, ModelConfig, PostNormEps,
+};
 use crate::tensor_keys::qk_norm;
 
 /// Layer type string used in Gemma 4 `layer_types` config field.
@@ -196,8 +198,16 @@ impl ModelArchitecture for Gemma4Arch {
         Activation::GeluTanh
     }
 
-    fn embed_scale(&self) -> f32 {
-        (self.config.hidden_size as f32).sqrt()
+    fn embed_scale(&self) -> Option<f32> {
+        Some((self.config.hidden_size as f32).sqrt())
+    }
+
+    /// Gemma 4's post-norms share `rms_norm_eps` with its pre-norms — see
+    /// [`Gemma2Architecture::post_norm_eps`](super::gemma2::Gemma2Architecture).
+    /// Declared rather than inherited: a four-norm stack that leaves the
+    /// post-norm epsilon unjudged is refused.
+    fn post_norm_eps(&self) -> Option<PostNormEps> {
+        Some(PostNormEps::Shared)
     }
 
     // Gemma 4's shipped `tokenizer.json` omits `<bos>` from its

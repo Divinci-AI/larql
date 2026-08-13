@@ -13,6 +13,7 @@ mod controls;
 mod golden;
 mod kernels;
 mod parity;
+mod seam;
 mod smoke;
 
 use std::io::Write;
