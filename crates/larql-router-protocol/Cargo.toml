@@ -69,6 +69,7 @@ http3 = [
 serde_json = { workspace = true }
 
 [build-dependencies]
+prost-build = "0.14.4"
 tonic-build = "0.13"
 
 # `protobuf-src` builds a fresh `protoc` via cmake. That works on Linux

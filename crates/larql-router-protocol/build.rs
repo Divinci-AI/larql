@@ -5,7 +5,8 @@
 // up `protoc` from the `PROTOC` env var or PATH automatically.
 #[cfg(not(windows))]
 fn set_protoc() {
-    std::env::set_var("PROTOC", protobuf_src::protoc());
+    let mut prost_build = prost_build::Config::new();
+    prost_build.protoc_executable(protobuf_src::protoc());
 }
 
 #[cfg(windows)]

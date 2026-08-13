@@ -103,6 +103,7 @@ quic = ["larql-router-protocol/quic", "dep:rustls"]
 http3 = ["quic", "larql-router-protocol/http3"]
 
 [build-dependencies]
+prost-build = "0.14.4"
 tonic-build = "0.13"
 
 # See `crates/larql-router-protocol/Cargo.toml` for the Windows
