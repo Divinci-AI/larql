@@ -30,13 +30,16 @@ fn contextual_io(what: &str, e: std::io::Error) -> VindexError {
 }
 
 /// An opened VINDEX3 container: root authority, programme manifest, and the
-/// segment bytes held resident for the reader's lifetime.
+/// segment bytes mapped for the reader's lifetime.
 pub struct Vindex3Container {
     root: PathBuf,
     index: Vindex3Index,
     manifest: MoeManifest,
-    /// Segment key → raw LYRW v2 file bytes.
-    segments: HashMap<String, Vec<u8>>,
+    /// Segment key → mmap of the LYRW v2 file. A map, not a heap read:
+    /// segment bases are page-aligned, which is what lets a GPU backend
+    /// register them for zero-copy aliasing (a `Vec` base carries no
+    /// alignment guarantee, so heap segments could never be registered).
+    segments: HashMap<String, memmap2::Mmap>,
 }
 
 /// Whether opening refuses a malformed manifest or loads it to be described.
@@ -111,9 +114,13 @@ impl Vindex3Container {
         let mut segments = HashMap::new();
         for key in index.segments.keys() {
             let path = segment_path(root, key);
-            let bytes =
-                std::fs::read(&path).map_err(|e| contextual_io(&format!("segment {key}"), e))?;
-            segments.insert(key.clone(), bytes);
+            let file = std::fs::File::open(&path)
+                .map_err(|e| contextual_io(&format!("segment {key}"), e))?;
+            // Safety: the container is serving data — the same not-modified-
+            // while-mapped contract every spine weight mmap already relies on.
+            let mmap = unsafe { memmap2::Mmap::map(&file) }
+                .map_err(|e| contextual_io(&format!("segment {key}"), e))?;
+            segments.insert(key.clone(), mmap);
         }
 
         Ok(Self {
@@ -164,7 +171,15 @@ impl Vindex3Container {
                 self.index.segments.keys().collect::<Vec<_>>()
             ))
         })?;
-        Lyrw2Reader::parse(bytes).map_err(|e| VindexError::Parse(format!("segment '{key}': {e}")))
+        Lyrw2Reader::parse(&bytes[..])
+            .map_err(|e| VindexError::Parse(format!("segment '{key}': {e}")))
+    }
+
+    /// Every segment's mapped bytes, for a compute backend to register as
+    /// zero-copy weight regions. Bases are page-aligned (they are mmaps),
+    /// which is the registration precondition.
+    pub fn segment_regions(&self) -> impl Iterator<Item = &[u8]> {
+        self.segments.values().map(|m| &m[..])
     }
 }
 

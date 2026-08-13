@@ -1036,6 +1036,14 @@ fn run_with_routed_container(
         let cached_layers =
             larql_inference::layer_graph::CachedLayerGraph::from_residuals(Vec::new());
         let num_layers = weights.num_layers;
+        // Fired evidence for the composed serve: witness counters must not
+        // move (no route-dependent host work) while the GPU-dataflow route
+        // fires on every routed layer of every decoded token.
+        use larql_compute_metal::route_witness;
+        use std::sync::atomic::Ordering;
+        let witness_before = route_witness::snapshot();
+        let route_layers_before = route_witness::GPU_ROUTE_LAYERS.load(Ordering::Relaxed);
+        let legacy_waits_before = route_witness::WAIT_MOE_ROUTE_LEGACY.load(Ordering::Relaxed);
         let result = larql_inference::layer_graph::generate_routed(
             &mut weights,
             &tokenizer,
@@ -1046,6 +1054,26 @@ fn run_with_routed_container(
             &cached_layers,
             0..num_layers,
             &routed,
+        );
+        let witness = witness_before.delta(&route_witness::snapshot());
+        let route_layers =
+            route_witness::GPU_ROUTE_LAYERS.load(Ordering::Relaxed) - route_layers_before;
+        let legacy_waits =
+            route_witness::WAIT_MOE_ROUTE_LEGACY.load(Ordering::Relaxed) - legacy_waits_before;
+        // Every forwarded position (prefill and decode alike) must route
+        // all of its MoE layers on the GPU, so the honest statement is the
+        // layers-per-forward quotient, not a per-decoded-token average.
+        eprintln!(
+            "[routed-metal] witness: gpu_route_layers={route_layers} \
+             (= {num_layers} layers x {} forwards, remainder {}), \
+             legacy_waits={legacy_waits}, host_resolves={}, bias_copies={}, \
+             weight_binds={}, offset_binds={}",
+            route_layers / num_layers as u64,
+            route_layers % num_layers as u64,
+            witness.host_resolves,
+            witness.bias_copies,
+            witness.weight_binds,
+            witness.offset_binds,
         );
         // Normalise to the CPU arm's (token, id) shape; the id is unused
         // downstream, and the GPU result carries probabilities instead.

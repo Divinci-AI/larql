@@ -189,6 +189,7 @@ mod tests {
             SamplingConfig::greedy(),
             &EosConfig::builtin(),
             |id, text, prob| streamed.push((id, text.to_string(), prob)),
+            None,
         );
 
         // The streaming callback must fire exactly once per emitted token.
@@ -321,6 +322,7 @@ mod tests {
             SamplingConfig::greedy(),
             &EosConfig::builtin(),
             |id, text, prob| streamed.push((id, text.to_string(), prob)),
+            None,
         );
         // Callback may or may not fire on the CPU fallback path. Either
         // outcome is acceptable for coverage purposes.

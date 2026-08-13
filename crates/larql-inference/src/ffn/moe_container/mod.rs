@@ -300,6 +300,46 @@ impl ContainerRoutedBackend {
             }
         }
 
+        // A format whose scales live in partner streams is unservable
+        // without them, and a stream of the wrong length resolves into the
+        // wrong expert's exponents — arithmetically valid, silently wrong.
+        // Both are composition failures, caught here for the same reason
+        // the payload sizes are.
+        if let Some((want_gu_scales, want_dn_scales)) = declared_scale_sizes(
+            declared,
+            moe.intermediate_size,
+            self.container.index().hidden_size,
+        ) {
+            for expert in 0..experts as u32 {
+                for (role, want) in [
+                    (RegionRole::GateUpFused, want_gu_scales),
+                    (RegionRole::Down, want_dn_scales),
+                ] {
+                    let got = reader
+                        .paired_region_bytes(ROUTED_BANK, expert, role, RegionRole::Scales)
+                        .map_err(|e| CompositionError::UnreadableLayer {
+                            layer,
+                            why: format!("expert {expert} {role:?} scales: {e}"),
+                        })?
+                        .ok_or_else(|| CompositionError::UnreadableLayer {
+                            layer,
+                            why: format!(
+                                "expert {expert} {role:?} declares a split-scale \
+                                 format but carries no scale partner"
+                            ),
+                        })?;
+                    if got.len() != want {
+                        return Err(CompositionError::Shape {
+                            layer,
+                            what: "scale partner bytes",
+                            spine: want as u64,
+                            container: got.len() as u64,
+                        });
+                    }
+                }
+            }
+        }
+
         // Resolve the two storage facts here as well, and discard them. They
         // are re-read per forward, but a bank whose scales are half-present or
         // whose row arrangement this build cannot act on must fail at
@@ -369,6 +409,14 @@ impl ContainerRoutedBackend {
         })
     }
 
+    /// The container's mapped segment regions, for the compute backend to
+    /// register alongside the spine's packed mmaps — the routed bank's
+    /// bytes must alias into GPU buffers the same way the spine's do, or
+    /// zero-copy resolve refuses every expert the override supplies.
+    pub fn weight_regions(&self) -> impl Iterator<Item = &[u8]> {
+        self.container.segment_regions()
+    }
+
     /// One line describing what this run actually composed.
     pub fn describe(&self, spine: &Path) -> String {
         format!(
@@ -407,6 +455,30 @@ fn declared_region_sizes(
             let row = |cols: usize| (cols / MXFP4_GROUP_ELEMS) * MXFP4_GROUP_BYTES;
             Some((FUSED_HALVES * inter * row(hidden), hidden * row(inter)))
         }
+        _ => None,
+    }
+}
+
+/// Scale-partner byte lengths a bank of `format` must carry per expert —
+/// `None` for formats whose scales ride inside the payload blocks.
+///
+/// For a split-scale format this is one e8m0 exponent per group of
+/// [`MXFP4_GROUP_ELEMS`](larql_models::quant::mxfp4::MXFP4_GROUP_ELEMS)
+/// input elements, per output row: the gate/up region is
+/// `[FUSED_HALVES x inter, hidden]` and the down region `[hidden, inter]`.
+/// A `Some` here also states the format cannot be served without its
+/// partner streams — nibbles with no exponents decode to nothing.
+fn declared_scale_sizes(
+    format: RegionFormat,
+    inter: usize,
+    hidden: usize,
+) -> Option<(usize, usize)> {
+    use larql_models::quant::mxfp4::{FUSED_HALVES, MXFP4_GROUP_ELEMS};
+    match format {
+        RegionFormat::Mxfp4 => Some((
+            FUSED_HALVES * inter * (hidden / MXFP4_GROUP_ELEMS),
+            hidden * (inter / MXFP4_GROUP_ELEMS),
+        )),
         _ => None,
     }
 }
@@ -579,114 +651,4 @@ impl MoeExpertBackend for ContainerRoutedBackend {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::test_utils::make_test_gemma4_moe_weights;
-    use larql_vindex::format::lyrw2::region_format::RegionFormat;
-    use larql_vindex::format::lyrw2::region_layout::RegionLayout;
-    use larql_vindex::format::vindex3::{ContainerBuilder, ExpertScaleStreams, MoeLayerSource};
-    use tempfile::TempDir;
-
-    /// Build a container from the fixture model's own expert bytes.
-    ///
-    /// `skip` omits that layer, so a test can produce a container that is
-    /// well-formed but cannot serve the model it is composed with — the
-    /// distinction the coverage check exists to make.
-    fn container_for(weights: &larql_models::ModelWeights, skip: Option<usize>) -> TempDir {
-        let dir = TempDir::new().unwrap();
-        let mut builder = ContainerBuilder::create(dir.path()).unwrap();
-        let arch = &*weights.arch;
-        let mut wrote = false;
-        for layer in 0..weights.num_layers {
-            if Some(layer) == skip {
-                continue;
-            }
-            let Some(moe) = build_moe_weights(weights, arch, layer) else {
-                continue;
-            };
-            let source = MoeLayerSource {
-                layer: layer as u32,
-                experts_gate_up: moe.experts_gate_up.clone(),
-                experts_down: moe.experts_down.clone(),
-                format: RegionFormat::Q4K,
-                // Q4_K packs its scales inside each super-block.
-                scales: ExpertScaleStreams::Inline,
-                // A fact about the bytes this fixture writes, not about any
-                // checkpoint: `build_moe_weights` yields `[all gate | all up]`.
-                gate_up_layout: RegionLayout::ContiguousHalves,
-                hidden_size: weights.hidden_size as u32,
-                gate_up_stored_intermediate: moe.intermediate_size as u32,
-                down_stored_intermediate: moe.inter_padded() as u32,
-                semantic_intermediate: moe.intermediate_size as u32,
-                top_k: moe.top_k as u32,
-            };
-            if builder.add_moe_layer(&source).is_ok() {
-                wrote = true;
-            }
-        }
-        assert!(wrote, "fixture produced no routed layers to import");
-        builder
-            .finish(
-                weights.arch.family(),
-                weights.arch.family(),
-                weights.hidden_size,
-                weights.num_layers,
-            )
-            .unwrap();
-        dir
-    }
-
-    #[test]
-    fn a_container_missing_a_routed_layer_is_refused_before_generation() {
-        // Coverage is checked against the model, so an omitted layer must be
-        // caught at open — not at the token where that layer first runs, by
-        // which point part of an answer has already been produced.
-        let weights = make_test_gemma4_moe_weights();
-        let full = container_for(&weights, None);
-        ContainerRoutedBackend::open(full.path(), &weights, true)
-            .expect("a complete container must compose");
-
-        let missing = container_for(&weights, Some(0));
-        let err = ContainerRoutedBackend::open(missing.path(), &weights, true)
-            .err()
-            .expect("a container missing a routed layer must be refused");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("no bank for it") || msg.contains("layer 0"),
-            "the refusal must name the missing layer, got: {msg}"
-        );
-    }
-
-    #[test]
-    fn a_container_describing_another_model_is_refused() {
-        let weights = make_test_gemma4_moe_weights();
-        let dir = container_for(&weights, None);
-
-        // Rewrite the family in place: same banks, different identity.
-        let index_path = dir.path().join("index.json");
-        let text = std::fs::read_to_string(&index_path).unwrap();
-        let mut json: serde_json::Value = serde_json::from_str(&text).unwrap();
-        json["family"] = serde_json::Value::String("not-this-model".into());
-        std::fs::write(&index_path, serde_json::to_string_pretty(&json).unwrap()).unwrap();
-
-        let err = ContainerRoutedBackend::open(dir.path(), &weights, true)
-            .err()
-            .expect("composing a container for another model must be refused");
-        assert!(
-            err.to_string().contains("not-this-model"),
-            "the refusal must name both sides, got: {err}"
-        );
-    }
-
-    #[test]
-    fn a_composed_route_reports_both_artifacts() {
-        // Provenance is not decoration: a composed run is two directories and
-        // a result recorded against only one of them is unreproducible.
-        let weights = make_test_gemma4_moe_weights();
-        let dir = container_for(&weights, None);
-        let backend = ContainerRoutedBackend::open(dir.path(), &weights, true).unwrap();
-        let line = backend.describe(std::path::Path::new("/models/spine.vindex"));
-        assert!(line.contains("/models/spine.vindex"), "{line}");
-        assert!(line.contains(&dir.path().display().to_string()), "{line}");
-    }
-}
+mod tests;
