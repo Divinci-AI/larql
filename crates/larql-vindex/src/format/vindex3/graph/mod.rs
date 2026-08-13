@@ -60,7 +60,32 @@ pub use surface::ExecutionSurface;
 /// deletion invariant's missing half. A v1 graph deserialises with
 /// `execution: None`, which [`execution_completeness`] reports as
 /// incomplete.
-pub const GRAPH_SCHEMA: u32 = 2;
+///
+/// v3: the execution surface distinguishes an *absent* operation from one
+/// declared as the identity, and records the post-norm epsilon as a
+/// judgment ([`larql_models::config::PostNormEps`]) rather than a bare
+/// number. A v2 graph cannot be reinterpreted into v3: it wrote
+/// `post_norm_eps` unconditionally, so a recorded value equal to
+/// `norm_eps` is ambiguous between "declared distinct" and "shares" —
+/// exactly the distinction v3 exists to keep. Such containers are
+/// refused and must be re-encoded, never silently upgraded.
+///
+/// v4: the execution surface carries the judged *embedding
+/// normalisation* ([`larql_models::config::EmbeddingNorm`]). A v3 graph
+/// deserialises with `embedding_norm: None`, which under absence ≠
+/// identity is the definite claim "this model has no such operation" —
+/// wrong for any family that does, and silent because the norm is
+/// weightless and no operand contradicts it. Refuse and re-encode.
+///
+/// v5: the norm surface carries a complete
+/// [`larql_models::config::NormSpec`] per *site* (pre, post, final)
+/// instead of a model-scope kind/epsilon/offset. Muse-Glimmer proved
+/// twice that norm facts are per-site: its post-norms use a different
+/// epsilon (1e-8 vs 1e-5) and its final norm a different weight offset
+/// (0.0 vs 1.0, centred layers vs an ordinary final norm). A v4 graph
+/// records one offset for every site, which is simply wrong for any
+/// such family and unrecoverable from the graph alone.
+pub const GRAPH_SCHEMA: u32 = 5;
 
 /// The complete executable-system description.
 #[derive(Debug, Clone, Serialize, Deserialize)]

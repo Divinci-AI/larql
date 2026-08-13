@@ -109,10 +109,16 @@ pub fn resolve(config: &Value, identity: &Identity) -> (Detection, ResolvedTopol
         .iter()
         .filter(|l| l.attention == ATTENTION_SLIDING)
         .count();
-    // Every defaulting decision the serving path would make, applied once
+    // Every semantic decision the serving path would make, resolved once
     // and recorded — the executor downstream reads, never defaults.
+    //
+    // Absence stays absence here. An identity default (`query_scale` 1.0,
+    // `output_multiplier` 1.0) is numerically plausible but semantically
+    // indistinguishable from a real declaration, so an ingestion
+    // regression would produce a fully executable *wrong* program rather
+    // than a loud one. Only a judgment may turn absence into an operation.
     let execution = ResolvedExecution {
-        query_scale: arch.qk_scale_factor().unwrap_or(1.0),
+        query_scale: arch.qk_scale_factor(),
         score_scale: arch.attention_scale(),
         attn_logit_softcapping: arch.attn_logit_softcapping(),
         qk_norm_scope: arch.qk_norm_scope(),
@@ -121,15 +127,13 @@ pub fn resolve(config: &Value, identity: &Identity) -> (Detection, ResolvedTopol
         attention_output_gate: arch.attention_output_gate(),
         activation: arch.activation(),
         ffn_type: arch.ffn_type(),
-        norm_kind: arch.norm_type(),
-        norm_eps: arch.norm_eps() as f64,
-        post_norm_eps: arch
-            .post_norm_eps()
-            .unwrap_or_else(|| arch.norm_eps() as f64),
+        norm_pre: arch.pre_norm_spec(),
+        norm_post: arch.post_norm_spec(),
+        norm_final: arch.final_norm_spec(),
+        embedding_norm: arch.embedding_norm(),
         post_norms: arch.has_post_norms(),
-        norm_weight_offset: arch.norm_weight_offset(),
         embed_scale: arch.embed_scale(),
-        output_multiplier: arch.output_multiplier().unwrap_or(1.0),
+        output_multiplier: arch.output_multiplier(),
         final_logit_softcapping: arch.final_logit_softcapping(),
     };
     let topology = ResolvedTopology {

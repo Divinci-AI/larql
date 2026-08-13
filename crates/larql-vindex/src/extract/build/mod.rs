@@ -101,7 +101,7 @@ impl<'a> BuildContext<'a> {
             hidden_size: weights.hidden_size,
             intermediate_size: weights.intermediate_size,
             vocab_size: weights.vocab_size,
-            embed_scale: weights.arch.embed_scale(),
+            embed_scale: weights.arch.embed_scale_multiplier(),
             is_moe: weights.arch.is_moe(),
             n_experts: weights.arch.num_experts(),
             weights,

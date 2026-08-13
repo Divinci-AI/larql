@@ -339,7 +339,7 @@ fn run_model_embedding_walk(
     );
 
     let last_tok = *token_ids.last().ok_or("empty prompt")?;
-    let embed_scale = weights.arch.embed_scale();
+    let embed_scale = weights.arch.embed_scale_multiplier();
     let embed_row = weights.embed.row(last_tok as usize);
     let query: ndarray::Array1<f32> = embed_row.mapv(|v| v * embed_scale);
 

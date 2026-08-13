@@ -144,12 +144,64 @@ pub fn diff_dumps(
     Ok((man_a, man_b, deltas))
 }
 
-/// First capture whose cosine falls below `threshold_cos`.
-pub fn first_drift(deltas: &[LayerDelta], threshold_cos: f64) -> Option<&LayerDelta> {
-    deltas.iter().find(|d| d.cos < threshold_cos)
+/// Which drift criteria a capture fails. Empty = no drift.
+///
+/// Two criteria because they see different failures. Cosine sees a
+/// change of *direction*; relative RMS sees a change of *magnitude*. A
+/// capture can fail either alone: `a = alpha * b` has cosine exactly 1.0
+/// for every positive `alpha`, and a rotation that preserves norm leaves
+/// `rel_rms` small. Gating on one is gating on half the error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DriftCriteria {
+    pub direction: bool,
+    pub magnitude: bool,
 }
 
-fn print_table(deltas: &[LayerDelta], threshold_cos: f64) {
+impl DriftCriteria {
+    pub fn drifted(&self) -> bool {
+        self.direction || self.magnitude
+    }
+
+    /// Human-readable list of the criteria that failed.
+    pub fn failed(&self) -> Vec<&'static str> {
+        let mut failed = Vec::new();
+        if self.direction {
+            failed.push("cosine");
+        }
+        if self.magnitude {
+            failed.push("rel_rms");
+        }
+        failed
+    }
+}
+
+/// Judge one capture against both thresholds.
+pub fn criteria(delta: &LayerDelta, threshold_cos: f64, threshold_rel_rms: f64) -> DriftCriteria {
+    DriftCriteria {
+        direction: delta.cos < threshold_cos,
+        magnitude: delta.rel_rms > threshold_rel_rms,
+    }
+}
+
+/// First capture that drifts by *either* criterion.
+///
+/// First matters more than worst: downstream captures inherit an
+/// upstream difference, so the shallowest disagreement is the defect.
+/// That is exactly why the magnitude criterion has to be here — a gate
+/// that misses the true first capture names its successor, and the
+/// investigation starts one step past the bug.
+pub fn first_drift(
+    deltas: &[LayerDelta],
+    threshold_cos: f64,
+    threshold_rel_rms: f64,
+) -> Option<(&LayerDelta, DriftCriteria)> {
+    deltas
+        .iter()
+        .map(|d| (d, criteria(d, threshold_cos, threshold_rel_rms)))
+        .find(|(_, c)| c.drifted())
+}
+
+fn print_table(deltas: &[LayerDelta], threshold_cos: f64, threshold_rel_rms: f64) {
     println!();
     println!(
         "{:<10}  {:>12}  {:>12}  {:>12}",
@@ -157,10 +209,13 @@ fn print_table(deltas: &[LayerDelta], threshold_cos: f64) {
     );
     println!("{}", "-".repeat(52));
     for d in deltas {
-        let flag = if d.cos < threshold_cos {
-            "  <-- drift"
+        let c = criteria(d, threshold_cos, threshold_rel_rms);
+        // Name the failing criterion in the row, so a reader can see at a
+        // glance that (say) direction passed while magnitude did not.
+        let flag = if c.drifted() {
+            format!("  <-- drift ({})", c.failed().join("+"))
         } else {
-            ""
+            String::new()
         };
         println!(
             "{:<10}  {:>12.9}  {:>12.6}  {:>12.6}{flag}",
@@ -183,18 +238,32 @@ pub fn run_layer_diff(args: LayerDiffArgs) -> Result<(), Box<dyn std::error::Err
         man_a.token_ids.len(),
         man_a.hidden_size,
     );
-    print_table(&deltas, args.threshold_cos);
+    print_table(&deltas, args.threshold_cos, args.threshold_rel_rms);
 
-    let drift = first_drift(&deltas, args.threshold_cos);
+    let drift = first_drift(&deltas, args.threshold_cos, args.threshold_rel_rms);
     println!();
     match drift {
-        Some(d) => println!(
-            "first drift: {} (cos {:.9} < {:.9})",
-            d.label(),
-            d.cos,
-            args.threshold_cos
+        // Report *both* criteria for the guilty capture, pass or fail.
+        // The failure that started this said `cos 1.000000000` while
+        // `rel_rms` was 0.9375; printing only the criterion that fired
+        // would hide how strongly the other one disagreed.
+        Some((d, c)) => {
+            println!("first drift: {}", d.label());
+            println!(
+                "  cosine : {:.9} ({})",
+                d.cos,
+                if c.direction { "FAIL" } else { "pass" }
+            );
+            println!(
+                "  rel_rms: {:.9} ({})",
+                d.rel_rms,
+                if c.magnitude { "FAIL" } else { "pass" }
+            );
+        }
+        None => println!(
+            "no capture drifts (cos >= {:.9}, rel_rms <= {:.9})",
+            args.threshold_cos, args.threshold_rel_rms
         ),
-        None => println!("no capture below cos {:.9}", args.threshold_cos),
     }
 
     if args.json {
@@ -205,8 +274,10 @@ pub fn run_layer_diff(args: LayerDiffArgs) -> Result<(), Box<dyn std::error::Err
                 "engine_b": man_b.engine,
                 "tokens": man_a.token_ids.len(),
                 "threshold_cos": args.threshold_cos,
-                "first_drift_capture": drift.map(|d| d.capture),
-                "first_drift_label": drift.map(|d| d.label()),
+                "threshold_rel_rms": args.threshold_rel_rms,
+                "first_drift_capture": drift.map(|(d, _)| d.capture),
+                "first_drift_label": drift.map(|(d, _)| d.label()),
+                "first_drift_criteria": drift.map(|(_, c)| c.failed()),
                 "captures": deltas.iter().map(|d| serde_json::json!({
                     "capture": d.capture,
                     "label": d.label(),
@@ -226,6 +297,7 @@ mod tests {
     use crate::commands::primary::shannon_trace::dump::{
         plane_name, write_plane, LayerDumpManifest, MANIFEST_NAME, PLANE_DTYPE,
     };
+    use crate::commands::primary::shannon_trace::{DEFAULT_DRIFT_COS, DEFAULT_DRIFT_REL_RMS};
 
     fn plane(values: &[f32]) -> Array2<f32> {
         Array2::from_shape_vec((1, values.len()), values.to_vec()).unwrap()
@@ -337,8 +409,79 @@ mod tests {
                 rel_rms: 0.9,
             },
         ];
-        assert_eq!(first_drift(&deltas, 0.9999).unwrap().capture, 1);
-        assert!(first_drift(&deltas[..1], 0.9999).is_none());
+        let (d, _) = first_drift(&deltas, 0.9999, DEFAULT_DRIFT_REL_RMS).unwrap();
+        assert_eq!(d.capture, 1);
+        assert!(first_drift(&deltas[..1], 0.9999, DEFAULT_DRIFT_REL_RMS).is_none());
+    }
+
+    /// The real Glimmer failure, reduced: a capture that is a *pure
+    /// rescale* of the reference. Cosine is exactly 1.0 for any positive
+    /// scalar, so a cosine-only gate scored this capture perfect and
+    /// named the next one as first drift — one step past the bug.
+    #[test]
+    fn a_pure_rescale_drifts_on_magnitude_while_cosine_says_perfect() {
+        // b = 16 * a, the observed missing-embedding-norm shape.
+        let a = plane(&[1.0, 2.0, 3.0, 4.0]);
+        let b = plane(&[16.0, 32.0, 48.0, 64.0]);
+        let delta = compare_planes(&a, &b);
+
+        assert!(
+            (delta.cos - 1.0).abs() < 1e-9,
+            "a pure rescale must leave cosine at 1.0, got {}",
+            delta.cos
+        );
+        assert!(
+            (delta.rel_rms - 0.9375).abs() < 1e-6,
+            "rel_rms must read |1 - 1/16| for this rescale, got {}",
+            delta.rel_rms
+        );
+
+        let c = criteria(&delta, DEFAULT_DRIFT_COS, DEFAULT_DRIFT_REL_RMS);
+        assert!(!c.direction, "direction is genuinely unchanged");
+        assert!(c.magnitude, "magnitude is wrong and must be caught");
+        assert!(c.drifted());
+        assert_eq!(c.failed(), vec!["rel_rms"]);
+    }
+
+    /// The gate must name the *first* offending capture, not its
+    /// successor. With magnitude included, a rescaled capture 0 is
+    /// reported even though capture 1 also drifts by direction.
+    #[test]
+    fn first_drift_names_a_magnitude_failure_ahead_of_a_later_direction_failure() {
+        let deltas = vec![
+            LayerDelta {
+                capture: 0,
+                cos: 1.0,
+                max_abs: 42.0,
+                rel_rms: 0.9375,
+            },
+            LayerDelta {
+                capture: 1,
+                cos: 0.3,
+                max_abs: 200.0,
+                rel_rms: 1.1,
+            },
+        ];
+        let (d, c) = first_drift(&deltas, DEFAULT_DRIFT_COS, DEFAULT_DRIFT_REL_RMS).unwrap();
+        assert_eq!(
+            d.capture, 0,
+            "the rescaled capture precedes the rotated one"
+        );
+        assert_eq!(c.failed(), vec!["rel_rms"]);
+    }
+
+    /// Accumulated bf16 rounding must not trip the magnitude gate: the
+    /// real 52-layer Glimmer table peaked at rel_rms ~0.008.
+    #[test]
+    fn bf16_scale_accumulation_stays_under_the_magnitude_threshold() {
+        let delta = LayerDelta {
+            capture: 51,
+            cos: 0.999969,
+            max_abs: 4.66,
+            rel_rms: 0.0079,
+        };
+        let c = criteria(&delta, DEFAULT_DRIFT_COS, DEFAULT_DRIFT_REL_RMS);
+        assert!(!c.drifted(), "bf16 accumulation is not drift: {c:?}");
     }
 
     #[test]
@@ -394,7 +537,8 @@ mod tests {
             deltas.iter().map(|d| d.capture).collect::<Vec<_>>(),
             vec![0, 1, 2]
         );
-        assert_eq!(first_drift(&deltas, 0.9999).unwrap().capture, 2);
+        let (d, _) = first_drift(&deltas, 0.9999, DEFAULT_DRIFT_REL_RMS).unwrap();
+        assert_eq!(d.capture, 2);
     }
 
     #[test]
@@ -411,6 +555,7 @@ mod tests {
             a: dir_a,
             b: dir_b,
             threshold_cos: super::super::DEFAULT_DRIFT_COS,
+            threshold_rel_rms: DEFAULT_DRIFT_REL_RMS,
             json: true,
         })
         .unwrap();

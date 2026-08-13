@@ -52,7 +52,16 @@ def write_plane(path: Path, tensor: torch.Tensor) -> None:
 
 def find_layers(model):
     """The decoder block list, across the layouts transformers uses."""
-    for path in ("model.layers", "model.model.layers", "transformer.h", "model.decoder.layers"):
+    for path in (
+        "model.layers",
+        "model.model.layers",
+        "transformer.h",
+        "model.decoder.layers",
+        # Multimodal wrappers keep the text stack under `language_model`
+        # (e.g. MuseGlimmerForConditionalGeneration).
+        "model.language_model.layers",
+        "model.model.language_model.layers",
+    ):
         obj = model
         for part in path.split("."):
             obj = getattr(obj, part, None)

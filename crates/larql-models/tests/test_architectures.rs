@@ -269,7 +269,8 @@ fn generic_architecture_exercises_default_trait_contract() {
     assert_eq!(arch.norm_type(), larql_models::NormType::RmsNorm);
     assert_eq!(arch.norm_weight_offset(), 0.0);
     assert_eq!(arch.qk_norm_weight_offset(), 0.0);
-    assert_eq!(arch.embed_scale(), 1.0);
+    // No embedding-scale operation declared — `None`, not `Some(1.0)`.
+    assert_eq!(arch.embed_scale(), None);
     assert_eq!(arch.bos_token_id(), None);
     assert_eq!(arch.activation(), larql_models::Activation::Silu);
     assert_eq!(arch.ffn_type(), larql_models::FfnType::Gated);
@@ -1053,7 +1054,7 @@ fn gemma4_gemma_family_traits() {
     assert!(arch.attn_q_norm_key(0).is_some());
     assert!(arch.attn_k_norm_key(0).is_some());
     // embed_scale = sqrt(hidden_size)
-    assert_eq!(arch.embed_scale(), (1536.0f32).sqrt());
+    assert_eq!(arch.embed_scale(), Some((1536.0f32).sqrt()));
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -1117,7 +1118,7 @@ fn gemma2_gemma_family_traits() {
     let arch = gemma2_arch();
     assert_eq!(arch.activation(), larql_models::Activation::GeluTanh);
     assert!(arch.has_post_norms());
-    assert_eq!(arch.embed_scale(), (2304.0f32).sqrt());
+    assert_eq!(arch.embed_scale(), Some((2304.0f32).sqrt()));
     // No sliding window on Gemma 2
     assert!(!arch.is_sliding_window_layer(0));
     assert!(!arch.is_sliding_window_layer(5));
@@ -1177,7 +1178,7 @@ fn gemma3_gemma_family_traits() {
     let arch = gemma3_arch();
     assert_eq!(arch.activation(), larql_models::Activation::GeluTanh);
     assert!(arch.has_post_norms());
-    assert_eq!(arch.embed_scale(), (2560.0f32).sqrt());
+    assert_eq!(arch.embed_scale(), Some((2560.0f32).sqrt()));
     assert!(arch.attn_q_norm_key(0).is_some());
     // No softcapping on Gemma 3
     assert!(arch.attn_logit_softcapping().is_none());
@@ -1386,7 +1387,7 @@ fn granite_detection() {
 #[test]
 fn granite_scaling_multipliers() {
     let arch = granite_arch();
-    assert_eq!(arch.embed_scale(), 12.0);
+    assert_eq!(arch.embed_scale(), Some(12.0));
     assert_eq!(arch.residual_multiplier(), 0.22);
     assert_eq!(arch.attention_multiplier(), 0.22);
     assert_eq!(arch.logits_scaling(), 0.13);
@@ -1533,7 +1534,8 @@ fn generic_fallback() {
     assert_eq!(arch.activation(), larql_models::Activation::Silu);
     assert_eq!(arch.ffn_type(), larql_models::FfnType::Gated);
     assert_eq!(arch.norm_weight_offset(), 0.0);
-    assert_eq!(arch.embed_scale(), 1.0);
+    // No embedding-scale operation declared — `None`, not `Some(1.0)`.
+    assert_eq!(arch.embed_scale(), None);
     assert!(!arch.has_post_norms());
     assert!(!arch.is_moe());
     assert!(!arch.uses_mla());

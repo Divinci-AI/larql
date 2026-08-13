@@ -20,7 +20,8 @@
 //! not a branch at run time.
 
 use larql_models::config::{
-    Activation, AttentionGateSpec, FfnType, NormType, ParameterFreeQkNorm, QkNormScope,
+    Activation, AttentionGateSpec, EmbeddingNorm, FfnType, NormSpec, NormType, ParameterFreeQkNorm,
+    QkNormScope,
 };
 use larql_models::inventory::components::ComponentTopology;
 use larql_models::inventory::ArchitectureInventory;
@@ -55,12 +56,14 @@ pub struct AttentionSurface {
     pub num_q_heads: usize,
     pub num_kv_heads: usize,
     pub head_dim: usize,
-    /// Multiplier on the (normalised) query states before position
-    /// encoding — a declared factor, or 1.0. Kept separate from
+    /// The query-scale operation: a multiplier on the (normalised) query
+    /// states before position encoding. `None` = the op is absent, which
+    /// is a different claim from `Some(1.0)`. Kept separate from
     /// [`Self::score_scale`]: folding them is algebra-equivalent but not
     /// fp-equivalent, and the executor must place each multiply where
     /// the judged semantics put it.
-    pub query_scale: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query_scale: Option<f64>,
     /// Canonical score-time multiplier on QK^T.
     pub score_scale: f64,
     /// Attention-logit softcap; `None` = the op is absent.
@@ -94,10 +97,21 @@ pub struct FfnSurface {
 /// What the norm op reads.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NormSurface {
-    pub kind: NormType,
-    pub eps: f64,
-    /// Post-norm epsilon; equals `eps` unless the source declared its own.
-    pub post_norm_eps: f64,
+    /// Complete spec for the pre-attention and pre-FFN sites.
+    pub pre: NormSpec,
+    /// Complete spec for the post-attention and post-FFN sites.
+    /// `None` = unjudged — nothing has established it, and a four-norm
+    /// [`Self::placement`] in that state fails closure rather than
+    /// inheriting [`Self::pre`]. Muse-Glimmer's differ by three orders
+    /// of magnitude in epsilon (1e-5 pre, 1e-8 post).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post: Option<NormSpec>,
+    /// Complete spec for the final norm before the head. Its own spec
+    /// because a family may use a different convention there and a
+    /// single model-scope answer would silently break one site to fix
+    /// the others — Muse-Glimmer's layers are centred (`1 + w`) while
+    /// its final norm is not.
+    pub final_norm: NormSpec,
     /// Norm placement around attention/FFN, judged from operand evidence
     /// ([`super::roles::norm_placement_evidence`]) — never from a family
     /// default, which is exactly the fact the generic fallback got wrong
@@ -105,8 +119,6 @@ pub struct NormSurface {
     /// placement is. `None` only for components with no decoder stack.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placement: Option<super::roles::NormPlacement>,
-    /// Offset added to norm weights at runtime.
-    pub weight_offset: f32,
 }
 
 /// What embedding lookup and the output head read. Present iff the
@@ -114,10 +126,19 @@ pub struct NormSurface {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HeadSurface {
     pub vocab_size: usize,
-    /// Multiplier applied to embeddings after lookup; 1.0 = identity.
-    pub embed_scale: f32,
-    /// Multiplier applied before the vocabulary projection; 1.0 = identity.
-    pub output_multiplier: f64,
+    /// Normalisation applied to embedding-table output. `None` = no such
+    /// operation. Weightless, so no operand evidences it and no closure
+    /// check can infer it — it arrives only as a family judgment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding_norm: Option<EmbeddingNorm>,
+    /// The embedding-scale operation, applied after lookup. `None` = the
+    /// op is absent, distinct from `Some(1.0)`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embed_scale: Option<f32>,
+    /// The output-multiplier operation, applied before the vocabulary
+    /// projection. `None` = the op is absent, distinct from `Some(1.0)`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_multiplier: Option<f64>,
     /// Final-logit softcap; `None` = the op is absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub final_logit_softcapping: Option<f32>,
@@ -186,13 +207,12 @@ pub fn surface_from_resolved(
             ffn_type: execution.ffn_type,
         },
         norm: NormSurface {
-            kind: execution.norm_kind,
-            eps: execution.norm_eps,
-            post_norm_eps: execution.post_norm_eps,
+            pre: execution.norm_pre,
+            post: execution.norm_post,
+            final_norm: execution.norm_final,
             // From operand evidence via `attach_stack_evidence`, once the
             // builder knows the component's stack object.
             placement: None,
-            weight_offset: execution.norm_weight_offset,
         },
         // Attached by the builder once it knows the component's objects.
         head: None,
@@ -245,6 +265,7 @@ pub fn head_from_resolved(inventory: &ArchitectureInventory) -> Result<HeadSurfa
     };
     Ok(HeadSurface {
         vocab_size,
+        embedding_norm: execution.embedding_norm,
         embed_scale: execution.embed_scale,
         output_multiplier: execution.output_multiplier,
         final_logit_softcapping: execution.final_logit_softcapping,
@@ -321,7 +342,10 @@ pub fn surface_from_nested(
             num_q_heads: heads,
             num_kv_heads: nested.num_key_value_heads.unwrap_or(heads),
             head_dim,
-            query_scale: 1.0,
+            // No perception tower has declared a query-scale operation.
+            // `None` says that; `Some(1.0)` would claim the source
+            // specifies a multiply by one.
+            query_scale: None,
             score_scale: (head_dim as f64).powf(-0.5),
             logit_softcapping: None,
             qk_norm_scope: QkNormScope::PerHead,
@@ -339,14 +363,25 @@ pub fn surface_from_nested(
             },
         },
         norm: NormSurface {
-            kind,
-            eps,
-            post_norm_eps: eps,
+            pre: NormSpec {
+                kind,
+                eps,
+                weight_offset: 0.0,
+            },
+            // Unjudged, not "the same as `pre`". Perception towers have
+            // no four-norm placement here, so nothing consumes it — and
+            // claiming an equivalence nobody established is the
+            // inherited-default failure this shape exists to prevent.
+            post: None,
+            final_norm: NormSpec {
+                kind,
+                eps,
+                weight_offset: 0.0,
+            },
             // Perception towers keep their own norm topology; placement
             // is a decoder-stack concept until the perception op set (5d)
             // defines its own.
             placement: None,
-            weight_offset: 0.0,
         },
         head: None,
     })

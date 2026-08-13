@@ -21,7 +21,6 @@ use larql_models::config::FfnType;
 use super::super::encode::segment::{read_segment_header, SegmentTensor};
 use super::super::encode::REPRESENTATION_ID_SEP;
 use super::super::graph::roles::classify_stack_tensor;
-use super::super::graph::surface::ExecutionSurface;
 use super::super::graph::{LogicalObject, NormPlacement, ObjectKind, OperandRole};
 use super::super::inspect::SystemInspection;
 use super::{
@@ -29,6 +28,12 @@ use super::{
     OpPlanOutcome, OperandRef, OutputOp, QkNormOp,
 };
 use crate::error::VindexError;
+
+/// The post-norm epsilon, named as [`ClosureDefect::UnjudgedSemantic`]
+/// reports it.
+const POST_NORM_EPS_FACT: &str = "post-norm epsilon";
+/// The structure that makes the post-norm epsilon load-bearing.
+const FOUR_NORM_PLACEMENT: &str = "four-norm placement";
 
 /// Build the operation plan for `component_id` from a container's
 /// inspection plus its segment tables. I/O failures are hard errors;
@@ -58,6 +63,27 @@ pub fn plan_component_ops(
         }
     };
     let placement = surface.norm.placement.expect("checked above");
+    // A four-norm stack executes two norms whose epsilon nothing else
+    // supplies. `Shared` and a declared value are both judgments;
+    // absence is not — and inheriting `eps` here would build exactly the
+    // executable-but-unfounded program this refuses. Returning no plan
+    // means no unjudged epsilon is ever written into one.
+    let post_norm: Option<larql_models::config::NormSpec> = match placement {
+        NormPlacement::PreOnly => None,
+        NormPlacement::PrePost => match surface.norm.post {
+            Some(judged) => Some(judged),
+            None => {
+                return Ok(OpPlanOutcome {
+                    plan: None,
+                    defects: vec![ClosureDefect::UnjudgedSemantic {
+                        component: component.id.clone(),
+                        fact: POST_NORM_EPS_FACT.to_string(),
+                        required_by: FOUR_NORM_PLACEMENT.to_string(),
+                    }],
+                })
+            }
+        },
+    };
     let Some(attention_table) = component
         .attention
         .as_ref()
@@ -231,11 +257,13 @@ pub fn plan_component_ops(
         dtype: tensor.dtype.clone(),
         shape: tensor.shape.clone(),
     };
+    // The spec travels whole: kind, epsilon and weight offset all come
+    // from the site being built, never from a model-scope answer.
     let norm_op =
-        |surface: &ExecutionSurface, eps: f64, object: &str, tensor: &SegmentTensor| NormOp {
-            kind: surface.norm.kind,
-            eps,
-            weight_offset: surface.norm.weight_offset,
+        |spec: larql_models::config::NormSpec, object: &str, tensor: &SegmentTensor| NormOp {
+            kind: spec.kind,
+            eps: spec.eps,
+            weight_offset: spec.weight_offset,
             weight: operand(object, tensor),
         };
 
@@ -260,29 +288,25 @@ pub fn plan_component_ops(
         // dedicated one under four-norm, the overloaded
         // `post_attention_layernorm` under two-norm.
         let (post_attention_norm, pre_ffn_role, post_ffn_norm) = match placement {
-            NormPlacement::PrePost => (
-                Some(norm_op(
-                    surface,
-                    surface.norm.post_norm_eps,
-                    &stack_id,
-                    get(OperandRole::PostAttentionNorm),
-                )),
-                OperandRole::PreFfnNorm,
-                Some(norm_op(
-                    surface,
-                    surface.norm.post_norm_eps,
-                    &stack_id,
-                    get(OperandRole::PostFfnNorm),
-                )),
-            ),
+            NormPlacement::PrePost => {
+                let spec = post_norm.expect("PrePost resolves or returns above");
+                (
+                    Some(norm_op(
+                        spec,
+                        &stack_id,
+                        get(OperandRole::PostAttentionNorm),
+                    )),
+                    OperandRole::PreFfnNorm,
+                    Some(norm_op(spec, &stack_id, get(OperandRole::PostFfnNorm))),
+                )
+            }
             NormPlacement::PreOnly => (None, OperandRole::PostAttentionNorm, None),
         };
         let consumed = slot.len();
         layers.push(LayerPlan {
             layer,
             pre_attention_norm: norm_op(
-                surface,
-                surface.norm.eps,
+                surface.norm.pre,
                 &stack_id,
                 get(OperandRole::PreAttentionNorm),
             ),
@@ -308,7 +332,7 @@ pub fn plan_component_ops(
                 }),
             },
             post_attention_norm,
-            pre_ffn_norm: norm_op(surface, surface.norm.eps, &stack_id, get(pre_ffn_role)),
+            pre_ffn_norm: norm_op(surface.norm.pre, &stack_id, get(pre_ffn_role)),
             ffn: FfnOp {
                 intermediate_size: inter,
                 activation: surface.ffn.activation,
@@ -326,19 +350,16 @@ pub fn plan_component_ops(
         component: component.id.clone(),
         embedding: embedding_tensor.map(|(object, tensor)| EmbeddingOp {
             table: operand(&object, &tensor),
-            scale: surface.head.as_ref().map(|h| h.embed_scale).unwrap_or(1.0),
+            norm: surface.head.as_ref().and_then(|h| h.embedding_norm),
+            scale: surface.head.as_ref().and_then(|h| h.embed_scale),
             vocab_size: vocab.unwrap_or(0),
         }),
         layers,
         final_norm: final_norm_tensor
-            .map(|(object, tensor)| norm_op(surface, surface.norm.eps, &object, &tensor)),
+            .map(|(object, tensor)| norm_op(surface.norm.final_norm, &object, &tensor)),
         output: head_tensor.map(|(object, tensor)| OutputOp {
             projection: operand(&object, &tensor),
-            multiplier: surface
-                .head
-                .as_ref()
-                .map(|h| h.output_multiplier)
-                .unwrap_or(1.0),
+            multiplier: surface.head.as_ref().and_then(|h| h.output_multiplier),
             softcapping: surface
                 .head
                 .as_ref()

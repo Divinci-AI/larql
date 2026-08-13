@@ -54,10 +54,15 @@ fn target_plan_reads_span_and_position_from_the_table() {
     assert_eq!(embedding.vocab_size, 128);
     assert!(plan.final_norm.is_some());
     let output = plan.output.as_ref().unwrap();
-    assert!((output.multiplier - 0.196).abs() < 1e-12);
+    let multiplier = output.multiplier.expect("declared output_multiplier");
+    assert!((multiplier - 0.196).abs() < 1e-12);
 
     // Both scales reach the kernel arguments, unfolded.
-    assert!((layer0.attention.query_scale - 3.87).abs() < 1e-12);
+    let query_scale = layer0
+        .attention
+        .query_scale
+        .expect("declared qk_scale_factor");
+    assert!((query_scale - 3.87).abs() < 1e-12);
     assert!((layer0.attention.score_scale - (8f64).powf(-0.5)).abs() < 1e-12);
     // The judged gate binds its operand.
     let gate = layer0.attention.output_gate.as_ref().unwrap();

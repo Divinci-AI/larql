@@ -25,21 +25,45 @@ pub fn matvec(weight: &[f32], out_dim: usize, in_dim: usize, x: &[f32]) -> Vec<f
     y
 }
 
+/// Gain of a parameter-free norm: the statistic alone, applied with the
+/// identity. Named because `1.0` here is a judged semantic (weightless
+/// normalisation), not an arbitrary starting value.
+const PARAMETER_FREE_GAIN: f32 = 1.0;
+
+/// Per-element gain: the identity when the norm is parameter-free, the
+/// stored weight plus its offset otherwise.
+///
+/// Indexes `weight` directly instead of tolerating a missing element. A
+/// weight that is neither empty nor `x`-length is a geometry bug, and
+/// padding the tail would convert that bug into a plausible-looking
+/// output — the norm would still return finite numbers, just wrong ones,
+/// and a parity table would show drift with no obvious cause.
+fn gain(weight: &[f32], weight_offset: f32, i: usize) -> f32 {
+    if weight.is_empty() {
+        PARAMETER_FREE_GAIN
+    } else {
+        weight[i] + weight_offset
+    }
+}
+
 /// Normalise one vector in place-by-return with the given kind, epsilon,
-/// weight and weight offset. `weight` may be empty for a parameter-free
-/// application (RMS statistic only).
+/// weight and weight offset. `weight` is either empty (parameter-free
+/// application, RMS statistic only) or exactly `x.len()` long; any other
+/// length is a geometry bug and panics rather than being padded.
 pub fn norm(kind: NormType, x: &[f32], weight: &[f32], weight_offset: f32, eps: f64) -> Vec<f32> {
+    assert!(
+        weight.is_empty() || weight.len() == x.len(),
+        "norm weight must be empty or {} long, got {}",
+        x.len(),
+        weight.len()
+    );
     match kind {
         NormType::RmsNorm => {
             let ss: f64 = x.iter().map(|v| (*v as f64) * (*v as f64)).sum();
             let inv = 1.0 / ((ss / x.len() as f64) + eps).sqrt();
             x.iter()
                 .enumerate()
-                .map(|(i, v)| {
-                    let w = weight.get(i).copied().unwrap_or(0.0) + weight_offset;
-                    let w = if weight.is_empty() { 1.0 } else { w };
-                    ((*v as f64) * inv) as f32 * w
-                })
+                .map(|(i, v)| ((*v as f64) * inv) as f32 * gain(weight, weight_offset, i))
                 .collect()
         }
         NormType::LayerNorm => {
@@ -55,11 +79,7 @@ pub fn norm(kind: NormType, x: &[f32], weight: &[f32], weight_offset: f32, eps: 
             let inv = 1.0 / (var + eps).sqrt();
             x.iter()
                 .enumerate()
-                .map(|(i, v)| {
-                    let w = weight.get(i).copied().unwrap_or(0.0) + weight_offset;
-                    let w = if weight.is_empty() { 1.0 } else { w };
-                    (((*v as f64 - mean) * inv) as f32) * w
-                })
+                .map(|(i, v)| (((*v as f64 - mean) * inv) as f32) * gain(weight, weight_offset, i))
                 .collect()
         }
     }

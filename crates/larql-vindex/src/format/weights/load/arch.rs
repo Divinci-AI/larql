@@ -379,7 +379,10 @@ mod tests {
         let arch = larql_models::detect_from_json(&v);
         assert_eq!(arch.qk_scale_factor(), Some(3.87));
         assert_eq!(arch.output_multiplier(), Some(0.196));
-        assert_eq!(arch.post_norm_eps(), Some(1e-8));
+        assert_eq!(
+            arch.post_norm_eps(),
+            Some(larql_models::config::PostNormEps::Value(1e-8))
+        );
         assert_eq!(arch.attention_bias(), Some(false));
         assert_eq!(
             arch.activation(),
@@ -518,7 +521,7 @@ mod tests {
         // `vindex/kquant_forward/cached.rs`).
         let arch = larql_models::detect_from_json(&v);
         assert_eq!(arch.family(), "granite");
-        assert_eq!(arch.embed_scale(), 12.0);
+        assert_eq!(arch.embed_scale(), Some(12.0));
         assert_eq!(arch.attention_multiplier(), 0.015625);
         assert_eq!(arch.residual_multiplier(), 0.22);
         assert_eq!(arch.logits_scaling(), 10.0);

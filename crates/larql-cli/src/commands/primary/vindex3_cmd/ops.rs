@@ -2,6 +2,7 @@
 
 use larql_vindex::format::vindex3::opplan::{plan_component_ops, LayerPlan, NormOp};
 
+use super::optional_op::scalar;
 use super::OpsArgs;
 
 pub(super) fn run_ops(args: OpsArgs) -> Result<(), Box<dyn std::error::Error>> {
@@ -14,7 +15,9 @@ pub(super) fn run_ops(args: OpsArgs) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(embedding) = &plan.embedding {
             println!(
                 "embedding: {} vocab {} scale {}",
-                embedding.table.object, embedding.vocab_size, embedding.scale
+                embedding.table.object,
+                embedding.vocab_size,
+                scalar(embedding.scale)
             );
         }
         match args.layer {
@@ -44,7 +47,7 @@ pub(super) fn run_ops(args: OpsArgs) -> Result<(), Box<dyn std::error::Error>> {
             println!(
                 "output: {} multiplier {}{}",
                 output.projection.object,
-                output.multiplier,
+                scalar(output.multiplier),
                 output
                     .softcapping
                     .map(|c| format!(" softcap {c}"))
@@ -84,7 +87,8 @@ fn print_layer(component: &str, layer: &LayerPlan) {
     );
     println!(
         "    query_scale {} score_scale {}",
-        attention.query_scale, attention.score_scale
+        scalar(attention.query_scale),
+        attention.score_scale
     );
     if attention.parameter_free_qk_norm.q || attention.parameter_free_qk_norm.k {
         println!(

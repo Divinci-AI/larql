@@ -56,7 +56,7 @@ impl GateIndex {
         callbacks: &mut dyn IndexBuildCallbacks,
     ) -> Self {
         let vocab_size = weights.vocab_size;
-        let embed_scale = weights.arch.embed_scale();
+        let embed_scale = weights.arch.embed_scale_multiplier();
         let total = layers.len();
 
         // Scale embeddings once (Gemma convention)
@@ -131,7 +131,7 @@ impl GateIndex {
         callbacks: &mut dyn IndexBuildCallbacks,
     ) -> Result<(), InferenceError> {
         let vocab_size = weights.vocab_size;
-        let embed_scale = weights.arch.embed_scale();
+        let embed_scale = weights.arch.embed_scale_multiplier();
         let total = layers.len();
 
         let scaled_embed = &weights.embed * embed_scale;
@@ -641,7 +641,7 @@ mod tests {
     fn lookup_returns_features_for_known_layer() {
         let weights = make_test_weights();
         let idx = build_small_index(&weights);
-        let scaled_embed = &weights.embed * weights.arch.embed_scale();
+        let scaled_embed = &weights.embed * weights.arch.embed_scale_multiplier();
         let residual = ndarray::Array1::<f32>::from_elem(weights.hidden_size, 0.05);
         let features = idx.lookup(0, &residual.view(), &scaled_embed, 5);
         // Either populated or empty — both are valid for the synthetic
@@ -653,7 +653,7 @@ mod tests {
     fn lookup_unknown_layer_returns_empty() {
         let weights = make_test_weights();
         let idx = build_small_index(&weights);
-        let scaled_embed = &weights.embed * weights.arch.embed_scale();
+        let scaled_embed = &weights.embed * weights.arch.embed_scale_multiplier();
         let residual = ndarray::Array1::<f32>::zeros(weights.hidden_size);
         // Layer 999 isn't in the small index → early return [].
         let features = idx.lookup(999, &residual.view(), &scaled_embed, 5);
@@ -666,7 +666,7 @@ mod tests {
         // is false → returns whatever the union accumulated.
         let weights = make_test_weights();
         let idx = build_small_index(&weights);
-        let scaled_embed = &weights.embed * weights.arch.embed_scale();
+        let scaled_embed = &weights.embed * weights.arch.embed_scale_multiplier();
         let residual = ndarray::Array1::<f32>::from_elem(weights.hidden_size, 0.1);
         let features = idx.lookup(0, &residual.view(), &scaled_embed, 0);
         // No assertion on length — just exercise the branch.

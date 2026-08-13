@@ -84,8 +84,12 @@ pub struct AttentionOp {
     pub num_q_heads: usize,
     pub num_kv_heads: usize,
     pub head_dim: usize,
-    /// Applied to the (normalised) query states before position encoding.
-    pub query_scale: f64,
+    /// The query-scale operation, applied to the (normalised) query
+    /// states before position encoding. `None` = the op is absent, which
+    /// the executor must skip rather than multiply by an identity it
+    /// invented.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub query_scale: Option<f64>,
     /// The canonical score-time multiply — deliberately not folded into
     /// [`Self::query_scale`] (algebra-equivalent, not fp-equivalent).
     pub score_scale: f64,
@@ -148,7 +152,12 @@ pub struct LayerPlan {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct EmbeddingOp {
     pub table: OperandRef,
-    pub scale: f32,
+    /// Weightless normalisation of the looked-up row. `None` = absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub norm: Option<larql_models::config::EmbeddingNorm>,
+    /// The embedding-scale operation. `None` = the op is absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scale: Option<f32>,
     pub vocab_size: usize,
 }
 
@@ -156,7 +165,9 @@ pub struct EmbeddingOp {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct OutputOp {
     pub projection: OperandRef,
-    pub multiplier: f64,
+    /// The output-multiplier operation. `None` = the op is absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub multiplier: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub softcapping: Option<f32>,
 }
@@ -203,6 +214,20 @@ pub enum ClosureDefect {
     },
     /// A non-stack executable object with an unexpected tensor estate.
     ObjectShape { object: String, detail: String },
+    /// The structure requires a semantic fact nothing has established.
+    ///
+    /// Distinct from [`Self::MissingOperand`]: no tensor is absent, and
+    /// the plan would build. It would simply execute a value nobody
+    /// judged — the failure mode where an identity or inherited default
+    /// is numerically plausible but semantically unfounded, so the
+    /// program looks executable and is quietly wrong.
+    UnjudgedSemantic {
+        component: String,
+        /// The fact, named as the surface names it.
+        fact: String,
+        /// The structure that makes it load-bearing.
+        required_by: String,
+    },
 }
 
 impl std::fmt::Display for ClosureDefect {
@@ -240,6 +265,14 @@ impl std::fmt::Display for ClosureDefect {
                 "geometry mismatch: `{tensor}` is {actual:?}, surface implies {expected:?}"
             ),
             Self::ObjectShape { object, detail } => write!(f, "object `{object}`: {detail}"),
+            Self::UnjudgedSemantic {
+                component,
+                fact,
+                required_by,
+            } => write!(
+                f,
+                "component `{component}`: {fact} is not judged, and {required_by} requires it"
+            ),
         }
     }
 }

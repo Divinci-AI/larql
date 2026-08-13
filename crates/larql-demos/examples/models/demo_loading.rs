@@ -66,7 +66,7 @@ fn main() {
     println!("  Norm offset:     {}", arch.norm_weight_offset());
     println!("  Activation:      {:?}", arch.activation());
     println!("  FFN type:        {:?}", arch.ffn_type());
-    println!("  Embed scale:     {:.2}", arch.embed_scale());
+    println!("  Embed scale:     {:?}", arch.embed_scale());
     println!("  Has QK norm:     {}", arch.attn_q_norm_key(0).is_some());
     println!("  Has post norms:  {}", arch.has_post_norms());
     println!("  Has V-norm:      {}", arch.has_v_norm());

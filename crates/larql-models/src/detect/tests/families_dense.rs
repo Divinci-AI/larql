@@ -24,7 +24,7 @@ fn test_detect_gemma3() {
     assert_eq!(arch.config().hidden_size, 2560);
     assert_eq!(arch.config().rope_base, 1_000_000.0);
     assert_eq!(arch.norm_weight_offset(), 1.0);
-    assert_eq!(arch.embed_scale(), (2560.0f32).sqrt());
+    assert_eq!(arch.embed_scale(), Some((2560.0f32).sqrt()));
     assert!(arch.has_post_norms());
     assert!(arch.attn_q_norm_key(0).is_some());
 
@@ -46,7 +46,8 @@ fn test_detect_llama() {
     assert_eq!(arch.config().hidden_size, 4096);
     assert_eq!(arch.config().rope_base, 10_000.0);
     assert_eq!(arch.norm_weight_offset(), 0.0);
-    assert_eq!(arch.embed_scale(), 1.0);
+    // No embedding-scale operation declared — `None`, not `Some(1.0)`.
+    assert_eq!(arch.embed_scale(), None);
     assert!(!arch.has_post_norms());
     assert!(arch.attn_q_norm_key(0).is_none());
 }
@@ -69,7 +70,7 @@ fn test_detect_tinymodel() {
     assert_eq!(arch.config().hidden_size, 512);
     assert_eq!(arch.config().num_layers, 20);
     assert_eq!(arch.config().rope_base, 10_000.0);
-    assert_eq!(arch.embed_scale(), (512.0_f32).sqrt());
+    assert_eq!(arch.embed_scale(), Some((512.0_f32).sqrt()));
     assert_eq!(arch.embed_key(), "embed.weight");
     assert_eq!(arch.final_norm_key(), "norm.weight");
     assert_eq!(arch.attn_q_key(5), "layers.5.attn.q_proj.weight");

@@ -410,7 +410,7 @@ fn main() {
     print_architecture(&*granite);
     println!("  [Granite specifics — scaling multipliers]");
     println!(
-        "  Embed scale:      {:.2} (from embedding_multiplier)",
+        "  Embed scale:      {:?} (from embedding_multiplier)",
         granite.embed_scale()
     );
     println!("  Residual mult:    {:.2}", granite.residual_multiplier());
@@ -567,7 +567,7 @@ fn print_architecture(arch: &dyn ModelArchitecture) {
     println!("  KV heads:        {}", cfg.num_kv_heads);
     println!("  RoPE base:       {:.0}", cfg.rope_base);
     println!("  Norm offset:     {}", arch.norm_weight_offset());
-    println!("  Embed scale:     {:.2}", arch.embed_scale());
+    println!("  Embed scale:     {:?}", arch.embed_scale());
     println!("  Has post norms:  {}", arch.has_post_norms());
     println!("  Has QK norm:     {}", arch.attn_q_norm_key(0).is_some());
     println!("  Embed key:       {}", arch.embed_key());

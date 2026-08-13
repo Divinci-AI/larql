@@ -53,7 +53,11 @@ fn builder_fills_every_component_surface() {
         .unwrap();
     let surface = target.execution.as_ref().unwrap();
     // Scales stay separate: declared query factor, canonical score scale.
-    assert!((surface.attention.query_scale - 3.87).abs() < 1e-12);
+    let query_scale = surface
+        .attention
+        .query_scale
+        .expect("declared qk_scale_factor");
+    assert!((query_scale - 3.87).abs() < 1e-12);
     assert!((surface.attention.score_scale - (8f64).powf(-0.5)).abs() < 1e-12);
     // Judged semantics from the registered family.
     assert!(surface.attention.output_gate.is_some());
@@ -61,11 +65,23 @@ fn builder_fills_every_component_surface() {
     assert_eq!(surface.attention.num_q_heads, 8);
     assert_eq!(surface.attention.num_kv_heads, 2);
     assert_eq!(surface.ffn.intermediate_size, 256);
-    // Declared post_norm_eps (1e-8) honoured, distinct from norm_eps.
-    assert!((surface.norm.post_norm_eps - 1e-8).abs() < 1e-20);
+    // Each norm site carries a complete spec. The declared post_norm_eps
+    // reaches the post sites as a distinct value, and Glimmer's centred
+    // layer norms reach every site that needs them — while the final norm
+    // keeps its own, uncentred, offset.
+    let post = surface
+        .norm
+        .post
+        .expect("four-norm stack judges its post sites");
+    assert!((post.eps - 1e-8).abs() < 1e-20);
+    assert_eq!(surface.norm.pre.weight_offset, 1.0);
+    assert_eq!(post.weight_offset, 1.0);
+    assert_eq!(surface.norm.final_norm.weight_offset, 0.0);
+    assert!((surface.norm.final_norm.eps - surface.norm.pre.eps).abs() < 1e-20);
     let head = surface.head.as_ref().expect("target owns embedding + head");
     assert_eq!(head.vocab_size, 128);
-    assert!((head.output_multiplier - 0.196).abs() < 1e-12);
+    let output_multiplier = head.output_multiplier.expect("declared output_multiplier");
+    assert!((output_multiplier - 0.196).abs() < 1e-12);
 
     // The drafter declares no vocab and owns no embedding/head objects —
     // its surface is complete *without* a head group.
@@ -96,7 +112,7 @@ fn perception_surface_derives_from_nested_evidence() {
     assert_eq!(surface.attention.head_dim, 8); // 32 / 4, derived
     assert_eq!(surface.ffn.activation, Activation::Gelu);
     assert_eq!(surface.ffn.ffn_type, FfnType::Standard);
-    assert_eq!(surface.norm.kind, NormType::LayerNorm); // layer_norm_eps spelling
+    assert_eq!(surface.norm.pre.kind, NormType::LayerNorm); // layer_norm_eps spelling
     assert!(surface.head.is_none());
 }
 

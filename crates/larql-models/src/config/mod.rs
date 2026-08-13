@@ -42,7 +42,7 @@ pub use experts::{
 pub use layer_types::{LAYER_TYPE_FULL_ATTENTION, LAYER_TYPE_SLIDING_ATTENTION};
 pub use model_config::ModelConfig;
 pub use moe_router::MoeRouterKind;
-pub use norm::{NormType, ParameterFreeQkNorm, QkNormScope};
+pub use norm::{EmbeddingNorm, NormSpec, NormType, ParameterFreeQkNorm, PostNormEps, QkNormScope};
 pub use position::PositionPolicy;
 pub use rope::{Llama3RopeScaling, RopeScaling, YarnRopeScaling};
 pub use rope_types::{ROPE_TYPE_DEFAULT, ROPE_TYPE_LINEAR, ROPE_TYPE_LLAMA3, ROPE_TYPE_YARN};

@@ -4,7 +4,8 @@
 // against the debug UCRT runtime on the GitHub windows-latest runner.
 #[cfg(not(windows))]
 fn set_protoc() {
-    std::env::set_var("PROTOC", protobuf_src::protoc());
+    let mut prost_build = prost_build::Config::new();
+    prost_build.protoc_executable(protobuf_src::protoc());
 }
 
 #[cfg(windows)]

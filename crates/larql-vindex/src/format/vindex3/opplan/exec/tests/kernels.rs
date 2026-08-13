@@ -30,6 +30,38 @@ fn rms_norm_matches_hand_computation() {
 }
 
 #[test]
+#[should_panic(expected = "norm weight must be empty or 3 long, got 2")]
+fn rms_norm_refuses_a_short_weight_rather_than_padding_it() {
+    // A weight that is neither empty nor `x`-length is a geometry bug.
+    // Padding the tail would return finite-but-wrong numbers, surfacing
+    // later as unexplained drift in a parity table instead of here.
+    norm(NormType::RmsNorm, &[1.0, 2.0, 3.0], &[1.0, 1.0], 0.0, 0.0);
+}
+
+#[test]
+#[should_panic(expected = "norm weight must be empty or 3 long, got 4")]
+fn layer_norm_refuses_an_over_long_weight() {
+    norm(
+        NormType::LayerNorm,
+        &[1.0, 2.0, 3.0],
+        &[1.0, 1.0, 1.0, 1.0],
+        0.0,
+        0.0,
+    );
+}
+
+#[test]
+fn parameter_free_norm_ignores_the_weight_offset() {
+    // Weightless normalisation is the statistic alone: an offset that
+    // would apply to a stored weight must not leak in through the
+    // empty-weight path.
+    let free = norm(NormType::RmsNorm, &[3.0, 4.0], &[], 5.0, 0.0);
+    let rms = (12.5f64).sqrt();
+    assert!((free[0] as f64 - 3.0 / rms).abs() < 1e-6);
+    assert!((free[1] as f64 - 4.0 / rms).abs() < 1e-6);
+}
+
+#[test]
 fn layer_norm_centres_and_scales() {
     // x = [1, 3]: mean 2, var 1 → normalised [-1, 1].
     let y = norm(NormType::LayerNorm, &[1.0, 3.0], &[1.0, 1.0], 0.0, 0.0);

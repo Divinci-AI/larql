@@ -82,6 +82,18 @@ fn push_tensor(
 /// rope array with NoPE zeros on the global layers, dangerous unconsumed
 /// scalars, a vision subtree, mixed tensor stack.
 pub fn glimmer_shaped_target(dir: &Path) -> ArchitectureInventory {
+    glimmer_shaped_target_with(dir, |_| {})
+}
+
+/// The same fixture with `mutate` applied to its config first.
+///
+/// Exists so a test can *withdraw* a declaration — the only way to check
+/// that an absent semantic fact stays absent instead of reappearing as a
+/// plausible identity.
+pub fn glimmer_shaped_target_with(
+    dir: &Path,
+    mutate: impl FnOnce(&mut serde_json::Value),
+) -> ArchitectureInventory {
     let layer_types: Vec<&str> = (0..FIXTURE_LAYERS)
         .map(|i| {
             if i % 4 == 3 {
@@ -94,7 +106,7 @@ pub fn glimmer_shaped_target(dir: &Path) -> ArchitectureInventory {
     let layer_rope_theta: Vec<f64> = (0..FIXTURE_LAYERS)
         .map(|i| if i % 4 == 3 { 0.0 } else { 500000.0 })
         .collect();
-    let config = serde_json::json!({
+    let mut config = serde_json::json!({
         "architectures": ["MuseGlimmerForConditionalGeneration"],
         "dtype": "bfloat16",
         "model_type": "muse_glimmer",
@@ -126,6 +138,7 @@ pub fn glimmer_shaped_target(dir: &Path) -> ArchitectureInventory {
             "layer_norm_eps": 1e-6
         }
     });
+    mutate(&mut config);
     // Full operand estate, mirroring the real four-norm Glimmer layer
     // anatomy, attention gate included (its semantics are judged on the
     // registered family): 12 tensors per layer.
