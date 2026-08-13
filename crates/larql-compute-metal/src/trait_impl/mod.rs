@@ -32,6 +32,13 @@ impl ComputeBackend for MetalBackend {
         let _ = self.bufs.register_region(region);
     }
 
+    fn seal_weight_regions(&self) {
+        // Declares the registered regions resident once, per
+        // `LARQL_RESIDENCY_SET`. Unset => implicit residency, i.e. the
+        // behaviour that existed before this hook.
+        self.bufs.seal_residency(&self.queue);
+    }
+
     fn supports(&self, cap: Capability) -> bool {
         // Metal accelerates everything in the menu.
         matches!(

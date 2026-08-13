@@ -225,3 +225,109 @@ fn dense_entry_pads_each_half_rowwise_before_concatenation() {
     assert_eq!(&floats[2 * block..2 * block + 2], &[5.0, 6.0]);
     assert_eq!(&floats[3 * block..3 * block + 2], &[7.0, 8.0]);
 }
+
+/// The wire code and the registry tag must agree, per variant, in both
+/// directions.
+///
+/// `as_u32` is what goes on disk and `registry_tag` is what the loader
+/// matches to pick a decoder — the two are written as separate `match`
+/// arms over the same enum, so nothing but a test stops one gaining a
+/// variant the other spells differently. A store whose header says 5 and
+/// whose registry says `Q4_K` decodes a Q6_K expert bank as Q4_K garbage,
+/// which is the failure `registry_tag`'s own doc comment records.
+#[test]
+fn every_layer_format_round_trips_its_code_and_tag() {
+    use std::collections::BTreeSet;
+
+    // Every variant, listed here so adding one to the enum without adding
+    // it here leaves the new arm visibly unpinned rather than silently
+    // untested.
+    const ALL: [LayerWeightFormat; 8] = [
+        LayerWeightFormat::F32,
+        LayerWeightFormat::F16,
+        LayerWeightFormat::BF16,
+        LayerWeightFormat::Q4_0,
+        LayerWeightFormat::Q4_K,
+        LayerWeightFormat::Q6_K,
+        LayerWeightFormat::Q8_0,
+        LayerWeightFormat::FP4,
+    ];
+
+    let mut codes = BTreeSet::new();
+    let mut tags = BTreeSet::new();
+    for f in ALL {
+        assert!(
+            codes.insert(f.as_u32()),
+            "{f:?} reuses wire code {}",
+            f.as_u32()
+        );
+        assert!(tags.insert(f.registry_tag()), "{f:?} reuses tag");
+        assert!(!f.registry_tag().is_empty());
+    }
+    // Codes are the on-disk contract: they must be the dense 0..8 range the
+    // header parser matches on, not merely distinct.
+    assert_eq!(
+        codes.iter().copied().collect::<Vec<_>>(),
+        (0..ALL.len() as u32).collect::<Vec<_>>()
+    );
+}
+
+/// A header carrying a code no variant claims is refused, not defaulted.
+///
+/// Defaulting an unknown quant code to Q4_K is precisely how a future
+/// format would be decoded as garbage by an older binary.
+#[test]
+fn an_unknown_quant_code_is_refused_by_the_header_parser() {
+    use super::super::write_layers::{parse_layer_weights_header, LayerWeightFormat};
+
+    // Build the smallest header the parser accepts, then vary only the
+    // quant word — so a refusal can only be about that field.
+    // Spelled out rather than imported: MAGIC/FORMAT_VERSION are private to
+    // `write_layers`, and a literal header is also a check that the on-disk
+    // shape is what this test thinks it is.
+    let header = |quant: u32| -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend_from_slice(b"LYRW"); // magic
+        v.extend_from_slice(&1u32.to_le_bytes()); // format_version
+        v.extend_from_slice(&quant.to_le_bytes());
+        v.extend_from_slice(&0u32.to_le_bytes()); // num_entries: no table
+        v.extend_from_slice(&8u32.to_le_bytes()); // inter
+        v.extend_from_slice(&16u32.to_le_bytes()); // hidden
+        v.resize(256, 0); // comfortably past HEADER_BYTES
+        v
+    };
+
+    let known = parse_layer_weights_header(&header(LayerWeightFormat::Q6_K.as_u32()));
+    assert!(known.is_some(), "a known code must parse");
+    // MXFP4 took code 8 — the refusal boundary moved with it rather than
+    // disappearing. This header's layout block reads as two zero words,
+    // which is Inline + ContiguousHalves.
+    let mxfp4 = parse_layer_weights_header(&header(LayerWeightFormat::MXFP4.as_u32()))
+        .expect("MXFP4 is a known code now");
+    assert_eq!(mxfp4.format, LayerWeightFormat::MXFP4);
+    // One past the last variant, and a far-future one.
+    assert!(parse_layer_weights_header(&header(9)).is_none());
+    assert!(parse_layer_weights_header(&header(9_999)).is_none());
+}
+
+/// `LayerEntry`'s Debug reports sizes, never contents.
+///
+/// It is printed in refusal messages on multi-megabyte expert banks; a
+/// derived Debug would dump the byte vectors into a diagnostic.
+#[test]
+fn layer_entry_debug_reports_sizes_not_bytes() {
+    use super::super::write_layers::LayerEntry;
+
+    let entry = LayerEntry {
+        gate_up: vec![7u8; 33],
+        down: vec![9u8; 5],
+        scales: None,
+    };
+    let rendered = format!("{entry:?}");
+    assert!(rendered.contains("33"), "{rendered}");
+    assert!(rendered.contains('5'), "{rendered}");
+    assert!(
+        !rendered.contains("7, 7, 7"),
+        "Debug must not dump payload bytes: {rendered}"
+    );
+}

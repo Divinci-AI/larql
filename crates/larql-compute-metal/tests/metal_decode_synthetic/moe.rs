@@ -26,6 +26,8 @@ fn decode_token_with_moe_layer_no_callback_drives_local_fallback() {
     let down = quantize_q4_0(&synth_weight_f32(HIDDEN * INTER, 0.7));
     let norm_w: Vec<f32> = (0..HIDDEN).map(|i| 1.0 + (i as f32 * 0.001)).collect();
     let null_moe = MoeLayerWeights {
+        expert_scales: larql_compute::MoeExpertScales::Inline,
+        fused_row_layout: larql_compute::MoeFusedRowLayout::ContiguousHalves,
         experts_gate_up: Vec::new(),
         experts_down: Vec::new(),
         routing_policy: MoeRoutingPolicy::default(),
@@ -103,6 +105,8 @@ fn decode_token_with_moe_and_dump_l0_drives_moe_intermediate_dump() {
     let down = quantize_q4_0(&synth_weight_f32(HIDDEN * INTER, 0.7));
     let norm_w: Vec<f32> = (0..HIDDEN).map(|i| 1.0 + (i as f32 * 0.001)).collect();
     let null_moe = MoeLayerWeights {
+        expert_scales: larql_compute::MoeExpertScales::Inline,
+        fused_row_layout: larql_compute::MoeFusedRowLayout::ContiguousHalves,
         experts_gate_up: Vec::new(),
         experts_down: Vec::new(),
         routing_policy: MoeRoutingPolicy::default(),
@@ -187,6 +191,8 @@ fn decode_token_with_moe_and_dump_residuals_drives_record_layer() {
     let down = quantize_q4_0(&synth_weight_f32(HIDDEN * INTER, 0.7));
     let norm_w: Vec<f32> = (0..HIDDEN).map(|i| 1.0 + (i as f32 * 0.001)).collect();
     let make_null_moe = || MoeLayerWeights {
+        expert_scales: larql_compute::MoeExpertScales::Inline,
+        fused_row_layout: larql_compute::MoeFusedRowLayout::ContiguousHalves,
         experts_gate_up: Vec::new(),
         experts_down: Vec::new(),
         routing_policy: MoeRoutingPolicy::default(),
@@ -265,6 +271,8 @@ fn decode_token_with_moe_remote_ffn_drives_remote_path() {
     let down = quantize_q4_0(&synth_weight_f32(HIDDEN * INTER, 0.7));
     let norm_w: Vec<f32> = (0..HIDDEN).map(|i| 1.0 + (i as f32 * 0.001)).collect();
     let null_moe = MoeLayerWeights {
+        expert_scales: larql_compute::MoeExpertScales::Inline,
+        fused_row_layout: larql_compute::MoeFusedRowLayout::ContiguousHalves,
         experts_gate_up: Vec::new(),
         experts_down: Vec::new(),
         routing_policy: MoeRoutingPolicy::default(),
@@ -324,6 +332,8 @@ fn decode_token_with_moe_fn_drives_interleave_path() {
     // expert work, but the moe_fn callback is still invoked which is
     // what we need for coverage.
     let null_moe = MoeLayerWeights {
+        expert_scales: larql_compute::MoeExpertScales::Inline,
+        fused_row_layout: larql_compute::MoeFusedRowLayout::ContiguousHalves,
         experts_gate_up: Vec::new(),
         experts_down: Vec::new(),
         routing_policy: MoeRoutingPolicy::default(),
@@ -387,6 +397,8 @@ fn decode_token_with_moe_split_fn_drives_split_mode_path() {
     let down = quantize_q4_0(&synth_weight_f32(HIDDEN * INTER, 0.7));
     let norm_w: Vec<f32> = (0..HIDDEN).map(|i| 1.0 + (i as f32 * 0.001)).collect();
     let null_moe = MoeLayerWeights {
+        expert_scales: larql_compute::MoeExpertScales::Inline,
+        fused_row_layout: larql_compute::MoeFusedRowLayout::ContiguousHalves,
         experts_gate_up: Vec::new(),
         experts_down: Vec::new(),
         routing_policy: MoeRoutingPolicy::default(),
@@ -458,6 +470,8 @@ fn pure_moe_layer_skips_dense_ffn_and_adds_expert_output_directly() {
     let wo = quantize_q4_k(&synth_weight_f32(HIDDEN * Q_DIM, 0.4));
     let norm_w: Vec<f32> = (0..HIDDEN).map(|i| 1.0 + (i as f32 * 0.001)).collect();
     let null_moe = || MoeLayerWeights {
+        expert_scales: larql_compute::MoeExpertScales::Inline,
+        fused_row_layout: larql_compute::MoeFusedRowLayout::ContiguousHalves,
         experts_gate_up: Vec::new(),
         experts_down: Vec::new(),
         routing_policy: MoeRoutingPolicy::default(),

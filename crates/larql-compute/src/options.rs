@@ -84,6 +84,9 @@ pub const ENV_METAL_MOE_TIMING: &str = "LARQL_MOE_TIMING";
 pub const ENV_Q4K_MATVEC_8SG: &str = "LARQL_Q4K_MATVEC_8SG";
 /// Opt in to the 8-simdgroup Q6_K matvec kernel.
 pub const ENV_Q6K_8SG: &str = "LARQL_Q6K_8SG";
+/// Select the MXFP4 grouped-expert arm (`a`..`d`, or the arm name).
+/// Unset or unrecognised selects the exact split-stream arm.
+pub const ENV_MXFP4_ARM: &str = "LARQL_MXFP4_ARM";
 /// Opt in to fused attention.
 pub const ENV_FUSED_ATTN: &str = "LARQL_FUSED_ATTN";
 /// Disable fused QK-norm + RoPE when set to a false value.

@@ -133,6 +133,14 @@ fn decode_token_with_q4_0_qkv_drives_q4_0_norm_qkv_path() {
 /// `prefill_q4_seq4_synthetic_smoke`.
 #[test]
 fn prefill_mixed_q4k_q6k_v_seq4_runs_fused_mixed_kernel() {
+    // Serialised with every other GPU-touching test in this binary. The
+    // three `decode_token_*` tests above already took this lock; the
+    // prefill trio never did, and they are exactly the tests that went
+    // non-finite about one run in two under `cargo test`. The lock's name
+    // predates its job: it is now "one GPU test at a time". What makes two
+    // concurrent backends interfere is a separate open question — this
+    // makes the suite honest, it does not answer it.
+    let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let Some(metal) = larql_compute_metal::MetalBackend::new() else {
         return;
     };
@@ -184,6 +192,7 @@ fn prefill_mixed_q4k_q6k_v_seq4_runs_fused_mixed_kernel() {
 /// needs its own exercise.
 #[test]
 fn prefill_uniform_q6k_seq2_runs_per_projection() {
+    let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let Some(metal) = larql_compute_metal::MetalBackend::new() else {
         return;
     };
@@ -229,6 +238,7 @@ fn prefill_uniform_q6k_seq2_runs_per_projection() {
 /// from Q4_K is an inline-to-inline `with_format`.
 #[test]
 fn prefill_uniform_q4kf_seq2_runs_fused_kernel() {
+    let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let Some(metal) = larql_compute_metal::MetalBackend::new() else {
         return;
     };

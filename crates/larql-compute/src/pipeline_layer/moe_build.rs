@@ -132,6 +132,15 @@ pub fn build_moe_weights<'a>(
         experts_down,
         routing_policy: moe_routing_policy(arch.moe_router_kind()),
         weight_layout: MoeWeightLayout::default(),
+        // Both statements are about the VINDEX2/legacy store this function
+        // reads, not about the architecture. That store is written by an
+        // extraction path which de-interleaves the fused rows and keeps
+        // k-quant scales inside the blocks — including for GPT-OSS, whose
+        // MXFP4 checkpoint is transcoded on the way in. A bank that kept
+        // the checkpoint's own arrangement arrives through the container
+        // route instead, which reads both facts off the region schema.
+        expert_scales: MoeExpertScales::Inline,
+        fused_row_layout: MoeFusedRowLayout::ContiguousHalves,
         expert_data_format,
         router_proj,
         router_bias,
@@ -194,6 +203,15 @@ fn build_moe_stub<'a>(
         experts_down: vec![],
         routing_policy: moe_routing_policy(arch.moe_router_kind()),
         weight_layout: MoeWeightLayout::default(),
+        // Both statements are about the VINDEX2/legacy store this function
+        // reads, not about the architecture. That store is written by an
+        // extraction path which de-interleaves the fused rows and keeps
+        // k-quant scales inside the blocks — including for GPT-OSS, whose
+        // MXFP4 checkpoint is transcoded on the way in. A bank that kept
+        // the checkpoint's own arrangement arrives through the container
+        // route instead, which reads both facts off the region schema.
+        expert_scales: MoeExpertScales::Inline,
+        fused_row_layout: MoeFusedRowLayout::ContiguousHalves,
         expert_data_format,
         router_proj: &[],
         router_bias: sl(arch.moe_router_bias_key(layer)),

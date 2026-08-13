@@ -76,6 +76,53 @@ pub struct QuantKernels {
     pub q6k_matvec_pipeline: KernelHandle,
     pub q6k_matvec_4sg_pipeline: KernelHandle,
     pub q6k_matvec_8sg_pipeline: KernelHandle,
+
+    /// Production-active MXFP4 grouped-expert arm — picked from
+    /// [`BackendOptions`] at construction (`mxfp4_arm`), the same way the
+    /// Q4_K and Q6_K aliases above are. Resolved once here rather than
+    /// per dispatch: the arm is a startup choice, and reading it inside
+    /// the encode path would put an env lookup on the per-layer hot path.
+    pub mxfp4_grouped_pipeline: KernelHandle,
+    /// How [`Self::mxfp4_grouped_pipeline`] receives its e8m0 exponents.
+    /// Travels with the pipeline because the two layouts have different
+    /// binding arities, so a call site cannot bind one without knowing
+    /// which it got.
+    pub mxfp4_grouped_binding: ExpertScaleBinding,
+}
+
+/// How a grouped-expert kernel receives its dequantisation scales.
+///
+/// The arity difference is real, not cosmetic:
+///
+/// | binding | buffers |
+/// |---|---|
+/// | [`Self::InlineScales`] | `W(0) offsets(1) X(2) out(3) N(4) K(5) XSTRIDE(6)` |
+/// | [`Self::SplitE8M0`] | `Wp(0) offsets(1) Ws(2) s_offsets(3) X(4) out(5) N(6) K(7) XSTRIDE(8) ROWBASE(9) ROWSTRIDE(10)` |
+///
+/// Binding an inline-scale call site against a split-scale kernel puts
+/// activations where the kernel reads exponents, which decodes silently
+/// and wrongly.
+///
+/// The two extra pairs on the split arm are not symmetry for its own sake.
+/// `s_offsets` exists because the exponent stream's placement is the
+/// container writer's choice, not `payload_offset / 16`; `ROWBASE`/
+/// `ROWSTRIDE` exist because a fused gate/up region can arrange its two
+/// halves contiguously *or* interleaved, and an inline-scale call site
+/// expresses "which half" as a byte offset, which can only say the former.
+/// Both are properties a stored bank has and a bench fixture does not,
+/// which is why only the arm that serves stored banks carries them.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum ExpertScaleBinding {
+    /// Scales ride inside the weight stream (Q4_K, Q6_K, and the
+    /// interleaved MXFP4 arms).
+    ///
+    /// Implies a contiguous-halves fused region: there is no binding here
+    /// that could say otherwise, so a call site holding an interleaved
+    /// bank must refuse rather than dispatch.
+    InlineScales,
+    /// A separate e8m0 exponent stream with its own offset table, plus an
+    /// explicit fused-row walk (the exact MXFP4 arm).
+    SplitE8M0,
 }
 
 impl QuantKernels {
@@ -130,6 +177,19 @@ impl QuantKernels {
             q6k_matvec_4sg_pipeline.clone()
         };
 
+        use shaders::mxfp4_grouped_experts::Mxfp4Arm;
+        let mxfp4_grouped_pipeline = match options.mxfp4_arm {
+            Mxfp4Arm::SplitLut16 => mxfp4g_split_lut16_pipeline.clone(),
+            Mxfp4Arm::InterLut16 => mxfp4g_inter_lut16_pipeline.clone(),
+            Mxfp4Arm::InterPair => mxfp4g_inter_pair_pipeline.clone(),
+            Mxfp4Arm::InterMagSign => mxfp4g_inter_magsign_pipeline.clone(),
+        };
+        let mxfp4_grouped_binding = if options.mxfp4_arm.is_split_scale() {
+            ExpertScaleBinding::SplitE8M0
+        } else {
+            ExpertScaleBinding::InlineScales
+        };
+
         Self {
             q8_quant_pipeline,
             q8_matvec_pipeline,
@@ -151,6 +211,72 @@ impl QuantKernels {
             q6k_matvec_pipeline,
             q6k_matvec_4sg_pipeline,
             q6k_matvec_8sg_pipeline,
+            mxfp4_grouped_pipeline,
+            mxfp4_grouped_binding,
+        }
+    }
+
+    /// The grouped-expert kernel serving `format`, with its binding shape.
+    ///
+    /// Replaces a `match format { Q6_K => .., _ => q4k }` that was spelled
+    /// inline at four dispatch sites. That wildcard is only safe while
+    /// every format reaching it is Q4_K-shaped: MXFP4 is not, and routing
+    /// its 16-byte groups through the Q4_K kernel's 144-byte superblock
+    /// stride produces garbage silently — the failure class the capability
+    /// audit (F4) named as the worst available.
+    ///
+    /// # Panics
+    /// If `format` has no grouped-expert kernel. Loud by design.
+    pub fn grouped_experts_for(
+        &self,
+        format: larql_compute::QuantFormat,
+    ) -> (&KernelHandle, ExpertScaleBinding) {
+        use larql_compute::QuantFormat as Q;
+        match format {
+            Q::Q6_K => (
+                &self.q6k_grouped_experts_pipeline,
+                ExpertScaleBinding::InlineScales,
+            ),
+            Q::Q4_K | Q::Q4_KF => (
+                &self.q4k_grouped_experts_pipeline,
+                ExpertScaleBinding::InlineScales,
+            ),
+            Q::MXFP4 => (&self.mxfp4_grouped_pipeline, self.mxfp4_grouped_binding),
+            other => panic!(
+                "kernels::quant: {other:?} has no grouped-expert kernel. \
+                 Implemented for Q4_K, Q4_KF, Q6_K and MXFP4 — add a kernel \
+                 and an arm here rather than falling through to Q4_K, which \
+                 would read the wrong block stride."
+            ),
+        }
+    }
+
+    /// The per-expert (non-grouped) matvec kernel serving `format`, with
+    /// its binding shape. The ragged-path sibling of
+    /// [`Self::grouped_experts_for`]; same wildcard hazard, same loud
+    /// failure.
+    ///
+    /// # Panics
+    /// If `format` has no per-expert matvec kernel.
+    pub fn expert_matvec_for(
+        &self,
+        format: larql_compute::QuantFormat,
+    ) -> (&KernelHandle, ExpertScaleBinding) {
+        use larql_compute::QuantFormat as Q;
+        match format {
+            Q::Q6_K => (&self.q6k_matvec_pipeline, ExpertScaleBinding::InlineScales),
+            Q::Q4_K | Q::Q4_KF => (&self.q4k_matvec_pipeline, ExpertScaleBinding::InlineScales),
+            // K1 of the ladder consumes the checkpoint's two streams
+            // directly, so it is split regardless of the grouped arm.
+            Q::MXFP4 => (&self.mxfp4_matvec_pipeline, ExpertScaleBinding::SplitE8M0),
+            other => panic!(
+                "kernels::quant: {other:?} has no per-expert matvec kernel. \
+                 Implemented for Q4_K, Q4_KF, Q6_K and MXFP4 — add a kernel \
+                 and an arm here rather than falling through to Q4_K."
+            ),
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

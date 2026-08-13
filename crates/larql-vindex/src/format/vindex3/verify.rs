@@ -144,10 +144,16 @@ impl Vindex3Container {
             // Bounds are checked by resolving every declared region for every
             // entry — the reader refuses an out-of-range offset, so a
             // successful resolve is the bounds check.
+            // Every *declared schema*, not every distinct role. A bank whose
+            // roles are unique makes these the same walk; a split-scale bank
+            // does not — it declares two `Scales` regions, and a role-driven
+            // walk both visits one of them twice and never reaches the other.
+            // Resolving by schema index also keeps this independent of the
+            // ambiguity that role lookup now refuses.
             for entry in 0..bank.num_entries {
-                for role in present.iter().copied() {
+                for schema in schemas {
                     let resolved = segment
-                        .region_bytes(bank.bank_id, entry, role)
+                        .resolve_by_schema_index(bank.bank_id, entry, schema.schema_index)
                         .ok()
                         .flatten();
                     if resolved.is_none() {
@@ -155,7 +161,7 @@ impl Vindex3Container {
                             layer: layer.layer,
                             bank: bank.bank_id,
                             entry,
-                            role,
+                            role: schema.role,
                             segment: bank_ref.storage.clone(),
                         });
                     }

@@ -82,6 +82,15 @@ pub trait ComputeBackend: MatMul + QuantMatVec + DecodeBackend + Send + Sync {
     /// the same base twice is a cheap no-op.
     fn register_weight_region(&self, _region: &[u8]) {}
 
+    /// Called once after the last [`Self::register_weight_region`] for a
+    /// model, before any timed work.
+    ///
+    /// A backend that prepares resources up front (Metal declares an explicit
+    /// residency set over the registered allocations) does it here rather than
+    /// per registration, which would rebuild the declaration N times. Default
+    /// is a no-op, which is exactly the pre-existing behaviour.
+    fn seal_weight_regions(&self) {}
+
     /// Expose the concrete type for safe downcasting.
     fn as_any(&self) -> &dyn std::any::Any;
 

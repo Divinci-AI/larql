@@ -90,6 +90,7 @@ pub mod forward_overrides;
 pub mod kquant_forward;
 pub mod kv_dispatch;
 pub mod kv_index;
+pub mod moe_route_observe;
 pub mod options;
 pub mod packed_attn_index;
 pub mod per_layer_decode_state;
@@ -111,12 +112,13 @@ pub use per_layer_decode_state::PerLayerDecodeState;
 // ── Re-exports: pipeline types ──
 
 pub use pipeline::{
-    stored_gate_up_cols, Activation, AttentionSpec, AttentionWeights, ExpertMlp, ExternalScaleKind,
-    FfnSpec, FfnType, FfnWeights, FullPipelineLayer, LayerNorms, LayerWeights,
-    MoeDownPaddingPolicy, MoeExpertScalePolicy, MoeGateRule, MoeInputSource, MoeLayerWeights,
-    MoePostExpertNormPolicy, MoeRouterNormPolicy, MoeRoutingPolicy, MoeSpec, MoeTopKWeightPolicy,
-    MoeWeightLayout, NormType, PositionEncodingType, QuantAux, QuantFormat, QuantWeight,
-    RemoteFfnSpec, ScaleStorage, RMSNORM_EPSILON_DEFAULT, ROPE_BASE_DEFAULT, ROPE_BASE_GLOBAL,
+    stored_gate_up_cols, Activation, AttentionSpec, AttentionWeights, ExpertBankOverride,
+    ExpertMlp, ExternalScaleKind, FfnSpec, FfnType, FfnWeights, FullPipelineLayer, LayerNorms,
+    LayerWeights, MoeDownPaddingPolicy, MoeExpertScalePolicy, MoeExpertScales, MoeFusedRowLayout,
+    MoeGateRule, MoeInputSource, MoeLayerWeights, MoePostExpertNormPolicy, MoeRouterNormPolicy,
+    MoeRoutingPolicy, MoeSpec, MoeTopKWeightPolicy, MoeWeightLayout, NormType,
+    PositionEncodingType, QuantAux, QuantFormat, QuantWeight, RemoteFfnSpec, ScaleStorage,
+    RMSNORM_EPSILON_DEFAULT, ROPE_BASE_DEFAULT, ROPE_BASE_GLOBAL,
 };
 
 // ── Re-exports: backend ──

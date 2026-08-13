@@ -21,6 +21,8 @@ fn make_moe<'a>(
         .map(|e| &down[e * dn_stride..(e + 1) * dn_stride])
         .collect();
     MoeLayerWeights {
+        expert_scales: crate::MoeExpertScales::Inline,
+        fused_row_layout: crate::MoeFusedRowLayout::ContiguousHalves,
         experts_gate_up,
         experts_down,
         routing_policy: crate::MoeRoutingPolicy::default(),
@@ -110,6 +112,8 @@ fn router_input_scalar_zero_is_applied() {
     ];
 
     let moe_no_scale = MoeLayerWeights {
+        expert_scales: crate::MoeExpertScales::Inline,
+        fused_row_layout: crate::MoeFusedRowLayout::ContiguousHalves,
         experts_gate_up: Vec::new(),
         experts_down: Vec::new(),
         routing_policy: crate::MoeRoutingPolicy::default(),
@@ -152,6 +156,8 @@ fn top_k_softmax_policy_keeps_raw_selected_weight() {
         0.0, 0.0, // expert 1 logit = 0
     ];
     let moe = MoeLayerWeights {
+        expert_scales: crate::MoeExpertScales::Inline,
+        fused_row_layout: crate::MoeFusedRowLayout::ContiguousHalves,
         experts_gate_up: Vec::new(),
         experts_down: Vec::new(),
         routing_policy: crate::MoeRoutingPolicy::top_k_softmax(),
@@ -197,6 +203,8 @@ fn router_bias_changes_which_expert_wins() {
     router[..hidden].fill(1.0); // expert 0 wins on the projection alone
 
     let no_bias = MoeLayerWeights {
+        expert_scales: crate::MoeExpertScales::Inline,
+        fused_row_layout: crate::MoeFusedRowLayout::ContiguousHalves,
         experts_gate_up: Vec::new(),
         experts_down: Vec::new(),
         routing_policy: crate::MoeRoutingPolicy::top_k_then_softmax(),
@@ -246,6 +254,8 @@ fn router_bias_of_the_wrong_width_panics() {
     let router = vec![0.0f32; 2 * hidden];
     let bias = [1.0f32; 3]; // 3 entries for 2 experts
     let moe = MoeLayerWeights {
+        expert_scales: crate::MoeExpertScales::Inline,
+        fused_row_layout: crate::MoeFusedRowLayout::ContiguousHalves,
         experts_gate_up: Vec::new(),
         experts_down: Vec::new(),
         routing_policy: crate::MoeRoutingPolicy::top_k_then_softmax(),
@@ -365,6 +375,8 @@ fn cpu_moe_forward_q4k_dispatch() {
 
     let h = vec![0.5f32; hidden];
     let moe = MoeLayerWeights {
+        expert_scales: crate::MoeExpertScales::Inline,
+        fused_row_layout: crate::MoeFusedRowLayout::ContiguousHalves,
         experts_gate_up,
         experts_down,
         routing_policy: crate::MoeRoutingPolicy::default(),
@@ -455,6 +467,8 @@ fn per_expert_indexing_routes_correctly() {
     router[hidden..].fill(1.0); // expert 1 row
 
     let moe = MoeLayerWeights {
+        expert_scales: crate::MoeExpertScales::Inline,
+        fused_row_layout: crate::MoeFusedRowLayout::ContiguousHalves,
         experts_gate_up: vec![&e0_gu, &e1_gu],
         experts_down: vec![&e0_dn, &e1_dn],
         routing_policy: crate::MoeRoutingPolicy::default(),
@@ -543,6 +557,8 @@ fn cpu_moe_forward_uses_same_router_input_as_cpu_moe_route() {
         .collect();
 
     let moe = MoeLayerWeights {
+        expert_scales: crate::MoeExpertScales::Inline,
+        fused_row_layout: crate::MoeFusedRowLayout::ContiguousHalves,
         experts_gate_up,
         experts_down,
         routing_policy: crate::MoeRoutingPolicy::default(),
@@ -670,6 +686,8 @@ fn row_parallel_schedule_matches_expert_parallel() {
     }
     let router = fill(E * H, 5);
     let moe = MoeLayerWeights {
+        expert_scales: crate::MoeExpertScales::Inline,
+        fused_row_layout: crate::MoeFusedRowLayout::ContiguousHalves,
         experts_gate_up: gate_up.iter().map(|v| v.as_slice()).collect(),
         experts_down: down.iter().map(|v| v.as_slice()).collect(),
         routing_policy: crate::MoeRoutingPolicy::top_k_then_softmax(),
@@ -717,4 +735,41 @@ fn row_parallel_schedule_matches_expert_parallel() {
         num / den.max(1e-30)
     );
     assert!(den > 1e-3, "fixture degenerated to ~zero output");
+}
+
+/// `moe_router_logits` is the routing oracle GPU implementations gate
+/// against: pin its arithmetic directly. logits[e] = Σ_h x[h]·W[e,h] + b[e]
+/// on a hand-checkable 3-expert × 4-hidden fixture.
+#[test]
+fn router_logits_matmul_plus_bias_hand_checked() {
+    let x = [1.0f32, 2.0, 3.0, 4.0];
+    #[rustfmt::skip]
+    let w = [
+        1.0f32, 0.0, 0.0, 0.0, // e0: x[0]            = 1
+        0.0,    1.0, 1.0, 0.0, // e1: x[1]+x[2]       = 5
+        1.0,    1.0, 1.0, 1.0, // e2: Σx              = 10
+    ];
+    let bias = [10.0f32, 0.0, -10.0];
+    let logits = moe_router_logits(&x, &w, &bias, 3);
+    assert_eq!(logits, vec![11.0, 5.0, 0.0]);
+}
+
+/// Empty bias means "architecture has none": logits are the bare
+/// projection, not a zero-added variant of anything.
+#[test]
+fn router_logits_empty_bias_is_bare_projection() {
+    let x = [1.0f32, -1.0];
+    let w = [2.0f32, 3.0, 0.5, 0.5];
+    let logits = moe_router_logits(&x, &w, &[], 2);
+    assert_eq!(logits, vec![-1.0, 0.0]);
+}
+
+/// Wrong-width bias must panic at the oracle itself, not only at the
+/// route wrapper — GPU parity rigs call the oracle directly.
+#[test]
+#[should_panic(expected = "does not describe this router")]
+fn router_logits_wrong_width_bias_panics() {
+    let x = [1.0f32, 1.0];
+    let w = [1.0f32, 1.0, 1.0, 1.0];
+    moe_router_logits(&x, &w, &[1.0], 2);
 }

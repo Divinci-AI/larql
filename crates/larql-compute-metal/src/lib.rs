@@ -87,11 +87,16 @@ mod direct_ops;
 #[cfg(target_os = "macos")]
 mod f32_ops;
 #[cfg(target_os = "macos")]
+pub mod moe_descriptor;
 mod moe_dispatch;
+#[cfg(target_os = "macos")]
+mod moe_gpu_route;
 #[cfg(target_os = "macos")]
 mod moe_zero_copy;
 #[cfg(target_os = "macos")]
 mod pipeline;
+#[cfg(target_os = "macos")]
+pub mod route_witness;
 
 // ───── Curated public surface ─────
 

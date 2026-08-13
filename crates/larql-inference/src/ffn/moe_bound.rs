@@ -347,6 +347,8 @@ mod tests {
 
         fn moe(&self) -> MoeLayerWeights<'_> {
             MoeLayerWeights {
+                expert_scales: larql_compute::MoeExpertScales::Inline,
+                fused_row_layout: larql_compute::MoeFusedRowLayout::ContiguousHalves,
                 experts_gate_up: vec![&self.gate_up, &self.gate_up],
                 experts_down: vec![&self.down, &self.down],
                 routing_policy: larql_compute::MoeRoutingPolicy::default(),

@@ -11,8 +11,11 @@ pub mod constants;
 pub mod coverage;
 pub mod metadata;
 pub mod moe_svd;
+pub mod native_moe;
+pub mod orchestrate;
 pub mod stage_labels;
 pub mod streaming;
+pub mod target;
 
 pub use build::{build_vindex, build_vindex_dense_only};
 pub use build_from_vectors::build_vindex_from_vectors;

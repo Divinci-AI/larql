@@ -49,6 +49,9 @@ impl Lyrw2Writer {
     /// reserved as zeroes and backpatched by [`Lyrw2Writer::finish`].
     pub fn create(path: &Path, plan: Lyrw2Plan) -> Result<Self, VindexError> {
         plan.validate().map_err(to_vindex_error)?;
+        // Writer-only: a new container must declare what a reader is
+        // allowed to find undeclared in a legacy one.
+        plan.validate_for_write().map_err(to_vindex_error)?;
         let layout = Lyrw2Layout::of(&plan);
 
         if let Some(parent) = path.parent() {

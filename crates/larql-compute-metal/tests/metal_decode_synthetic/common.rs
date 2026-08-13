@@ -7,12 +7,29 @@ pub use larql_compute::{
     QuantWeight,
 };
 
-/// Process-wide guard for tests that mutate env vars read by the decode
-/// hot path (e.g. `LARQL_FUSED_PRELAYER_NORM`, `LARQL_QKV_FUSED`). Cargo
-/// runs tests inside a binary in parallel by default; without this lock
-/// a parallel `decode_token` test races with the env-toggling test and
-/// observes the var in either state. Hold the guard for the entire
-/// duration of any backend creation + decode that depends on the env.
+/// Process-wide guard: **every test in this binary that builds a
+/// `MetalBackend` must hold this for the whole of its GPU work.**
+///
+/// It was introduced for env-var mutation — cargo runs a binary's tests in
+/// parallel threads, so a test toggling `LARQL_QKV_FUSED` and friends races
+/// any sibling reading them at backend construction. That reason still
+/// stands (and `BackendOptions` is the better answer where a test only wants
+/// the *behaviour* — see `d_rms_fuse_phase1_produces_identical_output`).
+///
+/// But the name understates the job it actually does. Most tests here took
+/// the lock; the four `prefill_*` tests and a handful of decode smokes did
+/// not, and those were precisely the tests that produced non-finite output
+/// in roughly one `cargo test` run in two, while passing alone and passing
+/// under `--test-threads=1`. Bringing them under the same guard made the
+/// binary green over 8 consecutive runs.
+///
+/// So the invariant this enforces is "one GPU test at a time in this
+/// process". **Why two concurrently live `MetalBackend`s interfere at all is
+/// not answered here** — each owns its own queue, buffer cache and KV cache,
+/// and the prefill path holds no statics. Serialising makes the suite report
+/// the truth about the code under test; it does not make concurrent backends
+/// correct, and anything that depends on that (a server holding several) is
+/// still on unproven ground.
 pub static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Synthetic dims chosen to be Q4_K-compatible (multiples of 256) and

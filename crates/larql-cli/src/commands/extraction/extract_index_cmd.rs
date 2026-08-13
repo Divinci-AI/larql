@@ -46,6 +46,18 @@ pub struct ExtractIndexArgs {
     #[arg(long, default_value = "inference", value_parser = parse_extract_level)]
     level: larql_vindex::ExtractLevel,
 
+    /// Expert-bank route: `legacy` (inline k-quant, today's behaviour),
+    /// `native` (VINDEX3 container in the checkpoint's own representation
+    /// — refuses rather than downgrades if the source cannot supply it),
+    /// or `auto` (admission policy decides). Native/auto require
+    /// `--expert-banks-out`.
+    #[arg(long, default_value = "legacy", value_parser = parse_expert_banks)]
+    expert_banks: larql_vindex::ExtractionRequest,
+
+    /// Destination directory for the native expert-bank container.
+    #[arg(long)]
+    expert_banks_out: Option<std::path::PathBuf>,
+
     /// Include full model weights. Alias for --level all (deprecated, use --level instead).
     #[arg(long)]
     include_weights: bool,
@@ -148,6 +160,17 @@ fn resolve_extract_level(
         larql_vindex::ExtractLevel::All
     } else {
         requested
+    }
+}
+
+fn parse_expert_banks(s: &str) -> Result<larql_vindex::ExtractionRequest, String> {
+    match s {
+        "legacy" => Ok(larql_vindex::ExtractionRequest::Legacy),
+        "native" => Ok(larql_vindex::ExtractionRequest::Native),
+        "auto" => Ok(larql_vindex::ExtractionRequest::Auto),
+        other => Err(format!(
+            "unknown expert-bank route '{other}' (legacy | native | auto)"
+        )),
     }
 }
 
@@ -481,6 +504,8 @@ pub fn run(args: ExtractIndexArgs) -> Result<(), Box<dyn std::error::Error>> {
                 weight_opts,
                 q4k_opts,
                 args.drop_gate_vectors,
+                args.expert_banks,
+                args.expert_banks_out.as_deref(),
                 &mut callbacks,
             )?;
         }

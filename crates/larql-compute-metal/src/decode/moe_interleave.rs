@@ -48,6 +48,27 @@ pub(super) struct MoeCommandState<'a> {
     pub residual_dump: &'a mut diag::ResidualDump,
 }
 
+/// Names the first unmet merged-CB precondition, per layer.
+const ENV_MOE_INLINE_DIAG: &str = "LARQL_MOE_INLINE_DIAG";
+
+/// R16 dose-response control: insert N extra empty commit+wait pairs per MoE
+/// layer. Each adds one submit->start->complete round trip and NO GPU work,
+/// so the slope of ms/token against N is the per-barrier cost measured in
+/// situ. Calibrates the claim that the 5.1 ms residual is rendezvous latency
+/// rather than something else that merely correlates with layer count.
+const ENV_EXTRA_BARRIERS: &str = "LARQL_EXTRA_BARRIERS";
+
+/// Spin on the command buffer's status instead of blocking in
+/// `wait_until_completed`.
+///
+/// The bubble between command buffers is ~240 us that is neither host compute
+/// (~49 us measured) nor generic submission (~15 us for an EMPTY command
+/// buffer). An empty buffer is already complete when the host asks, so the
+/// host never actually blocks — which makes descheduling/wake latency the
+/// candidate that both observations fit. Spinning keeps the thread on-core;
+/// if the bubble collapses, the cost was the sleep/wake round trip.
+const ENV_SPIN_WAIT: &str = "LARQL_SPIN_WAIT";
+
 /// Context for the merged-command-buffer MoE path: routing on CPU, expert
 /// dispatches + weighted combine encoded into the SAME command buffer the
 /// next layer's attention will ride — one wait per layer instead of two.
@@ -66,6 +87,85 @@ impl<'a> InlineMoeCtx<'a> {
 }
 
 impl MetalBackend {
+    /// Every merged-CB precondition, in one place: the S2 GPU-route arm
+    /// decides whether to SKIP the attention wait with exactly the same
+    /// checks the CPU fast path uses to decide whether to run — a drift
+    /// between the two would skip a wait some fallback arm still needs.
+    fn inline_moe_preconditions<'m>(
+        layer: &'m FullPipelineLayer<'_>,
+        ctx: &MoeInterleaveCtx<'_>,
+        scratch: &crate::moe_dispatch::MoeScratch,
+    ) -> Result<&'m larql_compute::MoeLayerWeights<'m>, String> {
+        let Some(moe) = layer.moe.as_ref() else {
+            return Err("layer has no MoE weights".into());
+        };
+        if layer.ffn_is_remote {
+            return Err("ffn_is_remote".into());
+        }
+        if ctx.defer_ffn_for_split {
+            return Err("defer_ffn_for_split".into());
+        }
+        if ctx.stage_timing_split {
+            return Err("stage_timing_split (LARQL_PROFILE_SPLIT)".into());
+        }
+        if layer.has_dense_ffn() {
+            return Err("layer has a dense FFN branch".into());
+        }
+        if !matches!(
+            moe.routing_policy.post_expert_norm,
+            larql_compute::MoePostExpertNormPolicy::None
+        ) {
+            return Err("post_expert_norm is not None (not the identity-combine class)".into());
+        }
+        if layer.moe_combined_output_norm {
+            return Err("moe_combined_output_norm is set".into());
+        }
+        if !(layer.layer_scalar == 0.0 || layer.layer_scalar == 1.0) {
+            return Err("layer_scalar is neither 0 nor 1".into());
+        }
+        if ctx.layer_in_snapshot.is_some() {
+            return Err("layer_in_snapshot capture is active".into());
+        }
+        if ctx.dump_l0_dir.is_some() {
+            return Err("dump_l0_dir capture is active".into());
+        }
+        let biased_gated_servable =
+            matches!(moe.gate_rule, larql_compute::MoeGateRule::ClampedGlu { .. })
+                || (moe.experts_gate_up_bias.is_empty() && moe.experts_down_bias.is_empty());
+        if !biased_gated_servable {
+            return Err("a Gated layer with expert biases has no kernel".into());
+        }
+        if moe.top_k != scratch.top_k {
+            return Err(format!("top_k {} != scratch {}", moe.top_k, scratch.top_k));
+        }
+        if moe.intermediate_size != scratch.inter {
+            return Err(format!(
+                "intermediate_size {} != scratch {}",
+                moe.intermediate_size, scratch.inter
+            ));
+        }
+        if ctx.hidden != scratch.hidden {
+            return Err(format!(
+                "hidden {} != scratch {}",
+                ctx.hidden, scratch.hidden
+            ));
+        }
+        if moe.expert_data_format != scratch.format {
+            return Err(format!(
+                "expert_data_format {:?} != scratch format {:?}",
+                moe.expert_data_format, scratch.format
+            ));
+        }
+        if moe.gate_up_cols(ctx.hidden) != scratch.weight_cols {
+            return Err(format!(
+                "gate_up_cols {} != scratch weight_cols {}",
+                moe.gate_up_cols(ctx.hidden),
+                scratch.weight_cols
+            ));
+        }
+        Ok(moe)
+    }
+
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     pub(super) fn handle_moe_interleave(
         &self,
@@ -87,9 +187,75 @@ impl MetalBackend {
         // fallback branch — never reached when moe_fn is Some or ffn_is_remote).
         let moe_ref = layer.moe.as_ref();
 
+        // ── S2 (GPU-dataflow scheduling): the commit+wait below existed so
+        // the CPU could read h_post_attn and route. When this layer will be
+        // GPU-routed, that completion has no consumer — keep the command
+        // buffer OPEN and encode the MoE straight after attention. Every
+        // precondition is decided from the SAME authority the CPU fast path
+        // uses (inline_moe_preconditions), plus the GPU-route support checks;
+        // any miss falls through to the legacy wait with nothing changed.
+        // (No moe_fn/moe_collect_fn gate: the merged-CB fast path has
+        // always outranked the callback arm when its preconditions hold —
+        // try_inline runs first regardless. S2 keeps that precedence.)
+        if crate::moe_gpu_route::gpu_route_enabled() {
+            if let Some(ictx) = inline_moe {
+                if let Ok(moe) = Self::inline_moe_preconditions(layer, &ctx, ictx.scratch) {
+                    if self.gpu_route_supported(moe, ictx.scratch) {
+                        if let Some(table) = self.descriptor_table_for_layer(
+                            ctx.layer_idx,
+                            moe,
+                            ictx.scratch.inter,
+                            ictx.scratch.hidden,
+                        ) {
+                            let _t_encode = std::time::Instant::now();
+                            self.encode_moe_layer_gpu_route(
+                                state.enc,
+                                moe,
+                                ictx.scratch,
+                                &table,
+                                bufs.h_post_attn,
+                                bufs.new_h,
+                                ictx.eps,
+                            );
+                            crate::route_witness::bump(&crate::route_witness::GPU_ROUTE_LAYERS);
+                            gpu_timing::add_host_segment(
+                                |h| &mut h.encode_ms,
+                                _t_encode.elapsed().as_secs_f64() * 1000.0,
+                            );
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+
+        let _t_commit = std::time::Instant::now();
         state.enc.end_encoding();
         state.cmd.commit();
-        state.cmd.wait_until_completed();
+        gpu_timing::add_host_segment(
+            |h| &mut h.commit_ms,
+            _t_commit.elapsed().as_secs_f64() * 1000.0,
+        );
+        crate::route_witness::bump(&crate::route_witness::WAIT_MOE_ROUTE_LEGACY);
+        let _t_wait = std::time::Instant::now();
+        if larql_compute::options::env_opt_in(ENV_SPIN_WAIT) {
+            while state.cmd.status() != metal::MTLCommandBufferStatus::Completed
+                && state.cmd.status() != metal::MTLCommandBufferStatus::Error
+            {
+                std::hint::spin_loop();
+            }
+        } else {
+            state.cmd.wait_until_completed();
+        }
+        gpu_timing::add_host_segment(|h| &mut h.wait_ms, _t_wait.elapsed().as_secs_f64() * 1000.0);
+        // R16 control — see ENV_EXTRA_BARRIERS.
+        if let Some(extra) = larql_compute::options::env_usize(ENV_EXTRA_BARRIERS) {
+            for _ in 0..extra {
+                let cb = self.queue.new_command_buffer();
+                cb.commit();
+                cb.wait_until_completed();
+            }
+        }
         // In split mode the cb we just waited contains ONLY attention
         // (steps 1-5). In non-split mode it normally contains attention +
         // dense FFN; but when stage_timing_split was active, attention was
@@ -300,59 +466,129 @@ impl MetalBackend {
         use larql_compute::cpu::ops::moe::{
             moe_expert_input, moe_route_from_router_input, moe_router_input,
         };
-        let Some(moe) = layer.moe.as_ref() else {
-            return false;
+        // `LARQL_MOE_INLINE_DIAG=1` names the first unmet precondition per
+        // layer. Without it a miss is invisible: decode stays correct and
+        // just runs the callback arm, which is the 22.7 ms/token rung
+        // instead of 16.7 — a 1.36x regression that no test can see, because
+        // both arms produce identical tokens. `docs/k3-funnel.md` §4.10
+        // records the same instrument-shaped failure one level up.
+        let diag = larql_compute::options::env_opt_in(ENV_MOE_INLINE_DIAG);
+        macro_rules! refuse {
+            ($why:expr) => {{
+                if diag {
+                    eprintln!("[moe-inline] layer {} refused: {}", ctx.layer_idx, $why);
+                }
+                return false;
+            }};
+        }
+
+        let moe = match Self::inline_moe_preconditions(layer, ctx, ictx.scratch) {
+            Ok(m) => m,
+            Err(why) => refuse!(why),
         };
-        if layer.ffn_is_remote
-            || ctx.defer_ffn_for_split
-            || ctx.stage_timing_split
-            || layer.has_dense_ffn()
-            || !matches!(
-                moe.routing_policy.post_expert_norm,
-                larql_compute::MoePostExpertNormPolicy::None
-            )
-            || layer.moe_combined_output_norm
-            || !(layer.layer_scalar == 0.0 || layer.layer_scalar == 1.0)
-            || ctx.layer_in_snapshot.is_some()
-            || ctx.dump_l0_dir.is_some()
-        {
-            return false;
-        }
-        // Same biased-Gated refusal as the staged dispatcher: a Gated
-        // layer with expert biases has no kernel; refusing INTO the
-        // callback arm keeps that path's loud assert authoritative.
-        let biased_gated_servable =
-            matches!(moe.gate_rule, larql_compute::MoeGateRule::ClampedGlu { .. })
-                || (moe.experts_gate_up_bias.is_empty() && moe.experts_down_bias.is_empty());
-        if !biased_gated_servable {
-            return false;
-        }
         let scratch = ictx.scratch;
-        if moe.top_k != scratch.top_k
-            || moe.intermediate_size != scratch.inter
-            || ctx.hidden != scratch.hidden
-            || moe.expert_data_format != scratch.format
-            || moe.gate_up_cols(ctx.hidden) != scratch.weight_cols
+
+        // ── GPU-dataflow route (serve-integration rung S1, gated by
+        // LARQL_GPU_ROUTE=1): router → select → descriptor-driven experts
+        // consume the GPU-RESIDENT h_post_attn buffer; the host slice's
+        // routing role ends here. Deliberately the SAME command-buffer
+        // lifecycle as the CPU arm below — S1 proves semantics in the
+        // real decode; removing the per-layer waits is S2's change, so
+        // a failure here can never be confused with a scheduling defect.
+        // Every precondition is checked before CB state is touched: an
+        // unsupported policy/format/bank falls through to the CPU arm
+        // with nothing to roll back.
+        if crate::moe_gpu_route::gpu_route_enabled()
+            && !self.gpu_route_supported(moe, scratch)
+            && larql_compute::options::env_opt_in(ENV_MOE_INLINE_DIAG)
         {
-            return false;
+            eprintln!(
+                "[gpu-route] layer {}: unsupported — format={:?} layout={:?} \
+                 weight_cols={} hidden={} transform={:?} E={} k={}",
+                ctx.layer_idx,
+                scratch.format,
+                moe.fused_row_layout,
+                scratch.weight_cols,
+                scratch.hidden,
+                crate::moe_gpu_route::router_input_transform(moe),
+                moe.num_experts,
+                moe.top_k,
+            );
+        }
+        if crate::moe_gpu_route::gpu_route_enabled() && self.gpu_route_supported(moe, scratch) {
+            // Dims come from the MoE scratch, NOT MoeInterleaveCtx: on a
+            // hybrid layer ctx.inter is the DENSE FFN width; the expert
+            // bank's own intermediate lives on the scratch (cost one
+            // refused table + this comment to learn).
+            let table =
+                self.descriptor_table_for_layer(ctx.layer_idx, moe, scratch.inter, scratch.hidden);
+            if table.is_none() && larql_compute::options::env_opt_in(ENV_MOE_INLINE_DIAG) {
+                eprintln!(
+                    "[gpu-route] layer {}: descriptor table refused — bank \
+                     unregistered/ragged/cross-buffer, or bias tables \
+                     contradict dims (E={} inter={} hidden={} gu_bias_len={} \
+                     dn_bias_len={} gu0_len={:?})",
+                    ctx.layer_idx,
+                    moe.num_experts,
+                    ctx.inter,
+                    ctx.hidden,
+                    moe.experts_gate_up_bias.len(),
+                    moe.experts_down_bias.len(),
+                    moe.experts_gate_up.first().map(|s| s.len()),
+                );
+            }
+            if let Some(table) = table {
+                let _t_encode = std::time::Instant::now();
+                *cmd = self.queue.new_command_buffer().to_owned();
+                *enc = cmd.new_compute_command_encoder().to_owned();
+                self.encode_moe_layer_gpu_route(
+                    enc,
+                    moe,
+                    scratch,
+                    &table,
+                    bufs.h_post_attn,
+                    bufs.new_h,
+                    ictx.eps,
+                );
+                *encoder_ended = false;
+                crate::route_witness::bump(&crate::route_witness::GPU_ROUTE_LAYERS);
+                gpu_timing::add_host_segment(
+                    |h| &mut h.encode_ms,
+                    _t_encode.elapsed().as_secs_f64() * 1000.0,
+                );
+                return true;
+            }
         }
 
         // CPU routing — identical helpers to the staged dispatcher.
+        let _t_route = std::time::Instant::now();
         let expert_input = moe_expert_input(h_post_attn, moe, 0.0, ictx.eps);
         let router_in = moe_router_input(h_post_attn, &expert_input, moe, 0.0, ictx.eps);
         let (expert_indices, expert_weights) = moe_route_from_router_input(&router_in, moe);
+        gpu_timing::add_host_segment(
+            |h| &mut h.route_ms,
+            _t_route.elapsed().as_secs_f64() * 1000.0,
+        );
+
+        let _t_resolve = std::time::Instant::now();
 
         let Some(resolved) =
-            self.resolve_selected_experts(scratch, &expert_indices, &expert_weights, |ei| {
+            self.resolve_selected_experts(scratch, moe, &expert_indices, &expert_weights, |ei| {
                 Some((
                     moe.experts_gate_up.get(ei).copied()?,
                     moe.experts_down.get(ei).copied()?,
                 ))
             })
         else {
-            return false;
+            refuse!("selected experts did not resolve to registered zero-copy regions")
         };
 
+        gpu_timing::add_host_segment(
+            |h| &mut h.resolve_ms,
+            _t_resolve.elapsed().as_secs_f64() * 1000.0,
+        );
+
+        let _t_encode = std::time::Instant::now();
         // Fresh command buffer; encode experts + combine; leave it OPEN —
         // the caller's loop encodes the next layer's attention into it and
         // the next interleave (or the token epilogue) commits it.
@@ -368,6 +604,10 @@ impl MetalBackend {
             bufs.new_h,
         );
         *encoder_ended = false;
+        gpu_timing::add_host_segment(
+            |h| &mut h.encode_ms,
+            _t_encode.elapsed().as_secs_f64() * 1000.0,
+        );
         true
     }
 }
@@ -497,6 +737,8 @@ mod tests {
         let router_scale: Vec<f32> = vec![1.0f32; hidden];
         let router_per_expert_scale: Vec<f32> = vec![1.0f32; num_experts];
         let moe = MoeLayerWeights {
+            expert_scales: larql_compute::MoeExpertScales::Inline,
+            fused_row_layout: larql_compute::MoeFusedRowLayout::ContiguousHalves,
             experts_gate_up,
             experts_down,
             // `top_k_softmax`, NOT the crate default (`gemma4_hybrid`):
@@ -676,6 +918,8 @@ mod tests {
         let experts_gate_up_bias = vec![0.1f32; num_experts * 2 * inter];
         let experts_down_bias = vec![0.05f32; num_experts * hidden];
         let moe = MoeLayerWeights {
+            expert_scales: larql_compute::MoeExpertScales::Inline,
+            fused_row_layout: larql_compute::MoeFusedRowLayout::ContiguousHalves,
             experts_gate_up,
             experts_down,
             routing_policy: MoeRoutingPolicy::top_k_softmax(),
@@ -853,6 +1097,8 @@ mod tests {
         let router_scale: Vec<f32> = vec![1.0f32; hidden];
         let router_per_expert_scale: Vec<f32> = vec![1.0f32; num_experts];
         let moe = MoeLayerWeights {
+            expert_scales: larql_compute::MoeExpertScales::Inline,
+            fused_row_layout: larql_compute::MoeFusedRowLayout::ContiguousHalves,
             experts_gate_up,
             experts_down,
             routing_policy: MoeRoutingPolicy::top_k_softmax(),

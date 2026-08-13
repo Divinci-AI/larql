@@ -157,6 +157,126 @@ impl Default for MoeWeightLayout {
     }
 }
 
+/// Where an expert bank's dequantisation scales physically live.
+///
+/// A format class does **not** answer this on its own: the same codec can
+/// keep its scales inside the payload blocks or split them into a partner
+/// stream, and MXFP4 checkpoints ship the split form while the k-quants
+/// ship the inline one. The container-side statement of the same fact is
+/// `larql_vindex::format::vindex3::ExpertScaleStreams`; this is its
+/// consumer-side twin, resolved once at the boundary that can see both.
+///
+/// An enum rather than two optional vectors, so that "split-scale format,
+/// scales missing" has no spelling.
+#[derive(Clone, Debug)]
+pub enum MoeExpertScales<'a> {
+    /// Scales ride inside the payload blocks. No partner stream exists —
+    /// not "an empty one".
+    Inline,
+    /// Per-expert e8m0 exponent streams, one per payload stream, index-aligned
+    /// with `experts_gate_up` / `experts_down`.
+    Paired {
+        /// Exponents for the fused gate+up payload, `[num_experts]`.
+        gate_up: Vec<&'a [u8]>,
+        /// Exponents for the down payload, `[num_experts]`.
+        down: Vec<&'a [u8]>,
+    },
+}
+
+impl<'a> MoeExpertScales<'a> {
+    /// Whether this bank carries a separate exponent stream.
+    pub fn is_paired(&self) -> bool {
+        matches!(self, Self::Paired { .. })
+    }
+
+    /// Expert `e`'s gate+up exponents, or `None` under [`Self::Inline`].
+    ///
+    /// # Panics
+    /// If a paired table is too short for expert `e`. Falling back to
+    /// `None` would put an inline-scale binding on a split-scale bank,
+    /// which decodes every group against the wrong bytes rather than
+    /// failing — the same reason [`MoeLayerWeights::expert_mlp`] panics.
+    pub fn gate_up(&self, e: usize) -> Option<&'a [u8]> {
+        match self {
+            Self::Inline => None,
+            Self::Paired { gate_up, .. } => Some(pick_stream(gate_up, e, "gate_up")),
+        }
+    }
+
+    /// Expert `e`'s down exponents, or `None` under [`Self::Inline`].
+    ///
+    /// # Panics
+    /// As [`Self::gate_up`].
+    pub fn down(&self, e: usize) -> Option<&'a [u8]> {
+        match self {
+            Self::Inline => None,
+            Self::Paired { down, .. } => Some(pick_stream(down, e, "down")),
+        }
+    }
+}
+
+/// Expert `e`'s stream out of a paired table, loudly.
+fn pick_stream<'a>(table: &[&'a [u8]], e: usize, what: &str) -> &'a [u8] {
+    table.get(e).copied().unwrap_or_else(|| {
+        panic!(
+            "{what} scale table has {} streams — too short for expert {e}",
+            table.len()
+        )
+    })
+}
+
+/// How a fused `gate_up` expert region arranges its two projections' rows.
+///
+/// A third axis, independent of [`MoeWeightLayout`] (down-projection
+/// padding) and [`MoeExpertScales`] (where scales live). Three axes, one
+/// field each: describing a bank with a value borrowed from a neighbouring
+/// axis is how a store ends up read under a convention it never claimed.
+///
+/// There is deliberately no `Unspecified` variant, though the container's
+/// `RegionLayout` has one. A container written before that field existed
+/// genuinely does not say; a consumer holding *this* type has already
+/// resolved that question or refused to serve.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MoeFusedRowLayout {
+    /// `[all gate rows | all up rows]` — up starts one half-region in.
+    /// Every larql-written k-quant expert store, because the extraction
+    /// path de-interleaves before writing.
+    ContiguousHalves,
+    /// `gate = rows 0, 2, 4, …`, `up = rows 1, 3, 5, …`. What a GPT-OSS
+    /// checkpoint ships, and what a verbatim MXFP4 passthrough preserves.
+    ///
+    /// Read as [`Self::ContiguousHalves`] it yields two 50/50 mixtures of
+    /// the real gate and up rows, with matching summary statistics and
+    /// coherent-looking output — `docs/k3-funnel.md` §4.7, which cost a
+    /// served model once already.
+    Interleaved,
+}
+
+impl MoeFusedRowLayout {
+    /// `(first row, row stride)` walking one half's rows in fused-row
+    /// space, where the fused region holds `2 * inter` rows.
+    ///
+    /// [`larql_models::quant::mxfp4::FusedHalf`] owns the interleaved
+    /// convention; this reads the base off it rather than restating that
+    /// gate is even and up is odd.
+    pub const fn row_walk(
+        self,
+        half: larql_models::quant::mxfp4::FusedHalf,
+        inter: usize,
+    ) -> (usize, usize) {
+        use larql_models::quant::mxfp4::{FusedHalf, FUSED_HALVES};
+        match self {
+            // Rows within a half are adjacent; the base is however many
+            // rows precede this half.
+            Self::ContiguousHalves => match half {
+                FusedHalf::Gate => (0, 1),
+                FusedHalf::Up => (inter, 1),
+            },
+            Self::Interleaved => (half.fused_row(0), FUSED_HALVES),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MoeRoutingPolicy {
     pub expert_input: MoeInputSource,
@@ -250,6 +370,19 @@ pub struct MoeLayerWeights<'a> {
     pub routing_policy: MoeRoutingPolicy,
     /// Explicit byte layout for expert tensors.
     pub weight_layout: MoeWeightLayout,
+    /// Where this bank's dequantisation scales live. `Inline` for every
+    /// k-quant store; `Paired` for a natively-stored MXFP4 bank, whose
+    /// e8m0 exponents are a stream of their own.
+    pub expert_scales: MoeExpertScales<'a>,
+    /// How the fused gate+up rows are arranged **as stored**, which is a
+    /// property of the store and not of the architecture: the same
+    /// checkpoint yields `Interleaved` under a verbatim passthrough and
+    /// `ContiguousHalves` under a canonicalising extraction.
+    ///
+    /// Governs the *weight* rows only. The bias table is interleaved
+    /// regardless — it is carried exactly as the checkpoint ships it, and
+    /// `expert_mlp` reads it through `FusedHalf`.
+    pub fused_row_layout: MoeFusedRowLayout,
     /// Format of the per-expert byte slices. `Q4_K` = per-layer Q4_K files;
     /// `BF16` = legacy monolith. Both flow through the same per-expert tables.
     pub expert_data_format: QuantFormat,
@@ -299,7 +432,48 @@ pub struct MoeLayerWeights<'a> {
     pub gate_rule: MoeGateRule,
 }
 
+/// The expert-bank facts a routed container substitutes into a layer —
+/// and nothing else. Attention, norms, router state and semantic
+/// topology stay spine-owned; this struct owns only the bank's bytes
+/// and the representation facts that make them readable.
+///
+/// Generic by design: "expert bank authority = routed container if
+/// supplied, otherwise spine." No representation is named here — a
+/// native MXFP4 bank is merely the first through the seam.
+///
+/// Everything is borrowed: applying an override moves references, never
+/// bank bytes, so the container backing them must outlive the layer
+/// views (the composing caller owns both).
+pub struct ExpertBankOverride<'a> {
+    pub experts_gate_up: Vec<&'a [u8]>,
+    pub experts_down: Vec<&'a [u8]>,
+    pub expert_scales: MoeExpertScales<'a>,
+    pub fused_row_layout: MoeFusedRowLayout,
+    pub expert_data_format: QuantFormat,
+}
+
 impl<'a> MoeLayerWeights<'a> {
+    /// Replace this layer's expert bank with a routed container's —
+    /// the representation authority swap, in one place. Refuses an
+    /// override whose expert count disagrees with the layer topology
+    /// (that is a semantic fact, and the spine owns it).
+    pub fn apply_expert_bank_override(&mut self, ovr: ExpertBankOverride<'a>) {
+        assert_eq!(
+            ovr.experts_gate_up.len(),
+            self.num_experts,
+            "expert-bank override carries {} gate/up banks for a layer of \
+             {} experts — the container cannot re-decide topology",
+            ovr.experts_gate_up.len(),
+            self.num_experts,
+        );
+        assert_eq!(ovr.experts_down.len(), self.num_experts);
+        self.experts_gate_up = ovr.experts_gate_up;
+        self.experts_down = ovr.experts_down;
+        self.expert_scales = ovr.expert_scales;
+        self.fused_row_layout = ovr.fused_row_layout;
+        self.expert_data_format = ovr.expert_data_format;
+    }
+
     pub fn inter_padded(&self) -> usize {
         self.weight_layout
             .down_cols(self.intermediate_size, self.expert_data_format)

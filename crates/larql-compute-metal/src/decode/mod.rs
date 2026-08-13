@@ -463,6 +463,10 @@ impl MetalBackend {
 
         for l in 0..num_layers {
             let layer = &layers[l];
+            // The only place that knows which layer is executing. The served
+            // MoE route boundary reads this; without it a routing trace is
+            // refused rather than attributed to a guessed layer.
+            let _route_scope = larql_compute::moe_route_observe::LayerScope::new(l);
 
             // Snapshot the layer input for HF-reference diff. Must be taken
             // before any compute since `h_buf` = layer-N input at this point

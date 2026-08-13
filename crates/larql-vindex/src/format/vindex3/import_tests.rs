@@ -51,6 +51,8 @@ fn source(o: &Owned) -> MoeLayerSource<'_> {
         experts_gate_up: o.gate_up.iter().map(|v| v.as_slice()).collect(),
         experts_down: o.down.iter().map(|v| v.as_slice()).collect(),
         format: RegionFormat::F32,
+        scales: ExpertScaleStreams::Inline,
+        gate_up_layout: RegionLayout::ContiguousHalves,
         hidden_size: HIDDEN,
         gate_up_stored_intermediate: SEMANTIC_INTER,
         down_stored_intermediate: STORED_INTER,
@@ -320,6 +322,14 @@ fn a_representable_expert_format_maps_to_its_region_format() {
     assert_eq!(
         region_format_for(QuantFormat::F32).unwrap(),
         RegionFormat::F32
+    );
+    // The native route's reason for existing: MXFP4 reaches a container
+    // as MXFP4 rather than being transcoded on the way in. The mapping
+    // only says the encoding is *describable* — its scales still have to
+    // be supplied as partner regions.
+    assert_eq!(
+        region_format_for(QuantFormat::MXFP4).unwrap(),
+        RegionFormat::Mxfp4
     );
 }
 

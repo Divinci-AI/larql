@@ -18,6 +18,25 @@ pub enum ExpertFormat {
     PackedBF16,
 }
 
+impl ExpertFormat {
+    /// Whether this format keeps its dequantisation scales in a **separate**
+    /// stream from the packed values.
+    ///
+    /// A capability, not a model name: it is what decides whether a native
+    /// extraction has to carry partner scale regions, and it must be asked
+    /// of the format rather than inferred from the family. `PackedMxfp4`
+    /// ships `*_blocks` alongside `*_scales`; `PackedBF16` is unquantised
+    /// and has no scales at all; `PerExpert` tensors reach a
+    /// `WeightSource` already dequantised, so there is no separate stream
+    /// left to carry.
+    pub fn has_split_scale_streams(self) -> bool {
+        match self {
+            Self::PackedMxfp4 => true,
+            Self::PerExpert | Self::PackedBF16 => false,
+        }
+    }
+}
+
 /// Which rows of a fused `gate_up` operand belong to the gate branch and
 /// which to the up branch.
 ///
@@ -172,5 +191,47 @@ mod tests {
             c.row(GateUpBranch::Up, 0, HALF),
             i.row(GateUpBranch::Up, 0, HALF)
         );
+    }
+
+    /// Where an expert format keeps its scales, asked of the format rather
+    /// than inferred from a model family.
+    ///
+    /// Exhaustive by construction: a new `ExpertFormat` must answer, rather
+    /// than inheriting whichever value happened to suit the formats that
+    /// existed when native extraction was written.
+    #[test]
+    fn scale_stream_arrangement_is_answered_by_every_format() {
+        let table = [
+            // `*_blocks` alongside `*_scales` — the only split form today.
+            (ExpertFormat::PackedMxfp4, true),
+            // Unquantised; there are no scales at all, which is not the
+            // same fact as "they are inline" but answers the same question.
+            (ExpertFormat::PackedBF16, false),
+            // Reaches a `WeightSource` already dequantised, so no separate
+            // stream survives to be carried.
+            (ExpertFormat::PerExpert, false),
+        ];
+        for (format, expected) in table {
+            assert_eq!(
+                format.has_split_scale_streams(),
+                expected,
+                "{format:?} answered the wrong scale arrangement"
+            );
+        }
+    }
+
+    /// Scale arrangement and fused row layout are independent axes: knowing
+    /// one tells you nothing about the other. `PackedMxfp4` is split-scale
+    /// *and* interleaved; `PackedBF16` is inline *and* contiguous — a pair
+    /// that would let a reader conflate them if only these two existed.
+    #[test]
+    fn scale_arrangement_does_not_imply_a_row_layout() {
+        assert!(ExpertFormat::PackedMxfp4.has_split_scale_streams());
+        assert!(!ExpertFormat::PackedBF16.has_split_scale_streams());
+        // Both layouts remain expressible under either arrangement; nothing
+        // in `ExpertFormat` narrows the choice.
+        for layout in [GateUpLayout::ContiguousHalves, GateUpLayout::Interleaved] {
+            assert_eq!(layout.row(GateUpBranch::Gate, 0, 4), 0);
+        }
     }
 }

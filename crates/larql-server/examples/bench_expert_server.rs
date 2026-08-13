@@ -608,6 +608,8 @@ fn main() {
     let experts_gate_up_local: Vec<&[u8]> = gu_bytes_owned.iter().map(|v| v.as_slice()).collect();
     let experts_down_local: Vec<&[u8]> = dn_bytes_owned.iter().map(|v| v.as_slice()).collect();
     let layer_w = MoeLayerWeights {
+        expert_scales: larql_compute::MoeExpertScales::Inline,
+        fused_row_layout: larql_compute::MoeFusedRowLayout::ContiguousHalves,
         experts_gate_up: experts_gate_up_local,
         experts_down: experts_down_local,
         routing_policy: larql_compute::MoeRoutingPolicy::gemma4_hybrid(),

@@ -72,6 +72,10 @@ pub fn load_model_weights_kquant_shard(
     let mut packed_mmaps: HashMap<String, memmap2::Mmap> = HashMap::new();
     let mut packed_byte_ranges: HashMap<String, (String, usize, usize)> = HashMap::new();
     let mut per_layer_ffn_format: HashMap<usize, String> = HashMap::new();
+    let mut per_layer_ffn_arrangement: HashMap<
+        usize,
+        larql_models::weights::PerLayerFfnArrangement,
+    > = HashMap::new();
     let mut lm_head_loaded: Option<larql_models::WeightArray> = None;
 
     if manifest_path.exists() {
@@ -183,38 +187,50 @@ pub fn load_model_weights_kquant_shard(
             }
             if let Ok(f) = std::fs::File::open(&fpath) {
                 if let Ok(mmap) = unsafe { memmap2::Mmap::map(&f) } {
-                    if let Some((fmt, _num_entries, _inter, _hidden, offsets)) =
-                        parse_layer_weights_header(&mmap)
-                    {
+                    if let Some(header) = parse_layer_weights_header(&mmap) {
                         // The header is the format authority for this store.
                         // Recording it is what lets the MoE forward decode a
                         // Q6_K (MXFP4-transcoded) store as Q6_K instead of
                         // assuming Q4_K.
-                        per_layer_ffn_format.insert(l, fmt.registry_tag().to_string());
+                        per_layer_ffn_format.insert(l, header.format.registry_tag().to_string());
+                        // The arrangement facts travel with the format, for
+                        // the same reason: a reader that takes the format and
+                        // derives the rest is the reader that serves an
+                        // interleaved bank as contiguous halves.
+                        per_layer_ffn_arrangement.insert(
+                            l,
+                            larql_models::weights::PerLayerFfnArrangement {
+                                split_scales: header.scale_binding.is_split(),
+                                gate_up_layout: header.fused_row_layout,
+                            },
+                        );
                         // Use the shared key builder from larql-models so the
                         // loader and `ModelWeights::get_layer_entry_bytes` stay
                         // in lockstep. Drift here causes silent None returns.
-                        for (e, (gu_off, gu_bytes, dn_off, dn_bytes)) in offsets.iter().enumerate()
-                        {
+                        for (e, entry) in header.entries.iter().enumerate() {
                             if !expert_in_shard(e, expert_filter) {
                                 continue;
                             }
-                            packed_byte_ranges.insert(
-                                larql_models::weights::per_layer_ffn_key(
-                                    l,
-                                    e,
-                                    larql_models::weights::PER_LAYER_FFN_GATE_UP,
-                                ),
-                                (filename.clone(), *gu_off, *gu_bytes),
-                            );
-                            packed_byte_ranges.insert(
-                                larql_models::weights::per_layer_ffn_key(
-                                    l,
-                                    e,
-                                    larql_models::weights::PER_LAYER_FFN_DOWN,
-                                ),
-                                (filename.clone(), *dn_off, *dn_bytes),
-                            );
+                            let mut record =
+                                |slot: &str, r: &super::super::write_layers::StoredRange| {
+                                    packed_byte_ranges.insert(
+                                        larql_models::weights::per_layer_ffn_key(l, e, slot),
+                                        (filename.clone(), r.offset, r.len),
+                                    );
+                                };
+                            record(larql_models::weights::PER_LAYER_FFN_GATE_UP, &entry.gate_up);
+                            record(larql_models::weights::PER_LAYER_FFN_DOWN, &entry.down);
+                            // Exponent streams, present exactly for a
+                            // split-scale store. Registering them under their
+                            // own slots keeps `payload_offset / 16` — a
+                            // physical-placement coincidence, not a format
+                            // property — out of every consumer.
+                            if let Some(r) = &entry.gate_up_scales {
+                                record(larql_models::weights::PER_LAYER_FFN_GATE_UP_SCALES, r);
+                            }
+                            if let Some(r) = &entry.down_scales {
+                                record(larql_models::weights::PER_LAYER_FFN_DOWN_SCALES, r);
+                            }
                         }
                         packed_mmaps.insert(filename, mmap);
                     }
@@ -288,6 +304,7 @@ pub fn load_model_weights_kquant_shard(
         packed_mmaps,
         packed_byte_ranges,
         per_layer_ffn_format,
+        per_layer_ffn_arrangement,
         embed,
         lm_head,
         position_embed: None,

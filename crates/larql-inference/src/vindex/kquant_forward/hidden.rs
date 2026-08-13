@@ -252,6 +252,10 @@ pub fn moe_ffn_block_cpu_with_index(
     moe: Option<crate::ffn::MoeRoute<'_>>,
     index: Option<&larql_vindex::VectorIndex>,
 ) -> Result<Array2<f32>, crate::ffn::MoeBackendError> {
+    // This block owns the layer coordinate, and the served CPU route boundary
+    // below it does not. Scope it so routing observations are attributable;
+    // without this they are refused, not guessed.
+    let _route_scope = larql_compute::moe_route_observe::LayerScope::new(layer);
     let arch = &*weights.arch;
     let norm_offset = arch.norm_weight_offset();
     let eps = arch.norm_eps();

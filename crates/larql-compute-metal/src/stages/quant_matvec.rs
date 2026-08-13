@@ -230,6 +230,31 @@ pub fn encode(
                  backend (`ternary_matvec`), or add a Metal sign-select shader."
             );
         }
+        larql_compute::QuantFormat::Q5_K => {
+            // The cheapest exact container for MXFP4 weights (25 affine
+            // levels needed, Q5_K has 32) and therefore the lossless
+            // fallback if the native MXFP4 path does not pay off — but
+            // no Metal Q5_K kernel exists yet. Fail loudly, mirroring
+            // the Q8_0 and I2S arms.
+            panic!(
+                "metal::stages::quant_matvec::encode: Q5_K has no Metal kernel \
+                 yet. Add a q5k matvec shader and register it in \
+                 `kernels::quant`, or serve these weights as Q6_K."
+            );
+        }
+        larql_compute::QuantFormat::MXFP4 => {
+            // MXFP4 *does* have Metal kernels — but they take the packed
+            // nibbles and the e8m0 exponent stream as two bindings, and
+            // this dispatcher's signature carries only `w_buf`. Binding
+            // the packed stream alone would decode every group at scale
+            // 2^0. Fail loudly, mirroring the Q8_0 and I2S arms.
+            panic!(
+                "metal::stages::quant_matvec::encode: MXFP4 needs its external \
+                 e8m0 scale stream, which this single-weight-buffer dispatcher \
+                 cannot bind. Route MXFP4 through the expert path \
+                 (`mxfp4_grouped_experts`) or `trait_impl::mxfp4`."
+            );
+        }
         larql_compute::QuantFormat::BF16
         | larql_compute::QuantFormat::F16
         | larql_compute::QuantFormat::F32 => {

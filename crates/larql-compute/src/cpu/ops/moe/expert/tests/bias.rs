@@ -153,6 +153,8 @@ fn expert_mlp_slices_by_expert_id() {
     ];
     let down_bias = [0.1f32, 0.2, /* expert 1 */ 0.3, 0.4];
     let moe = crate::MoeLayerWeights {
+        expert_scales: crate::MoeExpertScales::Inline,
+        fused_row_layout: crate::MoeFusedRowLayout::ContiguousHalves,
         experts_gate_up: Vec::new(),
         experts_down: Vec::new(),
         routing_policy: crate::MoeRoutingPolicy::top_k_then_softmax(),
@@ -196,6 +198,8 @@ fn expert_mlp_slices_by_expert_id() {
 fn a_short_bias_table_panics_rather_than_reusing_expert_zero() {
     let gate_up_bias = [1.0f32; 4]; // one expert's worth
     let moe = crate::MoeLayerWeights {
+        expert_scales: crate::MoeExpertScales::Inline,
+        fused_row_layout: crate::MoeFusedRowLayout::ContiguousHalves,
         experts_gate_up: Vec::new(),
         experts_down: Vec::new(),
         routing_policy: crate::MoeRoutingPolicy::top_k_then_softmax(),

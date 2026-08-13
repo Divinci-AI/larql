@@ -35,10 +35,13 @@ pub mod plan;
 mod plan_tests;
 pub mod read;
 #[cfg(test)]
+mod read_pairing_tests;
+#[cfg(test)]
 mod read_refusal_tests;
 #[cfg(test)]
 mod read_tests;
 pub mod region_format;
+pub mod region_layout;
 pub mod region_role;
 pub mod region_schema;
 pub mod segment;

@@ -10,6 +10,7 @@
 //! it is the exact shape of the mis-strided-table bug this format guards against.
 
 use super::bank::BankDescriptor;
+use super::consts::PAIR_ID_UNPAIRED;
 use super::consts::{
     BANK_DESCRIPTOR_BYTES, HEADER_BYTES, REGION_SCHEMA_BYTES, SEGMENT_DESCRIPTOR_BYTES,
 };
@@ -193,12 +194,136 @@ impl<'a> Lyrw2Reader<'a> {
         logical_entry: u32,
         role: RegionRole,
     ) -> Result<Option<ResolvedRegion>, Lyrw2Error> {
+        let Some(schema) = self.schema_for_role(bank_id, role)? else {
+            return Ok(None);
+        };
+        self.resolve_schema(bank_id, logical_entry, schema)
+    }
+
+    /// The unique schema carrying `role`, or an error if more than one does.
+    ///
+    /// **Refuses rather than picking.** Before split-scale banks every role in
+    /// a bank was unique, so `find` was total; a bank with two `Scales`
+    /// regions makes it a silent default that hands back gate/up's exponents
+    /// when down's were meant — bytes from the wrong region, which is the
+    /// exact failure this format's diagnostics exist to prevent. Callers that
+    /// need a duplicated role must say *which* by naming its pair
+    /// ([`Self::resolve_paired`]).
+    fn schema_for_role(
+        &self,
+        bank_id: u16,
+        role: RegionRole,
+    ) -> Result<Option<RegionSchema>, Lyrw2Error> {
         let Some(schemas) = self.schemas_for(bank_id) else {
             return Ok(None);
         };
-        let Some(schema) = schemas.iter().copied().find(|s| s.role == role) else {
+        let mut matching = schemas.iter().copied().filter(|s| s.role == role);
+        let Some(first) = matching.next() else {
             return Ok(None);
         };
+        let count = 1 + matching.count();
+        if count > 1 {
+            return Err(Lyrw2Error::AmbiguousRole {
+                bank_id,
+                role: role.name(),
+                count,
+            });
+        }
+        Ok(Some(first))
+    }
+
+    /// Resolve the region that `role`'s pairing binds to it.
+    ///
+    /// `pair_id` is the authority, not ordinal position. A caller asks for
+    /// "the `Scales` partnered with `Down`" rather than "the second `Scales`",
+    /// so a writer free to emit regions in any order cannot silently
+    /// re-associate a payload with the wrong exponents.
+    ///
+    /// ```text
+    /// GateUpFused ── pair_id 1 ── Scales
+    /// Down        ── pair_id 2 ── Scales
+    /// ```
+    ///
+    /// `source_role` must itself be unique in the bank; the partner must be
+    /// the unique region with the same `pair_id` and `partner_role`.
+    pub fn resolve_paired(
+        &self,
+        bank_id: u16,
+        logical_entry: u32,
+        source_role: RegionRole,
+        partner_role: RegionRole,
+    ) -> Result<Option<ResolvedRegion>, Lyrw2Error> {
+        let Some(source) = self.schema_for_role(bank_id, source_role)? else {
+            return Ok(None);
+        };
+        if source.pair_id == PAIR_ID_UNPAIRED {
+            return Err(Lyrw2Error::NotPaired {
+                bank_id,
+                role: source_role.name(),
+                partner_role: partner_role.name(),
+            });
+        }
+        // `schemas_for` already answered above, so this cannot be None.
+        let schemas = self.schemas_for(bank_id).unwrap_or(&[]);
+        let partners: Vec<RegionSchema> = schemas
+            .iter()
+            .copied()
+            .filter(|s| s.role == partner_role && s.pair_id == source.pair_id)
+            .collect();
+        match partners.len() {
+            0 => Err(Lyrw2Error::MissingPartner {
+                bank_id,
+                role: source_role.name(),
+                pair_id: source.pair_id,
+                partner_role: partner_role.name(),
+            }),
+            1 => self.resolve_schema(bank_id, logical_entry, partners[0]),
+            count => Err(Lyrw2Error::AmbiguousPartner {
+                bank_id,
+                partner_role: partner_role.name(),
+                pair_id: source.pair_id,
+                count,
+            }),
+        }
+    }
+
+    /// Resolve a region by its **schema index**, bypassing role lookup.
+    ///
+    /// For callers that already hold the schema table and want to visit
+    /// every declared region — a verifier, or a writer checking its own
+    /// output. Role-agnostic by construction, so a bank with duplicated
+    /// roles is enumerable without the ambiguity that role lookup refuses.
+    pub fn resolve_by_schema_index(
+        &self,
+        bank_id: u16,
+        logical_entry: u32,
+        schema_index: u16,
+    ) -> Result<Option<ResolvedRegion>, Lyrw2Error> {
+        let Some(schemas) = self.schemas_for(bank_id) else {
+            return Ok(None);
+        };
+        let Some(schema) = schemas
+            .iter()
+            .copied()
+            .find(|s| s.schema_index == schema_index)
+        else {
+            return Ok(None);
+        };
+        self.resolve_schema(bank_id, logical_entry, schema)
+    }
+
+    /// Byte range of one already-selected schema's region.
+    ///
+    /// Split out so role lookup and pair lookup share one offset/bounds path
+    /// — two copies of this arithmetic is how a reader ends up checking
+    /// bounds on one route and not the other.
+    fn resolve_schema(
+        &self,
+        bank_id: u16,
+        logical_entry: u32,
+        schema: RegionSchema,
+    ) -> Result<Option<ResolvedRegion>, Lyrw2Error> {
+        let role = schema.role;
         let Some((segment_ordinal, local_entry)) = self.segment_holding(bank_id, logical_entry)
         else {
             return Ok(None);
@@ -252,8 +377,31 @@ impl<'a> Lyrw2Reader<'a> {
         let Some(region) = self.resolve(bank_id, logical_entry, role)? else {
             return Ok(None);
         };
+        Ok(Some(self.borrow(&region)))
+    }
+
+    /// Borrow the bytes of the region `source_role`'s pairing binds to it.
+    ///
+    /// The addressing a split-scale bank needs: "down's exponents", not
+    /// "the second `Scales` region". See [`Self::resolve_paired`].
+    pub fn paired_region_bytes(
+        &self,
+        bank_id: u16,
+        logical_entry: u32,
+        source_role: RegionRole,
+        partner_role: RegionRole,
+    ) -> Result<Option<&'a [u8]>, Lyrw2Error> {
+        let Some(region) =
+            self.resolve_paired(bank_id, logical_entry, source_role, partner_role)?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(self.borrow(&region)))
+    }
+
+    fn borrow(&self, region: &ResolvedRegion) -> &'a [u8] {
         let start = region.offset as usize;
         let end = start + region.length as usize;
-        Ok(Some(&self.bytes[start..end]))
+        &self.bytes[start..end]
     }
 }

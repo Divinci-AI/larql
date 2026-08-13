@@ -36,7 +36,7 @@ use larql_compute::options::{
     env_flag, env_not_zero_or_default, env_opt_in, env_opt_out, ENV_F16_ACC, ENV_FUSED_ATTN,
     ENV_FUSED_DOWN, ENV_FUSED_KV_APPEND_ATTEND, ENV_FUSED_POST_ATTN_NORM, ENV_FUSED_POST_FFN_NORM,
     ENV_FUSED_PRELAYER_NORM, ENV_FUSED_Q6K_DOWN, ENV_FUSED_QK_NORM_ROPE, ENV_GATE_UP_8SG,
-    ENV_GATE_UP_COOP, ENV_Q4K_MATVEC_8SG, ENV_Q6K_8SG, ENV_QKV_FUSED,
+    ENV_GATE_UP_COOP, ENV_MXFP4_ARM, ENV_Q4K_MATVEC_8SG, ENV_Q6K_8SG, ENV_QKV_FUSED,
 };
 
 /// Decode-path flag snapshot captured at backend startup.
@@ -133,6 +133,13 @@ pub struct BackendOptions {
     /// kernel-isolated 1.96× did not translate end-to-end on M3 Max).
     /// Env: `LARQL_Q6K_8SG=1` opts in → sets this true.
     pub q6k_use_8sg: bool,
+    /// Which MXFP4 grouped-expert arm serves the native expert path.
+    /// The default is the exact split-stream arm; the interleaved arms
+    /// are 4.6% denser but lossy on wide superblocks, so selecting one
+    /// is an explicit act. Settling which is fastest is an end-to-end
+    /// question, which is why this is a runtime choice at all.
+    /// Env: `LARQL_MXFP4_ARM=a|b|c|d` (or the arm name) selects one.
+    pub mxfp4_arm: crate::shaders::mxfp4_grouped_experts::Mxfp4Arm,
 }
 
 impl BackendOptions {
@@ -144,6 +151,10 @@ impl BackendOptions {
             decode_flags: DecodeFlags::from_env(),
             q4k_matvec_use_4sg: env_opt_out(ENV_Q4K_MATVEC_8SG),
             q6k_use_8sg: env_opt_in(ENV_Q6K_8SG),
+            mxfp4_arm: std::env::var(ENV_MXFP4_ARM)
+                .ok()
+                .and_then(|v| crate::shaders::mxfp4_grouped_experts::Mxfp4Arm::from_name(&v))
+                .unwrap_or_default(),
         }
     }
 }
@@ -159,6 +170,8 @@ impl Default for BackendOptions {
             decode_flags: DecodeFlags::default(),
             q4k_matvec_use_4sg: false, // 8sg default since 2026-04-28
             q6k_use_8sg: false,        // 4sg default
+            // The exact arm — see `Mxfp4Arm`'s own default.
+            mxfp4_arm: crate::shaders::mxfp4_grouped_experts::Mxfp4Arm::default(),
         }
     }
 }

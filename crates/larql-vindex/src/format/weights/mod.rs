@@ -16,6 +16,7 @@
 //!                (`load_model_weights`, `find_tokenizer_path`).
 
 mod capabilities;
+pub mod layer_store_layout;
 pub mod load;
 pub mod manifest;
 pub mod mla_absorb;

@@ -46,6 +46,20 @@ pub fn cpu_moe_forward(
     if moe.router_proj.is_empty() || moe.experts_gate_up.is_empty() || moe.experts_down.is_empty() {
         return vec![0.0f32; hidden];
     }
+    // This tier splits the fused operand by halves (`gate_up_w[..inter*cols]`
+    // and the remainder, below), which is the `ContiguousHalves` reading and
+    // the only one it can express. Handed an interleaved bank it would return
+    // two 50/50 mixtures of the real gate and up rows — finite, coherent, and
+    // wrong, the failure `docs/k3-funnel.md` §4.7 already cost once. Refuse
+    // instead; serving a natively-stored MXFP4 bank is the Metal route's job
+    // until this tier learns the row walk.
+    assert_eq!(
+        moe.fused_row_layout,
+        crate::MoeFusedRowLayout::ContiguousHalves,
+        "cpu_moe_forward: this tier reads fused gate/up as contiguous halves \
+         and cannot serve a {:?} bank",
+        moe.fused_row_layout,
+    );
     // Diagnostic: bypass the expert block entirely. Dense FFN alone flows
     // through the normal path; if this produces legible output, the MoE
     // block is the broken piece. If still garbage, look upstream.
@@ -414,6 +428,8 @@ mod tests {
         format: QuantFormat,
     ) -> MoeLayerWeights<'a> {
         MoeLayerWeights {
+            expert_scales: crate::MoeExpertScales::Inline,
+            fused_row_layout: crate::MoeFusedRowLayout::ContiguousHalves,
             experts_gate_up,
             experts_down,
             routing_policy: crate::MoeRoutingPolicy::default(),
@@ -491,6 +507,8 @@ mod tests {
         let mut router = vec![0.0f32; num_experts * hidden];
         router[3 * hidden..4 * hidden].fill(10.0);
         let moe = MoeLayerWeights {
+            expert_scales: crate::MoeExpertScales::Inline,
+            fused_row_layout: crate::MoeFusedRowLayout::ContiguousHalves,
             experts_gate_up,
             experts_down,
             routing_policy: crate::MoeRoutingPolicy::default(),

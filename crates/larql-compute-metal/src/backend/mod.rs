@@ -109,6 +109,18 @@ pub struct MetalBackend {
     /// pulled inside the backend so the local decode path benefits
     /// without each caller threading a cache through.
     pub(crate) moe_scratch: std::sync::Mutex<Option<moe_dispatch::MoeScratch>>,
+    /// Per-layer expert descriptor tables for the GPU-dataflow route
+    /// (`LARQL_GPU_ROUTE=1`). Keyed by (layer_idx, first gate_up slice
+    /// pointer) — the pointer detects a model swap on a reused backend.
+    /// Built once per layer after regions register; NEVER rebuilt during
+    /// decode (a rebuild would trade routing host work for per-token
+    /// representation work).
+    pub(crate) moe_descriptor_tables: std::sync::Mutex<
+        std::collections::HashMap<
+            (usize, usize),
+            std::sync::Arc<crate::moe_descriptor::MoeExpertDescriptorTable>,
+        >,
+    >,
     /// Per-Layer Embeddings precomputed input table (Gemma 4 E2B).
     ///
     /// Set by [`prepare_ple_inputs`](Self::prepare_ple_inputs) before each
@@ -136,6 +148,26 @@ pub struct MetalBackend {
     /// weight matrix. Halves bandwidth for tied-embedding models whose
     /// lm_head would otherwise live as a 5.6 GB f32 clone on 31B.
     pub f16_gemv_pipeline: KernelHandle,
+    /// MoE router projection (`logits = W·x + bias`), rung A of the
+    /// GPU-dataflow routing ladder. Parity-gated against the CPU oracle
+    /// `larql_compute::cpu::ops::moe::moe_router_logits`.
+    pub moe_router_pipeline: KernelHandle,
+    /// Fused route selection (softmax → deterministic top-k → weight
+    /// policy) in one single-TG dispatch, rung B. Parity-gated against
+    /// `moe_route_from_router_input`; shares its tie contract with
+    /// `math::top_k` (prob descending, expert id ascending).
+    pub moe_router_select_pipeline: ComputePipelineState,
+    /// `out[slot] = descs[selected_ids[slot]]` — rung C's single runtime
+    /// indirection from route result to stored-expert descriptor.
+    pub moe_descriptor_gather_pipeline: ComputePipelineState,
+    /// GPU replacement for the CPU bias-staging memcpy loop: gathers the
+    /// selected experts' interleaved gate/up bias rows into slot-aligned
+    /// scratch, driven by descriptors instead of host pointers.
+    pub moe_bias_stage_pipeline: ComputePipelineState,
+    /// Slot-aligned staging of the selected experts' down-bias rows from
+    /// the layer bank, descriptor-driven — the last route-dependent CPU
+    /// memcpy (rung E1).
+    pub moe_down_bias_stage_pipeline: ComputePipelineState,
     pub(crate) flop_threshold: AtomicUsize,
     /// Decode-path flag snapshot copied from
     /// [`BackendOptions::decode_flags`] at construction. Captured once
@@ -264,6 +296,16 @@ impl MetalBackend {
             get_shader_pipeline::<shaders::f32_gemv::TopKKernel>(&device, &library)?;
         let f16_gemv_pipeline =
             KernelHandle::from_kernel::<shaders::f16_gemv::Kernel>(&device, &library)?;
+        let moe_router_pipeline =
+            KernelHandle::from_kernel::<shaders::moe_router::Kernel>(&device, &library)?;
+        let moe_router_select_pipeline =
+            get_shader_pipeline::<shaders::moe_router_select::Kernel>(&device, &library)?;
+        let moe_descriptor_gather_pipeline =
+            get_shader_pipeline::<shaders::moe_descriptor::GatherKernel>(&device, &library)?;
+        let moe_bias_stage_pipeline =
+            get_shader_pipeline::<shaders::moe_descriptor::BiasStageKernel>(&device, &library)?;
+        let moe_down_bias_stage_pipeline =
+            get_shader_pipeline::<shaders::moe_descriptor::DownBiasStageKernel>(&device, &library)?;
 
         // (RoPE / QKV projection / fused-attn — moved into
         //  `AttentionKernels` (the `attention` binding above).
@@ -283,11 +325,17 @@ impl MetalBackend {
             kv_cache: std::sync::Mutex::new(None),
             engine_window: std::sync::atomic::AtomicUsize::new(NO_ENGINE_WINDOW),
             moe_scratch: std::sync::Mutex::new(None),
+            moe_descriptor_tables: std::sync::Mutex::new(std::collections::HashMap::new()),
             ple_inputs: std::sync::Mutex::new(None),
             f32_gemv_pipeline,
             f32_argmax_partial_pipeline,
             f32_topk_partial_pipeline,
             f16_gemv_pipeline,
+            moe_router_pipeline,
+            moe_router_select_pipeline,
+            moe_descriptor_gather_pipeline,
+            moe_bias_stage_pipeline,
+            moe_down_bias_stage_pipeline,
             flop_threshold: AtomicUsize::new(calibration::DEFAULT_FLOP_THRESHOLD),
             decode_flags: backend_options.decode_flags,
         })

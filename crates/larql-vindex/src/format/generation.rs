@@ -64,7 +64,25 @@ pub const V2_MIN_SCHEMA: u32 = 1;
 /// What a fresh extraction of the shipped generation writes.
 pub const V2_CURRENT_SCHEMA: u32 = 2;
 pub const V3_MIN_SCHEMA: u32 = 3;
-pub const V3_CURRENT_SCHEMA: u32 = 3;
+/// What a fresh VINDEX3 extraction writes.
+///
+/// Bumped 3 → 4 when `RegionSchema` claimed its reserved u16 as
+/// [`RegionLayout`](super::lyrw2::region_layout::RegionLayout). The wire
+/// size did not change — `REGION_SCHEMA_BYTES` is still 20 — and that is
+/// precisely why the bump is needed rather than why it is not.
+///
+/// A reader built before the field existed sees a nonzero value at bytes
+/// 10..12 and ignores it. If it could then bind the region it would read a
+/// fused gate/up operand as contiguous halves when the container said
+/// interleaved: two branches silently mixed, plausible output, no error.
+/// **Versioning tracks changed meaning, not changed byte count.**
+///
+/// Admission is at the container: an old binary supports `3..=3` and so
+/// refuses a schema-4 `index.json` outright, never reaching the LYRW
+/// files. (A caller invoking `Lyrw2Reader::parse` on a stray `.weights`
+/// file bypasses that gate, but the container is the unit of
+/// distribution and the only path the loaders take.)
+pub const V3_CURRENT_SCHEMA: u32 = 4;
 
 /// Which container generation a directory holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -158,18 +176,27 @@ pub fn generation_for_schema(
         })
 }
 
-/// "1-2 (VINDEX2), 3 (VINDEX3)" — every schema this binary reads.
+/// One generation's supported range, as `"3-4 (VINDEX3)"` or `"3 (VINDEX3)"`.
+///
+/// Split out so both renderings stay testable on their own. Every
+/// generation begins its life spanning a single schema and widens as it
+/// gains one — VINDEX3 was a singleton until `RegionLayout` — so the
+/// singleton branch is a state the *next* generation will occupy, not dead
+/// code. Testing it through whichever generation happens to be a singleton
+/// today is what left it uncovered the moment that stopped being true.
+pub fn schema_range_label(range: std::ops::RangeInclusive<u32>, name: &str) -> String {
+    if range.start() == range.end() {
+        format!("{} ({name})", range.start())
+    } else {
+        format!("{}-{} ({name})", range.start(), range.end())
+    }
+}
+
+/// "1-2 (VINDEX2), 3-4 (VINDEX3)" — every schema this binary reads.
 pub fn supported_schema_summary() -> String {
     ALL_GENERATIONS
         .into_iter()
-        .map(|g| {
-            let r = g.supported_schema_versions();
-            if r.start() == r.end() {
-                format!("{} ({})", r.start(), g.name())
-            } else {
-                format!("{}-{} ({})", r.start(), r.end(), g.name())
-            }
-        })
+        .map(|g| schema_range_label(g.supported_schema_versions(), g.name()))
         .collect::<Vec<_>>()
         .join(", ")
 }

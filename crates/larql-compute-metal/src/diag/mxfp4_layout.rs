@@ -16,6 +16,7 @@
 //! this measures throughput and both layouts are emitted from the clamped
 //! encoding — but it means these buffers must never be used as a parity oracle.
 
+use crate::shaders::mxfp4_grouped_experts::{ROW_BASE_IDENTITY, ROW_STRIDE_IDENTITY};
 use crate::MetalBackend;
 
 /// Weights per e8m0 group.
@@ -222,11 +223,18 @@ pub fn race(
 
     let (mut split_w, mut split_s, mut inter) = (Vec::new(), Vec::new(), Vec::new());
     let (mut off_split, mut off_inter) = (Vec::<u32>::new(), Vec::<u32>::new());
+    // The scale stream gets its own offset table rather than `off_split / 16`.
+    // Here the two happen to stay proportional — both streams are appended in
+    // lockstep — but the arm A kernel no longer assumes that, and a bench that
+    // kept deriving the offset would be exercising a contract the kernel has
+    // stopped making.
+    let mut off_split_s = Vec::<u32>::new();
     let mut probes: Vec<Quantised> = Vec::new();
     for e in 0..top_k {
         let q = quantise(&synth(n * k, e), n, k);
         let (c, s) = q.split();
         off_split.push(split_w.len() as u32);
+        off_split_s.push(split_s.len() as u32);
         split_w.extend_from_slice(&c);
         split_s.extend_from_slice(&s);
         off_inter.push(inter.len() as u32);
@@ -255,6 +263,7 @@ pub fn race(
     // Offset tables are ephemeral, so they must NOT go through the
     // address-keyed weight cache — see `BufferCache::uncached_bytes`.
     let boff_split = metal.bufs().uncached_bytes(&obytes(&off_split));
+    let boff_split_s = metal.bufs().uncached_bytes(&obytes(&off_split_s));
     let boff_inter = metal.bufs().uncached_bytes(&obytes(&off_inter));
     let xb = metal.bufs().transient_from_f32(&x);
     let out = metal.bufs().output((top_k * n * 4) as u64);
@@ -335,11 +344,16 @@ pub fn race(
                     enc.set_buffer(0, Some(&bw_split), 0);
                     enc.set_buffer(1, Some(&boff_split), 0);
                     enc.set_buffer(2, Some(&bs_split), 0);
-                    enc.set_buffer(3, Some(&xb), 0);
-                    enc.set_buffer(4, Some(&out), 0);
-                    p(5, &nv);
-                    p(6, &kv);
-                    p(7, &xs);
+                    enc.set_buffer(3, Some(&boff_split_s), 0);
+                    enc.set_buffer(4, Some(&xb), 0);
+                    enc.set_buffer(5, Some(&out), 0);
+                    p(6, &nv);
+                    p(7, &kv);
+                    p(8, &xs);
+                    // Whole rows, no fused halves: this bench measures one
+                    // matvec per slot, so the walk is the identity.
+                    p(9, &ROW_BASE_IDENTITY);
+                    p(10, &ROW_STRIDE_IDENTITY);
                 } else {
                     enc.set_buffer(0, Some(&bw_inter), 0);
                     enc.set_buffer(1, Some(&boff_inter), 0);

@@ -132,6 +132,7 @@ mod tests {
             skipped_tensors: Vec::new(),
             packed_byte_ranges: HashMap::new(),
             per_layer_ffn_format: HashMap::new(),
+            per_layer_ffn_arrangement: HashMap::new(),
             embed: embed.clone(),
             lm_head: embed,
             position_embed: None,

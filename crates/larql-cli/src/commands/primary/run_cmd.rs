@@ -380,7 +380,13 @@ pub fn run(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
             .prompt
             .as_deref()
             .ok_or("--routed-from requires a prompt argument (chat mode not yet supported)")?;
-        return run_with_routed_container(&vindex_path, routed_dir, prompt, args.max_tokens);
+        return run_with_routed_container(
+            &vindex_path,
+            routed_dir,
+            prompt,
+            args.max_tokens,
+            args.metal,
+        );
     }
 
     if let Some(ref ffn_url) = args.ffn {
@@ -987,6 +993,7 @@ fn run_with_routed_container(
     routed_dir: &str,
     prompt: &str,
     max_tokens: usize,
+    metal: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let routed_path = std::path::Path::new(routed_dir);
 
@@ -1019,15 +1026,45 @@ fn run_with_routed_container(
         .map_err(|e| format!("failed to tokenise prompt: {e}"))?;
 
     let started = std::time::Instant::now();
-    let toks = larql_inference::vindex::generate_kquant_cpu_routed(
-        &mut weights,
-        &tokenizer,
-        &prompt_ids,
-        max_tokens,
-        &index,
-        &routed,
-    )
-    .map_err(|e| format!("routed container dispatch failed, generation aborted: {e}"))?;
+    let toks = if metal {
+        // Composed METAL serve: same GPU-dataflow decode as the plain
+        // --metal run; only the expert-bank authority differs. The CPU
+        // kquant generator below stays an explicit exclusion for banks
+        // it does not implement — it refuses, never transcodes.
+        let backend = larql_compute_metal::metal_backend()
+            .ok_or("--routed-from --metal requires a Metal device")?;
+        let cached_layers =
+            larql_inference::layer_graph::CachedLayerGraph::from_residuals(Vec::new());
+        let num_layers = weights.num_layers;
+        let result = larql_inference::layer_graph::generate_routed(
+            &mut weights,
+            &tokenizer,
+            &prompt_ids,
+            max_tokens,
+            &index,
+            &backend,
+            &cached_layers,
+            0..num_layers,
+            &routed,
+        );
+        // Normalise to the CPU arm's (token, id) shape; the id is unused
+        // downstream, and the GPU result carries probabilities instead.
+        result
+            .tokens
+            .into_iter()
+            .map(|(t, _)| (t, 0u32))
+            .collect::<Vec<(String, u32)>>()
+    } else {
+        larql_inference::vindex::generate_kquant_cpu_routed(
+            &mut weights,
+            &tokenizer,
+            &prompt_ids,
+            max_tokens,
+            &index,
+            &routed,
+        )
+        .map_err(|e| format!("routed container dispatch failed, generation aborted: {e}"))?
+    };
     let total_ms = started.elapsed().as_secs_f64() * 1000.0;
 
     let text: String = toks.iter().map(|(t, _)| t.as_str()).collect();

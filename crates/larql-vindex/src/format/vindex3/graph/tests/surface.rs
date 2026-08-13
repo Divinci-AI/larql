@@ -4,6 +4,7 @@
 
 use larql_models::config::{Activation, FfnType, NormType};
 
+use crate::format::vindex3::graph::object::{LogicalObject, ObjectKind};
 use crate::format::vindex3::graph::{
     build_from_inventories, execution_completeness, CompletenessDefect,
 };
@@ -228,4 +229,89 @@ fn head_objects_without_a_head_surface_are_a_defect() {
     assert!(execution_completeness(&built.graph)
         .iter()
         .any(|d| matches!(d, CompletenessDefect::MissingHeadSurface { .. })));
+}
+
+/// A component owning a decoder stack whose surface lost its norm
+/// placement is the sibling defect to the head one, and a distinct
+/// variant: where the norms sit is not derivable from the fact that
+/// norms exist, so a surface that does not say must be refused rather
+/// than defaulted to pre- or post-norm.
+#[test]
+fn a_decoder_stack_without_a_norm_placement_is_a_defect() {
+    let dir = tempfile::tempdir().unwrap();
+    let named = vec![("llama-artifact".to_string(), known_dense(dir.path()))];
+    let mut built = build_from_inventories(&named);
+    assert!(execution_completeness(&built.graph).is_empty());
+    let target = built
+        .graph
+        .components
+        .iter_mut()
+        .find(|c| c.id == "target")
+        .unwrap();
+    target.execution.as_mut().unwrap().norm.placement = None;
+    // The dense fixture's target owns only an Embedding, which implies the
+    // head ops and not the stack ones. Give it a decoder stack so the norm
+    // rule is the one under test — otherwise this passes on the head rule
+    // and says nothing about norm placement.
+    built.graph.objects.push(LogicalObject {
+        id: "target.decoder_stack".to_string(),
+        component: "target".to_string(),
+        kind: ObjectKind::DecoderStack,
+        source_bindings: Vec::new(),
+        representations: Vec::new(),
+    });
+    let defects = execution_completeness(&built.graph);
+    assert!(
+        defects.iter().any(
+            |d| matches!(d, CompletenessDefect::MissingNormPlacement { component }
+                if component == "target")
+        ),
+        "{defects:?}"
+    );
+    // The head surface is untouched, so the two defects must not travel
+    // together — otherwise this test would pass on the head rule.
+    assert!(!defects
+        .iter()
+        .any(|d| matches!(d, CompletenessDefect::MissingHeadSurface { .. })));
+}
+
+/// The norm-placement defect names its component and its own reason.
+#[test]
+fn the_norm_placement_defect_prints_its_own_diagnostic() {
+    let norm = CompletenessDefect::MissingNormPlacement {
+        component: "target".to_string(),
+    };
+    assert!(norm.to_string().contains("`target`"));
+    assert!(norm.to_string().contains("norm placement"));
+    // Distinct text from its sibling: a reader must be able to tell which
+    // half of the surface is missing.
+    let head = CompletenessDefect::MissingHeadSurface {
+        component: "target".to_string(),
+    };
+    assert_ne!(norm.to_string(), head.to_string());
+}
+
+/// A component with no executable objects and no surface is complete —
+/// the arm that says "nothing is implied here, so nothing is missing".
+/// Without this the empty case would be indistinguishable from a defect
+/// that simply was not detected.
+#[test]
+fn a_component_implying_no_ops_needs_no_surface() {
+    let dir = tempfile::tempdir().unwrap();
+    let named = vec![("llama-artifact".to_string(), known_dense(dir.path()))];
+    let mut built = build_from_inventories(&named);
+    let target = built
+        .graph
+        .components
+        .iter_mut()
+        .find(|c| c.id == "target")
+        .unwrap();
+    target.execution = None;
+    // Drop every object belonging to the component, so nothing implies a
+    // stack or a head any more.
+    built.graph.objects.retain(|o| o.component != "target");
+    assert!(
+        execution_completeness(&built.graph).is_empty(),
+        "a component that implies no operations cannot be missing a surface"
+    );
 }

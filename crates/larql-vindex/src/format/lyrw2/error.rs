@@ -66,6 +66,67 @@ pub enum Lyrw2Error {
     },
 
     #[error(
+        "bank {bank_id} schema {schema_index} ({role}) declares row layout \
+         {layout}, but only a fused operand has two branches to arrange"
+    )]
+    LayoutOnNonFusedRegion {
+        bank_id: u16,
+        schema_index: u16,
+        role: String,
+        layout: String,
+    },
+
+    #[error(
+        "bank {bank_id} schema {schema_index} is a fused gate/up region that \
+         declares no row layout; a container written at this schema must say \
+         whether its rows are contiguous halves or interleaved, because \
+         reading one as the other mixes the two branches without failing"
+    )]
+    UndeclaredFusedLayout { bank_id: u16, schema_index: u16 },
+
+    #[error(
+        "bank {bank_id} declares {count} regions with role {role}; a role-only \
+         lookup cannot say which was meant — resolve it through its pair"
+    )]
+    AmbiguousRole {
+        bank_id: u16,
+        role: String,
+        count: usize,
+    },
+
+    #[error(
+        "bank {bank_id} region {role} declares pair_id {pair_id}, but no region \
+         with role {partner_role} carries that pair_id"
+    )]
+    MissingPartner {
+        bank_id: u16,
+        role: String,
+        pair_id: u16,
+        partner_role: String,
+    },
+
+    #[error(
+        "bank {bank_id} has {count} regions with role {partner_role} and pair_id \
+         {pair_id}; a pairing must name exactly one partner"
+    )]
+    AmbiguousPartner {
+        bank_id: u16,
+        partner_role: String,
+        pair_id: u16,
+        count: usize,
+    },
+
+    #[error(
+        "bank {bank_id} region {role} is unpaired, so it has no {partner_role} \
+         partner to resolve"
+    )]
+    NotPaired {
+        bank_id: u16,
+        role: String,
+        partner_role: String,
+    },
+
+    #[error(
         "bank {bank_id} region {role} of entry {entry} spans {offset}..{end}, \
          past the file's {file_len} bytes"
     )]

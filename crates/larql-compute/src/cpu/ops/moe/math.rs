@@ -141,11 +141,22 @@ pub fn softmax(v: &mut [f32]) {
     }
 }
 
-/// Top-k indices by value (descending). Returns (indices, values).
+/// Top-k indices by (value descending, index ascending). Returns
+/// (indices, values).
+///
+/// The secondary key is the ROUTING TIE CONTRACT: under exact ties (or
+/// low-precision score collapse) the lower expert id wins, so CPU/GPU
+/// route equality stays well-defined. GPU router implementations
+/// (`larql-compute-metal` `moe_router_select`) implement the same
+/// contract; changing one side alone is a routing semantics change.
 pub(super) fn top_k(v: &[f32], k: usize) -> (Vec<usize>, Vec<f32>) {
     let k = k.min(v.len());
     let mut indexed: Vec<(usize, f32)> = v.iter().copied().enumerate().collect();
-    indexed.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    indexed.sort_unstable_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.0.cmp(&b.0))
+    });
     indexed.truncate(k);
     let indices: Vec<usize> = indexed.iter().map(|(i, _)| *i).collect();
     let values: Vec<f32> = indexed.iter().map(|(_, v)| *v).collect();
@@ -225,6 +236,26 @@ mod tests {
         // k > len — get all in descending order.
         let (idx, _) = top_k(&[0.1, 0.5, 0.3], 99);
         assert_eq!(idx, vec![1, 2, 0]);
+    }
+
+    /// The routing tie contract: equal values order by ascending index —
+    /// including ties that straddle the selection boundary, where the
+    /// contract decides WHICH expert is selected at all.
+    #[test]
+    fn top_k_ties_break_by_ascending_index() {
+        // Tie inside the selection: both 2.0s taken, lower index first.
+        let (idx, val) = top_k(&[1.0, 2.0, 2.0, 0.5], 3);
+        assert_eq!(idx, vec![1, 2, 0]);
+        assert_eq!(val, vec![2.0, 2.0, 1.0]);
+
+        // Tie ACROSS the boundary: k=1 must pick the lower index of the
+        // tied pair, deterministically.
+        let (idx, _) = top_k(&[0.5, 2.0, 2.0], 1);
+        assert_eq!(idx, vec![1]);
+
+        // All-equal input: selection is the first k indices.
+        let (idx, _) = top_k(&[3.0, 3.0, 3.0, 3.0], 2);
+        assert_eq!(idx, vec![0, 1]);
     }
 
     /// `softmax` produces a probability distribution.

@@ -99,11 +99,49 @@ impl Lyrw2Plan {
                         pair_id: schema.pair_id,
                     });
                 }
+                // Safe on legacy containers by construction: every schema
+                // written before the layout field existed has zeros there,
+                // which reads as `Unspecified` and declares nothing. What
+                // this refuses is a region claiming an arrangement it
+                // cannot have — a consumer that believed it would act on a
+                // fiction.
+                if !schema.layout_is_consistent_with_role() {
+                    return Err(Lyrw2Error::LayoutOnNonFusedRegion {
+                        bank_id: bank.bank_id,
+                        schema_index: schema.schema_index,
+                        role: schema.role.name(),
+                        layout: schema.layout.name(),
+                    });
+                }
                 if schema.schema_index as usize != position {
                     return Err(Lyrw2Error::BankSchemaCountMismatch {
                         bank_id: bank.bank_id,
                         declared: position,
                         found: schema.schema_index as usize,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The additional rules a **new** container must satisfy, beyond what
+    /// [`Self::validate`] requires of one being read.
+    ///
+    /// Split because the two questions genuinely differ: a schema-3
+    /// container with an undeclared fused region is legitimate history and
+    /// must stay readable, while writing one today would emit an artifact
+    /// whose rows cannot be interpreted without inferring. Enforcing the
+    /// write rule inside `validate` would make every legacy file
+    /// unparseable; leaving it to callers is what let the rule live in one
+    /// importer instead of in the format.
+    pub fn validate_for_write(&self) -> Result<(), Lyrw2Error> {
+        for (bank, schemas) in self.banks.iter().zip(&self.schemas) {
+            for schema in schemas {
+                if !schema.layout_is_declared_where_required() {
+                    return Err(Lyrw2Error::UndeclaredFusedLayout {
+                        bank_id: bank.bank_id,
+                        schema_index: schema.schema_index,
                     });
                 }
             }

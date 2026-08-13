@@ -256,6 +256,10 @@ impl MetalBackend {
         let mut moe_fn = {
             let get_expert_ref = &get_expert;
             move |layer_idx: usize, h_post_attn: &[f32]| -> Vec<f32> {
+                // The served MoE seam carries its own layer coordinate, so
+                // this is where routing becomes attributable. Nested inside
+                // any outer per-layer scope, and restored on drop.
+                let _route_scope = larql_compute::moe_route_observe::LayerScope::new(layer_idx);
                 let moe = match layers[layer_idx].moe.as_ref() {
                     Some(m) => m,
                     None => return vec![0.0f32; hidden],
@@ -875,7 +879,7 @@ impl MetalBackend {
         // GPT-OSS-class models. Any miss (unregistered region, short
         // slice) falls through to the staged path below unchanged.
         if let Some(resolved) =
-            self.resolve_selected_experts(scratch, &expert_indices, &expert_weights, |ei| {
+            self.resolve_selected_experts(scratch, moe, &expert_indices, &expert_weights, |ei| {
                 get_expert_bytes(ei)
             })
         {
@@ -1088,10 +1092,19 @@ impl MetalBackend {
         // default since 2026-04-28) leaves simdgroups 4..7 unscheduled and
         // only writes rows 0..3 of each TG's 8-row range. See the matching
         // fix in `trait_impl/quant_matvec.rs::q4k_matvec`.
-        let down_kh = match scratch.format {
-            larql_compute::QuantFormat::Q6_K => &self.quant.q6k_matvec_pipeline,
-            _ => &self.quant.q4k_matvec_pipeline,
-        };
+        let (down_kh, down_binding) = self.quant.expert_matvec_for(scratch.format);
+        // The staged path memcpys expert payloads into scratch buffers; it has
+        // no scratch for a second stream and no binding to reach one. A
+        // split-scale bank therefore serves through the zero-copy route only,
+        // which refuses at its own resolution step rather than arriving here.
+        assert_eq!(
+            down_binding,
+            crate::kernels::quant::ExpertScaleBinding::InlineScales,
+            "moe_dispatch: {:?} is a split-scale format and cannot be staged; \
+             it serves through the zero-copy route, which requires the layer's \
+             expert regions to be registered",
+            scratch.format,
+        );
         let down_tgs = (hidden as u64).div_ceil(down_kh.rows_per_tg);
 
         for e in 0..valid_count {
