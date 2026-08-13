@@ -34,6 +34,15 @@ pub(super) fn run_larql(
     let mut index = larql_vindex::VectorIndex::load_vindex(vindex_path, &mut cb)?;
     index.load_attn_kquant(vindex_path)?;
     index.load_interleaved_kquant(vindex_path)?;
+    // The k-quant lm_head view. Without it `lm_head_topk` finds no
+    // `lm_head_kquant_view()`, falls through to `backend_lm_head_topk`, and
+    // runs an f32 gemv over the dequantised `weights.lm_head` — for GPT-OSS
+    // that is a 2.3 GB matrix, ~8 ms/token against ~1.5 ms for the Q4_K
+    // matvec. Every other inference entry point loads it (`run_cmd`,
+    // `walk_cmd`, `diag_cmd`, the server, and bench's own remote-FFN and
+    // remote-MoE runtimes); this one did not, so the local bench was
+    // measuring a slower lm_head than the path it claims to benchmark.
+    let _ = index.load_lm_head_kquant(vindex_path);
 
     let cfg = larql_vindex::load_vindex_config(vindex_path)?;
     if cfg.quant != larql_vindex::QuantFormat::Q4K {

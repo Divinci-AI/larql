@@ -425,6 +425,8 @@ fn decode_token_q4k_moe_with_real_moe_layer_drives_gpu_dispatch() {
     let (expert_gu, expert_down) = make_q4k_experts(hidden, inter, num_experts);
 
     let moe = MoeLayerWeights {
+        expert_scales: larql_compute::MoeExpertScales::Inline,
+        fused_row_layout: larql_compute::MoeFusedRowLayout::ContiguousHalves,
         experts_gate_up: expert_gu.iter().map(|v| v.as_slice()).collect(),
         experts_down: expert_down.iter().map(|v| v.as_slice()).collect(),
         routing_policy: MoeRoutingPolicy::default(),
@@ -580,6 +582,8 @@ fn zero_copy_expert_dispatch_matches_staged_path() {
     let router_scale: Vec<f32> = vec![1.0f32; hidden];
     let router_per_expert_scale: Vec<f32> = vec![1.0f32; num_experts];
     let moe = MoeLayerWeights {
+        expert_scales: larql_compute::MoeExpertScales::Inline,
+        fused_row_layout: larql_compute::MoeFusedRowLayout::ContiguousHalves,
         experts_gate_up: expert_gu.iter().map(|v| v.as_slice()).collect(),
         experts_down: expert_down.iter().map(|v| v.as_slice()).collect(),
         routing_policy: MoeRoutingPolicy::default(),
@@ -696,6 +700,8 @@ fn zero_copy_grouped_q6k_dispatch_matches_staged_path() {
     let router_scale: Vec<f32> = vec![1.0f32; hidden];
     let router_per_expert_scale: Vec<f32> = vec![1.0f32; num_experts];
     let moe = MoeLayerWeights {
+        expert_scales: larql_compute::MoeExpertScales::Inline,
+        fused_row_layout: larql_compute::MoeFusedRowLayout::ContiguousHalves,
         experts_gate_up: expert_gu.iter().map(|v| v.as_slice()).collect(),
         experts_down: expert_down.iter().map(|v| v.as_slice()).collect(),
         routing_policy: MoeRoutingPolicy::default(),

@@ -145,11 +145,11 @@ fn each_layer_file_declares_every_expert() {
     let dir = temp_dir("entries");
     write_per_layer_moe_per_expert(&MapSource::complete(), &dir, NUM_LAYERS).unwrap();
     let bytes = std::fs::read(layer_file(&dir, 0)).unwrap();
-    let (_, num_entries, inter, hidden, offsets) = parse_layer_weights_header(&bytes).unwrap();
-    assert_eq!(num_entries, NUM_EXPERTS);
-    assert_eq!(inter, INTER);
-    assert_eq!(hidden, HIDDEN);
-    assert_eq!(offsets.len(), NUM_EXPERTS);
+    let h = parse_layer_weights_header(&bytes).unwrap();
+    assert_eq!(h.num_entries, NUM_EXPERTS);
+    assert_eq!(h.inter, INTER);
+    assert_eq!(h.hidden, HIDDEN);
+    assert_eq!(h.entries.len(), NUM_EXPERTS);
 }
 
 #[test]
@@ -159,10 +159,16 @@ fn every_expert_region_is_inside_the_file() {
     let dir = temp_dir("bounds");
     write_per_layer_moe_per_expert(&MapSource::complete(), &dir, NUM_LAYERS).unwrap();
     let bytes = std::fs::read(layer_file(&dir, 1)).unwrap();
-    let (_, _, _, _, offsets) = parse_layer_weights_header(&bytes).unwrap();
-    for (gu_off, gu_len, dn_off, dn_len) in offsets {
-        assert!(gu_off + gu_len <= bytes.len(), "gate_up region overruns");
-        assert!(dn_off + dn_len <= bytes.len(), "down region overruns");
+    let h = parse_layer_weights_header(&bytes).unwrap();
+    for e in &h.entries {
+        assert!(
+            e.gate_up.offset + e.gate_up.len <= bytes.len(),
+            "gate_up region overruns"
+        );
+        assert!(
+            e.down.offset + e.down.len <= bytes.len(),
+            "down region overruns"
+        );
     }
 }
 
@@ -359,7 +365,7 @@ fn packed_mxfp4_experts_are_stored_exactly_as_q6k() {
     write_per_layer_moe_per_expert(&source, &dir, NUM_LAYERS).unwrap();
 
     let bytes = std::fs::read(layer_file(&dir, 0)).unwrap();
-    let (format, ..) = parse_layer_weights_header(&bytes).unwrap();
+    let format = parse_layer_weights_header(&bytes).unwrap().format;
     assert_eq!(
         format,
         crate::format::weights::write_layers::LayerWeightFormat::Q6_K,
@@ -666,13 +672,15 @@ fn non_block_multiple_hidden_round_trips_through_the_integer_kernel() {
     assert_eq!(write_per_layer_moe_per_expert(&source, &dir, 1).unwrap(), 1);
 
     let bytes = std::fs::read(layer_file(&dir, 0)).unwrap();
-    let (format, _, inter, hidden, offsets) = parse_layer_weights_header(&bytes).unwrap();
+    let h = parse_layer_weights_header(&bytes).unwrap();
+    let (format, inter, hidden) = (h.format, h.inter, h.hidden);
     assert_eq!(
         (inter, hidden),
         (ODD_INTER, ODD_HIDDEN),
         "header keeps LOGICAL dims"
     );
-    let (gu_off, gu_len, dn_off, dn_len) = offsets[0];
+    let (gu_off, gu_len) = (h.entries[0].gate_up.offset, h.entries[0].gate_up.len);
+    let (dn_off, dn_len) = (h.entries[0].down.offset, h.entries[0].down.len);
     let gu_bytes = &bytes[gu_off..gu_off + gu_len];
     let dn_bytes = &bytes[dn_off..dn_off + dn_len];
 

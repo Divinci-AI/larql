@@ -11,6 +11,7 @@ use std::sync::Mutex;
 use metal::*;
 
 mod regions;
+pub mod residency;
 
 /// Cache key: (pointer address, byte length) of the source data.
 type CacheKey = (usize, usize);
@@ -35,6 +36,9 @@ pub struct BufferCache {
     /// Registered whole-mmap weight regions for zero-copy sub-slice
     /// resolution — see `regions.rs`.
     regions: Mutex<Vec<regions::Region>>,
+    /// Explicit residency for the registered regions. `None` under the
+    /// implicit arm or on a runtime without `MTLResidencySet`.
+    residency: Mutex<Option<residency::ResidencySet>>,
 }
 
 impl BufferCache {
@@ -44,6 +48,7 @@ impl BufferCache {
             cache: Mutex::new(HashMap::new()),
             scratch_pool: Mutex::new(HashMap::new()),
             regions: Mutex::new(Vec::new()),
+            residency: Mutex::new(None),
         }
     }
 

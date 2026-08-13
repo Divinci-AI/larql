@@ -72,6 +72,8 @@ fn make_moe_weights<'a>(
     let (experts_gate_up, experts_down) =
         bf16_expert_tables(gate_up, down, num_experts, inter, hidden);
     MoeLayerWeights {
+        expert_scales: larql_compute::MoeExpertScales::Inline,
+        fused_row_layout: larql_compute::MoeFusedRowLayout::ContiguousHalves,
         experts_gate_up,
         experts_down,
         routing_policy: larql_compute::MoeRoutingPolicy::default(),
@@ -177,6 +179,8 @@ fn moe_per_expert_scale_applied() {
 
     // Without per-expert scale
     let moe_no_scale = MoeLayerWeights {
+        expert_scales: larql_compute::MoeExpertScales::Inline,
+        fused_row_layout: larql_compute::MoeFusedRowLayout::ContiguousHalves,
         experts_gate_up: experts_gate_up.clone(),
         experts_down: experts_down.clone(),
         routing_policy: larql_compute::MoeRoutingPolicy::default(),
@@ -204,6 +208,8 @@ fn moe_per_expert_scale_applied() {
     // With per-expert scale = [2.0, 1.0, 1.0, 1.0] (expert 0 gets 2× weight)
     let per_expert_scale = vec![2.0f32, 1.0, 1.0, 1.0];
     let moe_scaled = MoeLayerWeights {
+        expert_scales: larql_compute::MoeExpertScales::Inline,
+        fused_row_layout: larql_compute::MoeFusedRowLayout::ContiguousHalves,
         experts_gate_up,
         experts_down,
         routing_policy: larql_compute::MoeRoutingPolicy::default(),
@@ -261,6 +267,8 @@ fn moe_router_scale_vector_applied() {
         bf16_expert_tables(&gate_up, &down, num_experts, inter, hidden);
 
     let moe = MoeLayerWeights {
+        expert_scales: larql_compute::MoeExpertScales::Inline,
+        fused_row_layout: larql_compute::MoeFusedRowLayout::ContiguousHalves,
         experts_gate_up,
         experts_down,
         routing_policy: larql_compute::MoeRoutingPolicy::default(),
@@ -306,6 +314,8 @@ fn moe_router_input_scalar_nonunit() {
 
     // scalar = 0.5 → router input scaled down before projection
     let moe_scalar = MoeLayerWeights {
+        expert_scales: larql_compute::MoeExpertScales::Inline,
+        fused_row_layout: larql_compute::MoeFusedRowLayout::ContiguousHalves,
         experts_gate_up,
         experts_down,
         routing_policy: larql_compute::MoeRoutingPolicy::default(),
@@ -336,6 +346,8 @@ fn moe_router_input_scalar_nonunit() {
 fn moe_empty_router_proj_returns_zeros() {
     let hidden = 8;
     let moe = MoeLayerWeights {
+        expert_scales: larql_compute::MoeExpertScales::Inline,
+        fused_row_layout: larql_compute::MoeFusedRowLayout::ContiguousHalves,
         experts_gate_up: Vec::new(),
         experts_down: Vec::new(),
         routing_policy: larql_compute::MoeRoutingPolicy::default(),
@@ -372,6 +384,8 @@ fn moe_zero_num_experts_returns_zeros() {
     // Exercises the num_experts == 0 early-return in forward.rs line 41.
     let hidden = 8;
     let moe = MoeLayerWeights {
+        expert_scales: larql_compute::MoeExpertScales::Inline,
+        fused_row_layout: larql_compute::MoeFusedRowLayout::ContiguousHalves,
         experts_gate_up: Vec::new(),
         experts_down: Vec::new(),
         routing_policy: larql_compute::MoeRoutingPolicy::default(),
@@ -409,6 +423,8 @@ fn moe_zero_top_k_or_intermediate_returns_zeros() {
     let h = vec![1.0f32; hidden];
 
     let zero_top_k = MoeLayerWeights {
+        expert_scales: larql_compute::MoeExpertScales::Inline,
+        fused_row_layout: larql_compute::MoeFusedRowLayout::ContiguousHalves,
         experts_gate_up: experts_gate_up.clone(),
         experts_down: experts_down.clone(),
         routing_policy: larql_compute::MoeRoutingPolicy::default(),
@@ -461,6 +477,8 @@ fn moe_missing_selected_expert_tables_are_skipped() {
         *v = 10.0;
     }
     let moe = MoeLayerWeights {
+        expert_scales: larql_compute::MoeExpertScales::Inline,
+        fused_row_layout: larql_compute::MoeFusedRowLayout::ContiguousHalves,
         experts_gate_up,
         experts_down,
         routing_policy: larql_compute::MoeRoutingPolicy::default(),
@@ -503,6 +521,8 @@ fn moe_post_experts_norm_branch_runs() {
     let (experts_gate_up, experts_down) =
         bf16_expert_tables(&gate_up, &down, num_experts, inter, hidden);
     let moe = MoeLayerWeights {
+        expert_scales: larql_compute::MoeExpertScales::Inline,
+        fused_row_layout: larql_compute::MoeFusedRowLayout::ContiguousHalves,
         experts_gate_up,
         experts_down,
         routing_policy: larql_compute::MoeRoutingPolicy::default(),
@@ -549,6 +569,8 @@ fn moe_gelu_tanh_activation_in_forward() {
         bf16_expert_tables(&gate_up, &down, num_experts, inter, hidden);
 
     let moe = MoeLayerWeights {
+        expert_scales: larql_compute::MoeExpertScales::Inline,
+        fused_row_layout: larql_compute::MoeFusedRowLayout::ContiguousHalves,
         experts_gate_up,
         experts_down,
         routing_policy: larql_compute::MoeRoutingPolicy::default(),
@@ -672,6 +694,8 @@ mod moe_prefill_integration {
         // num_experts=0 → cpu_moe_forward returns zeros immediately.
         // Sufficient to exercise the callback path without real expert weights.
         MoeLayerWeights {
+            expert_scales: larql_compute::MoeExpertScales::Inline,
+            fused_row_layout: larql_compute::MoeFusedRowLayout::ContiguousHalves,
             experts_gate_up: Vec::new(),
             experts_down: Vec::new(),
             routing_policy: larql_compute::MoeRoutingPolicy::default(),

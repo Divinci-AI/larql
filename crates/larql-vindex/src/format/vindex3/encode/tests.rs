@@ -234,3 +234,407 @@ fn known_dense_encodes_and_inspects() {
         .keys()
         .any(|k| k.starts_with("target.embedding@")));
 }
+
+/// A header length past the sanity bound is refused, not allocated.
+///
+/// The guard exists because the length prefix is the first thing read from
+/// an untrusted file: without it a corrupt or hostile prefix becomes a
+/// multi-gigabyte `vec![0; header_len]` before anything has been validated.
+/// The refusal must name the claimed size, so a reader can tell a corrupt
+/// file from a merely unsupported one.
+#[test]
+fn a_header_length_past_the_bound_is_refused_before_allocating() {
+    use std::io::Write;
+    const ABSURD_HEADER_LEN: u64 = 512 * 1024 * 1024;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("corrupt.segment");
+    let mut f = std::fs::File::create(&path).unwrap();
+    f.write_all(&ABSURD_HEADER_LEN.to_le_bytes()).unwrap();
+    // Deliberately no header body: the guard must fire on the prefix alone,
+    // before any attempt to read that many bytes.
+    f.flush().unwrap();
+    drop(f);
+
+    let err = read_segment_header(&path).unwrap_err().to_string();
+    assert!(
+        err.contains(&ABSURD_HEADER_LEN.to_string()),
+        "refusal must name the claimed length: {err}"
+    );
+    assert!(err.contains("corrupt"), "{err}");
+}
+
+/// A header length inside the bound but with no body behind it is a short
+/// read, not the corruption refusal — the two failures are different and a
+/// reader must not be told the wrong one.
+#[test]
+fn a_truncated_header_is_a_short_read_not_a_corruption_claim() {
+    use std::io::Write;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("truncated.segment");
+    let mut f = std::fs::File::create(&path).unwrap();
+    f.write_all(&64u64.to_le_bytes()).unwrap();
+    f.write_all(b"not sixty-four bytes").unwrap();
+    f.flush().unwrap();
+    drop(f);
+
+    let err = read_segment_header(&path).unwrap_err().to_string();
+    assert!(
+        !err.contains("corrupt"),
+        "a short body is not the over-long-header failure: {err}"
+    );
+}
+
+/// An object whose bindings select nothing is a disagreement between the
+/// graph and the inventory, and it must be named as such.
+///
+/// Silently planning zero tensors would write a well-formed segment holding
+/// no bytes — a container that passes every structural check and cannot
+/// serve the object it claims to carry.
+#[test]
+fn an_object_matching_no_source_tensors_refuses() {
+    use crate::format::vindex3::encode::plan_object_tensors;
+    use crate::format::vindex3::graph::object::{
+        LogicalObject, ObjectKind, Representation, SourceBinding,
+    };
+    use std::collections::BTreeMap;
+
+    let dir = tempfile::tempdir().unwrap();
+    let inventory = known_dense(dir.path());
+    let mut inventories = BTreeMap::new();
+    inventories.insert("only-artifact", &inventory);
+
+    let object = LogicalObject {
+        id: "target.embedding".to_string(),
+        component: "target".to_string(),
+        kind: ObjectKind::Embedding,
+        source_bindings: vec![SourceBinding {
+            artifact: "only-artifact".to_string(),
+            // A prefix no tensor in the inventory carries.
+            tensor_prefix: "no.such.prefix".to_string(),
+            tensors: 0,
+            bytes: 0,
+        }],
+        representations: Vec::<Representation>::new(),
+    };
+
+    let err = match plan_object_tensors(&object, &inventories) {
+        Err(e) => e.to_string(),
+        Ok(planned) => panic!(
+            "planned {} tensors from a prefix nothing matches",
+            planned.len()
+        ),
+    };
+    assert!(err.contains("target.embedding"), "{err}");
+    assert!(
+        err.contains("bindings and inventory disagree"),
+        "the refusal must say which two things disagree: {err}"
+    );
+}
+
+/// `binding_owner` matches a binding's prefix only at a segment boundary.
+///
+/// A plain `starts_with` would make `model.layers_extra.0` resolve to the
+/// binding for `model.layers`, quietly filing one object's tensors under
+/// another. The boundary check is the thing being pinned, so the negative
+/// case has to be a name that *shares a textual prefix* and is still not a
+/// match — a name that merely differs would pass either way.
+#[test]
+fn binding_owner_matches_on_segment_boundaries_not_text_prefixes() {
+    use crate::format::vindex3::encode::binding_owner;
+    use crate::format::vindex3::graph::object::{
+        LogicalObject, ObjectKind, Representation, SourceBinding,
+    };
+
+    let object = LogicalObject {
+        id: "target.stack".to_string(),
+        component: "target".to_string(),
+        kind: ObjectKind::DecoderStack,
+        source_bindings: vec![SourceBinding {
+            artifact: "art".to_string(),
+            tensor_prefix: "model.layers".to_string(),
+            tensors: 1,
+            bytes: 1,
+        }],
+        representations: Vec::<Representation>::new(),
+    };
+
+    assert_eq!(binding_owner(&object, "model.layers"), Some("art"));
+    assert_eq!(binding_owner(&object, "model.layers.0.attn"), Some("art"));
+    assert_eq!(binding_owner(&object, "model.layers_extra.0"), None);
+    assert_eq!(binding_owner(&object, "other.tensor"), None);
+}
+
+// ── Directory/segment coherence: what inspection is FOR ──
+//
+// A container is two agreeing descriptions of the same bytes — the
+// directory in `index.json` and each segment's own header. Inspection
+// exists to notice when they stop agreeing, so every disagreement it can
+// name needs a case where it actually names it. These tamper with the
+// directory only: the segments stay exactly as written, so any defect
+// reported is a real disagreement and not a corrupted fixture.
+
+/// Encode the dense fixture, then rewrite `index.json` through `edit`.
+fn tampered_directory(edit: impl FnOnce(&mut serde_json::Value)) -> Vec<String> {
+    let dir = tempfile::tempdir().unwrap();
+    let named = vec![("only-artifact".to_string(), known_dense(dir.path()))];
+    let out = tempfile::tempdir().unwrap();
+    encode_system(&named, out.path()).unwrap();
+
+    let index_path = out.path().join(crate::format::filenames::INDEX_JSON);
+    let mut index: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&index_path).unwrap()).unwrap();
+    edit(&mut index);
+    std::fs::write(&index_path, serde_json::to_string_pretty(&index).unwrap()).unwrap();
+
+    // Rendered as Debug: `InspectionDefect` carries its message as a
+    // payload rather than implementing Display, and the message is what
+    // these tests are about.
+    inspect_container(out.path(), false)
+        .unwrap()
+        .defects
+        .iter()
+        .map(|d| format!("{d:?}"))
+        .collect()
+}
+
+/// The first representation entry's id, for tests that need to name one.
+fn first_representation(index: &serde_json::Value) -> String {
+    index["representations"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .next()
+        .unwrap()
+        .clone()
+}
+
+#[test]
+fn a_directory_entry_naming_an_unknown_object_is_a_defect() {
+    let defects = tampered_directory(|index| {
+        let id = first_representation(index);
+        index["representations"][&id]["object"] = serde_json::json!("target.no_such_object");
+    });
+    assert!(
+        defects
+            .iter()
+            .any(|d| d.contains("references unknown object")
+                && d.contains("target.no_such_object")),
+        "{defects:?}"
+    );
+}
+
+#[test]
+fn a_directory_tensor_count_disagreeing_with_the_segment_is_a_defect() {
+    let defects = tampered_directory(|index| {
+        let id = first_representation(index);
+        index["representations"][&id]["tensor_count"] = serde_json::json!(9_999);
+    });
+    assert!(
+        defects
+            .iter()
+            .any(|d| d.contains("tensors, directory says 9999")),
+        "{defects:?}"
+    );
+}
+
+#[test]
+fn a_directory_payload_size_disagreeing_with_the_file_is_a_defect() {
+    let defects = tampered_directory(|index| {
+        let id = first_representation(index);
+        index["representations"][&id]["payload_bytes"] = serde_json::json!(1);
+    });
+    assert!(
+        defects
+            .iter()
+            .any(|d| d.contains("bytes, expected") && d.contains("payload")),
+        "{defects:?}"
+    );
+}
+
+/// A clean container reports no defects and a complete execution surface —
+/// the control the three tampering tests above are measured against. Without
+/// it, "defect found" could just mean the fixture never inspects clean.
+#[test]
+fn an_untampered_container_inspects_clean_and_complete() {
+    let dir = tempfile::tempdir().unwrap();
+    let named = vec![("only-artifact".to_string(), known_dense(dir.path()))];
+    let out = tempfile::tempdir().unwrap();
+    encode_system(&named, out.path()).unwrap();
+
+    let inspection = inspect_container(out.path(), true).unwrap();
+    assert!(inspection.is_coherent(), "{:?}", inspection.defects);
+    assert!(
+        inspection.execution_completeness().is_empty(),
+        "{:?}",
+        inspection.execution_completeness()
+    );
+}
+
+// ── Reading an untrusted checkpoint ──
+//
+// `ArtifactSource` is the one place the encoder touches bytes it did not
+// write. Every refusal below is about a shard that parses far enough to
+// look usable and is not: the guards exist so a malformed checkpoint is
+// named at open, not discovered as a wrong byte range halfway through a
+// multi-gigabyte encode.
+
+/// Write a `.safetensors` shard: 8-byte LE header length, header, payload.
+fn write_shard(path: &std::path::Path, header: &str, payload: &[u8]) {
+    use std::io::Write;
+    let mut f = std::fs::File::create(path).unwrap();
+    f.write_all(&(header.len() as u64).to_le_bytes()).unwrap();
+    f.write_all(header.as_bytes()).unwrap();
+    f.write_all(payload).unwrap();
+    f.flush().unwrap();
+}
+
+fn open_err(dir: &std::path::Path) -> String {
+    use crate::format::vindex3::encode::source::ArtifactSource;
+    match ArtifactSource::open(dir) {
+        Err(e) => e.to_string(),
+        Ok(_) => panic!("opened a shard that should have been refused"),
+    }
+}
+
+#[test]
+fn a_shard_header_past_the_bound_is_refused_before_allocating() {
+    use std::io::Write;
+    const ABSURD: u64 = 512 * 1024 * 1024;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut f = std::fs::File::create(dir.path().join("model.safetensors")).unwrap();
+    // Length prefix only: the guard must fire on it, without ever trying
+    // to read (or allocate) the half-gigabyte it claims.
+    f.write_all(&ABSURD.to_le_bytes()).unwrap();
+    f.flush().unwrap();
+    drop(f);
+
+    let err = open_err(dir.path());
+    assert!(err.contains(&ABSURD.to_string()), "{err}");
+    assert!(err.contains("corrupt"), "{err}");
+}
+
+#[test]
+fn a_shard_header_that_is_not_an_object_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    // Valid JSON, wrong shape — the case a bare `serde_json` parse accepts.
+    write_shard(&dir.path().join("model.safetensors"), "[1, 2, 3]", b"");
+    assert!(open_err(dir.path()).contains("header is not an object"));
+}
+
+#[test]
+fn a_tensor_without_usable_data_offsets_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    // `end < start` is the interesting case: the field is present and
+    // well-typed, so only the ordering check rejects it. A missing field
+    // would be caught by any parse.
+    write_shard(
+        &dir.path().join("model.safetensors"),
+        r#"{"weight":{"dtype":"F32","shape":[1],"data_offsets":[8,4]}}"#,
+        b"",
+    );
+    let err = open_err(dir.path());
+    assert!(err.contains("`weight`"), "{err}");
+    assert!(err.contains("data_offsets"), "{err}");
+}
+
+#[test]
+fn the_hf_shard_index_selects_and_dedupes_the_shards_it_names() {
+    use crate::format::vindex3::encode::source::ArtifactSource;
+
+    let dir = tempfile::tempdir().unwrap();
+    let header = r#"{"a":{"dtype":"F32","shape":[1],"data_offsets":[0,4]}}"#;
+    write_shard(&dir.path().join("one.safetensors"), header, &[0u8; 4]);
+    let header_b = r#"{"b":{"dtype":"F32","shape":[1],"data_offsets":[0,4]}}"#;
+    write_shard(&dir.path().join("two.safetensors"), header_b, &[0u8; 4]);
+    // A shard the index does NOT name: the index must be authoritative, so
+    // this one's tensor must not be locatable afterwards.
+    let header_c = r#"{"c":{"dtype":"F32","shape":[1],"data_offsets":[0,4]}}"#;
+    write_shard(&dir.path().join("three.safetensors"), header_c, &[0u8; 4]);
+
+    // `a` appears twice on purpose — a weight_map names a file per TENSOR,
+    // so a real multi-tensor shard is listed many times and must be deduped.
+    std::fs::write(
+        dir.path().join("model.safetensors.index.json"),
+        r#"{"weight_map":{"a":"one.safetensors","a2":"one.safetensors","b":"two.safetensors"}}"#,
+    )
+    .unwrap();
+
+    let source = ArtifactSource::open(dir.path()).unwrap();
+    assert!(source.locate("a").is_ok());
+    assert!(source.locate("b").is_ok());
+    assert!(
+        source.locate("c").is_err(),
+        "a shard the index does not name must not be indexed"
+    );
+}
+
+#[test]
+fn a_tensor_absent_from_every_shard_is_named_in_the_refusal() {
+    use crate::format::vindex3::encode::source::ArtifactSource;
+
+    let dir = tempfile::tempdir().unwrap();
+    write_shard(
+        &dir.path().join("model.safetensors"),
+        r#"{"present":{"dtype":"F32","shape":[1],"data_offsets":[0,4]}}"#,
+        &[0u8; 4],
+    );
+    let source = ArtifactSource::open(dir.path()).unwrap();
+    let err = match source.locate("missing.tensor") {
+        Err(e) => e.to_string(),
+        Ok(_) => panic!("located a tensor no shard carries"),
+    };
+    assert!(err.contains("missing.tensor"), "{err}");
+    // The message must point at the likely cause — the directory moving
+    // under an inventory taken earlier — not just report absence.
+    assert!(err.contains("changed since inspection"), "{err}");
+}
+
+#[test]
+fn a_container_recording_no_system_graph_is_refused_by_inspection() {
+    let dir = tempfile::tempdir().unwrap();
+    let named = vec![("only-artifact".to_string(), known_dense(dir.path()))];
+    let out = tempfile::tempdir().unwrap();
+    encode_system(&named, out.path()).unwrap();
+
+    let index_path = out.path().join(crate::format::filenames::INDEX_JSON);
+    let mut index: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&index_path).unwrap()).unwrap();
+    index["system_graph"] = serde_json::Value::Null;
+    std::fs::write(&index_path, serde_json::to_string_pretty(&index).unwrap()).unwrap();
+
+    // A refusal, not an empty inspection: there is a real container shape
+    // that records no graph (a routed-MoE bank), and reporting it as "no
+    // defects" would say the container inspected clean when nothing was
+    // inspected at all.
+    let err = match inspect_container(out.path(), false) {
+        Err(e) => e.to_string(),
+        Ok(_) => panic!("inspected a container with no graph to reconstruct"),
+    };
+    assert!(err.contains("records no system graph"), "{err}");
+    assert!(
+        err.contains("larql show"),
+        "the refusal must point at the tool that does open such a container: {err}"
+    );
+}
+
+#[test]
+fn a_segment_claiming_a_different_representation_than_the_directory_is_a_defect() {
+    let defects = tampered_directory(|index| {
+        let id = first_representation(index);
+        // Re-key the entry: the segment's own header still carries the old
+        // id, so the directory and the file now name different things.
+        let entry = index["representations"][&id].clone();
+        index["representations"]
+            .as_object_mut()
+            .unwrap()
+            .remove(&id);
+        index["representations"][format!("{id}-renamed")] = entry;
+    });
+    assert!(
+        defects.iter().any(|d| d.contains("says it materialises")),
+        "{defects:?}"
+    );
+}

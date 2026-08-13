@@ -281,6 +281,14 @@ pub struct SimResult {
     /// True when capacity cannot hold one layer's simultaneous demand, so the
     /// result is a thrash floor rather than a policy comparison.
     pub below_group_floor: bool,
+    /// True when capacity cannot hold ONE TOKEN's distinct demand across all
+    /// strata. Routing is cyclic at token granularity — the same ~240 slots
+    /// recur every step — so below this a recency-only policy evicts every slot
+    /// exactly before its next use and misses 100% by construction. That is a
+    /// known LRU pathology on cyclic references, not a measurement of the
+    /// workload, and any MIN-over-LRU gap in such a row is measuring the
+    /// pathology. The stricter floor, and the one that governs the comparison.
+    pub below_token_floor: bool,
 }
 
 /// Simulate one policy at one capacity.
@@ -299,7 +307,7 @@ pub fn simulate(
 ) -> SimResult {
     let capacity = capacity.max(1);
     let result = if policy == Policy::StaticOracle {
-        static_oracle(stream, capacity)
+        static_oracle(stream, capacity, warm)
     } else {
         dynamic(stream, policy, capacity, warm, seed)
     };
@@ -321,13 +329,19 @@ pub fn simulate(
         misses_per_token: misses as f64 / tokens,
         bytes_per_token: misses as f64 / tokens * expert_bytes as f64,
         below_group_floor: capacity < stream.max_group(),
+        below_token_floor: capacity < stream.peak_token_footprint(),
     }
 }
 
 /// The provisioning arm: the `capacity` most-referenced slots, resident forever.
-/// Loading the set itself is charged as `min(capacity, distinct)` compulsory
-/// misses so it is not credited with bytes it never paid.
-fn static_oracle(stream: &ReferenceStream, capacity: usize) -> (u64, u64) {
+///
+/// Loading the set is charged as compulsory misses so it is not credited with
+/// bytes it never paid — **once** when the cache is warm (a serving process
+/// provisions at startup), and **once per session** when cold (a fresh process
+/// must re-read it). Charging it once in the cold arm would compare a persistent
+/// static set against dynamic caches that get wiped, which is what produced a
+/// nonsensical negative temporal prize at high capacity before this was fixed.
+fn static_oracle(stream: &ReferenceStream, capacity: usize, warm: bool) -> (u64, u64) {
     let mut freq: HashMap<u32, u64> = HashMap::new();
     for &s in &stream.flat {
         *freq.entry(s).or_default() += 1;
@@ -337,13 +351,12 @@ fn static_oracle(stream: &ReferenceStream, capacity: usize) -> (u64, u64) {
     ranked.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
     let resident: std::collections::HashSet<u32> =
         ranked.iter().take(capacity).map(|&(s, _)| s).collect();
-    let load = resident.len() as u64;
-    let misses = stream
-        .flat
-        .iter()
-        .filter(|s| !resident.contains(s))
-        .count() as u64;
-    (misses + load, load)
+    let mut ids: Vec<usize> = stream.session_of_group.clone();
+    ids.dedup();
+    let sessions = if warm { 1 } else { ids.len().max(1) } as u64;
+    let load = resident.len() as u64 * sessions;
+    let misses = stream.flat.iter().filter(|s| !resident.contains(s)).count() as u64;
+    (misses + load, resident.len() as u64)
 }
 
 fn dynamic(
@@ -452,7 +465,14 @@ fn dynamic(
                         .unwrap_or(start + offset);
                     let n = next_use[pos];
                     // Never used again sorts first, so it is evicted first.
-                    (if n == usize::MAX { i64::MIN } else { -(n as i64) }, 0)
+                    (
+                        if n == usize::MAX {
+                            i64::MIN
+                        } else {
+                            -(n as i64)
+                        },
+                        0,
+                    )
                 }
                 _ => (clock, 0),
             };
@@ -469,6 +489,8 @@ fn dynamic(
 pub struct RetentionGate {
     pub capacity: usize,
     pub capacity_frac: f64,
+    /// The LRU-derived columns in this row are a cyclic-thrash artifact.
+    pub below_token_floor: bool,
     pub min_misses_per_token: f64,
     pub lru_misses_per_token: f64,
     pub static_misses_per_token: f64,
@@ -481,7 +503,7 @@ pub struct RetentionGate {
     pub recency_value: f64,
 }
 
-fn gain(baseline: f64, improved: f64) -> f64 {
+pub(super) fn gain(baseline: f64, improved: f64) -> f64 {
     if baseline <= 0.0 {
         0.0
     } else {
@@ -495,11 +517,16 @@ pub fn gate(results: &[SimResult], capacity: usize) -> Option<RetentionGate> {
             .iter()
             .find(|r| r.capacity == capacity && r.policy == p)
     };
-    let (min, lru, stat) = (at(Policy::Min)?, at(Policy::Lru)?, at(Policy::StaticOracle)?);
+    let (min, lru, stat) = (
+        at(Policy::Min)?,
+        at(Policy::Lru)?,
+        at(Policy::StaticOracle)?,
+    );
     let rnd = at(Policy::Random)?;
     Some(RetentionGate {
         capacity,
         capacity_frac: min.capacity_frac,
+        below_token_floor: min.below_token_floor,
         min_misses_per_token: min.misses_per_token,
         lru_misses_per_token: lru.misses_per_token,
         static_misses_per_token: stat.misses_per_token,

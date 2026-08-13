@@ -67,6 +67,47 @@ impl BufferCache {
         true
     }
 
+    /// Declare every registered region resident, per the selected arm.
+    ///
+    /// Idempotent and safe to call after each registration batch: the set is
+    /// rebuilt from the current region list, committed, optionally
+    /// `requestResidency`-ed, and attached to `queue`. Under
+    /// [`ResidencyArm::Implicit`] it does nothing at all, so arm A is
+    /// byte-identical to the pre-existing code path.
+    pub fn seal_residency(&self, queue: &metal::CommandQueue) {
+        use super::residency::{ResidencyArm, ResidencySet};
+        let arm = ResidencyArm::from_env();
+        if arm == ResidencyArm::Implicit {
+            return;
+        }
+        let regions = self.regions.lock().unwrap();
+        if regions.is_empty() {
+            return;
+        }
+        let Some(mut set) = ResidencySet::new(&self.device) else {
+            // Pre-macOS-15 runtime: implicit residency stays, which is
+            // correct. Say so once rather than silently reporting arm B
+            // numbers that are really arm A.
+            eprintln!("[residency] MTLResidencySet unavailable — running implicit residency");
+            return;
+        };
+        for r in regions.iter() {
+            set.add_buffer(&r.buf);
+        }
+        set.commit();
+        if arm == ResidencyArm::QueueSetRequested {
+            set.request_residency();
+        }
+        let attached = set.add_to_queue(queue);
+        eprintln!(
+            "[residency] arm={:?} regions={} attached_to_queue={}",
+            arm,
+            regions.len(),
+            attached
+        );
+        *self.residency.lock().unwrap() = Some(set);
+    }
+
     /// Resolve `sub` to `(buffer, byte_offset)` if it lies wholly inside a
     /// registered region. `None` → the caller stages a copy instead.
     pub fn resolve_region(&self, sub: &[u8]) -> Option<(Buffer, u64)> {

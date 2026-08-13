@@ -30,8 +30,8 @@ pub use enums::{
 };
 pub use layer::FullPipelineLayer;
 pub use moe::{
-    stored_gate_up_cols, ExpertMlp, MoeGateRule, MoeLayerWeights, MoeRoutingPolicy, MoeSpec,
-    MoeWeightLayout,
+    stored_gate_up_cols, ExpertMlp, MoeExpertScales, MoeFusedRowLayout, MoeGateRule,
+    MoeLayerWeights, MoeRoutingPolicy, MoeSpec, MoeWeightLayout,
 };
 pub use quant_format::{
     ExternalScaleKind, QuantAux, QuantFormat, QuantWeight, ScaleStorage, Q4_KF_BLOCK_BYTES,

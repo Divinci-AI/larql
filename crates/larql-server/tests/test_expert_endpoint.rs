@@ -268,6 +268,7 @@ fn make_loaded_model(
         skipped_tensors: Vec::new(),
         packed_byte_ranges: HashMap::new(),
         per_layer_ffn_format: Default::default(),
+        per_layer_ffn_arrangement: Default::default(),
         embed: embed.clone(),
         lm_head: embed,
         position_embed: None,
@@ -358,6 +359,8 @@ fn local_output(
     cpu_moe_forward(
         h,
         &MoeLayerWeights {
+            expert_scales: larql_compute::MoeExpertScales::Inline,
+            fused_row_layout: larql_compute::MoeFusedRowLayout::ContiguousHalves,
             experts_gate_up,
             experts_down,
             routing_policy: larql_compute::MoeRoutingPolicy::default(),

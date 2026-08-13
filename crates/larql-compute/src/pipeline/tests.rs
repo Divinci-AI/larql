@@ -90,6 +90,8 @@ fn is_hybrid_moe_reflects_option() {
     assert!(!no_moe.is_hybrid_moe());
 
     let moe = MoeLayerWeights {
+        expert_scales: crate::MoeExpertScales::Inline,
+        fused_row_layout: crate::MoeFusedRowLayout::ContiguousHalves,
         experts_gate_up: Vec::new(),
         experts_down: Vec::new(),
         routing_policy: MoeRoutingPolicy::default(),
@@ -339,4 +341,91 @@ fn has_dense_ffn_reflects_weight_presence() {
         ..FullPipelineLayer::default()
     };
     assert!(!half.has_dense_ffn());
+}
+
+// ── Expert-bank storage description ──
+
+#[test]
+fn interleaved_row_walk_agrees_with_the_convention_owner() {
+    use larql_models::quant::mxfp4::FusedHalf;
+
+    // `MoeFusedRowLayout` restates FusedHalf's convention as a (base,
+    // stride) pair because a kernel walks rows rather than indexing them.
+    // Pin the two against each other so the restatement cannot drift: it
+    // is agreement with the OWNER that is being asserted, not that both
+    // happen to produce the same numbers today.
+    for half in [FusedHalf::Gate, FusedHalf::Up] {
+        let (base, stride) = MoeFusedRowLayout::Interleaved.row_walk(half, 64);
+        for row in 0..64 {
+            assert_eq!(
+                base + row * stride,
+                half.fused_row(row),
+                "{half:?} row {row} disagrees with FusedHalf"
+            );
+        }
+    }
+}
+
+#[test]
+fn contiguous_halves_puts_up_one_half_region_in() {
+    use larql_models::quant::mxfp4::FusedHalf;
+
+    const INTER: usize = 64;
+    assert_eq!(
+        MoeFusedRowLayout::ContiguousHalves.row_walk(FusedHalf::Gate, INTER),
+        (0, 1)
+    );
+    assert_eq!(
+        MoeFusedRowLayout::ContiguousHalves.row_walk(FusedHalf::Up, INTER),
+        (INTER, 1)
+    );
+
+    // The two layouts must not agree anywhere past row 0, or a test that
+    // claims to distinguish them would be pinning a coincidence.
+    let (ci_base, ci_stride) = MoeFusedRowLayout::ContiguousHalves.row_walk(FusedHalf::Up, INTER);
+    let (in_base, in_stride) = MoeFusedRowLayout::Interleaved.row_walk(FusedHalf::Up, INTER);
+    assert_ne!((ci_base, ci_stride), (in_base, in_stride));
+}
+
+#[test]
+fn inline_scales_have_no_partner_stream() {
+    let scales = MoeExpertScales::Inline;
+    assert!(!scales.is_paired());
+    // `None` is "no such stream exists", not "the stream is empty" — the
+    // distinction the enum exists to keep.
+    assert!(scales.gate_up(0).is_none());
+    assert!(scales.down(0).is_none());
+}
+
+#[test]
+fn paired_scales_are_index_aligned_with_their_payloads() {
+    let gu: Vec<&[u8]> = vec![&[1, 2], &[3, 4]];
+    let dn: Vec<&[u8]> = vec![&[5], &[6]];
+    let scales = MoeExpertScales::Paired {
+        gate_up: gu,
+        down: dn,
+    };
+    assert!(scales.is_paired());
+    assert_eq!(scales.gate_up(1), Some(&[3u8, 4][..]));
+    assert_eq!(scales.down(1), Some(&[6u8][..]));
+}
+
+#[test]
+#[should_panic(expected = "too short for expert 2")]
+fn a_short_paired_table_panics_rather_than_reporting_inline() {
+    let scales = MoeExpertScales::Paired {
+        gate_up: vec![&[1u8][..]],
+        down: vec![&[2u8][..]],
+    };
+    let _ = scales.gate_up(2);
+}
+
+#[test]
+#[should_panic(expected = "too short for expert 3")]
+fn a_short_paired_down_table_panics_too() {
+    let scales = MoeExpertScales::Paired {
+        gate_up: vec![&[1u8][..]],
+        down: vec![&[2u8][..]],
+    };
+    let _ = scales.down(3);
 }

@@ -15,7 +15,8 @@ use crate::forward_overrides::effective_rope_base_for_layer;
 const NO_ATTENTION_WINDOW: usize = 0;
 
 use crate::{
-    FullPipelineLayer, MoeLayerWeights, MoeRoutingPolicy, MoeWeightLayout, QuantFormat, QuantWeight,
+    FullPipelineLayer, MoeExpertScales, MoeFusedRowLayout, MoeLayerWeights, MoeRoutingPolicy,
+    MoeWeightLayout, QuantFormat, QuantWeight,
 };
 use larql_models::ModelWeights;
 

@@ -27,6 +27,9 @@ pub mod graph_walk_knn;
 pub mod kv_append_attend_fused;
 pub mod kv_attention;
 pub mod layer_norm;
+pub mod moe_descriptor;
+pub mod moe_router;
+pub mod moe_router_select;
 pub mod moe_weighted_combine;
 pub mod mxfp4_grouped_experts;
 pub mod mxfp4_matvec;
@@ -82,6 +85,10 @@ pub fn all_shaders() -> String {
     src.push_str(&f32_gemv::argmax_shader_source());
     src.push_str(&f32_gemv::topk_shader_source());
     src.push_str(f16_gemv::SHADER);
+    // MoE GPU router (rungs A+B+C of the GPU-dataflow routing ladder)
+    src.push_str(moe_router::SHADER);
+    src.push_str(moe_router_select::SHADER);
+    src.push_str(moe_descriptor::SHADER);
     // Q4 dense matvec
     src.push_str(q4_matvec_v4::SHADER);
     // Q4 other

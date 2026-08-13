@@ -67,6 +67,14 @@ pub const SB_HEADER_BYTES: usize = 2;
 /// Total interleaved superblock size.
 pub const SB_BYTES: usize = SB_HEADER_BYTES + GROUPS_PER_SB * GROUP_BYTES;
 
+/// Row walk for a dispatch whose output rows *are* the stored rows — no
+/// fused halves to choose between, so `frow == row`. A fused gate/up
+/// dispatch takes its pair from
+/// [`larql_compute::MoeFusedRowLayout::row_walk`] instead.
+pub const ROW_BASE_IDENTITY: u32 = 0;
+/// Companion of [`ROW_BASE_IDENTITY`].
+pub const ROW_STRIDE_IDENTITY: u32 = 1;
+
 /// fp4 (e2m1) values, sign in bit 3.
 pub const LUT: [f32; 16] = [
     0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0,
@@ -98,16 +106,36 @@ inline float mxg_e8m0(uchar b) {
 "#;
 
 /// Arm A: separate scale stream, 16-entry LUT decode.
+///
+/// The only arm that takes `s_offsets` and a row walk, and it takes both for
+/// the same reason: it is the arm that serves a **stored** bank rather than a
+/// bench fixture, so it cannot assume anything about where the container put
+/// the streams or how the fused rows are arranged.
+///
+/// `s_offsets` replaces a derived `offsets[slot] / 16`. That derivation was a
+/// physical-placement invariant — "the exponent for a payload byte at `o`
+/// lives at `o/16`" — which holds for two parallel contiguous banks and not
+/// for a VINDEX3 container, whose paired regions are placed by the writer and
+/// bound by `pair_id`. Nothing established the invariant, so nothing would
+/// have caught it being false; the failure is silent wrong numbers.
+///
+/// `ROWBASE`/`ROWSTRIDE` express which fused rows this dispatch's half owns:
+/// `(half * inter, 1)` for contiguous halves, `(half, 2)` for the
+/// checkpoint's interleaving. Expressing the half as a byte offset — the way
+/// every inline-scale call site does — can only say the former.
 const KERNEL_A: &str = r#"
 kernel void mxfp4g_split_lut16(
-    device const uchar*  Wp      [[buffer(0)]],
-    device const uint*   offsets [[buffer(1)]],
-    device const uchar*  Ws      [[buffer(2)]],
-    device const float*  X       [[buffer(3)]],
-    device float*        out     [[buffer(4)]],
-    constant uint&       N       [[buffer(5)]],
-    constant uint&       K       [[buffer(6)]],
-    constant uint&       XSTRIDE [[buffer(7)]],
+    device const uchar*  Wp        [[buffer(0)]],
+    device const uint*   offsets   [[buffer(1)]],
+    device const uchar*  Ws        [[buffer(2)]],
+    device const uint*   s_offsets [[buffer(3)]],
+    device const float*  X         [[buffer(4)]],
+    device float*        out       [[buffer(5)]],
+    constant uint&       N         [[buffer(6)]],
+    constant uint&       K         [[buffer(7)]],
+    constant uint&       XSTRIDE   [[buffer(8)]],
+    constant uint&       ROWBASE   [[buffer(9)]],
+    constant uint&       ROWSTRIDE [[buffer(10)]],
     uint2 tg_id [[threadgroup_position_in_grid]],
     uint  lane  [[thread_index_in_simdgroup]],
     uint  sg_id [[simdgroup_index_in_threadgroup]])
@@ -117,9 +145,12 @@ kernel void mxfp4g_split_lut16(
     if (row >= N) { return; }
 
     const uint groups = K / MXG_GROUP_ELEMS;
-    // Scales are 1 byte per group where packed is 16, so one offset serves both.
-    const ulong pbase = (ulong)offsets[slot] + (ulong)row * groups * MXG_GROUP_BYTES;
-    const ulong sbase = (ulong)offsets[slot] / MXG_GROUP_BYTES + (ulong)row * groups;
+    // Output row `row` of this half is fused row `frow` of the stored region.
+    // `out` stays keyed on `row`: the destination is dense per half however
+    // the source rows are spaced.
+    const uint frow = ROWBASE + row * ROWSTRIDE;
+    const ulong pbase = (ulong)offsets[slot]   + (ulong)frow * groups * MXG_GROUP_BYTES;
+    const ulong sbase = (ulong)s_offsets[slot] + (ulong)frow * groups;
     device const uchar* row_p = Wp + pbase;
     device const uchar* row_s = Ws + sbase;
     device const float* Xs = X + (ulong)slot * XSTRIDE;
@@ -430,6 +461,40 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    #[test]
+    fn only_the_split_arm_binds_scale_offsets_and_a_row_walk() {
+        let src = shader();
+        // The binding table in `ExpertScaleBinding`'s docs is what call sites
+        // encode against, so pin it at the source rather than trusting prose.
+        // Whitespace is column alignment, not contract — collapse it first.
+        let flat = KERNEL_A.split_whitespace().collect::<Vec<_>>().join(" ");
+        for (name, slot) in [
+            ("Wp", 0),
+            ("offsets", 1),
+            ("Ws", 2),
+            ("s_offsets", 3),
+            ("X", 4),
+            ("out", 5),
+            ("N", 6),
+            ("K", 7),
+            ("XSTRIDE", 8),
+            ("ROWBASE", 9),
+            ("ROWSTRIDE", 10),
+        ] {
+            assert!(
+                flat.contains(&format!("{name} [[buffer({slot})]]")),
+                "arm A must bind {name} at buffer({slot})"
+            );
+        }
+        // The interleaved arms deliberately do NOT carry either: they keep the
+        // shared inline-scale arity, which is also why they can only serve a
+        // contiguous-halves bank. A call site holding an interleaved bank must
+        // refuse rather than pick one of them.
+        let interleaved_src: String = src.replace(KERNEL_A, "");
+        assert!(!interleaved_src.contains("s_offsets"));
+        assert!(!interleaved_src.contains("ROWSTRIDE"));
     }
 
     /// Every interleaved kernel — the three candidates plus the bit-math arm and

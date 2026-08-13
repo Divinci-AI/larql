@@ -163,6 +163,11 @@ pub struct ModelWeights {
     /// consumers fall back to Q4_K, which is the only format those ever
     /// carried.
     pub per_layer_ffn_format: HashMap<usize, String>,
+    /// How each per-layer FFN store arranges its bytes, recorded from the
+    /// same header as `per_layer_ffn_format` and travelling with it. Empty
+    /// for legacy vindexes and non-per-layer layouts, whose stores are all
+    /// inline-scale contiguous-halves — see [`PerLayerFfnArrangement`].
+    pub per_layer_ffn_arrangement: HashMap<usize, PerLayerFfnArrangement>,
     pub embed: WeightArray,
     /// Output projection matrix. Same as embed if tie_word_embeddings=true,
     /// separate lm_head.weight otherwise.
@@ -243,6 +248,18 @@ impl ModelWeights {
     /// only format they carried) and for non-per-layer layouts.
     pub fn per_layer_ffn_format_tag(&self, layer: usize) -> Option<&str> {
         self.per_layer_ffn_format.get(&layer).map(String::as_str)
+    }
+
+    /// How layer `layer`'s per-layer FFN store arranges its bytes.
+    ///
+    /// `None` means no store declared an arrangement — a legacy vindex or a
+    /// non-per-layer layout. Callers should use
+    /// [`PerLayerFfnArrangement::default`], which is what those stores
+    /// contain; it is deliberately not returned here so that "declared
+    /// contiguous halves" and "nothing declared" stay distinguishable at the
+    /// boundary.
+    pub fn per_layer_ffn_arrangement(&self, layer: usize) -> Option<PerLayerFfnArrangement> {
+        self.per_layer_ffn_arrangement.get(&layer).copied()
     }
 
     /// Whether FFN weights are stored in the per-layer format (`layers/`).
@@ -419,6 +436,45 @@ pub fn per_layer_ffn_key(layer: usize, entry: usize, component: &str) -> String 
 pub const PER_LAYER_FFN_GATE_UP: &str = "gate_up";
 /// Component string for the down half of a per-layer FFN entry.
 pub const PER_LAYER_FFN_DOWN: &str = "down";
+/// Component string for the gate+up e8m0 exponent stream of a split-scale
+/// per-layer FFN entry. Registered as its own slot rather than derived from
+/// the payload slot: `payload_offset / 16` holds only when the two streams
+/// were written as parallel banks, which is the writer's choice and not a
+/// property of the format.
+pub const PER_LAYER_FFN_GATE_UP_SCALES: &str = "gate_up_scales";
+/// Component string for the down e8m0 exponent stream of a split-scale
+/// per-layer FFN entry.
+pub const PER_LAYER_FFN_DOWN_SCALES: &str = "down_scales";
+
+/// How one layer's per-layer FFN store arranges its bytes, read off that
+/// store's own header at load time.
+///
+/// Separate from the format tag on purpose. The format answers "how is a
+/// block decoded"; these answer "where are the scales" and "which rows are
+/// gate". Every store written before native MXFP4 answered the latter two
+/// identically, which is why they used to be derivable — and why deriving
+/// them is now a defect rather than a shortcut.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PerLayerFfnArrangement {
+    /// Whether each entry carries its own e8m0 exponent streams, reachable
+    /// under [`PER_LAYER_FFN_GATE_UP_SCALES`] / [`PER_LAYER_FFN_DOWN_SCALES`].
+    pub split_scales: bool,
+    /// Which rows of the fused gate+up operand are gate and which are up.
+    pub gate_up_layout: crate::config::experts::GateUpLayout,
+}
+
+impl Default for PerLayerFfnArrangement {
+    /// The arrangement every pre-MXFP4 store on disk actually uses. A
+    /// default is safe here *only* because that is a fact about what those
+    /// writers emitted, not a guess — see `write_layer_weights`, which
+    /// states the same thing on the writing side.
+    fn default() -> Self {
+        Self {
+            split_scales: false,
+            gate_up_layout: crate::config::experts::GateUpLayout::ContiguousHalves,
+        }
+    }
+}
 
 #[cfg(test)]
 mod weights_view_tests {

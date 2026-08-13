@@ -89,6 +89,29 @@ impl RegionLayout {
     pub fn is_declared(self) -> bool {
         !matches!(self, Self::Unspecified)
     }
+
+    /// The row walk an execution path may perform on these bytes, or `None`
+    /// when this binary must not act on the declaration.
+    ///
+    /// The two `None` cases are different failures and both are real:
+    /// [`Self::Unspecified`] is a container that never said, and
+    /// [`Self::Unknown`] is one that said something this binary post-dates.
+    /// Neither may resolve to a concrete arrangement — mapping either to
+    /// [`larql_compute::MoeFusedRowLayout::ContiguousHalves`] because it is
+    /// the common case would reintroduce exactly the inference this type
+    /// was added to remove, and it would do it silently, since a wrong
+    /// arrangement computes a plausible answer rather than failing.
+    ///
+    /// The caller decides what to do with `None`. There is no default here
+    /// to fall back to, deliberately: a default would be indistinguishable
+    /// from a real declaration by the time it reached a kernel.
+    pub fn fused_row_layout(self) -> Option<larql_compute::MoeFusedRowLayout> {
+        match self {
+            Self::ContiguousHalves => Some(larql_compute::MoeFusedRowLayout::ContiguousHalves),
+            Self::Interleaved => Some(larql_compute::MoeFusedRowLayout::Interleaved),
+            Self::Unspecified | Self::Unknown(_) => None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -130,5 +153,32 @@ mod tests {
     #[test]
     fn unknown_tags_name_themselves() {
         assert_eq!(RegionLayout::Unknown(42).name(), "layout_42");
+    }
+
+    /// Both undeclared cases must refuse, and for different reasons — see
+    /// `fused_row_layout`. Pinning them together because they share an
+    /// answer today would hide it if one of them ever stopped refusing.
+    #[test]
+    fn neither_undeclared_case_resolves_to_an_arrangement() {
+        assert!(RegionLayout::Unspecified.fused_row_layout().is_none());
+        assert!(RegionLayout::Unknown(9).fused_row_layout().is_none());
+    }
+
+    #[test]
+    fn declared_layouts_map_to_their_own_row_walk() {
+        use larql_compute::MoeFusedRowLayout;
+        assert_eq!(
+            RegionLayout::ContiguousHalves.fused_row_layout(),
+            Some(MoeFusedRowLayout::ContiguousHalves)
+        );
+        assert_eq!(
+            RegionLayout::Interleaved.fused_row_layout(),
+            Some(MoeFusedRowLayout::Interleaved)
+        );
+        // The mapping must not collapse the two — that collapse IS the bug.
+        assert_ne!(
+            RegionLayout::ContiguousHalves.fused_row_layout(),
+            RegionLayout::Interleaved.fused_row_layout()
+        );
     }
 }

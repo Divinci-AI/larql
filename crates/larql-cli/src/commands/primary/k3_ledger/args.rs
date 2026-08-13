@@ -70,10 +70,43 @@ pub enum K3LedgerCmd {
     /// Trace which KDA projections read the same hidden state, and what a shared
     /// input rotation would have to be folded into. Reads the real tensor table.
     KdaGraph(KdaGraphArgs),
+    /// DEC-9A — retention oracle gate. How much external traffic is avoidable
+    /// by perfect RETENTION decisions alone? Belady/MIN bounds every predictor
+    /// that could ever be built; a best-fixed-set arm isolates how much of that
+    /// is merely popularity. Reads a local pool — no checkpoint, no network.
+    Retention(RetentionArgs),
     /// Frequency-mass coverage from a captured routing trace: what a resident
     /// set of C symbols per stratum actually serves, static vs adaptive vs
     /// oracle vs null. Reads a local pool — no checkpoint, no network.
     FreqMass(FreqMassArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct RetentionArgs {
+    /// DEC residual capture pool captured with `--routing`.
+    #[arg(long)]
+    pub pool: std::path::PathBuf,
+
+    /// Cache capacities to sweep, as a fraction of the layer-expert bank. A
+    /// capacity below one stratum's simultaneous demand can only thrash, and
+    /// the report flags those rows rather than ranking policies inside them.
+    #[arg(long, num_args = 1.., default_values_t = [0.01f64, 0.02, 0.04, 0.0625, 0.08, 0.125, 0.25])]
+    pub capacity_fracs: Vec<f64>,
+
+    /// Reset the cache at every session boundary. Default is warm (kept
+    /// across sessions), which is the serving case.
+    #[arg(long)]
+    pub cold: bool,
+
+    /// Seed for the random-eviction control.
+    #[arg(long, default_value_t = 20_260_810)]
+    pub seed: u64,
+
+    /// Bytes per cached expert. Defaults to K3's routed expert, which on any
+    /// other model's trace is a scaled projection for readability and not a
+    /// measurement of that model (R2).
+    #[arg(long)]
+    pub expert_bytes: Option<u64>,
 }
 
 #[derive(Debug, Args)]

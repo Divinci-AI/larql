@@ -234,6 +234,11 @@ where
     for mmap in weights.packed_mmaps.values() {
         backend.register_weight_region(&mmap[..]);
     }
+    // Every region is registered; let the backend prepare them once. Metal
+    // uses this to declare an explicit residency set instead of paying
+    // per-command-buffer residency bookkeeping on a ~697 MB allocation 24
+    // times per token.
+    backend.seal_weight_regions();
 
     let arch = &*weights.arch;
     let norm_offset = arch.norm_weight_offset();

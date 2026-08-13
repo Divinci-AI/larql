@@ -97,18 +97,31 @@ pub struct QuantKernels {
 /// | binding | buffers |
 /// |---|---|
 /// | [`Self::InlineScales`] | `W(0) offsets(1) X(2) out(3) N(4) K(5) XSTRIDE(6)` |
-/// | [`Self::SplitE8M0`] | `Wp(0) offsets(1) Ws(2) X(3) out(4) N(5) K(6) XSTRIDE(7)` |
+/// | [`Self::SplitE8M0`] | `Wp(0) offsets(1) Ws(2) s_offsets(3) X(4) out(5) N(6) K(7) XSTRIDE(8) ROWBASE(9) ROWSTRIDE(10)` |
 ///
 /// Binding an inline-scale call site against a split-scale kernel puts
 /// activations where the kernel reads exponents, which decodes silently
 /// and wrongly.
+///
+/// The two extra pairs on the split arm are not symmetry for its own sake.
+/// `s_offsets` exists because the exponent stream's placement is the
+/// container writer's choice, not `payload_offset / 16`; `ROWBASE`/
+/// `ROWSTRIDE` exist because a fused gate/up region can arrange its two
+/// halves contiguously *or* interleaved, and an inline-scale call site
+/// expresses "which half" as a byte offset, which can only say the former.
+/// Both are properties a stored bank has and a bench fixture does not,
+/// which is why only the arm that serves stored banks carries them.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum ExpertScaleBinding {
     /// Scales ride inside the weight stream (Q4_K, Q6_K, and the
     /// interleaved MXFP4 arms).
+    ///
+    /// Implies a contiguous-halves fused region: there is no binding here
+    /// that could say otherwise, so a call site holding an interleaved
+    /// bank must refuse rather than dispatch.
     InlineScales,
-    /// A separate e8m0 exponent stream at `buffer(2)`, shifting every
-    /// later index up by one (the exact MXFP4 arm).
+    /// A separate e8m0 exponent stream with its own offset table, plus an
+    /// explicit fused-row walk (the exact MXFP4 arm).
     SplitE8M0,
 }
 

@@ -252,6 +252,7 @@ pub fn dispatch_full_pipeline(
     super::dump::dump_h_embed(dump_path.as_deref(), &lb, seq_len, hidden);
 
     for l in 0..num_layers {
+        let _route_scope = larql_compute::moe_route_observe::LayerScope::new(l);
         let eps = layers[l].eps;
         let layer_rope_plan = &layers[l].rope_freq;
         let layer_head_dim = layers[l].head_dim;

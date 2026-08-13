@@ -304,6 +304,8 @@ fn decode_backend_decode_token_with_moe_split_runs() {
     let norm_w: Vec<f32> = (0..HIDDEN).map(|i| 1.0 + (i as f32 * 0.001)).collect();
     let _ = wv2;
     let null_moe = MoeLayerWeights {
+        expert_scales: larql_compute::MoeExpertScales::Inline,
+        fused_row_layout: larql_compute::MoeFusedRowLayout::ContiguousHalves,
         experts_gate_up: Vec::new(),
         experts_down: Vec::new(),
         routing_policy: MoeRoutingPolicy::default(),
@@ -379,17 +381,15 @@ fn decode_backend_multi_layer_q4_ffn_runs() {
 #[test]
 fn decode_token_with_unfused_attn_v_norm_qk_norm_drives_unfused_paths() {
     let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let Some(metal) = larql_compute_metal::MetalBackend::new() else {
+    use larql_compute::cpu::ops::q4_common::{quantize_q4_0, quantize_q4_k};
+    // Force unfused through options rather than the environment: `set_var`
+    // races every other test in this binary that builds a backend — see the
+    // note in `decode_core::d_rms_fuse_phase1_produces_identical_output`.
+    let mut opts = larql_compute_metal::BackendOptions::from_env();
+    opts.decode_flags.fused_attn = false;
+    let Some(metal2) = larql_compute_metal::MetalBackend::with_options(opts) else {
         return;
     };
-    use larql_compute::cpu::ops::q4_common::{quantize_q4_0, quantize_q4_k};
-    let saved_fused = std::env::var_os("LARQL_FUSED_ATTN");
-    // Force unfused: rebuild backend so DecodeFlags re-reads env.
-    unsafe {
-        std::env::set_var("LARQL_FUSED_ATTN", "0");
-    }
-    let metal2 = larql_compute_metal::MetalBackend::new().expect("Metal device");
-    let _ = metal; // keep first backend alive briefly
 
     let wq = quantize_q4_k(&synth_weight_f32(Q_DIM * HIDDEN, 0.1));
     let wk = quantize_q4_k(&synth_weight_f32(KV_DIM * HIDDEN, 0.2));
@@ -427,11 +427,4 @@ fn decode_token_with_unfused_attn_v_norm_qk_norm_drives_unfused_paths() {
         10_000.0,
     );
     assert_eq!(out.len(), HIDDEN);
-
-    unsafe {
-        match saved_fused {
-            Some(v) => std::env::set_var("LARQL_FUSED_ATTN", v),
-            None => std::env::remove_var("LARQL_FUSED_ATTN"),
-        }
-    }
 }

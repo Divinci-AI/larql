@@ -31,6 +31,13 @@ use larql_compute::MoeLayerWeights;
 pub(super) struct ResolvedExpert {
     pub gate_up: (Buffer, u64),
     pub down: (Buffer, u64),
+    /// e8m0 exponent streams, `Some` exactly when the bank is split-scale.
+    ///
+    /// Carried as their own bindings rather than derived from the payload
+    /// offsets: where the exponents sit is the container writer's choice,
+    /// and `payload_offset / 16` is only true of two parallel banks.
+    pub gate_up_scales: Option<(Buffer, u64)>,
+    pub down_scales: Option<(Buffer, u64)>,
     pub expert_id: usize,
     pub weight: f32,
 }
@@ -46,26 +53,86 @@ impl MetalBackend {
     pub(super) fn resolve_selected_experts<'w>(
         &self,
         scratch: &MoeScratch,
+        moe: &MoeLayerWeights<'_>,
         expert_indices: &[usize],
         expert_weights: &[f32],
         get_expert_bytes: impl Fn(usize) -> Option<(&'w [u8], &'w [u8])>,
     ) -> Option<Vec<ResolvedExpert>> {
+        crate::route_witness::bump(&crate::route_witness::HOST_RESOLVES);
         let gate_half_bytes = scratch.inter * scratch.row_bytes;
         let down_expert_bytes = scratch.hidden * scratch.down_row_bytes;
+        // `None` from this function means "not zero-copyable — use the
+        // staged path". That is only an honest answer for a bank the staged
+        // path can actually serve. Nothing in this backend can stage an e8m0
+        // stream, so for a split-scale bank the staged path is not a fallback
+        // but a deferred, mislabelled failure. Say so here, at the miss.
+        let split_scale = moe.expert_scales.is_paired();
+        let no_fallback = |what: &str| -> ! {
+            panic!(
+                "moe_zero_copy: {what}, and a split-scale bank has no staged \
+                 path to fall back to — the staged dispatcher cannot carry an \
+                 e8m0 stream. Register this layer's expert regions."
+            )
+        };
         let mut resolved = Vec::with_capacity(scratch.top_k);
         for (k, &ei) in expert_indices.iter().enumerate() {
             if resolved.len() >= scratch.top_k {
                 break;
             }
-            let (gu_bytes, dn_bytes) = get_expert_bytes(ei)?;
+            let Some((gu_bytes, dn_bytes)) = get_expert_bytes(ei) else {
+                if split_scale {
+                    no_fallback(&format!("expert {ei} has no weight bytes"));
+                }
+                return None;
+            };
             if gu_bytes.len() < 2 * gate_half_bytes || dn_bytes.len() < down_expert_bytes {
+                if split_scale {
+                    no_fallback(&format!("expert {ei}'s weight slices are short"));
+                }
                 return None;
             }
-            let gate_up = self.bufs.resolve_region(gu_bytes)?;
-            let down = self.bufs.resolve_region(dn_bytes)?;
+            let (Some(gate_up), Some(down)) = (
+                self.bufs.resolve_region(gu_bytes),
+                self.bufs.resolve_region(dn_bytes),
+            ) else {
+                if split_scale {
+                    no_fallback(&format!(
+                        "expert {ei}'s weights are not inside a registered region"
+                    ));
+                }
+                return None;
+            };
+            // The exponent streams come off the layer rather than the
+            // caller's closure: they are already stated there, and a second
+            // route to the same bytes is a second thing to get wrong.
+            //
+            // A `None` return here means "not zero-copyable, use the staged
+            // path". That is a real fallback for an inline-scale bank, which
+            // the staged path can serve. It is NOT one for a split-scale
+            // bank: no path in this backend can stage an e8m0 stream, so
+            // returning `None` would hand the caller a fallback that fails
+            // later, at an assert about binding arity, blaming the kernel
+            // registry for what is actually an unregistered region here.
+            // Refuse at the cause instead.
+            let resolve_scales = |slice: Option<&[u8]>, what: &str| {
+                slice.map(|bytes| {
+                    self.bufs.resolve_region(bytes).unwrap_or_else(|| {
+                        panic!(
+                            "moe_zero_copy: expert {ei}'s {what} e8m0 stream is \
+                             not inside a registered region, so it cannot be \
+                             bound; a split-scale bank has no staged fallback to \
+                             fall back to. Register the layer's scale regions."
+                        )
+                    })
+                })
+            };
+            let gate_up_scales = resolve_scales(moe.expert_scales.gate_up(ei), "gate_up");
+            let down_scales = resolve_scales(moe.expert_scales.down(ei), "down");
             resolved.push(ResolvedExpert {
                 gate_up,
                 down,
+                gate_up_scales,
+                down_scales,
                 expert_id: ei,
                 weight: expert_weights[k],
             });
@@ -107,6 +174,7 @@ impl MetalBackend {
         // weights stay zero-copy; the bias rows are `inter` f32 each).
         let stage_biases = !moe.experts_gate_up_bias.is_empty();
         if stage_biases {
+            crate::route_witness::bump(&crate::route_witness::BIAS_COPIES);
             for (slot, r) in resolved.iter().enumerate() {
                 let mlp = moe.expert_mlp(r.expert_id);
                 // SAFETY: shared-storage scratch buffers allocated at
@@ -147,7 +215,34 @@ impl MetalBackend {
                 .all(|w| extract(&w[0]).0.gpu_address() == extract(&w[1]).0.gpu_address())
                 && resolved.iter().all(|r| u32::try_from(extract(r).1).is_ok())
         };
+        // Every arm below except the MXFP4 one selects a fused half by adding
+        // `half * gate_half_bytes` to the expert's offset. That spelling can
+        // only describe `ContiguousHalves`; against an interleaved region it
+        // reads the first half of the fused rows as "gate", which is two
+        // 50/50 mixtures of the real gate and up — finite, coherent-looking
+        // and wrong (`docs/k3-funnel.md` §4.7). Refuse before encoding.
+        if !matches!(scratch.format, larql_compute::QuantFormat::MXFP4) {
+            assert_eq!(
+                moe.fused_row_layout,
+                larql_compute::MoeFusedRowLayout::ContiguousHalves,
+                "moe_zero_copy: {:?} selects fused halves by byte offset and \
+                 cannot serve a {:?} bank",
+                scratch.format,
+                moe.fused_row_layout,
+            );
+        }
+
         match scratch.format {
+            larql_compute::QuantFormat::MXFP4 if single_base(|r| &r.gate_up) => {
+                self.encode_mxfp4_gate_up(enc, moe, scratch, resolved);
+            }
+            larql_compute::QuantFormat::MXFP4 => panic!(
+                "moe_zero_copy: MXFP4 experts resolved to more than one base \
+                 buffer (or a >4 GiB offset). The split-scale arm addresses \
+                 through one base plus an offset table and has no ragged \
+                 form; falling through to a k-quant kernel would read a \
+                 different block stride."
+            ),
             larql_compute::QuantFormat::Q6_K if single_base(|r| &r.gate_up) => {
                 // K3a grouped kernel: all selected experts' gate rows in one
                 // 2-D dispatch (row tiles × slots), then the same for up.
@@ -169,6 +264,7 @@ impl MetalBackend {
                     };
                     enc.set_compute_pipeline_state(&kh.state);
                     enc.set_buffer(0, Some(base), 0);
+                    crate::route_witness::bump(&crate::route_witness::OFFSET_BINDS);
                     enc.set_bytes(
                         1,
                         (offsets.len() * 4) as u64,
@@ -224,6 +320,7 @@ impl MetalBackend {
                     };
                     enc.set_compute_pipeline_state(&kh.state);
                     enc.set_buffer(0, Some(base), 0);
+                    crate::route_witness::bump(&crate::route_witness::OFFSET_BINDS);
                     enc.set_bytes(
                         1,
                         (offsets.len() * 4) as u64,
@@ -310,7 +407,18 @@ impl MetalBackend {
         // ── Down projection at the experts' region offsets.
         let n_out = hidden as u32;
         let k_in = inter_padded as u32;
-        if single_base(|r| &r.down) {
+        if matches!(scratch.format, larql_compute::QuantFormat::MXFP4) {
+            // Split-scale down: its own two-stream binding, in
+            // `moe_zero_copy_mxfp4`. Reached only when the gate/up stage
+            // above already resolved to one base, so a ragged down here
+            // would be the same refusal twice.
+            assert!(
+                single_base(|r| &r.down),
+                "moe_zero_copy: MXFP4 down experts resolved to more than one \
+                 base buffer; the split-scale arm has no ragged form"
+            );
+            self.encode_mxfp4_down(enc, scratch, resolved);
+        } else if single_base(|r| &r.down) {
             // Grouped down: each slot reads its OWN activation
             // (`XSTRIDE = inter_padded` — the strided act_buf layout the
             // activation stage wrote above).
@@ -318,15 +426,15 @@ impl MetalBackend {
             let (kh, binding) = self.quant.grouped_experts_for(scratch.format);
             // This site encodes the inline-scale binding shape below
             // (W(0) offsets(1) X(2) out(3) …). A split-scale arm expects
-            // an e8m0 stream at buffer(2), which the zero-copy scratch
-            // does not carry yet — binding X there would decode every
-            // group against activation bytes. Refuse instead.
+            // an e8m0 stream at buffer(2); binding X there would decode
+            // every group against activation bytes. MXFP4 took the branch
+            // above, so anything reaching here claiming a split binding is
+            // a format/kernel disagreement rather than a missing feature.
             assert_eq!(
                 binding,
                 ExpertScaleBinding::InlineScales,
-                "moe_zero_copy: {:?} needs a split e8m0 binding, which this \
-                 path does not yet plumb; select an inline-scale arm or wait \
-                 for the native MXFP4 expert store",
+                "moe_zero_copy: {:?} reports a split e8m0 binding but is not \
+                 routed to the split-scale encoder",
                 scratch.format,
             );
             let row_tiles = (hidden as u64).div_ceil(kh.rows_per_tg);
@@ -335,6 +443,7 @@ impl MetalBackend {
             let xstride_own: u32 = inter_padded as u32;
             enc.set_compute_pipeline_state(&kh.state);
             enc.set_buffer(0, Some(base), 0);
+            crate::route_witness::bump(&crate::route_witness::OFFSET_BINDS);
             enc.set_bytes(
                 1,
                 (offsets.len() * 4) as u64,
@@ -355,7 +464,7 @@ impl MetalBackend {
                 down_binding,
                 crate::kernels::quant::ExpertScaleBinding::InlineScales,
                 "moe_zero_copy: {:?} needs a split e8m0 binding on the ragged \
-                 down path, which this site does not yet plumb",
+                 down path, which has no grouped offset table to carry one",
                 scratch.format,
             );
             let down_tgs = (hidden as u64).div_ceil(down_kh.rows_per_tg);
@@ -472,6 +581,7 @@ impl MetalBackend {
             .first()
             .is_some_and(|r| !moe.expert_mlp(r.expert_id).down_bias.is_empty());
         if has_bias {
+            crate::route_witness::bump(&crate::route_witness::BIAS_COPIES);
             for (slot, r) in resolved.iter().enumerate() {
                 let bias = moe.expert_mlp(r.expert_id).down_bias;
                 debug_assert_eq!(bias.len(), hidden);
@@ -498,6 +608,7 @@ impl MetalBackend {
         enc.set_buffer(2, Some(new_h), 0);
         enc.set_bytes(3, 4, &hidden_u as *const u32 as *const c_void);
         enc.set_bytes(4, 4, &k_u as *const u32 as *const c_void);
+        crate::route_witness::bump(&crate::route_witness::WEIGHT_BINDS);
         enc.set_bytes(
             5,
             (weights.len() * 4) as u64,
@@ -515,3 +626,6 @@ impl MetalBackend {
         );
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -9,6 +9,7 @@ use crate::common::*;
 /// encode_ffn,encode_post_ffn}.rs`.
 #[test]
 fn decode_token_single_layer_synthetic_q4k_smoke() {
+    let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let metal = match larql_compute_metal::MetalBackend::new() {
         Some(m) => m,
         None => {
@@ -76,8 +77,6 @@ fn decode_token_single_layer_synthetic_q4k_smoke() {
 /// `test_kernel_fused_ops_norms.rs::residual_norm_store_*`.
 #[test]
 fn d_rms_fuse_phase1_produces_identical_output() {
-    use std::env;
-
     // Hold the env lock for the whole test: both runs must observe the
     // env state at the time we construct each backend, and we must not
     // cross-pollute with the other env-mutating test
@@ -104,14 +103,16 @@ fn d_rms_fuse_phase1_produces_identical_output() {
     let layers = [layer0, layer1];
     let x = synth_input(HIDDEN, 0.99);
 
-    // Decode flags are cached at `MetalBackend::new()`. The test must
-    // construct a fresh backend AFTER the env is in the desired state
-    // — the previous "set env then call decode on the existing backend"
-    // pattern silently no-ops with cached flags.
-    //
-    // Run with fusion OFF.
-    env::remove_var("LARQL_FUSED_PRELAYER_NORM");
-    let metal_off = match larql_compute_metal::MetalBackend::new() {
+    // Decode flags are cached at construction, so each arm needs its own
+    // backend. They are set through `BackendOptions` rather than the
+    // environment: `set_var` mutates process-global state, this binary runs
+    // its tests in parallel threads, and a concurrent `getenv` in another
+    // test's `MetalBackend::new()` would latch whichever flag this test had
+    // mid-flight — which showed up as unrelated prefill tests going
+    // non-finite roughly one run in two.
+    let mut opts_off = larql_compute_metal::BackendOptions::from_env();
+    opts_off.decode_flags.fused_prelayer_norm = false;
+    let metal_off = match larql_compute_metal::MetalBackend::with_options(opts_off) {
         Some(m) => m,
         None => {
             eprintln!("skip: no Metal device");
@@ -138,9 +139,10 @@ fn d_rms_fuse_phase1_produces_identical_output() {
         10_000.0,
     );
 
-    // Run with fusion ON — fresh backend that captures the env flip.
-    env::set_var("LARQL_FUSED_PRELAYER_NORM", "1");
-    let metal_on = larql_compute_metal::MetalBackend::new()
+    // Run with fusion ON — fresh backend carrying the opposite flag.
+    let mut opts_on = larql_compute_metal::BackendOptions::from_env();
+    opts_on.decode_flags.fused_prelayer_norm = true;
+    let metal_on = larql_compute_metal::MetalBackend::with_options(opts_on)
         .expect("Metal device available since metal_off succeeded");
     assert!(
         metal_on.decode_flags.fused_prelayer_norm,
@@ -161,7 +163,6 @@ fn d_rms_fuse_phase1_produces_identical_output() {
         HEAD_DIM,
         10_000.0,
     );
-    env::remove_var("LARQL_FUSED_PRELAYER_NORM");
 
     assert_eq!(out_off.len(), out_on.len(), "output length mismatch");
     let mut max_diff = 0.0f32;
@@ -192,6 +193,7 @@ fn d_rms_fuse_phase1_produces_identical_output() {
 /// above doesn't reach.
 #[test]
 fn decode_token_gemma3_style_post_norms_smoke() {
+    let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let metal = match larql_compute_metal::MetalBackend::new() {
         Some(m) => m,
         None => {
@@ -312,6 +314,7 @@ fn decode_token_gemma3_style_post_norms_smoke() {
 /// per-layer scratch reuse paths.
 #[test]
 fn decode_token_multi_layer_synthetic_smoke() {
+    let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let metal = match larql_compute_metal::MetalBackend::new() {
         Some(m) => m,
         None => {
@@ -390,8 +393,6 @@ fn decode_token_multi_layer_synthetic_smoke() {
 /// unreached by the default tests.
 #[test]
 fn decode_token_qkv_fused_opt_in_smoke() {
-    use std::env;
-
     // Serialise against `d_rms_fuse_phase1_produces_identical_output`
     // and any future env-mutating test in this binary. Decode flags
     // are cached at backend construction; set the env BEFORE creating
@@ -470,20 +471,22 @@ fn decode_token_qkv_fused_opt_in_smoke() {
 
     let x = synth_input(HIDDEN, 2.9);
 
-    // Decode flags are cached at `MetalBackend::new()`; set env BEFORE
-    // construction so the fused QKV path is actually engaged.
-    env::set_var("LARQL_QKV_FUSED", "1");
-    let metal = match larql_compute_metal::MetalBackend::new() {
+    // Decode flags are cached at construction, so the fused QKV path has to
+    // be requested before the backend exists. Requested through
+    // `BackendOptions`, not the environment — see the note in
+    // `d_rms_fuse_phase1_produces_identical_output`.
+    let mut opts = larql_compute_metal::BackendOptions::from_env();
+    opts.decode_flags.qkv_fused = true;
+    let metal = match larql_compute_metal::MetalBackend::with_options(opts) {
         Some(m) => m,
         None => {
-            env::remove_var("LARQL_QKV_FUSED");
             eprintln!("skip: no Metal device");
             return;
         }
     };
     assert!(
         metal.decode_flags.qkv_fused,
-        "expected qkv_fused=true after setting env before backend construction"
+        "expected qkv_fused=true from the options this backend was built with"
     );
     let mut kv = metal.create_kv_cache(1, 64, NUM_KV_HEADS, HEAD_DIM);
     let result = larql_compute_metal::MetalBackend::decode_token(
@@ -500,7 +503,6 @@ fn decode_token_qkv_fused_opt_in_smoke() {
         HEAD_DIM,
         10_000.0,
     );
-    env::remove_var("LARQL_QKV_FUSED");
 
     assert_eq!(result.len(), HIDDEN);
     assert_eq!(result.iter().filter(|v| v.is_nan()).count(), 0);
@@ -514,6 +516,8 @@ fn decode_token_qkv_fused_opt_in_smoke() {
 /// Llama-style layer.
 #[test]
 fn prefill_q4_seq4_synthetic_smoke() {
+    // Same serialisation as the prefill trio in `qkv_routes`.
+    let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let metal = match larql_compute_metal::MetalBackend::new() {
         Some(m) => m,
         None => {
@@ -645,6 +649,7 @@ fn with_options_honours_explicit_decode_flags_over_env() {
 /// invariant.
 #[test]
 fn qkv_pipeline_geometry_matches_shader_constants() {
+    let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let metal = match larql_compute_metal::MetalBackend::new() {
         Some(m) => m,
         None => {
@@ -692,6 +697,7 @@ fn qkv_pipeline_geometry_matches_shader_constants() {
 /// from 2026-04-28), the `moe_dispatch.rs` paths must follow.
 #[test]
 fn moe_gate_up_pipeline_geometry_matches_shader_constants() {
+    let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let metal = match larql_compute_metal::MetalBackend::new() {
         Some(m) => m,
         None => {

@@ -72,6 +72,7 @@ fn empty_model_weights(arch_json: &serde_json::Value) -> ModelWeights {
         packed_mmaps: HashMap::new(),
         packed_byte_ranges: HashMap::new(),
         per_layer_ffn_format: Default::default(),
+        per_layer_ffn_arrangement: Default::default(),
         embed: embed.into_shared(),
         lm_head: lm_head.into_shared(),
         position_embed: None,

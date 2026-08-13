@@ -54,6 +54,7 @@ use ndarray::Array2;
 
 use larql_compute::pipeline_layer::build_moe_weights;
 use larql_compute::MoeLayerWeights;
+use larql_vindex::format::lyrw2::read::Lyrw2Reader;
 use larql_vindex::format::lyrw2::region_role::RegionRole;
 use larql_vindex::format::vindex3::import::routed_storage_key;
 use larql_vindex::format::vindex3::Vindex3Container;
@@ -269,6 +270,18 @@ impl ContainerRoutedBackend {
                 }
             }
         }
+
+        // Resolve the two storage facts here as well, and discard them. They
+        // are re-read per forward, but a bank whose scales are half-present or
+        // whose row arrangement this build cannot act on must fail at
+        // composition — the same reason the payload regions are read now
+        // rather than at first token. Deferring it to the forward turns a
+        // startup refusal into a mid-generation one.
+        let describe = |e: MoeBackendError| CompositionError::UnreadableLayer {
+            layer,
+            why: e.to_string(),
+        };
+        read_bank_storage(&reader, layer, experts).map_err(describe)?;
         Ok(())
     }
 
@@ -292,6 +305,91 @@ fn expert_region_sizes(moe: &MoeLayerWeights<'_>) -> (usize, usize) {
         moe.experts_gate_up.first().map_or(0, |s| s.len()),
         moe.experts_down.first().map_or(0, |s| s.len()),
     )
+}
+
+/// The two payload roles a routed bank always carries, in operand order.
+const PAYLOAD_ROLES: [RegionRole; 2] = [RegionRole::GateUpFused, RegionRole::Down];
+
+/// The entry whose schema speaks for the bank. Schemas are per-bank, not
+/// per-entry, so any entry answers — expert 0 is simply the one that always
+/// exists.
+const SCHEMA_ENTRY: u32 = 0;
+
+/// What a routed bank declares about how it is stored, as the compute tier
+/// spells it.
+///
+/// Read together because they come from one place — the gate/up region's
+/// schema — and because a consumer needs both or neither: knowing the rows
+/// are interleaved is no use without the exponents that decode them.
+struct BankStorage<'a> {
+    scales: larql_compute::MoeExpertScales<'a>,
+    fused_row_layout: larql_compute::MoeFusedRowLayout,
+}
+
+/// Read both storage facts off the container's own schema.
+///
+/// Neither is inferred from the format. A codec does not determine where its
+/// scales sit, and a checkpoint's row arrangement does not survive a
+/// canonicalising extraction — the schema is the only thing that knows, which
+/// is the whole reason it records them.
+fn read_bank_storage<'a>(
+    reader: &Lyrw2Reader<'a>,
+    layer: usize,
+    num_experts: usize,
+) -> Result<BankStorage<'a>, MoeBackendError> {
+    let refuse = |why: String| MoeBackendError::Container(format!("layer {layer}: {why}"));
+
+    let gate_up = reader
+        .resolve(ROUTED_BANK, SCHEMA_ENTRY, RegionRole::GateUpFused)
+        .map_err(|e| refuse(format!("gate/up schema: {e}")))?
+        .ok_or_else(|| refuse("no gate/up region".into()))?
+        .schema;
+
+    let fused_row_layout = gate_up.layout.fused_row_layout().ok_or_else(|| {
+        refuse(format!(
+            "gate/up rows are declared `{}`, which this binary cannot act on. \
+             Reading it as contiguous halves would silently mix the gate and \
+             up branches; re-extract with a layout this build understands.",
+            gate_up.layout.name()
+        ))
+    })?;
+
+    // Ask the schema whether a partner exists, rather than attempting the
+    // lookup and reading its error as "no". `resolve_paired` treats a partner
+    // request on an unpaired region as a caller mistake by design, and that
+    // same error path also carries `MissingPartner` — a corrupt bank, which
+    // must not be silently served as an inline one.
+    if !gate_up.is_paired() {
+        return Ok(BankStorage {
+            scales: larql_compute::MoeExpertScales::Inline,
+            fused_row_layout,
+        });
+    }
+
+    let mut streams: [Vec<&'a [u8]>; PAYLOAD_ROLES.len()] = Default::default();
+    for (slot, role) in PAYLOAD_ROLES.iter().enumerate() {
+        for expert in 0..num_experts as u32 {
+            let bytes = reader
+                .paired_region_bytes(ROUTED_BANK, expert, *role, RegionRole::Scales)
+                .map_err(|e| refuse(format!("expert {expert} {role:?} scales: {e}")))?
+                .ok_or_else(|| {
+                    refuse(format!(
+                        "expert {expert} has no {role:?} scale partner, but the \
+                         bank declares itself paired — a split-scale bank must \
+                         carry exponents for every expert"
+                    ))
+                })?;
+            streams[slot].push(bytes);
+        }
+    }
+    let [gate_up_scales, down_scales] = streams;
+    Ok(BankStorage {
+        scales: larql_compute::MoeExpertScales::Paired {
+            gate_up: gate_up_scales,
+            down: down_scales,
+        },
+        fused_row_layout,
+    })
 }
 
 impl MoeExpertBackend for ContainerRoutedBackend {
@@ -342,6 +440,13 @@ impl MoeExpertBackend for ContainerRoutedBackend {
         }
         moe.experts_gate_up = gate_up;
         moe.experts_down = down;
+        // Both remaining facts are read off the container, not inferred from
+        // the format: a codec does not determine where its scales sit, and a
+        // checkpoint's row arrangement does not survive a canonicalising
+        // extraction. The schema is the only thing that knows.
+        let storage = read_bank_storage(&reader, layer, moe.num_experts)?;
+        moe.expert_scales = storage.scales;
+        moe.fused_row_layout = storage.fused_row_layout;
 
         Ok(self.inner.run_layer(layer, &moe, h, norm_offset, eps)?)
     }

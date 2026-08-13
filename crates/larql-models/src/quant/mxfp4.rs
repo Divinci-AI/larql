@@ -160,7 +160,12 @@ pub fn dequantize_all_experts(
 pub type ExpertWeights = Vec<Vec<f32>>;
 
 /// Number of projections fused into one `gate_up` tensor.
-const FUSED_HALVES: usize = 2;
+///
+/// Public because it is also the *row stride* of the interleaved
+/// arrangement — a consumer walking one half's rows advances by this much —
+/// and a second `2` spelled at the walking site would be a second statement
+/// of the convention [`FusedHalf`] owns.
+pub const FUSED_HALVES: usize = 2;
 
 /// Which projection to lift out of a fused `gate_up` tensor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -252,3 +252,44 @@ fn attention_table_carries_nope_policies() {
         Some(PositionPolicy::Rope { theta: 500000.0 })
     );
 }
+
+/// A tensor group no placement rule owns is reported as unplaced, with the
+/// reason distinguishing "nothing classifies this" from "classified for a
+/// component this artifact does not declare".
+///
+/// The two reasons send a reader to different places — the first to the
+/// classifier, the second to the component declaration — so collapsing them
+/// into one string would make the report useless at exactly the moment it
+/// is consulted. Placing an unknown group silently would be worse: it would
+/// bind bytes to an object that no evidence says they implement.
+#[test]
+fn an_unclassifiable_group_is_reported_unplaced_with_its_own_reason() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut inventory = known_dense(dir.path());
+    // A prefix that matches no placement rule. Everything else about the
+    // inventory stays valid, so the only thing under test is the class.
+    inventory
+        .tensors
+        .groups
+        .push(larql_models::inventory::TensorGroup {
+            prefix: "totally.unclassifiable.thing".to_string(),
+            tensors: 1,
+            bytes: 32,
+        });
+    let named = vec![("only-artifact".to_string(), inventory)];
+    let built = build_from_inventories(&named);
+
+    let unplaced = built
+        .unplaced
+        .iter()
+        .find(|u| u.prefix == "totally.unclassifiable.thing")
+        .unwrap_or_else(|| panic!("group was placed anyway: {:?}", built.unplaced));
+    assert!(
+        unplaced
+            .reason
+            .contains("no placement rule owns this group"),
+        "{}",
+        unplaced.reason
+    );
+    assert_eq!(unplaced.artifact, "only-artifact");
+}

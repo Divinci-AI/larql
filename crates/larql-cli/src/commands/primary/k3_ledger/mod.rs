@@ -33,6 +33,8 @@
 //!                  R4 applied before the codec exists (pure).
 //!   scale_stream   — fold the e8m0 scale channel into the census alphabet, so
 //!                  the ledger prices payload AND metadata together (pure).
+//!   retention — DEC-9A retention oracle gate: Belady/MIN vs LRU vs a best
+//!                  fixed set, isolating the temporal prize (pure).
 //!   rng       — reproducible PRNG shared by every null in the ladder (pure).
 //!   fetch     — HTTP range-GET geometry loading (I/O, excluded).
 //!   report    — human-readable rendering (I/O-adjacent, excluded).
@@ -58,6 +60,10 @@ pub mod geometry;
 pub mod kda_a_log;
 pub mod kda_graph;
 mod report;
+pub mod retention;
+mod retention_report;
+#[cfg(test)]
+mod retention_tests;
 pub mod rng;
 pub mod scale_stream;
 pub mod scenario;
@@ -82,6 +88,10 @@ pub fn run(args: K3LedgerArgs) -> Result<(), Box<dyn std::error::Error>> {
     if let args::K3LedgerCmd::FreqMass(a) = &args.cmd {
         return report::freqmass(a, args.json);
     }
+    // Same: a local routing trace, no K3 geometry involved.
+    if let args::K3LedgerCmd::Retention(a) = &args.cmd {
+        return retention_report::run(a, args.json);
+    }
 
     let repo = fetch::Repo::new(&args.repo)?;
     eprintln!(
@@ -103,7 +113,9 @@ pub fn run(args: K3LedgerArgs) -> Result<(), Box<dyn std::error::Error>> {
         args::K3LedgerCmd::Block(a) => report::block(&geom, &premises, a, args.json),
         args::K3LedgerCmd::Ceilings(a) => report::ceilings(&geom, a, args.json),
         // Handled above, before geometry is fetched.
-        args::K3LedgerCmd::Formats | args::K3LedgerCmd::FreqMass(_) => unreachable!(),
+        args::K3LedgerCmd::Formats
+        | args::K3LedgerCmd::FreqMass(_)
+        | args::K3LedgerCmd::Retention(_) => unreachable!(),
         args::K3LedgerCmd::TranscodeScan(a) => {
             report::transcode_scan(&repo, &args.kda_shard, a, args.json)
         }

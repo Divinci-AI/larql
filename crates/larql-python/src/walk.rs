@@ -267,6 +267,7 @@ fn load_mmap_weights(dir: &Path) -> Result<(ModelWeights, Vec<WeightMmap>), Stri
         packed_mmaps: std::collections::HashMap::new(),
         packed_byte_ranges: std::collections::HashMap::new(),
         per_layer_ffn_format: Default::default(),
+        per_layer_ffn_arrangement: Default::default(),
         embed,
         lm_head,
         position_embed: None,

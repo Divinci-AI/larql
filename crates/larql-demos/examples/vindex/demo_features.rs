@@ -788,6 +788,7 @@ fn make_synthetic_model() -> larql_models::ModelWeights {
         packed_mmaps: std::collections::HashMap::new(),
         packed_byte_ranges: std::collections::HashMap::new(),
         per_layer_ffn_format: Default::default(),
+        per_layer_ffn_arrangement: Default::default(),
         embed: embed.clone(),
         lm_head: embed.clone(),
         position_embed: None,

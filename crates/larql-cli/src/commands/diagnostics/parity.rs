@@ -413,6 +413,13 @@ fn run_moe_block(
     }
 
     let moe = MoeLayerWeights {
+        // Both describe the VINDEX2 store this diagnostic reads — k-quant
+        // blocks with inline scales, de-interleaved by the extraction path —
+        // and match what `build_moe_weights` declares for the same bytes.
+        // A parity probe that described the store differently from the route
+        // it is checking would be comparing two different reads.
+        expert_scales: larql_compute::MoeExpertScales::Inline,
+        fused_row_layout: larql_compute::MoeFusedRowLayout::ContiguousHalves,
         experts_gate_up: experts_gate_up.clone(),
         experts_down: experts_down.clone(),
         routing_policy: match arch.moe_router_type() {

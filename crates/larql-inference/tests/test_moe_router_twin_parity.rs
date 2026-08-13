@@ -107,6 +107,8 @@ fn run_case(case: &Case, seed: u64) {
         top_k,
     };
     let compute = MoeLayerWeights {
+        expert_scales: larql_compute::MoeExpertScales::Inline,
+        fused_row_layout: larql_compute::MoeFusedRowLayout::ContiguousHalves,
         experts_gate_up: Vec::new(),
         experts_down: Vec::new(),
         routing_policy: MoeRoutingPolicy::gemma4_hybrid(),

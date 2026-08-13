@@ -114,30 +114,46 @@ pub fn moe_router_input(
     router_in
 }
 
-pub fn moe_route_from_router_input(
+/// Router projection: `logits[e] = dot(router_in, router_proj[e]) + bias[e]`.
+///
+/// Router bias joins the logits BEFORE softmax/selection — it changes
+/// which experts win, not just their weights, so adding it later would
+/// be a different (wrong) router. Reference: `ExpertWeightFfn::
+/// router_logits`, which the f32 tier pins against `transformers`.
+///
+/// This is the served tier's routing oracle: GPU router implementations
+/// gate their parity against exactly this function, so route selection
+/// changes must land here, not in a copy.
+pub fn moe_router_logits(
     router_in: &[f32],
-    moe: &MoeLayerWeights<'_>,
-) -> (Vec<usize>, Vec<f32>) {
+    router_proj: &[f32],
+    router_bias: &[f32],
+    num_experts: usize,
+) -> Vec<f32> {
     let hidden = router_in.len();
-    let num_experts = moe.num_experts;
-    let top_k_val = moe.top_k;
-
-    let mut logits = math::matmul_vec(router_in, moe.router_proj, num_experts, hidden);
-    // Router bias joins the logits BEFORE softmax/selection — it changes
-    // which experts win, not just their weights, so adding it later would
-    // be a different (wrong) router. Reference: `ExpertWeightFfn::
-    // router_logits`, which the f32 tier pins against `transformers`.
-    if !moe.router_bias.is_empty() {
+    let mut logits = math::matmul_vec(router_in, router_proj, num_experts, hidden);
+    if !router_bias.is_empty() {
         assert_eq!(
-            moe.router_bias.len(),
+            router_bias.len(),
             num_experts,
             "router bias length does not match the expert count — this bias \
              does not describe this router"
         );
-        for (l, b) in logits.iter_mut().zip(moe.router_bias) {
+        for (l, b) in logits.iter_mut().zip(router_bias) {
             *l += b;
         }
     }
+    logits
+}
+
+pub fn moe_route_from_router_input(
+    router_in: &[f32],
+    moe: &MoeLayerWeights<'_>,
+) -> (Vec<usize>, Vec<f32>) {
+    let num_experts = moe.num_experts;
+    let top_k_val = moe.top_k;
+
+    let mut logits = moe_router_logits(router_in, moe.router_proj, moe.router_bias, num_experts);
     math::softmax(&mut logits);
     let (indices, mut weights) = math::top_k(&logits, top_k_val);
 
@@ -159,6 +175,12 @@ pub fn moe_route_from_router_input(
             }
         }
     }
+
+    // The served tier's route decision boundary. The reference tier records
+    // its own selections where it already knows the layer; this is the other
+    // implementation, and leaving it unobserved is what made a routing trace
+    // come back empty on a model that was visibly generating.
+    crate::moe_route_observe::observe(&indices);
 
     (indices, weights)
 }

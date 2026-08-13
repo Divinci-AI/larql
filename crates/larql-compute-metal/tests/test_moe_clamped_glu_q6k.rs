@@ -90,6 +90,8 @@ fn fixture() -> Fixture {
 
 fn moe_weights(f: &Fixture) -> larql_compute::MoeLayerWeights<'_> {
     larql_compute::MoeLayerWeights {
+        expert_scales: larql_compute::MoeExpertScales::Inline,
+        fused_row_layout: larql_compute::MoeFusedRowLayout::ContiguousHalves,
         experts_gate_up: f.experts_gate_up.iter().map(|v| v.as_slice()).collect(),
         experts_down: f.experts_down.iter().map(|v| v.as_slice()).collect(),
         routing_policy: larql_compute::MoeRoutingPolicy::top_k_then_softmax(),

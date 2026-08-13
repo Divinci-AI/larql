@@ -57,6 +57,18 @@ impl RegionSchema {
         }
     }
 
+    /// Whether this region declares a partner.
+    ///
+    /// The question a consumer asks *before* reaching for one:
+    /// `resolve_paired` treats a partner lookup on an unpaired region as a
+    /// caller mistake and errors, deliberately, so an inline-scale bank must
+    /// be recognised here rather than by attempting the lookup and reading
+    /// the error as an answer. Error-as-absence would also swallow
+    /// `MissingPartner`, which is a corrupt bank and not an inline one.
+    pub fn is_paired(&self) -> bool {
+        self.pair_id != PAIR_ID_UNPAIRED
+    }
+
     pub fn encode(&self, out: &mut Vec<u8>) {
         push_u16(out, self.schema_index);
         push_u16(out, self.role.as_u16());
