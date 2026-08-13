@@ -241,7 +241,7 @@ fn test_real_granite_4_1_3b() {
     // since the forward path reads them through these accessors (see
     // `attention/{gpu,decode,block}.rs`, `forward/{embed,layer}.rs`,
     // `predict/*`, `vocab_proj.rs`).
-    assert_eq!(arch.embed_scale(), 12.0);
+    assert_eq!(arch.embed_scale(), Some(12.0));
     assert_eq!(arch.attention_multiplier(), 0.015625);
     assert_eq!(arch.residual_multiplier(), 0.22);
     assert_eq!(arch.logits_scaling(), 10.0);

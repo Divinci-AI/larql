@@ -13,7 +13,7 @@ use serde::Serialize;
 
 use super::encode::segment::read_segment_header;
 use super::graph::policy::AttentionSpan;
-use super::graph::SystemGraph;
+use super::graph::{SystemGraph, GRAPH_SCHEMA};
 use super::index::Vindex3Index;
 use crate::error::VindexError;
 use crate::format::filenames::INDEX_JSON;
@@ -69,6 +69,31 @@ impl SystemInspection {
 /// Inspect a container. `verify_payloads` additionally re-hashes every
 /// segment file and compares against the directory — slower, but detects
 /// byte corruption with no source access.
+/// Refuse a graph this build cannot read, naming the versions and the
+/// remedy.
+///
+/// Deliberately separate from deserialising the graph: the schema must be
+/// legible even when the rest of the document is not, which is the whole
+/// situation a version field exists for.
+fn check_graph_schema(graph_text: &str, graph_name: &str) -> Result<(), VindexError> {
+    let probe: serde_json::Value = serde_json::from_str(graph_text)
+        .map_err(|e| VindexError::Parse(format!("parse {graph_name}: {e}")))?;
+    let found = probe
+        .get("schema")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| VindexError::Parse(format!("{graph_name} records no schema version")))?;
+    if found == u64::from(GRAPH_SCHEMA) {
+        return Ok(());
+    }
+    Err(VindexError::Parse(format!(
+        "{graph_name} is schema v{found}, this build reads v{GRAPH_SCHEMA} — re-encode the \
+         container. Older graphs cannot be upgraded in place: each schema step added a judged \
+         semantic fact whose absence is indistinguishable from a deliberate \"this model has \
+         no such operation\", and inventing either answer is the guess the version exists to \
+         prevent."
+    )))
+}
+
 pub fn inspect_container(
     root: &Path,
     verify_payloads: bool,
@@ -86,11 +111,15 @@ pub fn inspect_container(
                 .into(),
         )
     })?;
-    let graph: SystemGraph = serde_json::from_str(
-        &std::fs::read_to_string(root.join(graph_name))
-            .map_err(|e| VindexError::Parse(format!("read {graph_name}: {e}")))?,
-    )
-    .map_err(|e| VindexError::Parse(format!("parse {graph_name}: {e}")))?;
+    let graph_text = std::fs::read_to_string(root.join(graph_name))
+        .map_err(|e| VindexError::Parse(format!("read {graph_name}: {e}")))?;
+    // Read the schema before the graph. A version field nothing checks is
+    // not a version field: without this, an older container fails as a
+    // parse error pointing at whichever line happens to have changed
+    // shape, which says nothing about what to do next.
+    check_graph_schema(&graph_text, graph_name)?;
+    let graph: SystemGraph = serde_json::from_str(&graph_text)
+        .map_err(|e| VindexError::Parse(format!("parse {graph_name}: {e}")))?;
 
     let mut defects: Vec<InspectionDefect> = graph
         .validate()

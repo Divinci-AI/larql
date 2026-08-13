@@ -34,7 +34,7 @@ fn main() {
     let arch = &model.weights().arch;
     println!("Architecture: {}", arch.family());
     println!("  Norm offset:    {}", arch.norm_weight_offset());
-    println!("  Embed scale:    {:.2}", arch.embed_scale());
+    println!("  Embed scale:    {:?}", arch.embed_scale());
     println!("  RoPE base:      {:.0}", arch.config().rope_base);
     println!("  Has post norms: {}", arch.has_post_norms());
     println!("  Has QK norm:    {}\n", arch.attn_q_norm_key(0).is_some());

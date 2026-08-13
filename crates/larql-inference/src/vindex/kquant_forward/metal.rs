@@ -68,7 +68,7 @@ pub fn predict_kquant_metal(
 
     let hidden = weights.hidden_size;
     let embed = &weights.embed;
-    let embed_scale = arch.embed_scale();
+    let embed_scale = arch.embed_scale_multiplier();
 
     let mut h_vec: Vec<f32> = Vec::with_capacity(hidden);
     for &tok in token_ids {
@@ -106,7 +106,7 @@ pub fn predict_kquant_metal_with_replaced_head_residual_delta(
     let arch = &*weights.arch;
     let num_layers = weights.num_layers;
     let hidden = weights.hidden_size;
-    let embed_scale = arch.embed_scale();
+    let embed_scale = arch.embed_scale_multiplier();
     let seq_len = token_ids.len();
     if seq_len == 0 {
         return None;
@@ -203,7 +203,7 @@ pub fn predict_kquant_metal_hidden(
     let arch = &*weights.arch;
     let num_layers = weights.num_layers;
     let hidden = weights.hidden_size;
-    let embed_scale = arch.embed_scale();
+    let embed_scale = arch.embed_scale_multiplier();
     let seq_len = token_ids.len();
     if seq_len == 0 {
         return None;
@@ -298,7 +298,7 @@ pub fn predict_kquant_metal_capture_pre_wo(
     let arch = &*weights.arch;
     let num_layers = weights.num_layers;
     let hidden = weights.hidden_size;
-    let embed_scale = arch.embed_scale();
+    let embed_scale = arch.embed_scale_multiplier();
     let seq_len = token_ids.len();
     if seq_len == 0 {
         return None;

@@ -15,7 +15,12 @@ fn fixture_dir(judged: bool) -> tempfile::TempDir {
         "num_attention_heads": 8,
         "num_key_value_heads": 2,
         "vocab_size": 128,
-        "qk_scale_factor": 3.87
+        "qk_scale_factor": 3.87,
+        // The operand estate below is four-norm, so the post-norms must
+        // apply *some* epsilon. Declaring it keeps the fixture a faithful
+        // model of the thing it stands in for; without it the stack is
+        // under-specified and the plan is refused, which is the point.
+        "post_norm_eps": 1e-8
     });
     if !judged {
         text_config["some_future_field_nobody_reviewed"] = serde_json::json!(1.5);

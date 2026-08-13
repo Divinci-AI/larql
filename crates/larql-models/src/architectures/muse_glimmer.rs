@@ -24,9 +24,15 @@
 //! path, which its operand estate closes under.
 
 use crate::config::{
-    AttentionGateSpec, GateActivation, GateCombine, GatePlacement, GateSource, ModelArchitecture,
-    ModelConfig, ParameterFreeQkNorm,
+    AttentionGateSpec, EmbeddingNorm, GateActivation, GateCombine, GatePlacement, GateSource,
+    ModelArchitecture, ModelConfig, NormSpec, ParameterFreeQkNorm,
 };
+
+/// Offset of a *centred* norm: weights are stored around zero and the
+/// runtime gain is `1 + w`.
+const CENTRED_NORM_OFFSET: f32 = 1.0;
+/// Offset of an ordinary norm: the stored weight *is* the gain.
+const ABSOLUTE_NORM_OFFSET: f32 = 0.0;
 
 pub struct MuseGlimmerArch {
     config: ModelConfig,
@@ -58,5 +64,55 @@ impl ModelArchitecture for MuseGlimmerArch {
 
     fn parameter_free_qk_norm(&self) -> ParameterFreeQkNorm {
         ParameterFreeQkNorm { q: true, k: true }
+    }
+
+    /// Layer norms are *centred*: `RMSNorm(x) * (1.0 + weight)`.
+    ///
+    /// All four decoder-layer norms are
+    /// `MuseGlimmerTextCenteredRMSNorm`, whose weights the checkpoint
+    /// stores centred on zero — layer 0's `input_layernorm` has mean
+    /// +0.34 and a minimum of exactly **-1.0000**, which under `1 + w`
+    /// cleanly zeroes a channel and under `w` alone would flip its sign.
+    fn norm_weight_offset(&self) -> f32 {
+        CENTRED_NORM_OFFSET
+    }
+
+    /// The final norm is **not** centred.
+    ///
+    /// `MuseGlimmerTextModel.norm` is a plain `MuseGlimmerRMSNorm`
+    /// (`normed * weight`), not the centred variant the layers use —
+    /// two different classes upstream, and `norm.weight` is stored
+    /// absolute (mean 0.017 spanning ±4.9) to match. Declared here
+    /// because a single model-scope offset would fix the four layer
+    /// norms and silently break this one.
+    fn final_norm_spec(&self) -> NormSpec {
+        NormSpec {
+            kind: self.norm_type(),
+            eps: self.norm_eps() as f64,
+            weight_offset: ABSOLUTE_NORM_OFFSET,
+        }
+    }
+
+    /// Embedding rows are RMS-normalised **weightlessly** on lookup.
+    ///
+    /// `MuseGlimmerTextNormedEmbedding.forward` is
+    /// `embed_norm(super().forward(ids))` with
+    /// `MuseGlimmerRMSNorm(eps=rms_norm_eps, with_scale=False)`. Upstream
+    /// notes it cannot be folded into the embedding matrix because the
+    /// DFlash draft path needs to embed *without* it — so it is a real
+    /// operation on the target's program, not a storage convention.
+    ///
+    /// No tensor evidences this: the norm is weightless. It was found by
+    /// diffing the upstream trace, where plane 000 differed from an
+    /// unnormalised lookup by a pure per-row rescale (RMS 1/16 → 1).
+    ///
+    /// The epsilon is resolved here, from this checkpoint's own
+    /// `rms_norm_eps`, so the operation site carries a concrete value
+    /// rather than inheriting one at execution time.
+    fn embedding_norm(&self) -> Option<EmbeddingNorm> {
+        Some(EmbeddingNorm {
+            kind: self.norm_type(),
+            eps: self.norm_eps() as f64,
+        })
     }
 }

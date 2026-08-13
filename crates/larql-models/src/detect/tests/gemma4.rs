@@ -166,7 +166,7 @@ fn test_detect_gemma4_31b() {
 
     // Gemma 4 stores norm weights as full multiplier (no +1 offset, unlike Gemma 2/3)
     assert_eq!(arch.norm_weight_offset(), 0.0);
-    assert_eq!(arch.embed_scale(), (5376.0f32).sqrt());
+    assert_eq!(arch.embed_scale(), Some((5376.0f32).sqrt()));
     assert!(arch.has_post_norms());
     assert!(arch.attn_q_norm_key(0).is_some());
     assert_eq!(arch.final_logit_softcapping(), Some(30.0));

@@ -221,6 +221,20 @@ fn mv(w: &[f32], out: usize, inp: usize, x: &[f32]) -> Vec<f32> {
         .collect()
 }
 
+/// The *centred* RMS norm — `MuseGlimmerTextCenteredRMSNorm`, whose gain
+/// is `1 + w` because the checkpoint stores its weights around zero.
+/// Upstream uses this class for all four decoder-layer norms and the
+/// plain [`rms`] for the final norm; two helpers here because they are
+/// two operations, not one with a flag.
+fn rms_centred(x: &[f32], w: &[f32], eps: f64) -> Vec<f32> {
+    let ss: f64 = x.iter().map(|v| (*v as f64) * (*v as f64)).sum();
+    let inv = 1.0 / ((ss / x.len() as f64) + eps).sqrt();
+    x.iter()
+        .enumerate()
+        .map(|(i, v)| ((*v as f64) * inv) as f32 * (1.0 + w[i]))
+        .collect()
+}
+
 fn rms(x: &[f32], w: Option<&[f32]>, eps: f64) -> Vec<f32> {
     let ss: f64 = x.iter().map(|v| (*v as f64) * (*v as f64)).sum();
     let inv = 1.0 / ((ss / x.len() as f64) + eps).sqrt();
@@ -239,9 +253,16 @@ pub(super) fn golden_forward(dir: &Path) -> GoldenTrace {
     let kv_rows = G_KV_HEADS * G_HEAD_DIM;
 
     let embed = w.get("model.embed_tokens.weight");
+    // Glimmer's `MuseGlimmerTextNormedEmbedding` RMS-normalises every
+    // looked-up row *weightlessly* — no tensor records it, which is why
+    // the IR needed a judged `EmbeddingNorm` for it. `rms` with `None`
+    // weight is the weightless form.
     let mut h: Vec<Vec<f32>> = G_TOKENS
         .iter()
-        .map(|&t| embed[t as usize * G_HIDDEN..(t as usize + 1) * G_HIDDEN].to_vec())
+        .map(|&t| {
+            let row = &embed[t as usize * G_HIDDEN..(t as usize + 1) * G_HIDDEN];
+            rms(row, None, 1e-5)
+        })
         .collect();
 
     let mut layers = Vec::new();
@@ -255,7 +276,7 @@ pub(super) fn golden_forward(dir: &Path) -> GoldenTrace {
         let mut values = Vec::new();
         let mut normed_inputs = Vec::new();
         for (position, row) in h.iter().enumerate() {
-            let pre = rms(row, Some(w.get(&name("input_layernorm.weight"))), 1e-5);
+            let pre = rms_centred(row, w.get(&name("input_layernorm.weight")), 1e-5);
             let mut q = mv(
                 w.get(&name("self_attn.q_proj.weight")),
                 q_rows,
@@ -388,11 +409,7 @@ pub(super) fn golden_forward(dir: &Path) -> GoldenTrace {
         // Four-norm placement: post-attention norm (eps 1e-8) on the
         // attention output before its residual add.
         for (row, out) in h.iter_mut().zip(&attn_out) {
-            let normed = rms(
-                out,
-                Some(w.get(&name("post_attention_layernorm.weight"))),
-                1e-8,
-            );
+            let normed = rms_centred(out, w.get(&name("post_attention_layernorm.weight")), 1e-8);
             for (a, b) in row.iter_mut().zip(&normed) {
                 *a += b;
             }
@@ -401,11 +418,7 @@ pub(super) fn golden_forward(dir: &Path) -> GoldenTrace {
 
         // Pre-FFN norm (1e-5), gated SiLU FFN, post-FFN norm (1e-8), residual.
         for row in h.iter_mut() {
-            let pre = rms(
-                row,
-                Some(w.get(&name("pre_feedforward_layernorm.weight"))),
-                1e-5,
-            );
+            let pre = rms_centred(row, w.get(&name("pre_feedforward_layernorm.weight")), 1e-5);
             let gate = mv(w.get(&name("mlp.gate_proj.weight")), G_FFN, G_HIDDEN, &pre);
             let up = mv(w.get(&name("mlp.up_proj.weight")), G_FFN, G_HIDDEN, &pre);
             let inner: Vec<f32> = gate
@@ -419,9 +432,9 @@ pub(super) fn golden_forward(dir: &Path) -> GoldenTrace {
                 G_FFN,
                 &inner,
             );
-            let normed = rms(
+            let normed = rms_centred(
                 &down,
-                Some(w.get(&name("post_feedforward_layernorm.weight"))),
+                w.get(&name("post_feedforward_layernorm.weight")),
                 1e-8,
             );
             for (a, b) in row.iter_mut().zip(&normed) {

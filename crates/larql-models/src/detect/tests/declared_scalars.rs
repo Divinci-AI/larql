@@ -1,7 +1,7 @@
 //! G2b declared scalars: attention/output scaling, norm shape, activation,
 //! multimodal protocol, and the drafter-interface declaration.
 
-use crate::config::Activation;
+use crate::config::{Activation, PostNormEps};
 use crate::detect::*;
 
 fn glimmer_shaped() -> serde_json::Value {
@@ -36,7 +36,7 @@ fn scaling_and_norm_scalars_are_read() {
     let arch = detect_from_json(&glimmer_shaped());
     assert_eq!(arch.qk_scale_factor(), Some(3.87));
     assert_eq!(arch.output_multiplier(), Some(0.196));
-    assert_eq!(arch.post_norm_eps(), Some(1e-8));
+    assert_eq!(arch.post_norm_eps(), Some(PostNormEps::Value(1e-8)));
     assert_eq!(arch.attention_bias(), Some(false));
     assert_eq!(arch.max_position_embeddings(), Some(131072));
     // post_norm_eps and rms_norm_eps are distinct facts.

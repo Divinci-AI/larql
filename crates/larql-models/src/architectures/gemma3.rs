@@ -10,7 +10,7 @@
 //! Note: HuggingFace saves Gemma norm weights with the +1 offset already baked in,
 //! so norm_weight_offset is 0.0 (the saved weight IS the final multiplier).
 
-use crate::config::{Activation, ModelArchitecture, ModelConfig};
+use crate::config::{Activation, ModelArchitecture, ModelConfig, PostNormEps};
 use crate::multimodal::{MultiModalProtocol, PlaceholderProtocol, PrecomputedScaling, TokenBudget};
 use crate::tensor_keys::qk_norm;
 
@@ -117,12 +117,20 @@ impl ModelArchitecture for Gemma3Arch {
         Activation::GeluTanh
     }
 
-    fn embed_scale(&self) -> f32 {
-        (self.config.hidden_size as f32).sqrt()
+    fn embed_scale(&self) -> Option<f32> {
+        Some((self.config.hidden_size as f32).sqrt())
     }
 
     fn has_post_norms(&self) -> bool {
         true
+    }
+
+    /// Gemma 3's post-norms share `rms_norm_eps` with its pre-norms — see
+    /// [`Gemma2Architecture::post_norm_eps`](super::gemma2::Gemma2Architecture).
+    /// Declared rather than inherited: a four-norm stack that leaves the
+    /// post-norm epsilon unjudged is refused.
+    fn post_norm_eps(&self) -> Option<PostNormEps> {
+        Some(PostNormEps::Shared)
     }
 
     fn is_sliding_window_layer(&self, layer: usize) -> bool {

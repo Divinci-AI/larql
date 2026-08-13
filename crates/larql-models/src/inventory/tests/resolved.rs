@@ -97,7 +97,10 @@ fn glimmer_target_resolves_with_judged_semantics() {
     assert!(execution.parameter_free_qk_norm.q);
     assert!(execution.parameter_free_qk_norm.k);
     // Scales stay separate: declared query factor, canonical score scale.
-    assert!((execution.query_scale - 3.87).abs() < 1e-12);
+    // `Some` is load-bearing — an absent declaration must not arrive here
+    // as a plausible 1.0.
+    let query_scale = execution.query_scale.expect("declared qk_scale_factor");
+    assert!((query_scale - 3.87).abs() < 1e-12);
     assert!(execution.score_scale < 1.0);
 }
 

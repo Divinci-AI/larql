@@ -3,6 +3,7 @@
 
 mod closure;
 mod plan;
+mod unjudged;
 
 use std::path::PathBuf;
 

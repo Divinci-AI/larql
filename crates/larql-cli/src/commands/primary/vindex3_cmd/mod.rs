@@ -37,6 +37,44 @@ pub enum Vindex3Command {
     /// must classify into a role a declared op consumes, with the
     /// geometry the surface states. Exits non-zero on any closure defect.
     Ops(OpsArgs),
+    /// Execute one component's own program from the container alone
+    /// (G5b-3c), optionally dumping per-layer hidden states in the
+    /// `shannon layer-dump` format so `layer-diff` can compare it
+    /// against an upstream trace with no new comparator.
+    Exec(ExecArgs),
+}
+
+/// Which numerical realisation runs the plan. Both execute the *same*
+/// program through the same interpreter; only the arithmetic differs.
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+pub enum ExecBackend {
+    /// Naive f32, sharing no arithmetic with `larql-compute`.
+    Reference,
+    /// The `larql-compute` kernels.
+    Production,
+}
+
+#[derive(Args)]
+pub struct ExecArgs {
+    /// Container directory.
+    pub container: PathBuf,
+
+    /// Component to execute.
+    #[arg(long, default_value = "target")]
+    pub component: String,
+
+    /// Comma-separated token ids. Given, never tokenised here: a
+    /// tokenizer is part of the fixture and only one side may choose it.
+    #[arg(long)]
+    pub tokens: String,
+
+    /// Write per-layer planes + manifest here instead of a summary.
+    #[arg(long)]
+    pub dump_layers: Option<PathBuf>,
+
+    /// Numerical realisation to run the plan on.
+    #[arg(long, value_enum, default_value_t = ExecBackend::Reference)]
+    pub backend: ExecBackend,
 }
 
 #[derive(Args)]
@@ -122,10 +160,14 @@ pub fn run(cmd: Vindex3Command) -> Result<(), Box<dyn std::error::Error>> {
         Vindex3Command::Inspect(args) => run_inspect(args),
         Vindex3Command::Verify(args) => run_verify(args),
         Vindex3Command::Ops(args) => run_ops(args),
+        Vindex3Command::Exec(args) => run_exec(args),
     }
 }
 
+mod exec;
 mod ops;
+mod optional_op;
+use exec::run_exec;
 use ops::run_ops;
 
 fn run_verify(args: VerifyArgs) -> Result<(), Box<dyn std::error::Error>> {
@@ -253,7 +295,7 @@ fn run_inspect(args: InspectArgs) -> Result<(), Box<dyn std::error::Error>> {
                         surface.attention.num_q_heads,
                         surface.attention.num_kv_heads,
                         surface.attention.head_dim,
-                        surface.attention.query_scale,
+                        optional_op::scalar(surface.attention.query_scale),
                         surface.attention.score_scale,
                         if surface.attention.output_gate.is_some() {
                             " gated"
@@ -263,8 +305,8 @@ fn run_inspect(args: InspectArgs) -> Result<(), Box<dyn std::error::Error>> {
                         surface.ffn.activation,
                         surface.ffn.ffn_type,
                         surface.ffn.intermediate_size,
-                        surface.norm.kind,
-                        surface.norm.eps,
+                        surface.norm.pre.kind,
+                        surface.norm.pre.eps,
                         match &surface.head {
                             Some(head) => format!(", head vocab {}", head.vocab_size),
                             None => String::new(),
