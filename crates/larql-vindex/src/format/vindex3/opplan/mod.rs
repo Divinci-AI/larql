@@ -24,6 +24,7 @@
 //! single matmul.
 
 pub mod build;
+pub mod exec;
 
 #[cfg(test)]
 mod tests;

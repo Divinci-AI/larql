@@ -1,0 +1,129 @@
+//! Naive f32 reference math for the plan executor (V3-G5b-2).
+//!
+//! Deliberately shares **nothing** with `larql-compute`'s kernels — the
+//! Stage A oracle is the production forward path, and a reference that
+//! called the same kernels would agree with it by construction (the
+//! `runtime/fixtures/direct_moe_oracle.rs` discipline). Plain loops,
+//! row-major `[out, in]` weights, no BLAS, no SIMD: semantic fidelity is
+//! the only job.
+
+use larql_models::config::{Activation, NormType};
+
+/// `y[o] = Σ_i w[o*in + i] * x[i]` — weight stored `[out, in]` row-major.
+pub fn matvec(weight: &[f32], out_dim: usize, in_dim: usize, x: &[f32]) -> Vec<f32> {
+    debug_assert_eq!(weight.len(), out_dim * in_dim);
+    debug_assert_eq!(x.len(), in_dim);
+    let mut y = vec![0.0f32; out_dim];
+    for (o, y_o) in y.iter_mut().enumerate() {
+        let row = &weight[o * in_dim..(o + 1) * in_dim];
+        let mut acc = 0.0f32;
+        for (w, v) in row.iter().zip(x) {
+            acc += w * v;
+        }
+        *y_o = acc;
+    }
+    y
+}
+
+/// Normalise one vector in place-by-return with the given kind, epsilon,
+/// weight and weight offset. `weight` may be empty for a parameter-free
+/// application (RMS statistic only).
+pub fn norm(kind: NormType, x: &[f32], weight: &[f32], weight_offset: f32, eps: f64) -> Vec<f32> {
+    match kind {
+        NormType::RmsNorm => {
+            let ss: f64 = x.iter().map(|v| (*v as f64) * (*v as f64)).sum();
+            let inv = 1.0 / ((ss / x.len() as f64) + eps).sqrt();
+            x.iter()
+                .enumerate()
+                .map(|(i, v)| {
+                    let w = weight.get(i).copied().unwrap_or(0.0) + weight_offset;
+                    let w = if weight.is_empty() { 1.0 } else { w };
+                    ((*v as f64) * inv) as f32 * w
+                })
+                .collect()
+        }
+        NormType::LayerNorm => {
+            let mean: f64 = x.iter().map(|v| *v as f64).sum::<f64>() / x.len() as f64;
+            let var: f64 = x
+                .iter()
+                .map(|v| {
+                    let d = *v as f64 - mean;
+                    d * d
+                })
+                .sum::<f64>()
+                / x.len() as f64;
+            let inv = 1.0 / (var + eps).sqrt();
+            x.iter()
+                .enumerate()
+                .map(|(i, v)| {
+                    let w = weight.get(i).copied().unwrap_or(0.0) + weight_offset;
+                    let w = if weight.is_empty() { 1.0 } else { w };
+                    (((*v as f64 - mean) * inv) as f32) * w
+                })
+                .collect()
+        }
+    }
+}
+
+/// The judged activation functions.
+pub fn activate(activation: Activation, x: f32) -> f32 {
+    match activation {
+        Activation::Silu => x * sigmoid(x),
+        Activation::Gelu => 0.5 * x * (1.0 + erf_approx(x / std::f32::consts::SQRT_2)),
+        Activation::GeluTanh => {
+            const SQRT_2_OVER_PI: f32 = 0.797_884_6;
+            const CUBIC: f32 = 0.044_715;
+            0.5 * x * (1.0 + (SQRT_2_OVER_PI * (x + CUBIC * x * x * x)).tanh())
+        }
+        Activation::Relu => x.max(0.0),
+    }
+}
+
+pub fn sigmoid(x: f32) -> f32 {
+    1.0 / (1.0 + (-x).exp())
+}
+
+/// Abramowitz–Stegun erf approximation — reference-grade.
+fn erf_approx(x: f32) -> f32 {
+    let sign = if x < 0.0 { -1.0 } else { 1.0 };
+    let x = x.abs();
+    let t = 1.0 / (1.0 + 0.327_591_1 * x);
+    let poly = t
+        * (0.254_829_6
+            + t * (-0.284_496_74 + t * (1.421_413_7 + t * (-1.453_152 + t * 1.061_405_4))));
+    sign * (1.0 - poly * (-x * x).exp())
+}
+
+/// Numerically-stable softmax in place.
+pub fn softmax(scores: &mut [f32]) {
+    let max = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let mut sum = 0.0f32;
+    for s in scores.iter_mut() {
+        *s = (*s - max).exp();
+        sum += *s;
+    }
+    for s in scores.iter_mut() {
+        *s /= sum;
+    }
+}
+
+/// Rotate-half RoPE on one head slice at one position, matching the
+/// production convention: pair `i` with `i + head_dim/2`,
+/// `inv_freq[i] = theta^(-2i/head_dim)`.
+pub fn rope_rotate(head: &mut [f32], position: usize, theta: f64) {
+    let half = head.len() / 2;
+    for i in 0..half {
+        let inv_freq = theta.powf(-2.0 * i as f64 / head.len() as f64);
+        let angle = position as f64 * inv_freq;
+        let (sin_t, cos_t) = (angle.sin() as f32, angle.cos() as f32);
+        let x0 = head[i];
+        let x1 = head[half + i];
+        head[i] = x0 * cos_t - x1 * sin_t;
+        head[half + i] = x0 * sin_t + x1 * cos_t;
+    }
+}
+
+/// Tanh softcap: `cap * tanh(x / cap)`.
+pub fn softcap(x: f32, cap: f32) -> f32 {
+    cap * (x / cap).tanh()
+}
