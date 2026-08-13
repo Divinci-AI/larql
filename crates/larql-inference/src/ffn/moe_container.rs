@@ -55,6 +55,7 @@ use ndarray::Array2;
 use larql_compute::pipeline_layer::build_moe_weights;
 use larql_compute::MoeLayerWeights;
 use larql_vindex::format::lyrw2::read::Lyrw2Reader;
+use larql_vindex::format::lyrw2::region_format::RegionFormat;
 use larql_vindex::format::lyrw2::region_role::RegionRole;
 use larql_vindex::format::vindex3::import::routed_storage_key;
 use larql_vindex::format::vindex3::Vindex3Container;
@@ -223,8 +224,7 @@ impl ContainerRoutedBackend {
             // Resolve and read the bank now rather than at first token: a key
             // that resolves to a missing file is a composition failure, and
             // discovering it mid-generation would be one too late.
-            let expected = expert_region_sizes(&moe);
-            self.check_layer_regions(layer, experts, expected)?;
+            self.check_layer_regions(layer, experts, &moe)?;
         }
         Ok(())
     }
@@ -234,7 +234,7 @@ impl ContainerRoutedBackend {
         &self,
         layer: usize,
         experts: usize,
-        expected: (usize, usize),
+        moe: &MoeLayerWeights<'_>,
     ) -> Result<(), CompositionError> {
         let reader = self
             .container
@@ -243,7 +243,36 @@ impl ContainerRoutedBackend {
                 layer,
                 why: e.to_string(),
             })?;
-        let (want_gate_up, want_down) = expected;
+        // The byte authority is the CONTAINER's declared representation,
+        // not the model's in-memory one: a native bank legitimately
+        // differs from the spine's transcode, and asking the model what
+        // the container should weigh reintroduces the coupling VINDEX3
+        // exists to remove. Semantic dims stay the model's; only the
+        // bytes-per-dim formula comes from the declaration. Formats
+        // without a declared formula keep the legacy same-representation
+        // contract (the model's own slice lengths) — strictness is
+        // preserved either way, only the authority moves.
+        let declared = reader
+            .resolve(ROUTED_BANK, SCHEMA_ENTRY, RegionRole::GateUpFused)
+            .map_err(|e| CompositionError::UnreadableLayer {
+                layer,
+                why: format!("gate/up schema: {e}"),
+            })?
+            .ok_or_else(|| CompositionError::UnreadableLayer {
+                layer,
+                why: "no gate/up region".into(),
+            })?
+            .schema
+            .format;
+        let (want_gate_up, want_down) = match declared_region_sizes(
+            declared,
+            moe.intermediate_size,
+            moe.num_experts,
+            self.container.index().hidden_size,
+        ) {
+            Some(native) => native,
+            None => expert_region_sizes(moe),
+        };
 
         for expert in 0..experts as u32 {
             for (role, want) in [
@@ -285,6 +314,61 @@ impl ContainerRoutedBackend {
         Ok(())
     }
 
+    /// This layer's expert bank as an override for a spine-built layer —
+    /// the routed container's representation authority, packaged for
+    /// `MoeLayerWeights::apply_expert_bank_override`. `Ok(None)` when the
+    /// spine layer routes nowhere (dense layers owe the container nothing).
+    ///
+    /// Everything returned borrows from `self`; the container must
+    /// outlive the layer views it feeds (the composing caller owns both,
+    /// which is what makes this a reference move and never a bank copy).
+    pub fn expert_bank_override(
+        &self,
+        num_experts: usize,
+        spine_format: larql_compute::QuantFormat,
+        layer: usize,
+    ) -> Result<larql_compute::ExpertBankOverride<'_>, MoeBackendError> {
+        let reader = self
+            .container
+            .segment(&routed_storage_key(layer as u32))
+            .map_err(|e| MoeBackendError::Container(format!("layer {layer} bank: {e}")))?;
+
+        let mut gate_up = Vec::with_capacity(num_experts);
+        let mut down = Vec::with_capacity(num_experts);
+        for expert in 0..num_experts as u32 {
+            for (role, sink) in [
+                (RegionRole::GateUpFused, &mut gate_up),
+                (RegionRole::Down, &mut down),
+            ] {
+                let bytes = reader
+                    .region_bytes(ROUTED_BANK, expert, role)
+                    .map_err(|e| {
+                        MoeBackendError::Container(format!(
+                            "layer {layer} expert {expert} {role:?}: {e}"
+                        ))
+                    })?
+                    .ok_or_else(|| {
+                        MoeBackendError::Container(format!(
+                            "layer {layer} expert {expert} has no {role:?} region"
+                        ))
+                    })?;
+                sink.push(bytes);
+            }
+        }
+        let storage = read_bank_storage(&reader, layer, num_experts)?;
+        Ok(larql_compute::ExpertBankOverride {
+            experts_gate_up: gate_up,
+            experts_down: down,
+            expert_scales: storage.scales,
+            fused_row_layout: storage.fused_row_layout,
+            // The container's declared representation travels with its
+            // bytes; a declaration without a compute binding keeps the
+            // spine's format (the legacy same-representation contract —
+            // the caller states it, nothing is hardcoded here).
+            expert_data_format: declared_quant_format(storage.format).unwrap_or(spine_format),
+        })
+    }
+
     /// One line describing what this run actually composed.
     pub fn describe(&self, spine: &Path) -> String {
         format!(
@@ -307,6 +391,35 @@ fn expert_region_sizes(moe: &MoeLayerWeights<'_>) -> (usize, usize) {
     )
 }
 
+/// Payload byte lengths a bank of `format` must have, from the
+/// container's declared representation + the model's semantic dims —
+/// or `None` for formats whose containers carry the model's own
+/// representation (the legacy contract: model slice lengths apply).
+fn declared_region_sizes(
+    format: RegionFormat,
+    inter: usize,
+    _experts: usize,
+    hidden: usize,
+) -> Option<(usize, usize)> {
+    use larql_models::quant::mxfp4::{FUSED_HALVES, MXFP4_GROUP_BYTES, MXFP4_GROUP_ELEMS};
+    match format {
+        RegionFormat::Mxfp4 => {
+            let row = |cols: usize| (cols / MXFP4_GROUP_ELEMS) * MXFP4_GROUP_BYTES;
+            Some((FUSED_HALVES * inter * row(hidden), hidden * row(inter)))
+        }
+        _ => None,
+    }
+}
+
+/// The compute-tier format a container declaration binds to, when it
+/// differs from carrying the model's own representation.
+fn declared_quant_format(format: RegionFormat) -> Option<larql_compute::QuantFormat> {
+    match format {
+        RegionFormat::Mxfp4 => Some(larql_compute::QuantFormat::MXFP4),
+        _ => None,
+    }
+}
+
 /// The two payload roles a routed bank always carries, in operand order.
 const PAYLOAD_ROLES: [RegionRole; 2] = [RegionRole::GateUpFused, RegionRole::Down];
 
@@ -324,6 +437,7 @@ const SCHEMA_ENTRY: u32 = 0;
 struct BankStorage<'a> {
     scales: larql_compute::MoeExpertScales<'a>,
     fused_row_layout: larql_compute::MoeFusedRowLayout,
+    format: RegionFormat,
 }
 
 /// Read both storage facts off the container's own schema.
@@ -363,8 +477,10 @@ fn read_bank_storage<'a>(
         return Ok(BankStorage {
             scales: larql_compute::MoeExpertScales::Inline,
             fused_row_layout,
+            format: gate_up.format,
         });
     }
+    let format = gate_up.format;
 
     let mut streams: [Vec<&'a [u8]>; PAYLOAD_ROLES.len()] = Default::default();
     for (slot, role) in PAYLOAD_ROLES.iter().enumerate() {
@@ -389,6 +505,7 @@ fn read_bank_storage<'a>(
             down: down_scales,
         },
         fused_row_layout,
+        format,
     })
 }
 
@@ -447,6 +564,11 @@ impl MoeExpertBackend for ContainerRoutedBackend {
         let storage = read_bank_storage(&reader, layer, moe.num_experts)?;
         moe.expert_scales = storage.scales;
         moe.fused_row_layout = storage.fused_row_layout;
+        // The container's declared representation travels with its bytes:
+        // a native bank must not execute under the spine's format.
+        if let Some(qf) = declared_quant_format(storage.format) {
+            moe.expert_data_format = qf;
+        }
 
         Ok(self.inner.run_layer(layer, &moe, h, norm_offset, eps)?)
     }

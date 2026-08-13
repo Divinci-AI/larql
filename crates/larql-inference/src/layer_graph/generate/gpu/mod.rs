@@ -82,6 +82,38 @@ pub fn generate(
 
 /// Fallible variant of [`generate`].
 #[allow(clippy::too_many_arguments)]
+/// [`generate`] with the expert-bank authority supplied by a routed
+/// VINDEX3 container — the composed Metal serve path. Everything except
+/// the routed banks is identical to [`generate`].
+#[allow(clippy::too_many_arguments)]
+pub fn generate_routed(
+    weights: &mut ModelWeights,
+    tokenizer: &tokenizers::Tokenizer,
+    token_ids: &[u32],
+    max_tokens: usize,
+    index: &larql_vindex::VectorIndex,
+    backend: &dyn ComputeBackend,
+    cached_layers: &CachedLayerGraph,
+    layer_range: std::ops::Range<usize>,
+    routed: &crate::ffn::ContainerRoutedBackend,
+) -> GenerateResult {
+    let _ = cached_layers;
+    generate_streaming(
+        weights,
+        tokenizer,
+        token_ids,
+        max_tokens,
+        index,
+        backend,
+        cached_layers,
+        layer_range,
+        SamplingConfig::greedy(),
+        &EosConfig::builtin(),
+        |_, _, _| {},
+        Some(routed),
+    )
+}
+
 pub fn try_generate(
     weights: &mut ModelWeights,
     tokenizer: &tokenizers::Tokenizer,
@@ -132,6 +164,7 @@ pub fn generate_with_sampling(
         sampling,
         eos,
         |_, _, _| {},
+        None,
     )
 }
 
@@ -196,6 +229,8 @@ pub fn generate_streaming<F>(
     sampling: SamplingConfig,
     eos: &EosConfig,
     mut on_token: F,
+    // Expert-bank authority override: routed container if supplied.
+    routed: Option<&crate::ffn::ContainerRoutedBackend>,
 ) -> GenerateResult
 where
     F: FnMut(u32, &str, f64),
@@ -242,7 +277,7 @@ where
 
     let arch = &*weights.arch;
     let norm_offset = arch.norm_weight_offset();
-    let setup = match build_gpu_decode_setup(weights, index, backend, layer_range, false) {
+    let setup = match build_gpu_decode_setup(weights, index, backend, layer_range, false, routed) {
         Ok(setup) => setup,
         Err(err) => {
             let _ = cached_layers;
@@ -458,6 +493,7 @@ where
         sampling,
         eos,
         on_token,
+        None,
     )
     .into_result()
 }

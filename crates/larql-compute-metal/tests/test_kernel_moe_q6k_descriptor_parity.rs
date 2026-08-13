@@ -167,6 +167,12 @@ impl Rig {
                 .new_buffer((n_slots * 4) as u64, MTLResourceOptions::StorageModeShared);
             let n = n_slots as u32;
             let ghb = GATE_HALF_BYTES as u32;
+            let gu_sc = self
+                .device
+                .new_buffer((n_slots * 4) as u64, MTLResourceOptions::StorageModeShared);
+            let dn_sc = self
+                .device
+                .new_buffer((n_slots * 4) as u64, MTLResourceOptions::StorageModeShared);
             enc.set_compute_pipeline_state(&self.gather);
             enc.set_buffer(0, Some(&self.descs), 0);
             enc.set_buffer(1, Some(&self.ids), 0);
@@ -174,8 +180,10 @@ impl Rig {
             enc.set_buffer(3, Some(&gate0), 0);
             enc.set_buffer(4, Some(&gate1), 0);
             enc.set_buffer(5, Some(&down), 0);
-            enc.set_bytes(6, 4, &n as *const u32 as *const _);
-            enc.set_bytes(7, 4, &ghb as *const u32 as *const _);
+            enc.set_buffer(6, Some(&gu_sc), 0);
+            enc.set_buffer(7, Some(&dn_sc), 0);
+            enc.set_bytes(8, 4, &n as *const u32 as *const _);
+            enc.set_bytes(9, 4, &ghb as *const u32 as *const _);
             enc.dispatch_threads(
                 MTLSize::new(n_slots as u64, 1, 1),
                 MTLSize::new(n_slots as u64, 1, 1),
@@ -329,6 +337,7 @@ fn up_half_table_matches_shifted_control_bitwise() {
             .new_buffer(bytes, MTLResourceOptions::StorageModeShared)
     };
     let (gate0, gate1, down) = (mk(16), mk(16), mk(16));
+    let (gu_sc, dn_sc) = (mk(16), mk(16));
     let out = mk((n_slots * N_ROWS * 4) as u64);
 
     let cmd = rig.queue.new_command_buffer();
@@ -342,8 +351,10 @@ fn up_half_table_matches_shifted_control_bitwise() {
     enc.set_buffer(3, Some(&gate0), 0);
     enc.set_buffer(4, Some(&gate1), 0);
     enc.set_buffer(5, Some(&down), 0);
-    enc.set_bytes(6, 4, &n as *const u32 as *const _);
-    enc.set_bytes(7, 4, &ghb as *const u32 as *const _);
+    enc.set_buffer(6, Some(&gu_sc), 0);
+    enc.set_buffer(7, Some(&dn_sc), 0);
+    enc.set_bytes(8, 4, &n as *const u32 as *const _);
+    enc.set_bytes(9, 4, &ghb as *const u32 as *const _);
     enc.dispatch_threads(MTLSize::new(n as u64, 1, 1), MTLSize::new(n as u64, 1, 1));
 
     let n_u32 = N_ROWS as u32;

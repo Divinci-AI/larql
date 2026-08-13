@@ -72,8 +72,10 @@ pub fn load_model_weights_kquant_shard(
     let mut packed_mmaps: HashMap<String, memmap2::Mmap> = HashMap::new();
     let mut packed_byte_ranges: HashMap<String, (String, usize, usize)> = HashMap::new();
     let mut per_layer_ffn_format: HashMap<usize, String> = HashMap::new();
-    let mut per_layer_ffn_arrangement: HashMap<usize, larql_models::weights::PerLayerFfnArrangement> =
-        HashMap::new();
+    let mut per_layer_ffn_arrangement: HashMap<
+        usize,
+        larql_models::weights::PerLayerFfnArrangement,
+    > = HashMap::new();
     let mut lm_head_loaded: Option<larql_models::WeightArray> = None;
 
     if manifest_path.exists() {
@@ -190,8 +192,7 @@ pub fn load_model_weights_kquant_shard(
                         // Recording it is what lets the MoE forward decode a
                         // Q6_K (MXFP4-transcoded) store as Q6_K instead of
                         // assuming Q4_K.
-                        per_layer_ffn_format
-                            .insert(l, header.format.registry_tag().to_string());
+                        per_layer_ffn_format.insert(l, header.format.registry_tag().to_string());
                         // The arrangement facts travel with the format, for
                         // the same reason: a reader that takes the format and
                         // derives the rest is the reader that serves an
@@ -210,12 +211,13 @@ pub fn load_model_weights_kquant_shard(
                             if !expert_in_shard(e, expert_filter) {
                                 continue;
                             }
-                            let mut record = |slot: &str, r: &super::super::write_layers::StoredRange| {
-                                packed_byte_ranges.insert(
-                                    larql_models::weights::per_layer_ffn_key(l, e, slot),
-                                    (filename.clone(), r.offset, r.len),
-                                );
-                            };
+                            let mut record =
+                                |slot: &str, r: &super::super::write_layers::StoredRange| {
+                                    packed_byte_ranges.insert(
+                                        larql_models::weights::per_layer_ffn_key(l, e, slot),
+                                        (filename.clone(), r.offset, r.len),
+                                    );
+                                };
                             record(larql_models::weights::PER_LAYER_FFN_GATE_UP, &entry.gate_up);
                             record(larql_models::weights::PER_LAYER_FFN_DOWN, &entry.down);
                             // Exponent streams, present exactly for a
@@ -224,10 +226,7 @@ pub fn load_model_weights_kquant_shard(
                             // physical-placement coincidence, not a format
                             // property — out of every consumer.
                             if let Some(r) = &entry.gate_up_scales {
-                                record(
-                                    larql_models::weights::PER_LAYER_FFN_GATE_UP_SCALES,
-                                    r,
-                                );
+                                record(larql_models::weights::PER_LAYER_FFN_GATE_UP_SCALES, r);
                             }
                             if let Some(r) = &entry.down_scales {
                                 record(larql_models::weights::PER_LAYER_FFN_DOWN_SCALES, r);

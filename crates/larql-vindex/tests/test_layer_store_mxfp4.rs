@@ -145,7 +145,10 @@ fn regions_stay_inside_the_file_and_do_not_overlap() {
         );
     }
     // The table must also not overlap the first payload.
-    assert!(spans[0].0 >= 32 + h.num_entries * 64, "data runs into the table");
+    assert!(
+        spans[0].0 >= 32 + h.num_entries * 64,
+        "data runs into the table"
+    );
 }
 
 #[test]

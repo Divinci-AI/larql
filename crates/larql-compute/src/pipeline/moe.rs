@@ -432,7 +432,48 @@ pub struct MoeLayerWeights<'a> {
     pub gate_rule: MoeGateRule,
 }
 
+/// The expert-bank facts a routed container substitutes into a layer —
+/// and nothing else. Attention, norms, router state and semantic
+/// topology stay spine-owned; this struct owns only the bank's bytes
+/// and the representation facts that make them readable.
+///
+/// Generic by design: "expert bank authority = routed container if
+/// supplied, otherwise spine." No representation is named here — a
+/// native MXFP4 bank is merely the first through the seam.
+///
+/// Everything is borrowed: applying an override moves references, never
+/// bank bytes, so the container backing them must outlive the layer
+/// views (the composing caller owns both).
+pub struct ExpertBankOverride<'a> {
+    pub experts_gate_up: Vec<&'a [u8]>,
+    pub experts_down: Vec<&'a [u8]>,
+    pub expert_scales: MoeExpertScales<'a>,
+    pub fused_row_layout: MoeFusedRowLayout,
+    pub expert_data_format: QuantFormat,
+}
+
 impl<'a> MoeLayerWeights<'a> {
+    /// Replace this layer's expert bank with a routed container's —
+    /// the representation authority swap, in one place. Refuses an
+    /// override whose expert count disagrees with the layer topology
+    /// (that is a semantic fact, and the spine owns it).
+    pub fn apply_expert_bank_override(&mut self, ovr: ExpertBankOverride<'a>) {
+        assert_eq!(
+            ovr.experts_gate_up.len(),
+            self.num_experts,
+            "expert-bank override carries {} gate/up banks for a layer of \
+             {} experts — the container cannot re-decide topology",
+            ovr.experts_gate_up.len(),
+            self.num_experts,
+        );
+        assert_eq!(ovr.experts_down.len(), self.num_experts);
+        self.experts_gate_up = ovr.experts_gate_up;
+        self.experts_down = ovr.experts_down;
+        self.expert_scales = ovr.expert_scales;
+        self.fused_row_layout = ovr.fused_row_layout;
+        self.expert_data_format = ovr.expert_data_format;
+    }
+
     pub fn inter_padded(&self) -> usize {
         self.weight_layout
             .down_cols(self.intermediate_size, self.expert_data_format)

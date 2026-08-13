@@ -80,6 +80,7 @@ pub use index::storage::ffn_store::{FFN_COMPONENTS_PER_LAYER, FFN_DOWN, FFN_GATE
 pub use describe::{DescribeEdge, LabelSource};
 
 // Extract
+pub use extract::target::ExtractionRequest;
 pub use extract::{
     build_vindex, build_vindex_dense_only, build_vindex_from_vectors, build_vindex_streaming,
     snapshot_hf_metadata, IndexBuildCallbacks, SilentBuildCallbacks, SNAPSHOT_FILES,

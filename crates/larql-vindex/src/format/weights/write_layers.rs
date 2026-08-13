@@ -617,10 +617,7 @@ pub fn parse_layer_weights_header(data: &[u8]) -> Option<LayerWeightsHeader> {
             fused_row_layout_from_code(layout_raw)?,
         )
     } else {
-        (
-            LayerScaleBinding::Inline,
-            GateUpLayout::ContiguousHalves,
-        )
+        (LayerScaleBinding::Inline, GateUpLayout::ContiguousHalves)
     };
 
     let entry_bytes = scale_binding.offset_entry_bytes();

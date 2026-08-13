@@ -21,11 +21,11 @@
 use metal::*;
 use std::ffi::c_void;
 
-use super::moe_dispatch::MoeScratch;
-use super::moe_zero_copy::ResolvedExpert;
-use super::MetalBackend;
+use super::ResolvedExpert;
 use crate::kernels::quant::ExpertScaleBinding;
+use crate::moe_dispatch::MoeScratch;
 use crate::shaders::mxfp4_grouped_experts::{ROW_BASE_IDENTITY, ROW_STRIDE_IDENTITY};
+use crate::MetalBackend;
 use larql_compute::MoeLayerWeights;
 use larql_models::quant::mxfp4::FusedHalf;
 
@@ -226,6 +226,10 @@ fn set_u32(enc: &metal::ComputeCommandEncoderRef, slot: u64, v: &u32) {
 /// Bind a `u32` table as an inline constant — the offset tables are
 /// per-dispatch and must not enter the address-keyed weight cache.
 fn set_u32_table(enc: &metal::ComputeCommandEncoderRef, slot: u64, v: &[u32]) {
+    // Every table this helper binds (payload offsets, e8m0 offsets) is
+    // route-dependent — the witness must see it or the descriptor path's
+    // "zero" claim has a blind spot (caught by rung G's positive control).
+    crate::route_witness::bump(&crate::route_witness::OFFSET_BINDS);
     enc.set_bytes(
         slot,
         v.len() as u64 * U32_BYTES,

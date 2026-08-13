@@ -197,7 +197,7 @@ impl MetalBackend {
         // (No moe_fn/moe_collect_fn gate: the merged-CB fast path has
         // always outranked the callback arm when its preconditions hold —
         // try_inline runs first regardless. S2 keeps that precedence.)
-        if crate::moe_zero_copy_descriptor::gpu_route_enabled() {
+        if crate::moe_gpu_route::gpu_route_enabled() {
             if let Some(ictx) = inline_moe {
                 if let Ok(moe) = Self::inline_moe_preconditions(layer, &ctx, ictx.scratch) {
                     if self.gpu_route_supported(moe, ictx.scratch) {
@@ -498,7 +498,7 @@ impl MetalBackend {
         // Every precondition is checked before CB state is touched: an
         // unsupported policy/format/bank falls through to the CPU arm
         // with nothing to roll back.
-        if crate::moe_zero_copy_descriptor::gpu_route_enabled()
+        if crate::moe_gpu_route::gpu_route_enabled()
             && !self.gpu_route_supported(moe, scratch)
             && larql_compute::options::env_opt_in(ENV_MOE_INLINE_DIAG)
         {
@@ -510,14 +510,12 @@ impl MetalBackend {
                 moe.fused_row_layout,
                 scratch.weight_cols,
                 scratch.hidden,
-                crate::moe_zero_copy_descriptor::router_input_transform(moe),
+                crate::moe_gpu_route::router_input_transform(moe),
                 moe.num_experts,
                 moe.top_k,
             );
         }
-        if crate::moe_zero_copy_descriptor::gpu_route_enabled()
-            && self.gpu_route_supported(moe, scratch)
-        {
+        if crate::moe_gpu_route::gpu_route_enabled() && self.gpu_route_supported(moe, scratch) {
             // Dims come from the MoE scratch, NOT MoeInterleaveCtx: on a
             // hybrid layer ctx.inter is the DENSE FFN width; the expert
             // bank's own intermediate lives on the scratch (cost one

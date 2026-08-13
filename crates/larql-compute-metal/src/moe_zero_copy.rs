@@ -18,6 +18,8 @@
 //! layer's typed `MoeGateRule` activation, ClampedGlu gate/up biases, and
 //! the down bias + routing weight + post-experts norm on readback.
 
+pub(crate) mod mxfp4;
+
 use metal::*;
 use std::ffi::c_void;
 

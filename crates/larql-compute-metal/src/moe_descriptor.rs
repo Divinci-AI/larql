@@ -85,6 +85,10 @@ pub struct SelectedExpertBindings {
     pub gate1_offs: Buffer,
     /// Down payload byte offsets per slot.
     pub down_offs: Buffer,
+    /// e8m0 exponent-stream byte offsets per slot (split-scale banks;
+    /// zero-filled and never bound under inline scales).
+    pub gu_scale_offs: Buffer,
+    pub dn_scale_offs: Buffer,
 }
 
 /// Host-side readback of one gather: the slot descriptors and expanded
@@ -266,6 +270,8 @@ impl MetalBackend {
         let gate0_offs = self.bufs.output((n_slots * 4) as u64);
         let gate1_offs = self.bufs.output((n_slots * 4) as u64);
         let down_offs = self.bufs.output((n_slots * 4) as u64);
+        let gu_scale_offs = self.bufs.output((n_slots * 4) as u64);
+        let dn_scale_offs = self.bufs.output((n_slots * 4) as u64);
         let n = n_slots as u32;
         enc.set_compute_pipeline_state(&self.moe_descriptor_gather_pipeline);
         enc.set_buffer(0, Some(&table.descs), 0);
@@ -274,9 +280,11 @@ impl MetalBackend {
         enc.set_buffer(3, Some(&gate0_offs), 0);
         enc.set_buffer(4, Some(&gate1_offs), 0);
         enc.set_buffer(5, Some(&down_offs), 0);
-        enc.set_bytes(6, 4, &n as *const u32 as *const std::ffi::c_void);
+        enc.set_buffer(6, Some(&gu_scale_offs), 0);
+        enc.set_buffer(7, Some(&dn_scale_offs), 0);
+        enc.set_bytes(8, 4, &n as *const u32 as *const std::ffi::c_void);
         enc.set_bytes(
-            7,
+            9,
             4,
             &gate_half_bytes as *const u32 as *const std::ffi::c_void,
         );
@@ -289,6 +297,8 @@ impl MetalBackend {
             gate0_offs,
             gate1_offs,
             down_offs,
+            gu_scale_offs,
+            dn_scale_offs,
         }
     }
 

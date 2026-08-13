@@ -51,8 +51,13 @@ kernel void moe_descriptor_gather(
     device uint*                      gate0_offs   [[buffer(3)]],  // [n_slots]
     device uint*                      gate1_offs   [[buffer(4)]],  // [n_slots]
     device uint*                      down_offs    [[buffer(5)]],  // [n_slots]
-    constant uint&                    n_slots      [[buffer(6)]],
-    constant uint&                    gate_half_bytes [[buffer(7)]],
+    // Split-scale (native MXFP4) expansions: the e8m0 exponent streams'
+    // per-slot offsets, index-aligned with the payload tables. Zero-filled
+    // facts under inline scales (never bound then).
+    device uint*                      gu_scale_offs [[buffer(6)]], // [n_slots]
+    device uint*                      dn_scale_offs [[buffer(7)]], // [n_slots]
+    constant uint&                    n_slots      [[buffer(8)]],
+    constant uint&                    gate_half_bytes [[buffer(9)]],
     uint tid [[thread_position_in_grid]])
 {
     if (tid < n_slots) {
@@ -61,6 +66,8 @@ kernel void moe_descriptor_gather(
         gate0_offs[tid] = d.gate_up_payload_off;
         gate1_offs[tid] = d.gate_up_payload_off + gate_half_bytes;
         down_offs[tid]  = d.down_payload_off;
+        gu_scale_offs[tid] = d.gate_up_scale_off;
+        dn_scale_offs[tid] = d.down_scale_off;
     }
 }
 

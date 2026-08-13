@@ -159,11 +159,11 @@ mod tests {
 
     #[test]
     fn fused_row_layout_codes_round_trip() {
-        for l in [
-            GateUpLayout::ContiguousHalves,
-            GateUpLayout::Interleaved,
-        ] {
-            assert_eq!(fused_row_layout_from_code(fused_row_layout_code(l)), Some(l));
+        for l in [GateUpLayout::ContiguousHalves, GateUpLayout::Interleaved] {
+            assert_eq!(
+                fused_row_layout_from_code(fused_row_layout_code(l)),
+                Some(l)
+            );
         }
     }
 
@@ -178,10 +178,7 @@ mod tests {
         // Not cosmetic: the layout block is absent from every store written
         // before it existed, and any future reader that zero-fills a missing
         // block must land on the arrangement those files actually use.
-        assert_eq!(
-            fused_row_layout_code(GateUpLayout::ContiguousHalves),
-            0
-        );
+        assert_eq!(fused_row_layout_code(GateUpLayout::ContiguousHalves), 0);
         assert_eq!(LayerScaleBinding::Inline.as_u32(), 0);
     }
 }

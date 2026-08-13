@@ -90,11 +90,9 @@ mod f32_ops;
 pub mod moe_descriptor;
 mod moe_dispatch;
 #[cfg(target_os = "macos")]
+mod moe_gpu_route;
+#[cfg(target_os = "macos")]
 mod moe_zero_copy;
-#[cfg(target_os = "macos")]
-mod moe_zero_copy_descriptor;
-#[cfg(target_os = "macos")]
-mod moe_zero_copy_mxfp4;
 #[cfg(target_os = "macos")]
 mod pipeline;
 #[cfg(target_os = "macos")]
