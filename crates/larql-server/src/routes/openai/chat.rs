@@ -589,6 +589,7 @@ fn stream_chat_completion(
                 sampling,
                 &eos,
                 on_token,
+                None,
             )
         };
 
