@@ -988,6 +988,94 @@ fn run_with_moe_shards(
 /// This is a *composed* run, not a VINDEX3 model. A container holding only
 /// routed banks has no tokenizer and no spine; `larql run <vindex3-dir>` is
 /// still correctly refused. Container completeness is a separate rung.
+/// The composed Metal serve arm of [`run_with_routed_container`].
+///
+/// Split out as two whole definitions rather than a `cfg` block inside the
+/// caller for the reason `shannon_trace::decode_diff` documents: the `gpu`
+/// feature compiles on every target, but `larql_compute_metal` is
+/// `#[cfg(target_os = "macos")]`, so a Linux build with the feature on
+/// reaches for a crate that is not there. Cargo cannot express "this
+/// feature, on this OS", so the call site carries it — and the unsupported
+/// build then pulls in neither the imports nor the locals of the supported
+/// one.
+#[cfg(not(all(feature = "gpu", target_os = "macos")))]
+fn generate_routed_metal(
+    _weights: &mut larql_models::ModelWeights,
+    _tokenizer: &larql_vindex::tokenizers::Tokenizer,
+    _prompt_ids: &[u32],
+    _max_tokens: usize,
+    _index: &larql_vindex::VectorIndex,
+    _routed: &larql_inference::ffn::ContainerRoutedBackend,
+) -> Result<Vec<(String, u32)>, Box<dyn std::error::Error>> {
+    Err(
+        "--routed-from --metal serves expert banks on the GPU, so it needs a macOS host with \
+         the `gpu` feature; this build has one or neither"
+            .into(),
+    )
+}
+
+#[cfg(all(feature = "gpu", target_os = "macos"))]
+fn generate_routed_metal(
+    weights: &mut larql_models::ModelWeights,
+    tokenizer: &larql_vindex::tokenizers::Tokenizer,
+    prompt_ids: &[u32],
+    max_tokens: usize,
+    index: &larql_vindex::VectorIndex,
+    routed: &larql_inference::ffn::ContainerRoutedBackend,
+) -> Result<Vec<(String, u32)>, Box<dyn std::error::Error>> {
+    use larql_compute_metal::route_witness;
+    use std::sync::atomic::Ordering;
+
+    // Composed METAL serve: same GPU-dataflow decode as the plain
+    // --metal run; only the expert-bank authority differs. The CPU
+    // kquant generator in the caller stays an explicit exclusion for
+    // banks it does not implement — it refuses, never transcodes.
+    let backend = larql_compute_metal::metal_backend()
+        .ok_or("--routed-from --metal requires a Metal device")?;
+    let cached_layers = larql_inference::layer_graph::CachedLayerGraph::from_residuals(Vec::new());
+    let num_layers = weights.num_layers;
+    // Fired evidence for the composed serve: witness counters must not
+    // move (no route-dependent host work) while the GPU-dataflow route
+    // fires on every routed layer of every decoded token.
+    let witness_before = route_witness::snapshot();
+    let route_layers_before = route_witness::GPU_ROUTE_LAYERS.load(Ordering::Relaxed);
+    let legacy_waits_before = route_witness::WAIT_MOE_ROUTE_LEGACY.load(Ordering::Relaxed);
+    let result = larql_inference::layer_graph::generate_routed(
+        weights,
+        tokenizer,
+        prompt_ids,
+        max_tokens,
+        index,
+        &backend,
+        &cached_layers,
+        0..num_layers,
+        routed,
+    );
+    let witness = witness_before.delta(&route_witness::snapshot());
+    let route_layers =
+        route_witness::GPU_ROUTE_LAYERS.load(Ordering::Relaxed) - route_layers_before;
+    let legacy_waits =
+        route_witness::WAIT_MOE_ROUTE_LEGACY.load(Ordering::Relaxed) - legacy_waits_before;
+    // Every forwarded position (prefill and decode alike) must route
+    // all of its MoE layers on the GPU, so the honest statement is the
+    // layers-per-forward quotient, not a per-decoded-token average.
+    eprintln!(
+        "[routed-metal] witness: gpu_route_layers={route_layers} \
+         (= {num_layers} layers x {} forwards, remainder {}), \
+         legacy_waits={legacy_waits}, host_resolves={}, bias_copies={}, \
+         weight_binds={}, offset_binds={}",
+        route_layers / num_layers as u64,
+        route_layers % num_layers as u64,
+        witness.host_resolves,
+        witness.bias_copies,
+        witness.weight_binds,
+        witness.offset_binds,
+    );
+    // Normalise to the CPU arm's (token, id) shape; the id is unused
+    // downstream, and the GPU result carries probabilities instead.
+    Ok(result.tokens.into_iter().map(|(t, _)| (t, 0u32)).collect())
+}
+
 fn run_with_routed_container(
     vindex_path: &std::path::Path,
     routed_dir: &str,
@@ -1027,61 +1115,14 @@ fn run_with_routed_container(
 
     let started = std::time::Instant::now();
     let toks = if metal {
-        // Composed METAL serve: same GPU-dataflow decode as the plain
-        // --metal run; only the expert-bank authority differs. The CPU
-        // kquant generator below stays an explicit exclusion for banks
-        // it does not implement — it refuses, never transcodes.
-        let backend = larql_compute_metal::metal_backend()
-            .ok_or("--routed-from --metal requires a Metal device")?;
-        let cached_layers =
-            larql_inference::layer_graph::CachedLayerGraph::from_residuals(Vec::new());
-        let num_layers = weights.num_layers;
-        // Fired evidence for the composed serve: witness counters must not
-        // move (no route-dependent host work) while the GPU-dataflow route
-        // fires on every routed layer of every decoded token.
-        use larql_compute_metal::route_witness;
-        use std::sync::atomic::Ordering;
-        let witness_before = route_witness::snapshot();
-        let route_layers_before = route_witness::GPU_ROUTE_LAYERS.load(Ordering::Relaxed);
-        let legacy_waits_before = route_witness::WAIT_MOE_ROUTE_LEGACY.load(Ordering::Relaxed);
-        let result = larql_inference::layer_graph::generate_routed(
+        generate_routed_metal(
             &mut weights,
             &tokenizer,
             &prompt_ids,
             max_tokens,
             &index,
-            &backend,
-            &cached_layers,
-            0..num_layers,
             &routed,
-        );
-        let witness = witness_before.delta(&route_witness::snapshot());
-        let route_layers =
-            route_witness::GPU_ROUTE_LAYERS.load(Ordering::Relaxed) - route_layers_before;
-        let legacy_waits =
-            route_witness::WAIT_MOE_ROUTE_LEGACY.load(Ordering::Relaxed) - legacy_waits_before;
-        // Every forwarded position (prefill and decode alike) must route
-        // all of its MoE layers on the GPU, so the honest statement is the
-        // layers-per-forward quotient, not a per-decoded-token average.
-        eprintln!(
-            "[routed-metal] witness: gpu_route_layers={route_layers} \
-             (= {num_layers} layers x {} forwards, remainder {}), \
-             legacy_waits={legacy_waits}, host_resolves={}, bias_copies={}, \
-             weight_binds={}, offset_binds={}",
-            route_layers / num_layers as u64,
-            route_layers % num_layers as u64,
-            witness.host_resolves,
-            witness.bias_copies,
-            witness.weight_binds,
-            witness.offset_binds,
-        );
-        // Normalise to the CPU arm's (token, id) shape; the id is unused
-        // downstream, and the GPU result carries probabilities instead.
-        result
-            .tokens
-            .into_iter()
-            .map(|(t, _)| (t, 0u32))
-            .collect::<Vec<(String, u32)>>()
+        )?
     } else {
         larql_inference::vindex::generate_kquant_cpu_routed(
             &mut weights,

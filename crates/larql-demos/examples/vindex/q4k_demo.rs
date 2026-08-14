@@ -67,7 +67,9 @@ fn main() {
         QuantFormat::None,
         larql_vindex::WriteWeightsOptions::default(),
         larql_vindex::KquantWriteOptions::default(),
-        false,
+        false,                                   // drop_gate_vectors
+        larql_vindex::ExtractionRequest::Legacy, // expert_banks
+        None,                                    // expert_banks_out
         &mut cb,
     )
     .expect("f32 extract");
@@ -91,7 +93,9 @@ fn main() {
         QuantFormat::Q4K,
         larql_vindex::WriteWeightsOptions::default(),
         larql_vindex::KquantWriteOptions::default(),
-        false,
+        false,                                   // drop_gate_vectors
+        larql_vindex::ExtractionRequest::Legacy, // expert_banks
+        None,                                    // expert_banks_out
         &mut cb,
     )
     .expect("q4k extract");
