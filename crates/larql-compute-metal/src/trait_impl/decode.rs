@@ -605,7 +605,17 @@ impl DecodeBackend for MetalBackend {
         let mut cache_guard = self.kv_cache.lock().unwrap();
         if let Some(ref mut kv) = *cache_guard {
             for layer in &mut kv.layers {
-                layer.current_len = 0;
+                // `clear()`, not `current_len = 0`. The cache splits
+                // occupancy from stream position on purpose — a slid
+                // window drops rows while the stream keeps advancing — and
+                // `abs_position` is what RoPE is computed at. Zeroing only
+                // the occupancy left `abs_position` climbing across every
+                // reset, so the first token of the NEXT sequence was
+                // rotated at the previous sequence's position and the
+                // whole decode drifted. Found via issue #227: once the
+                // O-projection stopped emitting zeros, two decodes over an
+                // identical seeded history stopped matching.
+                layer.clear();
             }
         }
     }

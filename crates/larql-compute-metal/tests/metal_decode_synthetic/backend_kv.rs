@@ -428,3 +428,76 @@ fn decode_token_with_unfused_attn_v_norm_qk_norm_drives_unfused_paths() {
     );
     assert_eq!(out.len(), HIDDEN);
 }
+
+/// `reset_kv_cache` must restore the cache to its *initial* state, which
+/// includes the stream position RoPE is computed at — not just occupancy.
+///
+/// It previously set `current_len = 0` and left `abs_position` alone, so
+/// the position kept climbing across resets and the first token of each
+/// new sequence was rotated at the previous sequence's position. A server
+/// starting a fresh conversation would therefore decode a differently
+/// rotated token than the same prompt on a fresh backend, drifting further
+/// with every reset.
+///
+/// The bug was invisible until issue #227 was fixed: while `Q_DIM = 128`
+/// the O-projection emitted zeros, so nothing RoPE affected could reach
+/// the output and every "reset then decode" comparison matched regardless.
+#[test]
+fn reset_kv_cache_restores_the_rope_stream_position_not_just_occupancy() {
+    let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(metal) = larql_compute_metal::MetalBackend::new() else {
+        return;
+    };
+    use larql_compute::backend::DecodeBackend;
+    use larql_compute::cpu::ops::q4_common::{quantize_q4_0, quantize_q4_k};
+
+    let wq = quantize_q4_k(&synth_weight_f32(Q_DIM * HIDDEN, 0.1));
+    let wk = quantize_q4_k(&synth_weight_f32(KV_DIM * HIDDEN, 0.2));
+    let wv = quantize_q4_k(&synth_weight_f32(KV_DIM * HIDDEN, 0.3));
+    let wo = quantize_q4_k(&synth_weight_f32(HIDDEN * Q_DIM, 0.4));
+    let gate = quantize_q4_0(&synth_weight_f32(INTER * HIDDEN, 0.5));
+    let up = quantize_q4_0(&synth_weight_f32(INTER * HIDDEN, 0.6));
+    let down = quantize_q4_0(&synth_weight_f32(HIDDEN * INTER, 0.7));
+    let norm_w: Vec<f32> = (0..HIDDEN).map(|i| 1.0 + (i as f32 * 0.001)).collect();
+    let x = synth_input(HIDDEN, 0.9);
+
+    // Seeding with `populate_kv_layer` is what makes the contract
+    // observable: it sets occupancy but not the stream position, so the
+    // ONLY thing carrying `abs_position` between these two decodes is what
+    // `reset_kv_cache` did or did not clear. A plain decode-reset-decode
+    // loop cannot see the bug, because there both fields advance together
+    // and the reset is the only divergence — this variant was tried first
+    // and passed happily with the defect reintroduced.
+    const SEED_ROWS: usize = 4;
+    let seeded_decode = || {
+        metal.reset_kv_cache();
+        let k: Vec<f32> = (0..SEED_ROWS * NUM_KV_HEADS * HEAD_DIM)
+            .map(|i| 0.5 + (i as f32) * 1e-3)
+            .collect();
+        let v: Vec<f32> = (0..SEED_ROWS * NUM_KV_HEADS * HEAD_DIM)
+            .map(|i| -0.5 + (i as f32) * 2e-3)
+            .collect();
+        metal.populate_kv_layer(0, &k, &v, SEED_ROWS, NUM_KV_HEADS, HEAD_DIM);
+        let layer = build_synth_layer(&wq, &wk, &wv, &wo, &gate, &up, &down, &norm_w);
+        let backend: &dyn DecodeBackend = &metal;
+        backend
+            .decode_token(&[layer], &x, HIDDEN, INTER)
+            .expect("decode returns Some")
+    };
+
+    let first = seeded_decode();
+    let again = seeded_decode();
+
+    assert_eq!(
+        again.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+        first.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+        "the same seeded history decoded differently the second time, so \
+         reset_kv_cache left stream state behind — abs_position drives RoPE \
+         and had advanced past the seeded history"
+    );
+    assert_eq!(
+        metal.kv_cache_len(),
+        SEED_ROWS + 1,
+        "seeded rows plus the decoded token"
+    );
+}

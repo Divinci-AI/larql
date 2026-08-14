@@ -37,15 +37,36 @@ pub use larql_compute::{
 /// still on unproven ground.
 pub static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// Synthetic dims chosen to be Q4_K-compatible (multiples of 256) and
-/// small enough for a fast test. Q4_K super-blocks are 256 elements.
+/// Synthetic dims chosen to be Q4_K-compatible and small enough for a fast
+/// test. Q4_K super-blocks are 256 elements.
+///
+/// **Every dimension that a k-quant weight reduces over must be a multiple
+/// of 256**, and that is the reduction dim, not the output dim. `wo`
+/// reduces over `Q_DIM`, so `Q_DIM` is load-bearing here — it was 128
+/// (`NUM_Q_HEADS = 2`) and the O-projection therefore dispatched zero
+/// superblocks and emitted an all-zero vector, for months, while every
+/// test in this suite passed on the FFN's contribution alone (issue #227).
+/// `stages::quant_matvec::encode` now asserts this rather than trusting a
+/// comment, but the fixture states it too because the comment it replaced
+/// claimed "multiples of 256" while `Q_DIM` was not one.
 pub const HIDDEN: usize = 256;
 pub const INTER: usize = 512;
 pub const HEAD_DIM: usize = 64;
-pub const NUM_Q_HEADS: usize = 2;
+/// 4 heads x 64 = 256 = exactly one Q4_K superblock for `wo`'s reduction.
+pub const NUM_Q_HEADS: usize = 4;
 pub const NUM_KV_HEADS: usize = 1;
-pub const Q_DIM: usize = NUM_Q_HEADS * HEAD_DIM; // 128
+pub const Q_DIM: usize = NUM_Q_HEADS * HEAD_DIM; // 256
 pub const KV_DIM: usize = NUM_KV_HEADS * HEAD_DIM; // 64
+
+/// Q4_K super-block width. `wo` reduces over `Q_DIM`, so `Q_DIM` must be a
+/// whole number of these or the O-projection dispatches nothing.
+pub const Q4K_SUPERBLOCK_ELEMS: usize = 256;
+
+const _: () = assert!(
+    Q_DIM.is_multiple_of(Q4K_SUPERBLOCK_ELEMS),
+    "wo reduces over Q_DIM; a non-multiple of the Q4_K superblock makes the \
+     O-projection emit zeros and this whole suite blind to attention"
+);
 
 pub fn synth_input(len: usize, seed: f32) -> Vec<f32> {
     (0..len)

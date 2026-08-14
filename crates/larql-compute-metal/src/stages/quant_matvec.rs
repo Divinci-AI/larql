@@ -23,6 +23,7 @@
 //! multi-position prefill the caller loops over positions, passing
 //! `f32_in_off` / `out_off` in bytes.
 
+use larql_models::quant::ggml::K_QUANT_BLOCK_ELEMS;
 use metal::{Buffer, ComputeCommandEncoderRef, ComputePipelineState, MTLSize};
 use std::ffi::c_void;
 
@@ -109,6 +110,34 @@ pub fn encode(
     num_rows: usize,
     hidden: usize,
 ) {
+    // Every k-quant shader derives its superblock count as `K / 256`,
+    // truncating. A `K` below one superblock therefore dispatches ZERO
+    // work and leaves the output as it found it — so the caller receives a
+    // well-formed vector of zeros rather than an error, and a misaligned
+    // `K` silently drops the tail.
+    //
+    // That is not hypothetical: the synthetic decode suite ran for months
+    // with a completely dead O-projection because its `Q_DIM` was 128
+    // (issue #227). Attention was computed correctly and thrown away, and
+    // every "non-NaN, non-zero, correct length" assertion still passed
+    // because the FFN alone satisfied all three.
+    //
+    // `qkv_proj::encode` already asserts this for its `hidden` (audit
+    // F17). The O-projection reaches the kernels through *this* path,
+    // which had no equivalent guard — hence the hole was on this side.
+    if matches!(
+        format,
+        larql_compute::QuantFormat::Q4_K
+            | larql_compute::QuantFormat::Q4_KF
+            | larql_compute::QuantFormat::Q6_K
+    ) {
+        assert!(
+            hidden >= K_QUANT_BLOCK_ELEMS && hidden.is_multiple_of(K_QUANT_BLOCK_ELEMS),
+            "{format:?} matvec requires K % {K_QUANT_BLOCK_ELEMS} == 0 and at least one \
+             superblock; got K={hidden}. Below one superblock the kernel emits zeros \
+             silently instead of failing (issue #227)."
+        );
+    }
     let n = num_rows as u32;
     let k = hidden as u32;
     match format {
