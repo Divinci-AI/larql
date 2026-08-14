@@ -273,10 +273,17 @@ pub fn race(
     // ceiling probes that deliberately compute something else, so gating them on
     // numerical agreement would be meaningless.
     #[allow(clippy::type_complexity)]
-    let arms: [(&'static str, &crate::kernels::KernelHandle, bool, f64, bool); 7] = [
+    let arms: [(&'static str, &crate::kernels::KernelHandle, bool, f64, bool); 8] = [
         (
             "A split / LUT16",
             &metal.quant.mxfp4g_split_lut16_pipeline,
+            true,
+            4.25,
+            true,
+        ),
+        (
+            "A2 split / LUT16 vec4",
+            &metal.quant.mxfp4g_split_lut16_vec_pipeline,
             true,
             4.25,
             true,

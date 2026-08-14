@@ -50,6 +50,10 @@ pub struct QuantKernels {
     /// the same weights through different scale layouts and decode strategies.
     /// Candidates, not production paths — see `shaders::mxfp4_grouped_experts`.
     pub mxfp4g_split_lut16_pipeline: KernelHandle,
+    /// Arm A2: arm A's layout and math with a vectorised skeleton
+    /// (`uint4` weight loads, `float4` X loads). Requires 16-byte-aligned
+    /// payload region bases; see the kernel docs.
+    pub mxfp4g_split_lut16_vec_pipeline: KernelHandle,
     pub mxfp4g_inter_lut16_pipeline: KernelHandle,
     pub mxfp4g_inter_pair_pipeline: KernelHandle,
     pub mxfp4g_inter_magsign_pipeline: KernelHandle,
@@ -88,6 +92,11 @@ pub struct QuantKernels {
     /// binding arities, so a call site cannot bind one without knowing
     /// which it got.
     pub mxfp4_grouped_binding: ExpertScaleBinding,
+    /// Which arm [`Self::mxfp4_grouped_pipeline`] is. The encode path
+    /// needs the identity, not just the pipeline: the vectorised arm
+    /// carries an alignment precondition it must check per descriptor
+    /// table, falling back to the scalar split arm when it fails.
+    pub mxfp4_grouped_arm: shaders::mxfp4_grouped_experts::Mxfp4Arm,
 }
 
 /// How a grouped-expert kernel receives its dequantisation scales.
@@ -145,6 +154,8 @@ impl QuantKernels {
 
         let mxfp4g_split_lut16_pipeline =
             h::<shaders::mxfp4_grouped_experts::KernelSplitLut16>(device, library);
+        let mxfp4g_split_lut16_vec_pipeline =
+            h::<shaders::mxfp4_grouped_experts::KernelSplitLut16Vec>(device, library);
         let mxfp4g_inter_lut16_pipeline =
             h::<shaders::mxfp4_grouped_experts::KernelInterLut16>(device, library);
         let mxfp4g_inter_pair_pipeline =
@@ -180,10 +191,12 @@ impl QuantKernels {
         use shaders::mxfp4_grouped_experts::Mxfp4Arm;
         let mxfp4_grouped_pipeline = match options.mxfp4_arm {
             Mxfp4Arm::SplitLut16 => mxfp4g_split_lut16_pipeline.clone(),
+            Mxfp4Arm::SplitLut16Vec => mxfp4g_split_lut16_vec_pipeline.clone(),
             Mxfp4Arm::InterLut16 => mxfp4g_inter_lut16_pipeline.clone(),
             Mxfp4Arm::InterPair => mxfp4g_inter_pair_pipeline.clone(),
             Mxfp4Arm::InterMagSign => mxfp4g_inter_magsign_pipeline.clone(),
         };
+        let mxfp4_grouped_arm = options.mxfp4_arm;
         let mxfp4_grouped_binding = if options.mxfp4_arm.is_split_scale() {
             ExpertScaleBinding::SplitE8M0
         } else {
@@ -197,6 +210,7 @@ impl QuantKernels {
             q6k_grouped_experts_pipeline,
             q4k_grouped_experts_pipeline,
             mxfp4g_split_lut16_pipeline,
+            mxfp4g_split_lut16_vec_pipeline,
             mxfp4g_inter_lut16_pipeline,
             mxfp4g_inter_pair_pipeline,
             mxfp4g_inter_magsign_pipeline,
@@ -213,6 +227,7 @@ impl QuantKernels {
             q6k_matvec_8sg_pipeline,
             mxfp4_grouped_pipeline,
             mxfp4_grouped_binding,
+            mxfp4_grouped_arm,
         }
     }
 

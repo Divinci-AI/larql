@@ -26,7 +26,10 @@
 //!     bit. That tail, not any global scale table, is the entire difference.
 //!
 //! Usage:
-//!   cargo run --release -p larql-compute-metal --example bench_mxfp4_layouts
+//!   cargo run --release -p larql-compute-metal --example bench_mxfp4_layouts [N K TOP_K]
+//!
+//! Defaults are the K3 expert branch; `5760 2880 4` and `2880 2880 4` are
+//! gpt-oss-20b's fused gate/up and down shapes.
 
 extern crate blas_src;
 
@@ -39,9 +42,17 @@ fn main() {
 fn main() {
     use larql_compute_metal::diag::mxfp4_layout;
 
-    const N: usize = 3584; // K3 expert branch rows
-    const K: usize = 3072; // latent reduction
-    const TOP_K: usize = 16;
+    let mut args = std::env::args().skip(1);
+    let mut dim = |default: usize| {
+        args.next()
+            .map(|a| a.parse().expect("N K TOP_K must be integers"))
+            .unwrap_or(default)
+    };
+    let n: usize = dim(3584); // K3 expert branch rows
+    let k: usize = dim(3072); // latent reduction
+    let top_k: usize = dim(16);
+    #[allow(non_snake_case)]
+    let (N, K, TOP_K) = (n, k, top_k);
     const ROOFLINE: f64 = 367.0;
     const BATCH: usize = 8;
     const WARMUP: usize = 3;
@@ -78,8 +89,24 @@ fn main() {
     println!();
 
     let get = |i: usize| &arms[i];
-    let (a, b, c, d, g, e, f) = (get(0), get(1), get(2), get(3), get(4), get(5), get(6));
-    println!("--- the four pre-registered comparisons ---");
+    let (a, a2, b, c, d, g, e, f) = (
+        get(0),
+        get(1),
+        get(2),
+        get(3),
+        get(4),
+        get(5),
+        get(6),
+        get(7),
+    );
+    println!("--- the pre-registered comparisons ---");
+    {
+        let pct = 100.0 * (a.ms / a2.ms - 1.0);
+        println!(
+            "  {:<28} {:>+7.2}%   ({:.4} -> {:.4} ms)",
+            "A2 - A vectorised skeleton", pct, a.ms, a2.ms
+        );
+    }
     let cmp = |label: &str, from: &mxfp4_layout::ArmResult, to: &mxfp4_layout::ArmResult| {
         let pct = 100.0 * (from.ms / to.ms - 1.0);
         println!(

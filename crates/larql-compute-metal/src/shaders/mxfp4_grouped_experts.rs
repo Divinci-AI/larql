@@ -173,6 +173,78 @@ kernel void mxfp4g_split_lut16(
 }
 "#;
 
+/// Arm A2: arm A's layout and math with a vectorised skeleton.
+///
+/// The tournament's ceiling probes said the split kernel's deficit on the
+/// gpt-oss down shape is the **skeleton**, not the decode: arm A streams
+/// each 16-byte group with sixteen single-`uchar` loads, so consecutive
+/// lanes read addresses 16 bytes apart and every load moves one byte. Here
+/// each group is one `uint4` load — consecutive lanes read consecutive
+/// 16-byte chunks (the coalescing shape `q6k_grouped_experts` already has)
+/// and the issue rate drops 16×. X moves through `float4`s the same way.
+///
+/// Alignment contract, stated because `uint4`/`float4` device loads
+/// require it: every payload region base must be 16-byte aligned and
+/// `XSTRIDE` a multiple of 4 floats. Both hold for the bench fixture and
+/// for VINDEX3 payload regions (per-expert payloads are whole groups of
+/// 16 bytes); a caller that cannot guarantee them keeps arm A.
+const KERNEL_A2: &str = r#"
+inline float mxg_dot8(uint v, float4 xa, float4 xb) {
+    return MXG_LUT[v         & 0x0Fu] * xa.x
+         + MXG_LUT[(v >>  4u) & 0x0Fu] * xa.y
+         + MXG_LUT[(v >>  8u) & 0x0Fu] * xa.z
+         + MXG_LUT[(v >> 12u) & 0x0Fu] * xa.w
+         + MXG_LUT[(v >> 16u) & 0x0Fu] * xb.x
+         + MXG_LUT[(v >> 20u) & 0x0Fu] * xb.y
+         + MXG_LUT[(v >> 24u) & 0x0Fu] * xb.z
+         + MXG_LUT[(v >> 28u) & 0x0Fu] * xb.w;
+}
+
+kernel void mxfp4g_split_lut16_vec(
+    device const uchar*  Wp        [[buffer(0)]],
+    device const uint*   offsets   [[buffer(1)]],
+    device const uchar*  Ws        [[buffer(2)]],
+    device const uint*   s_offsets [[buffer(3)]],
+    device const float*  X         [[buffer(4)]],
+    device float*        out       [[buffer(5)]],
+    constant uint&       N         [[buffer(6)]],
+    constant uint&       K         [[buffer(7)]],
+    constant uint&       XSTRIDE   [[buffer(8)]],
+    constant uint&       ROWBASE   [[buffer(9)]],
+    constant uint&       ROWSTRIDE [[buffer(10)]],
+    uint2 tg_id [[threadgroup_position_in_grid]],
+    uint  lane  [[thread_index_in_simdgroup]],
+    uint  sg_id [[simdgroup_index_in_threadgroup]])
+{
+    const uint slot = tg_id.y;
+    const uint row  = tg_id.x * MXG_ROWS_PER_TG + sg_id;
+    if (row >= N) { return; }
+
+    const uint groups = K / MXG_GROUP_ELEMS;
+    const uint frow = ROWBASE + row * ROWSTRIDE;
+    const ulong pbase = (ulong)offsets[slot]   + (ulong)frow * groups * MXG_GROUP_BYTES;
+    const ulong sbase = (ulong)s_offsets[slot] + (ulong)frow * groups;
+    device const uint4* row_p = (device const uint4*)(Wp + pbase);
+    device const uchar* row_s = Ws + sbase;
+    device const float4* Xs4 =
+        (device const float4*)(X + (ulong)slot * XSTRIDE);
+
+    float acc = 0.0f;
+    for (uint g = lane; g < groups; g += 32u) {
+        const float scale = mxg_e8m0(row_s[g]);
+        const uint4 w = row_p[g];
+        const uint xb = g * 8u; // group g's X span, in float4s
+        float part = mxg_dot8(w.x, Xs4[xb],      Xs4[xb + 1u])
+                   + mxg_dot8(w.y, Xs4[xb + 2u], Xs4[xb + 3u])
+                   + mxg_dot8(w.z, Xs4[xb + 4u], Xs4[xb + 5u])
+                   + mxg_dot8(w.w, Xs4[xb + 6u], Xs4[xb + 7u]);
+        acc += scale * part;
+    }
+    acc = simd_sum(acc);
+    if (lane == 0u) { out[slot * N + row] = acc; }
+}
+"#;
+
 /// Body shared by the interleaved arms; only the inner decode differs.
 fn interleaved(name: &str, decode: &str) -> String {
     format!(
@@ -320,6 +392,7 @@ pub fn shader() -> String {
     let mut s = String::from(PRELUDE);
     s.push_str(&pair_table());
     s.push_str(KERNEL_A);
+    s.push_str(KERNEL_A2);
     s.push_str(&interleaved("mxfp4g_inter_lut16", DECODE_LUT16));
     s.push_str(&interleaved("mxfp4g_inter_pair", DECODE_PAIR));
     s.push_str(&interleaved("mxfp4g_inter_magsign", DECODE_MAG_SIGN));
@@ -341,6 +414,7 @@ macro_rules! arm {
 }
 
 arm!(KernelSplitLut16, "mxfp4g_split_lut16");
+arm!(KernelSplitLut16Vec, "mxfp4g_split_lut16_vec");
 arm!(KernelInterLut16, "mxfp4g_inter_lut16");
 arm!(KernelInterPair, "mxfp4g_inter_pair");
 arm!(KernelInterMagSign, "mxfp4g_inter_magsign");
@@ -370,8 +444,15 @@ arm!(KernelInterNoX, "mxfp4g_inter_nox");
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
 pub enum Mxfp4Arm {
     /// Arm A — separate packed/scale streams, 4.25 bpw, **exact**.
-    #[default]
     SplitLut16,
+    /// Arm A2 — arm A's layout and math with a vectorised skeleton
+    /// (`uint4` weight loads, `float4` X loads). **Exact**, and the
+    /// tournament winner at every measured expert shape (+47% on the
+    /// gpt-oss down shape, +10-13% elsewhere). Requires every payload
+    /// offset to be 16-byte aligned; the encode path checks the built
+    /// descriptor table and falls back to arm A when it is not.
+    #[default]
+    SplitLut16Vec,
     /// Arm B — interleaved superblock, 16-entry LUT decode.
     InterLut16,
     /// Arm C — interleaved, 256-entry byte-pair LUT decode.
@@ -388,6 +469,7 @@ impl Mxfp4Arm {
     pub fn from_name(name: &str) -> Option<Self> {
         Some(match name.to_ascii_lowercase().as_str() {
             "split_lut16" | "a" => Self::SplitLut16,
+            "split_lut16_vec" | "a2" => Self::SplitLut16Vec,
             "inter_lut16" | "b" => Self::InterLut16,
             "inter_pair" | "c" => Self::InterPair,
             "inter_magsign" | "d" => Self::InterMagSign,
@@ -400,7 +482,7 @@ impl Mxfp4Arm {
     /// An inexact arm may not be parity-gated against the Q6_K transcode,
     /// and may not serve a model claiming lossless expert weights.
     pub fn is_exact(self) -> bool {
-        matches!(self, Self::SplitLut16)
+        matches!(self, Self::SplitLut16 | Self::SplitLut16Vec)
     }
 
     /// Whether this arm's kernel takes the e8m0 exponents as a **separate**
@@ -410,7 +492,7 @@ impl Mxfp4Arm {
     /// depend on `kernels`, so the mapping to a binding shape is made one
     /// level up, where the pipelines live.
     pub fn is_split_scale(self) -> bool {
-        matches!(self, Self::SplitLut16)
+        matches!(self, Self::SplitLut16 | Self::SplitLut16Vec)
     }
 }
 
@@ -448,6 +530,7 @@ mod tests {
         let src = shader();
         for name in [
             "mxfp4g_split_lut16",
+            "mxfp4g_split_lut16_vec",
             "mxfp4g_inter_lut16",
             "mxfp4g_inter_pair",
             "mxfp4g_inter_magsign",
@@ -455,8 +538,10 @@ mod tests {
             "mxfp4g_inter_affine",
             "mxfp4g_inter_nox",
         ] {
+            // The `(` closes the name: `mxfp4g_split_lut16` must not also
+            // count its `_vec` sibling.
             assert_eq!(
-                src.matches(&format!("kernel void {name}")).count(),
+                src.matches(&format!("kernel void {name}(")).count(),
                 1,
                 "{name}"
             );
@@ -488,11 +573,20 @@ mod tests {
                 "arm A must bind {name} at buffer({slot})"
             );
         }
+        // Arm A2 binds the identical table — same slots, same names — so the
+        // two split arms are interchangeable at every call site.
+        let flat_vec = KERNEL_A2.split_whitespace().collect::<Vec<_>>().join(" ");
+        for (name, slot) in [("s_offsets", 3), ("ROWBASE", 9), ("ROWSTRIDE", 10)] {
+            assert!(
+                flat_vec.contains(&format!("{name} [[buffer({slot})]]")),
+                "arm A2 must bind {name} at buffer({slot})"
+            );
+        }
         // The interleaved arms deliberately do NOT carry either: they keep the
         // shared inline-scale arity, which is also why they can only serve a
         // contiguous-halves bank. A call site holding an interleaved bank must
         // refuse rather than pick one of them.
-        let interleaved_src: String = src.replace(KERNEL_A, "");
+        let interleaved_src: String = src.replace(KERNEL_A, "").replace(KERNEL_A2, "");
         assert!(!interleaved_src.contains("s_offsets"));
         assert!(!interleaved_src.contains("ROWSTRIDE"));
     }

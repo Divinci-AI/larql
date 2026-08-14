@@ -9,12 +9,14 @@
 
 use crate::shaders::mxfp4_grouped_experts::Mxfp4Arm;
 
-/// Arm A is the default, and it is the exact one. Both halves matter:
+/// Arm A2 is the default, and it is an exact one. Both halves matter:
 /// the default must be servable under a losslessness claim without the
-/// caller opting in to anything.
+/// caller opting in to anything. (A2 additionally carries an alignment
+/// precondition, but the encode path demotes it to arm A — also exact —
+/// rather than weakening the claim.)
 #[test]
 fn default_arm_is_exact() {
-    assert_eq!(Mxfp4Arm::default(), Mxfp4Arm::SplitLut16);
+    assert_eq!(Mxfp4Arm::default(), Mxfp4Arm::SplitLut16Vec);
     assert!(Mxfp4Arm::default().is_exact());
 }
 
