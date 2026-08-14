@@ -84,53 +84,66 @@ fn main() {
 
     let mut q6k_token_ms = 0.0;
     let mut mxfp4_token_ms = 0.0;
+    let mut mxfp4_vec_token_ms = 0.0;
     for s in &stages {
         let (_ungrouped, q6k_gbs) =
             kernel_profile::profile_grouped_experts(s.n, s.k, TOP_K, BATCH, WARMUP, ITERS);
         let arms = mxfp4_layout::race(s.n, s.k, TOP_K, BATCH, WARMUP, ITERS);
-        let split = &arms[0]; // arm A: split / LUT16 — the production pipeline
+        // Arm A (scalar split) and arm A2 (vectorised split) — the
+        // production pipeline is A2 with A as the alignment fallback.
+        let split = &arms[0];
+        let split_vec = &arms[1];
         assert!(
-            split.name.contains("split"),
-            "arm order changed; refusing to report the wrong kernel: {}",
-            split.name
+            split.name.contains("split") && split_vec.name.contains("vec"),
+            "arm order changed; refusing to report the wrong kernel: {} / {}",
+            split.name,
+            split_vec.name
         );
 
         let stage_bytes =
             |bpw: f64| weights_per_expert(s.n, s.k) * (bpw / 8.0) * (TOP_K * LAYERS) as f64;
         let q6k_ms = stage_bytes(Q6K_BPW) / (q6k_gbs * 1e6);
         let mx_ms = stage_bytes(MXFP4_BPW) / (split.gbs * 1e6);
+        let mxv_ms = stage_bytes(MXFP4_BPW) / (split_vec.gbs * 1e6);
         q6k_token_ms += q6k_ms;
         mxfp4_token_ms += mx_ms;
+        mxfp4_vec_token_ms += mxv_ms;
 
         println!(
-            "  {:<8} Q6_K  {:>6.1} GB/s  eta {:>5.2}   -> {:>6.3} ms/token",
+            "  {:<8} Q6_K       {:>6.1} GB/s  eta {:>5.2}   -> {:>6.3} ms/token",
             s.name,
             q6k_gbs,
             q6k_gbs / ROOFLINE,
             q6k_ms
         );
-        println!(
-            "  {:<8} MXFP4 {:>6.1} GB/s  eta {:>5.2}   -> {:>6.3} ms/token   (oracle {:.2e})",
-            s.name,
-            split.gbs,
-            split.eta(ROOFLINE),
-            mx_ms,
-            split.max_abs_diff
-        );
+        for (label, arm, ms) in [("MXFP4 a", split, mx_ms), ("MXFP4 a2", split_vec, mxv_ms)] {
+            println!(
+                "  {:<8} {:<10} {:>6.1} GB/s  eta {:>5.2}   -> {:>6.3} ms/token   (oracle {:.2e})",
+                s.name,
+                label,
+                arm.gbs,
+                arm.eta(ROOFLINE),
+                ms,
+                arm.max_abs_diff
+            );
+        }
     }
 
     println!();
     println!("--- per-token expert read predictions ---");
     println!(
-        "  Q6_K  reads {:>7.1} MB -> {:.3} ms    MXFP4 reads {:>7.1} MB -> {:.3} ms",
+        "  Q6_K  reads {:>7.1} MB -> {:.3} ms    MXFP4 reads {:>7.1} MB -> a {:.3} / a2 {:.3} ms",
         token_bytes(Q6K_BPW) / 1e6,
         q6k_token_ms,
         token_bytes(MXFP4_BPW) / 1e6,
         mxfp4_token_ms,
+        mxfp4_vec_token_ms,
     );
     println!(
-        "  predicted delta {:.3} ms  |  e2e measured delta 1.25 ms (GPU busy 11.56 -> 10.31)",
-        q6k_token_ms - mxfp4_token_ms
+        "  predicted deltas: a {:.3} ms (e2e 1.25), a2-over-a {:.3} ms (e2e 0.46, \
+         GPU busy 11.56 -> 10.31 -> 9.93)",
+        q6k_token_ms - mxfp4_token_ms,
+        mxfp4_token_ms - mxfp4_vec_token_ms
     );
     println!();
     println!("  If the predicted delta lands near 1.25 ms, the kernels are already");

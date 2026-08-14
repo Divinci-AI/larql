@@ -259,6 +259,23 @@ pub trait QuantMatVec {
         None
     }
 
+    /// Q4_K matvec + GPU partial top-K in one submission — the Q4_K
+    /// sibling of [`Self::q4_matvec_topk`], for lm_heads stored as Q4_K.
+    /// Returns up to `top_k` `(row, score)` pairs sorted descending
+    /// without the full-vocab scores readback. `None` when not
+    /// specialised or `top_k` exceeds the kernel's per-TG capacity; the
+    /// caller falls back to [`Self::q4k_matvec`] + a CPU reduce.
+    fn q4k_matvec_topk(
+        &self,
+        _q4k_data: &[u8],
+        _x: &[f32],
+        _num_rows: usize,
+        _hidden: usize,
+        _top_k: usize,
+    ) -> Option<Vec<(u32, f32)>> {
+        None
+    }
+
     /// Fused two-weight Q4_K matvec sharing one input vector.
     ///
     /// `out_a[N] = W_a[N, K] · x[K]`, `out_b[N] = W_b[N, K] · x[K]`

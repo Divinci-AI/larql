@@ -123,6 +123,22 @@ impl VectorIndex {
                 if vocab > 0 {
                     if let Some(x) = query.as_slice() {
                         if let Some((cols, xp)) = q4k_row_query(q4_data, x, vocab, hidden) {
+                            // Small-K fast path: matvec + partial top-K in
+                            // one GPU submission — the full-vocab scores
+                            // never come back to the host. Greedy decode
+                            // (top_k ≤ 8) lives here; larger K falls
+                            // through to the full readback below.
+                            if let Some(hits) =
+                                backend.q4k_matvec_topk(q4_data, xp.as_query(x), vocab, cols, top_k)
+                            {
+                                static FIRED: std::sync::Once = std::sync::Once::new();
+                                FIRED.call_once(|| {
+                                    eprintln!(
+                                        "[lm-head] q4k matvec+topk fused path active (k={top_k})"
+                                    )
+                                });
+                                return hits;
+                            }
                             if let Some(scores_vec) =
                                 backend.q4k_matvec(q4_data, xp.as_query(x), vocab, cols)
                             {
