@@ -134,7 +134,7 @@ impl MetalBackend {
         match scratch.format {
             larql_compute::QuantFormat::MXFP4 => {
                 use larql_models::quant::mxfp4::FusedHalf;
-                let (kh, binding) = self.quant.grouped_experts_for(scratch.format);
+                let (kh, binding) = self.mxfp4_grouped_for_table(table);
                 assert_eq!(
                     binding,
                     crate::kernels::quant::ExpertScaleBinding::SplitE8M0,
@@ -247,7 +247,7 @@ impl MetalBackend {
                 use crate::shaders::mxfp4_grouped_experts::{
                     ROW_BASE_IDENTITY, ROW_STRIDE_IDENTITY,
                 };
-                let (kh, _) = self.quant.grouped_experts_for(scratch.format);
+                let (kh, _) = self.mxfp4_grouped_for_table(table);
                 let scale_base = table
                     .down_scale_base
                     .as_ref()
@@ -332,6 +332,28 @@ impl MetalBackend {
 }
 
 impl MetalBackend {
+    /// The grouped MXFP4 kernel to encode this table with: the
+    /// options-selected arm, demoted to the scalar split arm when the
+    /// vectorised arm's 16-byte payload-alignment precondition does not
+    /// hold for this bank. The demotion was already announced once at
+    /// table build; here it must only be correct.
+    fn mxfp4_grouped_for_table(
+        &self,
+        table: &MoeExpertDescriptorTable,
+    ) -> (
+        &crate::kernels::KernelHandle,
+        crate::kernels::quant::ExpertScaleBinding,
+    ) {
+        use crate::shaders::mxfp4_grouped_experts::Mxfp4Arm;
+        let (kh, binding) = self
+            .quant
+            .grouped_experts_for(larql_compute::QuantFormat::MXFP4);
+        if self.quant.mxfp4_grouped_arm == Mxfp4Arm::SplitLut16Vec && !table.payload_offsets_vec16 {
+            return (&self.quant.mxfp4g_split_lut16_pipeline, binding);
+        }
+        (kh, binding)
+    }
+
     /// Everything the GPU route needs to hold, checked BEFORE any
     /// command-buffer state is touched — a `false` here means the CPU
     /// arm proceeds with nothing to roll back.

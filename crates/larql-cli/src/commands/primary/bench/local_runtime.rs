@@ -69,21 +69,52 @@ pub(super) fn run_larql(
 
     let cached_layers = CachedLayerGraph::from_residuals(Vec::new());
 
-    // Pre-warm: one generate call to allocate the KV cache and populate the
-    // Metal buffer caches. The prefill timer would otherwise include this
-    // one-time allocation cost.
-    if metal {
-        let num_layers = weights.num_layers;
-        let _ = generate(
-            &mut weights,
+    // Composed bench: the routed container replaces the expert-bank
+    // authority and nothing else, exactly as `larql run --routed-from`.
+    // Opened before any timer so composition refusals cannot read as a
+    // slow prefill.
+    let routed = args
+        .routed_from
+        .as_deref()
+        .map(|dir| {
+            larql_inference::ffn::ContainerRoutedBackend::open(
+                std::path::Path::new(dir),
+                &weights,
+                true,
+            )
+        })
+        .transpose()
+        .map_err(|e| format!("--routed-from refused: {e}"))?;
+    let num_layers = weights.num_layers;
+    let generate_n = |weights: &mut larql_models::ModelWeights, max_tokens: usize| match &routed {
+        Some(routed) => larql_inference::layer_graph::generate_routed(
+            weights,
             &tokenizer,
             &token_ids,
-            1,
+            max_tokens,
             &index,
             &*backend,
             &cached_layers,
             0..num_layers,
-        );
+            routed,
+        ),
+        None => generate(
+            weights,
+            &tokenizer,
+            &token_ids,
+            max_tokens,
+            &index,
+            &*backend,
+            &cached_layers,
+            0..num_layers,
+        ),
+    };
+
+    // Pre-warm: one generate call to allocate the KV cache and populate the
+    // Metal buffer caches. The prefill timer would otherwise include this
+    // one-time allocation cost.
+    if metal {
+        let _ = generate_n(&mut weights, 1);
     }
 
     // NOTE: `--profile` enables engine-side stage timers
@@ -97,18 +128,8 @@ pub(super) fn run_larql(
     // masked the actual W10 deltas. Users who specifically want the
     // GPU-stage breakdown set `LARQL_PROFILE_SPLIT=1` explicitly.
     let max_tokens = args.warmup + args.tokens;
-    let num_layers = weights.num_layers;
     let t0 = Instant::now();
-    let result = generate(
-        &mut weights,
-        &tokenizer,
-        &token_ids,
-        max_tokens,
-        &index,
-        &*backend,
-        &cached_layers,
-        0..num_layers,
-    );
+    let result = generate_n(&mut weights, max_tokens);
     let wall_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
     if args.verbose {

@@ -287,6 +287,8 @@ fn q4k_end_to_end_from_synthetic_safetensors() {
         larql_vindex::WriteWeightsOptions::default(),
         larql_vindex::KquantWriteOptions::default(),
         false,
+        larql_vindex::ExtractionRequest::Legacy,
+        None,
         &mut cb,
     )
     .unwrap();
@@ -458,6 +460,8 @@ fn q4k_feature_major_down_round_trip() {
         larql_vindex::WriteWeightsOptions::default(),
         larql_vindex::KquantWriteOptions::default(),
         false,
+        larql_vindex::ExtractionRequest::Legacy,
+        None,
         &mut cb,
     )
     .unwrap();
@@ -562,6 +566,8 @@ fn legacy_q4k_filenames_load_via_dual_read() {
         larql_vindex::WriteWeightsOptions::default(),
         larql_vindex::KquantWriteOptions::default(),
         false,
+        larql_vindex::ExtractionRequest::Legacy,
+        None,
         &mut cb,
     )
     .unwrap();

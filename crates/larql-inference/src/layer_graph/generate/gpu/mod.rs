@@ -80,8 +80,6 @@ pub fn generate(
     )
 }
 
-/// Fallible variant of [`generate`].
-#[allow(clippy::too_many_arguments)]
 /// [`generate`] with the expert-bank authority supplied by a routed
 /// VINDEX3 container — the composed Metal serve path. Everything except
 /// the routed banks is identical to [`generate`].
@@ -114,6 +112,8 @@ pub fn generate_routed(
     )
 }
 
+/// Fallible variant of [`generate`].
+#[allow(clippy::too_many_arguments)]
 pub fn try_generate(
     weights: &mut ModelWeights,
     tokenizer: &tokenizers::Tokenizer,
@@ -258,6 +258,14 @@ where
             .unwrap_or(false);
     if !backend_supports_fused_q4_pipeline(backend) || (needs_per_layer_embed && !metal_ple_enabled)
     {
+        // The CPU fallback runs the spine's banks; falling into it with a
+        // routed override would silently measure or serve the wrong bytes.
+        if routed.is_some() {
+            return GenerateResult::empty_error(GenerateError::missing_weights(
+                "the routed expert-bank override requires the fused GPU pipeline; \
+                 this backend would silently serve the spine's banks instead",
+            ));
+        }
         return generate_via_cpu_q4k(weights, tokenizer, token_ids, max_tokens, index, eos);
     }
 
@@ -268,6 +276,15 @@ where
     // backend's default impl does nothing.
     for mmap in weights.packed_mmaps.values() {
         backend.register_weight_region(&mmap[..]);
+    }
+    // The routed container's banks are weight regions of the same standing:
+    // when the expert-bank authority is overridden, the override's bytes are
+    // what the per-expert offsets bind into, so they must be registered
+    // before the residency set is sealed.
+    if let Some(routed) = routed {
+        for region in routed.weight_regions() {
+            backend.register_weight_region(region);
+        }
     }
     // Every region is registered; let the backend prepare them once. Metal
     // uses this to declare an explicit residency set instead of paying
@@ -590,6 +607,7 @@ mod tests {
             SamplingConfig::greedy(),
             &EosConfig::builtin(),
             |_, _, _| fired = true,
+            None,
         );
         assert!(result.tokens.is_empty());
         assert!(!fired, "callback must not fire when max_tokens == 0");
@@ -748,6 +766,7 @@ mod tests {
             SamplingConfig::greedy(),
             &EosConfig::builtin(),
             |id, _text, _prob| streamed.push(id),
+            None,
         );
         assert!(
             result.error.is_none(),

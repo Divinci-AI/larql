@@ -123,6 +123,13 @@ pub struct BenchArgs {
     #[arg(long, value_name = "SHARDS")]
     pub moe_shards: Option<String>,
 
+    /// Serve the routed expert banks from a VINDEX3 container, exactly as
+    /// `larql run --routed-from` composes them. Everything else — the
+    /// prompt, the instrument, the spine — is identical to the plain
+    /// bench, so a run without this flag is the controlled comparison.
+    #[arg(long, value_name = "DIR")]
+    pub routed_from: Option<String>,
+
     /// Dispatch strategy for --moe-shards.
     ///   streaming  (default) — one round-trip per layer per token.
     ///   batch      — all layers in one round-trip per token (approximate).

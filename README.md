@@ -680,12 +680,21 @@ Dense and full-precision MoE models support all operations (DESCRIBE, WALK, INFE
 
 **GPT-OSS-20B is served end to end (2026-08-10).** `larql run
 gpt-oss-20b-q4k.vindex` generates coherent harmony-format output on CPU
-(~60 ms/token) and on Metal at **16.7 ms/token (59.8 tok/s)** with the
-identical greedy trajectory — see the [Pure MoE
-benchmark](#pure-moe-gpt-oss-20b-q6_k-m3-max) and
+(~60 ms/token) and on Metal with the identical greedy trajectory — see
+the [Pure MoE benchmark](#pure-moe-gpt-oss-20b-q6_k-m3-max) and
 [`docs/k3-funnel.md`](docs/k3-funnel.md) §4.11. The experts serve from a
 lossless MXFP4→Q6_K transcode; sliding-window + YaRN attention, per-layer
 sinks, and all four projection biases are applied on both backends.
+
+**Native MXFP4 experts are served end to end (2026-08-14).** `larql run
+<vindex> --routed-from <container> --metal` (with `LARQL_GPU_ROUTE=1`)
+composes the Q6_K spine with a VINDEX3 container's native MXFP4 expert
+banks — payloads, paired e8m0 scale streams, layout and format all owned
+by the container, admission complete-or-refuse with tamper-tested
+negative controls. Same machine, same session, paired: Q6_K **68.3
+tok/s**, native MXFP4 **77.2 tok/s** (12.95 ms/token) through the
+GPU-resident route (one command buffer per token, zero route-dependent
+host work).
 
 **GPT-OSS attention sinks (2026-07-29).** GPT-OSS attention uses a learned per-head *sink* logit that competes in the softmax and is then discarded, so attention weights over real positions deliberately sum to less than one. Until 2026-07-29 larql neither extracted nor applied it — along with all four projection biases — so 5 of 11 attention tensors per layer were silently dropped and the forward pass was systematically wrong. Both are now extracted and applied on the CPU and Metal paths, with numerical parity tests against the reference implementation. Details and the measured sink magnitudes are in [`docs/k3-funnel.md`](docs/k3-funnel.md) §4.6.
 
@@ -838,13 +847,21 @@ every rung of this ladder (2026-08-10, `docs/k3-funnel.md` §4.11):
 | 22.7 | 44.0 | **grouped expert kernels** — all selected experts in one 2-D dispatch (η 0.64→0.90) |
 | 22.6 | — | **fused attention** (no-QK-norm + QKV biases in `attn_fused`): attention GPU 8→3.3 ms, wall unmoved — the sync structure was the term |
 | 16.7 | **59.8** | **merged command buffers** — GPU MoE combine; a layer's experts + the next layer's attention share one CB (one wait/layer) |
+| 14.6 | 68.3 | **GPU-resident routing** (`LARQL_GPU_ROUTE=1`) — router + top-k + expert dispatch as GPU dataflow; **one command buffer per token**, witness counters prove zero route-dependent host work |
+| 13.4 | 74.6 | **native MXFP4 expert banks** (`--routed-from` a VINDEX3 container) — 4.25 bpw experts replace the 6.56 bpw Q6_K transcode; expert reads drop 1 959 → 1 269 MB/token |
+| 12.95 | **77.2** | **vectorised MXFP4 kernel** (`uint4` group loads; arm `a2`, the default) — the three rows above are one paired same-session A/B/A ladder (2026-08-14) |
 
 CPU decode on the same vindex: ~60 ms/token (15-17 tok/s). Comparison
-framing: native-MXFP4 engines (oMLX, ~4.25 bpw experts) report ~85-90 tok/s
-on this class of machine at 1k-4k context — LARQL is moving ~1.54× the expert
-bytes, so 59.8 tok/s is ≈92 tok/s byte-normalised. The remaining budget is
-~11.5 ms MoE (bandwidth), ~3.3 ms attention, ~2 ms sync residue; the
-MXFP4-native path (shaders already in-tree) is the open experiment.
+framing: native-MXFP4 engines (oMLX, ~4.25 bpw experts) report ~83-90 tok/s
+on this class of machine at 1k-4k context. With the native path served,
+the comparison is apples-to-apples: **77.2 vs ~83** is a ~0.9 ms/token gap,
+fully attributed — ~1.09 ms of the lm_head stage is Q4_K matvec at the
+bandwidth ceiling (irreducible as stored), ~0.5 ms is the command-buffer
+boundary between the decode submission and the lm_head submission (the
+open experiment: fold final norm → lm_head → top-K into the decode CB).
+Kernel-level attribution for the MXFP4 rungs: measured grouped-kernel
+bandwidth predicts the expert-read delta within 0.1 ms of the e2e number,
+so nothing is hiding in integration.
 
 ### Load-bearing environment flags (serving & measurement)
 
@@ -857,6 +874,8 @@ flag state. The ones that change what a measured number means:
 | Flag | Default | Effect |
 |---|---|---|
 | `LARQL_SKIP_MOE=1` | off | Bypass MoE entirely (the ceiling-arm flag above) — local AND grid paths |
+| `LARQL_GPU_ROUTE=1` | off | GPU-resident MoE routing (one CB/token). Off, decode falls back to the legacy CPU-routed path — a healthy-looking run at ~2/3 the speed, so any recorded MoE number must state this flag |
+| `LARQL_MXFP4_ARM=<a\|a2\|b\|c\|d>` | `a2` | MXFP4 grouped-expert kernel arm. `a2` (vectorised split, exact) is the default and demotes itself to `a` per layer bank when payload offsets are not 16-byte aligned — loudly, never silently |
 | `LARQL_Q4K_DIRECT_ATTN` / `_ATTN_INT8` / `_LM_HEAD` / `_DIRECT_FFN` / `_Q4K_ASM` / `_SPIN_POOL` | **on** (`=0` opts out) | CPU decode fast-path stages; A/B against the f32 path |
 | `LARQL_COMPUTE_CONCURRENCY=N` | auto (physical cores) | Expert-server batch compute parallelism (`layer_batch`) — load-bearing for tier throughput |
 | `LARQL_DISABLE_Q8K_WIRE=1` | off | Fall back from the Q8K predispatch wire to f32/f16 |

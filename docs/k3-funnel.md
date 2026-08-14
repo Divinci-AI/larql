@@ -888,6 +888,27 @@ accelerator, not a rescue operation.
 panics on pure MoE — a separate dense-assuming path; GB-style bits/token
 scoring of the served vindex (§4.6.8's scorer gap) remains unbuilt.
 
+### 4.12 GPU-resident routing + native MXFP4 experts — 59.8 → 77.2 tok/s (2026-08-13/14)
+
+Both "next MoE wins" named at the end of §4.11 landed. GPU routing (PR
+#249) turned the route into an index — router matvec, top-k, and the
+descriptor gather run as GPU dataflow, one command buffer per token,
+route-witness counters pinned at zero (opt-in: `LARQL_GPU_ROUTE=1`) —
+59.8 → 67.5 tok/s. The representation win followed on
+`feat/moe-g4b3-region-registration`: `--routed-from` serves a VINDEX3
+container's native MXFP4 banks (paired e8m0 streams, complete-or-refuse
+admission with five tamper controls) over the Q6_K spine, and a
+vectorised split kernel (`uint4` group loads, arm `a2`, oracle-exact)
+recovers the skeleton deficit the K2 ceiling probes located. Paired
+same-session ladder: Q6_K 68.3 → MXFP4 74.6 → **77.2 tok/s** (12.95
+ms/token). Kernel-measured bandwidth predicts the expert-read delta
+within ~0.1 ms of e2e — no integration tax. The remaining ~0.9 ms to
+the MLX-class ~83 reference is fully attributed: ~1.09 ms lm_head
+Q4_K matvec at bandwidth ceiling (irreducible as stored) + ~0.5 ms
+decode↔lm_head command-buffer boundary (open: fold final norm →
+lm_head → top-K into the decode CB). Full ladder + evidence: ROADMAP
+"Native MXFP4 served end to end (2026-08-14)".
+
 ## 5. Claims under test
 
 | ID | Claim | Falsifier |

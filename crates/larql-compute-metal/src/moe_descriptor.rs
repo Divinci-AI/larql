@@ -71,6 +71,11 @@ pub struct MoeExpertDescriptorTable {
     pub gate_up_expert_bytes: usize,
     pub down_expert_bytes: usize,
     pub num_experts: usize,
+    /// Whether every payload offset is 16-byte aligned — the vectorised
+    /// split kernel's load precondition, computed once at build. Base
+    /// buffers are page-aligned (registered mmapped regions or fresh
+    /// Metal allocations), so the per-expert offsets are the whole fact.
+    pub payload_offsets_vec16: bool,
 }
 
 /// One route's GPU-resident bindings, produced by `moe_descriptor_gather`:
@@ -235,6 +240,21 @@ impl MetalBackend {
         };
         let descs = self.bufs.transient_from_bytes(bytes);
 
+        let payload_offsets_vec16 = descs_host
+            .iter()
+            .all(|d| d.gate_up_payload_off % 16 == 0 && d.down_payload_off % 16 == 0);
+        if !payload_offsets_vec16
+            && self.quant.mxfp4_grouped_arm
+                == crate::shaders::mxfp4_grouped_experts::Mxfp4Arm::SplitLut16Vec
+        {
+            // Once per layer bank, at build — fired evidence that the
+            // vectorised arm was demoted, never a silent slow path.
+            eprintln!(
+                "[moe-descriptor] payload offsets not 16-byte aligned; \
+                 vectorised MXFP4 arm demoted to scalar for this bank"
+            );
+        }
+
         Some(MoeExpertDescriptorTable {
             descs,
             descs_host,
@@ -247,6 +267,7 @@ impl MetalBackend {
             gate_up_expert_bytes,
             down_expert_bytes,
             num_experts,
+            payload_offsets_vec16,
         })
     }
 

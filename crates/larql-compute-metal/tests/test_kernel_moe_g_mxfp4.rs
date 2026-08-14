@@ -203,6 +203,15 @@ fn mxfp4_descriptor_arm_matches_production_bitwise() {
         .build_expert_descriptor_table(&moe, INTER, HIDDEN)
         .expect("split-scale table builds (C1b class)");
     assert!(table.gate_up_scale_base.is_some() && table.down_scale_base.is_some());
+    // Gate–claim congruence: the arm this parity licenses is the arm the
+    // backend will actually encode. The vectorised default only fires on
+    // a 16-aligned table, so pin that this fixture IS one — otherwise a
+    // silent demotion would leave the default arm parity-ungated.
+    assert!(
+        table.payload_offsets_vec16,
+        "fixture payload offsets must be 16-byte aligned so the parity \
+         gate exercises the default (vectorised) arm"
+    );
     let h = h_post_attn();
 
     for seed in 0..4u32 {

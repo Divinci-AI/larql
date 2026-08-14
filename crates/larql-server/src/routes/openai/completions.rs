@@ -388,6 +388,7 @@ fn stream_completions(
                     early_stop = true;
                 }
             },
+            None,
         );
 
         let finish_reason: &'static str = if early_stop || result.tokens.len() < max_tokens {

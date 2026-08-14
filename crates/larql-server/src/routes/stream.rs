@@ -474,6 +474,7 @@ async fn handle_stream_generate(
             sampling,
             &eos,
             on_token,
+            None,
         );
     });
 

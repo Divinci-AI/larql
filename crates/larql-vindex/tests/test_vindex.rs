@@ -2627,6 +2627,8 @@ fn streaming_extract_from_safetensors() {
         larql_vindex::WriteWeightsOptions::default(),
         larql_vindex::KquantWriteOptions::default(),
         false,
+        larql_vindex::ExtractionRequest::Legacy,
+        None,
         &mut cb,
     )
     .unwrap();
@@ -2832,6 +2834,8 @@ fn streaming_extract_q4k_from_safetensors() {
         larql_vindex::WriteWeightsOptions::default(),
         larql_vindex::KquantWriteOptions::default(),
         false,
+        larql_vindex::ExtractionRequest::Legacy,
+        None,
         &mut cb,
     )
     .unwrap();
@@ -3847,6 +3851,8 @@ fn streaming_extract_q4k_carries_ple_tensors() {
         larql_vindex::WriteWeightsOptions::default(),
         larql_vindex::KquantWriteOptions::default(),
         false,
+        larql_vindex::ExtractionRequest::Legacy,
+        None,
         &mut cb,
     )
     .unwrap();
@@ -4028,6 +4034,8 @@ fn streaming_extract_noquant_carries_ple_tensors() {
         larql_vindex::WriteWeightsOptions::default(),
         larql_vindex::KquantWriteOptions::default(),
         false,
+        larql_vindex::ExtractionRequest::Legacy,
+        None,
         &mut cb,
     )
     .unwrap();
@@ -4199,6 +4207,8 @@ fn load_model_weights_rejects_ple_arch_with_missing_sidecars() {
         larql_vindex::WriteWeightsOptions::default(),
         larql_vindex::KquantWriteOptions::default(),
         false,
+        larql_vindex::ExtractionRequest::Legacy,
+        None,
         &mut cb,
     )
     .unwrap();
@@ -4412,6 +4422,8 @@ fn streaming_extract_preserves_per_layer_intermediate_for_variable_ffn() {
         larql_vindex::WriteWeightsOptions::default(),
         larql_vindex::KquantWriteOptions::default(),
         false,
+        larql_vindex::ExtractionRequest::Legacy,
+        None,
         &mut cb,
     )
     .unwrap();
