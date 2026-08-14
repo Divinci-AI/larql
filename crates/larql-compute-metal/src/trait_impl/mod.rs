@@ -258,4 +258,39 @@ mod tests {
         let any_backend: &dyn ComputeBackend = &m;
         assert!(any_backend.supports(Capability::HybridAttention));
     }
+
+    /// `register_weight_region` + `seal_weight_regions` are the two trait
+    /// hooks the serve path calls around model load: register each mmap'd
+    /// bank, then declare them resident once. Both are reachable through
+    /// `&dyn ComputeBackend`, and sealing must be harmless under the
+    /// shipped implicit arm — the composed serve calls it unconditionally.
+    #[test]
+    fn weight_region_registration_and_sealing_are_reachable_via_the_trait() {
+        let m = backend();
+        let any_backend: &dyn ComputeBackend = &m;
+
+        // Page-aligned by construction, the production contract's shape.
+        let mm = memmap2::MmapMut::map_anon(2 * 16384).expect("anon mmap");
+        let region = mm.make_read_only().expect("read-only");
+        any_backend.register_weight_region(&region[..]);
+        assert_eq!(
+            m.bufs.region_count(),
+            1,
+            "the trait hook must reach BufferCache::register_region"
+        );
+
+        // A non-page-aligned base cannot alias zero-copy; the hook
+        // swallows the refusal because resolution simply misses later and
+        // the MoE dispatch keeps its staged-copy path.
+        any_backend.register_weight_region(&region[8..]);
+        assert_eq!(m.bufs.region_count(), 1, "a misaligned base adds nothing");
+
+        // Sealing under the shipped arm is a no-op; the queue still works.
+        any_backend.seal_weight_regions();
+        let cmd = m.queue.new_command_buffer();
+        let enc = cmd.new_compute_command_encoder();
+        enc.end_encoding();
+        cmd.commit();
+        cmd.wait_until_completed();
+    }
 }

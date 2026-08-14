@@ -476,7 +476,22 @@ impl MetalBackend {
             let hd = cache.head_dim as u32;
             let num_q_val = layer_num_q_heads as u32;
             let num_kv = cache.num_kv_heads as u32;
-            enc.set_compute_pipeline_state(&self.attention.kv_append_attend_fused_pipeline);
+            // KV-B1: phase 3 walks the span serially on `head_dim` threads
+            // in the baseline kernel. When slices are requested, dispatch
+            // the sequence-parallel variant at `slices * head_dim` threads
+            // instead. `seqpar_slices_for` returns 0 when the request
+            // cannot be honoured for this head_dim, which keeps the
+            // baseline.
+            let fused_slices = ops::kv_cache::seqpar_slices_for(
+                self.decode_flags.kv_seqpar_slices,
+                layer_head_dim,
+                attn_span,
+            );
+            enc.set_compute_pipeline_state(if fused_slices > 1 {
+                &self.attention.kv_append_attend_fused_seqpar_pipeline
+            } else {
+                &self.attention.kv_append_attend_fused_pipeline
+            });
             enc.set_buffer(0, Some(bufs.q_out), 0);
             enc.set_buffer(1, Some(&cache.k_cache), 0);
             enc.set_buffer(2, Some(&cache.v_cache), 0);
@@ -501,13 +516,11 @@ impl MetalBackend {
                 4,
                 &layer.attn_softcap as *const f32 as *const std::ffi::c_void,
             );
+            let fused_width = crate::kernels::DISPATCH_TG_MAX_THREADS.min(layer_head_dim as u64)
+                * fused_slices.max(1) as u64;
             enc.dispatch_thread_groups(
                 MTLSize::new(layer_num_q_heads as u64, 1, 1),
-                MTLSize::new(
-                    crate::kernels::DISPATCH_TG_MAX_THREADS.min(layer_head_dim as u64),
-                    1,
-                    1,
-                ),
+                MTLSize::new(fused_width, 1, 1),
             );
         } else if let Some(src) = kv_shared_source {
             // Shared layer: attend against source's cache. Skip append
@@ -560,19 +573,47 @@ impl MetalBackend {
                 bufs.k_out,
                 bufs.v_out,
             );
-            ops::kv_cache::encode_kv_attend(
-                enc,
-                &kv_cache.layers[layer_idx],
-                &self.attention.kv_attend_pipeline,
-                Some(&self.attention.kv_attend_long_pipeline),
-                bufs.q_out,
-                bufs.attn_out_buf,
-                layer_num_q_heads,
-                scale,
-                window_size,
-                layer.attn_sinks,
-                layer.attn_softcap,
+            // KV-B1 (`LARQL_KV_SEQPAR=N`, opt-in): phase 3 — the
+            // weighted-V accumulation — is ~85% of long-span attention and
+            // walks the span serially with `head_dim` threads. The seqpar
+            // arm splits it across N slices. `seqpar_slices_for` returns 0
+            // when this layer's head_dim cannot honour the request, and the
+            // shipped kernel runs instead.
+            let slices = ops::kv_cache::seqpar_slices_for(
+                self.decode_flags.kv_seqpar_slices,
+                kv_cache.layers[attend_cache_idx].head_dim,
+                attn_span,
             );
+            if slices > 1 {
+                ops::kv_cache::encode_kv_attend_seqpar(
+                    enc,
+                    &kv_cache.layers[layer_idx],
+                    &self.attention.kv_attend_seqpar_pipeline,
+                    &self.attention.kv_attend_seqpar_long_pipeline,
+                    bufs.q_out,
+                    bufs.attn_out_buf,
+                    layer_num_q_heads,
+                    scale,
+                    window_size,
+                    layer.attn_sinks,
+                    layer.attn_softcap,
+                    slices,
+                );
+            } else {
+                ops::kv_cache::encode_kv_attend(
+                    enc,
+                    &kv_cache.layers[layer_idx],
+                    &self.attention.kv_attend_pipeline,
+                    Some(&self.attention.kv_attend_long_pipeline),
+                    bufs.q_out,
+                    bufs.attn_out_buf,
+                    layer_num_q_heads,
+                    scale,
+                    window_size,
+                    layer.attn_sinks,
+                    layer.attn_softcap,
+                );
+            }
         }
         // Only own-cache layers advance current_len; shared layers leave
         // their (unused) cache pointer at 0 forever.

@@ -30,6 +30,9 @@
 //! padded-intermediate refusal in `layer_supports_direct_matvec`, and
 //! the guard clauses of `matvec_q4k_or_q6k_q8k`.
 
+// Quantisation helpers these tests drive directly.
+use crate::cpu::ops::q4k_q8k_dot::{quantize_x_to_q8k_into, Q8KActivation};
+
 use super::*;
 use crate::test_fixtures::{make_q4k_fixture_index, Q4kFixtureIndex};
 use larql_models::test_fixtures::{make_test_q4k_weights, make_test_q4k_weights_rope_scaled};

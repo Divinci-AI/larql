@@ -218,7 +218,7 @@ fn streaming_extract_mixtral_exercises_moe_arms() {
         KquantWriteOptions::default(),
         false,
         larql_vindex::ExtractionRequest::Legacy,
-        None, // drop_gate_vectors
+        None, // expert_banks_out
         &mut cb,
     )
     .expect("streaming extract on mixtral fixture");
@@ -986,7 +986,7 @@ fn streaming_extract_mixtral_with_drop_gate_vectors_removes_zero_byte_file() {
         KquantWriteOptions::default(),
         true,
         larql_vindex::ExtractionRequest::Legacy,
-        None, // drop_gate_vectors
+        None, // expert_banks_out
         &mut cb,
     )
     .expect("streaming extract with drop_gate_vectors=true");
@@ -1201,7 +1201,7 @@ fn streaming_extract_gguf_llama_browse_runs_end_to_end() {
         KquantWriteOptions::default(),
         false,
         larql_vindex::ExtractionRequest::Legacy,
-        None, // drop_gate_vectors
+        None, // expert_banks_out
         &mut cb,
     )
     .expect("streaming extract on GGUF llama fixture");
@@ -1285,7 +1285,7 @@ fn streaming_extract_drop_gate_without_q4k_is_rejected() {
         KquantWriteOptions::default(),
         true,
         larql_vindex::ExtractionRequest::Legacy,
-        None, // drop_gate_vectors
+        None, // expert_banks_out
         &mut cb,
     )
     .expect_err("drop_gate_vectors without Q4K must be rejected");

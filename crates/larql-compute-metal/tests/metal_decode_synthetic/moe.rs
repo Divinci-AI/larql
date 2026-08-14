@@ -568,3 +568,63 @@ fn pure_moe_layer_skips_dense_ffn_and_adds_expert_output_directly() {
         );
     }
 }
+
+/// The two diagnostic knobs on the legacy MoE wait, exercised because
+/// each replaces the shipped `wait_until_completed` with something else
+/// and a broken one would hang or busy-loop rather than fail a check.
+///
+/// `LARQL_SPIN_WAIT=1` spins on `cmd.status()` instead of blocking — the
+/// lever that measured +1.8 ms/token before S2 obsoleted it.
+/// `LARQL_EXTRA_BARRIERS=N` injects N empty commit+wait pairs per layer;
+/// it is the dose-response control that falsified the "213 µs per command
+/// buffer" hypothesis, so it has to keep working to stay usable.
+#[test]
+fn legacy_moe_wait_honours_spin_wait_and_extra_barriers() {
+    let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(metal) = larql_compute_metal::MetalBackend::new() else {
+        return;
+    };
+    use larql_compute::backend::DecodeBackend;
+    use larql_compute::cpu::ops::q4_common::{quantize_q4_0, quantize_q4_k};
+
+    let wq = quantize_q4_k(&synth_weight_f32(Q_DIM * HIDDEN, 0.1));
+    let wk = quantize_q4_k(&synth_weight_f32(KV_DIM * HIDDEN, 0.2));
+    let wv = quantize_q4_k(&synth_weight_f32(KV_DIM * HIDDEN, 0.3));
+    let wo = quantize_q4_k(&synth_weight_f32(HIDDEN * Q_DIM, 0.4));
+    let gate = quantize_q4_0(&synth_weight_f32(INTER * HIDDEN, 0.5));
+    let up = quantize_q4_0(&synth_weight_f32(INTER * HIDDEN, 0.6));
+    let down = quantize_q4_0(&synth_weight_f32(HIDDEN * INTER, 0.7));
+    let norm_w: Vec<f32> = (0..HIDDEN).map(|i| 1.0 + (i as f32 * 0.001)).collect();
+
+    let run = || {
+        let mut layer = build_synth_layer(&wq, &wk, &wv, &wo, &gate, &up, &down, &norm_w);
+        layer.moe = Some(null_moe_layer());
+        let x = synth_input(HIDDEN, 0.9);
+        let mut moe_fn = |_l: usize, h: &[f32]| -> Vec<f32> { vec![0.0f32; h.len()] };
+        metal
+            .decode_token_with_moe(&[layer], &x, HIDDEN, INTER, &mut moe_fn)
+            .expect("decode returns Some")
+    };
+
+    // Baseline: the shipped blocking wait.
+    let baseline = run();
+    assert_eq!(baseline.len(), HIDDEN);
+
+    // Both knobs change HOW the host waits, never WHAT is computed, so the
+    // output must be bit-identical — that equality is the actual claim.
+    for (var, value) in [("LARQL_SPIN_WAIT", "1"), ("LARQL_EXTRA_BARRIERS", "2")] {
+        let prev = std::env::var_os(var);
+        unsafe { std::env::set_var(var, value) };
+        let out = run();
+        match prev {
+            Some(v) => unsafe { std::env::set_var(var, v) },
+            None => unsafe { std::env::remove_var(var) },
+        }
+        assert_eq!(
+            out.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            baseline.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            "{var}={value} changed the decoded values; it may only change \
+             how the host waits"
+        );
+    }
+}

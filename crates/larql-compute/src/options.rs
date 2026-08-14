@@ -89,10 +89,25 @@ pub const ENV_Q6K_8SG: &str = "LARQL_Q6K_8SG";
 pub const ENV_MXFP4_ARM: &str = "LARQL_MXFP4_ARM";
 /// Opt in to fused attention.
 pub const ENV_FUSED_ATTN: &str = "LARQL_FUSED_ATTN";
+/// Disable the fused decode head — final norm + lm_head + top-K inside the
+/// decode command buffer (TOKEN-B1 rung 2) — when set to a false value.
+/// Setting it to `0` restores the unfused path the fused one is pinned
+/// against, which is what makes a paired A/B of the two possible.
+pub const ENV_FUSED_DECODE_HEAD: &str = "LARQL_FUSED_DECODE_HEAD";
 /// Disable fused QK-norm + RoPE when set to a false value.
 pub const ENV_FUSED_QK_NORM_ROPE: &str = "LARQL_FUSED_QK_NORM_ROPE";
 /// Disable fused KV append + attend when set to a false value.
 pub const ENV_FUSED_KV_APPEND_ATTEND: &str = "LARQL_FUSED_KV_APPEND_ATTEND";
+/// Opt in to KV-B1's sequence-parallel weighted-V accumulation. The
+/// shipped attention kernels walk the whole span serially in phase 3,
+/// which is ~85% of long-span attention cost; this arm splits it across
+/// sequence slices.
+///
+/// `auto` selects the measured per-span slice count (the optimum is not
+/// flat: wide threadgroups lose at short span and win at long); an
+/// integer forces that many slices; unset or 0 keeps the serial kernel.
+/// Opt-in until the end-to-end gain is confirmed on an idle machine.
+pub const ENV_KV_SEQPAR: &str = "LARQL_KV_SEQPAR";
 /// Disable fused post-attention norm when set to a false value.
 pub const ENV_FUSED_POST_ATTN_NORM: &str = "LARQL_FUSED_POST_ATTN_NORM";
 /// Disable fused post-FFN norm when set to a false value.
@@ -139,6 +154,13 @@ pub const ENV_DUMP_L0: &str = "LARQL_DUMP_L0";
 pub const ENV_DEBUG_NAN_LAYERS: &str = "LARQL_DEBUG_NAN_LAYERS";
 /// Dump Metal decode layer outputs.
 pub const ENV_DECODE_DUMP_LAYERS: &str = "LARQL_DECODE_DUMP_LAYERS";
+/// Directory for the per-decode-call dump: each call's final hidden, its
+/// input embedding, and every layer's K cache. Indexed by call number, so
+/// it answers "which call and which layer first diverges".
+pub const ENV_PERCALL_LAYER_DUMP_DIR: &str = "LARQL_PERCALL_LAYER_DUMP_DIR";
+/// Directory for the end-of-call K/V cache dump. Overwritten every call —
+/// last call wins — for byte-level comparison against the CPU path.
+pub const ENV_KV_CACHE_DUMP_DIR: &str = "LARQL_KV_CACHE_DUMP_DIR";
 /// Dump Metal full-pipeline layer outputs.
 pub const ENV_METAL_DUMP_LAYERS: &str = "LARQL_METAL_DUMP_LAYERS";
 /// Layer index for stage-level dump helpers.

@@ -38,3 +38,4 @@ mod moe;
 mod padded_attn;
 mod qkv_routes;
 mod state_dump;
+mod trait_decode;

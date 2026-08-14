@@ -325,6 +325,82 @@ pub fn encode_kv_append(
     );
 }
 
+/// Threadgroup width ceiling for the KV-B1 seqpar kernels. Matches
+/// `tg_partial[1024]` in `shaders::kv_attention` and
+/// `shaders::kv_append_attend_fused`, and Metal's own 1024-thread
+/// threadgroup limit — so this is the hard ceiling, not a tuning knob.
+pub const SEQPAR_MAX_THREADS: usize = 1024;
+
+/// `LARQL_KV_SEQPAR=auto` — pick the slice count from the measured span
+/// policy rather than a fixed number. Distinct from any real slice count.
+pub const SEQPAR_AUTO: usize = usize::MAX;
+
+/// Threadgroup widths the KV-B1 sweep found best, by span tier.
+///
+/// Expressed in **threads, not slices**, because the optimum tracks
+/// threadgroup occupancy rather than the slice count itself — converting
+/// via `head_dim` keeps the policy meaningful for other attention
+/// geometries instead of pinning it to gpt-oss's 64.
+///
+/// Measured with `examples/bench_attention_span` on M3 Max, gpt-oss-20b
+/// geometry, 2026-08-14, using only rows whose bracketing baselines agreed
+/// within 5%. The wide end is genuinely harmful at short span — at span
+/// 128 16 slices ran 25% SLOWER than 8 — so this is a real optimum, not a
+/// clamp against the hardware limit.
+const SEQPAR_THREADS_SHORT: usize = 512;
+const SEQPAR_THREADS_MID: usize = 768;
+const SEQPAR_THREADS_LONG: usize = 1024;
+
+/// Span tier boundaries for [`SEQPAR_THREADS_SHORT`] and friends. Below
+/// MID the reduction over many partials costs more than the parallelism
+/// returns; past LONG the sweep was still improving at the ceiling.
+const SEQPAR_SPAN_TIER_MID: u32 = 512;
+const SEQPAR_SPAN_TIER_LONG: u32 = 1024;
+
+/// Measured-best threadgroup width for `span`. See [`SEQPAR_THREADS_SHORT`].
+fn seqpar_auto_threads(span: u32) -> usize {
+    if span < SEQPAR_SPAN_TIER_MID {
+        SEQPAR_THREADS_SHORT
+    } else if span < SEQPAR_SPAN_TIER_LONG {
+        SEQPAR_THREADS_MID
+    } else {
+        SEQPAR_THREADS_LONG
+    }
+}
+
+/// Sequence slices the KV-B1 kernel may use, given `head_dim`.
+///
+/// Bounded by the kernel's `tg_partial`, which holds `n_slices * head_dim`
+/// partials, and by the caller contract that `tg_sz` be a multiple of
+/// `head_dim`. Returns 0 when the request cannot be honoured, which the
+/// caller reads as "use the shipped kernel" — a refusal rather than a
+/// silently different geometry.
+pub fn seqpar_slices_for(requested: usize, head_dim: usize, span: u32) -> usize {
+    if head_dim == 0 {
+        return 0;
+    }
+    let requested = if requested == SEQPAR_AUTO {
+        seqpar_auto_threads(span) / head_dim
+    } else {
+        requested
+    };
+    if requested <= 1 {
+        return 0;
+    }
+    // `tg_partial[SEQPAR_MAX_THREADS]` and `tg_sg_vals[32]` in the seqpar
+    // kernels both bound the threadgroup at SEQPAR_MAX_THREADS; the
+    // partial bound is the tighter one for head_dim >= 32. The ceiling was
+    // raised from 512 after the KV-B1 sweep found the optimum sitting
+    // exactly ON the old ceiling at every span, i.e. unmeasured above it.
+    let max_by_partial = SEQPAR_MAX_THREADS / head_dim;
+    let n = requested.min(max_by_partial);
+    if n <= 1 {
+        0
+    } else {
+        n
+    }
+}
+
 /// Encode KV attend dispatch into an existing encoder.
 /// The encoder is NOT ended — caller continues adding dispatches.
 #[allow(clippy::too_many_arguments)]
@@ -395,6 +471,72 @@ pub fn encode_kv_attend(
     );
 }
 
+/// KV-B1: [`encode_kv_attend`] with the sequence-parallel phase-3 kernel.
+///
+/// Identical bindings and identical semantics; the only differences are the
+/// pipeline and a threadgroup of `slices * head_dim` threads instead of
+/// `head_dim`. Phase 3 in the shipped kernel walks the whole span serially
+/// with `head_dim` threads and is ~85% of long-span cost; this splits it.
+///
+/// The result is not bitwise equal to [`encode_kv_attend`] — summing slice
+/// partials reassociates the accumulation. Gated with a calibrated
+/// tolerance in `tests/test_kernel_kv_attention_seqpar.rs`.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_kv_attend_seqpar(
+    enc: &ComputeCommandEncoderRef,
+    cache: &LayerKVCache,
+    seqpar_pipeline: &ComputePipelineState,
+    seqpar_long_pipeline: &ComputePipelineState,
+    q: &Buffer,
+    out: &Buffer,
+    num_q_heads: usize,
+    scale: f32,
+    window_size: u32,
+    sinks: Option<&[f32]>,
+    softcap: f32,
+    slices: usize,
+) {
+    let t_val = (cache.current_len + 1) as u32;
+    let hd = cache.head_dim as u32;
+    let num_q_val = num_q_heads as u32;
+    let num_kv = cache.num_kv_heads as u32;
+    let span = attention_span(t_val, window_size);
+    let pipeline = if span > SHORT_ATTENTION_SPAN {
+        seqpar_long_pipeline
+    } else {
+        seqpar_pipeline
+    };
+    assert!(
+        span as usize <= LONG_ATTENTION_SPAN,
+        "attention span {span} exceeds the seqpar kernel's threadgroup scratch \
+         bound ({LONG_ATTENTION_SPAN})"
+    );
+    assert!(
+        slices > 1 && slices * cache.head_dim <= SEQPAR_MAX_THREADS,
+        "seqpar slices {slices} x head_dim {} exceed {SEQPAR_MAX_THREADS}, the \
+         kernel's tg_partial bound; callers must go through `seqpar_slices_for`",
+        cache.head_dim
+    );
+
+    enc.set_compute_pipeline_state(pipeline);
+    enc.set_buffer(0, Some(q), 0);
+    enc.set_buffer(1, Some(&cache.k_cache), 0);
+    enc.set_buffer(2, Some(&cache.v_cache), 0);
+    enc.set_buffer(3, Some(out), 0);
+    enc.set_bytes(4, 4, &t_val as *const u32 as *const c_void);
+    enc.set_bytes(5, 4, &hd as *const u32 as *const c_void);
+    enc.set_bytes(6, 4, &num_q_val as *const u32 as *const c_void);
+    enc.set_bytes(7, 4, &num_kv as *const u32 as *const c_void);
+    enc.set_bytes(8, 4, &scale as *const f32 as *const c_void);
+    enc.set_bytes(9, 4, &window_size as *const u32 as *const c_void);
+    crate::stages::sinks::bind(enc, 10, sinks, num_q_heads);
+    enc.set_bytes(12, 4, &softcap as *const f32 as *const c_void);
+    enc.dispatch_thread_groups(
+        MTLSize::new(num_q_heads as u64, 1, 1),
+        MTLSize::new((slices * cache.head_dim) as u64, 1, 1),
+    );
+}
+
 /// Append new K/V to cache and run attention in one command buffer.
 /// Returns attention output [num_q_heads, head_dim].
 /// Legacy API — creates its own encoders. For merged pipelines, use
@@ -440,6 +582,79 @@ pub fn append_and_attend(
     }
 
     cache.current_len += 1;
+}
+
+#[cfg(test)]
+mod seqpar_policy_tests {
+    use super::*;
+
+    /// gpt-oss-20b's head_dim, the geometry the sweep was run on.
+    const HD: usize = 64;
+
+    #[test]
+    fn auto_follows_the_measured_span_tiers() {
+        // Below MID the sweep's clean rows put 8 slices ahead of 12 and 16.
+        assert_eq!(seqpar_slices_for(SEQPAR_AUTO, HD, 64), 8);
+        assert_eq!(seqpar_slices_for(SEQPAR_AUTO, HD, 256), 8);
+        assert_eq!(
+            seqpar_slices_for(SEQPAR_AUTO, HD, SEQPAR_SPAN_TIER_MID - 1),
+            8
+        );
+        // MID..LONG: 12.
+        assert_eq!(seqpar_slices_for(SEQPAR_AUTO, HD, SEQPAR_SPAN_TIER_MID), 12);
+        assert_eq!(seqpar_slices_for(SEQPAR_AUTO, HD, 768), 12);
+        assert_eq!(
+            seqpar_slices_for(SEQPAR_AUTO, HD, SEQPAR_SPAN_TIER_LONG - 1),
+            12
+        );
+        // At and past LONG: the ceiling, where the sweep was still climbing.
+        assert_eq!(
+            seqpar_slices_for(SEQPAR_AUTO, HD, SEQPAR_SPAN_TIER_LONG),
+            16
+        );
+        assert_eq!(seqpar_slices_for(SEQPAR_AUTO, HD, 4096), 16);
+    }
+
+    /// The policy is stated in threads, so a different attention geometry
+    /// gets the same threadgroup width rather than the same slice count —
+    /// otherwise it would silently dispatch 2x the threads on head_dim 128.
+    #[test]
+    fn auto_is_expressed_in_threads_not_slices() {
+        assert_eq!(seqpar_slices_for(SEQPAR_AUTO, 128, 2048), 8);
+        assert_eq!(seqpar_slices_for(SEQPAR_AUTO, 32, 2048), 32);
+        for hd in [32usize, 64, 128] {
+            for span in [64u32, 512, 2048] {
+                let slices = seqpar_slices_for(SEQPAR_AUTO, hd, span);
+                assert!(
+                    slices * hd <= SEQPAR_MAX_THREADS,
+                    "head_dim {hd} span {span}: {slices} slices exceed the \
+                     {SEQPAR_MAX_THREADS}-thread bound"
+                );
+            }
+        }
+    }
+
+    /// An explicit count still overrides the policy, and is still clamped —
+    /// the assert in `encode_kv_attend_seqpar` is a panic, so the clamp has
+    /// to happen here.
+    #[test]
+    fn explicit_request_overrides_but_is_still_clamped() {
+        assert_eq!(seqpar_slices_for(4, HD, 2048), 4);
+        assert_eq!(seqpar_slices_for(999, HD, 64), SEQPAR_MAX_THREADS / HD);
+        assert_eq!(seqpar_slices_for(999, 128, 64), SEQPAR_MAX_THREADS / 128);
+    }
+
+    /// 0 and 1 are refusals, not slice counts: the caller reads them as
+    /// "dispatch the shipped serial kernel".
+    #[test]
+    fn zero_one_and_degenerate_head_dim_refuse() {
+        assert_eq!(seqpar_slices_for(0, HD, 2048), 0);
+        assert_eq!(seqpar_slices_for(1, HD, 2048), 0);
+        assert_eq!(seqpar_slices_for(SEQPAR_AUTO, 0, 2048), 0);
+        // head_dim past the whole thread budget cannot be sliced at all.
+        assert_eq!(seqpar_slices_for(SEQPAR_AUTO, SEQPAR_MAX_THREADS, 2048), 0);
+        assert_eq!(seqpar_slices_for(8, SEQPAR_MAX_THREADS, 2048), 0);
+    }
 }
 
 #[cfg(test)]

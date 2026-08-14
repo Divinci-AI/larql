@@ -54,3 +54,6 @@ pub(crate) fn router_input_transform(moe: &MoeLayerWeights<'_>) -> Option<Router
         MoeInputSource::PreExpertsNorm => None,
     }
 }
+
+#[cfg(test)]
+mod tests;

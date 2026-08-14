@@ -108,6 +108,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 print!("{text}");
                 std::io::stdout().flush().ok();
             },
+            None, // routed — this demo serves experts from the vindex itself
         );
         println!();
 

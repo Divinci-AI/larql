@@ -81,10 +81,31 @@ pub struct DecodeFlags {
     pub fused_qk_norm_rope: bool,
     /// `LARQL_FUSED_KV_APPEND_ATTEND` — default true; opt out with `=0`.
     pub fused_kv_append_attend: bool,
+    /// `LARQL_KV_SEQPAR` — sequence slices for KV-B1's phase-3 kernel.
+    /// `auto` uses the measured per-span policy; `N` forces N slices;
+    /// 0 (default) keeps the shipped serial accumulation.
+    pub kv_seqpar_slices: usize,
     /// `LARQL_FUSED_POST_ATTN_NORM` — default true; opt out with `=0`.
     pub fused_post_attn_norm: bool,
     /// `LARQL_FUSED_POST_FFN_NORM` — default true; opt out with `=0`.
     pub fused_post_ffn_norm: bool,
+}
+
+/// The value of `LARQL_KV_SEQPAR` that selects the measured span policy
+/// instead of a fixed slice count.
+const KV_SEQPAR_AUTO_VALUE: &str = "auto";
+
+/// Parse `LARQL_KV_SEQPAR`. `auto` maps to the sentinel the span policy
+/// reads; anything else falls back to the numeric parse (0 = off), so an
+/// unparseable value keeps the shipped kernel rather than guessing.
+fn kv_seqpar_from_env() -> usize {
+    let env = larql_compute::options::ENV_KV_SEQPAR;
+    match std::env::var(env) {
+        Ok(v) if v.trim().eq_ignore_ascii_case(KV_SEQPAR_AUTO_VALUE) => {
+            crate::ops::kv_cache::SEQPAR_AUTO
+        }
+        _ => larql_compute::options::env_usize(env).unwrap_or(0),
+    }
 }
 
 impl DecodeFlags {
@@ -101,6 +122,7 @@ impl DecodeFlags {
             fused_attn: env_opt_in(ENV_FUSED_ATTN),
             fused_qk_norm_rope: !env_opt_out(ENV_FUSED_QK_NORM_ROPE),
             fused_kv_append_attend: !env_opt_out(ENV_FUSED_KV_APPEND_ATTEND),
+            kv_seqpar_slices: kv_seqpar_from_env(),
             fused_post_attn_norm: !env_opt_out(ENV_FUSED_POST_ATTN_NORM),
             fused_post_ffn_norm: !env_opt_out(ENV_FUSED_POST_FFN_NORM),
         }
@@ -191,6 +213,7 @@ impl Default for DecodeFlags {
             fused_attn: false,
             fused_qk_norm_rope: true,
             fused_kv_append_attend: true,
+            kv_seqpar_slices: 0,
             fused_post_attn_norm: true,
             fused_post_ffn_norm: true,
         }
