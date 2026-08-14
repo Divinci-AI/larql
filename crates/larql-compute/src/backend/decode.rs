@@ -175,6 +175,42 @@ impl ProfileTimings {
     }
 }
 
+/// What a backend needs in order to finish the token itself: final norm,
+/// the lm_head matvec, and the partial top-K.
+///
+/// Handing this to [`DecodeBackend::decode_token_q4k_moe_head`] moves the
+/// head *inside* the decode submission. The token then costs one
+/// commit + wait instead of two, and the only thing crossing the host
+/// boundary is the partial top-K — the hidden state never comes back.
+///
+/// The plan states the store's geometry rather than deriving it: `cols`
+/// is the width the Q4_K rows are actually stored at (`hidden` rounded up
+/// to whole super-blocks), and the query is zero-padded to it. A backend
+/// that cannot honour some part of the plan returns `None` and the caller
+/// stays on the unfused path — never a silently different head.
+pub struct DecodeHeadPlan<'a> {
+    /// Which norm the head applies. Stated rather than assumed: a
+    /// backend that implements only one of them must refuse the other,
+    /// because "applied the wrong normaliser" and "did not run" are the
+    /// same `None` to the caller only if the refusal actually happens.
+    pub norm_type: crate::NormType,
+    /// Final norm weight, `[hidden]`.
+    pub final_norm_weight: &'a [f32],
+    /// Variance epsilon for the final norm.
+    pub norm_eps: f32,
+    /// Added to each norm weight before scaling (Gemma's `+ 1`).
+    pub norm_offset: f32,
+    /// Q4_K lm_head bytes, `[vocab, cols]` row-major.
+    pub lm_head_q4k: &'a [u8],
+    /// Rows in the lm_head store.
+    pub vocab: usize,
+    /// Stored row width in elements. Equals `hidden` when the hidden size
+    /// is already a whole number of Q4_K super-blocks.
+    pub cols: usize,
+    /// How many `(token_id, score)` pairs to return, descending.
+    pub top_k: usize,
+}
+
 /// KV-cached generation primitives.
 ///
 /// "Backend supports decode" means the backend can run a full forward
@@ -381,6 +417,28 @@ pub trait DecodeBackend {
         _norm_eps: f32,
         _get_expert: &dyn Fn(usize, usize) -> Option<(&'w [u8], &'w [u8])>,
     ) -> Option<Vec<f32>> {
+        None
+    }
+
+    /// [`Self::decode_token_q4k_moe`] with the LM head encoded into the
+    /// same command buffer: final norm → lm_head matvec → partial top-K,
+    /// one commit + wait, partials-only readback.
+    ///
+    /// Returns the `top_k` `(token_id, score)` pairs descending, or `None`
+    /// when this backend cannot serve the plan as stated — in which case
+    /// the caller runs the unfused path (readback → CPU norm → lm_head),
+    /// which stays the reference the fused result is pinned against.
+    #[allow(clippy::too_many_arguments)]
+    fn decode_token_q4k_moe_head<'w>(
+        &self,
+        _layers: &[crate::FullPipelineLayer<'_>],
+        _x: &[f32],
+        _hidden: usize,
+        _inter: usize,
+        _norm_eps: f32,
+        _get_expert: &dyn Fn(usize, usize) -> Option<(&'w [u8], &'w [u8])>,
+        _head: &DecodeHeadPlan<'_>,
+    ) -> Option<Vec<(u32, f32)>> {
         None
     }
 

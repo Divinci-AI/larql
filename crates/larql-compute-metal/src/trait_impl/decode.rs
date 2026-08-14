@@ -801,7 +801,50 @@ impl DecodeBackend for MetalBackend {
             rope_base,
             norm_eps,
             get_expert,
+            None, // head — this entry point returns the hidden state
         )
+    }
+
+    fn decode_token_q4k_moe_head<'w>(
+        &self,
+        layers: &[larql_compute::FullPipelineLayer<'_>],
+        x: &[f32],
+        hidden: usize,
+        inter: usize,
+        norm_eps: f32,
+        get_expert: &dyn Fn(usize, usize) -> Option<(&'w [u8], &'w [u8])>,
+        head: &larql_compute::DecodeHeadPlan<'_>,
+    ) -> Option<Vec<(u32, f32)>> {
+        let (q_dim, kv_dim, num_q_heads, num_kv_heads, head_dim, rope_base) =
+            legacy_l0_geometry(layers);
+        // The slot the encoded head writes into. It stays `None` when any
+        // precondition refused, and the caller then runs the unfused head
+        // — so a refusal costs a normal token, never a wrong one.
+        let mut hits = None;
+        let hidden_out = MetalBackend::decode_token_q4k_moe(
+            self,
+            layers,
+            x,
+            hidden,
+            inter,
+            q_dim,
+            kv_dim,
+            num_q_heads,
+            num_kv_heads,
+            head_dim,
+            rope_base,
+            norm_eps,
+            get_expert,
+            Some(crate::decode::HeadRequest {
+                plan: head,
+                out: &mut hits,
+            }),
+        );
+        // A decode that produced no hidden state produced no logits
+        // either; report that as `None` rather than an empty top-K, which
+        // the caller would read as "the head ran and found nothing".
+        hidden_out?;
+        hits
     }
 
     fn decode_token_with_moe_split(
@@ -845,6 +888,7 @@ impl DecodeBackend for MetalBackend {
             None, // no state capture on split fire/collect MoE path
             larql_compute::StateDumpMask::Full,
             None,
+            None, // head — split fire/collect returns the hidden state
         ))
     }
 

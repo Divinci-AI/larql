@@ -2,6 +2,11 @@
 //! for Q4_K super-blocks, deterministic synth weights, the layer
 //! builder, and the env-mutation lock every module must hold.
 
+// Shared by two integration binaries (`metal_decode_synthetic` and
+// `test_gpu_route_decode`); each uses a subset, so items unused by one
+// of them are not dead code in the usual sense.
+#![allow(dead_code, unused_imports)]
+
 pub use larql_compute::{
     Activation, ComputeBackend, DecodeBackend, FfnType, FullPipelineLayer, NormType, QuantFormat,
     QuantWeight,
@@ -186,5 +191,46 @@ pub fn decode_one_token_with_env(
             Some(s) => unsafe { std::env::set_var(n, s) },
             None => unsafe { std::env::remove_var(n) },
         }
+    }
+}
+
+/// A MoE layer with no experts: enough to put a layer on the MoE branch
+/// without needing a quantised expert bank. Callers that want real expert
+/// bytes build their own; this is for the paths where the branch itself is
+/// the subject.
+pub fn null_moe_layer<'a>() -> larql_compute::MoeLayerWeights<'a> {
+    null_moe_layer_with_format(larql_compute::QuantFormat::BF16)
+}
+
+/// As [`null_moe_layer`], but stating the expert store's format. The MoE
+/// scratch allocator requires a block format, so a caller that will build
+/// scratch must ask for Q4_K/Q6_K rather than the BF16 default.
+pub fn null_moe_layer_with_format<'a>(
+    expert_data_format: larql_compute::QuantFormat,
+) -> larql_compute::MoeLayerWeights<'a> {
+    larql_compute::MoeLayerWeights {
+        expert_scales: larql_compute::MoeExpertScales::Inline,
+        fused_row_layout: larql_compute::MoeFusedRowLayout::ContiguousHalves,
+        experts_gate_up: Vec::new(),
+        experts_down: Vec::new(),
+        routing_policy: larql_compute::MoeRoutingPolicy::default(),
+        weight_layout: larql_compute::MoeWeightLayout::default(),
+        router_proj: &[],
+        router_scale: &[],
+        router_per_expert_scale: &[],
+        router_norm: &[],
+        router_norm_parameter_free: false,
+        router_input_scalar: 1.0,
+        pre_experts_norm: &[],
+        post_ffn1_norm: &[],
+        post_experts_norm: &[],
+        num_experts: 0,
+        top_k: 1,
+        intermediate_size: INTER,
+        router_bias: &[],
+        experts_gate_up_bias: &[],
+        experts_down_bias: &[],
+        gate_rule: larql_compute::MoeGateRule::Gated(larql_compute::Activation::Silu),
+        expert_data_format,
     }
 }

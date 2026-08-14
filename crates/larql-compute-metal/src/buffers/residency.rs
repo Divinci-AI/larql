@@ -159,3 +159,6 @@ impl Drop for ResidencySet {
         }
     }
 }
+
+#[cfg(test)]
+pub(in crate::buffers) mod tests;

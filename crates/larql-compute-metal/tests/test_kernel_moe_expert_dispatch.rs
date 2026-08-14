@@ -528,6 +528,7 @@ fn decode_token_q4k_moe_with_real_moe_layer_drives_gpu_dispatch() {
                 expert_down[expert_idx].as_slice(),
             ))
         },
+        None, // head — this test asserts on the hidden state, not the top-K
     );
     let out = out.expect("decode_token_q4k_moe should return Some when MoE layer present");
     assert_eq!(out.len(), hidden);

@@ -32,4 +32,4 @@ mod transform;
 // The forward wrappers and `MoeTokenScheduleStats` surface as inherent
 // items on `MetalBackend` (tests receive the struct by return value);
 // only the route gate + transform resolver are consumed by path.
-pub(crate) use transform::{gpu_route_enabled, router_input_transform};
+pub(crate) use transform::gpu_route_enabled;

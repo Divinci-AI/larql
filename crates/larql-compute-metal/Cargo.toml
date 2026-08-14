@@ -37,6 +37,8 @@ libc = "0.2"
 
 [dev-dependencies]
 memmap2 = "0.9"
+# Scratch directories for the env-gated decode-diagnostic dump tests.
+tempfile = "3"
 serde_json = { workspace = true }
 criterion = "0.5"
 # Enable `larql-models`' `test-utils` feature so moved-down Metal trait
