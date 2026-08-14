@@ -178,6 +178,7 @@ larql bench <MODEL> [OPTIONS]
 | `--ffn <URL>` | Bench the grid path: route FFN to a remote larql-server | — |
 | `--ffn-dispatch <streaming\|batch>` | Same shape as `larql run --ffn-dispatch` | streaming |
 | `--moe-shards <SPEC>` | Bench the remote MoE expert path | — |
+| `--routed-from <DIR>` | Serve the routed expert banks from a VINDEX3 container, exactly as `larql run --routed-from` composes them — the plain bench on the same spine is the controlled comparison | — |
 | `--moe-dispatch <streaming\|batch>` | Same shape as `larql run --moe-dispatch` | streaming |
 | `--moe-predispatch-iters <N>` | Refinement iterations for batch dispatch | 2 |
 | `--profile` | Print per-stage timing breakdown for each engine (markov-rs only for now) | false |
@@ -193,6 +194,7 @@ Examples:
 larql bench gemma3-4b-it-vindex --backends metal,cpu
 larql bench gemma3-4b-it-vindex --ollama gemma3:4b
 larql bench gemma4-26b-a4b.vindex --moe-shards "0-63=http://a:8081,64-127=http://b:8082"
+LARQL_GPU_ROUTE=1 larql bench gpt-oss-20b-q4k.vindex --warmup 16 -n 256 --routed-from ~/models/gpt-oss-20b-experts-mxfp4.v3
 ```
 
 ### `larql accuracy`

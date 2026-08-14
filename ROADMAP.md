@@ -1593,11 +1593,61 @@ CB-window sum before optimising a kernel.
 
 | # | Item | Crate | Status |
 |---|---|---|---|
-| P5-F1 | **Native-MXFP4 expert execution** — the apples-to-apples experiment. Shaders `mxfp4_matvec` + `mxfp4_grouped_experts` already exist; the work is the store path (serve MXFP4 bytes without the Q6_K transcode) + wiring them into the zero-copy/grouped dispatch. First-order budget from the measured profile: MoE 11.5 ms / 1.54 ≈ 7.5 + 3.3 attention + ~2 residue ≈ **~78 tok/s** before any tuning — the ~85-90 reference falls out of the remaining milliseconds, not a miracle. Run it as *going past* the baseline, not reaching it. | larql-compute-metal, larql-vindex | open |
-| P5-F2 | **GPU routing + device-side offset tables** — kill the remaining 24 per-layer waits (~2 ms). Router matvec (32×2880) + policy top-k as a kernel writing the weights/offsets buffers the grouped kernels ALREADY read from device memory (their offset tables were designed for this — "K3b … without a signature change"). Gets decode to one command buffer per token. Policy scope: start with GPT-OSS's `top_k_then_softmax`; others keep the CPU route. | larql-compute-metal | open |
+| P5-F1 | **Native-MXFP4 expert execution — DONE (2026-08-14).** Served composed: `--routed-from` a VINDEX3 container carrying the checkpoint's own MXFP4 payload + paired e8m0 streams; expert-bank authority override is generic (no format branch in the plumbing). Paired same-session ladder: Q6_K 68.3 → MXFP4 74.6 → vectorised kernel **77.2 tok/s**. The first-order ~78 budget was honest: the ~2.6 ms byte-projection assumed equal kernel η, and the measured MXFP4 η deficit (skeleton, not decode — fixed for ~0.46 ms by `uint4` loads) accounts for the rest. See "Native MXFP4 served" below. | larql-compute-metal, larql-vindex | **done** |
+| P5-F2 | **GPU routing + device-side offset tables — DONE (2026-08-13, PR #249).** Router + top-k + descriptor gather as GPU dataflow; one command buffer per token; route-witness counters (host_resolves / bias_copies / weight_binds / offset_binds) pinned at zero by gates and printed by the composed serve. Opt-in via `LARQL_GPU_ROUTE=1`. 59.8 → 67.5 tok/s at landing. | larql-compute-metal | **done** |
 | P5-F3 | **`predict_kquant_metal` panics on pure MoE** ("ffn Q4K slices missing for layer") — the max-tokens-1 predict path is a separate dense-assuming forward; either route it through the MoE-aware decode or refuse with the typed capability error. | larql-inference | open |
 | P5-F4 | **`metal_decode_synthetic` parallel-run flake** — pre-existing (clean-tree reproducible, ~2/5 parallel runs, victim varies, prefill NaN; single-threaded always green; CI blind — runners have no Metal device). Cross-test interaction under concurrent GPU load, mechanism unidentified; suspect list starts at pooled-buffer recycling vs in-flight command buffers under parallel backends. Until fixed, local red on this suite means: re-run single-threaded before diagnosing. | larql-compute-metal | open |
 | P5-F5 | **GB-style bits/token scoring of the served vindex** — `shannon score` still can't load vindexes (raw-model only), so the serve path's quality gate is greedy-trajectory parity, not measured bits/token (§4.6.8's scorer gap, still open). | larql-cli, larql-inference | open |
+
+---
+
+### Native MXFP4 served end to end — 77.2 tok/s, every remaining millisecond named (2026-08-14)
+
+Branch `feat/moe-g4b3-region-registration` (commits `ba7418b9`,
+`1f0a5909`, `e9af233d`). Three results, one paired same-session A/B/A
+ladder on GPT-OSS-20B / M3 Max (warmup 16, n 256, long prompt; battery,
+idle — an AC-protocol repeat is owed for the books):
+
+| ms/token | tok/s | What changed |
+|---:|---:|---|
+| 14.63 | 68.3 | Q6_K control through the GPU route (reproduces the recorded 67.5) |
+| 13.41 | 74.6 | **native MXFP4 expert banks** — `--routed-from` composes a VINDEX3 container's payload + paired e8m0 streams over the Q6_K spine; expert reads 1 959 → 1 269 MB/token |
+| 12.95 | **77.2** | **vectorised split kernel** (`mxfp4g_split_lut16_vec`, arm `a2`, now default) — `uint4` group loads replace 16 single-byte loads; oracle-exact; 16-byte-alignment precondition checked per bank with loud scalar demotion |
+
+**What each step proved, and what it didn't:**
+
+- **G4b.3 (serve seam).** VINDEX3 segments are now mmapped (page-aligned
+  by construction) and registered with the Metal buffer cache beside the
+  spine's packed mmaps. Fired evidence, all in one run: 24 layers
+  overridden as MXFP4/SplitE8M0, `GPU_ROUTE_LAYERS = 24 × forwards`
+  remainder 0, all four route-witness counters zero, cmd_bufs/token 1,
+  output byte-identical to the legacy arm. Five tamper controls (wrong
+  declared format / missing scale pair / short scale pair / payload one
+  group short → refuse; untampered + the real 9.5 GB container → admit)
+  — composed open now derives paired scale-partner sizes from the
+  container's declared format, so moving byte authority did not weaken
+  validation. Trap worth recording: the GPU route is opt-in
+  (`LARQL_GPU_ROUTE=1`); unset, the run falls back healthy-looking at
+  cmd_bufs=25.
+- **G5 attribution.** Measured grouped-kernel bandwidth at production
+  geometry predicts the expert-read delta within ~0.1 ms of e2e — no
+  integration tax; the old −2.6 ms projection had assumed equal η.
+  Instrument caveat, learned the honest way: isolated tournament η at
+  17–35 MB working sets is SLC-confounded (arm-A down η read
+  0.36/0.57/0.65 across three runs); within-run ordering is stable, the
+  paired e2e numbers are the claim-bearers.
+- **TOKEN-B1 rung 1 (lm_head).** `q4k_matvec_topk` fuses the Q4_K
+  matvec with the partial top-K reduction in one submission (8 KB back
+  instead of ~800 KB + a 201K CPU scan). e2e-neutral — readback was
+  never the cost — but it pinned the stage: **~1.09 ms is Q4_K matvec
+  at the bandwidth ceiling; ~0.5 ms is the CB boundary/host round trip.**
+
+**Open next (in order):**
+
+| # | Item | Crate | Status |
+|---|---|---|---|
+| B1-2 | **Fold final norm → lm_head → top-K into the decode CB** — single wait per token, partials-only readback; the measured ~0.5 ms boundary is the prize (77.2 → ~80; MLX ≈ 83 sits ~0.9 ms away in total). Acceptance: token parity, fired-path witness, no hidden readback before lm_head, then the paired bench. | larql-compute-metal, larql-inference | open |
+| K1-2 | **Cold-fixture kernel instrument** — rotate expert banks ≫ SLC (the `bench_mxfp4_dequant` discipline) so isolated MXFP4 η is claim-bearing; then ask whether `a2` leaves more on the table at the down shape. | larql-compute-metal | open |
 
 ---
 
