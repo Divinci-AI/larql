@@ -91,6 +91,10 @@ pub fn run_exec(args: ExecArgs) -> Result<(), Box<dyn std::error::Error>> {
         .ok_or_else(|| format!("component `{}` produced no plan", args.component))?;
     let store = OperandStore::open(&args.container, &inspection)?;
 
+    #[cfg(feature = "gpu")]
+    if matches!(args.backend, ExecBackend::MetalLowered) {
+        return super::lowered::run_lowered(&args, &tokens, &plan, &store);
+    }
     match args.backend {
         ExecBackend::Reference => run_on(&ReferenceBackend::new(), &args, &tokens, &plan, &store),
         ExecBackend::Production => run_on(&ProductionBackend::new(), &args, &tokens, &plan, &store),
@@ -120,6 +124,8 @@ pub fn run_exec(args: ExecArgs) -> Result<(), Box<dyn std::error::Error>> {
                 );
             run_on(&backend, &args, &tokens, &plan, &store)
         }
+        #[cfg(feature = "gpu")]
+        ExecBackend::MetalLowered => unreachable!("handled above"),
         #[cfg(feature = "gpu")]
         ExecBackend::MetalMxfp4All => {
             let gpu = larql_compute_metal::MetalBackend::new()

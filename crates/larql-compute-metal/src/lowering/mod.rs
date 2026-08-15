@@ -32,6 +32,12 @@ pub mod stack;
 
 use metal::{Buffer, ComputeCommandEncoderRef};
 
+/// A device buffer, re-exported so callers can hold lowering state
+/// without linking `metal` themselves. The CLI is the only place a plan
+/// and a device meet, and it should not need the graphics API in its
+/// dependency list to say "this is resident".
+pub use metal::Buffer as DeviceBuffer;
+
 use crate::MetalBackend;
 
 /// The norm applied to a *branch output* before it joins the residual

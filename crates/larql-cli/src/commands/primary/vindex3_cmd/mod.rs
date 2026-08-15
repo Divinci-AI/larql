@@ -78,6 +78,11 @@ pub enum ExecBackend {
     /// scale geometry, so the formats are compared at one class split.
     #[cfg(feature = "gpu")]
     MetalNvfp4Ffn,
+    /// VINDEX3-G6d: the plan lowered onto GPU-resident execution — the
+    /// whole stack and head in one command buffer per token, KV resident,
+    /// host out of the dependency chain. All-NVFP4.
+    #[cfg(feature = "gpu")]
+    MetalLowered,
 }
 
 #[derive(Args)]
@@ -219,6 +224,8 @@ pub fn run(cmd: Vindex3Command) -> Result<(), Box<dyn std::error::Error>> {
 
 mod exec;
 mod generate;
+#[cfg(feature = "gpu")]
+mod lowered;
 mod ops;
 mod optional_op;
 mod teacher_force;
