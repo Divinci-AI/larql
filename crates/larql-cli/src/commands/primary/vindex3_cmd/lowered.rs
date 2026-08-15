@@ -17,6 +17,7 @@
 
 use std::collections::HashMap;
 
+use larql_compute::backend::MatMul;
 use larql_compute_metal::lowering::attention::{
     AttnShape, AttnWeights, LoweredPosition, Projection,
 };
@@ -263,6 +264,30 @@ impl<'a> LoweredSession<'a> {
             }
         }
 
+        // Residency bootstrap. Without it the driver's wired-page
+        // collector un-wires weights that sit idle between submissions,
+        // and a decode walking ~15 GB per token pays a re-wire on every
+        // touch — measured at 10x on a large f16 working set. One command
+        // buffer referencing everything re-wires it at memcpy speed, and
+        // steps fast enough thereafter keep themselves wired.
+        //
+        // The slices are the same allocations `lowering_weight` cached on,
+        // so this wires the buffers the stack will actually bind.
+        let mut streams: Vec<&[u8]> = Vec::with_capacity(keep.len() * 2);
+        for w in keep.iter() {
+            if let LoadedWeight::Nvfp4 { packed, scales, .. } = w {
+                streams.push(packed.as_slice());
+                streams.push(scales.as_slice());
+            }
+        }
+        let wiring = std::time::Instant::now();
+        gpu.wire_resident(&streams);
+        eprintln!(
+            "wired {} weight streams in {:.1} s",
+            streams.len(),
+            wiring.elapsed().as_secs_f64()
+        );
+
         Ok(Self {
             gpu,
             plan,
@@ -482,6 +507,23 @@ impl<'a> LoweredSession<'a> {
     }
 }
 
+fn argmax_of(logits: &[f32]) -> u32 {
+    logits
+        .iter()
+        .enumerate()
+        .fold(
+            (0usize, f32::MIN),
+            |(bi, bv), (i, v)| {
+                if *v > bv {
+                    (i, *v)
+                } else {
+                    (bi, bv)
+                }
+            },
+        )
+        .0 as u32
+}
+
 /// Run the plan through the lowering and report the final position's
 /// logits, in the same shape `run_exec`'s other arms do.
 pub(super) fn run_lowered(
@@ -508,6 +550,24 @@ pub(super) fn run_lowered(
     }
     let prompt_seconds = prompt_started.elapsed().as_secs_f64();
 
+    // ── decode, kept strictly separate from prefill ─────────────────
+    let mut decode_ms: Vec<f64> = Vec::new();
+    let mut generated: Vec<u32> = Vec::new();
+    if let Some(n) = args.generate {
+        let mut next = logits
+            .as_ref()
+            .map(|l| argmax_of(l))
+            .ok_or("plan carries no output head — cannot generate")?;
+        for _ in 0..n {
+            generated.push(next);
+            let started = std::time::Instant::now();
+            let l = session.step(next)?.ok_or("plan carries no output head")?;
+            decode_ms.push(started.elapsed().as_secs_f64() * 1e3);
+            next = argmax_of(&l);
+            logits = Some(l);
+        }
+    }
+
     println!("engine: vindex3-metal-g6d-lowered");
     println!("weights loaded: {load_seconds:.1} s");
     println!(
@@ -515,6 +575,24 @@ pub(super) fn run_lowered(
         tokens.len(),
         prompt_seconds * 1e3 / tokens.len().max(1) as f64,
     );
+    if !decode_ms.is_empty() {
+        let mut sorted = decode_ms.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).expect("finite"));
+        let pct = |q: f64| sorted[((sorted.len() - 1) as f64 * q).round() as usize];
+        // Steady state = the second half, so warmup and first-touch
+        // residency do not flatter or penalise the median.
+        let steady = &decode_ms[decode_ms.len() / 2..];
+        let steady_mean = steady.iter().sum::<f64>() / steady.len() as f64;
+        println!("decode tokens: {}", decode_ms.len());
+        println!("first token: {:.0} ms", decode_ms[0]);
+        println!("decode p50: {:.0} ms  p95: {:.0} ms", pct(0.50), pct(0.95));
+        println!(
+            "steady (last half): {:.0} ms/token ({:.3} tok/s)",
+            steady_mean,
+            1000.0 / steady_mean
+        );
+        println!("generated ids: {generated:?}");
+    }
     match &logits {
         Some(l) => {
             let (best, value) =
