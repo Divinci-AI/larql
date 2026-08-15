@@ -103,4 +103,41 @@ pub trait MatMul {
     fn f16_gemv_force(&self, w_f16: &[u8], x: &[f32], n: usize, k: usize) -> Option<Vec<f32>> {
         self.f16_gemv(w_f16, x, n, k)
     }
+
+    /// Several f16 matrices applied to **one** input vector, as one
+    /// device submission where the backend supports it.
+    ///
+    /// `weights` holds `(w_f16, n, k)` per matrix — every `k` must equal
+    /// `x.len()`. A decode step is full of this shape (Q/K/V and an
+    /// attention gate all read the attention input; FFN up and gate read
+    /// the FFN input), and submitting them together amortises the
+    /// per-submission synchronisation and the input upload that dominate
+    /// a serialised gemv-per-matmul decode.
+    ///
+    /// The default is the sequential force gemvs — bit-identical results,
+    /// no batching — so a backend only overrides this for the submission
+    /// win, never for different arithmetic.
+    fn f16_gemv_multi(
+        &self,
+        weights: &[(&[u8], usize, usize)],
+        x: &[f32],
+    ) -> Option<Vec<Vec<f32>>> {
+        weights
+            .iter()
+            .map(|&(w, n, k)| self.f16_gemv_force(w, x, n, k))
+            .collect()
+    }
+
+    /// Residency hint: these byte regions will be read repeatedly; make
+    /// them device-resident now if the backend can.
+    ///
+    /// Purely an execution-state action — it computes nothing and must
+    /// change no number. Motivation: a driver's wired-page collector
+    /// un-wires buffers that sit idle between submissions, and a decode
+    /// loop that walks tens of GB per token then pays a re-wire on
+    /// every touch (measured 10× on a 60 GB f16 working set). One
+    /// command buffer referencing everything re-wires it all at memcpy
+    /// speed, and steps fast enough to stay under the collector's idle
+    /// threshold keep themselves wired thereafter.
+    fn wire_resident(&self, _buffers: &[&[u8]]) {}
 }

@@ -209,6 +209,12 @@ pub trait PlanBackend: Sync {
         WeightFormat::F32
     }
 
+    /// Residency hint before a decode run: every matrix operand the
+    /// session will read, already loaded. Computes nothing and must
+    /// change no number — a backend may warm caches or wire device
+    /// memory, or ignore it entirely. The default does nothing.
+    fn prepare(&self, _weights: &[WeightSlice<'_>]) {}
+
     /// Look up one embedding row, applying the scale operation when the
     /// plan carries one. `scale` `None` = no such operation, so the row
     /// is returned unscaled rather than multiplied by an identity.

@@ -66,6 +66,123 @@ impl MatMul for MetalBackend {
         self.encode_f16_gemv(w_f16, x, n, k)
     }
 
+    /// One command buffer, one encoder, one input upload, N dispatches,
+    /// one wait — same kernel and same per-dispatch arguments as the
+    /// sequential path, so the results are bit-identical to N separate
+    /// [`Self::f16_gemv_force`] calls. The dispatches are mutually
+    /// independent (distinct output buffers), so encoding them without
+    /// barriers reorders nothing observable.
+    fn f16_gemv_multi(
+        &self,
+        weights: &[(&[u8], usize, usize)],
+        x: &[f32],
+    ) -> Option<Vec<Vec<f32>>> {
+        for &(w, n, k) in weights {
+            if w.len() < n * k * 2 || x.len() != k {
+                return None;
+            }
+        }
+        if weights.is_empty() {
+            return Some(Vec::new());
+        }
+
+        let x_buf = self.bufs.output((x.len() * 4) as u64);
+        let x_ptr = x_buf.contents() as *mut f32;
+        if x_ptr.is_null() {
+            return None;
+        }
+        // SAFETY: pooled buffer is at least x.len()*4 bytes and the GPU
+        // is not reading it — it has not been bound to any encoder yet.
+        unsafe { std::ptr::copy_nonoverlapping(x.as_ptr(), x_ptr, x.len()) };
+
+        let kernel = &self.f16_gemv_pipeline;
+        let cmd = self.queue.new_command_buffer();
+        let enc = cmd.new_compute_command_encoder();
+        enc.set_compute_pipeline_state(&kernel.state);
+        // Weight buffers must outlive the wait; the cache clone in this
+        // vec guarantees it independent of encoder retention semantics.
+        let mut w_bufs = Vec::with_capacity(weights.len());
+        let mut out_bufs = Vec::with_capacity(weights.len());
+        for &(w, n, k) in weights {
+            let w_buf = self.bufs.get_bytes(w);
+            let out_buf = self.bufs.output((n * 4) as u64);
+            let n_u32 = n as u32;
+            let k_u32 = k as u32;
+            enc.set_buffer(0, Some(&w_buf), 0);
+            enc.set_buffer(1, Some(&x_buf), 0);
+            enc.set_buffer(2, Some(&out_buf), 0);
+            enc.set_bytes(3, 4, &n_u32 as *const u32 as *const std::ffi::c_void);
+            enc.set_bytes(4, 4, &k_u32 as *const u32 as *const std::ffi::c_void);
+            enc.dispatch_thread_groups(
+                metal::MTLSize::new((n as u64).div_ceil(kernel.rows_per_tg), 1, 1),
+                metal::MTLSize::new(kernel.threads_per_tg, 1, 1),
+            );
+            w_bufs.push(w_buf);
+            out_bufs.push((out_buf, n));
+        }
+        enc.end_encoding();
+        cmd.commit();
+        cmd.wait_until_completed();
+
+        let results: Option<Vec<Vec<f32>>> = out_bufs
+            .iter()
+            .map(|(buf, n)| crate::buffers::try_read_buffer_f32(buf, *n))
+            .collect();
+        // Recycle after the wait and the copy-out, per the pool contract.
+        for (buf, _) in out_bufs {
+            self.bufs.recycle(buf);
+        }
+        self.bufs.recycle(x_buf);
+        results
+    }
+
+    /// One command buffer that references every buffer so the driver
+    /// wires them all in one pass (see the trait doc). The single 1×1
+    /// gemv gives the encoder real work — an encoder with no dispatch
+    /// may not trigger residency — and reads two bytes of the first
+    /// buffer without writing anywhere a caller can see.
+    fn wire_resident(&self, buffers: &[&[u8]]) {
+        let Some(first) = buffers.first() else {
+            return;
+        };
+        if first.len() < 2 {
+            return;
+        }
+        let wired: Vec<metal::Buffer> = buffers.iter().map(|b| self.bufs.get_bytes(b)).collect();
+        let x_buf = self.bufs.output(4);
+        let x_ptr = x_buf.contents() as *mut f32;
+        if x_ptr.is_null() {
+            return;
+        }
+        // SAFETY: pooled buffer holds at least one f32; not yet bound.
+        unsafe { *x_ptr = 0.0 };
+        let out_buf = self.bufs.output(4);
+
+        let kernel = &self.f16_gemv_pipeline;
+        let cmd = self.queue.new_command_buffer();
+        let enc = cmd.new_compute_command_encoder();
+        enc.set_compute_pipeline_state(&kernel.state);
+        for buf in &wired {
+            enc.use_resource(buf, metal::MTLResourceUsage::Read);
+        }
+        let n_u32: u32 = 1;
+        let k_u32: u32 = 1;
+        enc.set_buffer(0, Some(&wired[0]), 0);
+        enc.set_buffer(1, Some(&x_buf), 0);
+        enc.set_buffer(2, Some(&out_buf), 0);
+        enc.set_bytes(3, 4, &n_u32 as *const u32 as *const std::ffi::c_void);
+        enc.set_bytes(4, 4, &k_u32 as *const u32 as *const std::ffi::c_void);
+        enc.dispatch_thread_groups(
+            metal::MTLSize::new(1, 1, 1),
+            metal::MTLSize::new(kernel.threads_per_tg, 1, 1),
+        );
+        enc.end_encoding();
+        cmd.commit();
+        cmd.wait_until_completed();
+        self.bufs.recycle(out_buf);
+        self.bufs.recycle(x_buf);
+    }
+
     fn f32_gemv_topk1(&self, w: ArrayView2<f32>, x: &[f32]) -> Option<(u32, f32)> {
         MetalBackend::f32_gemv_topk1(self, w, x)
     }
@@ -519,7 +636,17 @@ impl MetalBackend {
     /// variants: threshold-gated `f16_gemv` and direct `f16_gemv_force`).
     fn encode_f16_gemv(&self, w_f16: &[u8], x: &[f32], n: usize, k: usize) -> Option<Vec<f32>> {
         let w_buf = self.bufs.get_bytes(w_f16);
-        let x_buf = self.bufs.transient_from_f32(x);
+        // Pooled x and out: a decode step issues hundreds of gemvs, and
+        // per-call device allocations were a measurable share of its
+        // cost. Recycled after the wait, per the pool contract.
+        let x_buf = self.bufs.output((x.len() * 4) as u64);
+        let x_ptr = x_buf.contents() as *mut f32;
+        if x_ptr.is_null() {
+            return None;
+        }
+        // SAFETY: pooled buffer is at least x.len()*4 bytes, and it is
+        // not bound to any encoder yet, so the GPU is not reading it.
+        unsafe { std::ptr::copy_nonoverlapping(x.as_ptr(), x_ptr, x.len()) };
         let out_buf = self.bufs.output((n * 4) as u64);
 
         // Geometry travels with the f16_gemv KernelHandle.
@@ -547,7 +674,10 @@ impl MetalBackend {
             "crates/larql-compute-metal/src/trait_impl/matmul.rs:530",
         );
 
-        Some(crate::buffers::read_buffer_f32(&out_buf, n))
+        let result = crate::buffers::try_read_buffer_f32(&out_buf, n);
+        self.bufs.recycle(out_buf);
+        self.bufs.recycle(x_buf);
+        result
     }
 }
 

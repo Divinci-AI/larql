@@ -106,7 +106,7 @@ pub fn run_exec(args: ExecArgs) -> Result<(), Box<dyn std::error::Error>> {
             let backend =
                 larql_vindex::format::vindex3::opplan::exec::device::DevicePlanBackend::new(
                     gpu,
-                    "metal-r2-f16",
+                    "metal-r3-f16",
                     larql_vindex::format::vindex3::opplan::exec::backend::WeightFormat::F16,
                 );
             run_on(&backend, &args, &tokens, &plan, &store)

@@ -132,9 +132,46 @@ impl<M: MatMul + Send> DevicePlanBackend<M> {
         }
     }
 
-    /// One position's Q/K/V projections on the device, conditioned by
-    /// the production glue — the arithmetic shared by the batch path
-    /// and the decode step.
+    /// Several matrices against one input vector. When every weight is
+    /// f16 this goes through the device's multi-gemv — one submission,
+    /// one wait, one input upload — which is where a serialised decode
+    /// spends most of its time. Any f32 weight falls back to sequential
+    /// dispatches; results are bit-identical either way (the multi path
+    /// encodes the same kernel with the same per-dispatch arguments).
+    fn gemv_multi(
+        &self,
+        weights: &[(WeightSlice<'_>, usize, usize)],
+        x: &[f32],
+    ) -> Result<Vec<Vec<f32>>, VindexError> {
+        let all_f16: Option<Vec<(&[u8], usize, usize)>> = weights
+            .iter()
+            .map(|&(w, n, k)| match w {
+                WeightSlice::F16(bytes) if bytes.len() >= n * k * 2 => Some((bytes, n, k)),
+                _ => None,
+            })
+            .collect();
+        match all_f16 {
+            Some(mats) => self
+                .device
+                .lock()
+                .expect("device dispatch lock")
+                .f16_gemv_multi(&mats, x)
+                .ok_or_else(|| {
+                    VindexError::Parse(format!(
+                        "device f16_gemv_multi ({} matrices) refused — no kernel or out of memory",
+                        mats.len()
+                    ))
+                }),
+            None => weights
+                .iter()
+                .map(|&(w, n, k)| self.gemv(w, n, k, x))
+                .collect(),
+        }
+    }
+
+    /// One position's Q/K/V projections on the device — one submission —
+    /// conditioned by the production glue; the arithmetic shared by the
+    /// batch path and the decode step.
     fn project_position(
         &self,
         call: &AttentionCall<'_>,
@@ -143,42 +180,19 @@ impl<M: MatMul + Send> DevicePlanBackend<M> {
     ) -> Result<ProjectedQkv, VindexError> {
         let q_rows = call.num_q_heads * call.head_dim;
         let kv_rows = call.num_kv_heads * call.head_dim;
-        let mut q = self.gemv(call.w_q, q_rows, call.hidden, pre)?;
-        let mut k = self.gemv(call.w_k, kv_rows, call.hidden, pre)?;
-        let v = self.gemv(call.w_v, kv_rows, call.hidden, pre)?;
+        let mut qkv = self.gemv_multi(
+            &[
+                (call.w_q, q_rows, call.hidden),
+                (call.w_k, kv_rows, call.hidden),
+                (call.w_v, kv_rows, call.hidden),
+            ],
+            pre,
+        )?;
+        let v = qkv.pop().expect("three matrices in, three vectors out");
+        let mut k = qkv.pop().expect("three matrices in, three vectors out");
+        let mut q = qkv.pop().expect("three matrices in, three vectors out");
         condition_qk_in_place(call, position, &mut q, &mut k);
         Ok((q, k, v))
-    }
-
-    /// Aggregation (production glue) plus this backend's own gate and
-    /// output projections on the device.
-    fn attend_position<'k>(
-        &self,
-        call: &AttentionCall<'_>,
-        position: usize,
-        query: &[f32],
-        key_of: impl Fn(usize) -> &'k [f32],
-        value_of: impl Fn(usize) -> &'k [f32],
-        gate_input: &[f32],
-    ) -> Result<Vec<f32>, VindexError> {
-        let q_rows = call.num_q_heads * call.head_dim;
-        let mut concat = aggregate_heads(call, position, query, key_of, value_of);
-
-        if let Some(GateCall { spec, weight }) = &call.gate {
-            // Exhaustive on the judged semantics, like both CPU
-            // backends: a new variant must be implemented here before
-            // it can execute on the device.
-            let GateSource::AttentionInput = spec.source;
-            let GateActivation::Sigmoid = spec.activation;
-            let GateCombine::ElementwiseMultiply = spec.combine;
-            let GatePlacement::AfterAggregationBeforeOutputProjection = spec.placement;
-            let gate_values = self.gemv(*weight, q_rows, call.hidden, gate_input)?;
-            for (c, g) in concat.iter_mut().zip(&gate_values) {
-                *c *= 1.0 / (1.0 + (-g).exp());
-            }
-        }
-
-        self.gemv(call.w_o, call.hidden, q_rows, &concat)
     }
 }
 
@@ -189,6 +203,25 @@ impl<M: MatMul + Send> PlanBackend for DevicePlanBackend<M> {
 
     fn weight_format(&self) -> WeightFormat {
         self.format
+    }
+
+    fn prepare(&self, weights: &[WeightSlice<'_>]) {
+        // Wire every f16 weight in one submission. Without this, a
+        // driver's wired-page collector un-wires idle buffers between
+        // submissions and a large-model decode pays a re-wire on every
+        // touch — measured 10× on a 60 GB f16 working set. After one
+        // pass, steps are fast enough to keep themselves wired.
+        let f16: Vec<&[u8]> = weights
+            .iter()
+            .filter_map(|w| match w {
+                WeightSlice::F16(bytes) => Some(*bytes),
+                WeightSlice::F32(_) => None,
+            })
+            .collect();
+        self.device
+            .lock()
+            .expect("device dispatch lock")
+            .wire_resident(&f16);
     }
 
     fn embed(&self, table: &[f32], hidden: usize, token: u32, scale: Option<f32>) -> Vec<f32> {
@@ -264,8 +297,31 @@ impl<M: MatMul + Send> PlanBackend for DevicePlanBackend<M> {
     fn attention_step(&self, step: AttentionStepCall<'_>) -> Result<AttentionStepOut, VindexError> {
         let call = &step.op;
         let pre = &call.inputs[0];
-        let (q, k, v) = self.project_position(call, step.position, pre)?;
-        let output = self.attend_position(
+        let q_rows = call.num_q_heads * call.head_dim;
+        let kv_rows = call.num_kv_heads * call.head_dim;
+
+        // Q/K/V and the judged gate all read the attention input, so
+        // they ride one submission; the gate values are only *used*
+        // after aggregation, exactly where the batch path applies them.
+        let mut mats = vec![
+            (call.w_q, q_rows, call.hidden),
+            (call.w_k, kv_rows, call.hidden),
+            (call.w_v, kv_rows, call.hidden),
+        ];
+        if let Some(GateCall { weight, .. }) = &call.gate {
+            mats.push((*weight, q_rows, call.hidden));
+        }
+        let mut projected = self.gemv_multi(&mats, pre)?;
+        let gate_values = call
+            .gate
+            .as_ref()
+            .map(|_| projected.pop().expect("gate matrix in, gate vector out"));
+        let v = projected.pop().expect("QKV in, three vectors out");
+        let mut k = projected.pop().expect("QKV in, three vectors out");
+        let mut q = projected.pop().expect("QKV in, three vectors out");
+        condition_qk_in_place(call, step.position, &mut q, &mut k);
+
+        let mut concat = aggregate_heads(
             call,
             step.position,
             &q,
@@ -283,8 +339,21 @@ impl<M: MatMul + Send> PlanBackend for DevicePlanBackend<M> {
                     step.values[p].as_slice()
                 }
             },
-            pre,
-        )?;
+        );
+        if let Some(GateCall { spec, .. }) = &call.gate {
+            // Exhaustive on the judged semantics, like both CPU
+            // backends: a new variant must be implemented here before
+            // it can execute on the device.
+            let GateSource::AttentionInput = spec.source;
+            let GateActivation::Sigmoid = spec.activation;
+            let GateCombine::ElementwiseMultiply = spec.combine;
+            let GatePlacement::AfterAggregationBeforeOutputProjection = spec.placement;
+            let gate_values = gate_values.expect("projected alongside QKV above");
+            for (c, g) in concat.iter_mut().zip(&gate_values) {
+                *c *= 1.0 / (1.0 + (-g).exp());
+            }
+        }
+        let output = self.gemv(call.w_o, call.hidden, q_rows, &concat)?;
         Ok(AttentionStepOut {
             key: k,
             value: v,
@@ -293,19 +362,30 @@ impl<M: MatMul + Send> PlanBackend for DevicePlanBackend<M> {
     }
 
     fn ffn(&self, call: FfnCall<'_>) -> Result<Vec<f32>, VindexError> {
-        let up = self.gemv(call.up, call.intermediate, call.hidden, call.x)?;
         let inner = match call.gate {
             Some(gate_weight) => {
-                let gate = self.gemv(gate_weight, call.intermediate, call.hidden, call.x)?;
+                // Up and gate read the same input: one submission.
+                let mut pair = self.gemv_multi(
+                    &[
+                        (call.up, call.intermediate, call.hidden),
+                        (gate_weight, call.intermediate, call.hidden),
+                    ],
+                    call.x,
+                )?;
+                let gate = pair.pop().expect("two matrices in, two vectors out");
+                let up = pair.pop().expect("two matrices in, two vectors out");
                 match call.activation {
                     Activation::Silu => geglu_silu_alloc(&gate, &up),
                     other => return Err(unsupported_activation("gated", other)),
                 }
             }
-            None => match call.activation {
-                Activation::Silu => up.iter().map(|u| silu(*u)).collect(),
-                other => return Err(unsupported_activation("ungated", other)),
-            },
+            None => {
+                let up = self.gemv(call.up, call.intermediate, call.hidden, call.x)?;
+                match call.activation {
+                    Activation::Silu => up.iter().map(|u| silu(*u)).collect(),
+                    other => return Err(unsupported_activation("ungated", other)),
+                }
+            }
         };
         self.gemv(call.down, call.hidden, call.intermediate, &inner)
     }

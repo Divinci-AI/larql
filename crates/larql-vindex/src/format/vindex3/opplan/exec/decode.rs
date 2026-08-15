@@ -147,7 +147,7 @@ impl<'a, B: PlanBackend> DecodeSession<'a, B> {
             })
             .transpose()?;
 
-        Ok(Self {
+        let session = Self {
             plan,
             backend,
             hidden,
@@ -156,7 +156,21 @@ impl<'a, B: PlanBackend> DecodeSession<'a, B> {
             final_norm,
             output,
             position: 0,
-        })
+        };
+        let mut weights: Vec<super::backend::WeightSlice<'_>> = Vec::new();
+        for state in &session.layers {
+            weights.extend(state.attention.weight_slices());
+            if let Some(gate) = &state.ffn_gate {
+                weights.push(gate.slice());
+            }
+            weights.push(state.ffn_up.slice());
+            weights.push(state.ffn_down.slice());
+        }
+        if let Some((_, projection)) = &session.output {
+            weights.push(projection.slice());
+        }
+        backend.prepare(&weights);
+        Ok(session)
     }
 
     /// Positions consumed so far.

@@ -363,6 +363,21 @@ impl AttentionOperands {
         })
     }
 
+    /// Every matrix operand this attention holds, for residency
+    /// preparation.
+    pub(super) fn weight_slices(&self) -> Vec<backend::WeightSlice<'_>> {
+        let mut slices = vec![
+            self.w_q.slice(),
+            self.w_k.slice(),
+            self.w_v.slice(),
+            self.w_o.slice(),
+        ];
+        if let Some(gate) = &self.gate {
+            slices.push(gate.slice());
+        }
+        slices
+    }
+
     /// A fully resolved call over `inputs`. Every judged fact travels as
     /// an argument; none is re-derived — and both the batch path and the
     /// decode step build their call here, so they cannot drift apart in
