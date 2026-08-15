@@ -597,6 +597,47 @@ impl MetalBackend {
                 }
             }
 
+            // Issue #228: record the residual for DENSE layers too.
+            //
+            // `record_layer` used to be reachable only from
+            // `handle_moe_interleave`, so `LARQL_DUMP_RESIDUALS` on a dense
+            // model created the file, wrote its header, printed
+            // "[residual-dump] writing to <path>" and then recorded
+            // nothing — a well-formed 16-byte file that reads as "no
+            // divergence found" rather than "nothing was measured". A
+            // diagnostic that reports success while measuring nothing is
+            // worse than one that is absent, because it gets trusted.
+            //
+            // Guarded on `!layer_is_moe`: the MoE arm already records at
+            // its own boundary, and recording here as well would double
+            // every MoE layer.
+            //
+            // The MoE arm commits at the end of each iteration, which is
+            // what makes its read of `new_h` consistent. The dense arm
+            // leaves the encoder open, so it must flush first AND restart
+            // the encoder for the next layer — the same shape
+            // `ENV_DECODE_DUMP_LAYERS` uses below. Omitting the restart
+            // encodes the next layer into a finished encoder, which
+            // segfaults rather than failing cleanly.
+            if !layer_is_moe {
+                if let Some(layer_in) = layer_in_snapshot.as_deref() {
+                    if !encoder_ended {
+                        enc.end_encoding();
+                        cmd.commit();
+                        cmd.wait_until_completed();
+                        encoder_ended = true;
+                    }
+                    let ha = super::buffers::read_buffer_f32(&h_post_attn, hidden);
+                    let lo = super::buffers::read_buffer_f32(new_h, hidden);
+                    residual_dump.record_layer(l, layer_in, &ha, &lo);
+                    if l + 1 < num_layers {
+                        cmd = self.queue.new_command_buffer().to_owned();
+                        enc = cmd.new_compute_command_encoder().to_owned();
+                        encoder_ended = false;
+                    }
+                }
+            }
+
             // Optional per-layer end-of-layer dump for decode-path
             // diagnostics. Flushes the encoder so `new_h` is readable,
             // writes `decode_layer_{LL}.f32`, then restarts the encoder

@@ -24,7 +24,11 @@ use larql_compute::{
 const HIDDEN: usize = 256;
 const INTER: usize = 512;
 const HEAD_DIM: usize = 64;
-const NUM_Q_HEADS: usize = 2;
+// 4 x 64 = 256 = one Q4_K superblock. `wo` reduces over Q_DIM, so at
+// NUM_Q_HEADS = 2 the O-projection dispatched zero superblocks and
+// emitted zeros, silently (issue #227). `stages::quant_matvec::encode`
+// now refuses that geometry instead of returning a zero vector.
+const NUM_Q_HEADS: usize = 4;
 const NUM_KV_HEADS: usize = 1;
 const Q_DIM: usize = NUM_Q_HEADS * HEAD_DIM;
 const KV_DIM: usize = NUM_KV_HEADS * HEAD_DIM;

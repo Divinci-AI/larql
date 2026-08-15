@@ -343,17 +343,42 @@ pub const SEQPAR_AUTO: usize = usize::MAX;
 /// geometries instead of pinning it to gpt-oss's 64.
 ///
 /// Measured with `examples/bench_attention_span` on M3 Max, gpt-oss-20b
-/// geometry, 2026-08-14, using only rows whose bracketing baselines agreed
-/// within 5%. The wide end is genuinely harmful at short span — at span
-/// 128 16 slices ran 25% SLOWER than 8 — so this is a real optimum, not a
-/// clamp against the hardware limit.
+/// geometry, 2026-08-14. Only rows whose bracketing baselines agreed
+/// within 5% are cited here:
+///
+/// ```text
+/// span   8x    12x   16x    best
+///  192  2.41  2.44  2.07    8~12
+///  256  2.92  2.76  2.32    8
+///  384  3.17  3.19  2.85    8~12
+///  768  4.32  5.25  5.15    12
+/// 1024  4.68  5.30  5.41    16
+/// 2048  5.68  6.73  6.90    16
+/// ```
+///
+/// Those establish that **the widest threadgroup is genuinely harmful at
+/// short span** — at span 256 it costs 21% against 8 slices — so this is a
+/// real optimum rather than a clamp against the 1024-thread hardware
+/// limit, and that 16 still wins at 2048, i.e. intra-threadgroup
+/// parallelism is exhausted there rather than merely sufficient.
 const SEQPAR_THREADS_SHORT: usize = 512;
 const SEQPAR_THREADS_MID: usize = 768;
 const SEQPAR_THREADS_LONG: usize = 1024;
 
-/// Span tier boundaries for [`SEQPAR_THREADS_SHORT`] and friends. Below
-/// MID the reduction over many partials costs more than the parallelism
-/// returns; past LONG the sweep was still improving at the ceiling.
+/// Span tier boundaries — **engineering policy, not measured phase
+/// transitions**, and worth keeping that distinction.
+///
+/// The sweep locates the ordering at 192-384 (8 wins), 768 (12) and
+/// 1024-2048 (16); it does NOT locate where each crossover actually falls.
+/// The rows nearest these boundaries are exactly the ones that breached
+/// the drift rule — span 384 and 512 read -10.1% and -12.8% on their
+/// bracketing baselines, and negative drift inflates the arms measured
+/// between them — so 512 and 1024 are round numbers interpolated between
+/// trustworthy neighbours.
+///
+/// Do not treat them as discovered constants or tune against them. A
+/// re-sweep on an idle machine, or any other head_dim, may move them; what
+/// should survive is the shape (narrow at short span, widest at long).
 const SEQPAR_SPAN_TIER_MID: u32 = 512;
 const SEQPAR_SPAN_TIER_LONG: u32 = 1024;
 

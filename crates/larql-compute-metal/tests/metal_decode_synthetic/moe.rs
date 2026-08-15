@@ -597,6 +597,17 @@ fn legacy_moe_wait_honours_spin_wait_and_extra_barriers() {
     let norm_w: Vec<f32> = (0..HIDDEN).map(|i| 1.0 + (i as f32 * 0.001)).collect();
 
     let run = || {
+        // The backend's KV cache is persistent across `decode_token_with_moe`
+        // calls, so identical inputs are NOT identical decodes — each call
+        // appends another row and the next one attends over a longer,
+        // RoPE-rotated history. Resetting makes `run` a function of its
+        // arguments again, which is what the equality below assumes.
+        //
+        // This was invisible until issue #227 was fixed: with `Q_DIM = 128`
+        // the O-projection emitted zeros, so the cache could not reach the
+        // output and every repeat matched no matter how much history had
+        // accumulated.
+        metal.reset_kv_cache();
         let mut layer = build_synth_layer(&wq, &wk, &wv, &wo, &gate, &up, &down, &norm_w);
         layer.moe = Some(null_moe_layer());
         let x = synth_input(HIDDEN, 0.9);
@@ -609,6 +620,28 @@ fn legacy_moe_wait_honours_spin_wait_and_extra_barriers() {
     // Baseline: the shipped blocking wait.
     let baseline = run();
     assert_eq!(baseline.len(), HIDDEN);
+
+    // CONTROL, and it must come first: the claim below is "changing the
+    // wait does not change the values", which is only meaningful if NOT
+    // changing the wait doesn't change them either. Without this, a decode
+    // that is simply non-deterministic reads as "the env var broke it".
+    // Sampled repeatedly, not once: a single repeat agreed by luck while
+    // the knob arms below disagreed, and which arm "failed" moved between
+    // runs — the signature of instability in the baseline, not the knob.
+    for i in 0..8 {
+        let repeat = run();
+        let diff = repeat
+            .iter()
+            .zip(&baseline)
+            .filter(|(a, b)| a.to_bits() != b.to_bits())
+            .count();
+        assert_eq!(
+            diff, 0,
+            "repeat {i} of an IDENTICAL decode differed from the baseline in \
+             {diff}/{HIDDEN} lanes, so this test cannot attribute anything to \
+             the wait knobs — decode itself is non-deterministic here"
+        );
+    }
 
     // Both knobs change HOW the host waits, never WHAT is computed, so the
     // output must be bit-identical — that equality is the actual claim.

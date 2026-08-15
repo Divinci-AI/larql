@@ -470,8 +470,8 @@ mod dispatch_tests {
     fn encode_gated_separated_path_silu() {
         let m = backend();
         let seq_len = 1usize;
-        let hidden = 32usize;
-        let inter = 64usize;
+        let hidden = 256usize;
+        let inter = 512usize;
         let (gate_buf, _norm, q8_in, q8s_in, gate_s, up_s, act_s, down_out) =
             fixture(&m, seq_len, hidden, inter);
         let pipes = pipes(&m);
@@ -520,8 +520,8 @@ mod dispatch_tests {
     fn encode_gated_separated_path_gelu_tanh() {
         let m = backend();
         let seq_len = 1usize;
-        let hidden = 32usize;
-        let inter = 64usize;
+        let hidden = 256usize;
+        let inter = 512usize;
         let (gate_buf, _norm, q8_in, q8s_in, gate_s, up_s, act_s, down_out) =
             fixture(&m, seq_len, hidden, inter);
         let pipes = pipes(&m);
@@ -568,8 +568,8 @@ mod dispatch_tests {
     fn encode_gated_fused_q4k_silu_path() {
         let m = backend();
         let seq_len = 1usize;
-        let hidden = 32usize;
-        let inter = 64usize;
+        let hidden = 256usize;
+        let inter = 512usize;
         let (gate_buf, _norm, q8_in, q8s_in, gate_s, up_s, act_s, down_out) =
             fixture(&m, seq_len, hidden, inter);
         let pipes = pipes(&m);
@@ -628,8 +628,8 @@ mod dispatch_tests {
     fn encode_standard_path() {
         let m = backend();
         let seq_len = 1usize;
-        let hidden = 32usize;
-        let inter = 64usize;
+        let hidden = 256usize;
+        let inter = 512usize;
         let (gate_buf, norm, q8_in, q8s_in, _gate_s, up_s, act_s, down_out) =
             fixture(&m, seq_len, hidden, inter);
         let pipes = pipes(&m);
@@ -671,8 +671,8 @@ mod dispatch_tests {
     fn encode_standard_gelu_tanh_path() {
         let m = backend();
         let seq_len = 1usize;
-        let hidden = 32usize;
-        let inter = 64usize;
+        let hidden = 256usize;
+        let inter = 512usize;
         let (gate_buf, norm, q8_in, q8s_in, _gate_s, up_s, act_s, down_out) =
             fixture(&m, seq_len, hidden, inter);
         let pipes = pipes(&m);

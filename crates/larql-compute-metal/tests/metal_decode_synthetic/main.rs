@@ -27,6 +27,8 @@
 #![cfg(target_os = "macos")]
 
 mod attention_hybrid;
+mod attention_reaches_residual;
+
 mod attn_options;
 mod backend_kv;
 mod common;

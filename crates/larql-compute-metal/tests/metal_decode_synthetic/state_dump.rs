@@ -158,3 +158,81 @@ fn decode_token_with_state_dump_unmasked_wrapper_defaults_to_full() {
     assert!(out.iter().all(|v| v.is_finite()));
     assert!(state.is_complete_for(1));
 }
+
+/// Issue #228: `LARQL_DUMP_RESIDUALS` must actually record on a DENSE
+/// model, not just create a well-formed empty file.
+///
+/// `record_layer` used to be reachable only through
+/// `handle_moe_interleave`, so a dense decode printed
+/// "[residual-dump] writing to <path>", wrote the 16-byte `LARQL_RES_V2`
+/// header, and recorded nothing. The run looked successful and the file
+/// looked valid, so it read as "no divergence found" rather than "nothing
+/// was measured" — which cost a turn of debugging on #226.
+///
+/// The assertion is on RECORD COUNT, not on file existence or on the
+/// header: existence and header are exactly what the broken version
+/// already produced.
+#[test]
+fn residual_dump_records_layers_on_a_dense_model() {
+    let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(metal) = larql_compute_metal::MetalBackend::new() else {
+        return;
+    };
+    use larql_compute::backend::DecodeBackend;
+    use larql_compute::cpu::ops::q4_common::{quantize_q4_0, quantize_q4_k};
+
+    let tmp = std::env::temp_dir().join("larql-cm-dense-residual-dump.bin");
+    let _ = std::fs::remove_file(&tmp);
+    let path_static: &'static str = Box::leak(tmp.to_str().unwrap().to_string().into_boxed_str());
+    let saved = std::env::var_os("LARQL_DUMP_RESIDUALS");
+    unsafe { std::env::set_var("LARQL_DUMP_RESIDUALS", path_static) };
+
+    let wq = quantize_q4_k(&synth_weight_f32(Q_DIM * HIDDEN, 0.1));
+    let wk = quantize_q4_k(&synth_weight_f32(KV_DIM * HIDDEN, 0.2));
+    let wv = quantize_q4_k(&synth_weight_f32(KV_DIM * HIDDEN, 0.3));
+    let wo = quantize_q4_k(&synth_weight_f32(HIDDEN * Q_DIM, 0.4));
+    let gate = quantize_q4_0(&synth_weight_f32(INTER * HIDDEN, 0.5));
+    let up = quantize_q4_0(&synth_weight_f32(INTER * HIDDEN, 0.6));
+    let down = quantize_q4_0(&synth_weight_f32(HIDDEN * INTER, 0.7));
+    let norm_w: Vec<f32> = (0..HIDDEN).map(|i| 1.0 + (i as f32 * 0.001)).collect();
+
+    // Two DENSE layers — `layer.moe` stays None, so nothing here can reach
+    // `handle_moe_interleave`.
+    let l0 = build_synth_layer(&wq, &wk, &wv, &wo, &gate, &up, &down, &norm_w);
+    let l1 = build_synth_layer(&wq, &wk, &wv, &wo, &gate, &up, &down, &norm_w);
+    let x = synth_input(HIDDEN, 0.9);
+    metal.reset_kv_cache();
+    let backend: &dyn DecodeBackend = &metal;
+    let out = backend.decode_token(&[l0, l1], &x, HIDDEN, INTER);
+
+    match saved {
+        Some(v) => unsafe { std::env::set_var("LARQL_DUMP_RESIDUALS", v) },
+        None => unsafe { std::env::remove_var("LARQL_DUMP_RESIDUALS") },
+    }
+    assert!(out.is_some(), "dense decode returned None");
+
+    let bytes = std::fs::read(&tmp).expect("residual dump file exists");
+    let _ = std::fs::remove_file(&tmp);
+
+    const HEADER: usize = 16;
+    // layer_idx u32 + hidden u32 + three hidden-length f32 vectors.
+    let record = 4 + 4 + 3 * HIDDEN * 4;
+    assert!(
+        bytes.len() > HEADER,
+        "dump is header-only ({} bytes): the dense path recorded nothing, \
+         which is the #228 signature — a diagnostic that reports success \
+         while measuring nothing",
+        bytes.len()
+    );
+    assert_eq!(
+        (bytes.len() - HEADER) % record,
+        0,
+        "dump body {} is not a whole number of {record}-byte records",
+        bytes.len() - HEADER
+    );
+    assert_eq!(
+        (bytes.len() - HEADER) / record,
+        2,
+        "expected one record per dense layer"
+    );
+}
