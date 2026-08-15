@@ -92,8 +92,37 @@ pub fn run_exec(args: ExecArgs) -> Result<(), Box<dyn std::error::Error>> {
     let store = OperandStore::open(&args.container, &inspection)?;
 
     #[cfg(feature = "gpu")]
-    if matches!(args.backend, ExecBackend::MetalLowered) {
-        return super::lowered::run_lowered(&args, &tokens, &plan, &store);
+    {
+        use larql_vindex::format::vindex3::opplan::exec::backend::{WeightFormat, WeightFormats};
+        // The lowered path's per-class policy. Same scheduling for every
+        // arm — one command buffer per token — so a comparison between
+        // them prices the *representation*, which the pre-lowering
+        // numbers could not (they mixed kernel families and starvation).
+        let lowered = match args.backend {
+            ExecBackend::MetalLowered => {
+                Some((WeightFormats::uniform(WeightFormat::Nvfp4), "nvfp4-all"))
+            }
+            ExecBackend::MetalLoweredFfn => Some((
+                WeightFormats {
+                    attention: WeightFormat::F16,
+                    ffn: WeightFormat::Nvfp4,
+                    head: WeightFormat::F16,
+                },
+                "nvfp4-ffn",
+            )),
+            ExecBackend::MetalLoweredNoHead => Some((
+                WeightFormats {
+                    attention: WeightFormat::Nvfp4,
+                    ffn: WeightFormat::Nvfp4,
+                    head: WeightFormat::F16,
+                },
+                "nvfp4-no-head",
+            )),
+            _ => None,
+        };
+        if let Some((formats, label)) = lowered {
+            return super::lowered::run_lowered(&args, &tokens, &plan, &store, formats, label);
+        }
     }
     match args.backend {
         ExecBackend::Reference => run_on(&ReferenceBackend::new(), &args, &tokens, &plan, &store),
@@ -125,7 +154,9 @@ pub fn run_exec(args: ExecArgs) -> Result<(), Box<dyn std::error::Error>> {
             run_on(&backend, &args, &tokens, &plan, &store)
         }
         #[cfg(feature = "gpu")]
-        ExecBackend::MetalLowered => unreachable!("handled above"),
+        ExecBackend::MetalLowered
+        | ExecBackend::MetalLoweredFfn
+        | ExecBackend::MetalLoweredNoHead => unreachable!("handled above"),
         #[cfg(feature = "gpu")]
         ExecBackend::MetalMxfp4All => {
             let gpu = larql_compute_metal::MetalBackend::new()

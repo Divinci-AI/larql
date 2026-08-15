@@ -30,20 +30,14 @@
 
 use metal::{Buffer, ComputeCommandEncoderRef};
 
-use super::{MatvecOperands, PostNorm};
+use super::{LoweredMatrix, MatvecTarget, PostNorm};
 use crate::MetalBackend;
 
 /// The weight streams one gated FFN reads, already resident.
 pub struct FfnWeights<'a> {
-    pub gate_packed: &'a Buffer,
-    pub gate_scales: &'a Buffer,
-    pub gate_tensor_scale: f32,
-    pub up_packed: &'a Buffer,
-    pub up_scales: &'a Buffer,
-    pub up_tensor_scale: f32,
-    pub down_packed: &'a Buffer,
-    pub down_scales: &'a Buffer,
-    pub down_tensor_scale: f32,
+    pub gate: LoweredMatrix<'a>,
+    pub up: LoweredMatrix<'a>,
+    pub down: LoweredMatrix<'a>,
     /// Pre-FFN norm weight (f32).
     pub norm_weight: &'a Buffer,
     /// The post-FFN norm, under four-norm placement. `None` = absent.
@@ -80,7 +74,7 @@ impl MetalBackend {
     /// `h_in` and `h_out` may be the same buffer only if the caller is
     /// certain no dispatch reads `h_in` after `h_out` is written; the
     /// residual reads both, so they must differ.
-    pub fn encode_nvfp4_gated_ffn(
+    pub fn encode_gated_ffn(
         &self,
         enc: &ComputeCommandEncoderRef,
         h_in: &Buffer,
@@ -106,31 +100,27 @@ impl MetalBackend {
         // 2. gate and up projections. Independent of each other, and the
         //    serial encoder still orders them after the norm that feeds
         //    them.
-        self.encode_nvfp4_matvec(
+        self.encode_matvec(
             enc,
-            &MatvecOperands {
-                packed: w.gate_packed,
-                scales: w.gate_scales,
+            &w.gate,
+            &MatvecTarget {
                 x: s.normed,
                 out: s.gate,
                 out_offset: 0,
                 n: shape.intermediate,
                 k: shape.hidden,
             },
-            w.gate_tensor_scale,
         );
-        self.encode_nvfp4_matvec(
+        self.encode_matvec(
             enc,
-            &MatvecOperands {
-                packed: w.up_packed,
-                scales: w.up_scales,
+            &w.up,
+            &MatvecTarget {
                 x: s.normed,
                 out: s.up,
                 out_offset: 0,
                 n: shape.intermediate,
                 k: shape.hidden,
             },
-            w.up_tensor_scale,
         );
 
         // 3. SiLU-GLU.
@@ -142,18 +132,16 @@ impl MetalBackend {
         );
 
         // 4. down projection.
-        self.encode_nvfp4_matvec(
+        self.encode_matvec(
             enc,
-            &MatvecOperands {
-                packed: w.down_packed,
-                scales: w.down_scales,
+            &w.down,
+            &MatvecTarget {
                 x: s.act,
                 out: s.down,
                 out_offset: 0,
                 n: shape.hidden,
                 k: shape.intermediate,
             },
-            w.down_tensor_scale,
         );
 
         // 5. post-FFN norm (four-norm placement only), then the

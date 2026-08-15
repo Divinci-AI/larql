@@ -20,14 +20,12 @@
 
 use metal::{Buffer, ComputeCommandEncoderRef};
 
-use super::MatvecOperands;
+use super::{LoweredMatrix, MatvecTarget};
 use crate::MetalBackend;
 
 /// What the head reads.
 pub struct HeadWeights<'a> {
-    pub projection_packed: &'a Buffer,
-    pub projection_scales: &'a Buffer,
-    pub projection_tensor_scale: f32,
+    pub projection: LoweredMatrix<'a>,
     /// Final norm weight (f32).
     pub norm_weight: &'a Buffer,
 }
@@ -54,7 +52,7 @@ pub struct HeadShape {
 
 impl MetalBackend {
     /// Encode final norm → head projection → multiplier → softcap.
-    pub fn encode_nvfp4_head(
+    pub fn encode_head(
         &self,
         enc: &ComputeCommandEncoderRef,
         h_final: &Buffer,
@@ -75,18 +73,16 @@ impl MetalBackend {
             shape.norm_eps,
             shape.norm_weight_offset,
         );
-        self.encode_nvfp4_matvec(
+        self.encode_matvec(
             enc,
-            &MatvecOperands {
-                packed: w.projection_packed,
-                scales: w.projection_scales,
+            &w.projection,
+            &MatvecTarget {
                 x: s.normed,
                 out: s.raw_logits,
                 out_offset: 0,
                 n: shape.vocab,
                 k: shape.hidden,
             },
-            w.projection_tensor_scale,
         );
         // Absent ops encode as 0.0, which the kernel reads as "skip" —
         // distinct from a multiplier of one or a cap of zero.

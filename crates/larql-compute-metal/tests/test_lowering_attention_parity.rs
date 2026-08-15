@@ -41,8 +41,9 @@
 #![cfg(target_os = "macos")]
 
 use larql_compute_metal::lowering::attention::{
-    AttnScratch, AttnShape, AttnWeights, LoweredPosition, Projection,
+    AttnScratch, AttnShape, AttnWeights, LoweredPosition,
 };
+use larql_compute_metal::lowering::LoweredMatrix;
 use larql_models::quant::nvfp4;
 
 const HIDDEN: usize = 512;
@@ -317,7 +318,7 @@ fn run_lowered(
     let post_scratch = gpu.lowering_scratch(HIDDEN);
     let post_buf = post_w.map(|w| gpu.lowering_upload(w).unwrap());
 
-    let proj = |m: &nvfp4::Nvfp4Matrix| Projection {
+    let proj = |m: &nvfp4::Nvfp4Matrix| LoweredMatrix::Nvfp4 {
         packed: Box::leak(Box::new(gpu.lowering_weight(&m.packed))),
         scales: Box::leak(Box::new(gpu.lowering_weight(&m.scales))),
         tensor_scale: m.tensor_scale,
@@ -370,7 +371,7 @@ fn run_lowered(
 
     let cmd = gpu.new_lowering_command_buffer();
     let enc = cmd.new_compute_command_encoder();
-    gpu.encode_nvfp4_attention(enc, &h_in, &h_out, &w, &s, &shape);
+    gpu.encode_attention(enc, &h_in, &h_out, &w, &s, &shape);
     enc.end_encoding();
     cmd.commit();
     cmd.wait_until_completed();

@@ -59,9 +59,10 @@
 #![cfg(target_os = "macos")]
 
 use larql_compute_metal::lowering::attention::{
-    AttnScratch, AttnShape, AttnWeights, LoweredPosition, Projection,
+    AttnScratch, AttnShape, AttnWeights, LoweredPosition,
 };
 use larql_compute_metal::lowering::ffn::{FfnScratch, FfnShape, FfnWeights};
+use larql_compute_metal::lowering::LoweredMatrix;
 use larql_models::quant::nvfp4;
 
 const HIDDEN: usize = 512;
@@ -408,7 +409,7 @@ fn run_lowered(
         ScratchPlan::Shared => (&attn_normed, &attn_out),
     };
 
-    let proj = |m: &nvfp4::Nvfp4Matrix| Projection {
+    let proj = |m: &nvfp4::Nvfp4Matrix| LoweredMatrix::Nvfp4 {
         packed: Box::leak(Box::new(gpu.lowering_weight(&m.packed))),
         scales: Box::leak(Box::new(gpu.lowering_weight(&m.scales))),
         tensor_scale: m.tensor_scale,
@@ -464,15 +465,21 @@ fn run_lowered(
     let down_buf = gpu.lowering_weight(&f.down.packed);
     let down_sc = gpu.lowering_weight(&f.down.scales);
     let fw = FfnWeights {
-        gate_packed: &gate_buf,
-        gate_scales: &gate_sc,
-        gate_tensor_scale: f.gate.tensor_scale,
-        up_packed: &up_buf,
-        up_scales: &up_sc,
-        up_tensor_scale: f.up.tensor_scale,
-        down_packed: &down_buf,
-        down_scales: &down_sc,
-        down_tensor_scale: f.down.tensor_scale,
+        gate: LoweredMatrix::Nvfp4 {
+            packed: &gate_buf,
+            scales: &gate_sc,
+            tensor_scale: f.gate.tensor_scale,
+        },
+        up: LoweredMatrix::Nvfp4 {
+            packed: &up_buf,
+            scales: &up_sc,
+            tensor_scale: f.up.tensor_scale,
+        },
+        down: LoweredMatrix::Nvfp4 {
+            packed: &down_buf,
+            scales: &down_sc,
+            tensor_scale: f.down.tensor_scale,
+        },
         norm_weight: &ffn_norm_buf,
         post_norm: Some(larql_compute_metal::lowering::PostNorm {
             weight: &ffn_post_buf,
@@ -499,8 +506,8 @@ fn run_lowered(
         Schedule::OneCommandBuffer => {
             let cmd = gpu.new_lowering_command_buffer();
             let enc = cmd.new_compute_command_encoder();
-            gpu.encode_nvfp4_attention(enc, &h0, &h1, &aw, &ascratch, &ashape);
-            gpu.encode_nvfp4_gated_ffn(enc, &h1, &h2, &fw, &fscratch, &fshape);
+            gpu.encode_attention(enc, &h0, &h1, &aw, &ascratch, &ashape);
+            gpu.encode_gated_ffn(enc, &h1, &h2, &fw, &fscratch, &fshape);
             enc.end_encoding();
             cmd.commit();
             cmd.wait_until_completed();
@@ -508,14 +515,14 @@ fn run_lowered(
         Schedule::TwoCommandBuffers => {
             let c1 = gpu.new_lowering_command_buffer();
             let e1 = c1.new_compute_command_encoder();
-            gpu.encode_nvfp4_attention(e1, &h0, &h1, &aw, &ascratch, &ashape);
+            gpu.encode_attention(e1, &h0, &h1, &aw, &ascratch, &ashape);
             e1.end_encoding();
             c1.commit();
             c1.wait_until_completed();
 
             let c2 = gpu.new_lowering_command_buffer();
             let e2 = c2.new_compute_command_encoder();
-            gpu.encode_nvfp4_gated_ffn(e2, &h1, &h2, &fw, &fscratch, &fshape);
+            gpu.encode_gated_ffn(e2, &h1, &h2, &fw, &fscratch, &fshape);
             e2.end_encoding();
             c2.commit();
             c2.wait_until_completed();

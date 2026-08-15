@@ -18,29 +18,46 @@
 use std::collections::HashMap;
 
 use larql_compute::backend::MatMul;
-use larql_compute_metal::lowering::attention::{
-    AttnShape, AttnWeights, LoweredPosition, Projection,
-};
+use larql_compute_metal::lowering::attention::{AttnShape, AttnWeights, LoweredPosition};
 use larql_compute_metal::lowering::ffn::{FfnShape, FfnWeights};
 use larql_compute_metal::lowering::head::{HeadScratch, HeadShape, HeadWeights};
 use larql_compute_metal::lowering::stack::{LayerLowering, StackScratch};
-use larql_compute_metal::lowering::{DeviceBuffer, PostNorm};
+use larql_compute_metal::lowering::{DeviceBuffer, LoweredMatrix, PostNorm};
 use larql_compute_metal::MetalBackend;
 use larql_models::config::PositionPolicy;
 use larql_vindex::error::VindexError;
 use larql_vindex::format::vindex3::graph::policy::AttentionSpan;
-use larql_vindex::format::vindex3::opplan::exec::backend::WeightFormat;
+use larql_vindex::format::vindex3::opplan::exec::backend::{WeightFormat, WeightFormats};
 use larql_vindex::format::vindex3::opplan::exec::operands::OperandStore;
 use larql_vindex::format::vindex3::opplan::exec::weights::{load_weight, LoadedWeight};
 use larql_vindex::format::vindex3::opplan::{ComponentOpPlan, LayerPlan, NormOp, OperandRef};
 
 /// One matrix operand, resident on the device.
 struct DeviceMatrix {
+    /// `scales` is unused for f16; the format is what the plan's
+    /// per-class policy asked for, not something inferred here.
     packed: DeviceBuffer,
     scales: DeviceBuffer,
     tensor_scale: f32,
+    f16: bool,
     rows: usize,
     cols: usize,
+}
+
+impl DeviceMatrix {
+    fn as_lowered(&self) -> LoweredMatrix<'_> {
+        if self.f16 {
+            LoweredMatrix::F16 {
+                bytes: &self.packed,
+            }
+        } else {
+            LoweredMatrix::Nvfp4 {
+                packed: &self.packed,
+                scales: &self.scales,
+                tensor_scale: self.tensor_scale,
+            }
+        }
+    }
 }
 
 /// Per-layer resident state. No host-side KV: the caches are device
@@ -90,28 +107,39 @@ fn resident_matrix(
     gpu: &MetalBackend,
     store: &OperandStore,
     operand: &OperandRef,
+    format: WeightFormat,
     keep: &mut Vec<LoadedWeight>,
 ) -> Result<DeviceMatrix, VindexError> {
     let rows = operand.shape.first().copied().unwrap_or(0);
     let cols = operand.shape.get(1).copied().unwrap_or(0);
-    let loaded = load_weight(store, operand, WeightFormat::Nvfp4)?;
-    let LoadedWeight::Nvfp4 {
-        packed,
-        scales,
-        tensor_scale,
-    } = &loaded
-    else {
-        return Err(VindexError::Parse(format!(
-            "operand `{}`: expected an NVFP4 load",
-            operand.tensor
-        )));
-    };
-    let m = DeviceMatrix {
-        packed: gpu.lowering_weight(packed.as_slice()),
-        scales: gpu.lowering_weight(scales.as_slice()),
-        tensor_scale: *tensor_scale,
-        rows,
-        cols,
+    let loaded = load_weight(store, operand, format)?;
+    let m = match &loaded {
+        LoadedWeight::Nvfp4 {
+            packed,
+            scales,
+            tensor_scale,
+        } => DeviceMatrix {
+            packed: gpu.lowering_weight(packed.as_slice()),
+            scales: gpu.lowering_weight(scales.as_slice()),
+            tensor_scale: *tensor_scale,
+            f16: false,
+            rows,
+            cols,
+        },
+        LoadedWeight::F16(bytes) => DeviceMatrix {
+            packed: gpu.lowering_weight(bytes.as_slice()),
+            scales: gpu.lowering_weight(&[]),
+            tensor_scale: 1.0,
+            f16: true,
+            rows,
+            cols,
+        },
+        _ => {
+            return Err(VindexError::Parse(format!(
+                "operand `{}`: unsupported lowering format {format:?}",
+                operand.tensor
+            )))
+        }
     };
     // The device buffers alias these allocations, so the session owns
     // them for its lifetime.
@@ -134,10 +162,14 @@ fn resident_norm(
 impl<'a> LoweredSession<'a> {
     /// Load every operand the plan consumes, once, resident on the
     /// device.
+    /// `formats` is the plan's per-class policy, applied here rather
+    /// than assumed: attention, FFN and head may each be resident in a
+    /// different representation and still execute under one schedule.
     pub fn new(
         gpu: &'a MetalBackend,
         plan: &'a ComponentOpPlan,
         store: &OperandStore,
+        formats: WeightFormats,
         max_positions: usize,
         keep: &mut Vec<LoadedWeight>,
     ) -> Result<Self, VindexError> {
@@ -154,12 +186,18 @@ impl<'a> LoweredSession<'a> {
             let kv_rows = a.num_kv_heads * a.head_dim;
             let zeros = vec![0.0f32; max_positions * kv_rows];
             layers.push(LayerResident {
-                q: resident_matrix(gpu, store, &a.q, keep)?,
-                k: resident_matrix(gpu, store, &a.k, keep)?,
-                v: resident_matrix(gpu, store, &a.v, keep)?,
-                o: resident_matrix(gpu, store, &a.o, keep)?,
+                q: resident_matrix(gpu, store, &a.q, formats.attention, keep)?,
+                k: resident_matrix(gpu, store, &a.k, formats.attention, keep)?,
+                v: resident_matrix(gpu, store, &a.v, formats.attention, keep)?,
+                o: resident_matrix(gpu, store, &a.o, formats.attention, keep)?,
                 gate: match &a.output_gate {
-                    Some(g) => Some(resident_matrix(gpu, store, &g.projection, keep)?),
+                    Some(g) => Some(resident_matrix(
+                        gpu,
+                        store,
+                        &g.projection,
+                        formats.attention,
+                        keep,
+                    )?),
                     None => None,
                 },
                 ffn_gate: resident_matrix(
@@ -168,10 +206,11 @@ impl<'a> LoweredSession<'a> {
                     layer.ffn.gate.as_ref().ok_or_else(|| {
                         VindexError::Parse("lowering requires a gated FFN".into())
                     })?,
+                    formats.ffn,
                     keep,
                 )?,
-                ffn_up: resident_matrix(gpu, store, &layer.ffn.up, keep)?,
-                ffn_down: resident_matrix(gpu, store, &layer.ffn.down, keep)?,
+                ffn_up: resident_matrix(gpu, store, &layer.ffn.up, formats.ffn, keep)?,
+                ffn_down: resident_matrix(gpu, store, &layer.ffn.down, formats.ffn, keep)?,
                 pre_attn_norm: resident_norm(gpu, store, &layer.pre_attention_norm)?.0,
                 post_attn_norm: match &layer.post_attention_norm {
                     Some(op) => Some(resident_norm(gpu, store, op)?),
@@ -197,7 +236,7 @@ impl<'a> LoweredSession<'a> {
         };
         let (head, vocab, head_multiplier, head_softcap) = match &plan.output {
             Some(out) => {
-                let m = resident_matrix(gpu, store, &out.projection, keep)?;
+                let m = resident_matrix(gpu, store, &out.projection, formats.head, keep)?;
                 let v = m.rows;
                 (
                     Some(m),
@@ -275,9 +314,13 @@ impl<'a> LoweredSession<'a> {
         // so this wires the buffers the stack will actually bind.
         let mut streams: Vec<&[u8]> = Vec::with_capacity(keep.len() * 2);
         for w in keep.iter() {
-            if let LoadedWeight::Nvfp4 { packed, scales, .. } = w {
-                streams.push(packed.as_slice());
-                streams.push(scales.as_slice());
+            match w {
+                LoadedWeight::Nvfp4 { packed, scales, .. } => {
+                    streams.push(packed.as_slice());
+                    streams.push(scales.as_slice());
+                }
+                LoadedWeight::F16(b) => streams.push(b.as_slice()),
+                _ => {}
             }
         }
         let wiring = std::time::Instant::now();
@@ -380,9 +423,7 @@ impl<'a> LoweredSession<'a> {
                     raw_logits: &s[17],
                 };
                 let hw = HeadWeights {
-                    projection_packed: &head.packed,
-                    projection_scales: &head.scales,
-                    projection_tensor_scale: head.tensor_scale,
+                    projection: head.as_lowered(),
                     norm_weight: nw,
                 };
                 let shape = HeadShape {
@@ -393,8 +434,7 @@ impl<'a> LoweredSession<'a> {
                     multiplier: self.head_multiplier,
                     softcap: self.head_softcap,
                 };
-                self.gpu
-                    .encode_nvfp4_head(enc, h_final, &s[16], &hw, &hs, &shape);
+                self.gpu.encode_head(enc, h_final, &s[16], &hw, &hs, &shape);
                 Some(&s[16])
             }
             _ => None,
@@ -424,18 +464,13 @@ impl<'a> LoweredSession<'a> {
                 scratch,
             })
         };
-        let pr = |m: &'b DeviceMatrix| Projection {
-            packed: &m.packed,
-            scales: &m.scales,
-            tensor_scale: m.tensor_scale,
-        };
         LayerLowering {
             attn: AttnWeights {
-                q: pr(&r.q),
-                k: pr(&r.k),
-                v: pr(&r.v),
-                o: pr(&r.o),
-                gate: r.gate.as_ref().map(pr),
+                q: r.q.as_lowered(),
+                k: r.k.as_lowered(),
+                v: r.v.as_lowered(),
+                o: r.o.as_lowered(),
+                gate: r.gate.as_ref().map(DeviceMatrix::as_lowered),
                 norm_weight: &r.pre_attn_norm,
                 post_norm: post(&r.post_attn_norm, &self.scratch[7]),
             },
@@ -468,15 +503,9 @@ impl<'a> LoweredSession<'a> {
                 kv_len: t + 1,
             },
             ffn: FfnWeights {
-                gate_packed: &r.ffn_gate.packed,
-                gate_scales: &r.ffn_gate.scales,
-                gate_tensor_scale: r.ffn_gate.tensor_scale,
-                up_packed: &r.ffn_up.packed,
-                up_scales: &r.ffn_up.scales,
-                up_tensor_scale: r.ffn_up.tensor_scale,
-                down_packed: &r.ffn_down.packed,
-                down_scales: &r.ffn_down.scales,
-                down_tensor_scale: r.ffn_down.tensor_scale,
+                gate: r.ffn_gate.as_lowered(),
+                up: r.ffn_up.as_lowered(),
+                down: r.ffn_down.as_lowered(),
                 norm_weight: &r.pre_ffn_norm,
                 post_norm: post(&r.post_ffn_norm, &self.scratch[14]),
             },
@@ -531,12 +560,14 @@ pub(super) fn run_lowered(
     tokens: &[u32],
     plan: &ComponentOpPlan,
     store: &OperandStore,
+    formats: WeightFormats,
+    label: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let gpu = MetalBackend::new().ok_or("no Metal device available for --backend metal-lowered")?;
     let total = tokens.len() + args.generate.unwrap_or(0);
     let loading = std::time::Instant::now();
     let mut keep = Vec::new();
-    let mut session = LoweredSession::new(&gpu, plan, store, total.max(1), &mut keep)?;
+    let mut session = LoweredSession::new(&gpu, plan, store, formats, total.max(1), &mut keep)?;
     let load_seconds = loading.elapsed().as_secs_f64();
     eprintln!("weights resident in {load_seconds:.1} s");
     if let Some((rows, cols)) = session.head_geometry() {
@@ -568,7 +599,7 @@ pub(super) fn run_lowered(
         }
     }
 
-    println!("engine: vindex3-metal-g6d-lowered");
+    println!("engine: vindex3-metal-lowered-{label}");
     println!("weights loaded: {load_seconds:.1} s");
     println!(
         "prompt: {} tokens in {prompt_seconds:.1} s ({:.0} ms/token)",

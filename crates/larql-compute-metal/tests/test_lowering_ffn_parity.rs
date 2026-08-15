@@ -35,6 +35,7 @@
 #![cfg(target_os = "macos")]
 
 use larql_compute_metal::lowering::ffn::{FfnScratch, FfnShape, FfnWeights};
+use larql_compute_metal::lowering::LoweredMatrix;
 use larql_models::quant::nvfp4;
 
 const HIDDEN: usize = 512;
@@ -212,15 +213,21 @@ fn run_lowered(
     let post_buf = post_norm_w.map(|w| gpu.lowering_upload(w).expect("upload"));
     let post_scratch = gpu.lowering_scratch(HIDDEN);
     let w = FfnWeights {
-        gate_packed: &gpu.lowering_weight(&gate.packed),
-        gate_scales: &gpu.lowering_weight(&gate.scales),
-        gate_tensor_scale: gate.tensor_scale,
-        up_packed: &gpu.lowering_weight(&up.packed),
-        up_scales: &gpu.lowering_weight(&up.scales),
-        up_tensor_scale: up.tensor_scale,
-        down_packed: &gpu.lowering_weight(&down.packed),
-        down_scales: &gpu.lowering_weight(&down.scales),
-        down_tensor_scale: down.tensor_scale,
+        gate: LoweredMatrix::Nvfp4 {
+            packed: &gpu.lowering_weight(&gate.packed),
+            scales: &gpu.lowering_weight(&gate.scales),
+            tensor_scale: gate.tensor_scale,
+        },
+        up: LoweredMatrix::Nvfp4 {
+            packed: &gpu.lowering_weight(&up.packed),
+            scales: &gpu.lowering_weight(&up.scales),
+            tensor_scale: up.tensor_scale,
+        },
+        down: LoweredMatrix::Nvfp4 {
+            packed: &gpu.lowering_weight(&down.packed),
+            scales: &gpu.lowering_weight(&down.scales),
+            tensor_scale: down.tensor_scale,
+        },
         norm_weight: &norm_buf,
         post_norm: post_buf
             .as_ref()
@@ -247,7 +254,7 @@ fn run_lowered(
 
     let cmd = gpu.new_lowering_command_buffer();
     let enc = cmd.new_compute_command_encoder();
-    gpu.encode_nvfp4_gated_ffn(enc, &h_in, &h_out, &w, &s, &shape);
+    gpu.encode_gated_ffn(enc, &h_in, &h_out, &w, &s, &shape);
     enc.end_encoding();
     cmd.commit();
     cmd.wait_until_completed();

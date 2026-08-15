@@ -31,6 +31,7 @@
 #![cfg(target_os = "macos")]
 
 use larql_compute_metal::lowering::head::{HeadScratch, HeadShape, HeadWeights};
+use larql_compute_metal::lowering::LoweredMatrix;
 use larql_models::quant::nvfp4;
 
 const HIDDEN: usize = 256;
@@ -140,9 +141,11 @@ fn run_lowered(
     let sk = gpu.lowering_weight(&proj.scales);
 
     let w = HeadWeights {
-        projection_packed: &pk,
-        projection_scales: &sk,
-        projection_tensor_scale: proj.tensor_scale,
+        projection: LoweredMatrix::Nvfp4 {
+            packed: &pk,
+            scales: &sk,
+            tensor_scale: proj.tensor_scale,
+        },
         norm_weight: &n_buf,
     };
     let s = HeadScratch {
@@ -159,7 +162,7 @@ fn run_lowered(
     };
     let cmd = gpu.new_lowering_command_buffer();
     let enc = cmd.new_compute_command_encoder();
-    gpu.encode_nvfp4_head(enc, &h_buf, &out, &w, &s, &shape);
+    gpu.encode_head(enc, &h_buf, &out, &w, &s, &shape);
     enc.end_encoding();
     cmd.commit();
     cmd.wait_until_completed();

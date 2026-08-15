@@ -24,12 +24,10 @@
 
 #![cfg(target_os = "macos")]
 
-use larql_compute_metal::lowering::attention::{
-    AttnShape, AttnWeights, LoweredPosition, Projection,
-};
+use larql_compute_metal::lowering::attention::{AttnShape, AttnWeights, LoweredPosition};
 use larql_compute_metal::lowering::ffn::{FfnShape, FfnWeights};
 use larql_compute_metal::lowering::stack::{Checkpoint, LayerLowering, StackScratch};
-use larql_compute_metal::lowering::PostNorm;
+use larql_compute_metal::lowering::{LoweredMatrix, PostNorm};
 use larql_models::quant::nvfp4;
 
 const LAYERS: usize = 52;
@@ -384,7 +382,7 @@ fn fifty_two_layers_lower_into_one_scheduling_domain() {
             let p = policy_for(l);
             let w = &ws[l];
             let i = &idx[l];
-            let pr = |(a, b): (usize, usize), ts: f32| Projection {
+            let pr = |(a, b): (usize, usize), ts: f32| LoweredMatrix::Nvfp4 {
                 packed: &keep[a],
                 scales: &keep[b],
                 tensor_scale: ts,
@@ -427,15 +425,21 @@ fn fifty_two_layers_lower_into_one_scheduling_domain() {
                     kv_len: T,
                 },
                 ffn: FfnWeights {
-                    gate_packed: &keep[i[5].0],
-                    gate_scales: &keep[i[5].1],
-                    gate_tensor_scale: w.fg.tensor_scale,
-                    up_packed: &keep[i[6].0],
-                    up_scales: &keep[i[6].1],
-                    up_tensor_scale: w.fu.tensor_scale,
-                    down_packed: &keep[i[7].0],
-                    down_scales: &keep[i[7].1],
-                    down_tensor_scale: w.fd.tensor_scale,
+                    gate: LoweredMatrix::Nvfp4 {
+                        packed: &keep[i[5].0],
+                        scales: &keep[i[5].1],
+                        tensor_scale: w.fg.tensor_scale,
+                    },
+                    up: LoweredMatrix::Nvfp4 {
+                        packed: &keep[i[6].0],
+                        scales: &keep[i[6].1],
+                        tensor_scale: w.fu.tensor_scale,
+                    },
+                    down: LoweredMatrix::Nvfp4 {
+                        packed: &keep[i[7].0],
+                        scales: &keep[i[7].1],
+                        tensor_scale: w.fd.tensor_scale,
+                    },
                     norm_weight: &norms[l][2],
                     post_norm: Some(PostNorm {
                         weight: &norms[l][3],

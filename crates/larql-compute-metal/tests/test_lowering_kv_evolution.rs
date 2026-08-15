@@ -33,12 +33,10 @@
 
 #![cfg(target_os = "macos")]
 
-use larql_compute_metal::lowering::attention::{
-    AttnShape, AttnWeights, LoweredPosition, Projection,
-};
+use larql_compute_metal::lowering::attention::{AttnShape, AttnWeights, LoweredPosition};
 use larql_compute_metal::lowering::ffn::{FfnShape, FfnWeights};
 use larql_compute_metal::lowering::stack::{LayerLowering, StackScratch};
-use larql_compute_metal::lowering::PostNorm;
+use larql_compute_metal::lowering::{LoweredMatrix, PostNorm};
 use larql_models::quant::nvfp4;
 
 const LAYERS: usize = 4;
@@ -372,7 +370,7 @@ fn step(d: &Device<'_>, ws: &[LayerW], h0: &[f32], t: usize, share: bool) -> Vec
             let w = &ws[l];
             let b = l * 16;
             let ci = if share { 0 } else { l };
-            let pr = |o: usize, ts: f32| Projection {
+            let pr = |o: usize, ts: f32| LoweredMatrix::Nvfp4 {
                 packed: &d.keep[b + o],
                 scales: &d.keep[b + o + 1],
                 tensor_scale: ts,
@@ -415,15 +413,21 @@ fn step(d: &Device<'_>, ws: &[LayerW], h0: &[f32], t: usize, share: bool) -> Vec
                     kv_len: t + 1,
                 },
                 ffn: FfnWeights {
-                    gate_packed: &d.keep[b + 10],
-                    gate_scales: &d.keep[b + 11],
-                    gate_tensor_scale: w.fg.tensor_scale,
-                    up_packed: &d.keep[b + 12],
-                    up_scales: &d.keep[b + 13],
-                    up_tensor_scale: w.fu.tensor_scale,
-                    down_packed: &d.keep[b + 14],
-                    down_scales: &d.keep[b + 15],
-                    down_tensor_scale: w.fd.tensor_scale,
+                    gate: LoweredMatrix::Nvfp4 {
+                        packed: &d.keep[b + 10],
+                        scales: &d.keep[b + 11],
+                        tensor_scale: w.fg.tensor_scale,
+                    },
+                    up: LoweredMatrix::Nvfp4 {
+                        packed: &d.keep[b + 12],
+                        scales: &d.keep[b + 13],
+                        tensor_scale: w.fu.tensor_scale,
+                    },
+                    down: LoweredMatrix::Nvfp4 {
+                        packed: &d.keep[b + 14],
+                        scales: &d.keep[b + 15],
+                        tensor_scale: w.fd.tensor_scale,
+                    },
                     norm_weight: &d.norms[l][2],
                     post_norm: Some(PostNorm {
                         weight: &d.norms[l][3],

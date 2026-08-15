@@ -61,6 +61,41 @@ pub struct PostNorm<'a> {
     pub scratch: &'a Buffer,
 }
 
+/// One matrix operand resident on the device, tagged with the
+/// representation it is stored in.
+///
+/// The lowering dispatches on this rather than taking a single format,
+/// so a plan may keep some matrix classes wide and quantise others — the
+/// per-class policy VINDEX3 already expresses, executed under one
+/// schedule instead of one command buffer per format family.
+#[derive(Clone, Copy)]
+pub enum LoweredMatrix<'a> {
+    /// Little-endian IEEE f16, `[n, k]` row-major.
+    F16 { bytes: &'a Buffer },
+    /// e2m1 codes + E4M3 group scales + one f32 tensor scale.
+    Nvfp4 {
+        packed: &'a Buffer,
+        scales: &'a Buffer,
+        tensor_scale: f32,
+    },
+}
+
+/// Where a matvec reads from and writes to, and the geometry of the
+/// matrix between them. Grouped because these five always travel
+/// together and a transposed `n`/`k` at a call site is invisible.
+#[derive(Clone, Copy)]
+pub struct MatvecTarget<'a> {
+    pub x: &'a Buffer,
+    pub out: &'a Buffer,
+    /// Byte offset into `out` — lets a K/V projection write straight
+    /// into its KV-cache slot.
+    pub out_offset: u64,
+    /// Output rows.
+    pub n: usize,
+    /// Input width.
+    pub k: usize,
+}
+
 /// One quantised matrix and the vectors it maps between, as device
 /// buffers. Grouped because a lowered matvec genuinely needs weights,
 /// scales, input, output and geometry, and an eight-argument call at
@@ -90,6 +125,56 @@ pub(crate) fn set_f32(enc: &ComputeCommandEncoderRef, index: u64, value: f32) {
 }
 
 impl MetalBackend {
+    /// Encode `out = W · x` for a matrix in whichever representation it
+    /// is resident in.
+    pub fn encode_matvec(
+        &self,
+        enc: &ComputeCommandEncoderRef,
+        w: &LoweredMatrix<'_>,
+        at: &MatvecTarget<'_>,
+    ) {
+        match w {
+            LoweredMatrix::Nvfp4 {
+                packed,
+                scales,
+                tensor_scale,
+            } => self.encode_nvfp4_matvec(
+                enc,
+                &MatvecOperands {
+                    packed,
+                    scales,
+                    x: at.x,
+                    out: at.out,
+                    out_offset: at.out_offset,
+                    n: at.n,
+                    k: at.k,
+                },
+                *tensor_scale,
+            ),
+            LoweredMatrix::F16 { bytes } => self.encode_f16_matvec(enc, bytes, at),
+        }
+    }
+
+    /// Encode `out = W · x` for an f16 matrix into `enc`.
+    pub fn encode_f16_matvec(
+        &self,
+        enc: &ComputeCommandEncoderRef,
+        w: &Buffer,
+        at: &MatvecTarget<'_>,
+    ) {
+        let kernel = &self.f16_gemv_pipeline;
+        enc.set_compute_pipeline_state(&kernel.state);
+        enc.set_buffer(0, Some(w), 0);
+        enc.set_buffer(1, Some(at.x), 0);
+        enc.set_buffer(2, Some(at.out), at.out_offset);
+        set_u32(enc, 3, at.n as u32);
+        set_u32(enc, 4, at.k as u32);
+        enc.dispatch_thread_groups(
+            metal::MTLSize::new((at.n as u64).div_ceil(kernel.rows_per_tg), 1, 1),
+            metal::MTLSize::new(kernel.threads_per_tg, 1, 1),
+        );
+    }
+
     /// Encode `out = W · x` for an NVFP4 matrix into `enc`.
     ///
     /// Every operand is already a device buffer, so nothing crosses to the

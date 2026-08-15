@@ -141,7 +141,7 @@ impl MetalBackend {
                 attn_out: s.attn_out,
                 inv_freq: s.inv_freq,
             };
-            self.encode_nvfp4_attention(enc, src, mid, &layer.attn, &ascratch, &layer.attn_shape);
+            self.encode_attention(enc, src, mid, &layer.attn, &ascratch, &layer.attn_shape);
 
             let fscratch = FfnScratch {
                 normed: s.ffn_normed,
@@ -150,7 +150,7 @@ impl MetalBackend {
                 act: s.ffn_act,
                 down: s.ffn_down,
             };
-            self.encode_nvfp4_gated_ffn(enc, mid, dst, &layer.ffn, &fscratch, &layer.ffn_shape);
+            self.encode_gated_ffn(enc, mid, dst, &layer.ffn, &fscratch, &layer.ffn_shape);
 
             for cp in checkpoints.iter().filter(|c| c.after_layer == index) {
                 // A copy, not a readback: the value lands in a device

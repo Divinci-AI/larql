@@ -83,6 +83,13 @@ pub enum ExecBackend {
     /// host out of the dependency chain. All-NVFP4.
     #[cfg(feature = "gpu")]
     MetalLowered,
+    /// Lowered execution, NVFP4 FFN with attention and head f16 — the
+    /// quality end of the Q2 frontier, under identical scheduling.
+    #[cfg(feature = "gpu")]
+    MetalLoweredFfn,
+    /// Lowered execution, NVFP4 attention and FFN with an f16 head.
+    #[cfg(feature = "gpu")]
+    MetalLoweredNoHead,
 }
 
 #[derive(Args)]

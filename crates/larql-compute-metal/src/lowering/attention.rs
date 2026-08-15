@@ -32,7 +32,7 @@
 
 use metal::{Buffer, ComputeCommandEncoderRef};
 
-use super::{MatvecOperands, PostNorm};
+use super::{LoweredMatrix, MatvecTarget, PostNorm};
 use crate::MetalBackend;
 
 /// Position encoding for this layer, from its own policy entry — never a
@@ -45,22 +45,15 @@ pub enum LoweredPosition {
     None,
 }
 
-/// One NVFP4 projection: the three device streams plus its tensor scale.
-pub struct Projection<'a> {
-    pub packed: &'a Buffer,
-    pub scales: &'a Buffer,
-    pub tensor_scale: f32,
-}
-
 /// Everything attention reads.
 pub struct AttnWeights<'a> {
-    pub q: Projection<'a>,
-    pub k: Projection<'a>,
-    pub v: Projection<'a>,
-    pub o: Projection<'a>,
+    pub q: LoweredMatrix<'a>,
+    pub k: LoweredMatrix<'a>,
+    pub v: LoweredMatrix<'a>,
+    pub o: LoweredMatrix<'a>,
     /// The judged attention output gate. `None` = no gate op — which is
     /// a different claim from a gate that happens to be near 1.
-    pub gate: Option<Projection<'a>>,
+    pub gate: Option<LoweredMatrix<'a>>,
     /// Pre-attention norm weight (f32).
     pub norm_weight: &'a Buffer,
     /// The post-attention norm, under four-norm placement. `None` =
@@ -133,7 +126,7 @@ impl AttnShape {
 impl MetalBackend {
     /// Encode one attention op, hidden state in to hidden state out.
     #[allow(clippy::too_many_arguments)]
-    pub fn encode_nvfp4_attention(
+    pub fn encode_attention(
         &self,
         enc: &ComputeCommandEncoderRef,
         h_in: &Buffer,
@@ -165,35 +158,31 @@ impl MetalBackend {
             (&w.k, s.k_cache, slot, kv_rows),
             (&w.v, s.v_cache, slot, kv_rows),
         ] {
-            self.encode_nvfp4_matvec(
+            self.encode_matvec(
                 enc,
-                &MatvecOperands {
-                    packed: p.packed,
-                    scales: p.scales,
+                p,
+                &MatvecTarget {
                     x: s.normed,
                     out,
                     out_offset: off,
                     n,
                     k: shape.hidden,
                 },
-                p.tensor_scale,
             );
         }
         if let Some(g) = &w.gate {
             // The gate reads the *attention input* — the same normalised
             // vector the projections read, per `GateSource::AttentionInput`.
-            self.encode_nvfp4_matvec(
+            self.encode_matvec(
                 enc,
-                &MatvecOperands {
-                    packed: g.packed,
-                    scales: g.scales,
+                g,
+                &MatvecTarget {
                     x: s.normed,
                     out: s.gate,
                     out_offset: 0,
                     n: q_rows,
                     k: shape.hidden,
                 },
-                g.tensor_scale,
             );
         }
 
@@ -260,18 +249,16 @@ impl MetalBackend {
             }
             None => s.concat,
         };
-        self.encode_nvfp4_matvec(
+        self.encode_matvec(
             enc,
-            &MatvecOperands {
-                packed: w.o.packed,
-                scales: w.o.scales,
+            &w.o,
+            &MatvecTarget {
                 x: aggregated,
                 out: s.attn_out,
                 out_offset: 0,
                 n: shape.hidden,
                 k: q_rows,
             },
-            w.o.tensor_scale,
         );
 
         // 8. post-attention norm (four-norm placement only), then the
