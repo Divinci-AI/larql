@@ -84,6 +84,9 @@ pub struct NormKernels {
     pub qk_norm_parameter_free_pipeline: ComputePipelineState,
     /// `out = a * sigmoid(g)` — the judged attention output gate.
     pub sigmoid_gate_multiply_pipeline: ComputePipelineState,
+    /// `logits = softcap(multiplier * x)` — the head's two judged
+    /// elementwise ops, fused because their order is semantic.
+    pub head_scale_softcap_pipeline: ComputePipelineState,
 }
 
 impl NormKernels {
@@ -136,6 +139,9 @@ impl NormKernels {
                 device, library,
             ),
             sigmoid_gate_multiply_pipeline: r::<shaders::plan_glue::SigmoidGateMultiplyKernel>(
+                device, library,
+            ),
+            head_scale_softcap_pipeline: r::<shaders::plan_glue::HeadScaleSoftcapKernel>(
                 device, library,
             ),
             scale_vector_pipeline: r::<shaders::residual_inject::ScaleVectorKernel>(

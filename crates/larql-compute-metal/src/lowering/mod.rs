@@ -27,6 +27,7 @@
 
 pub mod attention;
 pub mod ffn;
+pub mod head;
 pub mod stack;
 
 use metal::{Buffer, ComputeCommandEncoderRef};

@@ -59,6 +59,34 @@ kernel void qk_norm_parameter_free(
     }
 }
 
+// logits = softcap(multiplier * x), in that order.
+//
+// Fused because the order is the semantics and the two are inseparable
+// in the plan: `softcap(m*x)` and `m*softcap(x)` are different functions
+// (20*tanh(0.196x/20) vs 3.92*tanh(x/20)), so exposing them as two
+// composable kernels would invite a caller to get it wrong. A zero
+// multiplier or cap means the corresponding op is absent, which is what
+// `None` in the plan encodes — not a multiply by one or a cap at zero.
+//
+// The tanh argument is clamped like the GELU and attention kernels do:
+// Apple's tanh NaNs past |y| ~ 44.
+kernel void head_scale_softcap(
+    device const float* x          [[buffer(0)]],
+    device float*       out        [[buffer(1)]],
+    constant uint&      N          [[buffer(2)]],
+    constant float&     multiplier [[buffer(3)]],  // 0 = op absent
+    constant float&     softcap    [[buffer(4)]],  // 0 = op absent
+    uint tid [[thread_position_in_grid]])
+{
+    if (tid >= N) { return; }
+    float v = x[tid];
+    if (multiplier != 0.0f) { v *= multiplier; }
+    if (softcap > 0.0f) {
+        v = softcap * tanh(clamp(v / softcap, -15.0f, 15.0f));
+    }
+    out[tid] = v;
+}
+
 // out = a * sigmoid(g) — the judged attention output gate.
 kernel void sigmoid_gate_multiply(
     device const float* a   [[buffer(0)]],
@@ -76,6 +104,12 @@ kernel void sigmoid_gate_multiply(
 pub struct QkNormParameterFreeKernel;
 impl crate::kernels::ShaderKernel for QkNormParameterFreeKernel {
     const KERNEL_NAME: &'static str = "qk_norm_parameter_free";
+}
+
+/// Marker for the fused head scale+softcap pipeline.
+pub struct HeadScaleSoftcapKernel;
+impl crate::kernels::ShaderKernel for HeadScaleSoftcapKernel {
+    const KERNEL_NAME: &'static str = "head_scale_softcap";
 }
 
 /// Marker for the judged sigmoid attention-gate pipeline.
