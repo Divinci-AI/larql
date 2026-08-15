@@ -84,6 +84,19 @@ pub fn synth_weight_f32(len: usize, seed: f32) -> Vec<f32> {
 // the production `FullPipelineLayer` constructor surface; collapsing to
 // a single struct just for the test would obscure the per-tensor
 // fixture-builder pattern callers actually want.
+//
+// **The tensor slices must outlive the process, not the test.**
+// `decode::setup::new` passes each one to `BufferCache::get_bytes`, which
+// caches on `(ptr, len)` and is sound only for allocations that never
+// move or change — mmap'd weights, which is what a real model supplies.
+// A fixture built in a local `Vec` is freed on return; the allocator then
+// hands a later same-sized fixture the same address and the cache returns
+// the earlier buffer. Hold fixture tensors in a `OnceLock` (see
+// `attention_reaches_residual::synth_weights`) rather than in locals.
+//
+// The aliasing guard that catches this is a `debug_assert!`, so it exists
+// in test builds only. Do not treat a green suite as evidence that
+// ephemeral fixture data is safe.
 #[allow(clippy::too_many_arguments)]
 pub fn build_synth_layer<'a>(
     wq_data: &'a [u8],

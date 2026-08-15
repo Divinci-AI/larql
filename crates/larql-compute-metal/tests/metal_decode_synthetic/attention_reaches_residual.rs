@@ -35,30 +35,76 @@ use super::common::{
     build_synth_layer, synth_input, synth_weight_f32, ENV_TEST_LOCK, HIDDEN, INTER, KV_DIM, Q_DIM,
 };
 
+/// The fixture weights, allocated **once for the process**.
+///
+/// `BufferCache::get_bytes` keys on `(ptr, len)` and is documented as
+/// sound only for allocations that live for the process and never change
+/// — mmap'd weights, which is what `pipeline_layer` hands the decode path
+/// for a real model. `decode::setup::new` calls it unconditionally on
+/// `l.wq.data` and friends, so a caller supplying ephemeral data breaks
+/// the contract rather than the cache.
+///
+/// These used to be locals. They were freed on return, the allocator
+/// handed a later same-sized fixture the same address, and `get_bytes`
+/// returned the *earlier* buffer — which the aliasing guard caught about
+/// one whole-crate run in three, always here, never in isolation.
+/// Allocating once satisfies the contract and removes the collision by
+/// construction; it is not a workaround for the guard.
+///
+/// Note the guard is a `debug_assert!`. In a release build the same
+/// collision returns the stale buffer silently, so "the tests pass" is
+/// not on its own evidence that ephemeral data is safe here.
+struct SynthWeights {
+    wq: Vec<u8>,
+    wk: Vec<u8>,
+    wv: Vec<u8>,
+    wo: Vec<u8>,
+    gate: Vec<u8>,
+    up: Vec<u8>,
+    down: Vec<u8>,
+    norm_w: Vec<f32>,
+}
+
+fn synth_weights() -> &'static SynthWeights {
+    static WEIGHTS: std::sync::OnceLock<SynthWeights> = std::sync::OnceLock::new();
+    WEIGHTS.get_or_init(|| SynthWeights {
+        wq: quantize_q4_k(&synth_weight_f32(Q_DIM * HIDDEN, 0.1)),
+        wk: quantize_q4_k(&synth_weight_f32(KV_DIM * HIDDEN, 0.2)),
+        wv: quantize_q4_k(&synth_weight_f32(KV_DIM * HIDDEN, 0.3)),
+        wo: quantize_q4_k(&synth_weight_f32(HIDDEN * Q_DIM, 0.4)),
+        gate: quantize_q4_0(&synth_weight_f32(INTER * HIDDEN, 0.5)),
+        up: quantize_q4_0(&synth_weight_f32(INTER * HIDDEN, 0.6)),
+        down: quantize_q4_0(&synth_weight_f32(HIDDEN * INTER, 0.7)),
+        norm_w: (0..HIDDEN).map(|i| 1.0 + (i as f32 * 0.001)).collect(),
+    })
+}
+
 /// Decode `seeds` in order against one cache and return the LAST output.
 ///
 /// Every call starts from a reset cache, so the returned token is a
 /// function of `seeds` alone.
 fn decode_sequence(metal: &larql_compute_metal::MetalBackend, seeds: &[f32]) -> Vec<f32> {
-    let wq = quantize_q4_k(&synth_weight_f32(Q_DIM * HIDDEN, 0.1));
-    let wk = quantize_q4_k(&synth_weight_f32(KV_DIM * HIDDEN, 0.2));
-    let wv = quantize_q4_k(&synth_weight_f32(KV_DIM * HIDDEN, 0.3));
-    let wo = quantize_q4_k(&synth_weight_f32(HIDDEN * Q_DIM, 0.4));
-    let gate = quantize_q4_0(&synth_weight_f32(INTER * HIDDEN, 0.5));
-    let up = quantize_q4_0(&synth_weight_f32(INTER * HIDDEN, 0.6));
-    let down = quantize_q4_0(&synth_weight_f32(HIDDEN * INTER, 0.7));
-    let norm_w: Vec<f32> = (0..HIDDEN).map(|i| 1.0 + (i as f32 * 0.001)).collect();
+    let SynthWeights {
+        wq,
+        wk,
+        wv,
+        wo,
+        gate,
+        up,
+        down,
+        norm_w,
+    } = synth_weights();
 
     let backend: &dyn DecodeBackend = metal;
     // Settle the cache shape first, then reset: a decode that has to
     // CREATE the cache is not comparable with one that reuses it.
-    let warm = build_synth_layer(&wq, &wk, &wv, &wo, &gate, &up, &down, &norm_w);
+    let warm = build_synth_layer(wq, wk, wv, wo, gate, up, down, norm_w);
     let _ = backend.decode_token(&[warm], &synth_input(HIDDEN, 0.9), HIDDEN, INTER);
     metal.reset_kv_cache();
 
     let mut out = Vec::new();
     for &seed in seeds {
-        let layer = build_synth_layer(&wq, &wk, &wv, &wo, &gate, &up, &down, &norm_w);
+        let layer = build_synth_layer(wq, wk, wv, wo, gate, up, down, norm_w);
         out = backend
             .decode_token(&[layer], &synth_input(HIDDEN, seed), HIDDEN, INTER)
             .expect("decode returns Some");
