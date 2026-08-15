@@ -47,8 +47,9 @@ use larql_compute::backend::MatMul;
 use larql_models::config::{Activation, GateActivation, GateCombine, GatePlacement, GateSource};
 
 use super::backend::{
-    AttentionCall, AttentionStepCall, AttentionStepOut, FfnCall, GateCall, NormCall, PlanBackend,
-    ProjectCall, ProjectedQkv, WeightFormat, WeightSlice,
+    AttentionCall, AttentionStepCall, AttentionStepOut, DispatchStats, FfnCall, GateCall,
+    MatrixClass, NormCall, PlanBackend, ProjectCall, ProjectedQkv, WeightFormat, WeightFormats,
+    WeightSlice,
 };
 use super::production::{aggregate_heads, condition_qk_in_place, ProductionBackend};
 use crate::error::VindexError;
@@ -57,6 +58,14 @@ use ndarray::ArrayView2;
 use rayon::prelude::*;
 
 use super::production::unsupported_activation;
+
+/// One MXFP4 matrix as the device trait consumes it:
+/// `(packed, scales, n, k)`.
+type Mxfp4Matrix<'a> = (&'a [u8], &'a [u8], usize, usize);
+
+/// One NVFP4 matrix as the device trait consumes it:
+/// `(packed, scales, tensor_scale, n, k)`.
+type Nvfp4Matrix<'a> = (&'a [u8], &'a [u8], f32, usize, usize);
 
 /// Device realisation: injected-device matmuls, production-CPU glue.
 pub struct DevicePlanBackend<M: MatMul + Send> {
@@ -70,21 +79,44 @@ pub struct DevicePlanBackend<M: MatMul + Send> {
     /// so a dump names the concrete device and realisation that
     /// produced it.
     name: String,
-    /// The matrix-operand representation this backend asks the
-    /// interpreter for (see module docs on residency).
-    format: WeightFormat,
+    /// The matrix-operand representations this backend asks the
+    /// interpreter for, per matrix class (see module docs on residency).
+    formats: WeightFormats,
+    /// Cumulative time inside device dispatch calls, and how many
+    /// submissions those were. Diagnostic only — never read by the
+    /// arithmetic, so it cannot change a result.
+    device_nanos: std::sync::atomic::AtomicU64,
+    submissions: std::sync::atomic::AtomicU64,
 }
 
 impl<M: MatMul + Send> DevicePlanBackend<M> {
     /// `name` should carry device and realisation (e.g. `metal-r2-f16`)
     /// so a dump can never be mistaken for another lowering.
     pub fn new(device: M, name: impl Into<String>, format: WeightFormat) -> Self {
+        Self::with_formats(device, name, WeightFormats::uniform(format))
+    }
+
+    /// Per-class formats, for realisations that keep numerically
+    /// sensitive classes (the head, attention) in a wider format than
+    /// the FFN bulk.
+    pub fn with_formats(device: M, name: impl Into<String>, formats: WeightFormats) -> Self {
         Self {
             device: Mutex::new(device),
             glue: ProductionBackend::new(),
             name: name.into(),
-            format,
+            formats,
+            device_nanos: std::sync::atomic::AtomicU64::new(0),
+            submissions: std::sync::atomic::AtomicU64::new(0),
         }
+    }
+
+    /// Record one submission's wall time. `count` is the number of
+    /// command buffers the call made, which is one for every path here.
+    fn record(&self, started: std::time::Instant, count: u64) {
+        use std::sync::atomic::Ordering;
+        self.device_nanos
+            .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        self.submissions.fetch_add(count, Ordering::Relaxed);
     }
 
     /// `out[out_dim] = W[out_dim, in_dim] · x` on the device, always,
@@ -96,8 +128,9 @@ impl<M: MatMul + Send> DevicePlanBackend<M> {
         in_dim: usize,
         x: &[f32],
     ) -> Result<Vec<f32>, VindexError> {
+        let started = std::time::Instant::now();
         let device = self.device.lock().expect("device dispatch lock");
-        match weight {
+        let result = match weight {
             WeightSlice::F32(w) => {
                 let view = ArrayView2::from_shape((out_dim, in_dim), w).map_err(|e| {
                     VindexError::Parse(format!(
@@ -129,7 +162,30 @@ impl<M: MatMul + Send> DevicePlanBackend<M> {
                         ))
                     })
             }
-        }
+            WeightSlice::Mxfp4 { packed, scales } => device
+                .mxfp4_gemv(packed, scales, x, out_dim, in_dim)
+                .ok_or_else(|| {
+                    VindexError::Parse(format!(
+                        "device mxfp4_gemv [{out_dim} x {in_dim}] refused — no kernel, bad \
+                         geometry, or out of memory"
+                    ))
+                }),
+            WeightSlice::Nvfp4 {
+                packed,
+                scales,
+                tensor_scale,
+            } => device
+                .nvfp4_gemv(packed, scales, tensor_scale, x, out_dim, in_dim)
+                .ok_or_else(|| {
+                    VindexError::Parse(format!(
+                        "device nvfp4_gemv [{out_dim} x {in_dim}] refused — no kernel, bad \
+                         geometry, or out of memory"
+                    ))
+                }),
+        };
+        drop(device);
+        self.record(started, 1);
+        result
     }
 
     /// Several matrices against one input vector. When every weight is
@@ -143,6 +199,7 @@ impl<M: MatMul + Send> DevicePlanBackend<M> {
         weights: &[(WeightSlice<'_>, usize, usize)],
         x: &[f32],
     ) -> Result<Vec<Vec<f32>>, VindexError> {
+        let started = std::time::Instant::now();
         let all_f16: Option<Vec<(&[u8], usize, usize)>> = weights
             .iter()
             .map(|&(w, n, k)| match w {
@@ -150,8 +207,8 @@ impl<M: MatMul + Send> DevicePlanBackend<M> {
                 _ => None,
             })
             .collect();
-        match all_f16 {
-            Some(mats) => self
+        if let Some(mats) = all_f16 {
+            let out = self
                 .device
                 .lock()
                 .expect("device dispatch lock")
@@ -161,12 +218,66 @@ impl<M: MatMul + Send> DevicePlanBackend<M> {
                         "device f16_gemv_multi ({} matrices) refused — no kernel or out of memory",
                         mats.len()
                     ))
-                }),
-            None => weights
-                .iter()
-                .map(|&(w, n, k)| self.gemv(w, n, k, x))
-                .collect(),
+                });
+            self.record(started, 1);
+            return out;
         }
+        let all_mxfp4: Option<Vec<Mxfp4Matrix>> = weights
+            .iter()
+            .map(|&(w, n, k)| match w {
+                WeightSlice::Mxfp4 { packed, scales } => Some((packed, scales, n, k)),
+                _ => None,
+            })
+            .collect();
+        if let Some(mats) = all_mxfp4 {
+            let out = self
+                .device
+                .lock()
+                .expect("device dispatch lock")
+                .mxfp4_gemv_multi(&mats, x)
+                .ok_or_else(|| {
+                    VindexError::Parse(format!(
+                        "device mxfp4_gemv_multi ({} matrices) refused — no kernel, bad \
+                         geometry, or out of memory",
+                        mats.len()
+                    ))
+                });
+            self.record(started, 1);
+            return out;
+        }
+        let all_nvfp4: Option<Vec<Nvfp4Matrix>> = weights
+            .iter()
+            .map(|&(w, n, k)| match w {
+                WeightSlice::Nvfp4 {
+                    packed,
+                    scales,
+                    tensor_scale,
+                } => Some((packed, scales, tensor_scale, n, k)),
+                _ => None,
+            })
+            .collect();
+        if let Some(mats) = all_nvfp4 {
+            let out = self
+                .device
+                .lock()
+                .expect("device dispatch lock")
+                .nvfp4_gemv_multi(&mats, x)
+                .ok_or_else(|| {
+                    VindexError::Parse(format!(
+                        "device nvfp4_gemv_multi ({} matrices) refused — no kernel, bad \
+                         geometry, or out of memory",
+                        mats.len()
+                    ))
+                });
+            self.record(started, 1);
+            return out;
+        }
+        // Mixed formats: falls back to one submission per matrix, each of
+        // which records itself.
+        weights
+            .iter()
+            .map(|&(w, n, k)| self.gemv(w, n, k, x))
+            .collect()
     }
 
     /// One position's Q/K/V projections on the device — one submission —
@@ -201,8 +312,16 @@ impl<M: MatMul + Send> PlanBackend for DevicePlanBackend<M> {
         &self.name
     }
 
-    fn weight_format(&self) -> WeightFormat {
-        self.format
+    fn dispatch_stats(&self) -> Option<DispatchStats> {
+        use std::sync::atomic::Ordering;
+        Some(DispatchStats {
+            device_nanos: self.device_nanos.load(Ordering::Relaxed),
+            submissions: self.submissions.load(Ordering::Relaxed),
+        })
+    }
+
+    fn weight_format(&self, class: MatrixClass) -> WeightFormat {
+        self.formats.for_class(class)
     }
 
     fn prepare(&self, weights: &[WeightSlice<'_>]) {
@@ -211,17 +330,22 @@ impl<M: MatMul + Send> PlanBackend for DevicePlanBackend<M> {
         // submissions and a large-model decode pays a re-wire on every
         // touch — measured 10× on a 60 GB f16 working set. After one
         // pass, steps are fast enough to keep themselves wired.
-        let f16: Vec<&[u8]> = weights
-            .iter()
-            .filter_map(|w| match w {
-                WeightSlice::F16(bytes) => Some(*bytes),
-                WeightSlice::F32(_) => None,
-            })
-            .collect();
+        let mut streams: Vec<&[u8]> = Vec::with_capacity(weights.len() * 2);
+        for w in weights {
+            match w {
+                WeightSlice::F16(bytes) => streams.push(bytes),
+                WeightSlice::Mxfp4 { packed, scales }
+                | WeightSlice::Nvfp4 { packed, scales, .. } => {
+                    streams.push(packed);
+                    streams.push(scales);
+                }
+                WeightSlice::F32(_) => {}
+            }
+        }
         self.device
             .lock()
             .expect("device dispatch lock")
-            .wire_resident(&f16);
+            .wire_resident(&streams);
     }
 
     fn embed(&self, table: &[f32], hidden: usize, token: u32, scale: Option<f32>) -> Vec<f32> {

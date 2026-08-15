@@ -169,9 +169,18 @@ pub(super) fn aggregate_heads<'k>(
     let head_dim = call.head_dim;
     let q_rows = call.num_q_heads * head_dim;
     let group = call.num_q_heads / call.num_kv_heads;
+    // Exhaustive over the span vocabulary on purpose: a `_` arm would let
+    // the next span kind mean "whole prefix" without anyone deciding that,
+    // which is the defect `layer_types` already suffered once.
     let start = match (call.span, call.window) {
         (AttentionSpan::Sliding, Some(window)) => (position + 1).saturating_sub(window),
-        _ => 0,
+        // A sliding layer with no declared window has no bound to apply.
+        (AttentionSpan::Sliding, None) | (AttentionSpan::Full, _) => 0,
+        // A spatial window's extent is not a position count, so no
+        // sequence bound follows from it. No generic op lowers a
+        // perception component today; when one does, it needs the
+        // component's own geometry here rather than this fallthrough.
+        (AttentionSpan::Windowed, _) => 0,
     };
     let mut concat = vec![0.0f32; q_rows];
     for q_head in 0..call.num_q_heads {

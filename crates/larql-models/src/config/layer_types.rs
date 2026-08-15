@@ -25,6 +25,17 @@ pub const LAYER_TYPE_SLIDING_ATTENTION: &str = "sliding_attention";
 /// A layer attending to the whole prefix.
 pub const LAYER_TYPE_FULL_ATTENTION: &str = "full_attention";
 
+/// A layer attending within a bounded region defined by the component's
+/// own geometry rather than a trailing sequence window — the spelling
+/// perception towers use. Muse-Glimmer's vision tower declares 50 layers
+/// as 37 `window_attention` / 13 `full_attention`, a 3:1 interleave.
+///
+/// Deliberately *not* folded into [`LAYER_TYPE_SLIDING_ATTENTION`]:
+/// [`is_sliding_from_layer_types`] answers `false` for it, which is
+/// correct (it is not a sequence window) and would be silently wrong if
+/// the two were aliased.
+pub const LAYER_TYPE_WINDOW_ATTENTION: &str = "window_attention";
+
 /// Whether `layer_types` marks `layer` as sliding-window.
 ///
 /// Returns `None` when the config declares no `layer_types`, leaving the

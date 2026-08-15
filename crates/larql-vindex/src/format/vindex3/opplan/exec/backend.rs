@@ -44,6 +44,60 @@ pub enum WeightFormat {
     /// f16's 10); conversion fails closed on overflow. A device backend
     /// declares this so weights can stay resident in half the bytes.
     F16,
+    /// OCP microscaling 4-bit float: e2m1 codes two-per-byte plus one
+    /// e8m0 scale per 32-element group, in separate streams. A lossy
+    /// realisation — quantised at load, judged by the parity gates —
+    /// that quarters the bytes every decoded token must read.
+    Mxfp4,
+    /// The same e2m1 elements under a different scale geometry: 16-element
+    /// groups with **E4M3** scales, plus one f32 per matrix. 4.5 bpw
+    /// against MXFP4's 4.25.
+    ///
+    /// Present as its own format rather than a parameter of [`Self::Mxfp4`]
+    /// because the difference is the point: E8M0 forces a group's scale to
+    /// a power of two, and a weight-reconstruction sweep over Muse-Glimmer
+    /// with an equal-bit-budget control (E8M0 at group 16) found the group
+    /// size worth nothing and the scale format worth 1.27x in relative RMS
+    /// and 1.7x in worst-element error.
+    Nvfp4,
+}
+
+/// Which matrix a format question is about. Formats are declared per
+/// class because the classes have different numerical stakes: the
+/// output head feeds logits directly, attention feeds the softmax, and
+/// the FFN is the bulk of the bytes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MatrixClass {
+    AttentionProjection,
+    FfnProjection,
+    OutputHead,
+}
+
+/// A backend's declared format per matrix class.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct WeightFormats {
+    pub attention: WeightFormat,
+    pub ffn: WeightFormat,
+    pub head: WeightFormat,
+}
+
+impl WeightFormats {
+    /// The same format everywhere.
+    pub fn uniform(format: WeightFormat) -> Self {
+        Self {
+            attention: format,
+            ffn: format,
+            head: format,
+        }
+    }
+
+    pub fn for_class(&self, class: MatrixClass) -> WeightFormat {
+        match class {
+            MatrixClass::AttentionProjection => self.attention,
+            MatrixClass::FfnProjection => self.ffn,
+            MatrixClass::OutputHead => self.head,
+        }
+    }
 }
 
 /// One matrix operand, in the representation the backend declared.
@@ -55,6 +109,20 @@ pub enum WeightSlice<'a> {
     F32(&'a [f32]),
     /// Little-endian IEEE f16 bytes.
     F16(&'a [u8]),
+    /// MXFP4: packed e2m1 codes (`[n, k/32, 16]`, lo nibble first) and
+    /// e8m0 scales (`[n, k/32]`) as two streams.
+    Mxfp4 {
+        packed: &'a [u8],
+        scales: &'a [u8],
+    },
+    /// NVFP4: packed e2m1 codes (`[n, k/16, 8]`, lo nibble first), E4M3
+    /// group scales (`[n, k/16]`), and the single f32 both scale levels
+    /// are expressed relative to.
+    Nvfp4 {
+        packed: &'a [u8],
+        scales: &'a [u8],
+        tensor_scale: f32,
+    },
 }
 
 impl<'a> WeightSlice<'a> {
@@ -64,11 +132,13 @@ impl<'a> WeightSlice<'a> {
     pub fn as_f32(&self) -> Result<&'a [f32], VindexError> {
         match self {
             WeightSlice::F32(w) => Ok(w),
-            WeightSlice::F16(_) => Err(VindexError::Parse(
-                "backend declared f32 weights but was handed f16 — interpreter loaded the \
-                 wrong format"
-                    .to_string(),
-            )),
+            WeightSlice::F16(_) | WeightSlice::Mxfp4 { .. } | WeightSlice::Nvfp4 { .. } => {
+                Err(VindexError::Parse(
+                    "backend declared f32 weights but was handed another format — interpreter \
+                 loaded the wrong representation"
+                        .to_string(),
+                ))
+            }
         }
     }
 }
@@ -199,13 +269,37 @@ pub struct AttentionStepOut {
 /// (attention reads other positions' K/V but never writes them), so
 /// this parallelism reorders nothing within any one position's
 /// arithmetic — results stay bit-identical to a serial execution.
+/// What a backend spent inside its own dispatch calls, for attributing a
+/// token's latency between device work and the interpreter's glue.
+///
+/// Exists because "the part that does not scale with weight bytes" is not
+/// automatically submission overhead: the elementwise glue (norms, RoPE,
+/// softmax over the KV cache, activations, residuals) is also a fixed
+/// per-token cost, and optimising the wrong one of the two is free to
+/// look like progress on a fit that cannot tell them apart.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DispatchStats {
+    /// Wall nanoseconds inside device dispatch calls — submission,
+    /// device execution, and the wait, together.
+    pub device_nanos: u64,
+    /// Device submissions made (one per command buffer).
+    pub submissions: u64,
+}
+
 pub trait PlanBackend: Sync {
     /// A name for diagnostics and parity reports. Not dispatched on.
     fn name(&self) -> &str;
 
-    /// The representation this backend wants matrix operands loaded in.
-    /// A capability, asked once — not a per-call decision.
-    fn weight_format(&self) -> WeightFormat {
+    /// Cumulative device-dispatch accounting, when the backend keeps it.
+    /// `None` for backends with no device to account for.
+    fn dispatch_stats(&self) -> Option<DispatchStats> {
+        None
+    }
+
+    /// The representation this backend wants matrix operands of `class`
+    /// loaded in. A capability, asked per site at load time — not a
+    /// per-call decision.
+    fn weight_format(&self, _class: MatrixClass) -> WeightFormat {
         WeightFormat::F32
     }
 

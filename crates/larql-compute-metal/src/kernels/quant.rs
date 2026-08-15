@@ -40,6 +40,11 @@ pub struct QuantKernels {
     /// f32 materialisation (K1 of the fused-MXFP4 ladder).
     pub mxfp4_matvec_pipeline: KernelHandle,
 
+    /// Direct NVFP4 matvec — the same E2M1 elements read through E4M3
+    /// group scales plus one f32 tensor scale (VINDEX3-Q2). Sibling of
+    /// `mxfp4_matvec_pipeline`, differing only in the scale geometry.
+    pub nvfp4_matvec_pipeline: KernelHandle,
+
     /// Q6_K grouped-expert matvec: every selected expert in one dispatch, so
     /// the grid carries 16x the threadgroups of a single expert matrix (K3a).
     pub q6k_grouped_experts_pipeline: KernelHandle,
@@ -147,6 +152,7 @@ impl QuantKernels {
         let q8_matvec_pipeline = h::<shaders::q8_matvec::Kernel>(device, library);
 
         let mxfp4_matvec_pipeline = h::<shaders::mxfp4_matvec::Kernel>(device, library);
+        let nvfp4_matvec_pipeline = h::<shaders::nvfp4_matvec::Kernel>(device, library);
         let q6k_grouped_experts_pipeline =
             h::<shaders::q6k_grouped_experts::Kernel>(device, library);
         let q4k_grouped_experts_pipeline =
@@ -207,6 +213,7 @@ impl QuantKernels {
             q8_quant_pipeline,
             q8_matvec_pipeline,
             mxfp4_matvec_pipeline,
+            nvfp4_matvec_pipeline,
             q6k_grouped_experts_pipeline,
             q4k_grouped_experts_pipeline,
             mxfp4g_split_lut16_pipeline,

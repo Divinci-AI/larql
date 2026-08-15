@@ -182,6 +182,24 @@ pub struct MetalBackend {
 }
 
 impl MetalBackend {
+    /// Submit an empty command buffer and wait. The pure driver
+    /// round-trip floor — diagnostic only, computes nothing.
+    pub fn empty_roundtrip(&self) {
+        let cmd = self.queue.new_command_buffer();
+        cmd.commit();
+        cmd.wait_until_completed();
+    }
+
+    /// The same, with an empty compute encoder opened and closed, which
+    /// is the minimum shape any real dispatch pays.
+    pub fn empty_encoder_roundtrip(&self) {
+        let cmd = self.queue.new_command_buffer();
+        let enc = cmd.new_compute_command_encoder();
+        enc.end_encoding();
+        cmd.commit();
+        cmd.wait_until_completed();
+    }
+
     /// Create a Metal backend with default options derived from the
     /// process environment. Returns `None` if no Metal device is
     /// available.

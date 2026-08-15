@@ -54,6 +54,7 @@ fn greedy_decode_runs_end_to_end_on_the_encoded_fixture() {
         resume: false,
         backend: ExecBackend::Reference,
         generate: Some(2),
+        logit_dump: None,
     }))
     .expect("greedy decode over the fixture must complete");
 }

@@ -56,6 +56,28 @@ pub enum ExecBackend {
     /// the device, elementwise glue on the CPU).
     #[cfg(feature = "gpu")]
     Metal,
+    /// Metal with every matrix operand quantised to MXFP4 at load —
+    /// the compressed-execution realisation (VINDEX3-Q1). Lossy;
+    /// judged by the parity gates, not assumed.
+    #[cfg(feature = "gpu")]
+    MetalMxfp4,
+    /// Every matrix operand MXFP4 — the preset Q1's 6-token gate
+    /// *falsified*. Kept as the control arm: a Q2 result showing NVFP4
+    /// holds the prediction means nothing unless the same harness is
+    /// shown to break on the format Q1 broke on.
+    #[cfg(feature = "gpu")]
+    MetalMxfp4All,
+    /// VINDEX3-Q2 arm A: every matrix operand NVFP4 — e2m1 elements,
+    /// 16-element groups, E4M3 scales. 4.5 bpw everywhere.
+    #[cfg(feature = "gpu")]
+    MetalNvfp4,
+    /// Q2 arm B: attention and FFN NVFP4, head f16.
+    #[cfg(feature = "gpu")]
+    MetalNvfp4NoHead,
+    /// Q2 arm C: FFN NVFP4 only — Q1's passing partition under the new
+    /// scale geometry, so the formats are compared at one class split.
+    #[cfg(feature = "gpu")]
+    MetalNvfp4Ffn,
 }
 
 #[derive(Args)]
@@ -95,6 +117,17 @@ pub struct ExecArgs {
     /// has no KV cache yet, and the report says so.
     #[arg(long, conflicts_with_all = ["dump_layers", "resume"])]
     pub generate: Option<usize>,
+
+    /// Step the given tokens through the plan one position at a time and
+    /// write every position's logits here as `[positions, vocab]` f32.
+    ///
+    /// Teacher forcing, so two realisations scored this way see identical
+    /// context at every position and a per-position divergence is
+    /// attributable to the representation rather than to the two arms
+    /// having generated different text. This is what a KL/NLL gate needs;
+    /// `--generate` cannot supply it.
+    #[arg(long, conflicts_with_all = ["dump_layers", "resume", "generate"])]
+    pub logit_dump: Option<PathBuf>,
 }
 
 #[derive(Args)]
@@ -188,6 +221,7 @@ mod exec;
 mod generate;
 mod ops;
 mod optional_op;
+mod teacher_force;
 use exec::run_exec;
 use ops::run_ops;
 

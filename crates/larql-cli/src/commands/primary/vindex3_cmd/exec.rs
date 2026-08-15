@@ -95,6 +95,99 @@ pub fn run_exec(args: ExecArgs) -> Result<(), Box<dyn std::error::Error>> {
         ExecBackend::Reference => run_on(&ReferenceBackend::new(), &args, &tokens, &plan, &store),
         ExecBackend::Production => run_on(&ProductionBackend::new(), &args, &tokens, &plan, &store),
         #[cfg(feature = "gpu")]
+        ExecBackend::MetalMxfp4 => {
+            let gpu = larql_compute_metal::MetalBackend::new()
+                .ok_or("no Metal device available for --backend metal-mxfp4")?;
+            // FFN-only MXFP4 — the gpt-oss precedent. The gates
+            // falsified the wider presets on the 6-token fixture:
+            // all-MXFP4 flipped the argmax (top-2 gap 0.08 vs
+            // upstream's 1.13) and an f16 head alone did not recover
+            // it (gap 0.01) — 4-bit attention projections accumulate
+            // ~14% rel_rms across 52 layers. Attention and head stay
+            // f16; the FFN bulk (~3/4 of the bytes) is quantised.
+            use larql_vindex::format::vindex3::opplan::exec::backend::{
+                WeightFormat, WeightFormats,
+            };
+            let backend =
+                larql_vindex::format::vindex3::opplan::exec::device::DevicePlanBackend::with_formats(
+                    gpu,
+                    "metal-q1-mxfp4-ffn",
+                    WeightFormats {
+                        attention: WeightFormat::F16,
+                        ffn: WeightFormat::Mxfp4,
+                        head: WeightFormat::F16,
+                    },
+                );
+            run_on(&backend, &args, &tokens, &plan, &store)
+        }
+        #[cfg(feature = "gpu")]
+        ExecBackend::MetalMxfp4All => {
+            let gpu = larql_compute_metal::MetalBackend::new()
+                .ok_or("no Metal device available for --backend metal-mxfp4-all")?;
+            // The control arm: the preset Q1 falsified. Its job is to
+            // fail, so that a Q2 arm holding the prediction is evidence
+            // about the format rather than about the harness.
+            use larql_vindex::format::vindex3::opplan::exec::backend::{
+                WeightFormat, WeightFormats,
+            };
+            let backend =
+                larql_vindex::format::vindex3::opplan::exec::device::DevicePlanBackend::with_formats(
+                    gpu,
+                    "metal-q1-mxfp4-all",
+                    WeightFormats::uniform(WeightFormat::Mxfp4),
+                );
+            run_on(&backend, &args, &tokens, &plan, &store)
+        }
+        #[cfg(feature = "gpu")]
+        ExecBackend::MetalNvfp4 | ExecBackend::MetalNvfp4Ffn | ExecBackend::MetalNvfp4NoHead => {
+            let gpu = larql_compute_metal::MetalBackend::new()
+                .ok_or("no Metal device available for the nvfp4 backends")?;
+            // The VINDEX3-Q2 ladder. Q1 established that *this model's*
+            // attention does not survive MXFP4; NVFP4 keeps the same
+            // e2m1 elements and changes only the scale geometry, which a
+            // weight-reconstruction sweep with an equal-bit-budget
+            // control (E8M0 at group 16) isolated as the whole source of
+            // the difference. Arm A is the one that matters — it is the
+            // ~17 GB regime — and B and C exist so a failure says which
+            // class it came from rather than only that it failed.
+            use larql_vindex::format::vindex3::opplan::exec::backend::{
+                WeightFormat, WeightFormats,
+            };
+            let (name, formats) = match args.backend {
+                // A — everything 4-bit.
+                ExecBackend::MetalNvfp4 => (
+                    "metal-q2-nvfp4-all",
+                    WeightFormats::uniform(WeightFormat::Nvfp4),
+                ),
+                // B — attention and FFN 4-bit, head wide. Isolates the
+                // head, which Q1's second rung showed was not the whole
+                // story under MXFP4.
+                ExecBackend::MetalNvfp4NoHead => (
+                    "metal-q2-nvfp4-no-head",
+                    WeightFormats {
+                        attention: WeightFormat::Nvfp4,
+                        ffn: WeightFormat::Nvfp4,
+                        head: WeightFormat::F16,
+                    },
+                ),
+                // C — the Q1-passing partition, re-run under NVFP4, so
+                // the two formats are compared at the same class split.
+                _ => (
+                    "metal-q2-nvfp4-ffn",
+                    WeightFormats {
+                        attention: WeightFormat::F16,
+                        ffn: WeightFormat::Nvfp4,
+                        head: WeightFormat::F16,
+                    },
+                ),
+            };
+            let backend =
+                larql_vindex::format::vindex3::opplan::exec::device::DevicePlanBackend::with_formats(
+                    gpu, name, formats,
+                );
+            run_on(&backend, &args, &tokens, &plan, &store)
+        }
+        #[cfg(feature = "gpu")]
         ExecBackend::Metal => {
             // vindex never links Metal: the CLI injects the concrete
             // device through larql-compute's MatMul seam. f16 weights so
@@ -123,6 +216,9 @@ fn run_on<B: PlanBackend>(
     store: &OperandStore,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let engine = format!("{ENGINE_PREFIX}-{}", backend.name());
+    if let Some(out) = &args.logit_dump {
+        return super::teacher_force::run_teacher_force(backend, &engine, tokens, plan, store, out);
+    }
     match (&args.dump_layers, args.generate) {
         (Some(dir), _) => run_dump(dir, &engine, args, tokens, plan, store, backend),
         (None, Some(new_tokens)) => {

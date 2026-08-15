@@ -78,6 +78,21 @@ fn production_decode_matches_the_batch_traversal_bit_for_bit() {
 }
 
 #[test]
+fn mxfp4_device_decode_matches_its_own_batch_traversal_bit_for_bit() {
+    // The 32-aligned fixture: MXFP4's group constraint correctly
+    // refuses the awkward hidden-12 miniature.
+    let (_c, plan, store) = super::device::aligned_fixture();
+    let backend = DevicePlanBackend::new(
+        super::device::LoopDevice,
+        "loop-device-mxfp4-decode",
+        WeightFormat::Mxfp4,
+    );
+    let batch = execute_plan(&plan, &store, &G_TOKENS, &backend).unwrap();
+    let stepped = decode_logits(&plan, &store, &backend);
+    assert_eq!(batch.logits.as_deref(), Some(stepped.as_slice()));
+}
+
+#[test]
 fn f16_device_decode_matches_its_own_batch_traversal_bit_for_bit() {
     // Same loop device the seam tests use; the point here is that the
     // step path and the batch path convert and consume the *same* f16

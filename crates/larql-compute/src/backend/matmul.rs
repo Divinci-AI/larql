@@ -14,6 +14,14 @@ pub struct MatMulOp {
     pub transpose_b: bool,
 }
 
+/// One NVFP4 matrix as a batched call consumes it: packed e2m1 codes,
+/// E4M3 group scales, the matrix's f32 tensor scale, and `(n, k)`.
+///
+/// Named because the tensor scale is not foldable into the scale stream —
+/// E4M3 cannot represent the product — so the tuple genuinely carries
+/// five things and a reader needs to know which is which.
+pub type Nvfp4Operand<'a> = (&'a [u8], &'a [u8], f32, usize, usize);
+
 /// Dense linear-algebra primitives that don't depend on quantisation.
 pub trait MatMul {
     /// C = A × B where A is [m, k] and B is [k, n].
@@ -140,4 +148,72 @@ pub trait MatMul {
     /// speed, and steps fast enough to stay under the collector's idle
     /// threshold keep themselves wired thereafter.
     fn wire_resident(&self, _buffers: &[&[u8]]) {}
+
+    /// MXFP4 gemv: `out[N] = W[N, K] · x[K]` consuming the packed
+    /// nibble stream and the e8m0 scale stream directly (the two live
+    /// in separate buffers — see `mxfp4_matvec`'s layout doc: per row,
+    /// `K/32` groups of 16 packed bytes lo-nibble-first plus one scale
+    /// byte each). `None` when the backend has no MXFP4 kernel — the
+    /// established loud-missing-capability answer.
+    fn mxfp4_gemv(
+        &self,
+        _packed: &[u8],
+        _scales: &[u8],
+        _x: &[f32],
+        _n: usize,
+        _k: usize,
+    ) -> Option<Vec<f32>> {
+        None
+    }
+
+    /// Several MXFP4 matrices against one input vector, one submission
+    /// where the backend supports it — the same shape and rationale as
+    /// [`Self::f16_gemv_multi`]. `weights` holds
+    /// `(packed, scales, n, k)` per matrix. Default: sequential
+    /// [`Self::mxfp4_gemv`] calls, bit-identical results.
+    fn mxfp4_gemv_multi(
+        &self,
+        weights: &[(&[u8], &[u8], usize, usize)],
+        x: &[f32],
+    ) -> Option<Vec<Vec<f32>>> {
+        weights
+            .iter()
+            .map(|&(packed, scales, n, k)| self.mxfp4_gemv(packed, scales, x, n, k))
+            .collect()
+    }
+
+    /// NVFP4 gemv: `out[N] = W[N, K] · x[K]` from the packed nibble
+    /// stream, the **E4M3** group-scale stream (`K/16` groups of 8
+    /// packed bytes lo-nibble-first plus one scale byte each), and the
+    /// single `tensor_scale` both scale levels are expressed relative
+    /// to.
+    ///
+    /// The extra scalar is the whole difference from [`Self::mxfp4_gemv`]
+    /// at this seam, and it is not foldable into the scale stream: E4M3
+    /// cannot represent the product, which is exactly why the format
+    /// carries two levels. `None` when the backend has no NVFP4 kernel.
+    fn nvfp4_gemv(
+        &self,
+        _packed: &[u8],
+        _scales: &[u8],
+        _tensor_scale: f32,
+        _x: &[f32],
+        _n: usize,
+        _k: usize,
+    ) -> Option<Vec<f32>> {
+        None
+    }
+
+    /// Several NVFP4 matrices against one input vector, one submission
+    /// where the backend supports it. `weights` holds
+    /// `(packed, scales, tensor_scale, n, k)` per matrix. Default:
+    /// sequential [`Self::nvfp4_gemv`] calls, bit-identical results.
+    fn nvfp4_gemv_multi(&self, weights: &[Nvfp4Operand<'_>], x: &[f32]) -> Option<Vec<Vec<f32>>> {
+        weights
+            .iter()
+            .map(|&(packed, scales, tensor_scale, n, k)| {
+                self.nvfp4_gemv(packed, scales, tensor_scale, x, n, k)
+            })
+            .collect()
+    }
 }

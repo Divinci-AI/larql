@@ -11,16 +11,25 @@
 //! blocking findings. There is no separate capability table to drift out of
 //! sync with the schema.
 //!
-//! The other finding sources are unchanged from G1:
+//! The other finding sources:
 //!
 //! - `mismatched` — declared-vs-resolved value comparison (`consumed` is
 //!   never trusted; values are compared);
-//! - `unrepresented` unconsumed config keys, graded by semantic class,
-//!   where a key nobody has judged (`unknown`) blocks.
+//! - **every** declared config key, graded by semantic class, where a key
+//!   nobody has judged (`unknown`) blocks. The census covers consumed,
+//!   metadata and unconsumed keys alike, so `unrepresented: N` is a count
+//!   against a stated denominator rather than a lower bound.
+//! - **carriage** — for execution-semantic keys, how far VINDEX3 actually
+//!   carries the fact past the parser ([`carriage`]). This is the axis
+//!   that keeps `consumed` from being misread as `represented`: a key the
+//!   parser reads and the schema then drops used to produce no finding at
+//!   all, which is how GPT-OSS's YaRN scaling would have executed as
+//!   plain rope with the plan reporting nothing.
 //!
 //! The verdict is fail-closed and the exit gate is mechanical:
 //! `blocking == 0` before a single weight byte is converted.
 
+pub mod carriage;
 pub mod compare;
 pub mod report;
 pub mod semantics;
@@ -33,7 +42,7 @@ pub mod tests_support;
 
 use larql_models::inventory::{ArchitectureInventory, KeyStatus};
 
-use super::graph::{build_from_inventories, BuiltGraph, ComponentRole};
+use super::graph::{build_from_inventories, BuiltGraph, Component, ComponentRole};
 
 pub use report::{
     ArtifactPlan, Finding, FindingCategory, InterfacePlan, PlanSummary, SemanticClass, SystemPlan,
@@ -98,7 +107,7 @@ fn plan_artifact(
     built: &BuiltGraph,
 ) -> ArtifactPlan {
     let mut findings = compare::compare(inventory);
-    findings.extend(unconsumed_key_findings(inventory));
+    findings.extend(config_key_findings(inventory, built));
     findings.extend(placed_object_findings(name, built));
     findings.extend(unplaced_group_findings(name, built));
     findings.extend(attention_policy_findings(name, built));
@@ -111,28 +120,223 @@ fn plan_artifact(
     }
 }
 
-/// Every unconsumed config key, graded by the semantics registry. A key the
-/// registry has never seen grades `Unknown` and blocks — unjudged is not
-/// admissible.
-fn unconsumed_key_findings(inventory: &ArchitectureInventory) -> Vec<Finding> {
+/// Every declared config key, graded by the semantics registry and — for
+/// the execution-semantic ones — by how far VINDEX3 actually carries it.
+///
+/// The census is over *all* keys, not just the unconsumed ones. Reporting
+/// only the unconsumed keys made `unrepresented: N` a lower bound with no
+/// stated denominator, and hid the failure this gate exists to catch: a
+/// key the parser reads (`consumed`) that VINDEX3 then drops. See
+/// [`carriage`] for why parser consumption is not representation
+/// authority.
+fn config_key_findings(inventory: &ArchitectureInventory, built: &BuiltGraph) -> Vec<Finding> {
     inventory
         .config_keys
         .iter()
-        .filter(|fact| fact.status == KeyStatus::Unconsumed)
         .map(|fact| {
-            let class = semantics::classify_key(semantics::leaf_of(&fact.path));
-            Finding {
-                category: FindingCategory::Unrepresented,
-                class,
-                component: semantics::component_of(&fact.path),
-                subject: fact.path.clone(),
-                declared: Some(fact.value.clone()),
-                resolved: None,
-                detail: "declared by the checkpoint, read by nothing in any registered parser"
-                    .to_string(),
+            let leaf = semantics::leaf_of(&fact.path);
+            let component = semantics::component_of(&fact.path);
+            match fact.status {
+                // Read by nothing: the original G1 finding. Carriage is
+                // moot — a fact no parser read cannot be carried anywhere.
+                KeyStatus::Unconsumed => Finding {
+                    category: FindingCategory::Unrepresented,
+                    class: unconsumed_class(leaf, inventory),
+                    component,
+                    subject: fact.path.clone(),
+                    declared: Some(fact.value.clone()),
+                    resolved: None,
+                    carriage: None,
+                    detail: "declared by the checkpoint, read by nothing in any registered \
+                             parser"
+                        .to_string(),
+                },
+                KeyStatus::Metadata => Finding {
+                    category: FindingCategory::Representable,
+                    class: SemanticClass::MetadataOnly,
+                    component,
+                    subject: fact.path.clone(),
+                    declared: Some(fact.value.clone()),
+                    resolved: None,
+                    carriage: None,
+                    detail: "identity or training-time fact, inert for a forward pass".to_string(),
+                },
+                KeyStatus::Consumed => carriage_finding(fact, leaf, component, built),
             }
         })
         .collect()
+}
+
+/// Class for an unconsumed key. A registered alias is only benign while
+/// its canonical spelling is genuinely declared *and* consumed in the
+/// same config — otherwise the alias is the only carrier of the fact and
+/// grades `Unknown`, which blocks.
+fn unconsumed_class(leaf: &str, inventory: &ArchitectureInventory) -> SemanticClass {
+    let class = semantics::classify_key(leaf);
+    if class != SemanticClass::Alias {
+        return class;
+    }
+    let Some(canonical) = semantics::alias_canonical(leaf) else {
+        return SemanticClass::Unknown;
+    };
+    let backed = inventory.config_keys.iter().any(|other| {
+        other.status == KeyStatus::Consumed
+            && (other.path == canonical || other.path.ends_with(&format!(".{canonical}")))
+    });
+    if backed {
+        SemanticClass::Alias
+    } else {
+        SemanticClass::Unknown
+    }
+}
+
+/// The carriage verdict for one consumed key: does VINDEX3 carry it past
+/// the parser, and does what it carries still equal what was declared?
+fn carriage_finding(
+    fact: &larql_models::inventory::ConfigKeyFact,
+    leaf: &str,
+    component_name: String,
+    built: &BuiltGraph,
+) -> Finding {
+    let class = semantics::classify_key(leaf);
+    // Only execution semantics are gated on carriage here. Tensor
+    // semantics are proven carried by the placed-object findings (the
+    // graph holds the operands themselves), and interface semantics by
+    // the resolved edges.
+    if class != SemanticClass::ExecutionSemantic {
+        return Finding {
+            category: FindingCategory::Representable,
+            class,
+            component: component_name,
+            subject: fact.path.clone(),
+            declared: Some(fact.value.clone()),
+            resolved: None,
+            carriage: Some(carriage::Carriage::Parsed),
+            detail: "read by a registered parser".to_string(),
+        };
+    }
+    let Some(rule) = carriage::rule_for(leaf) else {
+        return Finding {
+            category: FindingCategory::Unrepresented,
+            class: SemanticClass::ExecutionSemantic,
+            component: component_name,
+            subject: fact.path.clone(),
+            declared: Some(fact.value.clone()),
+            resolved: None,
+            carriage: Some(carriage::Carriage::Parsed),
+            detail: "execution-semantic and parsed, but no carriage rule states whether \
+                     VINDEX3 represents it — parser consumption is not representation \
+                     authority, so this blocks until judged"
+                .to_string(),
+        };
+    };
+    // A rule that honestly stops at the parser carries its justification
+    // in `site`; there is nothing to read back.
+    if rule.reaches == carriage::Carriage::Parsed {
+        return Finding {
+            category: FindingCategory::Representable,
+            class: SemanticClass::ExecutionSemantic,
+            component: component_name,
+            subject: fact.path.clone(),
+            declared: Some(fact.value.clone()),
+            resolved: None,
+            carriage: Some(carriage::Carriage::Parsed),
+            detail: format!("stops at the parser by judgement — {}", rule.site),
+        };
+    }
+    let carried = component_for_key(built, &component_name)
+        .and_then(|component| rule.probe.and_then(|probe| probe(component)));
+    match carried {
+        // The schema holds a value: compare it to the declaration. This
+        // is where a dropped fact dies — GPT-OSS declares `yarn` and the
+        // position policy can only answer `default`.
+        Some(carried) if values_agree(&carried, &fact.value) => Finding {
+            category: FindingCategory::Representable,
+            class: SemanticClass::ExecutionSemantic,
+            component: component_name,
+            subject: fact.path.clone(),
+            declared: Some(fact.value.clone()),
+            resolved: Some(carried),
+            carriage: Some(rule.reaches),
+            detail: format!("carried to `{}` at {}", rule.reaches.name(), rule.site),
+        },
+        Some(carried) => Finding {
+            category: FindingCategory::Mismatched,
+            class: SemanticClass::ExecutionSemantic,
+            component: component_name,
+            subject: fact.path.clone(),
+            declared: Some(fact.value.clone()),
+            resolved: Some(carried),
+            carriage: Some(carriage::Carriage::Parsed),
+            detail: format!(
+                "parsed, but VINDEX3 carries a different value at {} — the declared fact is \
+                 dropped at the container boundary",
+                rule.site
+            ),
+        },
+        // No component could answer. Reported, never assumed correct:
+        // the rule claims carriage that nothing here demonstrates.
+        None => Finding {
+            category: FindingCategory::Unrepresented,
+            class: SemanticClass::ExecutionSemantic,
+            component: component_name,
+            subject: fact.path.clone(),
+            declared: Some(fact.value.clone()),
+            resolved: None,
+            carriage: Some(carriage::Carriage::Parsed),
+            detail: format!(
+                "rule claims `{}` at {}, but no built component answered the probe",
+                rule.reaches.name(),
+                rule.site
+            ),
+        },
+    }
+}
+
+/// The built component a config path belongs to. `text`/`language` and
+/// root-level keys describe the main text component; `<name>_config`
+/// keys describe the component of that name.
+fn component_for_key<'a>(built: &'a BuiltGraph, component_name: &str) -> Option<&'a Component> {
+    const ROOT: &str = "root";
+    const TEXT: &str = "text";
+    built
+        .graph
+        .components
+        .iter()
+        .find(|c| c.id == component_name)
+        .or_else(|| {
+            (component_name == ROOT || component_name == TEXT)
+                .then(|| {
+                    built
+                        .graph
+                        .components
+                        .iter()
+                        .find(|c| c.role == ComponentRole::PrimaryText)
+                })
+                .flatten()
+        })
+}
+
+/// JSON equality up to the precision the schema actually stores.
+///
+/// Exact first; then equality **after an f32 round-trip**, because parts
+/// of the surface narrow these facts to f32 on the way in. GPT-OSS
+/// declares `rms_norm_eps: 1e-5` and the graph carries
+/// `9.999999747378752e-6` — not a different value but the same one seen
+/// through f32, bit for bit. Reporting that as a dropped fact would be
+/// the gate misreading its own instrument, so the rule is the precise
+/// relationship rather than a chosen tolerance: a genuine change (Muse
+/// Glimmer's 1e-5 pre vs 1e-8 post norms) still differs as f32.
+fn values_agree(carried: &serde_json::Value, declared: &serde_json::Value) -> bool {
+    match (carried.as_array(), declared.as_array()) {
+        (Some(a), Some(b)) => {
+            a.len() == b.len() && a.iter().zip(b).all(|(x, y)| values_agree(x, y))
+        }
+        _ => match (carried.as_f64(), declared.as_f64()) {
+            (Some(a), Some(b)) => a == b || a as f32 == b as f32,
+            _ => carried == declared,
+        },
+    }
 }
 
 /// One representable finding per logical object this artifact's tensors
@@ -167,6 +371,7 @@ fn placed_object_findings(artifact: &str, built: &BuiltGraph) -> Vec<Finding> {
                 subject: object.id.clone(),
                 declared: None,
                 resolved: None,
+                carriage: None,
                 detail: format!(
                     "placed as `{}` ({} bytes from this artifact; encodings: {})",
                     object.kind.name(),
@@ -191,6 +396,7 @@ fn unplaced_group_findings(artifact: &str, built: &BuiltGraph) -> Vec<Finding> {
             subject: u.prefix.clone(),
             declared: None,
             resolved: None,
+            carriage: None,
             detail: u.reason.clone(),
         })
         .collect()
@@ -222,6 +428,7 @@ fn attention_policy_findings(artifact: &str, built: &BuiltGraph) -> Vec<Finding>
                 subject: "attention_policy".to_string(),
                 declared: None,
                 resolved: None,
+                carriage: None,
                 detail: format!(
                     "per-layer policy recorded on component `{}`: {} sliding / {} full, \
                      {} NoPE layer(s)",
@@ -253,6 +460,7 @@ fn execution_surface_findings(artifact: &str, built: &BuiltGraph) -> Vec<Finding
             subject: format!("{}.execution_surface", component.id),
             declared: None,
             resolved: None,
+            carriage: None,
             detail: format!(
                 "execution surface complete (attention, ffn, norm{})",
                 if component
@@ -279,6 +487,7 @@ fn execution_surface_findings(artifact: &str, built: &BuiltGraph) -> Vec<Finding
                 subject: format!("{}.execution_surface", s.component),
                 declared: None,
                 resolved: None,
+                carriage: None,
                 detail: format!(
                     "execution surface incomplete — missing: {}",
                     s.missing.join(", ")
@@ -301,6 +510,7 @@ fn unresolved_interface_findings(artifact: &str, built: &BuiltGraph) -> Vec<Find
             subject: "hidden_state_interface".to_string(),
             declared: None,
             resolved: None,
+            carriage: None,
             detail: u.reason.clone(),
         })
         .collect()

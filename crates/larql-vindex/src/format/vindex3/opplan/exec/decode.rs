@@ -21,7 +21,7 @@
 //! [`step`]: DecodeSession::step
 //! [`attention_step`]: super::backend::PlanBackend::attention_step
 
-use super::backend::{AttentionStepCall, FfnCall, NormCall, PlanBackend};
+use super::backend::{AttentionStepCall, FfnCall, MatrixClass, NormCall, PlanBackend};
 use super::operands::OperandStore;
 use super::weights::{load_weight, LoadedWeight};
 use super::AttentionOperands;
@@ -103,14 +103,17 @@ impl<'a, B: PlanBackend> DecodeSession<'a, B> {
             ))
         })?;
         let hidden = embedding.table.shape[1];
-        let format = backend.weight_format();
 
         let embed_table = store.load(&embedding.table)?;
         let mut layers = Vec::with_capacity(plan.layers.len());
         for layer in &plan.layers {
             layers.push(LayerState {
                 pre_attention: LoadedNorm::load(&layer.pre_attention_norm, store)?,
-                attention: AttentionOperands::load(&layer.attention, store, format)?,
+                attention: AttentionOperands::load(
+                    &layer.attention,
+                    store,
+                    backend.weight_format(MatrixClass::AttentionProjection),
+                )?,
                 post_attention: layer
                     .post_attention_norm
                     .as_ref()
@@ -121,10 +124,24 @@ impl<'a, B: PlanBackend> DecodeSession<'a, B> {
                     .ffn
                     .gate
                     .as_ref()
-                    .map(|gate| load_weight(store, gate, format))
+                    .map(|gate| {
+                        load_weight(
+                            store,
+                            gate,
+                            backend.weight_format(MatrixClass::FfnProjection),
+                        )
+                    })
                     .transpose()?,
-                ffn_up: load_weight(store, &layer.ffn.up, format)?,
-                ffn_down: load_weight(store, &layer.ffn.down, format)?,
+                ffn_up: load_weight(
+                    store,
+                    &layer.ffn.up,
+                    backend.weight_format(MatrixClass::FfnProjection),
+                )?,
+                ffn_down: load_weight(
+                    store,
+                    &layer.ffn.down,
+                    backend.weight_format(MatrixClass::FfnProjection),
+                )?,
                 post_ffn: layer
                     .post_ffn_norm
                     .as_ref()
@@ -143,7 +160,14 @@ impl<'a, B: PlanBackend> DecodeSession<'a, B> {
             .output
             .as_ref()
             .map(|op| {
-                Ok::<_, VindexError>((op.clone(), load_weight(store, &op.projection, format)?))
+                Ok::<_, VindexError>((
+                    op.clone(),
+                    load_weight(
+                        store,
+                        &op.projection,
+                        backend.weight_format(MatrixClass::OutputHead),
+                    )?,
+                ))
             })
             .transpose()?;
 

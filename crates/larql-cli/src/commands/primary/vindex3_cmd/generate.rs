@@ -96,6 +96,27 @@ pub(super) fn run_generate<B: PlanBackend>(
             report.steady_seconds_per_token * 1e3,
             report.steady_seconds_per_token.recip(),
         );
+        // Split the token between device dispatch and everything else.
+        // "Everything else" is the interpreter's elementwise glue —
+        // norms, RoPE, softmax over the KV cache, activations,
+        // residuals — which is a fixed per-token cost just as
+        // submission is, and which a bytes-vs-time fit cannot separate
+        // from it.
+        if let Some(stats) = backend.dispatch_stats() {
+            let device_s = stats.device_nanos as f64 / 1e9;
+            let per_token = device_s / (report.decode_tokens + prompt.len()) as f64;
+            println!(
+                "device: {:.0} ms/token in {} submissions/token ({:.0} us each)",
+                per_token * 1e3,
+                stats.submissions / (report.decode_tokens + prompt.len()) as u64,
+                per_token * 1e6
+                    / (stats.submissions as f64 / (report.decode_tokens + prompt.len()) as f64),
+            );
+            println!(
+                "glue:   {:.0} ms/token (everything not inside a device call)",
+                (report.mean_seconds_per_token - per_token) * 1e3,
+            );
+        }
     }
     Ok(())
 }

@@ -33,7 +33,8 @@ mod tests;
 use super::{AttentionOp, ComponentOpPlan, LayerPlan, NormOp};
 use crate::error::VindexError;
 use backend::{
-    AttentionCall, FfnCall, GateCall, NormCall, PlanBackend, ProjectCall, QkNormCall, WeightFormat,
+    AttentionCall, FfnCall, GateCall, MatrixClass, NormCall, PlanBackend, ProjectCall, QkNormCall,
+    WeightFormat,
 };
 use operands::OperandStore;
 use rayon::prelude::*;
@@ -230,7 +231,11 @@ pub fn execute_plan_streaming<B: PlanBackend + ?Sized>(
     };
     let logits = match &plan.output {
         Some(output) => {
-            let weight = load_weight(store, &output.projection, backend.weight_format())?;
+            let weight = load_weight(
+                store,
+                &output.projection,
+                backend.weight_format(MatrixClass::OutputHead),
+            )?;
             let vocab = output.projection.shape[0];
             Some(backend.output_head(
                 weight.slice(),
@@ -295,7 +300,7 @@ fn execute_layer<B: PlanBackend + ?Sized>(
     // allocates a fresh copy per call — re-reading them for every
     // token would dominate the run on a real model without changing a
     // single number.
-    let format = backend.weight_format();
+    let format = backend.weight_format(MatrixClass::FfnProjection);
     let up = load_weight(store, &layer.ffn.up, format)?;
     let down = load_weight(store, &layer.ffn.down, format)?;
     let gate = match &layer.ffn.gate {
@@ -439,7 +444,11 @@ fn attention<B: PlanBackend + ?Sized>(
     hidden: usize,
     backend: &B,
 ) -> Result<Vec<Vec<f32>>, VindexError> {
-    let operands = AttentionOperands::load(op, store, backend.weight_format())?;
+    let operands = AttentionOperands::load(
+        op,
+        store,
+        backend.weight_format(MatrixClass::AttentionProjection),
+    )?;
     backend.attention(operands.call(op, inputs, qk_norm_eps, hidden))
 }
 

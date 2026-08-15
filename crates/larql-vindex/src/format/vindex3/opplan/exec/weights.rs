@@ -20,6 +20,7 @@ use super::backend::{WeightFormat, WeightSlice};
 use super::operands::OperandStore;
 use crate::error::VindexError;
 use crate::format::vindex3::opplan::OperandRef;
+use larql_models::quant::mxfp4::{e8m0_to_f32, MXFP4_TABLE};
 
 /// Alignment (and length granularity) of f16 weight allocations:
 /// the Apple-GPU page size. A page-aligned, page-multiple allocation
@@ -107,9 +108,19 @@ impl Drop for AlignedBytes {
 
 /// One loaded matrix operand, owning its bytes in the format the
 /// backend declared.
+#[derive(Debug)]
 pub enum LoadedWeight {
     F32(Vec<f32>),
     F16(AlignedBytes),
+    Mxfp4 {
+        packed: AlignedBytes,
+        scales: AlignedBytes,
+    },
+    Nvfp4 {
+        packed: AlignedBytes,
+        scales: AlignedBytes,
+        tensor_scale: f32,
+    },
 }
 
 impl LoadedWeight {
@@ -118,6 +129,19 @@ impl LoadedWeight {
         match self {
             LoadedWeight::F32(w) => WeightSlice::F32(w),
             LoadedWeight::F16(b) => WeightSlice::F16(b.as_slice()),
+            LoadedWeight::Mxfp4 { packed, scales } => WeightSlice::Mxfp4 {
+                packed: packed.as_slice(),
+                scales: scales.as_slice(),
+            },
+            LoadedWeight::Nvfp4 {
+                packed,
+                scales,
+                tensor_scale,
+            } => WeightSlice::Nvfp4 {
+                packed: packed.as_slice(),
+                scales: scales.as_slice(),
+                tensor_scale: *tensor_scale,
+            },
         }
     }
 }
@@ -131,6 +155,18 @@ pub fn load_weight(
 ) -> Result<LoadedWeight, VindexError> {
     match format {
         WeightFormat::F32 => Ok(LoadedWeight::F32(store.load(operand)?)),
+        WeightFormat::Mxfp4 => {
+            let rows = operand.shape.first().copied().unwrap_or(0);
+            let k = operand.shape.get(1).copied().unwrap_or(0);
+            let values = store.load(operand)?;
+            quantize_mxfp4(&values, rows, k, &operand.tensor)
+        }
+        WeightFormat::Nvfp4 => {
+            let rows = operand.shape.first().copied().unwrap_or(0);
+            let k = operand.shape.get(1).copied().unwrap_or(0);
+            let values = store.load(operand)?;
+            quantize_nvfp4(&values, rows, k, &operand.tensor)
+        }
         WeightFormat::F16 => {
             let raw = store.load_raw(operand)?;
             match raw.dtype.as_str() {
@@ -303,6 +339,158 @@ fn bf16_to_f16(bf16: u16) -> Option<u16> {
     Some(sign | ((new_exp as u16) << 10) | (wide_mant >> MANTISSA_SHIFT) as u16)
 }
 
+/// MXFP4 group geometry, matching the kernel's layout contract exactly:
+/// per row, `k/32` groups of 16 packed bytes (lo nibble first) plus one
+/// e8m0 scale byte each.
+const MXFP4_GROUP_ELEMS: usize = 32;
+const MXFP4_GROUP_BYTES: usize = 16;
+/// e2m1's largest magnitude; the shared exponent is chosen so the
+/// group's max maps at or below it, saturating the rare overshoot.
+const MXFP4_MAX_MAG: f32 = 6.0;
+/// Exponent of [`MXFP4_MAX_MAG`]'s leading bit: `floor(log2(6)) = 2`.
+const MXFP4_EMAX: i32 = 2;
+
+/// Quantise one `[rows, k]` f32 matrix to MXFP4 — the OCP microscaling
+/// rule: per 32-element group, shared scale `2^(floor(log2(max|x|)) -
+/// 2)` as e8m0, elements rounded to the nearest e2m1 grid value
+/// (ties to the even code index), saturating at ±6.
+///
+/// A lossy realisation by construction; the parity gates against the
+/// f16/f32 anchors and the upstream trace are its judge. Layout is the
+/// kernel's, and the nibble-order control in the tests pins it against
+/// the independent `larql-models` decoder.
+pub fn quantize_mxfp4(
+    values: &[f32],
+    rows: usize,
+    k: usize,
+    name: &str,
+) -> Result<LoadedWeight, VindexError> {
+    if !k.is_multiple_of(MXFP4_GROUP_ELEMS) {
+        return Err(VindexError::Parse(format!(
+            "tensor `{name}`: k={k} is not a multiple of the MXFP4 32-element group"
+        )));
+    }
+    if values.len() != rows * k {
+        return Err(VindexError::Parse(format!(
+            "tensor `{name}`: {} values do not fill [{rows}, {k}]",
+            values.len()
+        )));
+    }
+    let groups = k / MXFP4_GROUP_ELEMS;
+    let mut packed = AlignedBytes::zeroed(rows * groups * MXFP4_GROUP_BYTES);
+    let mut scales = AlignedBytes::zeroed(rows * groups);
+    {
+        use rayon::prelude::*;
+        let packed_dst = packed.as_mut_slice();
+        let scales_dst = scales.as_mut_slice();
+        packed_dst[..rows * groups * MXFP4_GROUP_BYTES]
+            .par_chunks_mut(groups * MXFP4_GROUP_BYTES)
+            .zip(scales_dst[..rows * groups].par_chunks_mut(groups))
+            .zip(values.par_chunks(k))
+            .for_each(|((row_packed, row_scales), row_values)| {
+                for g in 0..groups {
+                    let group = &row_values[g * MXFP4_GROUP_ELEMS..(g + 1) * MXFP4_GROUP_ELEMS];
+                    let max_abs = group.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+                    let scale_byte = if max_abs == 0.0 {
+                        0u8 // decodes to 0.0; all codes zero
+                    } else {
+                        let exponent = max_abs.log2().floor() as i32 - MXFP4_EMAX;
+                        (exponent + 127).clamp(1, 254) as u8
+                    };
+                    row_scales[g] = scale_byte;
+                    let scale = e8m0_to_f32(scale_byte);
+                    let inv = if scale == 0.0 { 0.0 } else { scale.recip() };
+                    let bytes = &mut row_packed[g * MXFP4_GROUP_BYTES..(g + 1) * MXFP4_GROUP_BYTES];
+                    for (b, pair) in group.chunks_exact(2).enumerate() {
+                        let lo = nearest_mxfp4_code(pair[0] * inv);
+                        let hi = nearest_mxfp4_code(pair[1] * inv);
+                        bytes[b] = lo | (hi << 4);
+                    }
+                }
+            });
+    }
+    Ok(LoadedWeight::Mxfp4 { packed, scales })
+}
+
+/// Quantise one `[rows, k]` f32 matrix to NVFP4 into page-aligned
+/// buffers, delegating the numerics to `larql_models::quant::nvfp4` so
+/// the format has exactly one definition — the CPU reference, this
+/// loader, and the Metal kernel all read that module's contract.
+///
+/// The only thing added here is residency: the same page-aligned
+/// allocation MXFP4 uses, so a device can wrap the buffers zero-copy.
+pub fn quantize_nvfp4(
+    values: &[f32],
+    rows: usize,
+    k: usize,
+    name: &str,
+) -> Result<LoadedWeight, VindexError> {
+    use larql_models::quant::nvfp4::{
+        quantize_row_into, tensor_scale_for, NVFP4_GROUP_BYTES, NVFP4_GROUP_ELEMS,
+    };
+    if !k.is_multiple_of(NVFP4_GROUP_ELEMS) {
+        return Err(VindexError::Parse(format!(
+            "tensor `{name}`: k={k} is not a multiple of the NVFP4 \
+             {NVFP4_GROUP_ELEMS}-element group"
+        )));
+    }
+    if values.len() != rows * k {
+        return Err(VindexError::Parse(format!(
+            "tensor `{name}`: {} values do not fill [{rows}, {k}]",
+            values.len()
+        )));
+    }
+    let groups = k / NVFP4_GROUP_ELEMS;
+    // The tensor scale is a property of the whole matrix, so it is chosen
+    // once before any row is encoded — rows cannot each pick their own
+    // and still decode under one shared scale.
+    let tensor_scale = tensor_scale_for(values);
+    let mut packed = AlignedBytes::zeroed(rows * groups * NVFP4_GROUP_BYTES);
+    let mut scales = AlignedBytes::zeroed(rows * groups);
+    {
+        use rayon::prelude::*;
+        let packed_dst = packed.as_mut_slice();
+        let scales_dst = scales.as_mut_slice();
+        // Rows are independent given the tensor scale, so the parallelism
+        // lives here while the numerics stay in one place
+        // (`quant::nvfp4::quantize_row_into`), shared with the CPU
+        // reference the kernel is judged against.
+        packed_dst[..rows * groups * NVFP4_GROUP_BYTES]
+            .par_chunks_mut(groups * NVFP4_GROUP_BYTES)
+            .zip(scales_dst[..rows * groups].par_chunks_mut(groups))
+            .zip(values.par_chunks(k))
+            .for_each(|((row_packed, row_scales), row_values)| {
+                quantize_row_into(row_values, tensor_scale, row_packed, row_scales);
+            });
+    }
+    Ok(LoadedWeight::Nvfp4 {
+        packed,
+        scales,
+        tensor_scale,
+    })
+}
+
+/// The e2m1 code nearest to `v` (ties to the even code index),
+/// saturating at ±6.
+fn nearest_mxfp4_code(v: f32) -> u8 {
+    let sign = if v.is_sign_negative() { 8u8 } else { 0 };
+    let mag = v.abs().min(MXFP4_MAX_MAG);
+    let mut best = 0u8;
+    let mut best_err = f32::INFINITY;
+    for (code, value) in MXFP4_TABLE.iter().enumerate().take(8) {
+        let err = (mag - value).abs();
+        if err < best_err || (err == best_err && code.is_multiple_of(2)) {
+            best = code as u8;
+            best_err = err;
+        }
+    }
+    if best == 0 {
+        0 // ±0 collapse to +0: the table's -0.0 encodes nothing extra
+    } else {
+        sign | best
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -389,6 +577,129 @@ mod tests {
         assert!(f32_to_f16_rne(65503.0).is_some());
         let err = f32_bytes_to_f16(&1e6f32.to_le_bytes(), "w").unwrap_err();
         assert!(err.to_string().contains("overflows f16"), "{err}");
+    }
+
+    /// Grid-exact values survive MXFP4 quantisation unchanged, and the
+    /// packed bytes decode identically through the **independent**
+    /// `larql-models` decoder — the layout (lo nibble first, per-row
+    /// group order, e8m0 scales) is pinned against the code that has
+    /// already read real GPT-OSS checkpoints, not against this
+    /// quantiser's own assumptions.
+    #[test]
+    fn mxfp4_grid_values_round_trip_through_the_independent_decoder() {
+        // One row, 32 elements: max 6.0 → shared exponent 0 → scale 1.0,
+        // every value on the e2m1 grid.
+        let mut row = vec![0.0f32; 32];
+        let grid = [0.5f32, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.5, -1.5, -6.0];
+        row[..grid.len()].copy_from_slice(&grid);
+        let LoadedWeight::Mxfp4 { packed, scales } = quantize_mxfp4(&row, 1, 32, "w").unwrap()
+        else {
+            panic!("quantiser must produce the mxfp4 variant");
+        };
+        assert_eq!(scales.as_slice()[0], 127, "max 6.0 → 2^0 scale");
+        let decoded = larql_models::quant::mxfp4::dequantize_expert(
+            &packed.as_slice()[..16],
+            &scales.as_slice()[..1],
+            1,
+            1,
+        )
+        .unwrap();
+        assert_eq!(&decoded[..], &row[..], "grid values must survive exactly");
+    }
+
+    /// Off-grid values land within one half-step of the grid, and a
+    /// group's error is bounded by its scale (2·scale at saturation).
+    #[test]
+    fn mxfp4_error_is_bounded_by_the_group_scale() {
+        let row: Vec<f32> = (0..64).map(|i| (i as f32 * 0.37).sin() * 5.0).collect();
+        let LoadedWeight::Mxfp4 { packed, scales } = quantize_mxfp4(&row, 1, 64, "w").unwrap()
+        else {
+            panic!("quantiser must produce the mxfp4 variant");
+        };
+        let decoded = larql_models::quant::mxfp4::dequantize_expert(
+            &packed.as_slice()[..32],
+            &scales.as_slice()[..2],
+            1,
+            2,
+        )
+        .unwrap();
+        for (group, (xs, ds)) in row.chunks(32).zip(decoded.chunks(32)).enumerate() {
+            let scale = e8m0_to_f32(scales.as_slice()[group]);
+            for (x, d) in xs.iter().zip(ds) {
+                assert!(
+                    (x - d).abs() <= scale * 2.0 + f32::EPSILON,
+                    "group {group}: |{x} - {d}| exceeds 2·scale ({scale})"
+                );
+            }
+        }
+    }
+
+    /// Group misalignment and shape mismatches are refused, not padded.
+    #[test]
+    fn mxfp4_quantiser_fails_closed_on_bad_geometry() {
+        let err = quantize_mxfp4(&[0.0; 40], 1, 40, "w").unwrap_err();
+        assert!(err.to_string().contains("32-element group"), "{err}");
+        let err = quantize_mxfp4(&[0.0; 32], 2, 32, "w").unwrap_err();
+        assert!(err.to_string().contains("do not fill"), "{err}");
+    }
+
+    /// An all-zero group takes the zero-scale sentinel and decodes to
+    /// exact zeros.
+    #[test]
+    fn mxfp4_zero_group_uses_the_zero_scale_sentinel() {
+        let LoadedWeight::Mxfp4 { packed, scales } =
+            quantize_mxfp4(&[0.0f32; 32], 1, 32, "w").unwrap()
+        else {
+            panic!("quantiser must produce the mxfp4 variant");
+        };
+        assert_eq!(scales.as_slice()[0], 0);
+        assert!(packed.as_slice()[..16].iter().all(|&b| b == 0));
+    }
+
+    /// The parallel loader must produce **byte-identical** output to the
+    /// single-definition reference in `quant::nvfp4`. The loader exists
+    /// only for residency and thread-pool reasons; if it drifted, the
+    /// Metal kernel would be judged against a CPU reference that no
+    /// longer describes the bytes it is handed.
+    #[test]
+    fn the_parallel_nvfp4_loader_matches_the_reference_exactly() {
+        // Awkward geometry on purpose: rows that do not divide evenly
+        // across a pool, and a k spanning several groups.
+        let (rows, k) = (37, 16 * 11);
+        let values: Vec<f32> = (0..rows * k)
+            .map(|i| ((i as f32) * 0.0137).sin() * (1.0 + (i % 7) as f32))
+            .collect();
+
+        let reference = larql_models::quant::nvfp4::quantize(&values, rows, k).unwrap();
+        let LoadedWeight::Nvfp4 {
+            packed,
+            scales,
+            tensor_scale,
+        } = quantize_nvfp4(&values, rows, k, "w").unwrap()
+        else {
+            panic!("loader must produce the nvfp4 variant");
+        };
+
+        assert_eq!(tensor_scale, reference.tensor_scale);
+        assert_eq!(
+            &packed.as_slice()[..reference.packed.len()],
+            &reference.packed[..],
+            "packed codes must match the reference byte for byte"
+        );
+        assert_eq!(
+            &scales.as_slice()[..reference.scales.len()],
+            &reference.scales[..],
+            "E4M3 scales must match the reference byte for byte"
+        );
+    }
+
+    /// Geometry is refused by the loader too, not only by the codec.
+    #[test]
+    fn the_nvfp4_loader_fails_closed_on_bad_geometry() {
+        let err = quantize_nvfp4(&[0.0; 40], 1, 40, "w").unwrap_err();
+        assert!(err.to_string().contains("16-element group"), "{err}");
+        let err = quantize_nvfp4(&[0.0; 32], 3, 16, "w").unwrap_err();
+        assert!(err.to_string().contains("do not fill"), "{err}");
     }
 
     /// The aligned buffer really is page-aligned, page-multiple, and

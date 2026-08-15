@@ -183,6 +183,187 @@ impl MatMul for MetalBackend {
         self.bufs.recycle(x_buf);
     }
 
+    /// Routed through [`MatMul::mxfp4_gemv_multi`] as a one-element batch
+    /// rather than through `mxfp4_matmul_small_block`.
+    ///
+    /// Same kernel and same arguments either way, but the small-block
+    /// helper builds a *transient* input buffer per call and never
+    /// recycles its output back to the pool, so a decode that dispatches
+    /// it a few times per layer across 52 layers churns pool allocations
+    /// on every token. Measured on the all-MXFP4 preset: 298 ms/token
+    /// through the helper against ~105 ms predicted by the byte model
+    /// the other presets obey — a ~2.8x penalty that reads as a property
+    /// of the *format* if the two paths are compared without noticing.
+    /// The helper stays for its `t > 1` block callers.
+    fn mxfp4_gemv(
+        &self,
+        packed: &[u8],
+        scales: &[u8],
+        x: &[f32],
+        n: usize,
+        k: usize,
+    ) -> Option<Vec<f32>> {
+        let results = self.mxfp4_gemv_multi(&[(packed, scales, n, k)], x)?;
+        results.into_iter().next()
+    }
+
+    /// One command buffer, one encoder, one input upload, N dispatches,
+    /// one wait — the MXFP4 mirror of [`MatMul::f16_gemv_multi`], with
+    /// two weight planes bound per dispatch.
+    fn mxfp4_gemv_multi(
+        &self,
+        weights: &[(&[u8], &[u8], usize, usize)],
+        x: &[f32],
+    ) -> Option<Vec<Vec<f32>>> {
+        const GROUP_ELEMS: usize = 32;
+        const GROUP_BYTES: usize = 16;
+        for &(packed, scales, n, k) in weights {
+            if !k.is_multiple_of(GROUP_ELEMS) || x.len() < k {
+                return None;
+            }
+            let groups = k / GROUP_ELEMS;
+            if packed.len() < n * groups * GROUP_BYTES || scales.len() < n * groups {
+                return None;
+            }
+        }
+        if weights.is_empty() {
+            return Some(Vec::new());
+        }
+
+        let x_buf = self.bufs.output((x.len() * 4) as u64);
+        let x_ptr = x_buf.contents() as *mut f32;
+        if x_ptr.is_null() {
+            return None;
+        }
+        // SAFETY: pooled buffer is at least x.len()*4 bytes; not bound yet.
+        unsafe { std::ptr::copy_nonoverlapping(x.as_ptr(), x_ptr, x.len()) };
+
+        let kernel = &self.quant.mxfp4_matvec_pipeline;
+        let cmd = self.queue.new_command_buffer();
+        let enc = cmd.new_compute_command_encoder();
+        enc.set_compute_pipeline_state(&kernel.state);
+        let mut held = Vec::with_capacity(weights.len() * 2);
+        let mut out_bufs = Vec::with_capacity(weights.len());
+        for &(packed, scales, n, k) in weights {
+            let p_buf = self.bufs.get_bytes(packed);
+            let s_buf = self.bufs.get_bytes(scales);
+            let out_buf = self.bufs.output((n * 4) as u64);
+            let m_u32 = n as u32;
+            let k_u32 = k as u32;
+            enc.set_buffer(0, Some(&p_buf), 0);
+            enc.set_buffer(1, Some(&s_buf), 0);
+            enc.set_buffer(2, Some(&x_buf), 0);
+            enc.set_buffer(3, Some(&out_buf), 0);
+            enc.set_bytes(4, 4, &m_u32 as *const u32 as *const std::ffi::c_void);
+            enc.set_bytes(5, 4, &k_u32 as *const u32 as *const std::ffi::c_void);
+            enc.dispatch_thread_groups(
+                metal::MTLSize::new((n as u64).div_ceil(kernel.rows_per_tg), 1, 1),
+                metal::MTLSize::new(kernel.threads_per_tg, 1, 1),
+            );
+            held.push(p_buf);
+            held.push(s_buf);
+            out_bufs.push((out_buf, n));
+        }
+        enc.end_encoding();
+        cmd.commit();
+        cmd.wait_until_completed();
+
+        let results: Option<Vec<Vec<f32>>> = out_bufs
+            .iter()
+            .map(|(buf, n)| crate::buffers::try_read_buffer_f32(buf, *n))
+            .collect();
+        for (buf, _) in out_bufs {
+            self.bufs.recycle(buf);
+        }
+        self.bufs.recycle(x_buf);
+        results
+    }
+
+    fn nvfp4_gemv(
+        &self,
+        packed: &[u8],
+        scales: &[u8],
+        tensor_scale: f32,
+        x: &[f32],
+        n: usize,
+        k: usize,
+    ) -> Option<Vec<f32>> {
+        let results = self.nvfp4_gemv_multi(&[(packed, scales, tensor_scale, n, k)], x)?;
+        results.into_iter().next()
+    }
+
+    /// One command buffer, one encoder, one input upload, N dispatches,
+    /// one wait — the NVFP4 mirror of [`MatMul::mxfp4_gemv_multi`], with
+    /// the per-matrix tensor scale bound as a fourth argument.
+    fn nvfp4_gemv_multi(
+        &self,
+        weights: &[larql_compute::backend::matmul::Nvfp4Operand<'_>],
+        x: &[f32],
+    ) -> Option<Vec<Vec<f32>>> {
+        use larql_models::quant::nvfp4::{NVFP4_GROUP_BYTES, NVFP4_GROUP_ELEMS};
+        for &(packed, scales, _, n, k) in weights {
+            if !k.is_multiple_of(NVFP4_GROUP_ELEMS) || x.len() < k {
+                return None;
+            }
+            let groups = k / NVFP4_GROUP_ELEMS;
+            if packed.len() < n * groups * NVFP4_GROUP_BYTES || scales.len() < n * groups {
+                return None;
+            }
+        }
+        if weights.is_empty() {
+            return Some(Vec::new());
+        }
+
+        let x_buf = self.bufs.output((x.len() * 4) as u64);
+        let x_ptr = x_buf.contents() as *mut f32;
+        if x_ptr.is_null() {
+            return None;
+        }
+        // SAFETY: pooled buffer is at least x.len()*4 bytes; not bound yet.
+        unsafe { std::ptr::copy_nonoverlapping(x.as_ptr(), x_ptr, x.len()) };
+
+        let kernel = &self.quant.nvfp4_matvec_pipeline;
+        let cmd = self.queue.new_command_buffer();
+        let enc = cmd.new_compute_command_encoder();
+        enc.set_compute_pipeline_state(&kernel.state);
+        let mut held = Vec::with_capacity(weights.len() * 2);
+        let mut out_bufs = Vec::with_capacity(weights.len());
+        for &(packed, scales, tensor_scale, n, k) in weights {
+            let p_buf = self.bufs.get_bytes(packed);
+            let s_buf = self.bufs.get_bytes(scales);
+            let out_buf = self.bufs.output((n * 4) as u64);
+            let m_u32 = n as u32;
+            let k_u32 = k as u32;
+            enc.set_buffer(0, Some(&p_buf), 0);
+            enc.set_buffer(1, Some(&s_buf), 0);
+            enc.set_buffer(2, Some(&x_buf), 0);
+            enc.set_buffer(3, Some(&out_buf), 0);
+            enc.set_bytes(4, 4, &m_u32 as *const u32 as *const std::ffi::c_void);
+            enc.set_bytes(5, 4, &k_u32 as *const u32 as *const std::ffi::c_void);
+            enc.set_bytes(6, 4, &tensor_scale as *const f32 as *const std::ffi::c_void);
+            enc.dispatch_thread_groups(
+                metal::MTLSize::new((n as u64).div_ceil(kernel.rows_per_tg), 1, 1),
+                metal::MTLSize::new(kernel.threads_per_tg, 1, 1),
+            );
+            held.push(p_buf);
+            held.push(s_buf);
+            out_bufs.push((out_buf, n));
+        }
+        enc.end_encoding();
+        cmd.commit();
+        cmd.wait_until_completed();
+
+        let results: Option<Vec<Vec<f32>>> = out_bufs
+            .iter()
+            .map(|(buf, n)| crate::buffers::try_read_buffer_f32(buf, *n))
+            .collect();
+        for (buf, _) in out_bufs {
+            self.bufs.recycle(buf);
+        }
+        self.bufs.recycle(x_buf);
+        results
+    }
+
     fn f32_gemv_topk1(&self, w: ArrayView2<f32>, x: &[f32]) -> Option<(u32, f32)> {
         MetalBackend::f32_gemv_topk1(self, w, x)
     }

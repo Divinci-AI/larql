@@ -1,5 +1,6 @@
 //! Tests for the semantic representability plan.
 
+mod carriage;
 mod compare;
 mod semantics;
 mod system;
