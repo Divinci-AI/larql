@@ -68,6 +68,14 @@ impl OperandStore {
 
     /// Load one operand as f32 values.
     pub fn load(&self, operand: &OperandRef) -> Result<Vec<f32>, VindexError> {
+        let raw = self.load_raw(operand)?;
+        widen(&raw.dtype, &raw.bytes, &operand.tensor)
+    }
+
+    /// Load one operand's stored bytes and dtype, unwidened — for a
+    /// caller that converts to a representation other than f32 (and for
+    /// [`Self::load`] itself, so there is exactly one resolution path).
+    pub fn load_raw(&self, operand: &OperandRef) -> Result<RawOperand, VindexError> {
         let segment = self.segments.get(&operand.object).ok_or_else(|| {
             VindexError::Parse(format!("no segment for object `{}`", operand.object))
         })?;
@@ -81,8 +89,18 @@ impl OperandStore {
         file.seek(SeekFrom::Start(segment.payload_start + tensor.offset))?;
         let mut bytes = vec![0u8; tensor.len as usize];
         file.read_exact(&mut bytes)?;
-        widen(&tensor.dtype, &bytes, &operand.tensor)
+        Ok(RawOperand {
+            dtype: tensor.dtype.clone(),
+            bytes,
+        })
     }
+}
+
+/// One operand exactly as stored: payload bytes plus the dtype label
+/// that says how to read them.
+pub struct RawOperand {
+    pub dtype: String,
+    pub bytes: Vec<u8>,
 }
 
 /// Widen stored bytes to f32 — judged dtypes only, fail-closed.

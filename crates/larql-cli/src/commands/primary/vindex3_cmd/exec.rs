@@ -94,6 +94,23 @@ pub fn run_exec(args: ExecArgs) -> Result<(), Box<dyn std::error::Error>> {
     match args.backend {
         ExecBackend::Reference => run_on(&ReferenceBackend::new(), &args, &tokens, &plan, &store),
         ExecBackend::Production => run_on(&ProductionBackend::new(), &args, &tokens, &plan, &store),
+        #[cfg(feature = "gpu")]
+        ExecBackend::Metal => {
+            // vindex never links Metal: the CLI injects the concrete
+            // device through larql-compute's MatMul seam. f16 weights so
+            // the Metal buffer cache keeps the model resident (r2); the
+            // engine tag names the realisation so a dump can never be
+            // mistaken for the f32 r1 lowering.
+            let gpu = larql_compute_metal::MetalBackend::new()
+                .ok_or("no Metal device available for --backend metal")?;
+            let backend =
+                larql_vindex::format::vindex3::opplan::exec::device::DevicePlanBackend::new(
+                    gpu,
+                    "metal-r2-f16",
+                    larql_vindex::format::vindex3::opplan::exec::backend::WeightFormat::F16,
+                );
+            run_on(&backend, &args, &tokens, &plan, &store)
+        }
     }
 }
 
@@ -106,9 +123,12 @@ fn run_on<B: PlanBackend>(
     store: &OperandStore,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let engine = format!("{ENGINE_PREFIX}-{}", backend.name());
-    match &args.dump_layers {
-        Some(dir) => run_dump(dir, &engine, args, tokens, plan, store, backend),
-        None => {
+    match (&args.dump_layers, args.generate) {
+        (Some(dir), _) => run_dump(dir, &engine, args, tokens, plan, store, backend),
+        (None, Some(new_tokens)) => {
+            super::generate::run_generate(backend, &engine, tokens, new_tokens, plan, store)
+        }
+        (None, None) => {
             let trace = execute_plan(plan, store, tokens, backend)?;
             summarise(&engine, &trace);
             Ok(())
@@ -356,20 +376,12 @@ fn summarise(engine: &str, trace: &ExecutionTrace) {
         trace.embedded.first().map(Vec::len).unwrap_or(0),
     );
     match &trace.logits {
-        Some(logits) => {
-            let (best, value) =
-                logits
-                    .iter()
-                    .enumerate()
-                    .fold((0usize, f32::NEG_INFINITY), |(bi, bv), (i, v)| {
-                        if *v > bv {
-                            (i, *v)
-                        } else {
-                            (bi, bv)
-                        }
-                    });
-            println!("logits: {}, argmax {best} ({value:+.4})", logits.len());
-        }
+        Some(logits) => match super::generate::argmax(logits) {
+            Some((best, value)) => {
+                println!("logits: {}, argmax {best} ({value:+.4})", logits.len());
+            }
+            None => println!("logits: empty"),
+        },
         None => println!("logits: none (plan carries no output head)"),
     }
 }

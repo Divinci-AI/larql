@@ -28,6 +28,51 @@ use larql_models::config::{
 use super::super::super::graph::policy::AttentionSpan;
 use crate::error::VindexError;
 
+/// The numerical representation a backend wants matrix operands in.
+///
+/// Asked once by the interpreter (a capability, like [`PlanBackend::name`],
+/// not a per-call decision): the interpreter loads every matrix operand in
+/// the declared format and the backend receives what it asked for. Norm
+/// and QK-norm weights and the embedding table are always f32 — they are
+/// elementwise glue, not matrix traffic, and narrowing them buys nothing.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum WeightFormat {
+    /// Widened f32 — the constitutional representation.
+    F32,
+    /// IEEE 754 half, little-endian. Exactly representable from stored
+    /// bf16 for all normal-range values (bf16's 7 mantissa bits fit in
+    /// f16's 10); conversion fails closed on overflow. A device backend
+    /// declares this so weights can stay resident in half the bytes.
+    F16,
+}
+
+/// One matrix operand, in the representation the backend declared.
+///
+/// An `F16` slice may be longer than the matrix needs (page-padded for
+/// zero-copy device wrapping); geometry always travels separately.
+#[derive(Clone, Copy)]
+pub enum WeightSlice<'a> {
+    F32(&'a [f32]),
+    /// Little-endian IEEE f16 bytes.
+    F16(&'a [u8]),
+}
+
+impl<'a> WeightSlice<'a> {
+    /// The f32 view a CPU backend computes with. A backend that declared
+    /// `F32` can never legitimately receive `F16`, so this is fail-closed
+    /// evidence of an interpreter bug, not a conversion point.
+    pub fn as_f32(&self) -> Result<&'a [f32], VindexError> {
+        match self {
+            WeightSlice::F32(w) => Ok(w),
+            WeightSlice::F16(_) => Err(VindexError::Parse(
+                "backend declared f32 weights but was handed f16 — interpreter loaded the \
+                 wrong format"
+                    .to_string(),
+            )),
+        }
+    }
+}
+
 /// One normalisation, fully resolved.
 ///
 /// `weight` empty means a parameter-free application (statistic only) —
@@ -42,7 +87,7 @@ pub struct NormCall<'a> {
 
 /// One `[out, in]` row-major projection applied to one vector.
 pub struct ProjectCall<'a> {
-    pub weight: &'a [f32],
+    pub weight: WeightSlice<'a>,
     pub out_dim: usize,
     pub in_dim: usize,
     pub x: &'a [f32],
@@ -59,7 +104,7 @@ pub struct QkNormCall<'a> {
 /// The attention output gate, when the surface judged one.
 pub struct GateCall<'a> {
     pub spec: AttentionGateSpec,
-    pub weight: &'a [f32],
+    pub weight: WeightSlice<'a>,
 }
 
 /// One attention operation over a whole sequence, fully resolved.
@@ -74,10 +119,10 @@ pub struct AttentionCall<'a> {
     pub num_q_heads: usize,
     pub num_kv_heads: usize,
     pub head_dim: usize,
-    pub w_q: &'a [f32],
-    pub w_k: &'a [f32],
-    pub w_v: &'a [f32],
-    pub w_o: &'a [f32],
+    pub w_q: WeightSlice<'a>,
+    pub w_k: WeightSlice<'a>,
+    pub w_v: WeightSlice<'a>,
+    pub w_o: WeightSlice<'a>,
     pub qk_norm: Option<QkNormCall<'a>>,
     pub parameter_free_qk_norm: ParameterFreeQkNorm,
     /// Epsilon for both QK-norm forms; rides with the layer's norm
@@ -101,10 +146,44 @@ pub struct FfnCall<'a> {
     pub x: &'a [f32],
     pub hidden: usize,
     pub intermediate: usize,
-    pub gate: Option<&'a [f32]>,
-    pub up: &'a [f32],
-    pub down: &'a [f32],
+    pub gate: Option<WeightSlice<'a>>,
+    pub up: WeightSlice<'a>,
+    pub down: WeightSlice<'a>,
     pub activation: Activation,
+}
+
+/// One position's attention against interpreter-owned K/V state — the
+/// decode step.
+///
+/// `op.inputs` holds exactly one row: this position's already-normalised
+/// attention input. `keys`/`values` are the post-norm, post-rope K and V
+/// rows of every earlier position, exactly as this backend returned them
+/// from earlier steps — the interpreter owns the cache; the backend owns
+/// only the arithmetic of one step.
+pub struct AttentionStepCall<'a> {
+    /// The resolved attention operation, identical in meaning to the
+    /// batch call — one struct so the two paths cannot drift apart in
+    /// what they carry.
+    pub op: AttentionCall<'a>,
+    /// Absolute position of the row in `op.inputs`.
+    pub position: usize,
+    /// Cached K rows for positions `0..position`.
+    pub keys: &'a [Vec<f32>],
+    /// Cached V rows for positions `0..position`.
+    pub values: &'a [Vec<f32>],
+}
+
+/// One position's projected, conditioned (Q, K, V) — the intermediate
+/// every backend's projection helper produces.
+pub type ProjectedQkv = (Vec<f32>, Vec<f32>, Vec<f32>);
+
+/// What one decode step returns: this position's K and V rows (for the
+/// interpreter to append to its cache) and the attention output
+/// (post gate, post output-projection).
+pub struct AttentionStepOut {
+    pub key: Vec<f32>,
+    pub value: Vec<f32>,
+    pub output: Vec<f32>,
 }
 
 /// The numerical realisation of a plan's operations.
@@ -114,9 +193,21 @@ pub struct FfnCall<'a> {
 /// perform (an unimplemented QK-norm scope, a device error), but it may
 /// not decline work on semantic grounds — that judgment was made before
 /// the call.
-pub trait PlanBackend {
+///
+/// `Sync` because the interpreter issues per-position calls from
+/// worker threads. Positions are independent through every operation
+/// (attention reads other positions' K/V but never writes them), so
+/// this parallelism reorders nothing within any one position's
+/// arithmetic — results stay bit-identical to a serial execution.
+pub trait PlanBackend: Sync {
     /// A name for diagnostics and parity reports. Not dispatched on.
     fn name(&self) -> &str;
+
+    /// The representation this backend wants matrix operands loaded in.
+    /// A capability, asked once — not a per-call decision.
+    fn weight_format(&self) -> WeightFormat {
+        WeightFormat::F32
+    }
 
     /// Look up one embedding row, applying the scale operation when the
     /// plan carries one. `scale` `None` = no such operation, so the row
@@ -125,11 +216,22 @@ pub trait PlanBackend {
 
     fn norm(&self, call: NormCall<'_>) -> Vec<f32>;
 
-    fn project(&self, call: ProjectCall<'_>) -> Vec<f32>;
+    /// Fallible for the same reason as [`Self::attention`]: a device
+    /// backend may be unable to perform the work, and it must say so
+    /// rather than borrow another backend's arithmetic.
+    fn project(&self, call: ProjectCall<'_>) -> Result<Vec<f32>, VindexError>;
 
     /// Attention over the whole sequence, returning one output vector per
     /// position (post output-projection).
     fn attention(&self, call: AttentionCall<'_>) -> Result<Vec<Vec<f32>>, VindexError>;
+
+    /// One position's attention against cached K/V — the decode step.
+    ///
+    /// Must realise exactly the arithmetic its own [`Self::attention`]
+    /// applies to a single position: the decode-vs-batch parity tests
+    /// pin the two paths together per backend, and a backend may not
+    /// borrow another backend's step to fill the gap.
+    fn attention_step(&self, call: AttentionStepCall<'_>) -> Result<AttentionStepOut, VindexError>;
 
     /// Fallible for the same reason as [`Self::attention`]: a backend
     /// with no kernel for a judged variant must say so, not borrow
@@ -140,13 +242,13 @@ pub trait PlanBackend {
     /// softcap, in that order.
     fn output_head(
         &self,
-        projection: &[f32],
+        projection: WeightSlice<'_>,
         vocab: usize,
         hidden: usize,
         x: &[f32],
         multiplier: Option<f64>,
         softcapping: Option<f32>,
-    ) -> Vec<f32>;
+    ) -> Result<Vec<f32>, VindexError>;
 
     /// Add `delta` into `acc` elementwise — the residual write.
     ///

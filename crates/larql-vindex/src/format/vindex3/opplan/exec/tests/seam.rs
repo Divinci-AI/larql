@@ -14,15 +14,16 @@
 //! Without (2), a seam that silently ignored its backend would pass (1)
 //! perfectly.
 
-use std::cell::RefCell;
 use std::path::Path;
+use std::sync::Mutex;
 
 use super::golden::{executor_trace_from, max_abs, miniature_glimmer, G_TOKENS};
 use crate::error::VindexError;
 use crate::format::vindex3::encode::encode_system;
 use crate::format::vindex3::inspect::inspect_container;
 use crate::format::vindex3::opplan::exec::backend::{
-    AttentionCall, FfnCall, NormCall, PlanBackend, ProjectCall,
+    AttentionCall, AttentionStepCall, AttentionStepOut, FfnCall, NormCall, PlanBackend,
+    ProjectCall, WeightSlice,
 };
 use crate::format::vindex3::opplan::exec::operands::OperandStore;
 use crate::format::vindex3::opplan::exec::production::ProductionBackend;
@@ -38,19 +39,19 @@ const PERTURBATION: f32 = 1.001;
 /// the reference backend, so the recording is numerically transparent.
 struct RecordingBackend {
     inner: ReferenceBackend,
-    ops: RefCell<Vec<&'static str>>,
+    ops: Mutex<Vec<&'static str>>,
 }
 
 impl RecordingBackend {
     fn new() -> Self {
         Self {
             inner: ReferenceBackend::new(),
-            ops: RefCell::new(Vec::new()),
+            ops: Mutex::new(Vec::new()),
         }
     }
 
     fn record(&self, op: &'static str) {
-        self.ops.borrow_mut().push(op);
+        self.ops.lock().unwrap().push(op);
     }
 }
 
@@ -69,7 +70,7 @@ impl PlanBackend for RecordingBackend {
         self.inner.norm(call)
     }
 
-    fn project(&self, call: ProjectCall<'_>) -> Vec<f32> {
+    fn project(&self, call: ProjectCall<'_>) -> Result<Vec<f32>, VindexError> {
         self.record("project");
         self.inner.project(call)
     }
@@ -79,6 +80,11 @@ impl PlanBackend for RecordingBackend {
         self.inner.attention(call)
     }
 
+    fn attention_step(&self, call: AttentionStepCall<'_>) -> Result<AttentionStepOut, VindexError> {
+        self.record("attention_step");
+        self.inner.attention_step(call)
+    }
+
     fn ffn(&self, call: FfnCall<'_>) -> Result<Vec<f32>, VindexError> {
         self.record("ffn");
         self.inner.ffn(call)
@@ -86,13 +92,13 @@ impl PlanBackend for RecordingBackend {
 
     fn output_head(
         &self,
-        projection: &[f32],
+        projection: WeightSlice<'_>,
         vocab: usize,
         hidden: usize,
         x: &[f32],
         multiplier: Option<f64>,
         softcapping: Option<f32>,
-    ) -> Vec<f32> {
+    ) -> Result<Vec<f32>, VindexError> {
         self.record("output_head");
         self.inner
             .output_head(projection, vocab, hidden, x, multiplier, softcapping)
@@ -126,12 +132,16 @@ impl PlanBackend for PerturbedBackend {
             .collect()
     }
 
-    fn project(&self, call: ProjectCall<'_>) -> Vec<f32> {
+    fn project(&self, call: ProjectCall<'_>) -> Result<Vec<f32>, VindexError> {
         self.0.project(call)
     }
 
     fn attention(&self, call: AttentionCall<'_>) -> Result<Vec<Vec<f32>>, VindexError> {
         self.0.attention(call)
+    }
+
+    fn attention_step(&self, call: AttentionStepCall<'_>) -> Result<AttentionStepOut, VindexError> {
+        self.0.attention_step(call)
     }
 
     fn ffn(&self, call: FfnCall<'_>) -> Result<Vec<f32>, VindexError> {
@@ -140,13 +150,13 @@ impl PlanBackend for PerturbedBackend {
 
     fn output_head(
         &self,
-        projection: &[f32],
+        projection: WeightSlice<'_>,
         vocab: usize,
         hidden: usize,
         x: &[f32],
         multiplier: Option<f64>,
         softcapping: Option<f32>,
-    ) -> Vec<f32> {
+    ) -> Result<Vec<f32>, VindexError> {
         self.0
             .output_head(projection, vocab, hidden, x, multiplier, softcapping)
     }
@@ -208,7 +218,7 @@ fn the_operation_sequence_is_determined_by_the_plan() {
     let container = encoded_miniature();
     let backend = RecordingBackend::new();
     let _ = run_on(container.path(), &backend);
-    let ops = backend.ops.borrow();
+    let ops = backend.ops.lock().unwrap();
 
     let layers = super::golden::G_LAYERS;
     let positions = G_TOKENS.len();

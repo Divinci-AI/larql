@@ -19,19 +19,26 @@
 //! against a checkpoint-driven oracle.
 
 pub mod backend;
+pub mod decode;
+pub mod device;
 pub mod kernels;
 pub mod operands;
 pub mod production;
 pub mod reference;
+pub mod weights;
 
 #[cfg(test)]
 mod tests;
 
 use super::{AttentionOp, ComponentOpPlan, LayerPlan, NormOp};
 use crate::error::VindexError;
-use backend::{AttentionCall, FfnCall, GateCall, NormCall, PlanBackend, ProjectCall, QkNormCall};
+use backend::{
+    AttentionCall, FfnCall, GateCall, NormCall, PlanBackend, ProjectCall, QkNormCall, WeightFormat,
+};
 use operands::OperandStore;
+use rayon::prelude::*;
 use reference::ReferenceBackend;
+use weights::{load_weight, LoadedWeight};
 
 /// Per-layer hidden-state taps, mirroring the production hook points.
 #[derive(Debug)]
@@ -223,16 +230,16 @@ pub fn execute_plan_streaming<B: PlanBackend + ?Sized>(
     };
     let logits = match &plan.output {
         Some(output) => {
-            let weight = store.load(&output.projection)?;
+            let weight = load_weight(store, &output.projection, backend.weight_format())?;
             let vocab = output.projection.shape[0];
             Some(backend.output_head(
-                &weight,
+                weight.slice(),
                 vocab,
                 hidden,
                 &final_hidden,
                 output.multiplier,
                 output.softcapping,
-            ))
+            )?)
         }
         None => None,
     };
@@ -254,15 +261,15 @@ fn execute_layer<B: PlanBackend + ?Sized>(
     // The attention input is normalised here, once, and handed to the
     // backend — the judged gate reads the same vector, so producing it
     // in one place is what keeps the two from drifting apart.
-    let mut inputs = Vec::with_capacity(h.len());
-    for row in h.iter() {
-        inputs.push(apply_norm_op(
-            &layer.pre_attention_norm,
-            store,
-            row,
-            backend,
-        )?);
-    }
+    //
+    // Position loops below run in parallel. Each position's arithmetic
+    // is untouched and rows are disjoint, so the result is bit-identical
+    // to the serial order — parallelism here is an execution strategy,
+    // never a reassociation.
+    let inputs: Vec<Vec<f32>> = h
+        .par_iter()
+        .map(|row| apply_norm_op(&layer.pre_attention_norm, store, row, backend))
+        .collect::<Result<_, _>>()?;
     let attn_out = attention(
         &layer.attention,
         &inputs,
@@ -271,35 +278,39 @@ fn execute_layer<B: PlanBackend + ?Sized>(
         hidden,
         backend,
     )?;
-    for (row, out) in h.iter_mut().zip(&attn_out) {
-        let out = match &layer.post_attention_norm {
-            Some(op) => apply_norm_op(op, store, out, backend)?,
-            None => out.clone(),
-        };
-        backend.residual_add(row, &out);
-    }
+    h.par_iter_mut()
+        .zip(attn_out.par_iter())
+        .try_for_each(|(row, out)| {
+            let out = match &layer.post_attention_norm {
+                Some(op) => apply_norm_op(op, store, out, backend)?,
+                None => out.clone(),
+            };
+            backend.residual_add(row, &out);
+            Ok::<(), VindexError>(())
+        })?;
     let post_attention = h.to_vec();
 
     // FFN operands load once per layer, not once per position. They are
     // the bulk of a decoder layer's weight, and `OperandStore::load`
-    // allocates a fresh f32 copy per call — re-reading them for every
+    // allocates a fresh copy per call — re-reading them for every
     // token would dominate the run on a real model without changing a
     // single number.
-    let up = store.load(&layer.ffn.up)?;
-    let down = store.load(&layer.ffn.down)?;
+    let format = backend.weight_format();
+    let up = load_weight(store, &layer.ffn.up, format)?;
+    let down = load_weight(store, &layer.ffn.down, format)?;
     let gate = match &layer.ffn.gate {
-        Some(gate_ref) => Some(store.load(gate_ref)?),
+        Some(gate_ref) => Some(load_weight(store, gate_ref, format)?),
         None => None,
     };
-    for row in h.iter_mut() {
+    h.par_iter_mut().try_for_each(|row| {
         let normed = apply_norm_op(&layer.pre_ffn_norm, store, row, backend)?;
         let ffn_out = backend.ffn(FfnCall {
             x: &normed,
             hidden,
             intermediate: layer.ffn.intermediate_size,
-            gate: gate.as_deref(),
-            up: &up,
-            down: &down,
+            gate: gate.as_ref().map(LoadedWeight::slice),
+            up: up.slice(),
+            down: down.slice(),
             activation: layer.ffn.activation,
         })?;
         let ffn_out = match &layer.post_ffn_norm {
@@ -307,15 +318,104 @@ fn execute_layer<B: PlanBackend + ?Sized>(
             None => ffn_out,
         };
         backend.residual_add(row, &ffn_out);
-    }
+        Ok::<(), VindexError>(())
+    })?;
     Ok(LayerTrace {
         post_attention,
         post_layer: h.to_vec(),
     })
 }
 
+/// One layer's attention operands, loaded once in the backend's
+/// declared format. Owned by whichever traversal is running — the batch
+/// path loads them per forward, the decode session keeps them for its
+/// lifetime — so both paths resolve operands through exactly one place.
+pub(super) struct AttentionOperands {
+    w_q: LoadedWeight,
+    w_k: LoadedWeight,
+    w_v: LoadedWeight,
+    w_o: LoadedWeight,
+    qk_weights: Option<(Vec<f32>, Vec<f32>)>,
+    gate: Option<LoadedWeight>,
+}
+
+impl AttentionOperands {
+    /// Load through the closure-verified path. QK-norm weights stay f32
+    /// (elementwise glue, not matrix traffic).
+    pub(super) fn load(
+        op: &AttentionOp,
+        store: &OperandStore,
+        format: WeightFormat,
+    ) -> Result<Self, VindexError> {
+        Ok(Self {
+            w_q: load_weight(store, &op.q, format)?,
+            w_k: load_weight(store, &op.k, format)?,
+            w_v: load_weight(store, &op.v, format)?,
+            w_o: load_weight(store, &op.o, format)?,
+            qk_weights: match &op.qk_norm {
+                Some(qk) => Some((store.load(&qk.q)?, store.load(&qk.k)?)),
+                None => None,
+            },
+            gate: match &op.output_gate {
+                Some(gate) => Some(load_weight(store, &gate.projection, format)?),
+                None => None,
+            },
+        })
+    }
+
+    /// A fully resolved call over `inputs`. Every judged fact travels as
+    /// an argument; none is re-derived — and both the batch path and the
+    /// decode step build their call here, so they cannot drift apart in
+    /// what they carry.
+    pub(super) fn call<'a>(
+        &'a self,
+        op: &AttentionOp,
+        inputs: &'a [Vec<f32>],
+        qk_norm_eps: f64,
+        hidden: usize,
+    ) -> AttentionCall<'a> {
+        let qk_norm = match (&op.qk_norm, &self.qk_weights) {
+            (Some(qk), Some((q_weight, k_weight))) => Some(QkNormCall {
+                scope: qk.scope,
+                weight_offset: qk.weight_offset,
+                q_weight,
+                k_weight,
+            }),
+            _ => None,
+        };
+        let gate = match (&op.output_gate, &self.gate) {
+            (Some(gate), Some(weight)) => Some(GateCall {
+                spec: gate.spec,
+                weight: weight.slice(),
+            }),
+            _ => None,
+        };
+        AttentionCall {
+            inputs,
+            hidden,
+            num_q_heads: op.num_q_heads,
+            num_kv_heads: op.num_kv_heads,
+            head_dim: op.head_dim,
+            w_q: self.w_q.slice(),
+            w_k: self.w_k.slice(),
+            w_v: self.w_v.slice(),
+            w_o: self.w_o.slice(),
+            qk_norm,
+            parameter_free_qk_norm: op.parameter_free_qk_norm,
+            qk_norm_eps,
+            query_scale: op.query_scale,
+            score_scale: op.score_scale,
+            logit_softcapping: op.logit_softcapping,
+            position: op.position,
+            span: op.span,
+            window: op.window,
+            gate,
+        }
+    }
+}
+
 /// Load the attention operands and hand the backend a fully resolved
-/// call. Every judged fact travels as an argument; none is re-derived.
+/// call.
 fn attention<B: PlanBackend + ?Sized>(
     op: &AttentionOp,
     inputs: &[Vec<f32>],
@@ -324,55 +424,8 @@ fn attention<B: PlanBackend + ?Sized>(
     hidden: usize,
     backend: &B,
 ) -> Result<Vec<Vec<f32>>, VindexError> {
-    let w_q = store.load(&op.q)?;
-    let w_k = store.load(&op.k)?;
-    let w_v = store.load(&op.v)?;
-    let w_o = store.load(&op.o)?;
-    let qk_weights = match &op.qk_norm {
-        Some(qk) => Some((store.load(&qk.q)?, store.load(&qk.k)?)),
-        None => None,
-    };
-    let w_gate = match &op.output_gate {
-        Some(gate) => Some(store.load(&gate.projection)?),
-        None => None,
-    };
-    let qk_norm = match (&op.qk_norm, &qk_weights) {
-        (Some(qk), Some((q_weight, k_weight))) => Some(QkNormCall {
-            scope: qk.scope,
-            weight_offset: qk.weight_offset,
-            q_weight,
-            k_weight,
-        }),
-        _ => None,
-    };
-    let gate = match (&op.output_gate, &w_gate) {
-        (Some(gate), Some(weight)) => Some(GateCall {
-            spec: gate.spec,
-            weight,
-        }),
-        _ => None,
-    };
-    backend.attention(AttentionCall {
-        inputs,
-        hidden,
-        num_q_heads: op.num_q_heads,
-        num_kv_heads: op.num_kv_heads,
-        head_dim: op.head_dim,
-        w_q: &w_q,
-        w_k: &w_k,
-        w_v: &w_v,
-        w_o: &w_o,
-        qk_norm,
-        parameter_free_qk_norm: op.parameter_free_qk_norm,
-        qk_norm_eps,
-        query_scale: op.query_scale,
-        score_scale: op.score_scale,
-        logit_softcapping: op.logit_softcapping,
-        position: op.position,
-        span: op.span,
-        window: op.window,
-        gate,
-    })
+    let operands = AttentionOperands::load(op, store, backend.weight_format())?;
+    backend.attention(operands.call(op, inputs, qk_norm_eps, hidden))
 }
 
 /// Apply one norm op to one vector.
@@ -399,11 +452,11 @@ fn apply_norm_op<B: PlanBackend + ?Sized>(
 #[allow(dead_code)]
 fn project<B: PlanBackend + ?Sized>(
     backend: &B,
-    weight: &[f32],
+    weight: backend::WeightSlice<'_>,
     out_dim: usize,
     in_dim: usize,
     x: &[f32],
-) -> Vec<f32> {
+) -> Result<Vec<f32>, VindexError> {
     backend.project(ProjectCall {
         weight,
         out_dim,

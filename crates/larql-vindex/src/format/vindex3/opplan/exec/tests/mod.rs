@@ -10,6 +10,8 @@
 //! placement, RoPE convention, residual order — not shared arithmetic.
 
 mod controls;
+mod decode;
+mod device;
 mod golden;
 mod kernels;
 mod parity;

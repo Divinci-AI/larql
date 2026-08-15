@@ -1,6 +1,7 @@
 //! CLI-level gates for the vindex3 verbs.
 
 mod exec_resume;
+mod generate;
 
 use super::*;
 use std::io::Write;

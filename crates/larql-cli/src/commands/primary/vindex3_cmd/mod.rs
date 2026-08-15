@@ -52,6 +52,10 @@ pub enum ExecBackend {
     Reference,
     /// The `larql-compute` kernels.
     Production,
+    /// GPU matmuls via `larql-compute-metal` (rung 1: matrix work on
+    /// the device, elementwise glue on the CPU).
+    #[cfg(feature = "gpu")]
+    Metal,
 }
 
 #[derive(Args)]
@@ -84,6 +88,13 @@ pub struct ExecArgs {
     /// Numerical realisation to run the plan on.
     #[arg(long, value_enum, default_value_t = ExecBackend::Reference)]
     pub backend: ExecBackend,
+
+    /// Greedy-decode this many new tokens after the prompt, printing
+    /// per-step timing and a decode report instead of a single-forward
+    /// summary. Every step re-runs the full forward — the interpreter
+    /// has no KV cache yet, and the report says so.
+    #[arg(long, conflicts_with_all = ["dump_layers", "resume"])]
+    pub generate: Option<usize>,
 }
 
 #[derive(Args)]
@@ -174,6 +185,7 @@ pub fn run(cmd: Vindex3Command) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 mod exec;
+mod generate;
 mod ops;
 mod optional_op;
 use exec::run_exec;

@@ -31,10 +31,12 @@ use larql_compute::residual::{
 
 use super::super::super::graph::policy::AttentionSpan;
 use super::backend::{
-    AttentionCall, FfnCall, GateCall, NormCall, PlanBackend, ProjectCall, QkNormCall,
+    AttentionCall, AttentionStepCall, AttentionStepOut, FfnCall, GateCall, NormCall, PlanBackend,
+    ProjectCall, ProjectedQkv, QkNormCall,
 };
 use super::kernels::rope_rotate;
 use crate::error::VindexError;
+use rayon::prelude::*;
 
 /// Name reported by [`PlanBackend::name`].
 const NAME: &str = "production-larql-compute";
@@ -54,7 +56,7 @@ impl ProductionBackend {
 /// Naming what is missing, rather than silently reusing the reference's
 /// scalar loop: two backends that share arithmetic agree by construction,
 /// and that agreement is exactly what this rung must not manufacture.
-fn unsupported_activation(shape: &str, activation: Activation) -> VindexError {
+pub(super) fn unsupported_activation(shape: &str, activation: Activation) -> VindexError {
     VindexError::Parse(format!(
         "no production {shape}-FFN kernel for activation {activation:?} — refusing rather \
          than borrowing the reference backend's arithmetic"
@@ -62,12 +64,12 @@ fn unsupported_activation(shape: &str, activation: Activation) -> VindexError {
 }
 
 /// Wrap one vector as a `[1, n]` matrix for the row-wise norm kernels.
-fn as_row(x: &[f32]) -> Array2<f32> {
+pub(super) fn as_row(x: &[f32]) -> Array2<f32> {
     Array2::from_shape_vec((1, x.len()), x.to_vec()).expect("row shape matches length")
 }
 
 /// Take the single row back out.
-fn from_row(m: Array2<f32>) -> Vec<f32> {
+pub(super) fn from_row(m: Array2<f32>) -> Vec<f32> {
     m.into_raw_vec_and_offset().0
 }
 
@@ -75,7 +77,7 @@ fn from_row(m: Array2<f32>) -> Vec<f32> {
 ///
 /// Head geometry is passed to the kernel rather than sliced here, so the
 /// production path exercises the production reduction over `head_dim`.
-fn qk_norm_in_place(
+pub(super) fn qk_norm_in_place(
     values: &mut [f32],
     weight: Option<(&[f32], f32)>,
     parameter_free: bool,
@@ -91,6 +93,159 @@ fn qk_norm_in_place(
     if parameter_free {
         let normed = rms_norm_heads_no_weight_eps(&as_row(values), num_heads, head_dim, eps);
         values.copy_from_slice(&from_row(normed));
+    }
+}
+
+/// Q/K normalisation, query scale and position encoding for one
+/// position's already-projected Q/K, in the judged order — the CPU glue
+/// applied identically by the production and device backends after
+/// their own projection arithmetic.
+pub(super) fn condition_qk_in_place(
+    call: &AttentionCall<'_>,
+    position: usize,
+    q: &mut [f32],
+    k: &mut [f32],
+) {
+    let head_dim = call.head_dim;
+    let qk_weight = call.qk_norm.as_ref().map(
+        |QkNormCall {
+             weight_offset,
+             q_weight,
+             k_weight,
+             scope,
+         }| (*scope, *weight_offset, *q_weight, *k_weight),
+    );
+    let (scope, offset, q_w, k_w) = match qk_weight {
+        Some((scope, offset, q_w, k_w)) => (scope, offset, Some(q_w), Some(k_w)),
+        None => (larql_models::config::QkNormScope::PerHead, 0.0, None, None),
+    };
+    qk_norm_in_place(
+        q,
+        q_w.map(|w| (w, offset)),
+        call.parameter_free_qk_norm.q,
+        call.num_q_heads,
+        head_dim,
+        scope,
+        call.qk_norm_eps,
+    );
+    qk_norm_in_place(
+        k,
+        k_w.map(|w| (w, offset)),
+        call.parameter_free_qk_norm.k,
+        call.num_kv_heads,
+        head_dim,
+        scope,
+        call.qk_norm_eps,
+    );
+
+    if let Some(query_scale) = call.query_scale {
+        for value in q.iter_mut() {
+            *value *= query_scale as f32;
+        }
+    }
+    if let PositionPolicy::Rope { theta } = call.position {
+        for head in q.chunks_exact_mut(head_dim) {
+            rope_rotate(head, position, theta);
+        }
+        for head in k.chunks_exact_mut(head_dim) {
+            rope_rotate(head, position, theta);
+        }
+    }
+}
+
+/// One query position's scores, softmax and weighted-V aggregation —
+/// the production softmax kernel over whatever K/V storage the caller
+/// abstracts through `key_of`/`value_of`. Shared by the production and
+/// device backends (the device deliberately runs production glue so a
+/// divergence is attributable to device matmul arithmetic alone); the
+/// gate and output projections stay with each backend's own matmuls.
+pub(super) fn aggregate_heads<'k>(
+    call: &AttentionCall<'_>,
+    position: usize,
+    query: &[f32],
+    key_of: impl Fn(usize) -> &'k [f32],
+    value_of: impl Fn(usize) -> &'k [f32],
+) -> Vec<f32> {
+    let head_dim = call.head_dim;
+    let q_rows = call.num_q_heads * head_dim;
+    let group = call.num_q_heads / call.num_kv_heads;
+    let start = match (call.span, call.window) {
+        (AttentionSpan::Sliding, Some(window)) => (position + 1).saturating_sub(window),
+        _ => 0,
+    };
+    let mut concat = vec![0.0f32; q_rows];
+    for q_head in 0..call.num_q_heads {
+        let kv_head = q_head / group;
+        let q_slice = &query[q_head * head_dim..(q_head + 1) * head_dim];
+        let mut scores: Vec<f32> = (start..=position)
+            .map(|key_position| {
+                let k_slice = &key_of(key_position)[kv_head * head_dim..(kv_head + 1) * head_dim];
+                let dot: f32 = q_slice.iter().zip(k_slice).map(|(a, b)| a * b).sum();
+                let scaled = dot * call.score_scale as f32;
+                match call.logit_softcapping {
+                    Some(cap) => cap * (scaled / cap).tanh(),
+                    None => scaled,
+                }
+            })
+            .collect();
+        softmax_in_place_f32(&mut scores);
+        let head_out = &mut concat[q_head * head_dim..(q_head + 1) * head_dim];
+        for (offset, key_position) in (start..=position).enumerate() {
+            let v_slice = &value_of(key_position)[kv_head * head_dim..(kv_head + 1) * head_dim];
+            let weight = scores[offset];
+            for (acc, v) in head_out.iter_mut().zip(v_slice) {
+                *acc += weight * v;
+            }
+        }
+    }
+    concat
+}
+
+impl ProductionBackend {
+    /// One position's Q/K/V projections through the production matvec,
+    /// conditioned by the shared glue.
+    fn project_position(
+        call: &AttentionCall<'_>,
+        position: usize,
+        pre: &[f32],
+    ) -> Result<ProjectedQkv, VindexError> {
+        let head_dim = call.head_dim;
+        let q_rows = call.num_q_heads * head_dim;
+        let kv_rows = call.num_kv_heads * head_dim;
+        let mut q = matmul_vec(pre, call.w_q.as_f32()?, q_rows, call.hidden);
+        let mut k = matmul_vec(pre, call.w_k.as_f32()?, kv_rows, call.hidden);
+        let v = matmul_vec(pre, call.w_v.as_f32()?, kv_rows, call.hidden);
+        condition_qk_in_place(call, position, &mut q, &mut k);
+        Ok((q, k, v))
+    }
+
+    /// Aggregation plus this backend's own gate and output matmuls.
+    fn attend_position<'k>(
+        call: &AttentionCall<'_>,
+        position: usize,
+        query: &[f32],
+        key_of: impl Fn(usize) -> &'k [f32],
+        value_of: impl Fn(usize) -> &'k [f32],
+        gate_input: &[f32],
+    ) -> Result<Vec<f32>, VindexError> {
+        let q_rows = call.num_q_heads * call.head_dim;
+        let mut concat = aggregate_heads(call, position, query, key_of, value_of);
+
+        if let Some(GateCall { spec, weight }) = &call.gate {
+            // Exhaustive on the judged semantics, same as the
+            // reference: a new variant must be implemented before it
+            // can execute on this backend either.
+            let GateSource::AttentionInput = spec.source;
+            let GateActivation::Sigmoid = spec.activation;
+            let GateCombine::ElementwiseMultiply = spec.combine;
+            let GatePlacement::AfterAggregationBeforeOutputProjection = spec.placement;
+            let gate_values = matmul_vec(gate_input, weight.as_f32()?, q_rows, call.hidden);
+            for (c, g) in concat.iter_mut().zip(&gate_values) {
+                *c *= 1.0 / (1.0 + (-g).exp());
+            }
+        }
+
+        Ok(matmul_vec(&concat, call.w_o.as_f32()?, call.hidden, q_rows))
     }
 }
 
@@ -123,132 +278,93 @@ impl PlanBackend for ProductionBackend {
         from_row(normed)
     }
 
-    fn project(&self, call: ProjectCall<'_>) -> Vec<f32> {
-        matmul_vec(call.x, call.weight, call.out_dim, call.in_dim)
+    fn project(&self, call: ProjectCall<'_>) -> Result<Vec<f32>, VindexError> {
+        Ok(matmul_vec(
+            call.x,
+            call.weight.as_f32()?,
+            call.out_dim,
+            call.in_dim,
+        ))
     }
 
     fn attention(&self, call: AttentionCall<'_>) -> Result<Vec<Vec<f32>>, VindexError> {
-        let head_dim = call.head_dim;
-        let q_rows = call.num_q_heads * head_dim;
-        let kv_rows = call.num_kv_heads * head_dim;
-        let group = call.num_q_heads / call.num_kv_heads;
-        let hidden = call.hidden;
-        let qk_weight = call.qk_norm.as_ref().map(
-            |QkNormCall {
-                 weight_offset,
-                 q_weight,
-                 k_weight,
-                 scope,
-             }| (*scope, *weight_offset, *q_weight, *k_weight),
-        );
-
-        let mut queries = Vec::with_capacity(call.inputs.len());
-        let mut keys = Vec::with_capacity(call.inputs.len());
-        let mut values = Vec::with_capacity(call.inputs.len());
-        for (position, pre) in call.inputs.iter().enumerate() {
-            let mut q = matmul_vec(pre, call.w_q, q_rows, hidden);
-            let mut k = matmul_vec(pre, call.w_k, kv_rows, hidden);
-            let v = matmul_vec(pre, call.w_v, kv_rows, hidden);
-
-            let (scope, offset, q_w, k_w) = match qk_weight {
-                Some((scope, offset, q_w, k_w)) => (scope, offset, Some(q_w), Some(k_w)),
-                None => (larql_models::config::QkNormScope::PerHead, 0.0, None, None),
-            };
-            qk_norm_in_place(
-                &mut q,
-                q_w.map(|w| (w, offset)),
-                call.parameter_free_qk_norm.q,
-                call.num_q_heads,
-                head_dim,
-                scope,
-                call.qk_norm_eps,
-            );
-            qk_norm_in_place(
-                &mut k,
-                k_w.map(|w| (w, offset)),
-                call.parameter_free_qk_norm.k,
-                call.num_kv_heads,
-                head_dim,
-                scope,
-                call.qk_norm_eps,
-            );
-
-            if let Some(query_scale) = call.query_scale {
-                for value in &mut q {
-                    *value *= query_scale as f32;
-                }
-            }
-            if let PositionPolicy::Rope { theta } = call.position {
-                for head in q.chunks_exact_mut(head_dim) {
-                    rope_rotate(head, position, theta);
-                }
-                for head in k.chunks_exact_mut(head_dim) {
-                    rope_rotate(head, position, theta);
-                }
-            }
+        // Positions are independent, so projection runs in parallel with
+        // each position's arithmetic untouched — bit-identical to the
+        // serial order.
+        let projected: Vec<(Vec<f32>, Vec<f32>, Vec<f32>)> = call
+            .inputs
+            .par_iter()
+            .enumerate()
+            .map(|(position, pre)| Self::project_position(&call, position, pre))
+            .collect::<Result<_, VindexError>>()?;
+        let mut queries = Vec::with_capacity(projected.len());
+        let mut keys = Vec::with_capacity(projected.len());
+        let mut values = Vec::with_capacity(projected.len());
+        for (q, k, v) in projected {
             queries.push(q);
             keys.push(k);
             values.push(v);
         }
 
-        let mut out = Vec::with_capacity(call.inputs.len());
-        for (position, query) in queries.iter().enumerate() {
-            let start = match (call.span, call.window) {
-                (AttentionSpan::Sliding, Some(window)) => (position + 1).saturating_sub(window),
-                _ => 0,
-            };
-            let mut concat = vec![0.0f32; q_rows];
-            for q_head in 0..call.num_q_heads {
-                let kv_head = q_head / group;
-                let q_slice = &query[q_head * head_dim..(q_head + 1) * head_dim];
-                let mut scores: Vec<f32> = (start..=position)
-                    .map(|key_position| {
-                        let k_slice =
-                            &keys[key_position][kv_head * head_dim..(kv_head + 1) * head_dim];
-                        let dot: f32 = q_slice.iter().zip(k_slice).map(|(a, b)| a * b).sum();
-                        let scaled = dot * call.score_scale as f32;
-                        match call.logit_softcapping {
-                            Some(cap) => cap * (scaled / cap).tanh(),
-                            None => scaled,
-                        }
-                    })
-                    .collect();
-                softmax_in_place_f32(&mut scores);
-                let head_out = &mut concat[q_head * head_dim..(q_head + 1) * head_dim];
-                for (offset, key_position) in (start..=position).enumerate() {
-                    let v_slice =
-                        &values[key_position][kv_head * head_dim..(kv_head + 1) * head_dim];
-                    let weight = scores[offset];
-                    for (acc, v) in head_out.iter_mut().zip(v_slice) {
-                        *acc += weight * v;
-                    }
-                }
-            }
+        // Each query position reads every position's K/V but writes only
+        // its own output row — parallel over queries, arithmetic intact.
+        queries
+            .par_iter()
+            .enumerate()
+            .map(|(position, query)| {
+                Self::attend_position(
+                    &call,
+                    position,
+                    query,
+                    |p| keys[p].as_slice(),
+                    |p| values[p].as_slice(),
+                    &call.inputs[position],
+                )
+            })
+            .collect()
+    }
 
-            if let Some(GateCall { spec, weight }) = &call.gate {
-                // Exhaustive on the judged semantics, same as the
-                // reference: a new variant must be implemented before it
-                // can execute on this backend either.
-                let GateSource::AttentionInput = spec.source;
-                let GateActivation::Sigmoid = spec.activation;
-                let GateCombine::ElementwiseMultiply = spec.combine;
-                let GatePlacement::AfterAggregationBeforeOutputProjection = spec.placement;
-                let gate_values = matmul_vec(&call.inputs[position], weight, q_rows, hidden);
-                for (c, g) in concat.iter_mut().zip(&gate_values) {
-                    *c *= 1.0 / (1.0 + (-g).exp());
+    fn attention_step(&self, step: AttentionStepCall<'_>) -> Result<AttentionStepOut, VindexError> {
+        let call = &step.op;
+        let pre = &call.inputs[0];
+        let (q, k, v) = Self::project_position(call, step.position, pre)?;
+        let output = Self::attend_position(
+            call,
+            step.position,
+            &q,
+            |p| {
+                if p == step.position {
+                    k.as_slice()
+                } else {
+                    step.keys[p].as_slice()
                 }
-            }
-
-            out.push(matmul_vec(&concat, call.w_o, hidden, q_rows));
-        }
-        Ok(out)
+            },
+            |p| {
+                if p == step.position {
+                    v.as_slice()
+                } else {
+                    step.values[p].as_slice()
+                }
+            },
+            pre,
+        )?;
+        Ok(AttentionStepOut {
+            key: k,
+            value: v,
+            output,
+        })
     }
 
     fn ffn(&self, call: FfnCall<'_>) -> Result<Vec<f32>, VindexError> {
-        let up = matmul_vec(call.x, call.up, call.intermediate, call.hidden);
+        let up = matmul_vec(call.x, call.up.as_f32()?, call.intermediate, call.hidden);
         let inner: Vec<f32> = match call.gate {
             Some(gate_weight) => {
-                let gate = matmul_vec(call.x, gate_weight, call.intermediate, call.hidden);
+                let gate = matmul_vec(
+                    call.x,
+                    gate_weight.as_f32()?,
+                    call.intermediate,
+                    call.hidden,
+                );
                 match call.activation {
                     Activation::Silu => geglu_silu_alloc(&gate, &up),
                     other => return Err(unsupported_activation("gated", other)),
@@ -261,7 +377,7 @@ impl PlanBackend for ProductionBackend {
         };
         Ok(matmul_vec(
             &inner,
-            call.down,
+            call.down.as_f32()?,
             call.hidden,
             call.intermediate,
         ))
@@ -269,14 +385,14 @@ impl PlanBackend for ProductionBackend {
 
     fn output_head(
         &self,
-        projection: &[f32],
+        projection: super::backend::WeightSlice<'_>,
         vocab: usize,
         hidden: usize,
         x: &[f32],
         multiplier: Option<f64>,
         softcapping: Option<f32>,
-    ) -> Vec<f32> {
-        let mut logits = matmul_vec(x, projection, vocab, hidden);
+    ) -> Result<Vec<f32>, VindexError> {
+        let mut logits = matmul_vec(x, projection.as_f32()?, vocab, hidden);
         for logit in &mut logits {
             if let Some(multiplier) = multiplier {
                 *logit *= multiplier as f32;
@@ -285,7 +401,7 @@ impl PlanBackend for ProductionBackend {
                 *logit = cap * (*logit / cap).tanh();
             }
         }
-        logits
+        Ok(logits)
     }
 
     fn residual_add(&self, acc: &mut [f32], delta: &[f32]) {
