@@ -479,14 +479,11 @@ impl MetalBackend {
             // KV-B1: phase 3 walks the span serially on `head_dim` threads
             // in the baseline kernel. When slices are requested, dispatch
             // the sequence-parallel variant at `slices * head_dim` threads
-            // instead. `seqpar_slices_for` returns 0 when the request
-            // cannot be honoured for this head_dim, which keeps the
-            // baseline.
-            let fused_slices = ops::kv_cache::seqpar_slices_for(
-                self.decode_flags.kv_seqpar_slices,
-                layer_head_dim,
-                attn_span,
-            );
+            // instead. `slices_for` resolves the geometry-scoped default
+            // and returns 0 when the request cannot be honoured for this
+            // head_dim, which keeps the baseline.
+            let fused_slices =
+                ops::kv_seqpar::slices_for(self.decode_flags.kv_seqpar, layer_head_dim, attn_span);
             enc.set_compute_pipeline_state(if fused_slices > 1 {
                 &self.attention.kv_append_attend_fused_seqpar_pipeline
             } else {
@@ -573,14 +570,14 @@ impl MetalBackend {
                 bufs.k_out,
                 bufs.v_out,
             );
-            // KV-B1 (`LARQL_KV_SEQPAR=N`, opt-in): phase 3 — the
-            // weighted-V accumulation — is ~85% of long-span attention and
-            // walks the span serially with `head_dim` threads. The seqpar
-            // arm splits it across N slices. `seqpar_slices_for` returns 0
-            // when this layer's head_dim cannot honour the request, and the
-            // shipped kernel runs instead.
-            let slices = ops::kv_cache::seqpar_slices_for(
-                self.decode_flags.kv_seqpar_slices,
+            // KV-B1 (`LARQL_KV_SEQPAR`): phase 3 — the weighted-V
+            // accumulation — is ~85% of long-span attention and walks the
+            // span serially with `head_dim` threads. The seqpar arm splits
+            // it across N slices. `slices_for` resolves the geometry-scoped
+            // default and returns 0 when this layer's head_dim cannot
+            // honour the request, and the shipped kernel runs instead.
+            let slices = ops::kv_seqpar::slices_for(
+                self.decode_flags.kv_seqpar,
                 kv_cache.layers[attend_cache_idx].head_dim,
                 attn_span,
             );

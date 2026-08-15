@@ -39,6 +39,8 @@ use larql_compute::options::{
     ENV_GATE_UP_COOP, ENV_MXFP4_ARM, ENV_Q4K_MATVEC_8SG, ENV_Q6K_8SG, ENV_QKV_FUSED,
 };
 
+use crate::ops::kv_seqpar::SeqparRequest;
+
 /// Decode-path flag snapshot captured at backend startup.
 #[derive(Copy, Clone, Debug)]
 pub struct DecodeFlags {
@@ -81,10 +83,11 @@ pub struct DecodeFlags {
     pub fused_qk_norm_rope: bool,
     /// `LARQL_FUSED_KV_APPEND_ATTEND` — default true; opt out with `=0`.
     pub fused_kv_append_attend: bool,
-    /// `LARQL_KV_SEQPAR` — sequence slices for KV-B1's phase-3 kernel.
-    /// `auto` uses the measured per-span policy; `N` forces N slices;
-    /// 0 (default) keeps the shipped serial accumulation.
-    pub kv_seqpar_slices: usize,
+    /// `LARQL_KV_SEQPAR` — what the operator asked of KV-B1's phase-3
+    /// kernel. Resolved against the layer's `head_dim` and span at
+    /// dispatch time by `ops::kv_seqpar::slices_for`, because the default
+    /// is geometry-scoped and `head_dim` is per-layer.
+    pub kv_seqpar: SeqparRequest,
     /// `LARQL_FUSED_POST_ATTN_NORM` — default true; opt out with `=0`.
     pub fused_post_attn_norm: bool,
     /// `LARQL_FUSED_POST_FFN_NORM` — default true; opt out with `=0`.
@@ -95,16 +98,56 @@ pub struct DecodeFlags {
 /// instead of a fixed slice count.
 const KV_SEQPAR_AUTO_VALUE: &str = "auto";
 
-/// Parse `LARQL_KV_SEQPAR`. `auto` maps to the sentinel the span policy
-/// reads; anything else falls back to the numeric parse (0 = off), so an
-/// unparseable value keeps the shipped kernel rather than guessing.
-fn kv_seqpar_from_env() -> usize {
+/// Value that disables the sequence-parallel kernels entirely.
+const KV_SEQPAR_OFF_VALUE: &str = "off";
+
+/// Parse `LARQL_KV_SEQPAR`. `auto` selects the measured span policy, `off`
+/// or `0` the serial kernel, an integer forces that slice count, and an
+/// unrecognised value keeps the shipped kernel rather than guessing.
+///
+/// Absent is NOT the same as `off`: it defers to the geometry-scoped
+/// default in `ops::kv_seqpar`, which is `auto` at head_dim 64 and off
+/// everywhere else. An unparseable value maps to `off` rather than to
+/// absent, so a typo cannot silently inherit a default.
+///
+/// **Nothing defaults on yet** — `SEQPAR_DEFAULT_ON_HEAD_DIMS` is empty,
+/// so `Unset` currently resolves like `Off` on every geometry. head_dim 64
+/// is the candidate: an interleaved off/auto/off/auto e2e A/B on a
+/// verified-idle GPU (pre-run occupancy mean 2%, max 3%) read
+/// 11.97 / 10.84 / 12.01 / 10.86 ms/token — arms non-overlapping,
+/// within-arm spread 0.3% and 0.2%, ordering surviving the interleave, so
+/// a contention step would have to land on both `auto` slots and neither
+/// `off` slot to fake it. That is 11.99 -> 10.85 ms/token, +10.8%
+/// throughput (83.3 -> 92.3 tok/s), at short context only.
+///
+/// Two things gate enabling it, and both bound it to head_dim 64:
+///
+/// 1. The long-context and 2K blocks were taken while another session held
+///    the GPU and are void. Bracketing controls do NOT rescue them: a flat
+///    baseline arm only shows the BASELINE was uncontended, and `auto`
+///    runs a much wider threadgroup, so a competing workload can hit the
+///    two arms asymmetrically. Those regimes need exclusive GPU ownership.
+/// 2. The span policy has only ever been measured at head_dim 64, where
+///    threadgroup width and slice count are collinear. See the confound
+///    note on the width constants in `crate::ops::kv_seqpar`. Defaulting
+///    on anywhere else would ship an unmeasured policy.
+fn kv_seqpar_from_env() -> SeqparRequest {
     let env = larql_compute::options::ENV_KV_SEQPAR;
-    match std::env::var(env) {
-        Ok(v) if v.trim().eq_ignore_ascii_case(KV_SEQPAR_AUTO_VALUE) => {
-            crate::ops::kv_cache::SEQPAR_AUTO
-        }
-        _ => larql_compute::options::env_usize(env).unwrap_or(0),
+    let Ok(raw) = std::env::var(env) else {
+        return SeqparRequest::Unset;
+    };
+    let raw = raw.trim();
+    if raw.eq_ignore_ascii_case(KV_SEQPAR_OFF_VALUE) {
+        return SeqparRequest::Off;
+    }
+    if raw.eq_ignore_ascii_case(KV_SEQPAR_AUTO_VALUE) {
+        return SeqparRequest::Auto;
+    }
+    // Set-but-unparseable and an explicit 0 both mean the shipped kernel,
+    // NOT the geometry default — the operator touched the knob.
+    match larql_compute::options::env_usize(env) {
+        Some(n) if n > 0 => SeqparRequest::Slices(n),
+        _ => SeqparRequest::Off,
     }
 }
 
@@ -122,7 +165,7 @@ impl DecodeFlags {
             fused_attn: env_opt_in(ENV_FUSED_ATTN),
             fused_qk_norm_rope: !env_opt_out(ENV_FUSED_QK_NORM_ROPE),
             fused_kv_append_attend: !env_opt_out(ENV_FUSED_KV_APPEND_ATTEND),
-            kv_seqpar_slices: kv_seqpar_from_env(),
+            kv_seqpar: kv_seqpar_from_env(),
             fused_post_attn_norm: !env_opt_out(ENV_FUSED_POST_ATTN_NORM),
             fused_post_ffn_norm: !env_opt_out(ENV_FUSED_POST_FFN_NORM),
         }
@@ -213,7 +256,12 @@ impl Default for DecodeFlags {
             fused_attn: false,
             fused_qk_norm_rope: true,
             fused_kv_append_attend: true,
-            kv_seqpar_slices: 0,
+            // `Unset`, not `Off`: the programmatic default must mean the
+            // same thing as a clean env, or `MetalBackend::new()` and
+            // `with_options(BackendOptions::default())` would dispatch
+            // different attention kernels on the same model. Callers who
+            // want the serial kernel ask for `Off`.
+            kv_seqpar: SeqparRequest::Unset,
             fused_post_attn_norm: true,
             fused_post_ffn_norm: true,
         }
@@ -224,6 +272,17 @@ impl Default for DecodeFlags {
 mod tests {
     use super::*;
 
+    /// Serialises every env-mutating test in this module.
+    ///
+    /// These tests read and write the *process* environment, so they must
+    /// share one lock. Each previously declared its own function-local
+    /// `static LOCK`, which is uncontended by construction and serialised
+    /// nothing: `backend_options_default_ignores_env` sets `LARQL_QKV_FUSED`
+    /// and asserts `from_env` picks it up, while
+    /// `from_env_defaults_when_no_vars_set` removes it — interleaved, the
+    /// former reads an absent var and fails.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// Pin the defaults: every flag must resolve to a known value with
     /// no env vars set. Captures the contract that
     /// `MetalBackend::new()` on a clean process is deterministic.
@@ -233,8 +292,7 @@ mod tests {
         // test robust we explicitly clear ours, snapshot, and restore.
         // Held under a static lock so this doesn't race other tests in
         // the file.
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _g = LOCK.lock().expect("flag-test lock poisoned");
+        let _g = ENV_LOCK.lock().expect("flag-test lock poisoned");
 
         let names = [
             ENV_GATE_UP_COOP,
@@ -249,6 +307,7 @@ mod tests {
             ENV_FUSED_KV_APPEND_ATTEND,
             ENV_FUSED_POST_ATTN_NORM,
             ENV_FUSED_POST_FFN_NORM,
+            larql_compute::options::ENV_KV_SEQPAR,
         ];
         let prior: Vec<_> = names.iter().map(|n| (*n, std::env::var_os(n))).collect();
         for n in names {
@@ -265,6 +324,16 @@ mod tests {
         assert!(!flags.fused_prelayer_norm);
         assert!(!flags.qkv_fused);
         assert!(!flags.fused_attn);
+
+        // An unset env is NOT "off" — it defers to the geometry-scoped
+        // default, which `ops::kv_seqpar` resolves per layer. The default
+        // being narrow is pinned there, not here.
+        assert_eq!(
+            flags.kv_seqpar,
+            SeqparRequest::Unset,
+            "an absent LARQL_KV_SEQPAR must defer to the geometry default, \
+             not collapse to off"
+        );
 
         // Default-on flags.
         assert!(flags.fused_down);
@@ -287,8 +356,7 @@ mod tests {
     /// doc on `Default`).
     #[test]
     fn backend_options_default_matches_clean_env() {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _g = LOCK.lock().expect("flag-test lock poisoned");
+        let _g = ENV_LOCK.lock().expect("flag-test lock poisoned");
 
         let names = [
             ENV_GATE_UP_COOP,
@@ -305,6 +373,7 @@ mod tests {
             ENV_FUSED_POST_FFN_NORM,
             ENV_Q4K_MATVEC_8SG,
             ENV_Q6K_8SG,
+            larql_compute::options::ENV_KV_SEQPAR,
         ];
         let prior: Vec<_> = names.iter().map(|n| (*n, std::env::var_os(n))).collect();
         for n in names {
@@ -334,6 +403,13 @@ mod tests {
             from_env.decode_flags.qkv_fused,
             default.decode_flags.qkv_fused
         );
+        // The geometry-scoped seqpar default has two entry points; they
+        // must agree, or the same model gets different attention kernels
+        // depending on how the backend was constructed.
+        assert_eq!(
+            from_env.decode_flags.kv_seqpar,
+            default.decode_flags.kv_seqpar
+        );
 
         for (n, v) in prior {
             match v {
@@ -347,8 +423,7 @@ mod tests {
     /// vars must not change what `default()` returns.
     #[test]
     fn backend_options_default_ignores_env() {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _g = LOCK.lock().expect("flag-test lock poisoned");
+        let _g = ENV_LOCK.lock().expect("flag-test lock poisoned");
 
         let prior_qkv = std::env::var_os(ENV_QKV_FUSED);
         let prior_4sg = std::env::var_os(ENV_Q4K_MATVEC_8SG);

@@ -7,6 +7,7 @@ use metal::*;
 use std::ffi::c_void;
 
 use crate::buffers::BufferCache;
+use crate::ops::kv_seqpar::SEQPAR_MAX_THREADS;
 
 pub const SHORT_ATTENTION_SPAN: u32 = 1024;
 
@@ -342,107 +343,6 @@ pub fn encode_kv_append(
     );
 }
 
-/// Threadgroup width ceiling for the KV-B1 seqpar kernels. Matches
-/// `tg_partial[1024]` in `shaders::kv_attention` and
-/// `shaders::kv_append_attend_fused`, and Metal's own 1024-thread
-/// threadgroup limit — so this is the hard ceiling, not a tuning knob.
-pub const SEQPAR_MAX_THREADS: usize = 1024;
-
-/// `LARQL_KV_SEQPAR=auto` — pick the slice count from the measured span
-/// policy rather than a fixed number. Distinct from any real slice count.
-pub const SEQPAR_AUTO: usize = usize::MAX;
-
-/// Threadgroup widths the KV-B1 sweep found best, by span tier.
-///
-/// Expressed in **threads, not slices**, because the optimum tracks
-/// threadgroup occupancy rather than the slice count itself — converting
-/// via `head_dim` keeps the policy meaningful for other attention
-/// geometries instead of pinning it to gpt-oss's 64.
-///
-/// Measured with `examples/bench_attention_span` on M3 Max, gpt-oss-20b
-/// geometry, 2026-08-14. Only rows whose bracketing baselines agreed
-/// within 5% are cited here:
-///
-/// ```text
-/// span   8x    12x   16x    best
-///  192  2.41  2.44  2.07    8~12
-///  256  2.92  2.76  2.32    8
-///  384  3.17  3.19  2.85    8~12
-///  768  4.32  5.25  5.15    12
-/// 1024  4.68  5.30  5.41    16
-/// 2048  5.68  6.73  6.90    16
-/// ```
-///
-/// Those establish that **the widest threadgroup is genuinely harmful at
-/// short span** — at span 256 it costs 21% against 8 slices — so this is a
-/// real optimum rather than a clamp against the 1024-thread hardware
-/// limit, and that 16 still wins at 2048, i.e. intra-threadgroup
-/// parallelism is exhausted there rather than merely sufficient.
-const SEQPAR_THREADS_SHORT: usize = 512;
-const SEQPAR_THREADS_MID: usize = 768;
-const SEQPAR_THREADS_LONG: usize = 1024;
-
-/// Span tier boundaries — **engineering policy, not measured phase
-/// transitions**, and worth keeping that distinction.
-///
-/// The sweep locates the ordering at 192-384 (8 wins), 768 (12) and
-/// 1024-2048 (16); it does NOT locate where each crossover actually falls.
-/// The rows nearest these boundaries are exactly the ones that breached
-/// the drift rule — span 384 and 512 read -10.1% and -12.8% on their
-/// bracketing baselines, and negative drift inflates the arms measured
-/// between them — so 512 and 1024 are round numbers interpolated between
-/// trustworthy neighbours.
-///
-/// Do not treat them as discovered constants or tune against them. A
-/// re-sweep on an idle machine, or any other head_dim, may move them; what
-/// should survive is the shape (narrow at short span, widest at long).
-const SEQPAR_SPAN_TIER_MID: u32 = 512;
-const SEQPAR_SPAN_TIER_LONG: u32 = 1024;
-
-/// Measured-best threadgroup width for `span`. See [`SEQPAR_THREADS_SHORT`].
-fn seqpar_auto_threads(span: u32) -> usize {
-    if span < SEQPAR_SPAN_TIER_MID {
-        SEQPAR_THREADS_SHORT
-    } else if span < SEQPAR_SPAN_TIER_LONG {
-        SEQPAR_THREADS_MID
-    } else {
-        SEQPAR_THREADS_LONG
-    }
-}
-
-/// Sequence slices the KV-B1 kernel may use, given `head_dim`.
-///
-/// Bounded by the kernel's `tg_partial`, which holds `n_slices * head_dim`
-/// partials, and by the caller contract that `tg_sz` be a multiple of
-/// `head_dim`. Returns 0 when the request cannot be honoured, which the
-/// caller reads as "use the shipped kernel" — a refusal rather than a
-/// silently different geometry.
-pub fn seqpar_slices_for(requested: usize, head_dim: usize, span: u32) -> usize {
-    if head_dim == 0 {
-        return 0;
-    }
-    let requested = if requested == SEQPAR_AUTO {
-        seqpar_auto_threads(span) / head_dim
-    } else {
-        requested
-    };
-    if requested <= 1 {
-        return 0;
-    }
-    // `tg_partial[SEQPAR_MAX_THREADS]` and `tg_sg_vals[32]` in the seqpar
-    // kernels both bound the threadgroup at SEQPAR_MAX_THREADS; the
-    // partial bound is the tighter one for head_dim >= 32. The ceiling was
-    // raised from 512 after the KV-B1 sweep found the optimum sitting
-    // exactly ON the old ceiling at every span, i.e. unmeasured above it.
-    let max_by_partial = SEQPAR_MAX_THREADS / head_dim;
-    let n = requested.min(max_by_partial);
-    if n <= 1 {
-        0
-    } else {
-        n
-    }
-}
-
 /// Encode KV attend dispatch into an existing encoder.
 /// The encoder is NOT ended — caller continues adding dispatches.
 #[allow(clippy::too_many_arguments)]
@@ -624,79 +524,6 @@ pub fn append_and_attend(
     }
 
     cache.current_len += 1;
-}
-
-#[cfg(test)]
-mod seqpar_policy_tests {
-    use super::*;
-
-    /// gpt-oss-20b's head_dim, the geometry the sweep was run on.
-    const HD: usize = 64;
-
-    #[test]
-    fn auto_follows_the_measured_span_tiers() {
-        // Below MID the sweep's clean rows put 8 slices ahead of 12 and 16.
-        assert_eq!(seqpar_slices_for(SEQPAR_AUTO, HD, 64), 8);
-        assert_eq!(seqpar_slices_for(SEQPAR_AUTO, HD, 256), 8);
-        assert_eq!(
-            seqpar_slices_for(SEQPAR_AUTO, HD, SEQPAR_SPAN_TIER_MID - 1),
-            8
-        );
-        // MID..LONG: 12.
-        assert_eq!(seqpar_slices_for(SEQPAR_AUTO, HD, SEQPAR_SPAN_TIER_MID), 12);
-        assert_eq!(seqpar_slices_for(SEQPAR_AUTO, HD, 768), 12);
-        assert_eq!(
-            seqpar_slices_for(SEQPAR_AUTO, HD, SEQPAR_SPAN_TIER_LONG - 1),
-            12
-        );
-        // At and past LONG: the ceiling, where the sweep was still climbing.
-        assert_eq!(
-            seqpar_slices_for(SEQPAR_AUTO, HD, SEQPAR_SPAN_TIER_LONG),
-            16
-        );
-        assert_eq!(seqpar_slices_for(SEQPAR_AUTO, HD, 4096), 16);
-    }
-
-    /// The policy is stated in threads, so a different attention geometry
-    /// gets the same threadgroup width rather than the same slice count —
-    /// otherwise it would silently dispatch 2x the threads on head_dim 128.
-    #[test]
-    fn auto_is_expressed_in_threads_not_slices() {
-        assert_eq!(seqpar_slices_for(SEQPAR_AUTO, 128, 2048), 8);
-        assert_eq!(seqpar_slices_for(SEQPAR_AUTO, 32, 2048), 32);
-        for hd in [32usize, 64, 128] {
-            for span in [64u32, 512, 2048] {
-                let slices = seqpar_slices_for(SEQPAR_AUTO, hd, span);
-                assert!(
-                    slices * hd <= SEQPAR_MAX_THREADS,
-                    "head_dim {hd} span {span}: {slices} slices exceed the \
-                     {SEQPAR_MAX_THREADS}-thread bound"
-                );
-            }
-        }
-    }
-
-    /// An explicit count still overrides the policy, and is still clamped —
-    /// the assert in `encode_kv_attend_seqpar` is a panic, so the clamp has
-    /// to happen here.
-    #[test]
-    fn explicit_request_overrides_but_is_still_clamped() {
-        assert_eq!(seqpar_slices_for(4, HD, 2048), 4);
-        assert_eq!(seqpar_slices_for(999, HD, 64), SEQPAR_MAX_THREADS / HD);
-        assert_eq!(seqpar_slices_for(999, 128, 64), SEQPAR_MAX_THREADS / 128);
-    }
-
-    /// 0 and 1 are refusals, not slice counts: the caller reads them as
-    /// "dispatch the shipped serial kernel".
-    #[test]
-    fn zero_one_and_degenerate_head_dim_refuse() {
-        assert_eq!(seqpar_slices_for(0, HD, 2048), 0);
-        assert_eq!(seqpar_slices_for(1, HD, 2048), 0);
-        assert_eq!(seqpar_slices_for(SEQPAR_AUTO, 0, 2048), 0);
-        // head_dim past the whole thread budget cannot be sliced at all.
-        assert_eq!(seqpar_slices_for(SEQPAR_AUTO, SEQPAR_MAX_THREADS, 2048), 0);
-        assert_eq!(seqpar_slices_for(8, SEQPAR_MAX_THREADS, 2048), 0);
-    }
 }
 
 #[cfg(test)]
