@@ -32,6 +32,27 @@ use metal::{Buffer, ComputeCommandEncoderRef};
 
 use crate::MetalBackend;
 
+/// The norm applied to a *branch output* before it joins the residual
+/// stream, under four-norm (`NormPlacement::PrePost`) placement.
+///
+/// Its own weight and epsilon because they are not the pre-norm's:
+/// Muse-Glimmer uses eps 1e-5 before its blocks and **1e-8** after them,
+/// three orders of magnitude apart, and reusing the pre-norm epsilon
+/// produces superficially plausible output while lowering a different
+/// program.
+///
+/// `None` means the op is absent (two-norm placement) — a different
+/// claim from a norm with a neutral weight.
+pub struct PostNorm<'a> {
+    pub weight: &'a Buffer,
+    pub eps: f32,
+    pub weight_offset: f32,
+    /// `hidden` floats of scratch. Separate from the branch output
+    /// because the norm reduces over the whole vector before writing,
+    /// so writing in place would race its own reduction.
+    pub scratch: &'a Buffer,
+}
+
 /// One quantised matrix and the vectors it maps between, as device
 /// buffers. Grouped because a lowered matvec genuinely needs weights,
 /// scales, input, output and geometry, and an eight-argument call at
@@ -305,4 +326,45 @@ pub(crate) fn dispatch_linear(
         metal::MTLSize::new((len as u64).div_ceil(tg), 1, 1),
         metal::MTLSize::new(tg, 1, 1),
     );
+}
+
+impl MetalBackend {
+    /// Encode `out = branch, normalised if the plan carries a post-norm`,
+    /// then `h_out = h_in + out`.
+    ///
+    /// The order is load-bearing and the reason this is one function
+    /// rather than two calls at each site: the interpreter normalises the
+    /// **branch output** and then adds it to the residual stream. Adding
+    /// first and normalising the sum is a different model, and
+    /// "post-attention norm" is an ambiguous enough name that a lowering
+    /// could plausibly do either.
+    pub fn encode_branch_norm_then_residual(
+        &self,
+        enc: &ComputeCommandEncoderRef,
+        h_in: &Buffer,
+        branch: &Buffer,
+        h_out: &Buffer,
+        post: Option<&PostNorm<'_>>,
+        hidden: usize,
+    ) {
+        let addend = match post {
+            Some(p) => {
+                crate::stages::input_norm::encode_f32(
+                    enc,
+                    &self.norms.rms_norm_pipeline,
+                    branch,
+                    0,
+                    p.weight,
+                    p.scratch,
+                    0,
+                    hidden,
+                    p.eps,
+                    p.weight_offset,
+                );
+                p.scratch
+            }
+            None => branch,
+        };
+        self.encode_residual_add(enc, h_in, addend, h_out, hidden, 1.0);
+    }
 }

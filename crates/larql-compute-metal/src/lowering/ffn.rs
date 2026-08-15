@@ -10,8 +10,12 @@
 //!
 //! ```text
 //! h ─ pre_ffn_norm ─┬─ gate proj ─┐
-//!                   └─ up proj ───┴─ SiLU-GLU ─ down proj ─ residual ─ h'
+//!                   └─ up proj ───┴─ SiLU-GLU ─ down proj ─ post_ffn_norm ─ residual ─ h'
 //! ```
+//!
+//! The post-FFN norm is present only under four-norm placement, and it
+//! normalises the **branch output before** the residual add — not the
+//! summed hidden state after it.
 //!
 //! No fusion yet. A fused activation+down kernel exists for Q4_K/Q6_K and
 //! would be faster, but it would also make the correspondence between the
@@ -26,7 +30,7 @@
 
 use metal::{Buffer, ComputeCommandEncoderRef};
 
-use super::MatvecOperands;
+use super::{MatvecOperands, PostNorm};
 use crate::MetalBackend;
 
 /// The weight streams one gated FFN reads, already resident.
@@ -42,6 +46,8 @@ pub struct FfnWeights<'a> {
     pub down_tensor_scale: f32,
     /// Pre-FFN norm weight (f32).
     pub norm_weight: &'a Buffer,
+    /// The post-FFN norm, under four-norm placement. `None` = absent.
+    pub post_norm: Option<PostNorm<'a>>,
 }
 
 /// Device scratch the lowered FFN needs. Caller-owned so the whole layer
@@ -150,10 +156,18 @@ impl MetalBackend {
             w.down_tensor_scale,
         );
 
-        // 5. residual. `b_scale` is 1.0: a residual multiplier is a
+        // 5. post-FFN norm (four-norm placement only), then the
+        //    residual. `b_scale` is 1.0: a residual multiplier is a
         //    judged plan fact and Glimmer's FFN residual has none, so
         //    passing anything else here would invent semantics.
-        self.encode_residual_add(enc, h_in, s.down, h_out, shape.hidden, 1.0);
+        self.encode_branch_norm_then_residual(
+            enc,
+            h_in,
+            s.down,
+            h_out,
+            w.post_norm.as_ref(),
+            shape.hidden,
+        );
     }
 }
 

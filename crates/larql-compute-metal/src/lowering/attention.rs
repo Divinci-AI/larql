@@ -15,7 +15,7 @@
 //!                                                          │          │
 //!                                            sigmoid gate ─┴──────────┘
 //!                                                          │
-//!                                                       o_proj ─ residual ─ h'
+//!                                            o_proj ─ post_attn_norm ─ residual ─ h'
 //! ```
 //!
 //! **Query scale applies to Q only, after QK norm and before RoPE.** All
@@ -32,7 +32,7 @@
 
 use metal::{Buffer, ComputeCommandEncoderRef};
 
-use super::MatvecOperands;
+use super::{MatvecOperands, PostNorm};
 use crate::MetalBackend;
 
 /// Position encoding for this layer, from its own policy entry — never a
@@ -63,6 +63,9 @@ pub struct AttnWeights<'a> {
     pub gate: Option<Projection<'a>>,
     /// Pre-attention norm weight (f32).
     pub norm_weight: &'a Buffer,
+    /// The post-attention norm, under four-norm placement. `None` =
+    /// absent.
+    pub post_norm: Option<PostNorm<'a>>,
 }
 
 /// Caller-owned device scratch and cache.
@@ -271,8 +274,16 @@ impl MetalBackend {
             w.o.tensor_scale,
         );
 
-        // 8. residual.
-        self.encode_residual_add(enc, h_in, s.attn_out, h_out, shape.hidden, 1.0);
+        // 8. post-attention norm (four-norm placement only), then the
+        //    residual — branch output normalised *before* the add.
+        self.encode_branch_norm_then_residual(
+            enc,
+            h_in,
+            s.attn_out,
+            h_out,
+            w.post_norm.as_ref(),
+            shape.hidden,
+        );
     }
 
     fn encode_kv_attention(

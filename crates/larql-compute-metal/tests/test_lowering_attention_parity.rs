@@ -56,6 +56,8 @@ const POS: usize = T - 1;
 const EPS: f32 = 1e-5;
 const QK_EPS: f32 = 1e-6;
 const NORM_OFFSET: f32 = 1.0;
+/// Muse-Glimmer's post-block epsilon (four-norm placement).
+const POST_EPS: f32 = 1e-8;
 const QUERY_SCALE: f32 = 3.87;
 const THETA: f64 = 500_000.0;
 
@@ -143,6 +145,8 @@ fn cpu_reference(
     window: Option<usize>,
     order: Order,
     score_scale: f32,
+    // (weight, eps, before_residual); None = two-norm placement.
+    post: Option<(&[f32], f32, bool)>,
 ) -> Vec<f32> {
     // pre-attention norm
     let ms = h.iter().map(|v| v * v).sum::<f32>() / HIDDEN as f32;
@@ -223,7 +227,27 @@ fn cpu_reference(
         }
     }
     let out = matvec(wo, &concat, HIDDEN, Q_ROWS);
-    h.iter().zip(&out).map(|(a, b)| a + b).collect()
+    let rms_norm = |v: &[f32], w: &[f32], eps: f32| -> Vec<f32> {
+        let ms = v.iter().map(|x| x * x).sum::<f32>() / v.len() as f32;
+        let inv = 1.0 / (ms + eps).sqrt();
+        v.iter()
+            .zip(w)
+            .map(|(x, wv)| x * inv * (NORM_OFFSET + wv))
+            .collect()
+    };
+    match post {
+        // Judged: normalise the attention branch, then add.
+        Some((w, eps, true)) => {
+            let n = rms_norm(&out, w, eps);
+            h.iter().zip(&n).map(|(a, b)| a + b).collect()
+        }
+        // Wrong reading of "post-attention norm": add, then normalise.
+        Some((w, eps, false)) => {
+            let summed: Vec<f32> = h.iter().zip(&out).map(|(a, b)| a + b).collect();
+            rms_norm(&summed, w, eps)
+        }
+        None => h.iter().zip(&out).map(|(a, b)| a + b).collect(),
+    }
 }
 
 struct Fixture {
@@ -268,6 +292,7 @@ fn fixture() -> Fixture {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_lowered(
     gpu: &larql_compute_metal::MetalBackend,
     f: &Fixture,
@@ -275,6 +300,7 @@ fn run_lowered(
     window: Option<usize>,
     with_gate: bool,
     score_scale: f32,
+    post_w: Option<&[f32]>,
 ) -> Vec<f32> {
     let h_in = gpu.lowering_upload(&f.h).unwrap();
     let norm_buf = gpu.lowering_upload(&f.norm_w).unwrap();
@@ -288,6 +314,8 @@ fn run_lowered(
     let concat = gpu.lowering_scratch(Q_ROWS);
     let gated = gpu.lowering_scratch(Q_ROWS);
     let attn_out = gpu.lowering_scratch(HIDDEN);
+    let post_scratch = gpu.lowering_scratch(HIDDEN);
+    let post_buf = post_w.map(|w| gpu.lowering_upload(w).unwrap());
 
     let proj = |m: &nvfp4::Nvfp4Matrix| Projection {
         packed: Box::leak(Box::new(gpu.lowering_weight(&m.packed))),
@@ -301,6 +329,14 @@ fn run_lowered(
         o: proj(&f.o),
         gate: with_gate.then(|| proj(&f.g)),
         norm_weight: &norm_buf,
+        post_norm: post_buf
+            .as_ref()
+            .map(|b| larql_compute_metal::lowering::PostNorm {
+                weight: b,
+                eps: POST_EPS,
+                weight_offset: NORM_OFFSET,
+                scratch: &post_scratch,
+            }),
     };
     let s = AttnScratch {
         normed: &normed,
@@ -340,9 +376,25 @@ fn run_lowered(
     cmd.wait_until_completed();
 
     let out = gpu.lowering_readback(&h_out, HIDDEN).unwrap();
+    // `w` borrows the uploaded buffers; end its borrow before recycling.
     for b in [
-        h_in, norm_buf, k_cache, v_cache, inv_freq, h_out, normed, q, gate, concat, gated, attn_out,
+        h_in,
+        norm_buf,
+        k_cache,
+        v_cache,
+        inv_freq,
+        h_out,
+        normed,
+        q,
+        gate,
+        concat,
+        gated,
+        attn_out,
+        post_scratch,
     ] {
+        gpu.recycle_lowering_scratch(b);
+    }
+    if let Some(b) = post_buf {
         gpu.recycle_lowering_scratch(b);
     }
     out
@@ -366,6 +418,7 @@ fn lowered_attention_executes_the_ordered_program() {
         return;
     };
     let f = fixture();
+    let post_w = det(HIDDEN, 42);
     let scale = 1.0 / (HEAD_DIM as f32).sqrt();
 
     // ── Proof 1: parity, full-attention rope layer with the gate ────
@@ -383,6 +436,7 @@ fn lowered_attention_executes_the_ordered_program() {
         None,
         Order::NormScaleRope,
         scale,
+        Some((&post_w, POST_EPS, true)),
     );
     let got = run_lowered(
         &gpu,
@@ -391,6 +445,7 @@ fn lowered_attention_executes_the_ordered_program() {
         None,
         true,
         scale,
+        Some(&post_w),
     );
     let parity = rel_rms(&reference, &got);
     eprintln!("attention parity (rope, full, gated): rel_rms {parity:.3e}");
@@ -414,6 +469,7 @@ fn lowered_attention_executes_the_ordered_program() {
         None,
         Order::ScaleNormRope,
         scale,
+        Some((&post_w, POST_EPS, true)),
     );
     assert_control("query scale before QK norm", &scale_first, &got, parity);
 
@@ -436,6 +492,7 @@ fn lowered_attention_executes_the_ordered_program() {
         None,
         Order::NormRopeScale,
         scale,
+        Some((&post_w, POST_EPS, true)),
     );
     let commute = rel_rms(&rope_first, &got) / parity;
     eprintln!("  commutation `query scale vs RoPE`: {commute:.1}x parity (expected ~1)");
@@ -460,6 +517,7 @@ fn lowered_attention_executes_the_ordered_program() {
         None,
         Order::NormScaleRope,
         scale,
+        Some((&post_w, POST_EPS, true)),
     );
     assert_control("attention gate bypassed", &ungated, &got, parity);
 
@@ -481,8 +539,17 @@ fn lowered_attention_executes_the_ordered_program() {
         None,
         Order::NormScaleRope,
         scale,
+        Some((&post_w, POST_EPS, true)),
     );
-    let nope_got = run_lowered(&gpu, &f, LoweredPosition::None, None, true, scale);
+    let nope_got = run_lowered(
+        &gpu,
+        &f,
+        LoweredPosition::None,
+        None,
+        true,
+        scale,
+        Some(&post_w),
+    );
     let nope_parity = rel_rms(&nope_ref, &nope_got);
     eprintln!("attention parity (NoPE): rel_rms {nope_parity:.3e}");
     assert!(
@@ -506,6 +573,7 @@ fn lowered_attention_executes_the_ordered_program() {
         Some(4),
         Order::NormScaleRope,
         scale,
+        Some((&post_w, POST_EPS, true)),
     );
     let win_got = run_lowered(
         &gpu,
@@ -514,6 +582,7 @@ fn lowered_attention_executes_the_ordered_program() {
         Some(4),
         true,
         scale,
+        Some(&post_w),
     );
     let win_parity = rel_rms(&win_ref, &win_got);
     eprintln!("attention parity (sliding w=4): rel_rms {win_parity:.3e}");
@@ -522,4 +591,44 @@ fn lowered_attention_executes_the_ordered_program() {
         "sliding layer disagrees: {win_parity:.3e}"
     );
     assert_control("sliding vs full span", &win_ref, &got, parity);
+
+    // ── Post-attention norm (four-norm placement) ───────────────────
+    // Omitted entirely.
+    let no_post = cpu_reference(
+        &f.h,
+        &f.norm_w,
+        &f.qq,
+        &f.kq,
+        &f.vq,
+        &f.oq,
+        Some(&f.gq),
+        &f.k_cache,
+        &f.v_cache,
+        LoweredPosition::Rope { theta: THETA },
+        None,
+        Order::NormScaleRope,
+        scale,
+        None,
+    );
+    assert_control("post-attention norm omitted", &no_post, &got, parity);
+
+    // Applied to the summed hidden state instead of the branch output.
+    // "Post-attention norm" reads both ways; only one is the model.
+    let after = cpu_reference(
+        &f.h,
+        &f.norm_w,
+        &f.qq,
+        &f.kq,
+        &f.vq,
+        &f.oq,
+        Some(&f.gq),
+        &f.k_cache,
+        &f.v_cache,
+        LoweredPosition::Rope { theta: THETA },
+        None,
+        Order::NormScaleRope,
+        scale,
+        Some((&post_w, POST_EPS, false)),
+    );
+    assert_control("post-norm applied after the residual", &after, &got, parity);
 }

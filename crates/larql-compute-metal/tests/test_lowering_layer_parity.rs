@@ -76,6 +76,10 @@ const POS: usize = T - 1;
 const EPS: f32 = 1e-5;
 const QK_EPS: f32 = 1e-6;
 const NORM_OFFSET: f32 = 1.0;
+/// Muse-Glimmer's post-block epsilon. Four-norm placement normalises each
+/// branch output *before* its residual add, at an epsilon three orders of
+/// magnitude below the pre-block one.
+const POST_EPS: f32 = 1e-8;
 const QUERY_SCALE: f32 = 3.87;
 const THETA: f64 = 500_000.0;
 const SCORE_SCALE: f32 = 0.125;
@@ -221,6 +225,8 @@ fn attention_reference(f: &Fixture, residual: bool) -> (Vec<f32>, Vec<f32>) {
         *c *= 1.0 / (1.0 + (-gv).exp());
     }
     let out = matvec(&f.oq, &concat, HIDDEN, Q_ROWS);
+    // Four-norm placement: normalise the attention branch, then add.
+    let out = rms_norm(&out, &f.attn_post_w, POST_EPS, NORM_OFFSET);
     let h1 = if residual {
         f.h.iter().zip(&out).map(|(a, b)| a + b).collect()
     } else {
@@ -248,6 +254,7 @@ fn ffn_reference(
         .map(|(gv, uv)| (gv / (1.0 + (-gv).exp())) * uv)
         .collect();
     let d = matvec(&f.down_q, &act, HIDDEN, INTER);
+    let d = rms_norm(&d, &f.ffn_post_w, POST_EPS, NORM_OFFSET);
     if residual {
         residual_source.iter().zip(&d).map(|(a, b)| a + b).collect()
     } else {
@@ -282,6 +289,8 @@ struct Fixture {
     h: Vec<f32>,
     norm_w: Vec<f32>,
     ffn_norm_w: Vec<f32>,
+    attn_post_w: Vec<f32>,
+    ffn_post_w: Vec<f32>,
     k_cache: Vec<f32>,
     v_cache: Vec<f32>,
     q: nvfp4::Nvfp4Matrix,
@@ -315,6 +324,8 @@ fn fixture() -> Fixture {
         h: det(HIDDEN, 6),
         norm_w: det(HIDDEN, 7),
         ffn_norm_w: det(HIDDEN, 13),
+        attn_post_w: det(HIDDEN, 51),
+        ffn_post_w: det(HIDDEN, 52),
         k_cache: det(T * KV_ROWS, 8),
         v_cache: det(T * KV_ROWS, 9),
         q: nvfp4::quantize(&qf, Q_ROWS, HIDDEN).unwrap(),
@@ -379,6 +390,10 @@ fn run_lowered(
     let concat = gpu.lowering_scratch(Q_ROWS);
     let gated = gpu.lowering_scratch(Q_ROWS);
     let attn_out = gpu.lowering_scratch(HIDDEN);
+    let attn_post_scratch = gpu.lowering_scratch(HIDDEN);
+    let ffn_post_scratch = gpu.lowering_scratch(HIDDEN);
+    let attn_post_buf = gpu.lowering_upload(&f.attn_post_w).unwrap();
+    let ffn_post_buf = gpu.lowering_upload(&f.ffn_post_w).unwrap();
     let ffn_g = gpu.lowering_scratch(INTER);
     let ffn_u = gpu.lowering_scratch(INTER);
     let ffn_a = gpu.lowering_scratch(INTER);
@@ -405,6 +420,12 @@ fn run_lowered(
         o: proj(&f.o),
         gate: Some(proj(&f.g)),
         norm_weight: &attn_norm_buf,
+        post_norm: Some(larql_compute_metal::lowering::PostNorm {
+            weight: &attn_post_buf,
+            eps: POST_EPS,
+            weight_offset: NORM_OFFSET,
+            scratch: &attn_post_scratch,
+        }),
     };
     let ascratch = AttnScratch {
         normed: &attn_normed,
@@ -453,6 +474,12 @@ fn run_lowered(
         down_scales: &down_sc,
         down_tensor_scale: f.down.tensor_scale,
         norm_weight: &ffn_norm_buf,
+        post_norm: Some(larql_compute_metal::lowering::PostNorm {
+            weight: &ffn_post_buf,
+            eps: POST_EPS,
+            weight_offset: NORM_OFFSET,
+            scratch: &ffn_post_scratch,
+        }),
     };
     let fscratch = FfnScratch {
         normed: ffn_normed,
