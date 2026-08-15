@@ -251,3 +251,101 @@ e2e run is spent on it.
 - Interleave arms within a block (`off/auto/off/auto`), and report the raw
   per-arm readings, not just the derived delta.
 - Steady state: warmup 16, n 256. Short runs read slow.
+- Run the control triple (`unset` / `off` / `auto`) once per session.
+  `unset ≈ auto ≪ off` is what distinguishes "the default fired and helped"
+  from "the default never fired"; an `off`-vs-`default` pair alone cannot
+  tell those apart, and reads the second as a negative result.
+
+### The instrument is not stable by default
+
+Measured 2026-08-15 on the M3 Max, gpt-oss-20b. Both effects below are
+larger than the ~11% being measured, and neither announces itself:
+`pmset -g therm` stays silent, the GPU reads idle between runs, and memory
+stays healthy throughout.
+
+**Cold working set.** `larql bench` is one process per arm, and this model
+is ~27.5 GB across the two containers (18 GB q4k spine + 9.5 GB routed
+MXFP4). With the page cache evicted, each arm re-faults tens of GB and
+consecutive runs warm progressively — an `off` arm read 17.40, 16.58,
+16.05, 15.76, 15.51 ms across five identical runs. Warm explicitly before
+timing anything:
+
+```bash
+find <spine> <routed> -type f -size +10M -exec cat {} + > /dev/null
+```
+
+**Sustained-load degradation, recoverable.** Past roughly 5–10 consecutive
+runs the machine collapses — the same `off` arm walked 14.17 → 36.22 ms
+over ten runs, a 2.5× loss, monotonic. A 5-minute rest fully restores it:
+13.70, 13.72, 13.75, 13.75, 13.75, a 0.36% spread reproducing the
+pre-degradation value. So this is pacing, not a leak, and the fix is rest
+between blocks rather than a faster harness.
+
+Root cause on this machine: a **67W adapter negotiating 65W**, on hardware
+specced for 96W/140W, with the battery charging concurrently. Sustained
+20B MoE decode exceeds that envelope by itself. Check before benching —
+`pmset -g batt` says "AC Power" and is blind to wattage:
+
+```bash
+ioreg -rn AppleSmartBattery | grep -o '"Watts"=[0-9]*'
+system_profiler SPPowerDataType | grep -iE "wattage|Name:"
+```
+
+**The power cap clips the faster arm.** This is the part that matters for
+A/B design: `default` does more work per unit time than `off`, so it draws
+more instantaneous power and is the arm the cap truncates — variably, and
+only downward. Same-arm spread therefore tracks how fast the arm is, not
+how noisy the machine is, and it grows with work per token (0.18% at short
+context, 1.91% at ~574, 5.43% at ~2024 while every `off` arm stayed under
+0.4%). A power-limited A/B is biased *against* the faster arm, so it
+understates rather than inflates — but it cannot produce a point estimate.
+
+### Validity preconditions
+
+A block counts only if all four hold. Check them **before** computing any
+delta:
+
+1. Adapter delivers the machine's rated wattage. On the 65W adapter this
+   gate cannot pass at depth — see above.
+2. Warm to plateau, then confirm it: repeat one arm until consecutive
+   readings agree within ~1%. A still-improving or still-degrading series
+   means the block is not yet runnable.
+3. Rest ~5 minutes before each block, and keep a block to its 4 arms.
+4. The two same-arm readings inside the block agree within ~1%. If they do
+   not, the block is void — do **not** average across the disagreement.
+
+Precondition 4 is the load-bearing one. An arm-mean computed over a
+disagreeing pair will happily produce a plausible number, and interleaving
+does not protect against it: interleaving controls for *monotonic* drift,
+and this failure is not monotonic.
+
+## Provisional readings — 2026-08-15, VOID
+
+Recorded because the prediction check pre-dates the clean run, which makes
+the re-run a genuine replication rather than a first look. **These are not
+results.** Blocks B and C fail precondition 4 on the `default` arm, and
+precondition 1 failed for the whole session (65W adapter).
+
+```
+                     off (ms/tok)     default (ms/tok)   same-arm spread
+A  ~36 + 256 tok     12.14  12.15     10.88  10.90       0.08% / 0.18%  PASS
+B  ~574 + 256        13.73  13.69     10.98  11.19       0.29% / 1.91%  VOID
+C  ~2024 + 256       18.19  18.26     13.67  12.93       0.38% / 5.43%  VOID
+```
+
+What survives without the arm means, as a description of the data rather
+than an inference: the arms do not overlap in any block, and the *slowest*
+`default` reading beats the *fastest* `off` reading by 10.2%, 18.3% and
+24.9% respectively.
+
+The prediction holds directionally — the gain grows with depth, as 12
+sliding layers pinning at window 128 while 12 full layers keep climbing
+predicts. The asymptote toward the full-attention share is **not** observed;
+it is still rising at ~2K, so locating the plateau needs deeper context.
+
+The token-by-token prefill phase is a second instrument on the same kernel
+(`encode_attention_block` has one caller, `decode/token.rs`, and prefill
+runs at decode rate — 19706 ms for ~2024 tokens). It averages over the
+whole span ramp rather than sitting at final depth, so it should show a
+*smaller* delta than decode at the same block, and it does: −10.8% at B and
+−18.2% at C, with arms tight to 0.01–1.7%. Two instruments, same shape.
