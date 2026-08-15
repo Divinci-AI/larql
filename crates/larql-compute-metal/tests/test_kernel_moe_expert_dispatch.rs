@@ -400,9 +400,12 @@ fn decode_token_q4k_moe_with_real_moe_layer_drives_gpu_dispatch() {
     let inter = 256;
     let top_k = 2;
     let num_experts = 4;
-    let q_dim = 128;
+    // 4 x 64 = 256 = one Q4_K superblock. `wo` reduces over q_dim, so at
+    // q_dim = 128 the O-projection dispatched zero superblocks and emitted
+    // zeros silently (issue #227).
+    let q_dim = 256;
     let kv_dim = 64;
-    let num_q_heads = 2;
+    let num_q_heads = 4;
     let num_kv_heads = 1;
     let head_dim = 64;
 
