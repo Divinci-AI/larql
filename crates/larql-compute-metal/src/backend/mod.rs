@@ -193,7 +193,10 @@ impl MetalBackend {
     pub fn empty_roundtrip(&self) {
         let cmd = self.queue.new_command_buffer();
         cmd.commit();
-        cmd.wait_until_completed();
+        let _ = crate::cb_status::wait_checked(
+            cmd,
+            "crates/larql-compute-metal/src/backend/mod.rs:196",
+        );
     }
 
     /// The same, with an empty compute encoder opened and closed, which
@@ -203,7 +206,10 @@ impl MetalBackend {
         let enc = cmd.new_compute_command_encoder();
         enc.end_encoding();
         cmd.commit();
-        cmd.wait_until_completed();
+        let _ = crate::cb_status::wait_checked(
+            cmd,
+            "crates/larql-compute-metal/src/backend/mod.rs:206",
+        );
     }
 
     /// Create a Metal backend with default options derived from the

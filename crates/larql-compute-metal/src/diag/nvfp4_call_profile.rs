@@ -118,7 +118,10 @@ impl MetalBackend {
         p.commit = t.elapsed().as_secs_f64() * 1e6;
 
         let t = Instant::now();
-        cmd.wait_until_completed();
+        let _ = crate::cb_status::wait_checked(
+            cmd,
+            "crates/larql-compute-metal/src/diag/nvfp4_call_profile.rs:121",
+        );
         p.wait = t.elapsed().as_secs_f64() * 1e6;
         let commit_to_done = commit_wall.elapsed().as_secs_f64() * 1e6;
 
@@ -206,7 +209,10 @@ impl MetalBackend {
             last = Some(cmd);
         }
         if let Some(cmd) = last {
-            cmd.wait_until_completed();
+            let _ = crate::cb_status::wait_checked(
+                &cmd,
+                "crates/larql-compute-metal/src/diag/nvfp4_call_profile.rs:209",
+            );
         }
         let per = started.elapsed().as_secs_f64() * 1e6 / depth as f64;
 

@@ -122,7 +122,10 @@ impl MatMul for MetalBackend {
         }
         enc.end_encoding();
         cmd.commit();
-        cmd.wait_until_completed();
+        let _ = crate::cb_status::wait_checked(
+            cmd,
+            "crates/larql-compute-metal/src/trait_impl/matmul.rs:125",
+        );
 
         let results: Option<Vec<Vec<f32>>> = out_bufs
             .iter()
@@ -178,7 +181,10 @@ impl MatMul for MetalBackend {
         );
         enc.end_encoding();
         cmd.commit();
-        cmd.wait_until_completed();
+        let _ = crate::cb_status::wait_checked(
+            cmd,
+            "crates/larql-compute-metal/src/trait_impl/matmul.rs:181",
+        );
         self.bufs.recycle(out_buf);
         self.bufs.recycle(x_buf);
     }
@@ -266,7 +272,10 @@ impl MatMul for MetalBackend {
         }
         enc.end_encoding();
         cmd.commit();
-        cmd.wait_until_completed();
+        let _ = crate::cb_status::wait_checked(
+            cmd,
+            "crates/larql-compute-metal/src/trait_impl/matmul.rs:269",
+        );
 
         let results: Option<Vec<Vec<f32>>> = out_bufs
             .iter()
@@ -351,7 +360,10 @@ impl MatMul for MetalBackend {
         }
         enc.end_encoding();
         cmd.commit();
-        cmd.wait_until_completed();
+        let _ = crate::cb_status::wait_checked(
+            cmd,
+            "crates/larql-compute-metal/src/trait_impl/matmul.rs:354",
+        );
 
         let results: Option<Vec<Vec<f32>>> = out_bufs
             .iter()
