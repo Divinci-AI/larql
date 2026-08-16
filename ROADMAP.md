@@ -1651,6 +1651,91 @@ idle — an AC-protocol repeat is owed for the books):
 
 ---
 
+### Attention execution ladder — #229 closed, KV-B1 licensed, VINDEX3 carries it, geometry planner (2026-08-16)
+
+One day, three rungs closed and one bug that had been impersonating five
+others. Full record: [`docs/kv-attention-scaling.md`](docs/kv-attention-scaling.md)
+(§"The fault is on main and predates seqpar", §"Glimmer geometry — the policy
+becomes a planner"). PRs #262 #263 #261 #260 #264 #265 #266.
+
+**#229 closed (#263).** The intermittent startup-integrity fault (EOS at token
+1, token ids past the vocabulary, "decode" at 0.5 ms/token over a full budget,
+wrong-but-plausible trajectories, hangs, one NaN row) was one bug: the routed
+decode path sized sliding-layer KV at `window × 2 = 256` rows — a residency
+policy that presumes compaction — and never compacts, so from position 256
+every sliding layer wrote and read past its buffers by a margin growing with
+position; the corruption stayed self-consistent until another allocation
+shared the memory, then NaN → router `~0u` ids → `moe_descriptor_gather` page
+fault → failed command buffers that nothing checked. Fix: every layer at full
+`max_seq` on that path; `encode_kv_append` refuses a full cache. Containment
+kept regardless: `cb_status::wait_checked` on all 101 waits (a test forbids
+naked waits), the MoE entry seam refuses a step whose buffer failed, the
+prompt pass propagates a failed step instead of substituting zeros, the
+gather bounds its ids. Acceptance 16/16 fresh processes clean, `run` output
+byte-identical across processes. **Lesson: a residency policy and the
+operation that makes it valid must be pinned together.**
+
+**KV-B1 licensed (#264).** Bracketed A/B/C ladder on one binary, one session,
+`off / default / off`, 300 s rests: A 12.04 → 10.80 ms/token (+11.5%, brackets
+0.08%), B 13.71 → 11.01 (+24.5%, 0.51%), C 18.11 → 11.88 (+52.4%, 0.55%).
+Serial 12.0 → 13.7 → 18.1 with context; seqpar 10.8 → 11.0 → 11.9 — the slope
+claim. `SEQPAR_DEFAULT_ON_HEAD_DIMS = &[64]` shipped.
+
+**VINDEX3 carries it (#265) and the policy became a planner (#266).** The
+lowering's attention now tiers short/long (it had pinned the short kernel and
+overflowed its threadgroup scratch past span 1024) and dispatches KV-B1
+seqpar behind the shared policy, with a route witness (`serial N / seqpar M`)
+printed by `larql vindex3 exec --generate`. The hd-64 policy did **not**
+transfer to Glimmer (32 q-heads, 2 KV heads, head_dim 128), so the policy
+moved into `ops/attention_geometry.rs`: `(head_dim, q_heads, kv_heads, span)
+→ Serial | SeqPar { slices }` over measured rows, no model names, serial
+where unmeasured; the gpt-oss row reproduces the KV-B1 tiers (pinned by test).
+Glimmer's row, from the rested `off/2/4/8/off` surface (ms/token, serial
+brackets, identical ids on every arm, witness on every row):
+
+```text
+ctx    serial   2     4     8    serial   bracket   verdict
+512      73    70    69    68      77      5.5%    direction only → serial
+1024     88    83    83    79      89      1.1%    near-valid: 8 slices +12%
+2048    116    96    92    85     113      2.6%    lower bounds +18 / +23 / +33%
+4000    144     -   136   134     145      0.7%    VALID: +6.2% / +7.8%
+```
+
+→ serial below 1024, `SeqPar { 8 }` (the 1024-thread ceiling at head_dim 128)
+from 1024. Default policy at 2K: witness splits at position 1024, **116 → 92
+ms/token**, same trajectory. Glimmer serial curve: 61 / 73 / 88 / 116 / 144
+ms/token at 128 / 512 / 1K / 2K / 4K.
+
+**Method notes that paid for themselves today:** fresh-process sampling
+(`--repeat` is N correlated draws of one process); a per-process watchdog (a
+hang prints no row); rest before every arm (unrested arms drift monotonically
+in *time* and read as a slice-count cliff: 76 → 159 across nine minutes);
+route witnesses so performance and routing are separate assertions; and no
+timing claim from an evening's drifted machine — the planner's decode-path
+query was verified as `{64,64,8,1025} → 16 slices` and pinned by test instead.
+
+**What's next (order agreed 2026-08-16):**
+
+| # | Item | Condition that closes it | Status |
+|---|---|---|---|
+| A-1 | **What dominates Glimmer past ~2K?** B1's gain collapses (+33% → +8%) although 39/52 layers stay at their 2048 window. Hypothesis: 16:1 GQA read amplification — 16 query-head threadgroups per KV head each stream that head's whole K/V (~2 GB/token at 4K), which no intra-TG slicing touches. Discriminating experiment: synthetic attention bench, 32 per-head TGs vs 2 KV-head groups serving 16 queries from one K/V stream, at 2K and 4K. | The grouped form barely moves 2K and opens 4K (hypothesis holds) — or does not (falsified cheaply, before any kernel machinery). | open |
+| A-2 | **GQA-group attention kernel** if A-1 holds: one threadgroup per KV head serving its query group, then composed with seqpar / B2. Planner gains a `GqaGroup` geometry. | Bracketed Glimmer ladder 1K/2K/4K, same oracle trajectory, witness. | blocked on A-1 |
+| A-3 | **Re-certify Glimmer under the planner** — same oracle fixture (argmax 13796; interpreter parity), same guards; that becomes the engine baseline. | 32/32 id parity, no `[metal]` lines, tok/s on a rested bracket. | open |
+| A-4 | **Close the quant chain through the planner-aware lowerer** — Meta fixed KQuant and KQuant-dynamic alongside NVFP4 and the MXFP4 control. | Representation/Pareto branch declared closed. | open |
+| A-5 | **Small projection geometry** (Q/K/V/O GEMV) — the remaining conventional kernel weakness; the 20–21 → 22–23+ tok/s move. | Kernel-level then e2e bracket. | open |
+| A-6 | **(layer, role) → representation policy** from the Meta recipes + quality matrix. | Bytes down without the coarse FFN-only cost. | open |
+| A-7 | **Speculative decoding last**, entering at ~22–24 tok/s native. | — | open |
+| A-8 | **B2 (sequence tiles across threadgroups)** once B1's intra-TG width is spent — at head_dim 128 that is 8 slices. | Planner rung. | after A-2 |
+| A-9 | **gpt-oss through the same lowerer** — the proof it is an engine architecture, not a Glimmer implementation. | Same oracle discipline on gpt-oss. | after A-3 |
+
+The framing to keep: **mechanism is portable; optimal schedule is
+geometry-dependent.** VINDEX3 carries semantic geometry; the Metal planner
+owns the execution choice; the KV engines belong under the same planner.
+Individual techniques (kernel selection, seqpar) are not novel; the claim is
+integration from semantics down to execution.
+
+---
+
 ### K3 expert transport codec — CLOSED, cross-expert redundancy is nil (2026-08-10)
 
 Registry: `dec8-13-cross-expert-conditional-census` (programme `dec`), completed

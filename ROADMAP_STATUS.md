@@ -593,6 +593,17 @@ test is the one that covers what ships.
 
 ## Recently shipped (delta since last update)
 
+- **#229 closed; KV-B1 licensed; VINDEX3 carries seqpar; geometry planner (2026-08-16).**
+  One bug behind five faces: sliding-layer KV sized `window × 2` on a path that never
+  compacts — overrun from position 256, fixed + contained (every command-buffer wait
+  checked, failed steps refused, gather bounded) in #263. Then the bracketed A/B/C
+  ladder licensed `SEQPAR_DEFAULT_ON_HEAD_DIMS = &[64]` (+11.5 / +24.5 / +52.4%, #264);
+  the lowering carries seqpar behind the shared policy with a route witness (#265);
+  and the policy became `ops/attention_geometry.rs` — `(head_dim, q_heads, kv_heads,
+  span) → Serial | SeqPar{n}` over measured rows, Glimmer's from a rested surface:
+  2K decode 116 → 92 ms/token, same trajectory (#266). Past ~2K the gain collapses;
+  next rung is the GQA read-amplification discriminating bench (ROADMAP §"Attention
+  execution ladder", A-1).
 - **GPT-OSS-20B served end to end; Metal decode 10.2 → 59.8 tok/s (2026-08-09/10).**
   K3 R1 P4/P5 closed on both backends — `larql run gpt-oss-20b-q4k.vindex --metal`
   produces the **identical greedy trajectory to CPU at 16.7 ms/token**. Correctness
