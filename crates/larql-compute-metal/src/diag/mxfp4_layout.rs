@@ -256,9 +256,9 @@ pub fn race(
         .flat_map(|q| reference(q, &x, k, ORACLE_ROWS))
         .collect();
 
-    let bw_split = metal.bufs().get_bytes(&split_w);
-    let bs_split = metal.bufs().get_bytes(&split_s);
-    let bw_inter = metal.bufs().get_bytes(&inter);
+    let bw_split = metal.bufs().uncached_bytes(&split_w);
+    let bs_split = metal.bufs().uncached_bytes(&split_s);
+    let bw_inter = metal.bufs().uncached_bytes(&inter);
     let obytes = |v: &[u32]| -> Vec<u8> { v.iter().flat_map(|o| o.to_ne_bytes()).collect() };
     // Offset tables are ephemeral, so they must NOT go through the
     // address-keyed weight cache — see `BufferCache::uncached_bytes`.

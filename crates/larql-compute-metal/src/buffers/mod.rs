@@ -183,6 +183,18 @@ impl BufferCache {
     /// Use this for anything built on the fly — offset tables, per-call index
     /// lists — where address identity says nothing about content. Always copies,
     /// so the caller's buffer may be dropped immediately afterwards.
+    ///
+    /// **This is the safe default; [`Self::get_bytes`] is the optimisation.**
+    /// Caching on `(ptr, len)` is what keeps decode from re-uploading
+    /// gigabytes of weights per token, so the serving path must keep using
+    /// it — its operands are mmap'd and satisfy the contract. Everything
+    /// else should come here. `diag/` in particular builds synthetic
+    /// weights in locals and uploads once, outside the timed region, so it
+    /// gains nothing from the cache and carries all of its risk: a freed
+    /// local's address reused by the next arm's same-sized tensor returns
+    /// the *previous* arm's buffer, and since the aliasing guard in
+    /// `get_bytes` is a `debug_assert!`, a release-mode benchmark would
+    /// report a number computed on the wrong weights with no symptom.
     pub fn uncached_bytes(&self, data: &[u8]) -> Buffer {
         if data.is_empty() {
             return self

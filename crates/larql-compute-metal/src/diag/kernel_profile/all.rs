@@ -71,7 +71,7 @@ pub fn profile_all(n_layers: usize, warmup: usize, iters: usize) -> Vec<KernelRe
             let _ = metal.q6k_matvec(&w, &x, n, k);
         });
 
-        let wb = metal.bufs().get_bytes(&w);
+        let wb = metal.bufs().uncached_bytes(&w);
         let xb = metal.bufs().transient_from_f32(&x);
         let ob = metal.bufs().output((n * 4) as u64);
         let kh = &metal.quant.q6k_matvec_pipeline;
@@ -176,8 +176,8 @@ pub fn profile_all(n_layers: usize, warmup: usize, iters: usize) -> Vec<KernelRe
 
         // Isolated: use the trait method which handles dispatch internally.
         // We can't use trait method for gate+up (it's internal), so dispatch directly.
-        let wg = metal.bufs().get_bytes(&gate_q4k);
-        let wu = metal.bufs().get_bytes(&up_q4k);
+        let wg = metal.bufs().uncached_bytes(&gate_q4k);
+        let wu = metal.bufs().uncached_bytes(&up_q4k);
         let xb = metal.bufs().transient_from_f32(&x);
         let go = metal.bufs().output((n * 4) as u64);
         let uo = metal.bufs().output((n * 4) as u64);
@@ -326,7 +326,7 @@ pub fn profile_all(n_layers: usize, warmup: usize, iters: usize) -> Vec<KernelRe
         // missing here historically — Wo's "13.4 ms/tok" earlier
         // estimate was iso_ms × 34 which over-counts cmd-buffer
         // overhead.
-        let wb = metal.bufs().get_bytes(&w);
+        let wb = metal.bufs().uncached_bytes(&w);
         let xb = metal.bufs().transient_from_f32(&x);
         let ob = metal.bufs().output((n * 4) as u64);
         let kh = &metal.quant.q4k_matvec_pipeline;
@@ -390,9 +390,9 @@ pub fn profile_all(n_layers: usize, warmup: usize, iters: usize) -> Vec<KernelRe
         let wv = quantize_q4_k(&synth_f32(v_rows * k, 0.7));
         let x = synth_f32(k, 0.4);
 
-        let wqb = metal.bufs().get_bytes(&wq);
-        let wkb = metal.bufs().get_bytes(&wk);
-        let wvb = metal.bufs().get_bytes(&wv);
+        let wqb = metal.bufs().uncached_bytes(&wq);
+        let wkb = metal.bufs().uncached_bytes(&wk);
+        let wvb = metal.bufs().uncached_bytes(&wv);
         let xb = metal.bufs().transient_from_f32(&x);
         let qo = metal.bufs().output((q_rows * 4) as u64);
         let ko = metal.bufs().output((k_rows * 4) as u64);
@@ -480,9 +480,9 @@ pub fn profile_all(n_layers: usize, warmup: usize, iters: usize) -> Vec<KernelRe
         let h = synth_f32(k, 0.4);
         let norm_w = vec![1.0f32; k];
 
-        let wqb = metal.bufs().get_bytes(&wq);
-        let wkb = metal.bufs().get_bytes(&wk);
-        let wvb = metal.bufs().get_bytes(&wv);
+        let wqb = metal.bufs().uncached_bytes(&wq);
+        let wkb = metal.bufs().uncached_bytes(&wk);
+        let wvb = metal.bufs().uncached_bytes(&wv);
         let hb = metal.bufs().transient_from_f32(&h);
         let nb = metal.bufs().get_f32(&norm_w);
         let qo = metal.bufs().output((q_rows * 4) as u64);

@@ -45,9 +45,9 @@ pub fn profile_grouped_experts(
     let total_mb = (per_expert * top_k) as f64 / 1e6;
     let x = synth_f32(k, 0.5);
 
-    let wb = metal.bufs().get_bytes(&bank);
+    let wb = metal.bufs().uncached_bytes(&bank);
     let off_bytes: Vec<u8> = offsets.iter().flat_map(|o| o.to_ne_bytes()).collect();
-    let offb = metal.bufs().get_bytes(&off_bytes);
+    let offb = metal.bufs().uncached_bytes(&off_bytes);
     let xb = metal.bufs().transient_from_f32(&x);
     let out_single = metal.bufs().output((n * 4) as u64);
     let out_group = metal.bufs().output((top_k * n * 4) as u64);

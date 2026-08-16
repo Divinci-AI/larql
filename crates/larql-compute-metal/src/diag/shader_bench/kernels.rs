@@ -20,7 +20,7 @@ pub(crate) fn bench_q4_0_matvec(metal: &MetalBackend, cfg: &Config, shape: Shape
     let x = synth_f32(k, 0.31);
     let (q8_x, q8_scales) = quantize_to_q8(&x);
     let bufs = metal.bufs();
-    let wb = bufs.get_bytes(&w);
+    let wb = bufs.uncached_bytes(&w);
     let xb = bufs.transient_from_i8(&q8_x);
     let sb = bufs.transient_from_f32(&q8_scales);
     let ob = bufs.output((n * 4) as u64);
@@ -118,7 +118,7 @@ pub(crate) fn bench_qk_matvec(
 ) -> BenchResult {
     let x = synth_f32(k, 0.41);
     let bufs = metal.bufs();
-    let wb = bufs.get_bytes(w);
+    let wb = bufs.uncached_bytes(w);
     let xb = bufs.transient_from_f32(&x);
     let ob = bufs.output((n * 4) as u64);
     let n_val = n as u32;
@@ -229,8 +229,8 @@ pub(crate) fn bench_gate_up(
 ) -> BenchResult {
     let x = synth_f32(k, 0.61);
     let bufs = metal.bufs();
-    let gb = bufs.get_bytes(gate);
-    let ub = bufs.get_bytes(up);
+    let gb = bufs.uncached_bytes(gate);
+    let ub = bufs.uncached_bytes(up);
     let xb = bufs.transient_from_f32(&x);
     let go = bufs.output((n * 4) as u64);
     let uo = bufs.output((n * 4) as u64);
@@ -364,7 +364,7 @@ pub(crate) fn bench_geglu_down(
     let n = shape.hidden;
     let k = shape.inter;
     let bufs = metal.bufs();
-    let wb = bufs.get_bytes(weights);
+    let wb = bufs.uncached_bytes(weights);
     let gb = bufs.transient_from_f32(gate);
     let ub = bufs.transient_from_f32(up);
     let ob = bufs.output((n * 4) as u64);
@@ -481,9 +481,9 @@ pub(crate) fn bench_q4k_qkv(
 ) -> BenchResult {
     let x = synth_f32(shape.hidden, 0.91);
     let bufs = metal.bufs();
-    let wqb = bufs.get_bytes(wq);
-    let wkb = bufs.get_bytes(wk);
-    let wvb = bufs.get_bytes(wv);
+    let wqb = bufs.uncached_bytes(wq);
+    let wkb = bufs.uncached_bytes(wk);
+    let wvb = bufs.uncached_bytes(wv);
     let xb = bufs.transient_from_f32(&x);
     let qb = bufs.output((shape.q_rows * 4) as u64);
     let kb = bufs.output((shape.kv_rows * 4) as u64);
@@ -547,9 +547,9 @@ pub(crate) fn bench_q4k_q6k_qkv(
     let x = synth_f32(shape.hidden, 0.92);
     let norm_w = vec![1.0f32; shape.hidden];
     let bufs = metal.bufs();
-    let wqb = bufs.get_bytes(wq);
-    let wkb = bufs.get_bytes(wk);
-    let wvb = bufs.get_bytes(wv);
+    let wqb = bufs.uncached_bytes(wq);
+    let wkb = bufs.uncached_bytes(wk);
+    let wvb = bufs.uncached_bytes(wv);
     let xb = bufs.transient_from_f32(&x);
     let nb = bufs.transient_from_f32(&norm_w);
     let qb = bufs.output((shape.q_rows * 4) as u64);
