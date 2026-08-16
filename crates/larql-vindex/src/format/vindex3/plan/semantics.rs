@@ -33,6 +33,10 @@ pub const EXECUTION_SEMANTIC_KEYS: &[&str] = &[
     "final_logit_softcapping",
     "attn_logit_softcapping",
     "partial_rotary_factor",
+    // GPT-OSS clamps both halves of the fused gate/up projection at
+    // ±this value before the GLU. It changes what the FFN computes, so
+    // it is execution-semantic wherever it is declared.
+    "swiglu_limit",
 ];
 
 /// Keys that describe stored operands: widths, depths, head geometry,
@@ -68,9 +72,46 @@ pub const INTERFACE_SEMANTIC_KEYS: &[&str] = &[
 /// Identity facts inert for a forward pass wherever they appear.
 pub const METADATA_KEYS: &[&str] = &["model_type", "tie_word_embeddings"];
 
+/// Keys that parameterise *training* and are inert at inference. Each
+/// entry must name the training-time path it belongs to, because "we
+/// don't run that" is the entire justification for dropping it.
+pub const TRAINING_ONLY_KEYS: &[&str] = &[
+    // MoE load-balancing auxiliary loss: added to the training objective,
+    // never read on a forward pass.
+    "router_aux_loss_coef",
+    // Whether the model *returns* router logits alongside hidden states —
+    // a training/analysis output switch. It changes what is returned, not
+    // what is computed, and generic execution returns logits only.
+    "output_router_logits",
+];
+
+/// Redundant spellings: `alias → canonical`. An entry claims the same
+/// fact is declared under `canonical` *in the same config* and read
+/// there, which the gate verifies — so listing a key here cannot silence
+/// it if the canonical spelling is missing or disagrees.
+pub const ALIAS_KEYS: &[(&str, &str)] = &[
+    // GPT-OSS declares both spellings, with the same value; the parser's
+    // alias list reads `num_experts_per_tok`.
+    ("experts_per_token", "num_experts_per_tok"),
+    // The pre-scaling context length, also declared inside the rope
+    // scaling block, which is where the parser reads it.
+    (
+        "initial_context_length",
+        "rope_scaling.original_max_position_embeddings",
+    ),
+];
+
 /// Reviewed-and-safe-to-drop keys. Empty by design until a key has actually
 /// been reviewed; every future entry must carry a justification comment.
 pub const IGNORED_SAFE_KEYS: &[&str] = &[];
+
+/// The canonical spelling this leaf aliases, if it is a registered alias.
+pub fn alias_canonical(leaf: &str) -> Option<&'static str> {
+    ALIAS_KEYS
+        .iter()
+        .find(|(alias, _)| *alias == leaf)
+        .map(|(_, canonical)| *canonical)
+}
 
 /// Classify an unconsumed config key by its leaf name.
 pub fn classify_key(leaf: &str) -> SemanticClass {
@@ -82,6 +123,10 @@ pub fn classify_key(leaf: &str) -> SemanticClass {
         SemanticClass::InterfaceSemantic
     } else if METADATA_KEYS.contains(&leaf) {
         SemanticClass::MetadataOnly
+    } else if TRAINING_ONLY_KEYS.contains(&leaf) {
+        SemanticClass::TrainingOnly
+    } else if alias_canonical(leaf).is_some() {
+        SemanticClass::Alias
     } else if IGNORED_SAFE_KEYS.contains(&leaf) {
         SemanticClass::IgnoredSafe
     } else {

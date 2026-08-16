@@ -18,6 +18,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::carriage::Carriage;
 use crate::format::vindex3::graph::SystemGraph;
 
 /// Current plan schema. Bump on any breaking change to these types.
@@ -25,7 +26,13 @@ use crate::format::vindex3::graph::SystemGraph;
 /// v2: the plan carries the built [`SystemGraph`] — representability is
 /// defined as "the graph builder placed it", and the graph is the proof.
 /// Interfaces are reported as resolved edges rather than candidate guesses.
-pub const PLAN_SCHEMA: u32 = 2;
+///
+/// v3: findings about config keys carry a [`Carriage`] stage, and the
+/// census reports every declared key rather than only the unconsumed
+/// ones — so `unrepresented: N` is a count against a stated denominator
+/// instead of a lower bound. Adds the `training_only` and `alias`
+/// semantic classes.
+pub const PLAN_SCHEMA: u32 = 3;
 
 /// The whole-system plan over every artifact given.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,6 +91,15 @@ pub struct Finding {
     /// Value this build resolves, when the finding compares values.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resolved: Option<serde_json::Value>,
+    /// How far VINDEX3 carries the subject past the parser, for findings
+    /// about a config key. `None` for findings about tensors, topology or
+    /// interfaces, where carriage is not the question being asked.
+    ///
+    /// This is the field that keeps `consumed` from being read as
+    /// `represented`: a key can be parsed and go no further, and the plan
+    /// now says which.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub carriage: Option<Carriage>,
     pub detail: String,
 }
 
@@ -119,6 +135,17 @@ pub enum SemanticClass {
     IgnoredSafe,
     /// Identity/training facts inert for a forward pass.
     MetadataOnly,
+    /// Declared for training and inert at inference — an auxiliary-loss
+    /// coefficient, a router-logit output switch. Distinct from
+    /// [`Self::MetadataOnly`]: these describe the *forward pass of
+    /// training*, so the reason they are safe to drop is that inference
+    /// does not run that path, not that they are identity strings.
+    TrainingOnly,
+    /// A redundant spelling of a fact the checkpoint declares elsewhere
+    /// and a parser reads. Safe only while the canonical key is present
+    /// and agrees — the registry names it and the gate checks both, so
+    /// `alias` cannot become a way to silence a key.
+    Alias,
     /// Changes what a forward pass computes (norm eps, rope, scales…).
     ExecutionSemantic,
     /// Describes stored operands (shapes, widths, component topology).
@@ -170,6 +197,7 @@ mod tests {
             subject: "x".into(),
             declared: None,
             resolved: None,
+            carriage: None,
             detail: String::new(),
         };
         assert!(!finding.blocks());
@@ -190,6 +218,7 @@ mod tests {
                 subject: "x".into(),
                 declared: None,
                 resolved: None,
+                carriage: None,
                 detail: String::new(),
             };
             assert!(finding.blocks(), "{class:?} must block");
@@ -206,6 +235,7 @@ mod tests {
                 subject: "x".into(),
                 declared: None,
                 resolved: None,
+                carriage: None,
                 detail: String::new(),
             };
             assert!(!finding.blocks(), "{class:?} must not block");

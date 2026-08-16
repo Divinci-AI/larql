@@ -182,6 +182,36 @@ pub struct MetalBackend {
 }
 
 impl MetalBackend {
+    /// The underlying device, for diagnostics that need to create
+    /// device-level objects (counter sample buffers).
+    pub fn device_ref(&self) -> metal::Device {
+        self.queue.device().to_owned()
+    }
+
+    /// Submit an empty command buffer and wait. The pure driver
+    /// round-trip floor — diagnostic only, computes nothing.
+    pub fn empty_roundtrip(&self) {
+        let cmd = self.queue.new_command_buffer();
+        cmd.commit();
+        let _ = crate::cb_status::wait_checked(
+            cmd,
+            "crates/larql-compute-metal/src/backend/mod.rs:196",
+        );
+    }
+
+    /// The same, with an empty compute encoder opened and closed, which
+    /// is the minimum shape any real dispatch pays.
+    pub fn empty_encoder_roundtrip(&self) {
+        let cmd = self.queue.new_command_buffer();
+        let enc = cmd.new_compute_command_encoder();
+        enc.end_encoding();
+        cmd.commit();
+        let _ = crate::cb_status::wait_checked(
+            cmd,
+            "crates/larql-compute-metal/src/backend/mod.rs:206",
+        );
+    }
+
     /// Create a Metal backend with default options derived from the
     /// process environment. Returns `None` if no Metal device is
     /// available.

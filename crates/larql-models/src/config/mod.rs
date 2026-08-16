@@ -39,7 +39,9 @@ pub use attention_gate::{
 pub use experts::{
     ExpertFormat, ExpertGatePolicy, ExpertRoutingPolicy, GateUpBranch, GateUpLayout,
 };
-pub use layer_types::{LAYER_TYPE_FULL_ATTENTION, LAYER_TYPE_SLIDING_ATTENTION};
+pub use layer_types::{
+    LAYER_TYPE_FULL_ATTENTION, LAYER_TYPE_SLIDING_ATTENTION, LAYER_TYPE_WINDOW_ATTENTION,
+};
 pub use model_config::ModelConfig;
 pub use moe_router::MoeRouterKind;
 pub use norm::{EmbeddingNorm, NormSpec, NormType, ParameterFreeQkNorm, PostNormEps, QkNormScope};

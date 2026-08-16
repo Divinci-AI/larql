@@ -129,3 +129,65 @@ fn topology_round_trips_through_json() {
     assert_eq!(back.name, "vision");
     assert_eq!(back.patch.patch_size, Some(14));
 }
+
+/// A `*_config` object that declares no topology is a policy block, not a
+/// component. GPT-OSS's real `quantization_config` is the witness: read as
+/// a component it produced a phantom with zero layers and zero heads,
+/// whose execution surface then failed completeness and blocked the plan
+/// for a reason about the reader rather than the model.
+#[test]
+fn a_config_block_with_no_topology_is_not_a_component() {
+    let config = json!({
+        "vision_config": { "hidden_size": 32 },
+        "quantization_config": {
+            "modules_to_not_convert": [
+                "model.layers.*.self_attn",
+                "model.layers.*.mlp.router",
+                "model.embed_tokens",
+                "lm_head"
+            ],
+            "quant_method": "mxfp4"
+        }
+    });
+    let readings = read_components(&config);
+    let names: Vec<&str> = readings.iter().map(|r| r.topology.name.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["vision"],
+        "quantization_config is not a component"
+    );
+    // Its keys must stay uncredited, so they still face the semantics
+    // registry rather than vanishing into a component that does not exist.
+    assert!(
+        !readings.iter().any(|r| r
+            .consumed_paths
+            .iter()
+            .any(|p| p.starts_with("quantization_config"))),
+        "a rejected reading must not credit its keys as consumed"
+    );
+}
+
+/// The rule is evidence-based, not a name denylist: any single topology
+/// fact is enough to make a nested block a component, and a block with
+/// none is rejected whatever it is called.
+#[test]
+fn topology_evidence_alone_decides_componenthood() {
+    for (fact, value) in [
+        ("hidden_size", json!(32)),
+        ("num_hidden_layers", json!(4)),
+        ("layer_types", json!(["full_attention"])),
+        ("patch_size", json!(14)),
+    ] {
+        let config = json!({ "mystery_config": { fact: value } });
+        assert_eq!(
+            read_components(&config).len(),
+            1,
+            "`{fact}` is topology evidence and must make a component"
+        );
+    }
+    let inert = json!({ "mystery_config": { "some_policy": "value", "flag": true } });
+    assert!(
+        read_components(&inert).is_empty(),
+        "a block with no topology fact is not a component"
+    );
+}

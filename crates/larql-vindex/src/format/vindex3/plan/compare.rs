@@ -123,6 +123,7 @@ fn value_finding(
         class,
         component: component_of(path),
         subject: path.to_string(),
+        carriage: None,
         detail: if agrees {
             "declared and resolved agree".to_string()
         } else {
@@ -196,6 +197,7 @@ fn layer_rope_theta_findings(inventory: &ArchitectureInventory) -> Option<Findin
         class: SemanticClass::ExecutionSemantic,
         component: component_of(&fact.path),
         subject: fact.path.clone(),
+        carriage: None,
         detail: if agrees {
             "per-layer position policies all honoured (NoPE included)".to_string()
         } else {
@@ -243,6 +245,7 @@ fn layer_types_finding(inventory: &ArchitectureInventory) -> Option<Finding> {
         class: SemanticClass::ExecutionSemantic,
         component: component_of(&fact.path),
         subject: fact.path.clone(),
+        carriage: None,
         detail: if agrees {
             format!(
                 "declared interleave honoured ({} sliding / {} full)",

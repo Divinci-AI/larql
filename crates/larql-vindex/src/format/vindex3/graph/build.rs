@@ -9,6 +9,7 @@
 
 use std::collections::BTreeMap;
 
+use larql_models::config::PositionPolicy;
 use larql_models::inventory::{ArchitectureInventory, TensorGroup};
 
 use super::component::{Component, ComponentRole};
@@ -161,9 +162,11 @@ pub fn build_from_inventories(named: &[(String, ArchitectureInventory)]) -> Buil
                 source_artifact: artifact.clone(),
                 num_layers: nested.num_layers.unwrap_or(0),
                 hidden_size: nested.hidden_size.unwrap_or(0),
-                // No per-layer resolution exists for nested components yet;
-                // absent is honest, a fabricated table would not be.
-                attention: None,
+                // From the component's own topology, the same way the
+                // text path derives its table from its own resolution.
+                // `None` only when the component declares no interleave,
+                // or names a span the vocabulary cannot express.
+                attention: nested_attention_table(nested),
                 execution: None, // attached in pass 3
             });
         }
@@ -373,6 +376,44 @@ fn attention_table(inventory: &ArchitectureInventory) -> Vec<AttentionLayerPolic
             },
             window: layer.window,
             position: layer.position,
+        })
+        .collect()
+}
+
+/// The per-layer policy of a **nested** component, from that component's
+/// own declared topology.
+///
+/// The same shape as [`attention_table`] one level down: a component's
+/// per-layer policy comes from that component's facts. Nested components
+/// previously carried `attention: None` — honest at the time, but it
+/// meant a perception tower's declared interleave and rope base were
+/// parsed into [`ComponentTopology`] and then dropped before the graph,
+/// with nothing reporting the loss.
+///
+/// `None` when the component declares no `layer_types` (there is no
+/// interleave to record) or when it names a span the vocabulary does not
+/// contain — refusing rather than resolving an unknown spelling to a
+/// default, which is the failure this vocabulary exists to prevent.
+fn nested_attention_table(
+    topology: &larql_models::inventory::components::ComponentTopology,
+) -> Option<Vec<AttentionLayerPolicy>> {
+    let layer_types = topology.layer_types.as_ref()?;
+    // A rope base the component declares for itself; absent means the
+    // component states no position policy, which is a fact, not a zero.
+    let position = match topology.rope_theta {
+        Some(theta) => PositionPolicy::from_declared_theta(theta),
+        None => PositionPolicy::None,
+    };
+    layer_types
+        .iter()
+        .map(|entry| {
+            Some(AttentionLayerPolicy {
+                span: AttentionSpan::from_declared(entry)?,
+                // No nested component declares a sequence window today;
+                // a spatial window's extent is not a position count.
+                window: None,
+                position,
+            })
         })
         .collect()
 }

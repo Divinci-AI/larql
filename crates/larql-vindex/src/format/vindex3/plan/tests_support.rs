@@ -129,13 +129,25 @@ pub fn glimmer_shaped_target_with(
             "output_multiplier": 0.196,
             "post_norm_eps": 1e-8
         },
+        // The vision tower declares its own interleave and rope base.
+        // Both were absent from this fixture until the carriage gate
+        // found them dropped on the real checkpoint — the fixture could
+        // not see a hole it did not declare, so the nested-component
+        // policy gap passed every test while failing the actual model.
         "vision_config": {
             "hidden_size": 32,
-            "num_hidden_layers": 2,
+            "num_hidden_layers": 4,
             "num_attention_heads": 4,
             "intermediate_size": 128,
             "hidden_act": "gelu",
-            "layer_norm_eps": 1e-6
+            "layer_norm_eps": 1e-6,
+            "layer_types": [
+                "window_attention",
+                "window_attention",
+                "window_attention",
+                "full_attention"
+            ],
+            "rope_parameters": { "rope_theta": 10000.0, "rope_type": "default" }
         }
     });
     mutate(&mut config);

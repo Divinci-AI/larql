@@ -81,6 +81,39 @@ impl PatchGeometry {
     }
 }
 
+impl ComponentTopology {
+    /// Whether this reading found any fact that only a *model component*
+    /// can declare — depth, width, head geometry, norm, activation,
+    /// position, or patch geometry.
+    ///
+    /// The `*_config` suffix alone does not make a component: a checkpoint
+    /// may nest policy blocks under the same spelling. GPT-OSS's
+    /// `quantization_config` declares `quant_method` and
+    /// `modules_to_not_convert` and no geometry at all — read as a
+    /// component it became a phantom with zero layers and zero heads,
+    /// which then failed execution-surface completeness ("hidden 0 not
+    /// divisible by 0 heads") and blocked the plan for a reason that was
+    /// about the reader, not the model.
+    ///
+    /// Judged on declared evidence rather than a name denylist, so a
+    /// future `*_config` policy block is excluded by the same rule
+    /// without anyone adding its name here.
+    pub fn declares_topology(&self) -> bool {
+        self.hidden_size.is_some()
+            || self.intermediate_size.is_some()
+            || self.num_layers.is_some()
+            || self.num_attention_heads.is_some()
+            || self.num_key_value_heads.is_some()
+            || self.head_dim.is_some()
+            || self.layer_types.is_some()
+            || self.norm_eps.is_some()
+            || self.hidden_act.is_some()
+            || self.rope_theta.is_some()
+            || self.max_position_embeddings.is_some()
+            || !self.patch.is_empty()
+    }
+}
+
 /// A component reading: the topology plus the exact key paths consumed to
 /// produce it (paths are full, from the config root).
 pub struct ComponentReading {
@@ -100,6 +133,12 @@ pub fn read_components(config: &Value) -> Vec<ComponentReading> {
                 && !MAIN_PARSER_COMPONENTS.contains(&key.as_str())
         })
         .map(|(key, value)| read_component(key, value))
+        // A `*_config` object that declares no topology is not a component
+        // (see [`ComponentTopology::declares_topology`]). Rejecting the whole
+        // reading also withholds its `consumed_paths`, so its keys stay
+        // unconsumed and face the semantics registry rather than being
+        // credited to a component that does not exist.
+        .filter(|reading| reading.topology.declares_topology())
         .collect()
 }
 

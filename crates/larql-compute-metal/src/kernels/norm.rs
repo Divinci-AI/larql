@@ -77,6 +77,16 @@ pub struct NormKernels {
     /// the norm registry because it sits in the same residual-stream
     /// "small ops" cluster.
     pub scale_vector_pipeline: ComputePipelineState,
+
+    /// Weightless per-head RMS for Q/K — the judged
+    /// `ParameterFreeQkNorm` semantics, which every weighted `qk_norm`
+    /// kernel here is unable to express (VINDEX3-G6b).
+    pub qk_norm_parameter_free_pipeline: ComputePipelineState,
+    /// `out = a * sigmoid(g)` — the judged attention output gate.
+    pub sigmoid_gate_multiply_pipeline: ComputePipelineState,
+    /// `logits = softcap(multiplier * x)` — the head's two judged
+    /// elementwise ops, fused because their order is semantic.
+    pub head_scale_softcap_pipeline: ComputePipelineState,
 }
 
 impl NormKernels {
@@ -125,6 +135,15 @@ impl NormKernels {
                 device, library,
             ),
 
+            qk_norm_parameter_free_pipeline: r::<shaders::plan_glue::QkNormParameterFreeKernel>(
+                device, library,
+            ),
+            sigmoid_gate_multiply_pipeline: r::<shaders::plan_glue::SigmoidGateMultiplyKernel>(
+                device, library,
+            ),
+            head_scale_softcap_pipeline: r::<shaders::plan_glue::HeadScaleSoftcapKernel>(
+                device, library,
+            ),
             scale_vector_pipeline: r::<shaders::residual_inject::ScaleVectorKernel>(
                 device, library,
             ),
