@@ -850,10 +850,16 @@ impl DecodeBackend for MetalBackend {
                 out: &mut hits,
             }),
         );
-        // A decode that produced no hidden state produced no logits
-        // either; report that as `None` rather than an empty top-K, which
-        // the caller would read as "the head ran and found nothing".
-        hidden_out?;
+        // `None` from the step means a command buffer inside it failed
+        // (`cb_status`): the step *ran* — KV was appended — but its bytes
+        // are poison. That must not read as a refusal, or the caller would
+        // fall through to the unfused path and run the same token again on
+        // top of the appended KV. Report it as an empty top-K instead:
+        // "the step ran and has no usable candidates", which the caller
+        // treats as terminal.
+        if hidden_out.is_none() {
+            return Some(Vec::new());
+        }
         hits
     }
 

@@ -377,7 +377,10 @@ pub fn race(
             }
             enc.end_encoding();
             cmd.commit();
-            cmd.wait_until_completed();
+            let _ = crate::cb_status::wait_checked(
+                cmd,
+                "crates/larql-compute-metal/src/diag/mxfp4_layout.rs:380",
+            );
             if i >= warmup {
                 times.push(t.elapsed().as_secs_f64() * 1e3 / batch as f64);
             }

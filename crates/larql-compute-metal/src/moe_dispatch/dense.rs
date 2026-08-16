@@ -106,7 +106,10 @@ impl MetalBackend {
 
         enc.end_encoding();
         cmd.commit();
-        cmd.wait_until_completed();
+        let _ = crate::cb_status::wait_checked(
+            cmd,
+            "crates/larql-compute-metal/src/moe_dispatch/dense.rs:109",
+        );
 
         let result = read_buffer_f32(&out_buf, hidden);
 

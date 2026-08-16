@@ -95,7 +95,10 @@ pub(super) fn measure_single_cmdbuf_batched(
         }
         enc.end_encoding();
         cmd.commit();
-        cmd.wait_until_completed();
+        let _ = crate::cb_status::wait_checked(
+            cmd,
+            "crates/larql-compute-metal/src/diag/kernel_profile/measure.rs:98",
+        );
         let ms = t.elapsed().as_secs_f64() * 1000.0;
         if i >= warmup {
             times.push(ms / n_layers as f64);

@@ -184,6 +184,13 @@ impl Rig {
             enc.set_buffer(7, Some(&dn_sc), 0);
             enc.set_bytes(8, 4, &n as *const u32 as *const _);
             enc.set_bytes(9, 4, &ghb as *const u32 as *const _);
+            // #229 bounds guard: the table's length and a refusal counter.
+            let num_experts = NUM_EXPERTS as u32;
+            enc.set_bytes(10, 4, &num_experts as *const u32 as *const _);
+            let bad_ids = self
+                .device
+                .new_buffer(4, MTLResourceOptions::StorageModeShared);
+            enc.set_buffer(11, Some(&bad_ids), 0);
             enc.dispatch_threads(
                 MTLSize::new(n_slots as u64, 1, 1),
                 MTLSize::new(n_slots as u64, 1, 1),
@@ -355,6 +362,13 @@ fn up_half_table_matches_shifted_control_bitwise() {
     enc.set_buffer(7, Some(&dn_sc), 0);
     enc.set_bytes(8, 4, &n as *const u32 as *const _);
     enc.set_bytes(9, 4, &ghb as *const u32 as *const _);
+    // #229 bounds guard: the table's length and a refusal counter.
+    let num_experts = NUM_EXPERTS as u32;
+    enc.set_bytes(10, 4, &num_experts as *const u32 as *const _);
+    let bad_ids = rig
+        .device
+        .new_buffer(4, MTLResourceOptions::StorageModeShared);
+    enc.set_buffer(11, Some(&bad_ids), 0);
     enc.dispatch_threads(MTLSize::new(n as u64, 1, 1), MTLSize::new(n as u64, 1, 1));
 
     let n_u32 = N_ROWS as u32;

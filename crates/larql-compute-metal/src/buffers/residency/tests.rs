@@ -154,7 +154,10 @@ fn attaching_to_a_queue_reports_whether_it_took() {
         let enc = cmd.new_compute_command_encoder();
         enc.end_encoding();
         cmd.commit();
-        cmd.wait_until_completed();
+        let _ = crate::cb_status::wait_checked(
+            cmd,
+            "crates/larql-compute-metal/src/buffers/residency/tests.rs:157",
+        );
     }
 }
 

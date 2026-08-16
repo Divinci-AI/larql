@@ -235,8 +235,15 @@ where
             generated_ids,
             on_token,
         ) else {
+            // Empty candidates: either the head found nothing, or the fused
+            // step ran and a command buffer inside it failed (a GPU fault —
+            // the backend reports that as an empty top-K so the token is
+            // not re-run on top of its already-appended KV). Terminal
+            // either way; a poisoned step must never reach the sampler.
             if profile {
-                eprintln!("[profile] step={step} — lm_head returned empty; break");
+                eprintln!(
+                    "[profile] step={step} — no candidates (empty head, or GPU step failed); break"
+                );
             }
             break;
         };

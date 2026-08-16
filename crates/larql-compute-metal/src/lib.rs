@@ -59,6 +59,10 @@ pub mod backend;
 pub mod buffers;
 #[cfg(target_os = "macos")]
 pub mod calibration;
+
+/// Command-buffer completion status (#229 instrumentation).
+pub mod cb_status;
+
 #[cfg(target_os = "macos")]
 pub mod decode;
 #[cfg(target_os = "macos")]
@@ -73,6 +77,8 @@ pub mod kv_residency_contract;
 pub mod ops;
 #[cfg(target_os = "macos")]
 pub mod options;
+/// Router-id bounds guard for the descriptor gather (#229).
+pub mod route_guard;
 #[cfg(target_os = "macos")]
 pub mod shaders;
 #[cfg(target_os = "macos")]

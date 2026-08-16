@@ -56,7 +56,10 @@ impl QuantMatVec for MetalBackend {
             self.encode_argmax_partial(enc, &scores, num_rows);
         enc.end_encoding();
         cmd.commit();
-        cmd.wait_until_completed();
+        let _ = crate::cb_status::wait_checked(
+            cmd,
+            "crates/larql-compute-metal/src/trait_impl/quant_matvec.rs:59",
+        );
         Self::reduce_argmax_partial(&partial_vals, &partial_idxs, n_partials)
     }
 
@@ -100,7 +103,10 @@ impl QuantMatVec for MetalBackend {
             self.encode_topk_partial(enc, &scores, num_rows);
         enc.end_encoding();
         cmd.commit();
-        cmd.wait_until_completed();
+        let _ = crate::cb_status::wait_checked(
+            cmd,
+            "crates/larql-compute-metal/src/trait_impl/quant_matvec.rs:103",
+        );
         Some(MetalBackend::reduce_topk_partial(
             &partial_vals,
             &partial_idxs,
@@ -181,7 +187,10 @@ impl QuantMatVec for MetalBackend {
         );
         enc.end_encoding();
         cmd.commit();
-        cmd.wait_until_completed();
+        let _ = crate::cb_status::wait_checked(
+            cmd,
+            "crates/larql-compute-metal/src/trait_impl/quant_matvec.rs:184",
+        );
 
         Some(crate::buffers::read_buffer_f32(&buf_out, num_rows))
     }
@@ -231,7 +240,10 @@ impl QuantMatVec for MetalBackend {
             self.encode_topk_partial(enc, &buf_out, num_rows);
         enc.end_encoding();
         cmd.commit();
-        cmd.wait_until_completed();
+        let _ = crate::cb_status::wait_checked(
+            cmd,
+            "crates/larql-compute-metal/src/trait_impl/quant_matvec.rs:234",
+        );
         Some(MetalBackend::reduce_topk_partial(
             &partial_vals,
             &partial_idxs,
@@ -288,7 +300,10 @@ impl QuantMatVec for MetalBackend {
         );
         enc.end_encoding();
         cmd.commit();
-        cmd.wait_until_completed();
+        let _ = crate::cb_status::wait_checked(
+            cmd,
+            "crates/larql-compute-metal/src/trait_impl/quant_matvec.rs:291",
+        );
 
         Some(crate::buffers::read_buffer_f32(
             &buf_out,
@@ -333,7 +348,10 @@ impl QuantMatVec for MetalBackend {
         );
         enc.end_encoding();
         cmd.commit();
-        cmd.wait_until_completed();
+        let _ = crate::cb_status::wait_checked(
+            cmd,
+            "crates/larql-compute-metal/src/trait_impl/quant_matvec.rs:336",
+        );
 
         Some(crate::buffers::read_buffer_f32(&buf_out, num_rows))
     }

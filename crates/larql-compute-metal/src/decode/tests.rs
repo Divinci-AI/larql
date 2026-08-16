@@ -161,3 +161,93 @@ fn ensure_kv_cache_does_not_shrink_for_a_shorter_prompt() {
         "cache shrank on a shorter request"
     );
 }
+
+/// A minimal `FullPipelineLayer` whose only live fact is `sliding_window`.
+fn layer_with_window(norm: &[f32], sliding_window: usize) -> larql_compute::FullPipelineLayer<'_> {
+    use larql_compute::{Activation, FfnType, NormType, QuantAux, QuantFormat, QuantWeight};
+    let empty_q4 = QuantWeight::new(QuantFormat::Q4_K, &[], QuantAux::None);
+    larql_compute::FullPipelineLayer {
+        attn_sinks: None,
+        attn_q_bias: None,
+        attn_k_bias: None,
+        attn_v_bias: None,
+        attn_o_bias: None,
+        attn_softcap: 0.0,
+        wq: empty_q4,
+        wk: empty_q4,
+        wv: empty_q4,
+        wo: empty_q4,
+        gate: empty_q4,
+        up: empty_q4,
+        down: empty_q4,
+        input_norm: norm,
+        post_attn_norm: norm,
+        pre_ffn_norm: None,
+        post_ffn_norm: None,
+        input_norm_bias: None,
+        post_attn_norm_bias: None,
+        norm_offset: 1.0,
+        qk_norm_offset: 0.0,
+        eps: 1e-6,
+        has_post_norms: false,
+        norm_type: NormType::RmsNorm,
+        ffn_type: FfnType::Gated,
+        activation: Activation::Silu,
+        attn_scale: 0.125,
+        head_dim: 64,
+        num_q_heads: 8,
+        num_kv_heads: 8,
+        rope_base: 10000.0,
+        rotary_dim: 0,
+        rope_freq: larql_compute::attention::rope::RopeFreqPlan::unscaled(
+            64_usize,
+            0_usize,
+            10000.0_f64,
+        ),
+        sliding_window,
+        has_v_norm: false,
+        layer_scalar: 1.0,
+        q_norm_weight: None,
+        k_norm_weight: None,
+        ffn_up_bias: None,
+        ffn_down_bias: None,
+        moe: None,
+        ffn_is_remote: false,
+        moe_combined_output_norm: false,
+        moe_outer_post_norm: None,
+        kv_shared_source: None,
+        residual_multiplier: 1.0,
+        ple_input_gate: None,
+        ple_projection: None,
+        ple_post_norm: None,
+    }
+}
+
+/// #229. The decode path appends row `current_len` and attends absolute
+/// rows `[T - window, T)`; **nothing on it compacts** — `compact_kv_to_window`
+/// is called only by the KV-engine `coarse_*` path. So a sliding layer
+/// allocated at `window x KV_COMPACTION_SLACK` (256 rows for gpt-oss) is
+/// written and read past its buffer from position 256 on, by a growing
+/// margin: ~3.5 MB per K/V buffer at a ~2K prompt. That is self-consistent
+/// until another allocation lands on the same memory — then NaN in the
+/// residual, NaN router softmax, `~0u` expert ids, and a GPU page fault in
+/// the descriptor gather. Every layer this path allocates must hold the
+/// full requested `max_seq`.
+#[test]
+fn decode_path_sizes_sliding_layers_for_the_full_max_seq_because_it_never_compacts() {
+    let be = gpu_or_skip!();
+    let norm = vec![1.0f32; 64];
+    let layers = [layer_with_window(&norm, 128), layer_with_window(&norm, 0)];
+    let mut cache = None;
+    let kv = be.ensure_kv_cache_for_layers(&mut cache, &layers, 4096);
+    for (i, layer) in kv.layers.iter().enumerate() {
+        assert!(
+            layer.max_seq >= 4096,
+            "layer {i} (sliding_window {}) allocated {} rows for a 4096-row request; \
+             the decode path never compacts, so position {} would append past the buffer",
+            layers[i].sliding_window,
+            layer.max_seq,
+            layer.max_seq
+        );
+    }
+}

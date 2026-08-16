@@ -159,7 +159,10 @@ impl MetalBackend {
         );
         enc.end_encoding();
         cmd.commit();
-        cmd.wait_until_completed();
+        let _ = crate::cb_status::wait_checked(
+            cmd,
+            "crates/larql-compute-metal/src/trait_impl/mxfp4.rs:162",
+        );
 
         Ok(crate::buffers::read_buffer_f32(&buf_out, m))
     }

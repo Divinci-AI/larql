@@ -511,7 +511,10 @@ impl MetalBackend {
         self.encode_experts_zero_copy(enc, expert_input, moe, scratch, resolved);
         enc.end_encoding();
         cmd.commit();
-        cmd.wait_until_completed();
+        let _ = crate::cb_status::wait_checked(
+            cmd,
+            "crates/larql-compute-metal/src/moe_zero_copy.rs:514",
+        );
         let t_gpu = t_start.elapsed();
 
         // ── Readback: down bias joins each expert's output BEFORE the

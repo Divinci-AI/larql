@@ -191,7 +191,10 @@ mod tests {
         );
         enc.end_encoding();
         cmd.commit();
-        cmd.wait_until_completed();
+        let _ = crate::cb_status::wait_checked(
+            cmd,
+            "crates/larql-compute-metal/src/stages/qk_norm.rs:194",
+        );
 
         let q_out = crate::buffers::read_buffer_f32(&q_buf, num_q_heads * head_dim);
         let k_out = crate::buffers::read_buffer_f32(&k_buf, num_kv_heads * head_dim);
@@ -240,7 +243,10 @@ mod tests {
         );
         enc.end_encoding();
         cmd.commit();
-        cmd.wait_until_completed();
+        let _ = crate::cb_status::wait_checked(
+            cmd,
+            "crates/larql-compute-metal/src/stages/qk_norm.rs:243",
+        );
 
         let v_out = crate::buffers::read_buffer_f32(&v_buf, num_kv_heads * head_dim);
         assert!(

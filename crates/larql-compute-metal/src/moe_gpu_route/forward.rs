@@ -43,7 +43,10 @@ impl MetalBackend {
         );
         enc.end_encoding();
         cmd.commit();
-        cmd.wait_until_completed();
+        let _ = crate::cb_status::wait_checked(
+            cmd,
+            "crates/larql-compute-metal/src/moe_gpu_route/forward.rs:46",
+        );
         crate::buffers::try_read_buffer_f32(&new_h, hidden)
     }
 
@@ -153,7 +156,10 @@ impl MetalBackend {
         );
         enc.end_encoding();
         cmd.commit();
-        cmd.wait_until_completed();
+        let _ = crate::cb_status::wait_checked(
+            cmd,
+            "crates/larql-compute-metal/src/moe_gpu_route/forward.rs:156",
+        );
         crate::buffers::try_read_buffer_f32(&new_h, hidden)
     }
 }
@@ -275,7 +281,10 @@ impl MetalBackend {
             }
             enc.end_encoding();
             cmd.commit();
-            cmd.wait_until_completed();
+            let _ = crate::cb_status::wait_checked(
+                cmd,
+                "crates/larql-compute-metal/src/moe_gpu_route/forward.rs:278",
+            );
             windows.push(unsafe {
                 let start: f64 = msg_send![cmd, GPUStartTime];
                 let end: f64 = msg_send![cmd, GPUEndTime];
@@ -290,7 +299,10 @@ impl MetalBackend {
                 encode_layer(enc, &prev, out);
                 enc.end_encoding();
                 cmd.commit();
-                cmd.wait_until_completed();
+                let _ = crate::cb_status::wait_checked(
+                    cmd,
+                    "crates/larql-compute-metal/src/moe_gpu_route/forward.rs:293",
+                );
                 windows.push(unsafe {
                     let start: f64 = msg_send![cmd, GPUStartTime];
                     let end: f64 = msg_send![cmd, GPUEndTime];

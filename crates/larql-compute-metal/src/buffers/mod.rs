@@ -250,6 +250,21 @@ impl BufferCache {
     pub fn output(&self, bytes: u64) -> Buffer {
         let mut pool = self.scratch_pool.lock().unwrap();
         if let Some(buf) = pool.entry(bytes).or_default().pop() {
+            // A fresh Metal buffer arrives zeroed; a recycled one carries
+            // its previous tenant's bytes. Any caller that writes less
+            // than it reads therefore behaves differently once the pool
+            // has been churned — see `ENV_ZERO_POOLED_BUFFERS`, which
+            // exists to tell that defect apart from a real race.
+            if larql_compute::options::env_flag(larql_compute::options::ENV_ZERO_POOLED_BUFFERS) {
+                let ptr = buf.contents();
+                if !ptr.is_null() {
+                    // SAFETY: shared-storage buffer of exactly `bytes`
+                    // bytes, and the pool is keyed by that length. No GPU
+                    // work can be in flight against it: `recycle` is only
+                    // legal after `wait_until_completed`.
+                    unsafe { std::ptr::write_bytes(ptr as *mut u8, 0, bytes as usize) };
+                }
+            }
             return buf;
         }
         self.device

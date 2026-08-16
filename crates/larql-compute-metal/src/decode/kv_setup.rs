@@ -54,20 +54,29 @@ impl MetalBackend {
             .collect()
     }
 
-    /// Per-layer capacities implied by each layer's own attention window.
+    /// Per-layer capacities for the decode path: **every layer holds the
+    /// full `default_capacity`**, windowed or not.
+    ///
+    /// The window-derived capacity (`kv_capacity_for_window`, i.e.
+    /// `window x KV_COMPACTION_SLACK`) is a residency policy that is only
+    /// sound where something compacts the cache back below it. On this
+    /// path nothing does: `compact_kv_to_window` is called by the
+    /// KV-engine `coarse_*` steps alone, while the decode path appends at
+    /// row `current_len` and attends absolute rows `[T - window, T)`. A
+    /// sliding layer sized to 256 rows was therefore written and read
+    /// past its buffer from position 256 onward, by a margin growing with
+    /// position — the memory corruption behind #229 (NaN mid-stack, router
+    /// ids past `num_experts`, GPU page faults, hangs). Pinned by
+    /// `decode_path_sizes_sliding_layers_for_the_full_max_seq_because_it_never_compacts`.
+    ///
+    /// `layers` is still the input so that a future decode-path compaction
+    /// can reintroduce per-layer capacities here, at the one site that
+    /// owns the fact.
     pub(crate) fn kv_capacities_for_layers(
         layers: &[larql_compute::FullPipelineLayer<'_>],
         default_capacity: usize,
     ) -> Vec<usize> {
-        layers
-            .iter()
-            .map(|layer| {
-                larql_compute::pipeline_layer::kv_capacity_for_window(
-                    layer.sliding_window,
-                    default_capacity,
-                )
-            })
-            .collect()
+        layers.iter().map(|_| default_capacity).collect()
     }
 
     /// Ensure a cache sized by each layer's *own* capacity.
