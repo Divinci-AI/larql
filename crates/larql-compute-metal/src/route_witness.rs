@@ -37,6 +37,14 @@ pub static GPU_ROUTE_LAYERS: AtomicU64 = AtomicU64::new(0);
 /// bubble then belongs to a DIFFERENT, named boundary.
 pub static WAIT_MOE_ROUTE_LEGACY: AtomicU64 = AtomicU64::new(0);
 
+/// Attention dispatches encoded by the VINDEX3 lowering on the serial
+/// phase-3 kernel (`kv_attention` / `kv_attention_long`).
+pub static LOWERED_ATTEND_SERIAL: AtomicU64 = AtomicU64::new(0);
+/// Attention dispatches encoded by the VINDEX3 lowering on the KV-B1
+/// sequence-parallel kernel. The lowering's seqpar port is judged by this
+/// moving, not by a throughput number that might have another cause.
+pub static LOWERED_ATTEND_SEQPAR: AtomicU64 = AtomicU64::new(0);
+
 #[inline]
 pub(crate) fn bump(counter: &AtomicU64) {
     counter.fetch_add(1, Ordering::Relaxed);

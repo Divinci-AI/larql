@@ -699,6 +699,16 @@ pub(super) fn run_lowered(
             1000.0 / steady_mean
         );
         println!("generated ids: {generated:?}");
+        // Which attention kernel actually ran — the seqpar port is judged
+        // by this witness, not inferred from a throughput number.
+        {
+            use std::sync::atomic::Ordering;
+            let serial =
+                larql_compute_metal::route_witness::LOWERED_ATTEND_SERIAL.load(Ordering::Relaxed);
+            let seqpar =
+                larql_compute_metal::route_witness::LOWERED_ATTEND_SEQPAR.load(Ordering::Relaxed);
+            println!("attention dispatches: serial {serial}  seqpar {seqpar}");
+        }
     }
     match &logits {
         Some(l) => {
