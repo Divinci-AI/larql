@@ -118,6 +118,9 @@ pub fn run_exec(args: ExecArgs) -> Result<(), Box<dyn std::error::Error>> {
                 },
                 "nvfp4-no-head",
             )),
+            ExecBackend::MetalLoweredMxfp4 => {
+                Some((WeightFormats::uniform(WeightFormat::Mxfp4), "mxfp4-all"))
+            }
             _ => None,
         };
         if let Some((formats, label)) = lowered {
@@ -156,7 +159,8 @@ pub fn run_exec(args: ExecArgs) -> Result<(), Box<dyn std::error::Error>> {
         #[cfg(feature = "gpu")]
         ExecBackend::MetalLowered
         | ExecBackend::MetalLoweredFfn
-        | ExecBackend::MetalLoweredNoHead => unreachable!("handled above"),
+        | ExecBackend::MetalLoweredNoHead
+        | ExecBackend::MetalLoweredMxfp4 => unreachable!("handled above"),
         #[cfg(feature = "gpu")]
         ExecBackend::MetalMxfp4All => {
             let gpu = larql_compute_metal::MetalBackend::new()

@@ -182,6 +182,12 @@ pub struct MetalBackend {
 }
 
 impl MetalBackend {
+    /// The underlying device, for diagnostics that need to create
+    /// device-level objects (counter sample buffers).
+    pub fn device_ref(&self) -> metal::Device {
+        self.queue.device().to_owned()
+    }
+
     /// Submit an empty command buffer and wait. The pure driver
     /// round-trip floor — diagnostic only, computes nothing.
     pub fn empty_roundtrip(&self) {

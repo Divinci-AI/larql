@@ -151,7 +151,6 @@ impl MetalBackend {
             shape.norm_eps,
             shape.norm_weight_offset,
         );
-
         // 2. projections. K and V land in their cache slots directly.
         for (p, out, off, n) in [
             (&w.q, s.q, 0u64, q_rows),
@@ -185,7 +184,6 @@ impl MetalBackend {
                 },
             );
         }
-
         // 3. parameter-free QK norm — Q and K independently, per head.
         if shape.parameter_free_q {
             self.encode_parameter_free_qk_norm(
@@ -207,12 +205,10 @@ impl MetalBackend {
                 shape.qk_norm_eps,
             );
         }
-
         // 4. query scale — Q only, after the norm, before RoPE.
         if let Some(scale) = shape.query_scale {
             self.encode_scale_vector(enc, s.q, q_rows, scale);
         }
-
         // 5. position encoding, from this layer's policy. `None` means
         //    the op is absent and nothing is encoded — not rotation by
         //    a zero angle, which would also be a no-op here but would
@@ -237,10 +233,8 @@ impl MetalBackend {
                 shape.position_index,
             );
         }
-
         // 6. attention over the cache.
         self.encode_kv_attention(enc, s, shape);
-
         // 7. the judged gate, then the output projection.
         let aggregated = match &w.gate {
             Some(_) => {
@@ -260,7 +254,6 @@ impl MetalBackend {
                 k: q_rows,
             },
         );
-
         // 8. post-attention norm (four-norm placement only), then the
         //    residual — branch output normalised *before* the add.
         self.encode_branch_norm_then_residual(

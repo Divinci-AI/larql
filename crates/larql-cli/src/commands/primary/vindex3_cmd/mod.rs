@@ -90,6 +90,10 @@ pub enum ExecBackend {
     /// Lowered execution, NVFP4 attention and FFN with an f16 head.
     #[cfg(feature = "gpu")]
     MetalLoweredNoHead,
+    /// Lowered execution, all-MXFP4 — the format bakeoff arm, so the two
+    /// representations are priced under one schedule.
+    #[cfg(feature = "gpu")]
+    MetalLoweredMxfp4,
 }
 
 #[derive(Args)]

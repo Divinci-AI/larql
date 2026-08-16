@@ -96,7 +96,6 @@ impl MetalBackend {
             shape.norm_eps,
             shape.norm_weight_offset,
         );
-
         // 2. gate and up projections. Independent of each other, and the
         //    serial encoder still orders them after the norm that feeds
         //    them.
@@ -122,7 +121,6 @@ impl MetalBackend {
                 k: shape.hidden,
             },
         );
-
         // 3. SiLU-GLU.
         encode_elementwise(
             enc,
@@ -130,7 +128,6 @@ impl MetalBackend {
             &[s.gate, s.up, s.act],
             shape.intermediate,
         );
-
         // 4. down projection.
         self.encode_matvec(
             enc,
@@ -143,7 +140,6 @@ impl MetalBackend {
                 k: shape.intermediate,
             },
         );
-
         // 5. post-FFN norm (four-norm placement only), then the
         //    residual. `b_scale` is 1.0: a residual multiplier is a
         //    judged plan fact and Glimmer's FFN residual has none, so

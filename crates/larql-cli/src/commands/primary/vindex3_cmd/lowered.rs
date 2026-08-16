@@ -34,28 +34,31 @@ use larql_vindex::format::vindex3::opplan::{ComponentOpPlan, LayerPlan, NormOp, 
 
 /// One matrix operand, resident on the device.
 struct DeviceMatrix {
-    /// `scales` is unused for f16; the format is what the plan's
+    /// `scales` is unused for f16; the representation is what the plan's
     /// per-class policy asked for, not something inferred here.
     packed: DeviceBuffer,
     scales: DeviceBuffer,
     tensor_scale: f32,
-    f16: bool,
+    format: WeightFormat,
     rows: usize,
     cols: usize,
 }
 
 impl DeviceMatrix {
     fn as_lowered(&self) -> LoweredMatrix<'_> {
-        if self.f16 {
-            LoweredMatrix::F16 {
+        match self.format {
+            WeightFormat::F16 => LoweredMatrix::F16 {
                 bytes: &self.packed,
-            }
-        } else {
-            LoweredMatrix::Nvfp4 {
+            },
+            WeightFormat::Mxfp4 => LoweredMatrix::Mxfp4 {
+                packed: &self.packed,
+                scales: &self.scales,
+            },
+            _ => LoweredMatrix::Nvfp4 {
                 packed: &self.packed,
                 scales: &self.scales,
                 tensor_scale: self.tensor_scale,
-            }
+            },
         }
     }
 }
@@ -79,6 +82,44 @@ struct LayerResident {
     v_cache: DeviceBuffer,
 }
 
+/// Stages this run omits, for marginal-cost profiling.
+///
+/// Every one of these is an operation the plan marks **optional**, so
+/// omitting it exercises a path the lowering already supports rather
+/// than a special diagnostic branch. The numbers are wrong by
+/// construction; the *time difference* is the measurement.
+///
+/// Ablation is used because this hardware supports counter sampling only
+/// at compute-pass boundaries (`AtDispatchBoundary` is false on M3), so
+/// per-dispatch GPU timestamps are unavailable. Splitting stages into
+/// separate encoders to get boundaries would change what can overlap;
+/// ablation leaves the schedule of everything that remains intact.
+#[derive(Clone, Copy, Default)]
+pub struct Ablation {
+    pub no_query_scale: bool,
+    pub no_rope: bool,
+    pub no_qk_norm: bool,
+    pub no_gate: bool,
+    pub no_post_norms: bool,
+}
+
+impl Ablation {
+    fn from_env() -> Self {
+        let on = |k: &str| std::env::var(k).is_ok();
+        Self {
+            no_query_scale: on("LARQL_ABLATE_QUERY_SCALE"),
+            no_rope: on("LARQL_ABLATE_ROPE"),
+            no_qk_norm: on("LARQL_ABLATE_QK_NORM"),
+            no_gate: on("LARQL_ABLATE_GATE"),
+            no_post_norms: on("LARQL_ABLATE_POST_NORMS"),
+        }
+    }
+
+    fn any(&self) -> bool {
+        self.no_query_scale || self.no_rope || self.no_qk_norm || self.no_gate || self.no_post_norms
+    }
+}
+
 /// A plan lowered onto the device, ready to step positions.
 pub struct LoweredSession<'a> {
     gpu: &'a MetalBackend,
@@ -96,6 +137,8 @@ pub struct LoweredSession<'a> {
     scratch: Vec<DeviceBuffer>,
     inv_freq: HashMap<u64, DeviceBuffer>,
     position: usize,
+    /// Destination for resolved GPU timestamps, when profiling.
+    ablate: Ablation,
 }
 
 /// Load one matrix operand as NVFP4 and hand it to the device.
@@ -122,7 +165,15 @@ fn resident_matrix(
             packed: gpu.lowering_weight(packed.as_slice()),
             scales: gpu.lowering_weight(scales.as_slice()),
             tensor_scale: *tensor_scale,
-            f16: false,
+            format: WeightFormat::Nvfp4,
+            rows,
+            cols,
+        },
+        LoadedWeight::Mxfp4 { packed, scales } => DeviceMatrix {
+            packed: gpu.lowering_weight(packed.as_slice()),
+            scales: gpu.lowering_weight(scales.as_slice()),
+            tensor_scale: 1.0,
+            format: WeightFormat::Mxfp4,
             rows,
             cols,
         },
@@ -130,7 +181,7 @@ fn resident_matrix(
             packed: gpu.lowering_weight(bytes.as_slice()),
             scales: gpu.lowering_weight(&[]),
             tensor_scale: 1.0,
-            f16: true,
+            format: WeightFormat::F16,
             rows,
             cols,
         },
@@ -319,6 +370,10 @@ impl<'a> LoweredSession<'a> {
                     streams.push(packed.as_slice());
                     streams.push(scales.as_slice());
                 }
+                LoadedWeight::Mxfp4 { packed, scales } => {
+                    streams.push(packed.as_slice());
+                    streams.push(scales.as_slice());
+                }
                 LoadedWeight::F16(b) => streams.push(b.as_slice()),
                 _ => {}
             }
@@ -345,11 +400,14 @@ impl<'a> LoweredSession<'a> {
             scratch,
             inv_freq,
             position: 0,
+            ablate: Ablation::from_env(),
         })
     }
 
     /// Step one token: embed on the host, then the entire stack and head
     /// in **one** command buffer with a single wait.
+    /// Step one token: embed on the host, then the entire stack and
+    /// head in one command buffer with a single wait.
     pub fn step(&mut self, token: u32) -> Result<Option<Vec<f32>>, VindexError> {
         let t = self.position;
         let row = &self.embed_table[token as usize * self.hidden..][..self.hidden];
@@ -470,9 +528,14 @@ impl<'a> LoweredSession<'a> {
                 k: r.k.as_lowered(),
                 v: r.v.as_lowered(),
                 o: r.o.as_lowered(),
-                gate: r.gate.as_ref().map(DeviceMatrix::as_lowered),
+                gate: r
+                    .gate
+                    .as_ref()
+                    .filter(|_| !self.ablate.no_gate)
+                    .map(DeviceMatrix::as_lowered),
                 norm_weight: &r.pre_attn_norm,
-                post_norm: post(&r.post_attn_norm, &self.scratch[7]),
+                post_norm: post(&r.post_attn_norm, &self.scratch[7])
+                    .filter(|_| !self.ablate.no_post_norms),
             },
             attn_shape: AttnShape {
                 hidden: self.hidden,
@@ -484,13 +547,18 @@ impl<'a> LoweredSession<'a> {
                 // The interpreter passes the pre-attention norm's epsilon
                 // as the QK-norm epsilon; it is not a separate fact.
                 qk_norm_eps: plan_layer.pre_attention_norm.eps as f32,
-                parameter_free_q: a.parameter_free_qk_norm.q,
-                parameter_free_k: a.parameter_free_qk_norm.k,
-                query_scale: a.query_scale.map(|s| s as f32),
+                parameter_free_q: a.parameter_free_qk_norm.q && !self.ablate.no_qk_norm,
+                parameter_free_k: a.parameter_free_qk_norm.k && !self.ablate.no_qk_norm,
+                query_scale: a
+                    .query_scale
+                    .map(|s| s as f32)
+                    .filter(|_| !self.ablate.no_query_scale),
                 score_scale: a.score_scale as f32,
                 position: match a.position {
-                    PositionPolicy::Rope { theta } => LoweredPosition::Rope { theta },
-                    PositionPolicy::None => LoweredPosition::None,
+                    PositionPolicy::Rope { theta } if !self.ablate.no_rope => {
+                        LoweredPosition::Rope { theta }
+                    }
+                    _ => LoweredPosition::None,
                 },
                 // A window applies only to a sliding span; a full layer
                 // attends the whole prefix whatever the plan records.
@@ -507,7 +575,8 @@ impl<'a> LoweredSession<'a> {
                 up: r.ffn_up.as_lowered(),
                 down: r.ffn_down.as_lowered(),
                 norm_weight: &r.pre_ffn_norm,
-                post_norm: post(&r.post_ffn_norm, &self.scratch[14]),
+                post_norm: post(&r.post_ffn_norm, &self.scratch[14])
+                    .filter(|_| !self.ablate.no_post_norms),
             },
             ffn_shape: FfnShape {
                 hidden: self.hidden,
@@ -523,6 +592,11 @@ impl<'a> LoweredSession<'a> {
     /// Matrix geometry the loader saw, for diagnostics.
     pub fn head_geometry(&self) -> Option<(usize, usize)> {
         self.head.as_ref().map(|h| (h.rows, h.cols))
+    }
+
+    /// Whether any stage is being ablated.
+    pub fn ablation_active(&self) -> bool {
+        self.ablate.any()
     }
 
     /// Whether the plan carried a final norm, for diagnostics.
@@ -579,8 +653,6 @@ pub(super) fn run_lowered(
     for &token in tokens {
         logits = session.step(token)?;
     }
-    let prompt_seconds = prompt_started.elapsed().as_secs_f64();
-
     // ── decode, kept strictly separate from prefill ─────────────────
     let mut decode_ms: Vec<f64> = Vec::new();
     let mut generated: Vec<u32> = Vec::new();
@@ -599,6 +671,10 @@ pub(super) fn run_lowered(
         }
     }
 
+    let prompt_seconds = prompt_started.elapsed().as_secs_f64();
+    if session.ablation_active() {
+        println!("ABLATED RUN — numbers are wrong by construction; timing only");
+    }
     println!("engine: vindex3-metal-lowered-{label}");
     println!("weights loaded: {load_seconds:.1} s");
     println!(

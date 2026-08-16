@@ -78,6 +78,14 @@ pub enum LoweredMatrix<'a> {
         scales: &'a Buffer,
         tensor_scale: f32,
     },
+    /// The same e2m1 codes under E8M0 group scales, 32 to a group. Kept
+    /// as a first-class representation, not a deprecated one: gpt-oss
+    /// ships its expert matrices in MXFP4 natively, so there it is the
+    /// checkpoint's own storage rather than a choice.
+    Mxfp4 {
+        packed: &'a Buffer,
+        scales: &'a Buffer,
+    },
 }
 
 /// Where a matvec reads from and writes to, and the geometry of the
@@ -150,6 +158,18 @@ impl MetalBackend {
                     k: at.k,
                 },
                 *tensor_scale,
+            ),
+            LoweredMatrix::Mxfp4 { packed, scales } => self.encode_mxfp4_matvec(
+                enc,
+                &MatvecOperands {
+                    packed,
+                    scales,
+                    x: at.x,
+                    out: at.out,
+                    out_offset: at.out_offset,
+                    n: at.n,
+                    k: at.k,
+                },
             ),
             LoweredMatrix::F16 { bytes } => self.encode_f16_matvec(enc, bytes, at),
         }
