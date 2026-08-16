@@ -104,9 +104,17 @@ pub const ENV_FUSED_KV_APPEND_ATTEND: &str = "LARQL_FUSED_KV_APPEND_ATTEND";
 /// sequence slices.
 ///
 /// `auto` selects the measured per-span slice count (the optimum is not
-/// flat: wide threadgroups lose at short span and win at long); an
-/// integer forces that many slices; unset or 0 keeps the serial kernel.
-/// Opt-in until the end-to-end gain is confirmed on an idle machine.
+/// flat: wide threadgroups lose at short span and win at long); an integer
+/// forces that many slices; unset, `0` or `off` keeps the serial kernel.
+///
+/// **Opt-in.** Short context is clean — see `kv_seqpar_from_env` in
+/// `larql-compute-metal` for what the remaining blocks still owe.
+///
+/// The kernels are exact in the sense that matters — the sum is
+/// reassociated, not approximated, and the KV contents are unchanged — but
+/// they are deliberately *not* bitwise equal to the serial kernel. Parity
+/// is gated at three levels at 1e-4 relative to row scale, with negative
+/// controls calibrated at ~1e-1, plus bitwise determinism across repeats.
 pub const ENV_KV_SEQPAR: &str = "LARQL_KV_SEQPAR";
 /// Disable fused post-attention norm when set to a false value.
 pub const ENV_FUSED_POST_ATTN_NORM: &str = "LARQL_FUSED_POST_ATTN_NORM";
