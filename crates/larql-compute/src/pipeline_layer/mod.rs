@@ -57,6 +57,13 @@ pub fn kv_capacity_for_window(sliding_window: usize, default_capacity: usize) ->
 /// Per-layer KV capacities for a model, parallel to
 /// [`kv_cache_shapes_for_arch`].
 ///
+/// **Presumes compaction.** A window-derived capacity is only sound on a
+/// path that compacts the cache back below `window x slack`; the GPU
+/// decode path does not (it appends at `current_len` and attends absolute
+/// rows), and sizing its sliding layers with this function ran them off
+/// the end of their buffers (#229). That path now allocates every layer at
+/// the full default; use this only where `compact_kv_to_window` runs.
+///
 /// Deliberately a separate slice rather than a third tuple element:
 /// `num_kv_heads` and `head_dim` describe the *representation* of a row,
 /// while capacity is *residency policy*. Widening the shape tuple would

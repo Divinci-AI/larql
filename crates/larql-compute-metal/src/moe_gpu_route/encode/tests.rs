@@ -385,7 +385,10 @@ fn run_gpu_route(metal: &MetalBackend, moe: &MoeLayerWeights<'_>, x: &[f32]) -> 
     metal.encode_moe_layer_gpu_route(enc, moe, &s, &table, &h_post_attn, &new_h, 1e-6);
     enc.end_encoding();
     cmd.commit();
-    cmd.wait_until_completed();
+    let _ = crate::cb_status::wait_checked(
+        cmd,
+        "crates/larql-compute-metal/src/moe_gpu_route/encode/tests.rs:388",
+    );
     crate::buffers::read_buffer_f32(&new_h, HIDDEN)
 }
 

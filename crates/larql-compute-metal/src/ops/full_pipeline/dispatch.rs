@@ -462,7 +462,10 @@ pub fn dispatch_full_pipeline(
         if let Some(iv) = intervention {
             if l == iv.target_layer {
                 cmd.commit();
-                cmd.wait_until_completed();
+                let _ = crate::cb_status::wait_checked(
+                    &cmd,
+                    "crates/larql-compute-metal/src/ops/full_pipeline/dispatch.rs:465",
+                );
                 let q_dim = iv.num_q_heads * iv.head_dim;
 
                 // A.1: Capture pre-W_O for oracle code computation.
@@ -529,7 +532,10 @@ pub fn dispatch_full_pipeline(
         if let Some(iv) = intervention {
             if l == iv.target_layer {
                 cmd.commit();
-                cmd.wait_until_completed();
+                let _ = crate::cb_status::wait_checked(
+                    &cmd,
+                    "crates/larql-compute-metal/src/ops/full_pipeline/dispatch.rs:532",
+                );
                 debug_assert_eq!(
                     iv.replacement_delta.len(),
                     seq_len * hidden,
@@ -742,7 +748,10 @@ pub fn dispatch_full_pipeline(
         // restart the command buffer for the next layer.
         if needs_per_layer_commit {
             cmd.commit();
-            cmd.wait_until_completed();
+            let _ = crate::cb_status::wait_checked(
+                &cmd,
+                "crates/larql-compute-metal/src/ops/full_pipeline/dispatch.rs:745",
+            );
 
             // KV cache: copy this layer's K/V before the caller reads
             // `h_post_attn` or touches `new_h`.
@@ -770,7 +779,10 @@ pub fn dispatch_full_pipeline(
 
     if !needs_per_layer_commit {
         cmd.commit();
-        cmd.wait_until_completed();
+        let _ = crate::cb_status::wait_checked(
+            &cmd,
+            "crates/larql-compute-metal/src/ops/full_pipeline/dispatch.rs:773",
+        );
 
         // Post-commit: populate persistent KV cache from GPU-computed
         // RoPE'd K/V (buffers are readable now that the command buffer is

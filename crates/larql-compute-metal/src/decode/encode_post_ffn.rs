@@ -278,7 +278,10 @@ mod tests {
         );
         enc.end_encoding();
         cmd.commit();
-        cmd.wait_until_completed();
+        let _ = crate::cb_status::wait_checked(
+            cmd,
+            "crates/larql-compute-metal/src/decode/encode_post_ffn.rs:281",
+        );
 
         let out = crate::buffers::read_buffer_f32(&new_h, hidden);
         assert_eq!(out.len(), hidden);

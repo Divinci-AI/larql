@@ -210,7 +210,10 @@ fn try_inline_zero_copy_moe_encodes_experts_and_combine_on_registered_region() {
     // that was never `end_encoding()`'d.
     enc.end_encoding();
     cmd.commit();
-    cmd.wait_until_completed();
+    let _ = crate::cb_status::wait_checked(
+        &cmd,
+        "crates/larql-compute-metal/src/decode/moe_interleave/tests.rs:213",
+    );
     let took_zero_copy_path = m.try_inline_zero_copy_moe(
         &layer,
         &ctx,
@@ -229,7 +232,10 @@ fn try_inline_zero_copy_moe_encodes_experts_and_combine_on_registered_region() {
 
     enc.end_encoding();
     cmd.commit();
-    cmd.wait_until_completed();
+    let _ = crate::cb_status::wait_checked(
+        &cmd,
+        "crates/larql-compute-metal/src/decode/moe_interleave/tests.rs:232",
+    );
 
     let out = unsafe { std::slice::from_raw_parts(new_h_buf.contents() as *const f32, hidden) };
     assert!(
@@ -385,7 +391,10 @@ fn try_inline_zero_copy_moe_uses_non_grouped_dispatch_across_separate_regions() 
     let mut encoder_ended = true;
     enc.end_encoding();
     cmd.commit();
-    cmd.wait_until_completed();
+    let _ = crate::cb_status::wait_checked(
+        &cmd,
+        "crates/larql-compute-metal/src/decode/moe_interleave/tests.rs:388",
+    );
     let took_zero_copy_path = m.try_inline_zero_copy_moe(
         &layer,
         &ctx,
@@ -404,7 +413,10 @@ fn try_inline_zero_copy_moe_uses_non_grouped_dispatch_across_separate_regions() 
 
     enc.end_encoding();
     cmd.commit();
-    cmd.wait_until_completed();
+    let _ = crate::cb_status::wait_checked(
+        &cmd,
+        "crates/larql-compute-metal/src/decode/moe_interleave/tests.rs:407",
+    );
 
     let out = unsafe { std::slice::from_raw_parts(new_h_buf.contents() as *const f32, hidden) };
     assert!(
@@ -561,7 +573,10 @@ fn try_inline_zero_copy_moe_uses_q6k_grouped_dispatch() {
     let mut encoder_ended = true;
     enc.end_encoding();
     cmd.commit();
-    cmd.wait_until_completed();
+    let _ = crate::cb_status::wait_checked(
+        &cmd,
+        "crates/larql-compute-metal/src/decode/moe_interleave/tests.rs:564",
+    );
     let took_zero_copy_path = m.try_inline_zero_copy_moe(
         &layer,
         &ctx,
@@ -580,7 +595,10 @@ fn try_inline_zero_copy_moe_uses_q6k_grouped_dispatch() {
 
     enc.end_encoding();
     cmd.commit();
-    cmd.wait_until_completed();
+    let _ = crate::cb_status::wait_checked(
+        &cmd,
+        "crates/larql-compute-metal/src/decode/moe_interleave/tests.rs:583",
+    );
 
     let out = unsafe { std::slice::from_raw_parts(new_h_buf.contents() as *const f32, hidden) };
     assert!(
@@ -648,7 +666,10 @@ fn try_inline_zero_copy_moe_returns_false_without_moe_layer() {
     // that was never `end_encoding()`'d.
     enc.end_encoding();
     cmd.commit();
-    cmd.wait_until_completed();
+    let _ = crate::cb_status::wait_checked(
+        &cmd,
+        "crates/larql-compute-metal/src/decode/moe_interleave/tests.rs:651",
+    );
     let took_zero_copy_path = m.try_inline_zero_copy_moe(
         &layer,
         &ctx,

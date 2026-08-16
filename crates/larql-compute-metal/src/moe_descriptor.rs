@@ -309,6 +309,9 @@ impl MetalBackend {
             4,
             &gate_half_bytes as *const u32 as *const std::ffi::c_void,
         );
+        let num_experts = table.descs_host.len() as u32;
+        enc.set_bytes(10, 4, &num_experts as *const u32 as *const std::ffi::c_void);
+        enc.set_buffer(11, Some(&self.route_guard.counter), 0);
         enc.dispatch_threads(
             metal::MTLSize::new(n_slots as u64, 1, 1),
             metal::MTLSize::new(n_slots as u64, 1, 1),
@@ -376,7 +379,10 @@ impl MetalBackend {
         let out = self.encode_descriptor_gather(enc, table, &ids_buf, n_slots, gate_half_bytes);
         enc.end_encoding();
         cmd.commit();
-        cmd.wait_until_completed();
+        let _ = crate::cb_status::wait_checked(
+            cmd,
+            "crates/larql-compute-metal/src/moe_descriptor.rs:382",
+        );
 
         let ptr = out.slot_descs.contents() as *const GpuExpertDescriptor;
         if ptr.is_null() {
@@ -437,7 +443,10 @@ impl MetalBackend {
         );
         enc.end_encoding();
         cmd.commit();
-        cmd.wait_until_completed();
+        let _ = crate::cb_status::wait_checked(
+            cmd,
+            "crates/larql-compute-metal/src/moe_descriptor.rs:443",
+        );
 
         let gate = crate::buffers::try_read_buffer_f32(&gate_out, n_slots * inter)?;
         let up = crate::buffers::try_read_buffer_f32(&up_out, n_slots * inter)?;

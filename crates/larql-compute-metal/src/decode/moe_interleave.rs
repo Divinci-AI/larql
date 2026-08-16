@@ -245,7 +245,10 @@ impl MetalBackend {
                 std::hint::spin_loop();
             }
         } else {
-            state.cmd.wait_until_completed();
+            let _ = crate::cb_status::wait_checked(
+                state.cmd,
+                "crates/larql-compute-metal/src/decode/moe_interleave.rs:248",
+            );
         }
         gpu_timing::add_host_segment(|h| &mut h.wait_ms, _t_wait.elapsed().as_secs_f64() * 1000.0);
         // R16 control — see ENV_EXTRA_BARRIERS.
@@ -253,7 +256,10 @@ impl MetalBackend {
             for _ in 0..extra {
                 let cb = self.queue.new_command_buffer();
                 cb.commit();
-                cb.wait_until_completed();
+                let _ = crate::cb_status::wait_checked(
+                    cb,
+                    "crates/larql-compute-metal/src/decode/moe_interleave.rs:256",
+                );
             }
         }
         // In split mode the cb we just waited contains ONLY attention
@@ -354,7 +360,10 @@ impl MetalBackend {
                 .as_deref_mut()
                 .expect("split_mode implies moe_collect_fn");
             let result = collect(ctx.layer_idx);
-            state.cmd.wait_until_completed();
+            let _ = crate::cb_status::wait_checked(
+                state.cmd,
+                "crates/larql-compute-metal/src/decode/moe_interleave.rs:357",
+            );
             state
                 .gpu_time
                 .record_stage(state.cmd, gpu_timing::DecodeStage::DenseFfn);

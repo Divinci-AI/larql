@@ -198,6 +198,18 @@ pub const ENV_Q4K_DIRECT_FFN: &str = "LARQL_Q4K_DIRECT_FFN";
 pub const ENV_Q4K_ASM: &str = "LARQL_Q4K_ASM";
 /// Spin-barrier thread pool for the decode hot path (vs rayon's sleeping pool).
 pub const ENV_SPIN_POOL: &str = "LARQL_SPIN_POOL";
+/// Zero every scratch buffer handed back by the pool, instead of trusting
+/// callers to write before they read.
+///
+/// Diagnostic, not a tuning knob. `BufferCache::output` recycles buffers
+/// with their previous tenant's bytes intact, so a kernel that writes only
+/// part of its output silently reads stale data — and only once the pool
+/// has been churned, which is why such a defect is invisible on the first
+/// runs of a process and appears later. Setting this makes recycled
+/// buffers indistinguishable from fresh ones, so a non-determinism that
+/// disappears under it is a read-before-write, and one that survives is
+/// not. Costs a memset per allocation; never set it while timing.
+pub const ENV_ZERO_POOLED_BUFFERS: &str = "LARQL_ZERO_POOLED_BUFFERS";
 
 thread_local! {
     /// Per-thread override for env-var reads ([`env_override`]). Tests inject

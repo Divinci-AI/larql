@@ -104,7 +104,15 @@ impl MetalBackend {
         // closure above stays as the per-layer fallback.
         let inline_ctx = scratch_ref.map(|s| crate::decode::InlineMoeCtx::new(s, norm_eps));
 
-        Some(self.decode_token_with_moe_split_fn(
+        // A step whose command buffer failed (GPU address fault, ignored
+        // buffer after an earlier fault) returns from its wait exactly like
+        // a healthy one, with stale or garbage bytes in `h_buf`. Count the
+        // failures across the whole step — every wait on this path goes
+        // through `cb_status::wait_checked` — and refuse to hand a poisoned
+        // hidden state to the sampler. The caller treats `None` as
+        // "GPU decode returned None; stopping generation" (#229).
+        let failures_before = crate::cb_status::non_completed_count();
+        let h = self.decode_token_with_moe_split_fn(
             kv,
             layers,
             x,
@@ -122,7 +130,21 @@ impl MetalBackend {
             larql_compute::StateDumpMask::Full,
             inline_ctx.as_ref(),
             head,
-        ))
+        );
+        if crate::cb_status::non_completed_count() != failures_before {
+            return None;
+        }
+        // The gather kernel clamps router ids past `num_experts` and
+        // counts them; a step that needed the clamp computed with the wrong
+        // expert and must not be sampled from either.
+        let refused = self.route_guard.take_new_refusals();
+        if refused != 0 {
+            eprintln!(
+                "[metal] router emitted {refused} expert id(s) >= num_experts in this decode step; refusing the step (#229)"
+            );
+            return None;
+        }
+        Some(h)
     }
 
     /// Public single-layer MoE block entry — the parity/test surface for

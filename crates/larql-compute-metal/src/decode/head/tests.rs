@@ -85,7 +85,10 @@ fn run_head(
     let out = metal.encode_decode_head(enc, &h_buf, HIDDEN, plan);
     enc.end_encoding();
     cmd.commit();
-    cmd.wait_until_completed();
+    let _ = crate::cb_status::wait_checked(
+        cmd,
+        "crates/larql-compute-metal/src/decode/head/tests.rs:88",
+    );
     out.map(|b| b.reduce_and_recycle(&metal.bufs))
 }
 

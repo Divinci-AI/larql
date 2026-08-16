@@ -327,7 +327,10 @@ impl MetalBackend {
         }
         enc.end_encoding();
         cmd.commit();
-        cmd.wait_until_completed();
+        let _ = crate::cb_status::wait_checked(
+            cmd,
+            "crates/larql-compute-metal/src/moe_dispatch/dispatch.rs:330",
+        );
 
         // ── 7. CPU weighted sum + post-experts norm ──────────────────────
         // The down bias joins each expert's output BEFORE the routing

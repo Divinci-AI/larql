@@ -95,7 +95,10 @@ impl MetalBackend {
         );
         enc.end_encoding();
         cmd.commit();
-        cmd.wait_until_completed();
+        let _ = crate::cb_status::wait_checked(
+            cmd,
+            "crates/larql-compute-metal/src/ops/moe_router.rs:98",
+        );
 
         crate::buffers::try_read_buffer_f32(&out_buf, num_experts)
     }
@@ -215,7 +218,10 @@ impl MetalBackend {
         );
         enc.end_encoding();
         cmd.commit();
-        cmd.wait_until_completed();
+        let _ = crate::cb_status::wait_checked(
+            cmd,
+            "crates/larql-compute-metal/src/ops/moe_router.rs:218",
+        );
 
         let weights = crate::buffers::try_read_buffer_f32(&weights_buf, top_k)?;
         let ids: Vec<usize> = unsafe {

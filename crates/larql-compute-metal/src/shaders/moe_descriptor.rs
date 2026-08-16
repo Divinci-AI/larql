@@ -58,10 +58,22 @@ kernel void moe_descriptor_gather(
     device uint*                      dn_scale_offs [[buffer(7)]], // [n_slots]
     constant uint&                    n_slots      [[buffer(8)]],
     constant uint&                    gate_half_bytes [[buffer(9)]],
+    // Bounds guard (#229): `descs` has exactly `num_experts` entries and
+    // nothing upstream proves the router's ids stay inside it. An id past
+    // the end is a GPU page fault — a failed command buffer whose stale
+    // outputs read like a finished one. Instead: count it, and gather
+    // expert 0 so the step completes and the host can refuse it.
+    constant uint&                    num_experts  [[buffer(10)]],
+    device atomic_uint*               bad_ids      [[buffer(11)]],
     uint tid [[thread_position_in_grid]])
 {
     if (tid < n_slots) {
-        MoeExpertDescriptor d = descs[selected_ids[tid]];
+        uint id = selected_ids[tid];
+        if (id >= num_experts) {
+            atomic_fetch_add_explicit(bad_ids, 1u, memory_order_relaxed);
+            id = 0u;
+        }
+        MoeExpertDescriptor d = descs[id];
         out[tid] = d;
         gate0_offs[tid] = d.gate_up_payload_off;
         gate1_offs[tid] = d.gate_up_payload_off + gate_half_bytes;

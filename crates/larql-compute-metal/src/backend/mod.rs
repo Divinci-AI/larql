@@ -160,6 +160,8 @@ pub struct MetalBackend {
     /// `out[slot] = descs[selected_ids[slot]]` — rung C's single runtime
     /// indirection from route result to stored-expert descriptor.
     pub moe_descriptor_gather_pipeline: ComputePipelineState,
+    /// Device-side count of router ids the gather kernel refused (#229).
+    pub route_guard: crate::route_guard::RouteGuard,
     /// GPU replacement for the CPU bias-staging memcpy loop: gathers the
     /// selected experts' interleaved gate/up bias rows into slot-aligned
     /// scratch, driven by descriptors instead of host pointers.
@@ -334,6 +336,7 @@ impl MetalBackend {
             moe_router_pipeline,
             moe_router_select_pipeline,
             moe_descriptor_gather_pipeline,
+            route_guard: crate::route_guard::RouteGuard::new(&device),
             moe_bias_stage_pipeline,
             moe_down_bias_stage_pipeline,
             flop_threshold: AtomicUsize::new(calibration::DEFAULT_FLOP_THRESHOLD),

@@ -155,7 +155,10 @@ impl MetalBackend {
         );
         enc.end_encoding();
         cmd.commit();
-        cmd.wait_until_completed();
+        let _ = crate::cb_status::wait_checked(
+            cmd,
+            "crates/larql-compute-metal/src/trait_impl/grouped_experts.rs:158",
+        );
 
         Ok(crate::buffers::read_buffer_f32(&buf_out, offsets.len() * n))
     }
@@ -237,7 +240,10 @@ impl MetalBackend {
         );
         enc.end_encoding();
         cmd.commit();
-        cmd.wait_until_completed();
+        let _ = crate::cb_status::wait_checked(
+            cmd,
+            "crates/larql-compute-metal/src/trait_impl/grouped_experts.rs:240",
+        );
 
         Ok(crate::buffers::read_buffer_f32(&buf_out, offsets.len() * n))
     }

@@ -356,7 +356,10 @@ impl MetalBackend {
             if stage_timing_split {
                 enc.end_encoding();
                 cmd.commit();
-                cmd.wait_until_completed();
+                let _ = crate::cb_status::wait_checked(
+                    &cmd,
+                    "crates/larql-compute-metal/src/decode/token.rs:359",
+                );
                 gpu_time.record_stage(&cmd, gpu_timing::DecodeStage::Attention);
                 cmd = self.queue.new_command_buffer().to_owned();
                 enc = cmd.new_compute_command_encoder().to_owned();
@@ -413,7 +416,10 @@ impl MetalBackend {
                     self.encode_ffn_gate_up_phase(&enc, layer, &ffn_bufs, ffn_dims);
                     enc.end_encoding();
                     cmd.commit();
-                    cmd.wait_until_completed();
+                    let _ = crate::cb_status::wait_checked(
+                        &cmd,
+                        "crates/larql-compute-metal/src/decode/token.rs:416",
+                    );
                     gpu_time.record_stage(&cmd, gpu_timing::DecodeStage::GateUp);
                     cmd = self.queue.new_command_buffer().to_owned();
                     enc = cmd.new_compute_command_encoder().to_owned();
@@ -429,7 +435,10 @@ impl MetalBackend {
                     );
                     enc.end_encoding();
                     cmd.commit();
-                    cmd.wait_until_completed();
+                    let _ = crate::cb_status::wait_checked(
+                        &cmd,
+                        "crates/larql-compute-metal/src/decode/token.rs:432",
+                    );
                     gpu_time.record_stage(&cmd, gpu_timing::DecodeStage::Down);
                     cmd = self.queue.new_command_buffer().to_owned();
                     enc = cmd.new_compute_command_encoder().to_owned();
@@ -515,7 +524,10 @@ impl MetalBackend {
                     enc.end_encoding();
                 }
                 cmd.commit();
-                cmd.wait_until_completed();
+                let _ = crate::cb_status::wait_checked(
+                    &cmd,
+                    "crates/larql-compute-metal/src/decode/token.rs:518",
+                );
                 let h = super::buffers::read_buffer_f32(h_buf, hidden);
                 let nans = h.iter().filter(|v| v.is_nan()).count();
                 eprintln!(
@@ -624,7 +636,10 @@ impl MetalBackend {
                     if !encoder_ended {
                         enc.end_encoding();
                         cmd.commit();
-                        cmd.wait_until_completed();
+                        let _ = crate::cb_status::wait_checked(
+                            &cmd,
+                            "crates/larql-compute-metal/src/decode/token.rs:627",
+                        );
                         encoder_ended = true;
                     }
                     let ha = super::buffers::read_buffer_f32(&h_post_attn, hidden);
@@ -660,7 +675,10 @@ impl MetalBackend {
                 if !encoder_ended {
                     enc.end_encoding();
                     cmd.commit();
-                    cmd.wait_until_completed();
+                    let _ = crate::cb_status::wait_checked(
+                        &cmd,
+                        "crates/larql-compute-metal/src/decode/token.rs:663",
+                    );
                     encoder_ended = true;
                 }
                 let hidden_bytes = super::buffers::read_buffer_f32(new_h, hidden);
@@ -713,7 +731,10 @@ impl MetalBackend {
                 if !encoder_ended {
                     enc.end_encoding();
                     cmd.commit();
-                    cmd.wait_until_completed();
+                    let _ = crate::cb_status::wait_checked(
+                        &cmd,
+                        "crates/larql-compute-metal/src/decode/token.rs:716",
+                    );
                 }
                 let bufs = diag::LayerDiagBufs {
                     norm_f32_buf: &norm_f32_buf,
@@ -758,7 +779,13 @@ impl MetalBackend {
         if !encoder_ended {
             enc.end_encoding();
             cmd.commit();
-            cmd.wait_until_completed();
+            let _ = crate::cb_status::wait_checked(
+                &cmd,
+                "crates/larql-compute-metal/src/decode/token.rs:761",
+            );
+            // A failed or ignored buffer returns from the wait just like a
+            // finished one; only the status tells them apart. The MoE entry
+            // seam turns any failure inside this step into `None`.
             gpu_time.record(&cmd);
         }
 

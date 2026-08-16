@@ -114,7 +114,12 @@ pub(super) fn run_larql(
     // Metal buffer caches. The prefill timer would otherwise include this
     // one-time allocation cost.
     if metal {
-        let _ = generate_n(&mut weights, 1);
+        let warm = generate_n(&mut weights, 1);
+        if let Some(e) = &warm.error {
+            // A pre-warm that failed is a row-shaped lie waiting to happen:
+            // say so, rather than let the timed run inherit the state.
+            eprintln!("[bench] pre-warm generate failed: {e}");
+        }
     }
 
     // NOTE: `--profile` enables engine-side stage timers
@@ -131,6 +136,9 @@ pub(super) fn run_larql(
     let t0 = Instant::now();
     let result = generate_n(&mut weights, max_tokens);
     let wall_ms = t0.elapsed().as_secs_f64() * 1000.0;
+    if let Some(e) = &result.error {
+        eprintln!("[bench] generate failed: {e}");
+    }
 
     if args.verbose {
         let (slots, bytes) = index.kquant_ffn_cache_stats();

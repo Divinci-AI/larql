@@ -137,7 +137,10 @@ impl MetalBackend {
         }
         enc.end_encoding();
         cmd.commit();
-        cmd.wait_until_completed();
+        let _ = crate::cb_status::wait_checked(
+            cmd,
+            "crates/larql-compute-metal/src/moe_dispatch/experts.rs:140",
+        );
         let t_gpu = t_start.elapsed();
 
         let all_expert_outputs = read_buffer_f32(&scratch.expert_outs, valid_count * hidden);
@@ -346,7 +349,10 @@ impl MetalBackend {
         }
         enc.end_encoding();
         cmd.commit();
-        cmd.wait_until_completed();
+        let _ = crate::cb_status::wait_checked(
+            cmd,
+            "crates/larql-compute-metal/src/moe_dispatch/experts.rs:349",
+        );
         let t_gpu = t_start.elapsed();
 
         // CPU weighted sum (no post-experts norm — client does that across shards).

@@ -510,7 +510,8 @@ mod dispatch_tests {
         );
         enc.end_encoding();
         cmd.commit();
-        cmd.wait_until_completed();
+        let _ =
+            crate::cb_status::wait_checked(cmd, "crates/larql-compute-metal/src/stages/ffn.rs:513");
     }
 
     /// Same shape, GeluTanh activation — covers the `Activation::GeluTanh`
@@ -558,7 +559,8 @@ mod dispatch_tests {
         );
         enc.end_encoding();
         cmd.commit();
-        cmd.wait_until_completed();
+        let _ =
+            crate::cb_status::wait_checked(cmd, "crates/larql-compute-metal/src/stages/ffn.rs:561");
     }
 
     /// `encode_gated` with `LARQL_FUSED_DOWN=1` + Q4_K down dispatches
@@ -616,7 +618,8 @@ mod dispatch_tests {
         );
         enc.end_encoding();
         cmd.commit();
-        cmd.wait_until_completed();
+        let _ =
+            crate::cb_status::wait_checked(cmd, "crates/larql-compute-metal/src/stages/ffn.rs:619");
         unsafe {
             std::env::remove_var(larql_compute::options::ENV_FUSED_DOWN);
         }
@@ -662,7 +665,8 @@ mod dispatch_tests {
         );
         enc.end_encoding();
         cmd.commit();
-        cmd.wait_until_completed();
+        let _ =
+            crate::cb_status::wait_checked(cmd, "crates/larql-compute-metal/src/stages/ffn.rs:665");
     }
 
     /// `encode_standard` with `Activation::GeluTanh` — covers the
@@ -705,6 +709,7 @@ mod dispatch_tests {
         );
         enc.end_encoding();
         cmd.commit();
-        cmd.wait_until_completed();
+        let _ =
+            crate::cb_status::wait_checked(cmd, "crates/larql-compute-metal/src/stages/ffn.rs:708");
     }
 }

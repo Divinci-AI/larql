@@ -42,7 +42,10 @@ pub fn profile_all(n_layers: usize, warmup: usize, iters: usize) -> Vec<KernelRe
             let enc = cmd.new_compute_command_encoder();
             enc.end_encoding();
             cmd.commit();
-            cmd.wait_until_completed();
+            let _ = crate::cb_status::wait_checked(
+                cmd,
+                "crates/larql-compute-metal/src/diag/kernel_profile/all.rs:45",
+            );
             let ms = t.elapsed().as_secs_f64() * 1000.0;
             if i >= warmup {
                 times.push(ms);
@@ -129,7 +132,10 @@ pub fn profile_all(n_layers: usize, warmup: usize, iters: usize) -> Vec<KernelRe
                 }
                 enc.end_encoding();
                 cmd.commit();
-                cmd.wait_until_completed();
+                let _ = crate::cb_status::wait_checked(
+                    cmd,
+                    "crates/larql-compute-metal/src/diag/kernel_profile/all.rs:132",
+                );
                 let ms = t.elapsed().as_secs_f64() * 1000.0;
                 if i >= warmup {
                     times.push(ms / n_layers as f64);
@@ -207,7 +213,10 @@ pub fn profile_all(n_layers: usize, warmup: usize, iters: usize) -> Vec<KernelRe
             dispatch(enc);
             enc.end_encoding();
             cmd.commit();
-            cmd.wait_until_completed();
+            let _ = crate::cb_status::wait_checked(
+                cmd,
+                "crates/larql-compute-metal/src/diag/kernel_profile/all.rs:210",
+            );
         });
         // TRUE batched (warm-cache): all n_layers dispatches reuse the
         // SAME weight buffers (wg/wu). After the first call, weights
@@ -275,7 +284,10 @@ pub fn profile_all(n_layers: usize, warmup: usize, iters: usize) -> Vec<KernelRe
                 }
                 enc.end_encoding();
                 cmd.commit();
-                cmd.wait_until_completed();
+                let _ = crate::cb_status::wait_checked(
+                    cmd,
+                    "crates/larql-compute-metal/src/diag/kernel_profile/all.rs:278",
+                );
                 let ms = t.elapsed().as_secs_f64() * 1000.0;
                 if i >= warmup {
                     times.push(ms / n_layers as f64);
@@ -429,7 +441,10 @@ pub fn profile_all(n_layers: usize, warmup: usize, iters: usize) -> Vec<KernelRe
             dispatch(enc);
             enc.end_encoding();
             cmd.commit();
-            cmd.wait_until_completed();
+            let _ = crate::cb_status::wait_checked(
+                cmd,
+                "crates/larql-compute-metal/src/diag/kernel_profile/all.rs:432",
+            );
         });
         let bat_ms = measure_single_cmdbuf_batched(&metal, warmup, iters, n_layers, &dispatch);
 
@@ -525,7 +540,10 @@ pub fn profile_all(n_layers: usize, warmup: usize, iters: usize) -> Vec<KernelRe
             dispatch(enc);
             enc.end_encoding();
             cmd.commit();
-            cmd.wait_until_completed();
+            let _ = crate::cb_status::wait_checked(
+                cmd,
+                "crates/larql-compute-metal/src/diag/kernel_profile/all.rs:528",
+            );
         });
         let bat_ms = measure_single_cmdbuf_batched(&metal, warmup, iters, n_layers, &dispatch);
 

@@ -294,6 +294,15 @@ impl KVCache {
 
 /// Encode KV append dispatch into an existing encoder.
 /// The encoder is NOT ended — caller continues adding dispatches.
+///
+/// # Panics
+///
+/// If the cache is full (`current_len >= max_seq`). The append kernel
+/// writes row `current_len` with no bound of its own, so a full cache
+/// would mean a write past the buffer — memory corruption that surfaces
+/// only much later and somewhere else (#229: a sliding layer sized to its
+/// window on a path that never compacts). Refusing here turns that into a
+/// named failure at the site that owns the fact.
 #[allow(clippy::too_many_arguments)]
 pub fn encode_kv_append(
     enc: &ComputeCommandEncoderRef,
@@ -302,6 +311,14 @@ pub fn encode_kv_append(
     new_k: &Buffer,
     new_v: &Buffer,
 ) {
+    assert!(
+        cache.current_len < cache.max_seq,
+        "KV append past capacity: current_len {} >= max_seq {} — the cache must be \
+         sized for every position this path will reach, or compacted before this \
+         append; either way the write must not happen (#229)",
+        cache.current_len,
+        cache.max_seq
+    );
     let pos = cache.current_len as u32;
     let num_kv = cache.num_kv_heads as u32;
     let hd = cache.head_dim as u32;
@@ -951,6 +968,49 @@ mod tests {
         (8, 2, 64)
     }
 
+    /// #229. A full cache must refuse the append rather than write row
+    /// `max_seq` past its buffer. Encoding, not execution: the assertion
+    /// fires before any dispatch is recorded.
+    #[test]
+    fn encode_kv_append_refuses_a_full_cache() {
+        let m = backend();
+        let (_, num_kv, head_dim) = append_attend_shapes();
+        let max_seq = 4;
+        let mut layer = LayerKVCache::new(&m.bufs, max_seq, num_kv, head_dim);
+        layer.current_len = max_seq; // positions 0..4 stored; the 5th must not land
+        let zeros = vec![0.0f32; num_kv * head_dim];
+        let new_k_buf = m.bufs.transient_from_f32(&zeros);
+        let new_v_buf = m.bufs.transient_from_f32(&zeros);
+        let cmd = m.queue.new_command_buffer();
+        let enc = cmd.new_compute_command_encoder();
+        // Metal aborts the process if an encoder is dropped mid-panic, so
+        // catch the refusal and end the encoder before asserting on it.
+        let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            encode_kv_append(
+                enc,
+                &layer,
+                &m.attention.kv_append_pipeline,
+                &new_k_buf,
+                &new_v_buf,
+            )
+        }));
+        enc.end_encoding();
+        cmd.commit();
+        let _ = crate::cb_status::wait_checked(cmd, "kv_cache refuse test");
+        let msg = match refused {
+            Err(payload) => payload
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
+                .unwrap_or_default(),
+            Ok(()) => panic!("a full cache accepted an append past its buffer"),
+        };
+        assert!(
+            msg.contains("KV append past capacity"),
+            "unexpected refusal message: {msg}"
+        );
+    }
+
     /// `encode_kv_append` writes new K/V rows into the cache slot at
     /// `current_len`.  After a single dispatch + commit + wait the
     /// dispatch should complete and the kernel input/output buffers
@@ -979,7 +1039,10 @@ mod tests {
         );
         enc.end_encoding();
         cmd.commit();
-        cmd.wait_until_completed();
+        let _ = crate::cb_status::wait_checked(
+            cmd,
+            "crates/larql-compute-metal/src/ops/kv_cache.rs:1042",
+        );
 
         // The callsite is responsible for bumping `current_len`; the
         // encoder itself only writes the buffer.  Mirror the legacy
@@ -1021,7 +1084,10 @@ mod tests {
         );
         enc.end_encoding();
         cmd.commit();
-        cmd.wait_until_completed();
+        let _ = crate::cb_status::wait_checked(
+            cmd,
+            "crates/larql-compute-metal/src/ops/kv_cache.rs:1084",
+        );
 
         let out = crate::buffers::read_buffer_f32(&out_buf, num_kv * head_dim);
         assert!(out.iter().all(|v| v.is_finite()));
@@ -1068,7 +1134,10 @@ mod tests {
         );
         enc.end_encoding();
         cmd.commit();
-        cmd.wait_until_completed();
+        let _ = crate::cb_status::wait_checked(
+            cmd,
+            "crates/larql-compute-metal/src/ops/kv_cache.rs:1131",
+        );
 
         // Output buffer length matches the requested shape (a weak but
         // valid post-condition: a panicked kernel never gets here, and
@@ -1113,7 +1182,10 @@ mod tests {
             (head_dim as f32).sqrt().recip(),
         );
         cmd.commit();
-        cmd.wait_until_completed();
+        let _ = crate::cb_status::wait_checked(
+            cmd,
+            "crates/larql-compute-metal/src/ops/kv_cache.rs:1176",
+        );
 
         assert_eq!(
             layer.current_len, 1,

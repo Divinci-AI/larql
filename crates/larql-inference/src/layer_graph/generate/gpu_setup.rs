@@ -164,13 +164,15 @@ pub(super) fn ensure_prompt_fits(seq_len: usize) -> Result<(), GenerateError> {
 pub(super) fn reset_and_preallocate_kv_cache(weights: &ModelWeights, backend: &dyn ComputeBackend) {
     backend.reset_kv_cache();
     let kv_shapes = kv_cache_shapes_for_arch(weights);
-    // Sliding layers are sized for what they can reach plus compaction
-    // slack, not for the global default — on Gemma 3 4B that is 29 of 34
-    // layers at 2048 rows instead of 4096. Global layers are unchanged.
-    let kv_capacities = larql_compute::pipeline_layer::kv_capacities_for_arch(
-        weights,
-        DEFAULT_GPU_KV_CACHE_MAX_SEQ,
-    );
+    // Every layer at the full default, sliding or not. The window-derived
+    // capacity (`kv_capacities_for_arch`) presumes compaction, and the GPU
+    // decode path never compacts — it appends at `current_len` and attends
+    // absolute rows — so a sliding layer sized to its window ran off the
+    // end of its buffer past position `window x slack` (#229). The Metal
+    // backend applies the same rule in `ensure_kv_cache_for_layers`; stating
+    // it here too keeps the preallocation from being grown on the first
+    // step.
+    let kv_capacities = vec![DEFAULT_GPU_KV_CACHE_MAX_SEQ; kv_shapes.len()];
     backend.preallocate_kv_cache_per_layer_with_capacity(&kv_shapes, &kv_capacities);
 }
 

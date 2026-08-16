@@ -291,6 +291,9 @@ mod tests {
         let enc = cmd.new_compute_command_encoder();
         enc.end_encoding();
         cmd.commit();
-        cmd.wait_until_completed();
+        let _ = crate::cb_status::wait_checked(
+            cmd,
+            "crates/larql-compute-metal/src/trait_impl/mod.rs:294",
+        );
     }
 }
