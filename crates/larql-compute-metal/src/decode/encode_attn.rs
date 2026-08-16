@@ -479,11 +479,19 @@ impl MetalBackend {
             // KV-B1: phase 3 walks the span serially on `head_dim` threads
             // in the baseline kernel. When slices are requested, dispatch
             // the sequence-parallel variant at `slices * head_dim` threads
-            // instead. `slices_for` resolves the geometry-scoped default
-            // and returns 0 when the request cannot be honoured for this
-            // head_dim, which keeps the baseline.
-            let fused_slices =
-                ops::kv_seqpar::slices_for(self.decode_flags.kv_seqpar, layer_head_dim, attn_span);
+            // instead. The planner resolves the request against this
+            // layer's full geometry and returns 0 when the baseline should
+            // run.
+            let fused_slices = ops::attention_geometry::choose_attention_geometry(
+                self.decode_flags.kv_seqpar,
+                &ops::attention_geometry::AttentionGeometryQuery {
+                    head_dim: layer_head_dim,
+                    num_q_heads: layer_num_q_heads,
+                    num_kv_heads: cache.num_kv_heads,
+                    span: attn_span,
+                },
+            )
+            .slices();
             enc.set_compute_pipeline_state(if fused_slices > 1 {
                 &self.attention.kv_append_attend_fused_seqpar_pipeline
             } else {
@@ -573,14 +581,20 @@ impl MetalBackend {
             // KV-B1 (`LARQL_KV_SEQPAR`): phase 3 — the weighted-V
             // accumulation — is ~85% of long-span attention and walks the
             // span serially with `head_dim` threads. The seqpar arm splits
-            // it across N slices. `slices_for` resolves the geometry-scoped
-            // default and returns 0 when this layer's head_dim cannot
-            // honour the request, and the shipped kernel runs instead.
-            let slices = ops::kv_seqpar::slices_for(
+            // it across N slices. The planner resolves the request against
+            // this layer's full geometry — a measured row (gpt-oss's is the
+            // A/B/C-licensed policy) or serial where none exists — and
+            // returns 0 when the shipped kernel should run instead.
+            let slices = ops::attention_geometry::choose_attention_geometry(
                 self.decode_flags.kv_seqpar,
-                kv_cache.layers[attend_cache_idx].head_dim,
-                attn_span,
-            );
+                &ops::attention_geometry::AttentionGeometryQuery {
+                    head_dim: kv_cache.layers[attend_cache_idx].head_dim,
+                    num_q_heads: layer_num_q_heads,
+                    num_kv_heads: kv_cache.layers[attend_cache_idx].num_kv_heads,
+                    span: attn_span,
+                },
+            )
+            .slices();
             if slices > 1 {
                 ops::kv_cache::encode_kv_attend_seqpar(
                     enc,
