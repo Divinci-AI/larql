@@ -266,13 +266,60 @@ impl MetalBackend {
         );
     }
 
+    /// Attention over the cache: the same tiered dispatch the production
+    /// decode path uses (`decode/encode_attn.rs`), transcribed rather than
+    /// re-derived.
+    ///
+    /// - **Span tier.** `kv_attention` holds `SHORT_ATTENTION_SPAN` scores
+    ///   in threadgroup memory; a span past it must run the long kernel,
+    ///   whose bound is `LONG_ATTENTION_SPAN`. Before this the lowering
+    ///   pinned the short kernel for every span, i.e. overflowed its
+    ///   threadgroup scratch past 1024 — the sliding layers' 2048 window
+    ///   and every full layer past 1K.
+    /// - **Sequence-parallel phase 3 (KV-B1).** The weighted-V walk is
+    ///   ~85% of long-span cost and the serial kernel walks it with
+    ///   `head_dim` threads per head — 32 threadgroups regardless of
+    ///   context on Glimmer. `slices_for` resolves the operator's
+    ///   `LARQL_KV_SEQPAR` against this layer's `head_dim` and the span
+    ///   (0 = keep the serial kernel); the seqpar kernels bind the same
+    ///   thirteen slots and differ only in a `slices x head_dim`
+    ///   threadgroup and a reassociated sum, gated at 1e-4 against serial
+    ///   in `tests/test_kernel_kv_attention_seqpar.rs`.
     fn encode_kv_attention(
         &self,
         enc: &ComputeCommandEncoderRef,
         s: &AttnScratch<'_>,
         shape: &AttnShape,
     ) {
-        let pipeline = &self.attention.kv_attend_pipeline;
+        use crate::ops::kv_cache::{attention_span, LONG_ATTENTION_SPAN, SHORT_ATTENTION_SPAN};
+
+        let window = shape.window.unwrap_or(0) as u32;
+        let span = attention_span(shape.kv_len as u32, window);
+        assert!(
+            span as usize <= LONG_ATTENTION_SPAN,
+            "attention span {span} exceeds the long kernel's threadgroup scratch \
+             bound ({LONG_ATTENTION_SPAN})"
+        );
+        let long = span > SHORT_ATTENTION_SPAN;
+        let slices =
+            crate::ops::kv_seqpar::slices_for(self.decode_flags.kv_seqpar, shape.head_dim, span);
+        let (pipeline, threads) = if slices > 1 {
+            crate::route_witness::bump(&crate::route_witness::LOWERED_ATTEND_SEQPAR);
+            let p = if long {
+                &self.attention.kv_attend_seqpar_long_pipeline
+            } else {
+                &self.attention.kv_attend_seqpar_pipeline
+            };
+            (p, (slices * shape.head_dim) as u64)
+        } else {
+            crate::route_witness::bump(&crate::route_witness::LOWERED_ATTEND_SERIAL);
+            let p = if long {
+                &self.attention.kv_attend_long_pipeline
+            } else {
+                &self.attention.kv_attend_pipeline
+            };
+            (p, p.max_total_threads_per_threadgroup().min(256))
+        };
         enc.set_compute_pipeline_state(pipeline);
         enc.set_buffer(0, Some(s.q), 0);
         enc.set_buffer(1, Some(s.k_cache), 0);
@@ -283,15 +330,14 @@ impl MetalBackend {
         super::set_u32(enc, 6, shape.num_q_heads as u32);
         super::set_u32(enc, 7, shape.num_kv_heads as u32);
         super::set_f32(enc, 8, shape.score_scale);
-        super::set_u32(enc, 9, shape.window.unwrap_or(0) as u32);
-        // No sink logits in this plan. The kernel reads slot 10 only when
+        super::set_u32(enc, 9, window);
+        // No sink logits in this plan. The kernels read slot 10 only when
         // `has_sinks` is non-zero, but Metal still requires the binding to
         // exist, so a one-float placeholder goes in — `inv_freq` is a
         // live buffer of the right kind and is not read by this kernel.
         enc.set_buffer(10, Some(s.inv_freq), 0);
         super::set_u32(enc, 11, 0);
         super::set_f32(enc, 12, shape.softcap.unwrap_or(0.0));
-        let threads = pipeline.max_total_threads_per_threadgroup().min(256);
         enc.dispatch_thread_groups(
             metal::MTLSize::new(shape.num_q_heads as u64, 1, 1),
             metal::MTLSize::new(threads, 1, 1),
