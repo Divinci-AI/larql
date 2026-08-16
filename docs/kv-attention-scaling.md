@@ -1066,6 +1066,27 @@ statement about the *slope*, which is the metric this ladder was set up to
 move. It needs block A re-run under the full preconditions to be said at
 all, and block C to be said about depth.
 
-**Not yet licensed:** `SEQPAR_DEFAULT_ON_HEAD_DIMS = &[64]`. The decision
-table wants short + medium + deep; one valid block in the middle is not
-that. Block C additionally cannot run until #229 is fixed.
+**Licensed — 2026-08-16, after #229 (#263).** The full ladder, one binary,
+one session, `off / default / off` with 300 s rests, every arm at its full
+255-step budget, both `off` arms of each block carrying one fingerprint:
+
+```text
+block  prompt          serial (off)    seqpar (default)   Δ throughput   brackets
+A      ~36 + 256 tok      12.04 ms         10.80 ms          +11.5%        0.08%
+B      ~574 + 256         13.71 ms         11.01 ms          +24.5%        0.51%
+C      ~2024 + 256        18.11 ms         11.88 ms          +52.4%        0.55%
+```
+
+Serial degrades 12.0 → 13.7 → 18.1 ms/token with context; seqpar holds
+10.8 → 11.0 → 11.9. That is the slope claim, and it is what the decision
+table wanted: short, medium and deep all VALID, the candidate ahead in
+every block, brackets agreeing. `SEQPAR_DEFAULT_ON_HEAD_DIMS = &[64]` is
+therefore the shipping default for gpt-oss's geometry, and the two
+expectation tests in `kv_seqpar/tests.rs` pin that state instead of the
+pending one.
+
+Recorded deviation: the session ran on the 65 W adapter with a full battery
+(user's call), so precondition 1 was not met as written; the brackets
+(≤0.55%) are the evidence that power did not move under the blocks. Block C
+was runnable at all only because #229's KV overrun is fixed — its `off`
+arms complete 255/255 where the same prompt used to stop at token 1.
