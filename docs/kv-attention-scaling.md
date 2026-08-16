@@ -1090,3 +1090,62 @@ Recorded deviation: the session ran on the 65 W adapter with a full battery
 (≤0.55%) are the evidence that power did not move under the blocks. Block C
 was runnable at all only because #229's KV overrun is fixed — its `off`
 arms complete 255/255 where the same prompt used to stop at token 1.
+
+## Glimmer geometry — the policy becomes a planner (2026-08-16, evening)
+
+KV-B1's kernel ported into the VINDEX3 lowering unchanged (PR #265: tiered
+short/long dispatch, seqpar behind the shared policy, a route witness
+printed by `larql vindex3 exec --generate`). Its *policy* did not port:
+`SEQPAR_DEFAULT_ON_HEAD_DIMS = &[64]` encodes span → threadgroup-width
+tiers measured on gpt-oss (64 query heads, 8 KV heads, head_dim 64), and
+Muse-Glimmer-30B is 32 query heads, 2 KV heads, head_dim 128 — the same
+widths are half the slices, on half the head-level threadgroups, with 8
+slices already the 1024-thread ceiling. So the policy moved into
+`ops/attention_geometry.rs`: `choose_attention_geometry(request,
+{head_dim, q_heads, kv_heads, span})` over **measured rows**, no model
+names, serial wherever no row exists. The gpt-oss row reproduces the KV-B1
+tiers exactly (pinned by test); the decode path and the lowering both call
+the planner.
+
+### The Glimmer surface
+
+`scripts/glimmer-seqpar-surface.sh`, `bench/prompts/glimmer/span-*.ids`,
+64 decode tokens, **300 s rest before every arm** — the first attempt ran
+arms back-to-back and read 76 → 74 → 79 → 121 → 159 → 148 across nine
+minutes: a monotone drift in *time* that a reader would score as a
+monotone slice-count cliff. Rested, with serial brackets and the witness
+confirming the kernel on every row (ms/token; identical token ids on every
+arm at each context):
+
+```text
+ctx    serial   2     4     8    serial   bracket   verdict
+512      73    70    69    68      77      5.5%    direction only
+1024     88    83    83    79      89      1.1%    near-valid: 8 slices +12%
+2048    116    96    92    85     113      2.6%    lower bounds +18 / +23 / +33%
+4000    144     -   136   134     145      0.7%    VALID: 4 → +6.2%, 8 → +7.8%
+```
+
+(4000 rather than 4096: prompt + 64 generated tokens must stay within
+`LONG_ATTENTION_SPAN`, the long kernels' threadgroup-scratch bound; past it
+the lowering now refuses instead of overflowing, which is what the first
+4096 arm did.)
+
+Row: serial below 1024, `SeqPar { slices: 8 }` from 1024. Under the
+default policy the witness splits at the boundary — 53196 serial (1023
+positions × 52 layers) then 56628 seqpar — and the mixed trajectory is
+byte-identical to both pure arms.
+
+Two readings, kept apart. **B1 works at this geometry**: +12% at 1K, ≥+33%
+at 2K, and 8 slices is best from 1K because 8 × 128 is the intra-TG ceiling.
+**Past ~2K the family's gain collapses** (+33% → +8%) even though 39 of 52
+layers stay at their 2048 window: the serial phase-3 walk is no longer
+what dominates. The candidate — hypothesis, to be measured, not claimed —
+is the 16:1 GQA read amplification: sixteen query-head threadgroups per KV
+head each stream that head's whole K/V, ~2 GB/token at 4K, which no
+intra-threadgroup slicing touches. The discriminating experiment is a
+synthetic attention bench, 32 per-head threadgroups vs 2 KV-head groups
+each serving 16 queries from one K/V stream, at 2K and 4K: if the grouped
+form barely moves 2K and opens up 4K, that is the surface above, and a
+GQA-group kernel is the next attention rung — followed by B2 (sequence
+tiles across threadgroups) once B1's width is spent.
+

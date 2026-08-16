@@ -10,6 +10,7 @@
 //! All operations use the shared `BufferCache` for weight caching
 //! and `ComputePipelineState` from shader compilation.
 
+pub mod attention_geometry;
 pub mod full_layer;
 pub mod full_pipeline;
 pub mod kv_cache;

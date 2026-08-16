@@ -279,9 +279,10 @@ impl MetalBackend {
     /// - **Sequence-parallel phase 3 (KV-B1).** The weighted-V walk is
     ///   ~85% of long-span cost and the serial kernel walks it with
     ///   `head_dim` threads per head — 32 threadgroups regardless of
-    ///   context on Glimmer. `slices_for` resolves the operator's
-    ///   `LARQL_KV_SEQPAR` against this layer's `head_dim` and the span
-    ///   (0 = keep the serial kernel); the seqpar kernels bind the same
+    ///   context on Glimmer. `ops::attention_geometry` resolves the
+    ///   operator's `LARQL_KV_SEQPAR` against this op's full geometry
+    ///   (head_dim, q heads, kv heads, span); serial for any geometry
+    ///   without a measured row. The seqpar kernels bind the same
     ///   thirteen slots and differ only in a `slices x head_dim`
     ///   threadgroup and a reassociated sum, gated at 1e-4 against serial
     ///   in `tests/test_kernel_kv_attention_seqpar.rs`.
@@ -301,8 +302,18 @@ impl MetalBackend {
              bound ({LONG_ATTENTION_SPAN})"
         );
         let long = span > SHORT_ATTENTION_SPAN;
-        let slices =
-            crate::ops::kv_seqpar::slices_for(self.decode_flags.kv_seqpar, shape.head_dim, span);
+        // The planner, not the head_dim-only policy: this op's full
+        // semantic geometry decides its execution geometry.
+        let slices = crate::ops::attention_geometry::choose_attention_geometry(
+            self.decode_flags.kv_seqpar,
+            &crate::ops::attention_geometry::AttentionGeometryQuery {
+                head_dim: shape.head_dim,
+                num_q_heads: shape.num_q_heads,
+                num_kv_heads: shape.num_kv_heads,
+                span,
+            },
+        )
+        .slices();
         let (pipeline, threads) = if slices > 1 {
             crate::route_witness::bump(&crate::route_witness::LOWERED_ATTEND_SEQPAR);
             let p = if long {
