@@ -68,13 +68,9 @@ pub enum SeqparRequest {
 /// sweep at that head_dim on an idle GPU showing the same tier ordering.
 /// Until then a new geometry can still opt in explicitly with `auto`.
 ///
-/// **Currently empty: nothing defaults on.** head_dim 64 (gpt-oss-20b) is
-/// the only geometry the KV-B1 sweep covered and its short-context result
-/// is clean, but the pre-registered long-prompt and deep-context blocks in
-/// `docs/kv-attention-scaling.md` have not been run on an exclusively
-/// owned GPU. Adding 64 here is the flip those blocks license — one
-/// constant plus the two expectation tests that pin the pending state.
-const SEQPAR_DEFAULT_ON_HEAD_DIMS: &[usize] = &[];
+/// 64 is gpt-oss-20b, the only geometry the KV-B1 sweep covered, enabled
+/// on the A/B/C gate in `docs/kv-attention-scaling.md`.
+const SEQPAR_DEFAULT_ON_HEAD_DIMS: &[usize] = &[64];
 
 /// Whether an unset `LARQL_KV_SEQPAR` means `auto` for this geometry.
 ///

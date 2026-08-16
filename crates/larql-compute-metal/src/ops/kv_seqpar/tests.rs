@@ -129,21 +129,20 @@ fn unset_resolves_through_the_default_list() {
 /// starts failing, either the default list grew without the A/B/C gate or
 /// the gate closed and this expectation is stale — check which.
 #[test]
-fn nothing_defaults_on_until_the_gate_closes() {
-    for hd in [32usize, 64, 128, 256, 512] {
+fn head_dim_64_defaults_on_and_nothing_else_does() {
+    // The measured geometry gets the span-tracking policy, not a fixed count.
+    assert_eq!(slices_for(SeqparRequest::Unset, HD, 256), 8);
+    assert_eq!(slices_for(SeqparRequest::Unset, HD, 2048), 16);
+
+    for hd in [32usize, 128, 256, 512] {
         for span in [64u32, 512, 2048] {
             assert_eq!(
                 slices_for(SeqparRequest::Unset, hd, span),
                 0,
-                "head_dim {hd} must not default on before docs/\
-                 kv-attention-scaling.md's A/B/C gate closes"
+                "head_dim {hd} is unmeasured and must not default on"
             );
         }
     }
-    // The capability is present and waiting — this is a policy refusal,
-    // not a missing kernel. Cf. `unset_resolves_through_the_default_list`.
-    assert_eq!(slices_for(SeqparRequest::Auto, HD, 256), 8);
-    assert_eq!(slices_for(SeqparRequest::Auto, HD, 2048), 16);
 }
 
 /// head_dim 128 is supported by the kernel and would produce a legal
@@ -221,15 +220,15 @@ fn explicit_slices_are_honoured_on_unmeasured_geometries() {
 /// by accident. This test is expected to be edited *with* the evidence
 /// that justifies the new entry — never on its own.
 #[test]
-fn the_default_list_is_empty_pending_the_gate() {
+fn the_default_list_holds_the_measured_geometry() {
     assert_eq!(
         SEQPAR_DEFAULT_ON_HEAD_DIMS,
-        &[] as &[usize],
+        &[64],
         "adding a head_dim requires the A/B/C gate in \
          docs/kv-attention-scaling.md (for 64) or a bench_attention_span \
          sweep on an idle GPU (for any other); see the const's doc comment"
     );
-    assert!(!default_is_auto(HD));
+    assert!(default_is_auto(HD));
     for hd in [32usize, 128, 256, 512] {
         assert!(!default_is_auto(hd), "head_dim {hd} is unmeasured");
     }
