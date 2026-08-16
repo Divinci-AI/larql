@@ -7,19 +7,22 @@ use std::time::Instant;
 
 use super::args::BenchArgs;
 use super::local::{
-    append_cpu_fallback_note, backend_name_for, format_early_stop_note, format_q4k_cache_log,
+    append_cpu_fallback_note, append_repeat_note, backend_name_for, format_early_stop_note,
+    format_q4k_cache_log, generation_fingerprint,
 };
 use super::row::{compute_percentiles, BenchRow};
 
-/// Run the larql generate loop once with the selected backend.
+/// Run the larql generate loop with the selected backend, once per
+/// `--repeat`, returning one row per repeat.
 ///
 /// Warmup runs are discarded; the measured window is `args.tokens` steps
-/// AFTER warmup.
+/// AFTER warmup. Repeats share one process, so the model is opened and the
+/// page cache warmed once for the whole series rather than once per row.
 pub(super) fn run_larql(
     vindex_path: &std::path::Path,
     args: &BenchArgs,
     metal: bool,
-) -> Result<BenchRow, Box<dyn std::error::Error>> {
+) -> Result<Vec<BenchRow>, Box<dyn std::error::Error>> {
     use larql_inference::layer_graph::generate::generate;
     use larql_inference::layer_graph::CachedLayerGraph;
 
@@ -133,52 +136,64 @@ pub(super) fn run_larql(
     // masked the actual W10 deltas. Users who specifically want the
     // GPU-stage breakdown set `LARQL_PROFILE_SPLIT=1` explicitly.
     let max_tokens = args.warmup + args.tokens;
-    let t0 = Instant::now();
-    let result = generate_n(&mut weights, max_tokens);
-    let wall_ms = t0.elapsed().as_secs_f64() * 1000.0;
-    if let Some(e) = &result.error {
-        eprintln!("[bench] generate failed: {e}");
-    }
+    let repeats = args.repeat.max(1);
+    let mut rows = Vec::with_capacity(repeats);
+    for repeat_idx in 0..repeats {
+        let t0 = Instant::now();
+        let result = generate_n(&mut weights, max_tokens);
+        let wall_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        if let Some(e) = &result.error {
+            eprintln!("[bench] generate failed: {e}");
+        }
 
-    if args.verbose {
-        let (slots, bytes) = index.kquant_ffn_cache_stats();
-        eprintln!(
-            "{}",
-            format_q4k_cache_log(backend_name_for(metal), slots, bytes)
+        if args.verbose {
+            let (slots, bytes) = index.kquant_ffn_cache_stats();
+            eprintln!(
+                "{}",
+                format_q4k_cache_log(backend_name_for(metal), slots, bytes)
+            );
+        }
+
+        let n_warm = args.warmup.min(result.decode_ms.len());
+        let measured = &result.decode_ms[n_warm..];
+        let measured_n = measured.len();
+        let (prefill_ms, avg_decode_ms, p50_ms, p99_ms, tok_per_s) = if measured_n == 0 {
+            (result.prefill_ms, 0.0, 0.0, 0.0, 0.0)
+        } else {
+            let (avg, p50, p99) = compute_percentiles(measured);
+            (result.prefill_ms, avg, p50, p99, 1000.0 / avg)
+        };
+
+        let backend_name = backend_name_for(metal);
+        let mut note = format_early_stop_note(measured_n, args.tokens, wall_ms);
+        if !metal {
+            let cached = larql_inference::vindex::supports_cached_decode(&weights);
+            note = append_cpu_fallback_note(note, cached);
+        }
+        note = append_repeat_note(
+            note,
+            repeat_idx,
+            repeats,
+            &generation_fingerprint(&result.tokens),
         );
+        let stages = Some(result.stage_timings.avg_per_step(result.decode_ms.len()));
+
+        rows.push(BenchRow {
+            backend: backend_name.to_string(),
+            prefill_ms,
+            avg_decode_ms,
+            p50_ms,
+            p99_ms,
+            tok_per_s,
+            stages,
+            ffn_rtt_ms: None,
+            attn_ms: None,
+            wire_bytes_per_tok: None,
+            shard_efficiency: None,
+            n_steps: measured_n,
+            note,
+        });
     }
 
-    let n_warm = args.warmup.min(result.decode_ms.len());
-    let measured = &result.decode_ms[n_warm..];
-    let measured_n = measured.len();
-    let (prefill_ms, avg_decode_ms, p50_ms, p99_ms, tok_per_s) = if measured_n == 0 {
-        (result.prefill_ms, 0.0, 0.0, 0.0, 0.0)
-    } else {
-        let (avg, p50, p99) = compute_percentiles(measured);
-        (result.prefill_ms, avg, p50, p99, 1000.0 / avg)
-    };
-
-    let backend_name = backend_name_for(metal);
-    let mut note = format_early_stop_note(measured_n, args.tokens, wall_ms);
-    if !metal {
-        let cached = larql_inference::vindex::supports_cached_decode(&weights);
-        note = append_cpu_fallback_note(note, cached);
-    }
-    let stages = Some(result.stage_timings.avg_per_step(result.decode_ms.len()));
-
-    Ok(BenchRow {
-        backend: backend_name.to_string(),
-        prefill_ms,
-        avg_decode_ms,
-        p50_ms,
-        p99_ms,
-        tok_per_s,
-        stages,
-        ffn_rtt_ms: None,
-        attn_ms: None,
-        wire_bytes_per_tok: None,
-        shard_efficiency: None,
-        n_steps: measured_n,
-        note,
-    })
+    Ok(rows)
 }

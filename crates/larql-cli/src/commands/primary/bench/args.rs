@@ -22,6 +22,34 @@ pub struct BenchArgs {
     #[arg(long, default_value = "3")]
     pub warmup: usize,
 
+    /// QUARANTINED — values above 1 are refused. Re-runs the timed
+    /// generate in the SAME process, emitting one row per repeat.
+    ///
+    /// The intent was to amortise model-open and page-cache re-faulting
+    /// across samples, which is the dominant cost when the model is tens
+    /// of GB. The flaw is not in that reasoning but in what a repeat can
+    /// sample: every repeat inherits its process's state, so N repeats are
+    /// N *correlated* observations of one draw. gpt-oss-20b on Metal
+    /// intermittently starts a process in a broken state — decode
+    /// short-circuits to ~0.5 ms/token and generates different text — and
+    /// a process-scoped startup fault is precisely what repeats cannot
+    /// see. They multiply one outcome into a row count that reads like
+    /// replication.
+    ///
+    /// `--repeat` does **not** cause that fault; it occurs at
+    /// `--repeat 1`. That attribution was made and falsified on
+    /// 2026-08-16.
+    ///
+    /// The `fp=` hash of the generated (token, probability) sequence is
+    /// still a good determinism detector — far more sensitive than
+    /// watching for an early stop, which only fires when a divergence
+    /// crosses an argmax boundary. Run it across separate processes.
+    ///
+    /// See the quarantine note in `run.rs` for the fresh-process readings,
+    /// and `docs/kv-attention-scaling.md` §Run hygiene.
+    #[arg(long, default_value = "1", value_name = "N")]
+    pub repeat: usize,
+
     /// Comma-separated backend list. Supported: `metal`, `cpu`.
     #[arg(long, default_value = "metal")]
     pub backends: String,
