@@ -1726,7 +1726,42 @@ query was verified as `{64,64,8,1025} → 16 slices` and pinned by test instead.
 | A-6 | **(layer, role) → representation policy** from the Meta recipes + quality matrix. | Bytes down without the coarse FFN-only cost. | open |
 | A-7 | **Speculative decoding last**, entering at ~22–24 tok/s native. | — | open |
 | A-8 | **B2 (sequence tiles across threadgroups)** once B1's intra-TG width is spent — at head_dim 128 that is 8 slices. | Planner rung. | after A-2 |
-| A-9 | **gpt-oss through the same lowerer** — the proof it is an engine architecture, not a Glimmer implementation. | Same oracle discipline on gpt-oss. | after A-3 |
+| A-9 | **gpt-oss through the same lowerer** — the proof it is an engine architecture, not a Glimmer implementation. Mapped 2026-08-17: `larql vindex3 plan` on the HF checkpoint is inadmissible on four facts, and that is only rung 0 of six (below). Oracle banked: `bench/prompts/gpt-oss/vindex3-oracle-2026-08-17.txt` (65 chat-wrapped prompt ids → 16 generated ids, via `larql run --emit-ids`, #268). | Same oracle discipline on gpt-oss: byte-identical greedy ids to the served path through `vindex3 exec --backend metal-lowered`. | after A-3 |
+
+A-9's rungs, each with its file coordinates (from the 2026-08-17 map; the
+generic system-graph path is **dense-only today** — Glimmer encodes because it
+is dense on that path, and the two container shapes, `system_graph.json` vs
+`moe_manifest.json`, are mutually exclusive: `encode/mod.rs` sets
+`index.moe_manifest = None`):
+
+```text
+A-9.0  plan admissibility as REPRESENTATION, not suppression:
+       PositionPolicy gains a YaRN variant carrying {theta, factor, beta_fast, beta_slow,
+       truncate, original_max_position_embeddings, amplitude} — amplitude is the part that
+       moves every logit and lowering/mod.rs:397 fakes 1.0 today; probe_rope_type reads it
+       (plan/carriage.rs:281, config/position.rs:25). swiglu_limit → an explicit gate policy
+       on FfnSurface/FfnOp mirroring ExpertGatePolicy::ClampedGlu{limit, alpha}
+       (graph/surface.rs:91, opplan/mod.rs:116, carriage rule at carriage.rs:110; the test
+       at plan/tests/carriage.rs:86 already says "MOE1 is where it gets one").
+       quantization_config.{quant_method, modules_to_not_convert} classified (semantics.rs
+       registries / config_keys.rs:116) as the representation fact they are.
+A-9.1  attention sinks + q/k/v/o biases in AttentionSurface / AttentionCall and every
+       backend — the reference interpreter has neither (reference.rs:165 softmax without the
+       sink, :92 projection without bias); the lowering binds has_sinks=0 with a placeholder
+       (lowering/attention.rs:344) although the kernels support sinks.
+A-9.2  MoE in the generic system graph: an expert-bank ObjectKind (graph/object.rs:11),
+       router/expert/bias OperandRoles (graph/roles.rs:22,58), an MoE FfnOp; encode writes
+       banks into the system container (or exec composes system + routed containers the way
+       `run --routed-from` composes VINDEX2 + banks).
+A-9.3  MoE execution in the interpreter (exec/mod.rs, reference.rs, production.rs) with
+       gpt-oss routing (top-k then softmax over the selected — MoeRouterKind::TopKThenSoftmax,
+       ExpertRoutingPolicy::NormalisedOverSelected) and ClampedGlu (pipeline/moe.rs:43).
+A-9.4  MoE + sinks + biases + YaRN amplitude in the Metal lowering — moe_zero_copy.rs is the
+       served path's machinery and is not plan-reachable; make it so.
+A-9.5  the parity chain: ops closure → exec reference → production → lowered, byte-identical
+       to the banked oracle; then the bracketed ladder.
+```
+
 
 The framing to keep: **mechanism is portable; optimal schedule is
 geometry-dependent.** VINDEX3 carries semantic geometry; the Metal planner
