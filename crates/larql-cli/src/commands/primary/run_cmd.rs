@@ -150,6 +150,13 @@ pub struct RunArgs {
     #[arg(long, value_name = "DIR")]
     pub routed_from: Option<String>,
 
+    /// With `--routed-from --metal`: print the exact prompt token ids (after
+    /// chat wrapping) and the generated token ids to stderr, so the run can
+    /// serve as an id-level oracle for `larql vindex3 exec --tokens ...`
+    /// on the same model. Text output is unchanged.
+    #[arg(long, default_value_t = false)]
+    pub emit_ids: bool,
+
     /// HTTP timeout in seconds for --ffn.
     #[arg(long, default_value = "60")]
     pub ffn_timeout_secs: u64,
@@ -386,6 +393,7 @@ pub fn run(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
             prompt,
             args.max_tokens,
             args.metal,
+            args.emit_ids,
         );
     }
 
@@ -1022,6 +1030,7 @@ fn generate_routed_metal(
     max_tokens: usize,
     index: &larql_vindex::VectorIndex,
     routed: &larql_inference::ffn::ContainerRoutedBackend,
+    emit_ids: bool,
 ) -> Result<Vec<(String, u32)>, Box<dyn std::error::Error>> {
     use larql_compute_metal::route_witness;
     use std::sync::atomic::Ordering;
@@ -1040,7 +1049,11 @@ fn generate_routed_metal(
     let witness_before = route_witness::snapshot();
     let route_layers_before = route_witness::GPU_ROUTE_LAYERS.load(Ordering::Relaxed);
     let legacy_waits_before = route_witness::WAIT_MOE_ROUTE_LEGACY.load(Ordering::Relaxed);
-    let result = larql_inference::layer_graph::generate_routed(
+    // `generate_routed` is `generate_streaming` with greedy sampling and
+    // built-in EOS; calling the streaming form directly is what lets the
+    // per-token id reach `--emit-ids` without widening `GenerateResult`.
+    let mut generated_ids: Vec<u32> = Vec::new();
+    let result = larql_inference::layer_graph::generate_streaming(
         weights,
         tokenizer,
         prompt_ids,
@@ -1049,8 +1062,17 @@ fn generate_routed_metal(
         &backend,
         &cached_layers,
         0..num_layers,
-        routed,
+        larql_inference::layer_graph::SamplingConfig::greedy(),
+        &larql_inference::layer_graph::EosConfig::builtin(),
+        |id, _, _| generated_ids.push(id),
+        Some(routed),
     );
+    if emit_ids {
+        eprintln!(
+            "[ids] generated {} tokens: {generated_ids:?}",
+            generated_ids.len()
+        );
+    }
     let witness = witness_before.delta(&route_witness::snapshot());
     let route_layers =
         route_witness::GPU_ROUTE_LAYERS.load(Ordering::Relaxed) - route_layers_before;
@@ -1082,6 +1104,7 @@ fn run_with_routed_container(
     prompt: &str,
     max_tokens: usize,
     metal: bool,
+    emit_ids: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let routed_path = std::path::Path::new(routed_dir);
 
@@ -1114,6 +1137,9 @@ fn run_with_routed_container(
         .map_err(|e| format!("failed to tokenise prompt: {e}"))?;
 
     let started = std::time::Instant::now();
+    if emit_ids {
+        eprintln!("[ids] prompt {} tokens: {prompt_ids:?}", prompt_ids.len());
+    }
     let toks = if metal {
         generate_routed_metal(
             &mut weights,
@@ -1122,6 +1148,7 @@ fn run_with_routed_container(
             max_tokens,
             &index,
             &routed,
+            emit_ids,
         )?
     } else {
         larql_inference::vindex::generate_kquant_cpu_routed(
