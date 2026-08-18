@@ -337,7 +337,7 @@ container ladder
 [x] c5  structural verify with {layer, entry, role} defects; CLI dual-generation
 [ ] c6  fixtures B–D (GPT-OSS, Inkling, Mini-K3) — proves nothing is hard-coded
 [ ] c7  WALK/DESCRIBE parity over in-place bank regions
-[ ] c8  a real Gemma MoE layer written as a VINDEX3 container
+[x] c8  a real Gemma MoE layer written as a VINDEX3 container (CLOSED 2026-08-04, below)
 [ ] c9  every Gemma layer — the first real model that *is* a VINDEX3 container
 ```
 
@@ -1726,7 +1726,8 @@ query was verified as `{64,64,8,1025} → 16 slices` and pinned by test instead.
 | A-6 | **(layer, role) → representation policy** from the Meta recipes + quality matrix. | Bytes down without the coarse FFN-only cost. | open |
 | A-7 | **Speculative decoding last**, entering at ~22–24 tok/s native. | — | open |
 | A-8 | **B2 (sequence tiles across threadgroups)** once B1's intra-TG width is spent — at head_dim 128 that is 8 slices. | Planner rung. | after A-2 |
-| A-9 | **gpt-oss through the same lowerer** — the proof it is an engine architecture, not a Glimmer implementation. Mapped 2026-08-17: `larql vindex3 plan` on the HF checkpoint is inadmissible on four facts, and that is only rung 0 of six (below). Oracle banked: `bench/prompts/gpt-oss/vindex3-oracle-2026-08-17.txt` (65 chat-wrapped prompt ids → 16 generated ids, via `larql run --emit-ids`, #268). | Same oracle discipline on gpt-oss: byte-identical greedy ids to the served path through `vindex3 exec --backend metal-lowered`. | after A-3 |
+| A-9 | **gpt-oss through the same lowerer** — the proof it is an engine architecture, not a Glimmer implementation. Mapped 2026-08-17: `larql vindex3 plan` on the HF checkpoint is inadmissible on four facts, and that is only rung 0 of six (below). Oracle banked: `bench/prompts/gpt-oss/vindex3-oracle-2026-08-17.txt` (65 chat-wrapped prompt ids → 16 generated ids, via `larql run --emit-ids`, #268). | Same oracle discipline on gpt-oss: byte-identical greedy ids to the served path through `vindex3 exec --backend metal-lowered`. | **closed 2026-08-18** (parity chain, rungs A-9.0–A-9.5 below); the bracketed ladder is A-10 |
+| A-10 | **Cost of abstraction — gpt-oss bracketed perf ladder** through the generic plan. Arms: served routed Metal path (`larql run --routed-from`) · `vindex3 exec --backend metal-lowered` f16-attention · the same with NVFP4 attention; contexts short / ~512 / ~1K / ~2K / ~4K; baseline/candidate/baseline brackets, full decode budget, route/plan witness on every row, same trajectory fingerprint, rests between arms (the KV-B1 hygiene). The question is the delta between the generic lowering and the mature served path — single-digit % says the execution architecture generalised without discarding the optimised backend; larger says there is a clean, correctness-free profiling problem. | A rested bracketed table with witnesses; a stated delta per context. | open, next |
 
 A-9's rungs, each with its file coordinates (from the 2026-08-17 map; the
 generic system-graph path is **dense-only today** — Glimmer encodes because it
@@ -1735,7 +1736,18 @@ is dense on that path, and the two container shapes, `system_graph.json` vs
 `index.moe_manifest = None`):
 
 ```text
-A-9.0  plan admissibility as REPRESENTATION, not suppression:
+A-9.0  DONE 2026-08-17 (branch feat/vindex3-gpt-oss-rung0): `larql vindex3 plan` on the HF
+       checkpoint is admissible — 50 representable / 0 mismatched / 4 unrepresented (all
+       alias or training_only) / 0 blocking; PositionPolicy::Yarn{theta 150000, factor 32,
+       β 32/1, orig 4096} carried, amplitude derived by ONE authority
+       (YarnRopeScaling::attention_amplitude); ffn.gate_policy = ClampedGlu{7, 1.702};
+       decoder_stack encodings BF16+MXFP4. Executors and the lowering REFUSE Yarn and
+       ClampedGlu (typed, before any bytes) rather than serve the wrong model. Two finds
+       the gate forced: the parser read theta from transformers-5 `rope_parameters` but
+       SCALING only from legacy `rope_scaling` (a 5.x YaRN block was dropped at parse —
+       §4.7.8 again; fixed, pinned); and the YaRN leaves had carriage rules but were not
+       classified execution-semantic, so the rules were never reached. As mapped:
+       plan admissibility as REPRESENTATION, not suppression:
        PositionPolicy gains a YaRN variant carrying {theta, factor, beta_fast, beta_slow,
        truncate, original_max_position_embeddings, amplitude} — amplitude is the part that
        moves every logit and lowering/mod.rs:397 fakes 1.0 today; probe_rope_type reads it
@@ -1745,21 +1757,134 @@ A-9.0  plan admissibility as REPRESENTATION, not suppression:
        at plan/tests/carriage.rs:86 already says "MOE1 is where it gets one").
        quantization_config.{quant_method, modules_to_not_convert} classified (semantics.rs
        registries / config_keys.rs:116) as the representation fact they are.
-A-9.1  attention sinks + q/k/v/o biases in AttentionSurface / AttentionCall and every
-       backend — the reference interpreter has neither (reference.rs:165 softmax without the
-       sink, :92 projection without bias); the lowering binds has_sinks=0 with a placeholder
-       (lowering/attention.rs:344) although the kernels support sinks.
-A-9.2  MoE in the generic system graph: an expert-bank ObjectKind (graph/object.rs:11),
+A-9.1  DONE 2026-08-17 (branch feat/vindex3-gpt-oss-rung0): judged AttentionSinkSpec::
+       SoftmaxDenominator (models crate, derived from attn_sinks_key so the schema fact and
+       the served kernel cannot disagree) + `attention_bias` on AttentionSurface; roles
+       Attn{Q,K,V,O}Bias/AttnSinks; closure paired both ways (declared ⇒ all four operands,
+       operand ⇒ declaration; sink operand ⇒ judgment, judgment ⇒ operand; shapes pinned);
+       AttentionOp.{q,k,v,o}_bias/sinks → BiasCall/SinkCall → reference (append-and-drop
+       softmax), production + device (served `softmax_in_place(scores, sink)`), lowering
+       REFUSES until A-9.4. Gates: golden parity (denominator form, third transcription),
+       3-backend parity, 5 causal controls (each operand moves layer-0 attention 1e-2…6e-1,
+       propagates to logits), absence (bias-free plan serialises byte-identically; four
+       fail-closed refusals). gpt-oss `vindex3 ops`: 384 → 264 defects, ZERO attention
+       defects, every survivor MoE (A-9.2). As mapped: attention sinks + q/k/v/o biases in
+       AttentionSurface / AttentionCall and every backend — the reference interpreter had
+       neither (reference.rs:165 softmax without the sink, :92 projection without bias); the
+       lowering still binds has_sinks=0 with a placeholder (lowering/attention.rs:344).
+A-9.2  DONE 2026-08-17 (branch feat/vindex3-gpt-oss-rung0): ObjectKind::ExpertBank, carved out
+       of the stack by binding SPECIFICITY (`most_specific_owner`: longest binding prefix owns
+       a tensor — the graph's one membership rule, consulted by encode/verify/closure; no
+       exclusion lists, no manifest); FfnSurface.moe (MoeSurface lifted from the family
+       judgment: experts, top_k, router_kind, routing_policy, router_bias, expert_format,
+       gate_up_layout, …); roles MoeRouter{Weight,Bias} (stack) + Expert{GateUp,Down}
+       {,Scales,Bias} (bank); LayerFfn::{Dense,Routed} untagged so dense plans serialise
+       byte-identically; RoutedFfnOp → RoutedFfnCall → reference (literal transcription),
+       production (served router::select + MoeGateRule), device (per-expert gemv, NATIVE
+       MXFP4 bytes bound when declared); lowering refuses (A-9.4). Gates on a miniature
+       gpt_oss-FAMILY fixture (packed MXFP4 + biases + sinks + router bias + clamped GLU):
+       served CPU forward ≡ reference ≡ production ≡ device(mxfp4) at 2e-5; four causal
+       controls (router / gate_up / down / bias → 3e-2…5e-1); closure fail-closed both ways
+       (no judgment ⇒ 8 stray operands/layer; wrong expert count ⇒ 8 geometry/layer; expert
+       operand in the stack ⇒ misplaced). REAL gpt-oss: `vindex3 ops` 264 → 0, "plan closed:
+       24 layer(s), every executable operand accounted"; container = decoder_stack@BF16 1.28 GB
+       + expert_bank@BF16+MXFP4 10.17 GB (24 bindings) + embedding/final_norm/output_head, NO
+       moe_manifest.json, `inspect` coherent; `vindex3 exec` now runs to the executor and
+       refuses at YaRN — the last unexecuted semantic (A-9.3). As mapped:
+       MoE in the generic system graph: an expert-bank ObjectKind (graph/object.rs:11),
        router/expert/bias OperandRoles (graph/roles.rs:22,58), an MoE FfnOp; encode writes
        banks into the system container (or exec composes system + routed containers the way
        `run --routed-from` composes VINDEX2 + banks).
-A-9.3  MoE execution in the interpreter (exec/mod.rs, reference.rs, production.rs) with
+       SUCCESS CRITERION (2026-08-17, stronger than "zero MoE defects"): an MoE is
+       expressible ENTIRELY inside the object/operand/op-plan universe dense attention and
+       FFN use — no second container semantics, no side-loaded expert manifest execution
+       must reinterpret; `moe_manifest.json` disappears or shrinks to physical layout.
+       Shape: DecoderLayer → FfnOp::Moe { RouterWeight, RouterBias, ExpertBank(ObjectKind)
+       { gate/up repr, down repr, biases, quant auxiliaries } }. The judged MoE vocabulary
+       already exists in format/moe_manifest (Router{activation, selection, post}, Reduction,
+       Combine, Programme, BankRef{experts, expert_dims}) — A-9.2 lifts it into the graph,
+       it does not re-judge it. Gates mirror A-9.1: bidirectional closure (declared MoE ⇒
+       every operand; stray MoE operand ⇒ the op), shape/count closure (router [E,H], E,
+       top-k, packed geometry gate_up [E,2I,K/32,16]+[E,2I,K/32] scales, down [E,H,I/32,16]),
+       causal controls (perturb router weight, one expert gate/up, one down, one bias →
+       output moves), absence (dense FFN plan byte-identical), container universality (no
+       executor reaches outside the generic graph to find a bank), real gpt-oss closure
+       264 → ~0 (only genuinely later-rung semantics may survive).
+A-9.3  DONE 2026-08-17 (branch feat/vindex3-gpt-oss-rung0): the interpreter executes YaRN —
+       kernels::rope_rotate_scaled + kernels::yarn_frequencies (reference transcription) and
+       the served rope_freq_plan(Yarn) on production/device; MoE execution landed with A-9.2.
+       Gates: fixture with GPT-OSS's YaRN block, served ≡ reference ≡ production ≡ device at
+       2e-5; persisted `factor` 32→4 moves position 0 (amplitude) and layer 0. REAL gpt-oss:
+       `vindex3 exec` runs end-to-end (24 layers, 65-id prompt: 20.8 s single forward, 148
+       ms/token prefill, 7.5 tok/s CPU decode); argmax = oracle's first id; `--generate 16`
+       matches a 3-id prefix then diverges at step 4 and re-syncs; TEACHER-FORCED over the
+       oracle's 81 ids: 14/16 per-position argmax agreement, both misses at the two lowest
+       margins (+0.47, +0.12 logits; oracle id ranked #2). CONGRUENCE: the banked oracle is a
+       Q4_K-SPINE served run; the container is BF16 attention + native MXFP4 — so this is
+       "same semantics, different representation", NOT the A-9.5 byte-identical claim, which
+       needs a same-representation oracle (served path over the same BF16 spine bytes).
+       As mapped: MoE execution in the interpreter (exec/mod.rs, reference.rs, production.rs) with
        gpt-oss routing (top-k then softmax over the selected — MoeRouterKind::TopKThenSoftmax,
        ExpertRoutingPolicy::NormalisedOverSelected) and ClampedGlu (pipeline/moe.rs:43).
-A-9.4  MoE + sinks + biases + YaRN amplitude in the Metal lowering — moe_zero_copy.rs is the
-       served path's machinery and is not plan-reachable; make it so.
+A-9.4  DONE 2026-08-18 (branch feat/vindex3-gpt-oss-rung0): the real gpt-oss-20b container
+       lowers END-TO-END through the generic Metal path — routed MXFP4 MoE + YaRN + sinks +
+       biases, no family-name branching. Routed FFN: LayerFfnLowering::{Dense,Routed} in the
+       stack encoder; lowered.rs registers the container's expert-bank segments as zero-copy
+       regions (AlignedBytes page-aligned == PAGE_SIZE 16384) and builds a MoeLayerWeights
+       (router from decoder_stack, experts from expert_bank, top_k_then_softmax, Interleaved,
+       Paired MXFP4 scales, ClampedGlu via MoeGateRule) → the SERVED descriptor MoE encode
+       (encode_moe_layer_gpu_route) — ClampedGlu executes through the existing clamped_glu_bias
+       kernel, so no new gate. `vindex3 exec --backend metal-lowered` on the 65-id oracle
+       prompt: argmax 200005 = oracle id 1; `--generate 16` = 15/16 IDENTICAL to the production
+       interpreter's own trajectory (one flip at position 6, NVFP4 attention vs f32, re-syncs
+       immediately), 18.5 tok/s. Fragment gate: tests/test_lowering_attention_extras.rs (YaRN+
+       sinks+biases <1e-4 + 4 controls); routed FFN reuses the tested served MoE encode. 821
+       Metal tests green. REMAINING for a per-layer congruent gate: wire lowered `--dump-layers`
+       (encode_stack Checkpoints, per-position [seq,hidden] planes) so `shannon layer-diff` can
+       localise the lowered vs interpreter/served dumps to a first-differing layer (whole-model
+       argmax+trajectory already agree within NVFP4-attention noise). Was:
+       ATTENTION HALF DONE 2026-08-17 (branch feat/vindex3-gpt-oss-rung0): sinks, Q/K/V/O
+       biases and YaRN (scaled inv_freq + amplitude) lowered in lowering/attention.rs +
+       mod.rs, reusing the existing bias_add / sinks-slot(10,11) / rope-amplitude(slot 6)
+       kernels; lowered.rs feeds them from the plan and lifts the three refusals (LoweredMatrix
+       gains Scaled{theta, amplitude}; per-(theta,yarn) inv_freq table; resident bias/sink
+       vectors). Gate: tests/test_lowering_attention_extras.rs — lowered ≡ reference (biases +
+       YaRN + sink) < 1e-4, with four controls (drop sink / drop Q bias / amplitude→1 / ramp→
+       plain rope) each moving output ≥20× the parity residual; all 421+ Metal lowering tests
+       green. REMAINING (routed FFN): the lowered stack still refuses a routed layer, so
+       gpt-oss does not yet lower e2e. moe_zero_copy.rs / moe_gpu_route encode the served MoE
+       into one CB but resolve experts through registered mmap REGIONS (BufferCache::
+       register_region → resolve_region); the lowering loads operands as owned bytes, so the
+       routed rung must register the container's expert-bank segment as a region and thread a
+       MoeLayerWeights-shaped call (router in stack, experts in bank) through encode_stack —
+       then layer-diff the lowered dump against the served/interpreter dumps from A-9.5.
+       As mapped: moe_zero_copy.rs is the served path's machinery and is not plan-reachable.
 A-9.5  the parity chain: ops closure → exec reference → production → lowered, byte-identical
        to the banked oracle; then the bracketed ladder.
+       CLOSED 2026-08-18: the three-way chain holds on the real gpt-oss-20b. `vindex3 exec
+       --dump-layers` now works on the Metal-lowered path (encode_stack Checkpoints capture
+       every layer per position into [seq,hidden] planes, byte-compatible with the interpreter
+       dump). Over the same 81 ids, `shannon layer-diff` metal-lowered-ffn (f16 attention/head,
+       native MXFP4 experts) vs the production interpreter: cos 1.000000000 and rel_rms ≤ 1e-6
+       through ALL 24 layers, "no capture drifts" — the same congruence as served-vs-interpreter.
+       This MEASURES the earlier generated-token flip: with all-NVFP4 attention the layer-0
+       rel_rms is 0.058 (cos still 0.998, direction preserved), and swapping attention to f16
+       collapses it to 0.000000 — the drift was the NVFP4 attention weight representation, not a
+       semantic defect. Stated at the strength the measurement licenses: any divergence
+       attributable to the common MXFP4 expert path is BELOW the ~1e-6 residual of the
+       congruent f16-attention run — the end-to-end measurement bounds it, not only the fact
+       that both paths read the same expert codes). CPU interpreter and Metal now execute the represented GPT-OSS semantics —
+       YaRN, sinks, biases, routed MXFP4 MoE, ClampedGlu — numerically identically to f32 noise.
+       Remaining: the bracketed performance ladder. Earlier note kept:
+       INTERPRETER HALF CLOSED 2026-08-17: `shannon layer-dump --tokens` (new; given ids) over
+       the HF checkpoint = the served CPU forward on the exact BF16+MXFP4 bytes, vs `vindex3
+       exec --dump-layers` on the container, same 81 oracle ids → `layer-diff`: cos
+       1.000000000, rel_rms 1e-6 (layers 0–16) to 3e-6 (17–23), max_abs ≤ 0.08, "no capture
+       drifts". SAME weights, SAME semantics, two engines, f32-reassociation agreement through
+       all 24 layers. Corollary: the 14/16 vs the Q4_K-spine oracle is the spine's
+       representation (final residual within 3e-6 rel-RMS ⇒ logits within ~1e-3 ≪ the 0.12/
+       0.47 miss margins). Remaining: the lowered arm (A-9.4) against the same dumps, and a
+       BF16-spine served id oracle if a byte-identical id claim is wanted.
 ```
 
 
@@ -1768,6 +1893,229 @@ geometry-dependent.** VINDEX3 carries semantic geometry; the Metal planner
 owns the execution choice; the KV engines belong under the same planner.
 Individual techniques (kernel selection, seqpar) are not novel; the claim is
 integration from semantics down to execution.
+
+### VINDEX3 evolution — versioned by capability, not by model architecture (2026-08-18)
+
+The organising rule, adopted 2026-08-18: **freeze the VINDEX3 ontology soon;
+everything after that evolves through opsets, representation sets, profiles
+and packaging — not schema redesign.** Stages are defined by the capability
+they add, each with an exit criterion; what may land in each stage is
+disciplined. The gauntlet (F1–F7) and standard-grade backlog (P0–P2) below
+are the *detail* of the first two stages and are tagged with their stage.
+
+| Stage | Goal | Defining capability | Status 2026-08-18 |
+|---|---|---|---|
+| **V3-F0 — Saturation** | prove the ontology | awkward architectures fit without changing a foundational relationship | **2 of 3 witnesses**: Glimmer (dense) and gpt-oss (routed MoE + sinks + biases + YaRN + clamped GLU, A-9) both went graph → plan → interpreter → Metal with new *vocabulary* only (F1 held). Third not started through the generic chain: Gemma 4 hybrid MoE exists only via the V2→V3 *import* path (c8), Kimi Linear/KDA/MLA only via the K3 adapter, multimodal only served. |
+| **V3.0 — Stable Core** | freeze the model-database ABI | Model · Object · Representation · Segment/Region · Operation · Operand · Graph · Profile · Reference, and their relationships; separate versioning (container 3 / semantic IR 1 / opsets / representation sets); formal unknown-field rules; canonical serialisation + deterministic ids; corruption fixtures; independent reference reader | **~half**: generic MoE graph done (A-9.2, no `moe_manifest.json`); multi-representation *binding* not done (refusal real, selection does not yet steer bytes — F3); WALK/DESCRIBE against V3 authority not done (V2-1/c7 — F5); opset versioning not started (one integer today); criticality classes exist in code but not in the spec; F7 mutation sweep unwritten; canonical serialisation only as "dense plans serialise byte-identically under absence"; reference reader/conformance not started. |
+| **V3.1 — Immutable Distribution** | composable, distributable models | content-addressed segments (OCI descriptor: type + digest + size + locations, manifests as Merkle DAGs), overlays/deltas/adapters (`parent: sha256:…; replace object 391 MXFP4 → sha256:…; add adapter`), provenance DAG per representation (tool, version, args, input/output/calibration digests) | not designed; Hub publish/slice contract (larql-factory, ADR-0026) is the packaging start |
+| **V3.2 — Adaptive Representation** | runtime-selectable physical model | one semantic object with several *legitimate* representations; declarative profiles (`prefer: MXFP4`, `allow_remote`) that carry no kernel names; quality as metadata per representation (reference, rel_rms, cosine, kl_delta, shannon_delta, calibration digest) so a profile can say `max_shannon_loss: 0.01` and the planner chooses | the representation algebra exists in the lowering (F16/Q4_K/MXFP4/NVFP4 priced under identical scheduling) and Shannon scoring exists; nothing is *carried* as representation metadata yet |
+| **V3.3 — Location Independence** | model bigger than machine | `segment == local file` removed: segment identity → resolver (GPU-resident / RAM / mmap / NVMe / HTTP-range / S3 / remote expert node); `PLAN operation|layer|token|prompt` returns inputs, selected experts, representations, required regions, expected bytes, residency, missing bytes — before execution | groundwork only: segments are page-aligned, mmapped and registered straight into Metal buffers ("bind, never reconstruct"); the working-set instrument (200 predicted / 200 resident / 0 overshoot) is `PLAN operation` before it has a name |
+| **V3.4 — Ecosystem Standard** | no dependency on LARQL | `vindex-spec/` + `vindex-conformance/` + `vindex-reference/` (tiny C reader, Rust reader with no engine, Python reader); conformance corpus (dense, GQA, MoE, multi-rep, overlay, remote segment, unknown optional/mandatory extension, corruption); `vindex pull/inspect/verify/diff/compat`; registries (HF, OCI, S3, HTTP, LAN peer) equivalent | not started |
+| **V4** | only if the ontology fails | a foundational relationship must change (e.g. object identity genuinely dynamic/context-dependent in a way operations/state/relations cannot express) | — VINDEX4 means "our ontology was wrong", not "there is a new model" (no FP3, no KDA2, no video) |
+
+**Exit criterion for V3-F0 (the freeze trigger):** *three consecutive
+structurally different architectures require new operators or
+representation types, but no new foundational relationship.* Not "N tests
+pass", not "all models work" — ontology saturation. Candidates for the
+third witness, in the order they attack different parts of the ontology:
+hybrid MoE (dense + routed/shared experts in one layer — cheapest, the
+vocabulary already exists), Kimi Linear (recurrent/KDA state + MLA — the
+most informative, because *state as an object* is where the V4 trigger
+would show if it exists), another MLA model (attention/KV independently),
+one multimodal architecture (towers/projectors/decoder graph); later, a
+Mamba/Jamba/RWKV-type model to test "neural model" versus "transformer".
+
+**Discipline per stage.** V3-F0: attack the ontology, add no ecosystem
+feature. V3.0: freeze, publish the spec, ship the reference reader and
+conformance suite, add no architectural idea; remote execution, cost models
+and Shannon *selection* stay out of the frozen core. After ~V3.2, resist
+3.5/3.6/…: the semantic IR stays at 1, and innovation happens in
+`vindex.moe:3`, `vindex.kda:2`, `vindex.ssm:1`, `vindex.audio:2`, quant
+representation sets, placement, quality contracts. Engine work (A-1…A-10)
+continues throughout but is **not permitted to move schema** — a schema
+change is a V3-F0/V3.0 event, argued as such.
+
+**Immediate queue this implies:** (1) the third hostile architecture through
+the generic chain; (2) multi-representation binding, WALK/DESCRIBE on V3
+authority, the opset/version model, refusal semantics in the spec (the
+V3.0 pre-freeze list); (3) freeze. A-10 runs alongside as engine work.
+
+### VINDEX3 stabilisation — freeze gauntlet, positioning, standard-grade backlog (2026-08-17)
+
+**Judgement: the architecture is converged; the ABI had one adversarial pass
+left, and that pass was A-9 — closed 2026-08-18 (below): gpt-oss went through
+the same graph → plan → CPU interpreter / Metal lowering as Glimmer, no
+family branch, interpreter ≡ Metal at rel_rms ≤ 1e-6 across all 24 layers, and
+every A-9 rung added vocabulary to existing categories rather than a new
+category (F1 held).** Distinguish *architectural stability* from
+*freezing schema 3*. The question is no longer "is the VINDEX3 abstraction
+right?" but "have we discovered every semantic noun and relationship the
+frozen ABI must carry?" — and gpt-oss is the last high-value attack on it,
+because every A-9 blocker is a **schema-vocabulary** fact (YaRN incl.
+amplitude, clamped-GLU policy, representation-level quantisation policy,
+sinks, Q/K/V/O biases, expert-bank objects, router/expert/bias roles, MoE
+FFN op, over-selected normalisation), not a kernel. Freeze before A-9.0–A-9.3
+close and schema 3.0 immediately fails to describe a production architecture.
+
+| Layer | Assessment |
+|---|---|
+| Core VINDEX3 idea (state the working set before execution) | ~95 % settled — 200 predicted / 200 resident / 0 overshoot |
+| Object / region / addressability model | ~90 % settled |
+| Plan / execution architecture (reference → production → lowered) | ~90 % settled |
+| Dense / Glimmer execution model | proven (real-model parity, GPU-resident multi-layer, KV through the plan) |
+| Routed-bank serving | proven in production machinery (native MXFP4, GPU routing, one CB/token) |
+| Generic MoE graph semantics | settled 2026-08-18 — A-9.2/A-9.3 closed; MoE is an object/operand/op arrangement inside the graph, `moe_manifest.json` absent from the gpt-oss container |
+| Representation / profile machinery | conceptually settled, plumbing incomplete (selection does not yet steer bytes) |
+| V3 extraction / default lifecycle | not ready to freeze |
+| On-disk ABI / schema 3 | one serious architecture pass from freeze |
+
+The pattern that says the centre is stable: *new architecture → missing
+semantic fact exposed → added to graph/plan → the existing lowerer can reason
+about it.* The 2026-08-16 representation algebra is the milestone —
+attention policy stopped being a model-name decision and became
+`(head_dim, q_heads, kv_heads, span) → execution geometry`, unmeasured cases
+falling back rather than guessing. VINDEX3 knows *what the operation means,
+what representations exist, what semantic geometry exists*; the backend
+planner knows *how this hardware executes it*. **Protect that boundary.** The
+Metal work strengthened it rather than distorting it: VINDEX3 segments are
+mmap'd and registered straight into Metal buffers, expert selection stays
+GPU-side, host resolution/binding witnesses stay zero, output byte-identical
+— the bytes remain authoritative, so **bind, never reconstruct** graduates
+from standing method to a design principle of the format.
+
+**One smell to resolve before freeze:** `system_graph.json` and
+`moe_manifest.json` are mutually exclusive container shapes. The frozen
+answer must be *MoE is another operation/object arrangement inside a VINDEX3
+system*, not a different container type — `moe_manifest.json` may survive as
+a physical/indexing artefact, but MoE must not live outside the graph
+universe. A-9.2 is that closure.
+
+```text
+VINDEX3
+   ├── objects          tensor · expert_bank · embedding · norm · …
+   ├── representations  F16 · Q4_K · MXFP4+E8M0 · NVFP4 · …
+   ├── operations       attention · dense_ffn · routed_ffn · norm · vocab_projection · …
+   └── plans / profiles
+```
+
+**Freeze gauntlet — seven gates, all required before "schema 3.0 is frozen":**
+
+```text
+F1  ontology closure      A-9.0/1/2/3 close without a NEW CATEGORY of semantic fact
+                          → HELD 2026-08-18 (YaRN, ClampedGlu, sinks, biases, expert bank,
+                          MoE roles/op all landed as vocabulary in existing categories)
+F2  cross-family witness  Glimmer (dense, local/global) · gpt-oss (pure routed MoE +
+                          biases/sinks/YaRN) · Gemma 4 (hybrid MoE); recurrent/KDA later,
+                          non-blocking if unsupported ops fail loudly
+                          → Glimmer + gpt-oss WITNESSED 2026-08-18; Gemma 4 open
+F3  representation witness ONE container genuinely carries ≥2 representations of the same
+                          semantic role; profile choice changes the BOUND bytes; a tamper
+                          control proves it cannot silently hit the other
+F4  independent execution reference → production → lowered parity (the discipline in hand)
+                          → exercised on gpt-oss 2026-08-18: served HF ≡ interpreter ≡ lowered
+F5  database parity       WALK/DESCRIBE run against V3 authority, not a V2 shadow — the
+                          exact expert-bank bytes execution binds ARE the addressable
+                          objects; no second KNN index unless declared a derived repr
+F6  E0                    VINDEX2 untouched: full golden matrix + legacy CLI dispatch
+F7  mutation test         corrupt every load-bearing relationship (wrong role, dims,
+                          representation, missing partner scale, impossible profile,
+                          illegal programme, wrong bank ownership, overlapping ranges,
+                          unsupported policy) → typed refusal, every one
+```
+
+After F1–F7: *"VINDEX3 schema 3.0 is frozen. Additive extensions preserve the
+3.x compatibility rules; semantic breaking changes require VINDEX4."*
+Extraction default is a **later, separate** ladder — semantic freeze → schema
+freeze → conformance fixtures → `--format vindex3` opt-in → soak → default →
+VINDEX2 readable indefinitely. Not on the same day.
+
+Housekeeping the freeze implies: this file has stopped being the right
+authority for schema status (c8 was `[ ]` in the ladder above and CLOSED in
+the prose below it). At freeze the status moves to one canonical
+requirement × status × test × fixture × since matrix in the spec, and the
+roadmap points at it.
+
+**Where VINDEX3 sits.** Safetensors stores tensors; GGUF packages an
+inference model; ONNX describes a computation; ExecuTorch/MLC/TensorRT
+describe or compile an execution. VINDEX3 describes the model, its physical
+representations, and how those may be *selectively bound* into execution
+while the model stays addressable as data. Ticks below are *what the format
+represents*, not maturity — GGUF's ecosystem, stability, tooling and
+architecture coverage, ONNX's independent normative standard, and
+TensorRT/TVM's compiler depth all beat VINDEX3 today, and none of those is the
+battle.
+
+| Format | Semantic graph | Quantised layout | mmap/segmented | Exec planning | Multi-repr / placement | Queryable model data | HW-neutral |
+|---|---|---|---|---|---|---|---|
+| Safetensors | ✗ | limited | ✓ | ✗ | ✗ | tensor-level | ✓ |
+| GGUF | metadata/naming | ✓✓ | ✓✓ | ✗ | limited | tensor-level | mostly |
+| ONNX | ✓✓ | some | external data | ✗ | limited | graph-level | ✓✓ |
+| OpenVINO IR / Core ML | ✓ | some/✓ | separate/package | runtime/✓ | some | limited | mostly / Apple |
+| ExecuTorch PTE | ✓ | ✓ | ✓ segmented | ✓✓ | delegates/mem plan | limited | ✓-ish |
+| MLC/TVM | ✓ | ✓✓ | ✓ | ✓✓✓ | target compile | ✗ | source-portable |
+| TensorRT engine | compiled | ✓✓✓ | internal | ✓✓✓ | HW-selected | ✗ | ✗ |
+| **VINDEX3** | ✓ | ✓✓ | ✓✓✓ | ✓✓ | **✓✓✓** | **✓✓✓** | designed to be |
+
+Safetensors is a *source* format for VINDEX3, not a competitor. GGUF's unit
+of authority is the tensor at an offset; VINDEX3's is the semantic object
+with representations and regions — the moat is that *operation → working set*
+is part of the format contract, not a clever runtime's external policy.
+ONNX is the closest to the semantic graph but deliberately declines to
+prescribe physical representation; VINDEX3 keeps meaning + representations +
+locations + bindability together, and encodes a higher-level neural algebra
+(attention, routed_ffn, norm, …) rather than an SSA op graph, so one semantic
+op can lower differently by length, residency, representation, hardware,
+selected experts, prefill vs decode. ExecuTorch is the closest cousin
+(graph + data + lowering + memory plan) but its output is a *prepared
+program*; VINDEX3 is a *datastore from which an execution is constructed at
+serve time*. TensorRT is the far extreme VINDEX3 must not become — an opaque
+compiled artefact cannot answer "where are expert 37's up-projection bytes"
+or "which pages will this op touch". Combined: GGUF's physical storage +
+ONNX's versioned semantic contracts + OCI's content-addressed packaging +
+Arrow/Parquet's random-access engineering + a database's addressability +
+LARQL's representation-aware planning, under **one authority model whose
+bottom does not sever from its top**. "Format" undersells it — it is a
+neural-database storage-engine format.
+
+**Standard-grade backlog** — optimise against the format we would design from
+scratch if models were large, queryable, heterogeneous databases, not against
+GGUF:
+
+| Pri · stage | Improvement | Why |
+|---|---|---|
+| P0 · V3.0 | **Separate container / semantic-IR / opset / representation-set versioning** (ONNX's model: `container 3`, `semantic_ir 1`, `org.larql.core:1`, `org.larql.moe:2`, `org.larql.attn:3`, `org.larql.quant:4`) | KDA arrives as `org.larql.kda:1`, not VINDEX4; a reader says "cannot execute ops 46–91" instead of branching on architecture name |
+| P0 · V3.1 | **Content-address every physical segment** (OCI descriptor: media type + digest + size + locations; manifests as Merkle DAGs) | dedup across fine-tunes, one-segment publishes, local/remote indistinguishable, per-region verification, model identity = hash of the semantic manifest |
+| P0 · V3.0 (binding) / V3.2 (algebra) | **Finish genuine multi-representation objects** — representation as an independently describable entity (encoding, layout, scale encoding, block geometry, alignment, companion streams, accuracy contract, source repr, transformation, HW compat); profiles select a *physical representation* | the signature VINDEX3 capability; F3 above |
+| P0 · V3.0 | **Formal unknown-field semantics** — every extension is `annotation` (ignore) · `execution_metadata` · `semantic_required` (refuse) · `representation_required` (fine if another admissible repr exists) · `interface_required` | criticality work already invented the answer; put it in the spec, avoid GGUF's accumulate-conventions-forever fate |
+| P0 · V3.0 (reader) / V3.4 (ecosystem) | **Conformance suite + tiny independent reader** (`vindex-spec/`: spec, schema, test-vectors, reference-{c,rust,python}; open/validate/list objects+ops/resolve reprs/map segments/verify hashes, no LARQL dependency) | if only `larql-vindex` can read it, it is a good LARQL format; if a compatible reader is a weekend, it can be a standard |
+| P1 · V3.1 | Transformation/provenance DAG per representation (tool, version, args, input/output digest, calibration corpus digest) | reproducible builds; "where did these 64 bytes come from" has an answer |
+| P1 · V3.1 | First-class overlays/deltas/adapters (`parent: sha256:… ; replace object 391 MXFP4 → sha256:… ; add adapter`) | LoRA, patches, expert replacement, LARQL INSERTs, spec heads as composable artefacts — no 30 GB duplicate, no base mutation |
+| P1 · V3.3 | Remote/range-addressable segments — objects refer to segment *identity*, a resolver yields RAM/mmap/NVMe/HTTP-range/S3/peer/GPU | model-as-database at its logical conclusion |
+| P1 · V3.1 | Compact binary navigation index alongside (or canonical under) `index.json` (`index.vxb`; Arrow footer / Parquet metadata model) | opening K3 must not mean parsing 300 MB of JSON |
+| P1 · V3.3 | Compatibility/capability query — `vindex compat model --runtime metal-m3-max` → per-opset ✓/✗, executable layers, no model data touched | complete-or-refuse, before touching weights |
+| P2 · V3.2 | Per-region measured quality contracts (reference, max_abs, rel_rms, cosine, shannon_delta, fixture digest) | representation choice becomes a correctness decision — the Shannon work meets the representation algebra |
+| P2 · V3.1 | Optional signatures / encryption / access policy | distributed commercial models |
+| P2 · V3.4 | Standard packaging profile (HF, OCI registries, S3, local disk) | natural homes |
+
+Never embed executable code (no Python/dylib/CUDA/wasm-with-host-access to
+*load* a model): operators are declarative contracts, unknown ones fail
+closed, backend code belongs to runtimes — downloading a VINDEX stays closer
+to downloading data than a program.
+
+If only three land before 1.0: **independent IR/opset/representation
+versioning, content-addressed immutable segments, conformance suite + tiny
+reader.** Target end state:
+
+```text
+vindex describe model      → operators, representations by count, local/remote/hot-set bytes,
+                             per-runtime FULL/PARTIAL, derivation digests
+vindex plan model --hardware this-machine --memory 12GB
+                           → a valid physical plan WITHOUT loading the weights
+```
+
+Then K3/Kimi stop being about discovering VINDEX3 and become the stronger
+test: *can the frozen algebra express exotic architectures without changing
+its ontology?*
 
 ---
 

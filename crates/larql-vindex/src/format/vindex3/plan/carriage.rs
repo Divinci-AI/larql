@@ -119,11 +119,48 @@ pub const CARRIAGE_RULES: &[CarriageRule] = &[
     CarriageRule {
         leaf: "rope_type",
         reaches: Carriage::Represented,
-        // PositionPolicy is `Rope { theta } | None`. It can state that a
-        // layer is rotary or has no position encoding, and nothing else —
-        // so the only rope *class* it can represent is the unscaled one.
-        site: "Component.attention[].position — PositionPolicy expresses unscaled rope only",
+        // PositionPolicy is `Rope { theta } | Yarn { theta, scaling } |
+        // None`: unscaled rotary, YaRN-scaled rotary (frequencies AND the
+        // attention amplitude), or no position encoding. Any other declared
+        // rope class (llama3, dynamic, ...) still has no variant and
+        // mismatches here — represented, not lowered: the interpreter and
+        // the lowering refuse a YaRN layer until A-9.3/A-9.4 execute it.
+        site: "Component.attention[].position (PositionPolicy::Rope | Yarn)",
         probe: Some(probe_rope_type),
+    },
+    // The YaRN block's own leaves, each carried on `PositionPolicy::Yarn`
+    // and answered from it. A checkpoint that declares them without
+    // declaring `rope_type: yarn` gets no answer, which is right — the
+    // leaves mean nothing outside that block.
+    CarriageRule {
+        leaf: "factor",
+        reaches: Carriage::Represented,
+        site: "Component.attention[].position (PositionPolicy::Yarn.scaling.factor)",
+        probe: Some(probe_yarn_factor),
+    },
+    CarriageRule {
+        leaf: "beta_fast",
+        reaches: Carriage::Represented,
+        site: "Component.attention[].position (PositionPolicy::Yarn.scaling.beta_fast)",
+        probe: Some(probe_yarn_beta_fast),
+    },
+    CarriageRule {
+        leaf: "beta_slow",
+        reaches: Carriage::Represented,
+        site: "Component.attention[].position (PositionPolicy::Yarn.scaling.beta_slow)",
+        probe: Some(probe_yarn_beta_slow),
+    },
+    CarriageRule {
+        leaf: "truncate",
+        reaches: Carriage::Represented,
+        site: "Component.attention[].position (PositionPolicy::Yarn.scaling.truncate)",
+        probe: Some(probe_yarn_truncate),
+    },
+    CarriageRule {
+        leaf: "original_max_position_embeddings",
+        reaches: Carriage::Represented,
+        site: "Component.attention[].position (PositionPolicy::Yarn.scaling.original_max_position_embeddings)",
+        probe: Some(probe_yarn_original_max),
     },
     // ── Span policy ─────────────────────────────────────────────────
     CarriageRule {
@@ -176,6 +213,17 @@ pub const CARRIAGE_RULES: &[CarriageRule] = &[
         site: "ExecutionSurface.ffn.activation → FfnOp.activation",
         probe: Some(probe_activation),
     },
+    CarriageRule {
+        leaf: "swiglu_limit",
+        reaches: Carriage::Represented,
+        // GPT-OSS's clamped GLU: `gate.min(limit)`, `up.clamp(±limit)`,
+        // `(up + 1) * gate * sigmoid(alpha * gate)`. Carried as a gate
+        // *policy* rather than an activation variant, and judged here by
+        // the limit it carries. Represented, not lowered: the interpreter
+        // and the lowering refuse a ClampedGlu FFN until A-9.3/A-9.4.
+        site: "ExecutionSurface.ffn.gate_policy (ExpertGatePolicy::ClampedGlu.limit) → FfnOp.gate_policy",
+        probe: Some(probe_swiglu_limit),
+    },
     // ── Attention/output scaling ────────────────────────────────────
     CarriageRule {
         leaf: "qk_scale_factor",
@@ -210,16 +258,14 @@ pub const CARRIAGE_RULES: &[CarriageRule] = &[
     // ── Facts that stop at the parser, reviewed ─────────────────────
     CarriageRule {
         leaf: "attention_bias",
-        reaches: Carriage::Parsed,
-        // VINDEX3 has no `attention_bias` field; what it has instead is
-        // operand closure, which refuses any bias tensor it cannot
-        // classify into a declared op. For a model that declares `false`
-        // the two agree trivially. For one that declares `true` the bias
-        // operands themselves block at G5b — a stronger check than a
-        // boolean, and the reason this is judged rather than a hole.
-        // MOE1 gives the projections explicit bias operands.
-        site: "no schema field — carried instead as operand evidence, gated by G5b closure",
-        probe: None,
+        reaches: Carriage::Represented,
+        // A-9.1: the surface states it, and operand closure enforces it
+        // both ways — `true` requires all four bias operands, anything
+        // else refuses any bias operand it finds — so the boolean and the
+        // operand evidence cannot drift apart. The executors add the four
+        // biases; the Metal lowering refuses them until A-9.4.
+        site: "ExecutionSurface.attention.attention_bias → AttentionOp.{q,k,v,o}_bias (closure-paired)",
+        probe: Some(probe_attention_bias),
     },
     CarriageRule {
         leaf: "max_position_embeddings",
@@ -266,13 +312,48 @@ fn probe_layer_rope_theta(component: &Component) -> Option<Value> {
     ))
 }
 
-/// The rope *class* the schema can express. `PositionPolicy` has no
-/// scaling variant, so an all-rotary (or NoPE) table can only mean
-/// unscaled rope — which is exactly the claim to compare against a
-/// declared `rope_type`.
+/// The rope *class* the table actually carries, in the checkpoint's own
+/// spelling: `yarn` when any rotating layer holds a YaRN block, else
+/// `default`. A table can not mix the two — the block is a checkpoint-wide
+/// fact — so the first rotating layer answers for all.
 fn probe_rope_type(component: &Component) -> Option<Value> {
-    component.attention.as_ref()?;
-    Some(json!("default"))
+    let table = component.attention.as_ref()?;
+    let scaled = table.iter().any(|l| l.position.yarn().is_some());
+    Some(json!(if scaled { "yarn" } else { "default" }))
+}
+
+/// The YaRN block the table carries, when it carries one. `None` when the
+/// table has no scaled layer — the caller's leaf then has nothing to be
+/// judged against, which is the right answer for a checkpoint that
+/// declares the leaf outside a `yarn` block.
+fn yarn_block(component: &Component) -> Option<larql_models::YarnRopeScaling> {
+    component
+        .attention
+        .as_ref()?
+        .iter()
+        .find_map(|l| l.position.yarn())
+}
+
+fn probe_yarn_factor(component: &Component) -> Option<Value> {
+    Some(json!(yarn_block(component)?.factor))
+}
+
+fn probe_yarn_beta_fast(component: &Component) -> Option<Value> {
+    Some(json!(yarn_block(component)?.beta_fast))
+}
+
+fn probe_yarn_beta_slow(component: &Component) -> Option<Value> {
+    Some(json!(yarn_block(component)?.beta_slow))
+}
+
+fn probe_yarn_truncate(component: &Component) -> Option<Value> {
+    Some(json!(yarn_block(component)?.truncate))
+}
+
+fn probe_yarn_original_max(component: &Component) -> Option<Value> {
+    Some(json!(
+        yarn_block(component)?.original_max_position_embeddings
+    ))
 }
 
 /// Per-layer span kinds in the checkpoint's own vocabulary, so the
@@ -307,6 +388,23 @@ fn probe_post_norm_eps(component: &Component) -> Option<Value> {
 fn probe_activation(component: &Component) -> Option<Value> {
     let activation = component.execution.as_ref()?.ffn.activation;
     serde_json::to_value(activation).ok()
+}
+
+/// The clamp bound the FFN surface carries, when its gate policy is the
+/// clamped GLU. A plain-gated surface has no limit to answer with — a
+/// checkpoint declaring `swiglu_limit` that resolved to plain gating is
+/// then reported as unrepresented, which is the truth.
+fn probe_swiglu_limit(component: &Component) -> Option<Value> {
+    match component.execution.as_ref()?.ffn.gate_policy {
+        larql_models::ExpertGatePolicy::ClampedGlu { limit, .. } => Some(json!(limit)),
+        larql_models::ExpertGatePolicy::Gated => None,
+    }
+}
+
+fn probe_attention_bias(component: &Component) -> Option<Value> {
+    Some(json!(
+        component.execution.as_ref()?.attention.attention_bias?
+    ))
 }
 
 fn probe_query_scale(component: &Component) -> Option<Value> {

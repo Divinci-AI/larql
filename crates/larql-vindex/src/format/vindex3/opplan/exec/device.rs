@@ -48,10 +48,13 @@ use larql_models::config::{Activation, GateActivation, GateCombine, GatePlacemen
 
 use super::backend::{
     AttentionCall, AttentionStepCall, AttentionStepOut, DispatchStats, FfnCall, GateCall,
-    MatrixClass, NormCall, PlanBackend, ProjectCall, ProjectedQkv, WeightFormat, WeightFormats,
-    WeightSlice,
+    MatrixClass, NormCall, PlanBackend, ProjectCall, ProjectedQkv, RoutedFfnCall, WeightFormat,
+    WeightFormats, WeightSlice,
 };
-use super::production::{aggregate_heads, condition_qk_in_place, ProductionBackend};
+use super::production::{
+    add_expert_bias, add_output_bias, add_projection_biases, aggregate_heads,
+    condition_qk_in_place, expert_inner, select_experts, ProductionBackend, FUSED_BRANCHES,
+};
 use crate::error::VindexError;
 use larql_compute::cpu::ops::geglu::{geglu_silu_alloc, silu};
 use ndarray::ArrayView2;
@@ -299,10 +302,11 @@ impl<M: MatMul + Send> DevicePlanBackend<M> {
             ],
             pre,
         )?;
-        let v = qkv.pop().expect("three matrices in, three vectors out");
+        let mut v = qkv.pop().expect("three matrices in, three vectors out");
         let mut k = qkv.pop().expect("three matrices in, three vectors out");
         let mut q = qkv.pop().expect("three matrices in, three vectors out");
-        condition_qk_in_place(call, position, &mut q, &mut k);
+        add_projection_biases(call, &mut q, &mut k, &mut v);
+        condition_qk_in_place(call, position, &mut q, &mut k)?;
         Ok((q, k, v))
     }
 }
@@ -408,12 +412,14 @@ impl<M: MatMul + Send> PlanBackend for DevicePlanBackend<M> {
                     *c *= 1.0 / (1.0 + (-g).exp());
                 }
             }
-            out.push(self.gemv(
+            let mut projected = self.gemv(
                 call.w_o,
                 call.hidden,
                 call.num_q_heads * call.head_dim,
                 &concat,
-            )?);
+            )?;
+            add_output_bias(&call, &mut projected);
+            out.push(projected);
         }
         Ok(out)
     }
@@ -440,10 +446,11 @@ impl<M: MatMul + Send> PlanBackend for DevicePlanBackend<M> {
             .gate
             .as_ref()
             .map(|_| projected.pop().expect("gate matrix in, gate vector out"));
-        let v = projected.pop().expect("QKV in, three vectors out");
+        let mut v = projected.pop().expect("QKV in, three vectors out");
         let mut k = projected.pop().expect("QKV in, three vectors out");
         let mut q = projected.pop().expect("QKV in, three vectors out");
-        condition_qk_in_place(call, step.position, &mut q, &mut k);
+        add_projection_biases(call, &mut q, &mut k, &mut v);
+        condition_qk_in_place(call, step.position, &mut q, &mut k)?;
 
         let mut concat = aggregate_heads(
             call,
@@ -477,7 +484,8 @@ impl<M: MatMul + Send> PlanBackend for DevicePlanBackend<M> {
                 *c *= 1.0 / (1.0 + (-g).exp());
             }
         }
-        let output = self.gemv(call.w_o, call.hidden, q_rows, &concat)?;
+        let mut output = self.gemv(call.w_o, call.hidden, q_rows, &concat)?;
+        add_output_bias(call, &mut output);
         Ok(AttentionStepOut {
             key: k,
             value: v,
@@ -485,7 +493,38 @@ impl<M: MatMul + Send> PlanBackend for DevicePlanBackend<M> {
         })
     }
 
+    /// The routed FFN on the device: router, then each selected expert's
+    /// fused gate/up and down through the same `gemv` seam as every other
+    /// matrix — in whatever representation the bank was loaded (native
+    /// MXFP4 when this backend declared it). Selection and the gate rule
+    /// are the production glue, so a divergence is device matmul
+    /// arithmetic alone.
+    fn routed_ffn(&self, call: RoutedFfnCall<'_>) -> Result<Vec<f32>, VindexError> {
+        let mut logits = self.gemv(
+            WeightSlice::F32(call.router),
+            call.experts,
+            call.hidden,
+            call.x,
+        )?;
+        let selected = select_experts(&call, &mut logits)?;
+        let two_inter = FUSED_BRANCHES * call.intermediate;
+        let mut out = vec![0.0f32; call.hidden];
+        for (expert, weight) in selected {
+            let mut fused = self.gemv(call.gate_up[expert], two_inter, call.hidden, call.x)?;
+            add_expert_bias(&mut fused, call.gate_up_bias, expert);
+            let inner = expert_inner(&call, &fused);
+            let mut expert_out =
+                self.gemv(call.down[expert], call.hidden, call.intermediate, &inner)?;
+            add_expert_bias(&mut expert_out, call.down_bias, expert);
+            for (acc, v) in out.iter_mut().zip(&expert_out) {
+                *acc += weight * v;
+            }
+        }
+        Ok(out)
+    }
+
     fn ffn(&self, call: FfnCall<'_>) -> Result<Vec<f32>, VindexError> {
+        super::production::require_plain_gate("device", call.gate_policy)?;
         let inner = match call.gate {
             Some(gate_weight) => {
                 // Up and gate read the same input: one submission.

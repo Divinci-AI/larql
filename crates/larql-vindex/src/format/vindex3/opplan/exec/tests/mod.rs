@@ -10,12 +10,17 @@
 //! placement, RoPE convention, residual order — not shared arithmetic.
 
 mod controls;
+mod coverage_backend_decode;
+mod coverage_device;
+mod coverage_experts_production;
 mod decode;
 mod device;
 mod golden;
 mod kernels;
 mod parity;
+mod routed;
 mod seam;
+mod sinks_bias;
 mod smoke;
 mod streaming;
 
@@ -68,6 +73,21 @@ impl ShardBuilder {
             name.to_string(),
             serde_json::json!({
                 "dtype": "F32",
+                "shape": shape,
+                "data_offsets": [start, self.payload.len()],
+            }),
+        );
+    }
+
+    /// Write one tensor of any dtype from raw little-endian bytes — for
+    /// packed MXFP4 (`U8`) expert banks.
+    pub(super) fn push_bytes(&mut self, name: &str, dtype: &str, shape: &[usize], bytes: &[u8]) {
+        let start = self.payload.len();
+        self.payload.extend_from_slice(bytes);
+        self.header.insert(
+            name.to_string(),
+            serde_json::json!({
+                "dtype": dtype,
                 "shape": shape,
                 "data_offsets": [start, self.payload.len()],
             }),

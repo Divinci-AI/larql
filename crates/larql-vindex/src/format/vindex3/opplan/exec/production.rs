@@ -18,23 +18,33 @@
 //! sharing code, which is exactly the agreement that proves nothing.
 
 use larql_models::config::{
-    Activation, GateActivation, GateCombine, GatePlacement, GateSource, NormType, PositionPolicy,
+    Activation, AttentionSinkSpec, GateActivation, GateCombine, GatePlacement, GateSource,
+    GateUpBranch, MoeRouterKind, NormType, PositionPolicy,
 };
 use ndarray::Array2;
 
-use larql_compute::attention::softmax::softmax_in_place_f32;
+use larql_compute::attention::softmax::{softmax_in_place, softmax_in_place_f32};
 use larql_compute::cpu::ops::geglu::{geglu_silu_alloc, silu};
 use larql_compute::cpu::ops::moe::math::matmul_vec;
+use larql_compute::ffn::expert_weight::router;
 use larql_compute::residual::{
     layer_norm_eps, rms_norm_eps, rms_norm_heads_no_weight_eps, rms_norm_qk_eps,
 };
+use larql_compute::MoeGateRule;
 
 use super::super::super::graph::policy::AttentionSpan;
 use super::backend::{
     AttentionCall, AttentionStepCall, AttentionStepOut, FfnCall, GateCall, NormCall, PlanBackend,
-    ProjectCall, ProjectedQkv, QkNormCall,
+    ProjectCall, ProjectedQkv, QkNormCall, RoutedFfnCall,
 };
-use super::kernels::rope_rotate;
+use super::kernels::{rope_rotate, rope_rotate_scaled};
+use larql_compute::attention::rope::{rope_freq_plan, RopeFreqScaling};
+
+/// The whole head rotates: `PositionPolicy` carries no partial-rotary
+/// fraction (no family through this path declares one).
+const FULL_ROTARY: f64 = 1.0;
+/// No position divisor (`rope_freq_plan` treats 0 as 1).
+const NO_POSITION_DIVISOR: f64 = 1.0;
 use crate::error::VindexError;
 use rayon::prelude::*;
 
@@ -61,6 +71,26 @@ pub(super) fn unsupported_activation(shape: &str, activation: Activation) -> Vin
         "no production {shape}-FFN kernel for activation {activation:?} — refusing rather \
          than borrowing the reference backend's arithmetic"
     ))
+}
+
+/// The gate policy every backend here honours today. A `ClampedGlu` plan
+/// (GPT-OSS's `swiglu_limit`) is carried by the container and refused
+/// until A-9.3 executes it — computing `activation(gate) * up` for it
+/// would run a different model without saying so.
+pub(super) fn require_plain_gate(
+    backend: &str,
+    policy: larql_models::ExpertGatePolicy,
+) -> Result<(), VindexError> {
+    match policy {
+        larql_models::ExpertGatePolicy::Gated => Ok(()),
+        larql_models::ExpertGatePolicy::ClampedGlu { limit, alpha } => {
+            Err(VindexError::Parse(format!(
+                "the {backend} backend does not execute ExpertGatePolicy::ClampedGlu {{ limit: \
+             {limit}, alpha: {alpha} }} yet (A-9.3); refusing rather than applying plain \
+             gating to a clamped-GLU FFN"
+            )))
+        }
+    }
 }
 
 /// Wrap one vector as a `[1, n]` matrix for the row-wise norm kernels.
@@ -105,7 +135,7 @@ pub(super) fn condition_qk_in_place(
     position: usize,
     q: &mut [f32],
     k: &mut [f32],
-) {
+) -> Result<(), VindexError> {
     let head_dim = call.head_dim;
     let qk_weight = call.qk_norm.as_ref().map(
         |QkNormCall {
@@ -143,13 +173,129 @@ pub(super) fn condition_qk_in_place(
             *value *= query_scale as f32;
         }
     }
-    if let PositionPolicy::Rope { theta } = call.position {
-        for head in q.chunks_exact_mut(head_dim) {
-            rope_rotate(head, position, theta);
+    match call.position {
+        PositionPolicy::Rope { theta } => {
+            for head in q.chunks_exact_mut(head_dim) {
+                rope_rotate(head, position, theta);
+            }
+            for head in k.chunks_exact_mut(head_dim) {
+                rope_rotate(head, position, theta);
+            }
         }
-        for head in k.chunks_exact_mut(head_dim) {
-            rope_rotate(head, position, theta);
+        // YaRN through the served rope planner: the same ramp and
+        // amplitude the production forward applies (full rotary width, no
+        // position divisor — what `PositionPolicy::Yarn` carries).
+        PositionPolicy::Yarn { theta, scaling } => {
+            let plan = rope_freq_plan(
+                head_dim,
+                FULL_ROTARY,
+                theta,
+                NO_POSITION_DIVISOR,
+                RopeFreqScaling::Yarn(scaling),
+            );
+            let amplitude = plan.amplitude as f32;
+            for head in q.chunks_exact_mut(head_dim) {
+                rope_rotate_scaled(head, position, &plan.inv_freq, amplitude);
+            }
+            for head in k.chunks_exact_mut(head_dim) {
+                rope_rotate_scaled(head, position, &plan.inv_freq, amplitude);
+            }
         }
+        PositionPolicy::None => {}
+    }
+    Ok(())
+}
+
+/// The Q/K/V projection biases, added right after projection — before
+/// [`condition_qk_in_place`] reads Q/K and before V is cached. Shared
+/// glue, so the production and device backends place them identically.
+pub(super) fn add_projection_biases(
+    call: &AttentionCall<'_>,
+    q: &mut [f32],
+    k: &mut [f32],
+    v: &mut [f32],
+) {
+    if let Some(bias) = &call.bias {
+        add_bias_in_place(q, bias.q);
+        add_bias_in_place(k, bias.k);
+        add_bias_in_place(v, bias.v);
+    }
+}
+
+/// The output-projection bias, added after `w_o`.
+pub(super) fn add_output_bias(call: &AttentionCall<'_>, out: &mut [f32]) {
+    if let Some(bias) = &call.bias {
+        add_bias_in_place(out, bias.o);
+    }
+}
+
+/// `x[i] += b[i]`; a length mismatch is a geometry bug closure refuses,
+/// so it panics rather than pads.
+fn add_bias_in_place(x: &mut [f32], b: &[f32]) {
+    assert_eq!(
+        x.len(),
+        b.len(),
+        "bias length must equal the projection's rows"
+    );
+    for (x, b) in x.iter_mut().zip(b) {
+        *x += b;
+    }
+}
+
+/// Gate and up: the two branches sharing one fused operand.
+pub(super) const FUSED_BRANCHES: usize = larql_models::quant::mxfp4::FUSED_HALVES;
+
+/// Route one token through the served selection rule
+/// (`larql-compute`'s `router::select`) over the router logits — shared
+/// glue, so the production and device backends select identically and
+/// exactly as the served path does. Exhaustive on the router kind: Gemma
+/// 4's per-expert scale has its own arithmetic and must be implemented
+/// before it can execute here.
+pub(super) fn select_experts(
+    call: &RoutedFfnCall<'_>,
+    logits: &mut [f32],
+) -> Result<Vec<(usize, f32)>, VindexError> {
+    match call.router_kind {
+        MoeRouterKind::TopKSoftmax | MoeRouterKind::TopKThenSoftmax => {}
+        MoeRouterKind::Gemma4Hybrid => {
+            return Err(VindexError::Parse(
+                "MoeRouterKind::Gemma4Hybrid carries a per-expert scale this backend does not \
+                 execute; refusing rather than routing with the plain rule"
+                    .to_string(),
+            ))
+        }
+    }
+    if let Some(bias) = call.router_bias {
+        for (l, b) in logits.iter_mut().zip(bias) {
+            *l += b;
+        }
+    }
+    Ok(router::select(logits, call.top_k, call.routing_policy))
+}
+
+/// One selected expert's inner activation from its fused gate/up output
+/// (bias already added): rows read through the declared layout, combined
+/// by the served gate rule.
+pub(super) fn expert_inner(call: &RoutedFfnCall<'_>, fused: &[f32]) -> Vec<f32> {
+    let rule = MoeGateRule::from_arch(call.gate_policy, call.activation);
+    (0..call.intermediate)
+        .map(|i| {
+            let g = fused[call
+                .gate_up_layout
+                .row(GateUpBranch::Gate, i, call.intermediate)];
+            let u = fused[call
+                .gate_up_layout
+                .row(GateUpBranch::Up, i, call.intermediate)];
+            rule.combine(g, u)
+        })
+        .collect()
+}
+
+/// `x[i] += bias[expert-th row]` for a per-expert bias stored flat.
+pub(super) fn add_expert_bias(x: &mut [f32], bias: Option<&[f32]>, expert: usize) {
+    if let Some(bias) = bias {
+        let rows = x.len();
+        add_bias_in_place(x, &bias[expert * rows..(expert + 1) * rows]);
     }
 }
 
@@ -197,7 +343,16 @@ pub(super) fn aggregate_heads<'k>(
                 }
             })
             .collect();
-        softmax_in_place_f32(&mut scores);
+        match &call.sinks {
+            // The served path's own sink softmax; exhaustive on the judged
+            // semantics so a new variant must be implemented before it
+            // can execute here.
+            Some(sinks) => {
+                let AttentionSinkSpec::SoftmaxDenominator = sinks.spec;
+                softmax_in_place(&mut scores, Some(sinks.logits[q_head]));
+            }
+            None => softmax_in_place_f32(&mut scores),
+        }
         let head_out = &mut concat[q_head * head_dim..(q_head + 1) * head_dim];
         for (offset, key_position) in (start..=position).enumerate() {
             let v_slice = &value_of(key_position)[kv_head * head_dim..(kv_head + 1) * head_dim];
@@ -223,8 +378,9 @@ impl ProductionBackend {
         let kv_rows = call.num_kv_heads * head_dim;
         let mut q = matmul_vec(pre, call.w_q.as_f32()?, q_rows, call.hidden);
         let mut k = matmul_vec(pre, call.w_k.as_f32()?, kv_rows, call.hidden);
-        let v = matmul_vec(pre, call.w_v.as_f32()?, kv_rows, call.hidden);
-        condition_qk_in_place(call, position, &mut q, &mut k);
+        let mut v = matmul_vec(pre, call.w_v.as_f32()?, kv_rows, call.hidden);
+        add_projection_biases(call, &mut q, &mut k, &mut v);
+        condition_qk_in_place(call, position, &mut q, &mut k)?;
         Ok((q, k, v))
     }
 
@@ -254,7 +410,9 @@ impl ProductionBackend {
             }
         }
 
-        Ok(matmul_vec(&concat, call.w_o.as_f32()?, call.hidden, q_rows))
+        let mut out = matmul_vec(&concat, call.w_o.as_f32()?, call.hidden, q_rows);
+        add_output_bias(call, &mut out);
+        Ok(out)
     }
 }
 
@@ -365,6 +523,7 @@ impl PlanBackend for ProductionBackend {
     }
 
     fn ffn(&self, call: FfnCall<'_>) -> Result<Vec<f32>, VindexError> {
+        require_plain_gate("production", call.gate_policy)?;
         let up = matmul_vec(call.x, call.up.as_f32()?, call.intermediate, call.hidden);
         let inner: Vec<f32> = match call.gate {
             Some(gate_weight) => {
@@ -390,6 +549,34 @@ impl PlanBackend for ProductionBackend {
             call.hidden,
             call.intermediate,
         ))
+    }
+
+    fn routed_ffn(&self, call: RoutedFfnCall<'_>) -> Result<Vec<f32>, VindexError> {
+        let mut logits = matmul_vec(call.x, call.router, call.experts, call.hidden);
+        let selected = select_experts(&call, &mut logits)?;
+        let two_inter = FUSED_BRANCHES * call.intermediate;
+        let mut out = vec![0.0f32; call.hidden];
+        for (expert, weight) in selected {
+            let mut fused = matmul_vec(
+                call.x,
+                call.gate_up[expert].as_f32()?,
+                two_inter,
+                call.hidden,
+            );
+            add_expert_bias(&mut fused, call.gate_up_bias, expert);
+            let inner = expert_inner(&call, &fused);
+            let mut expert_out = matmul_vec(
+                &inner,
+                call.down[expert].as_f32()?,
+                call.hidden,
+                call.intermediate,
+            );
+            add_expert_bias(&mut expert_out, call.down_bias, expert);
+            for (acc, v) in out.iter_mut().zip(&expert_out) {
+                *acc += weight * v;
+            }
+        }
+        Ok(out)
     }
 
     fn output_head(

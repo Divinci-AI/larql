@@ -223,6 +223,9 @@ pub fn build_from_inventories(named: &[(String, ArchitectureInventory)]) -> Buil
             match placement {
                 Some((component, kind)) => {
                     merge_binding(&mut objects, &component, kind, artifact, group, inventory);
+                    if kind == ObjectKind::DecoderStack {
+                        carve_expert_banks(&mut objects, &component, artifact, group, inventory);
+                    }
                 }
                 None => unplaced.push(UnplacedGroup {
                     artifact: artifact.clone(),
@@ -434,9 +437,11 @@ fn merge_binding(
         component: component.to_string(),
         kind,
         source_bindings: Vec::new(),
-        representations: canonical_representation(inventory, &group.prefix)
-            .into_iter()
-            .collect(),
+        representations: canonical_representation(inventory, |name| {
+            name.starts_with(&group.prefix)
+        })
+        .into_iter()
+        .collect(),
     });
     object.source_bindings.push(SourceBinding {
         artifact: artifact.to_string(),
@@ -446,19 +451,141 @@ fn merge_binding(
     });
 }
 
+/// Carve every routed layer's expert bank out of a just-placed decoder
+/// stack into the component's [`ObjectKind::ExpertBank`] object, one
+/// binding per layer at the prefix the architecture named
+/// (`resolved.layers[L].expert_bank`). Ownership is settled by binding
+/// specificity ([`super::object::most_specific_owner`]), so the stack keeps
+/// its whole-stack binding and simply stops owning what the bank binds;
+/// its recorded counts and representation are re-derived over what it
+/// still owns, so neither object describes bytes it does not hold.
+fn carve_expert_banks(
+    objects: &mut BTreeMap<String, LogicalObject>,
+    component: &str,
+    artifact: &str,
+    group: &TensorGroup,
+    inventory: &ArchitectureInventory,
+) {
+    let bank_prefixes: Vec<&str> = inventory
+        .resolved
+        .layers
+        .iter()
+        .filter_map(|l| l.expert_bank.as_deref())
+        .filter(|p| {
+            p.strip_prefix(&group.prefix)
+                .is_some_and(|r| r.starts_with('.'))
+        })
+        .collect();
+    if bank_prefixes.is_empty() {
+        return;
+    }
+    let in_bank = |name: &str| {
+        bank_prefixes
+            .iter()
+            .any(|p| name == *p || name.strip_prefix(p).is_some_and(|r| r.starts_with('.')))
+    };
+    let bank_id = format!("{component}.{}", ObjectKind::ExpertBank.name());
+    let bank = objects
+        .entry(bank_id.clone())
+        .or_insert_with(|| LogicalObject {
+            id: bank_id,
+            component: component.to_string(),
+            kind: ObjectKind::ExpertBank,
+            source_bindings: Vec::new(),
+            representations: canonical_representation(inventory, in_bank)
+                .into_iter()
+                .collect(),
+        });
+    let mut carved_tensors = 0usize;
+    let mut carved_bytes = 0u64;
+    for prefix in &bank_prefixes {
+        let (tensors, bytes) = inventory
+            .tensors
+            .tensors
+            .iter()
+            .filter(|t| {
+                t.name == *prefix
+                    || t.name
+                        .strip_prefix(prefix)
+                        .is_some_and(|r| r.starts_with('.'))
+            })
+            .fold((0usize, 0u64), |(n, b), t| (n + 1, b + t.bytes));
+        carved_tensors += tensors;
+        carved_bytes += bytes;
+        bank.source_bindings.push(SourceBinding {
+            artifact: artifact.to_string(),
+            tensor_prefix: (*prefix).to_string(),
+            tensors,
+            bytes,
+        });
+    }
+    // The stack no longer owns those tensors: correct its counts and its
+    // representation to what it still holds.
+    let stack_id = format!("{component}.{}", ObjectKind::DecoderStack.name());
+    if let Some(stack) = objects.get_mut(&stack_id) {
+        if let Some(binding) = stack
+            .source_bindings
+            .iter_mut()
+            .find(|b| b.artifact == artifact && b.tensor_prefix == group.prefix)
+        {
+            binding.tensors = binding.tensors.saturating_sub(carved_tensors);
+            binding.bytes = binding.bytes.saturating_sub(carved_bytes);
+        }
+        stack.representations = canonical_representation(inventory, |name| {
+            name.starts_with(&group.prefix) && !in_bank(name)
+        })
+        .into_iter()
+        .collect();
+    }
+}
+
+/// The MXFP4 pair suffixes HF writes for a block-quantised tensor: the
+/// packed e2m1 nibbles and the e8m0 scales, both stored as `U8`.
+const MXFP4_BLOCKS_SUFFIX: &str = "_blocks";
+const MXFP4_SCALES_SUFFIX: &str = "_scales";
+/// The encoding name a declared MXFP4 tensor is placed under, in the same
+/// vocabulary as the region formats a container writes.
+const MXFP4_ENCODING: &str = "MXFP4";
+
+/// The encoding one tensor is placed under: its shard dtype, unless the
+/// checkpoint's declared stored representation says those bytes are
+/// something else. A `U8` `*_blocks` / `*_scales` tensor under an `mxfp4`
+/// declaration, outside `modules_to_not_convert`, is MXFP4 — placing it as
+/// raw bytes would drop the one fact that gives the bytes meaning.
+fn tensor_encoding<'a>(
+    inventory: &'a ArchitectureInventory,
+    name: &str,
+    dtype: &'a str,
+) -> &'a str {
+    let Some(rep) = inventory.stored_representation.as_ref() else {
+        return dtype;
+    };
+    let declared_mxfp4 = rep
+        .method
+        .eq_ignore_ascii_case(larql_models::inventory::representation::QUANT_METHOD_MXFP4);
+    let mxfp4_pair = name.ends_with(MXFP4_BLOCKS_SUFFIX) || name.ends_with(MXFP4_SCALES_SUFFIX);
+    if declared_mxfp4 && mxfp4_pair && dtype == "U8" && !rep.excludes(name) {
+        MXFP4_ENCODING
+    } else {
+        dtype
+    }
+}
+
 /// The canonical representation for an object: encodings actually observed
-/// in the shard headers under this prefix, falling back to the checkpoint's
-/// declared dtype when the per-tensor list was stripped. Never invented.
+/// in the shard headers under this prefix — read through the checkpoint's
+/// declared stored representation, see [`tensor_encoding`] — falling back
+/// to the checkpoint's declared dtype when the per-tensor list was
+/// stripped. Never invented.
 fn canonical_representation(
     inventory: &ArchitectureInventory,
-    prefix: &str,
+    is_member: impl Fn(&str) -> bool,
 ) -> Option<Representation> {
     let mut encodings: Vec<&str> = inventory
         .tensors
         .tensors
         .iter()
-        .filter(|t| t.name.starts_with(prefix))
-        .map(|t| t.dtype.as_str())
+        .filter(|t| is_member(&t.name))
+        .map(|t| tensor_encoding(inventory, &t.name, t.dtype.as_str()))
         .collect();
     encodings.sort_unstable();
     encodings.dedup();

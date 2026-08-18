@@ -27,6 +27,16 @@ pub enum OperandRole {
     /// Elementwise gate on attention output — the primitive the
     /// `self_attn.gate_proj` operand implies.
     AttnOutputGate,
+    /// Additive bias on the Q/K/V/O projections — present iff the surface
+    /// declares `attention_bias`, all four together (GPT-OSS).
+    AttnQBias,
+    AttnKBias,
+    AttnVBias,
+    AttnOBias,
+    /// Per-query-head attention-sink logits — the operand the judged
+    /// [`AttentionSinkSpec`](larql_models::config::AttentionSinkSpec)
+    /// consumes.
+    AttnSinks,
     AttnQNorm,
     AttnKNorm,
     /// `input_layernorm` — normalises the stream before attention.
@@ -39,6 +49,37 @@ pub enum OperandRole {
     FfnGate,
     FfnUp,
     FfnDown,
+    /// Router logits `[experts, hidden]` of a routed FFN — lives in the
+    /// decoder stack (it is dense).
+    MoeRouterWeight,
+    /// Additive router bias `[experts]`.
+    MoeRouterBias,
+    /// Packed expert operands, living in the component's expert-bank
+    /// object: the fused gate+up projection of every expert, its
+    /// dequantisation scales (formats that keep them apart) and its
+    /// per-expert bias; likewise the down projection.
+    ExpertGateUp,
+    ExpertGateUpScales,
+    ExpertGateUpBias,
+    ExpertDown,
+    ExpertDownScales,
+    ExpertDownBias,
+}
+
+impl OperandRole {
+    /// Whether this operand lives in the expert-bank object rather than
+    /// the decoder stack.
+    pub fn is_expert_bank(self) -> bool {
+        matches!(
+            self,
+            Self::ExpertGateUp
+                | Self::ExpertGateUpScales
+                | Self::ExpertGateUpBias
+                | Self::ExpertDown
+                | Self::ExpertDownScales
+                | Self::ExpertDownBias
+        )
+    }
 }
 
 /// How norms are placed around attention and FFN in every layer of a
@@ -61,6 +102,11 @@ const ROLE_TABLE: &[(&str, OperandRole)] = &[
     ("self_attn.v_proj.weight", OperandRole::AttnV),
     ("self_attn.o_proj.weight", OperandRole::AttnO),
     ("self_attn.gate_proj.weight", OperandRole::AttnOutputGate),
+    ("self_attn.q_proj.bias", OperandRole::AttnQBias),
+    ("self_attn.k_proj.bias", OperandRole::AttnKBias),
+    ("self_attn.v_proj.bias", OperandRole::AttnVBias),
+    ("self_attn.o_proj.bias", OperandRole::AttnOBias),
+    ("self_attn.sinks", OperandRole::AttnSinks),
     ("self_attn.q_norm.weight", OperandRole::AttnQNorm),
     ("self_attn.k_norm.weight", OperandRole::AttnKNorm),
     ("input_layernorm.weight", OperandRole::PreAttentionNorm),
@@ -76,6 +122,27 @@ const ROLE_TABLE: &[(&str, OperandRole)] = &[
     ("mlp.gate_proj.weight", OperandRole::FfnGate),
     ("mlp.up_proj.weight", OperandRole::FfnUp),
     ("mlp.down_proj.weight", OperandRole::FfnDown),
+    ("mlp.router.weight", OperandRole::MoeRouterWeight),
+    ("mlp.router.bias", OperandRole::MoeRouterBias),
+    // Packed MXFP4 (GPT-OSS): blocks + scales + bias per projection.
+    ("mlp.experts.gate_up_proj_blocks", OperandRole::ExpertGateUp),
+    (
+        "mlp.experts.gate_up_proj_scales",
+        OperandRole::ExpertGateUpScales,
+    ),
+    (
+        "mlp.experts.gate_up_proj_bias",
+        OperandRole::ExpertGateUpBias,
+    ),
+    ("mlp.experts.down_proj_blocks", OperandRole::ExpertDown),
+    (
+        "mlp.experts.down_proj_scales",
+        OperandRole::ExpertDownScales,
+    ),
+    ("mlp.experts.down_proj_bias", OperandRole::ExpertDownBias),
+    // Packed BF16 (Gemma 4 A4B): one unquantised operand per projection.
+    ("mlp.experts.gate_up_proj", OperandRole::ExpertGateUp),
+    ("mlp.experts.down_proj", OperandRole::ExpertDown),
 ];
 
 /// Classify one stack tensor by its object-relative name

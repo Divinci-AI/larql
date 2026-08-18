@@ -56,6 +56,14 @@ pub struct ArchitectureInventory {
     /// single-component checkpoints.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub nested_components: Vec<crate::inventory::components::ComponentTopology>,
+    /// The checkpoint's declared stored representation
+    /// (`quantization_config`), read by
+    /// [`super::representation::read_stored_representation`]. `None` for
+    /// an unquantised checkpoint. Decides what raw-byte tensors *mean* —
+    /// GPT-OSS's `U8` expert blocks and scales are MXFP4 by this
+    /// declaration alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stored_representation: Option<crate::inventory::representation::StoredRepresentation>,
     /// Every leaf in `config.json`, flattened to a dot path, classified.
     pub config_keys: Vec<ConfigKeyFact>,
     /// Declared cross-component interfaces (see
@@ -151,8 +159,31 @@ pub struct ResolvedExecution {
     /// exists (a shipped gate operand then fails operand closure).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attention_output_gate: Option<crate::config::AttentionGateSpec>,
+    /// Judged attention-sink semantics; `None` = no judgment exists (a
+    /// shipped `self_attn.sinks` operand then fails operand closure).
+    /// Defaults for inventories written before it was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attention_sinks: Option<crate::config::AttentionSinkSpec>,
+    /// Whether the Q/K/V/O projections carry additive biases, as the
+    /// checkpoint declares (`attention_bias`). `None` = undeclared, which
+    /// is not "no bias": bias operands shipped under `None` fail operand
+    /// closure; `Some(true)` requires all four. Defaults for inventories
+    /// written before it was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attention_bias: Option<bool>,
+    /// The routed-FFN facts when the family declares experts; `None` = a
+    /// dense-FFN model. Defaults for inventories written before it was
+    /// recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub moe: Option<MoeExecution>,
     pub activation: crate::config::Activation,
     pub ffn_type: crate::config::FfnType,
+    /// How the FFN's gate combines with its up branch. `Gated` is the
+    /// plain `activation(gate) * up`; GPT-OSS's clamped GLU is a distinct
+    /// policy, not an activation variant — see `ExpertGatePolicy`.
+    /// Defaults for inventories written before it was recorded.
+    #[serde(default)]
+    pub gate_policy: crate::config::ExpertGatePolicy,
     /// Complete norm spec for the pre-attention / pre-FFN sites.
     pub norm_pre: crate::config::NormSpec,
     /// Complete norm spec for the post-attention / post-FFN sites.
@@ -203,6 +234,43 @@ pub struct LayerPolicy {
     pub position: crate::config::PositionPolicy,
     pub head_dim: usize,
     pub num_kv_heads: usize,
+    /// Source-name prefix of this layer's packed expert bank (the parent of
+    /// its `gate_up`/`down` operands), when the layer's FFN is routed —
+    /// `model.layers.3.mlp.experts`. `None` = a dense-FFN layer. Per layer,
+    /// so an arbitrary dense/routed schedule needs no dedicated field.
+    /// Defaults for inventories written before it was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expert_bank: Option<String>,
+}
+
+/// The routed-FFN (mixture-of-experts) execution facts, resolved once
+/// from the architecture. Every field is a judged semantic the executor
+/// reads — none is re-derived from operand names downstream.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct MoeExecution {
+    /// Routed experts per layer.
+    pub experts: usize,
+    /// Experts selected per token.
+    pub top_k: usize,
+    /// Per-expert intermediate width.
+    pub expert_intermediate_size: usize,
+    /// How router logits become selected experts and weights.
+    pub router_kind: crate::config::MoeRouterKind,
+    /// Whether the selected weights are normalised to sum to one.
+    pub routing_policy: crate::config::ExpertRoutingPolicy,
+    /// Whether the router carries an additive bias on its logits.
+    pub router_bias: bool,
+    /// How the experts are stored (per-expert tensors, packed MXFP4, packed
+    /// BF16).
+    pub expert_format: crate::config::ExpertFormat,
+    /// How a fused `gate_up` operand splits into its branches; `None` when
+    /// no fused operand exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_up_layout: Option<crate::config::GateUpLayout>,
+    /// Always-active experts alongside the routed ones.
+    pub shared_experts: usize,
+    /// A dense MLP summed with the expert block every layer (Gemma 4 A4B).
+    pub hybrid: bool,
 }
 
 /// One flattened `config.json` leaf.
