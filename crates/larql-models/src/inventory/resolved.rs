@@ -135,6 +135,8 @@ pub fn resolve(config: &Value, identity: &Identity) -> (Detection, ResolvedTopol
         embed_scale: arch.embed_scale(),
         output_multiplier: arch.output_multiplier(),
         final_logit_softcapping: arch.final_logit_softcapping(),
+        residual_scale: arch.residual_scale(),
+        head_reuses_embedding: arch.output_head_reuses_embedding(),
     };
     let topology = ResolvedTopology {
         num_layers: cfg.num_layers,

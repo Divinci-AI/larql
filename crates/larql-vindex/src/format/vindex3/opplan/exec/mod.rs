@@ -254,6 +254,23 @@ pub fn execute_plan_streaming<B: PlanBackend + ?Sized>(
     })
 }
 
+/// Scale a sublayer's own output before its residual add, when the plan
+/// declares a residual-scale operation (`LayerPlan::residual_scale`).
+/// `None` leaves `delta` untouched — absence is not an identity multiply,
+/// the same discipline every other optional op in the surface follows.
+/// Backend-agnostic by design: every `PlanBackend` shares this one step
+/// rather than each reimplementing the same multiply. `pub(super)`: the
+/// stateful single-token driver in [`decode`] applies the same op at its
+/// own residual-add sites, on the incremental decode path this batch path
+/// does not cover.
+pub(super) fn scale_residual_delta(scale: Option<f32>, delta: &mut [f32]) {
+    if let Some(scale) = scale {
+        for x in delta.iter_mut() {
+            *x *= scale;
+        }
+    }
+}
+
 /// One decoder layer: norms and residuals exactly where the plan puts
 /// them — placement is data, not code structure.
 fn execute_layer<B: PlanBackend + ?Sized>(
@@ -286,10 +303,11 @@ fn execute_layer<B: PlanBackend + ?Sized>(
     h.par_iter_mut()
         .zip(attn_out.par_iter())
         .try_for_each(|(row, out)| {
-            let out = match &layer.post_attention_norm {
+            let mut out = match &layer.post_attention_norm {
                 Some(op) => apply_norm_op(op, store, out, backend)?,
                 None => out.clone(),
             };
+            scale_residual_delta(layer.residual_scale, &mut out);
             backend.residual_add(row, &out);
             Ok::<(), VindexError>(())
         })?;
@@ -318,10 +336,11 @@ fn execute_layer<B: PlanBackend + ?Sized>(
             down: down.slice(),
             activation: layer.ffn.activation,
         })?;
-        let ffn_out = match &layer.post_ffn_norm {
+        let mut ffn_out = match &layer.post_ffn_norm {
             Some(op) => apply_norm_op(op, store, &ffn_out, backend)?,
             None => ffn_out,
         };
+        scale_residual_delta(layer.residual_scale, &mut ffn_out);
         backend.residual_add(row, &ffn_out);
         Ok::<(), VindexError>(())
     })?;

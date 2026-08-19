@@ -38,6 +38,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use larql_models::config::{score_scale_from_query_pre_attn_scalar, Activation};
+
 use super::super::graph::Component;
 
 /// How far a declared fact travels from `config.json` into execution.
@@ -158,6 +160,14 @@ pub const CARRIAGE_RULES: &[CarriageRule] = &[
         probe: Some(probe_pre_norm_eps),
     },
     CarriageRule {
+        leaf: "layer_norm_epsilon",
+        reaches: Carriage::Lowered,
+        // GPT-2's spelling; `detect/parser.rs:292` folds it into the same
+        // `norm_eps` read as its three siblings above.
+        site: "ExecutionSurface.norm.pre.eps → NormOp.eps",
+        probe: Some(probe_pre_norm_eps),
+    },
+    CarriageRule {
         leaf: "post_norm_eps",
         reaches: Carriage::Lowered,
         site: "ExecutionSurface.norm.post.eps → NormOp.eps at the post sites",
@@ -207,6 +217,50 @@ pub const CARRIAGE_RULES: &[CarriageRule] = &[
         site: "ExecutionSurface.head.output_multiplier → OutputOp.multiplier",
         probe: Some(probe_output_multiplier),
     },
+    CarriageRule {
+        leaf: "embedding_multiplier",
+        reaches: Carriage::Lowered,
+        // Granite's embedding-scale operation, wired through
+        // `GraniteArch::embed_scale()` (`config/architecture.rs`) into
+        // `HeadSurface.embed_scale` and on into `EmbeddingOp.scale`
+        // (`opplan/build.rs`).
+        site: "ExecutionSurface.head.embed_scale → EmbeddingOp.scale",
+        probe: Some(probe_embed_scale),
+    },
+    CarriageRule {
+        leaf: "attention_multiplier",
+        reaches: Carriage::Lowered,
+        // NOT `qk_scale_factor`/`query_scale` — Granite's attention_multiplier
+        // *replaces* the standard 1/sqrt(head_dim) score scale rather than
+        // multiplying on top of it (every legacy-path call site treats it
+        // that way, and the declared value — 1/head_dim — confirms it
+        // numerically). `ModelArchitecture::attention_scale`'s default
+        // resolves it into `score_scale` accordingly.
+        site: "ExecutionSurface.attention.score_scale → AttentionOp.score_scale",
+        probe: Some(probe_score_scale),
+    },
+    CarriageRule {
+        leaf: "logits_scaling",
+        reaches: Carriage::Lowered,
+        // Granite's spelling of `output_multiplier` — algebraically the
+        // same operation (scaling commutes through the linear head, so
+        // "before the vocab projection" and "on the logits" are the same
+        // number), resolved by `ModelArchitecture::output_multiplier`'s
+        // default the same way `attention_multiplier` resolves above.
+        site: "ExecutionSurface.head.output_multiplier → OutputOp.multiplier",
+        probe: Some(probe_output_multiplier),
+    },
+    CarriageRule {
+        leaf: "residual_multiplier",
+        reaches: Carriage::Lowered,
+        // Granite's residual-stream scale: the sublayer's own output
+        // (attention or FFN) is multiplied by this before its residual
+        // add, at both sites — no other family in this registry scales
+        // the residual stream, so this is new schema (A-11.3), not a
+        // second spelling of an existing field.
+        site: "ExecutionSurface.residual_scale → LayerPlan.residual_scale",
+        probe: Some(probe_residual_scale),
+    },
     // ── Facts that stop at the parser, reviewed ─────────────────────
     CarriageRule {
         leaf: "attention_bias",
@@ -218,6 +272,18 @@ pub const CARRIAGE_RULES: &[CarriageRule] = &[
         // operands themselves block at G5b — a stronger check than a
         // boolean, and the reason this is judged rather than a hole.
         // MOE1 gives the projections explicit bias operands.
+        site: "no schema field — carried instead as operand evidence, gated by G5b closure",
+        probe: None,
+    },
+    CarriageRule {
+        leaf: "mlp_bias",
+        reaches: Carriage::Parsed,
+        // Same argument as `attention_bias` immediately above: VINDEX3 has
+        // no `mlp_bias` field, and operand closure over the FFN's actual
+        // bias tensors (or their absence) is the real gate. Granite 4.1
+        // declares `false` on 3B/8B/30B, which agrees trivially; a
+        // checkpoint declaring `true` blocks at G5b if the projections
+        // don't carry bias operands, not here.
         site: "no schema field — carried instead as operand evidence, gated by G5b closure",
         probe: None,
     },
@@ -236,6 +302,44 @@ pub const CARRIAGE_RULES: &[CarriageRule] = &[
 /// The rule governing a config leaf, if any.
 pub fn rule_for(leaf: &str) -> Option<&'static CarriageRule> {
     CARRIAGE_RULES.iter().find(|rule| rule.leaf == leaf)
+}
+
+/// Canonicalises a declared config value into the vocabulary a probe's
+/// carried value uses, for leaves where VINDEX3 legitimately stores a
+/// *renamed* or *derived* form of the same fact rather than the
+/// checkpoint's own spelling.
+///
+/// This is not a tolerance knob: each arm reuses the one conversion the
+/// parser (or the runtime) already applies, so agreement here means the
+/// same fact was recognised twice by the same rule, not that comparison
+/// was loosened. A leaf with no arm here falls through unchanged, so
+/// [`super::values_agree`] still requires byte-for-byte (or f32-precision)
+/// identity — this function only ever narrows a `mismatched` finding to
+/// `representable`, never the reverse, and callers still show the raw
+/// declared value in the finding regardless of what this returns.
+pub fn canonical_declared(leaf: &str, declared: &Value) -> Value {
+    match leaf {
+        // HF spells the tanh-approximated GELU several ways
+        // (`gelu_new`, `gelu_pytorch_tanh`); `Activation::from_hf_name` is
+        // the one name↔variant table the parser itself reads, so a probe
+        // reading back `Activation::GeluTanh` as `"gelu_tanh"` is the same
+        // fact as a declared `"gelu_pytorch_tanh"`, not a dropped one.
+        "hidden_act" | "hidden_activation" => declared
+            .as_str()
+            .and_then(Activation::from_hf_name)
+            .and_then(|activation| serde_json::to_value(activation).ok())
+            .unwrap_or_else(|| declared.clone()),
+        // The checkpoint declares the raw scalar; VINDEX3's execution
+        // surface stores the score scale execution actually reads —
+        // `scalar.powf(-0.5)`, the identical formula
+        // `ModelArchitecture::attention_scale` applies at runtime, called
+        // through the one shared function rather than re-derived here.
+        "query_pre_attn_scalar" => declared
+            .as_f64()
+            .map(|scalar| json!(score_scale_from_query_pre_attn_scalar(scalar)))
+            .unwrap_or_else(|| declared.clone()),
+        _ => declared.clone(),
+    }
 }
 
 // ── Probes ──────────────────────────────────────────────────────────
@@ -343,4 +447,14 @@ fn probe_output_multiplier(component: &Component) -> Option<Value> {
             .as_ref()?
             .output_multiplier?
     ))
+}
+
+fn probe_embed_scale(component: &Component) -> Option<Value> {
+    Some(json!(
+        component.execution.as_ref()?.head.as_ref()?.embed_scale?
+    ))
+}
+
+fn probe_residual_scale(component: &Component) -> Option<Value> {
+    Some(json!(component.execution.as_ref()?.residual_scale?))
 }

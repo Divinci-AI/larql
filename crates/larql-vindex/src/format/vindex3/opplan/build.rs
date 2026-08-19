@@ -232,11 +232,29 @@ pub fn plan_component_ops(
         &mut defects,
     );
     let final_norm_tensor = single(ObjectKind::FinalNorm, Some(vec![hidden]), &mut defects);
+    // No standalone `OutputHead` object is placed for a checkpoint that
+    // ships no separate `lm_head`-named tensor group at all — the near-
+    // universal tied-embeddings convention, not a missing object. Reusing
+    // the embedding object's own tensor reference is judged here, from
+    // `surface.head_reuses_embedding` alone (see [`ModelArchitecture::
+    // output_head_reuses_embedding`](larql_models::config::ModelArchitecture::output_head_reuses_embedding)):
+    // the container never gets a second copy of the matrix, and a
+    // checkpoint that explicitly declared `tie_word_embeddings: false`
+    // and still has no head tensor stays `None` here — a lost tensor, not
+    // a tied one, so it must not silently reuse the embedding.
     let head_tensor = single(
         ObjectKind::OutputHead,
         vocab.map(|v| vec![v, hidden]),
         &mut defects,
-    );
+    )
+    .or_else(|| {
+        surface
+            .head
+            .as_ref()
+            .is_some_and(|h| h.head_reuses_embedding)
+            .then(|| embedding_tensor.clone())
+            .flatten()
+    });
     if (embedding_tensor.is_some() || head_tensor.is_some()) && surface.head.is_none() {
         defects.push(ClosureDefect::MissingSurface {
             component: component.id.clone(),
@@ -341,6 +359,7 @@ pub fn plan_component_ops(
                 down: operand(&stack_id, get(OperandRole::FfnDown)),
             },
             post_ffn_norm,
+            residual_scale: surface.residual_scale,
             operands_accounted: consumed,
             operands_present: consumed,
         });

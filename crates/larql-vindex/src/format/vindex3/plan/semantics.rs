@@ -20,6 +20,7 @@ pub const EXECUTION_SEMANTIC_KEYS: &[&str] = &[
     "hidden_activation",
     "hidden_act",
     "attention_bias",
+    "mlp_bias",
     "layer_norm_eps",
     "rms_norm_eps",
     "norm_epsilon",
@@ -37,6 +38,51 @@ pub const EXECUTION_SEMANTIC_KEYS: &[&str] = &[
     // ±this value before the GLU. It changes what the FFN computes, so
     // it is execution-semantic wherever it is declared.
     "swiglu_limit",
+    // GPT-2's spelling of the norm epsilon `rms_norm_eps` etc. already
+    // cover — same fact, fourth name; `parser.rs` folds all four into one
+    // `norm_eps` read, so this shares `rms_norm_eps`'s carriage rule.
+    "layer_norm_epsilon",
+    // Per-layer attention geometry and behaviour (A-9/A-11 census,
+    // 2026-08-18: these were `consumed` but absent from every registry
+    // here, so they silently graded `representable` instead of blocking —
+    // the exact "parsed but unjudged" shape this module exists to name).
+    // Which layers are sliding vs full.
+    "sliding_window_pattern",
+    // A second rope base for local/sliding layers, alongside `rope_theta`.
+    "rope_local_base_freq",
+    // Whether K and V share storage — changes what attention reads.
+    "attention_k_eq_v",
+    // Whether the FFN routes through MoE at all.
+    "enable_moe_block",
+    // Whether router weights are renormalised after top-k selection.
+    "norm_topk_prob",
+    // Routing width: how many experts activate per token.
+    "num_experts_per_tok",
+    "num_experts_per_token",
+    "top_k_experts",
+    // The rope-scaling (YaRN / Llama-3-style) block's own leaves, besides
+    // `rope_type` — every one of them is consumed and changes what rope
+    // computes, and none has a schema field yet (the A-9.0 YaRN work).
+    "type",
+    "factor",
+    "low_freq_factor",
+    "high_freq_factor",
+    "original_max_position_embeddings",
+    "beta_fast",
+    "beta_slow",
+    "truncate",
+    "mscale",
+    "mscale_all_dim",
+    // Granite-style scaling multipliers (A-11.1): consumed into
+    // `ModelConfig` but not yet carried past it — `embedding_multiplier`
+    // is the one exception, wired through `embed_scale()`. See A-11.2/.3
+    // in ROADMAP.md for the schema work that gives the other three a
+    // canonical home instead of borrowing `qk_scale_factor` /
+    // `output_multiplier`'s names.
+    "embedding_multiplier",
+    "attention_multiplier",
+    "residual_multiplier",
+    "logits_scaling",
 ];
 
 /// Keys that describe stored operands: widths, depths, head geometry,
@@ -57,6 +103,32 @@ pub const TENSOR_SEMANTIC_KEYS: &[&str] = &[
     "patch_temporal",
     "pos_emb_height",
     "pos_emb_width",
+    // GPT-2 aliases of shape fields above (`hidden_size`, `num_hidden_layers`,
+    // `intermediate_size`, `num_attention_heads` respectively).
+    "n_embd",
+    "n_layer",
+    "n_inner",
+    "n_head",
+    // Per-layer attention geometry (Gemma 4 style global/local split) —
+    // widths, not behaviour.
+    "global_head_dim",
+    "num_global_key_value_heads",
+    // Per-layer embedding width (PLE).
+    "hidden_size_per_layer_input",
+    // MoE operand counts: how many expert tensors exist, not how the
+    // forward pass selects among them (that's `num_experts_per_tok` etc.,
+    // in `EXECUTION_SEMANTIC_KEYS`).
+    "n_routed_experts",
+    "num_local_experts",
+    "num_experts",
+    "n_shared_experts",
+    "moe_intermediate_size",
+    // MLA (DeepSeek-style) head/rank geometry.
+    "kv_lora_rank",
+    "q_lora_rank",
+    "qk_nope_head_dim",
+    "qk_rope_head_dim",
+    "v_head_dim",
 ];
 
 /// Keys that declare a cross-component contract: hidden-state taps, block
@@ -70,7 +142,29 @@ pub const INTERFACE_SEMANTIC_KEYS: &[&str] = &[
 ];
 
 /// Identity facts inert for a forward pass wherever they appear.
-pub const METADATA_KEYS: &[&str] = &["model_type", "tie_word_embeddings"];
+pub const METADATA_KEYS: &[&str] = &[
+    "model_type",
+    "tie_word_embeddings",
+    // `rope_scaling` as a bare leaf (not recursed into) means its value is
+    // not an object — in every checkpoint on hand, `null`. A non-null
+    // object never reaches this leaf; it flattens into `rope_type`/
+    // `factor`/etc. instead, covered above. So a bare `rope_scaling` fact
+    // carries no scaling information to lose — the same claim
+    // `max_position_embeddings` makes about itself, just true unconditionally
+    // here rather than by schema absence.
+    "rope_scaling",
+    // HF's serving-time KV-cache implementation selector (`"hybrid"`,
+    // `"static"`, …) — which cache *class* generation code should
+    // instantiate to hold a mix of sliding/full attention layers
+    // efficiently. It names a consequence of the per-layer attention
+    // topology, not an independent forward-pass fact: the topology itself
+    // is declared elsewhere (`sliding_window` + the architecture's layer
+    // alternation, e.g. Gemma 2's fixed period-2 pattern) and VINDEX3
+    // already carries *that*, per layer, in the attention table. Two
+    // checkpoints differing only in `cache_implementation` compute
+    // identical logits for any prompt both can hold.
+    "cache_implementation",
+];
 
 /// Keys that parameterise *training* and are inert at inference. Each
 /// entry must name the training-time path it belongs to, because "we
