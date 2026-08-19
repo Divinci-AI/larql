@@ -114,6 +114,8 @@ pub struct QuantKernels {
     /// A2x2gu — gate+up halves in one dispatch (buffers 11–13 add the
     /// second output and row walk).
     pub mxfp4_grouped_x2_gu_pipeline: KernelHandle,
+    /// A2dc — down projection + weighted combine in one dispatch (top-4).
+    pub mxfp4_down_combine4_pipeline: KernelHandle,
     /// How [`Self::mxfp4_grouped_pipeline`] receives its e8m0 exponents.
     /// Travels with the pipeline because the two layouts have different
     /// binding arities, so a call site cannot bind one without knowing
@@ -247,6 +249,8 @@ impl QuantKernels {
             h::<shaders::mxfp4_grouped_experts::KernelSplitLut16VecX2>(device, library);
         let mxfp4_grouped_x2_gu_pipeline =
             h::<shaders::mxfp4_grouped_experts::KernelSplitLut16VecX2Gu>(device, library);
+        let mxfp4_down_combine4_pipeline =
+            h::<shaders::mxfp4_grouped_experts::KernelDownCombine4>(device, library);
         let mxfp4_grouped_arm = options.mxfp4_arm;
         let mxfp4_grouped_binding = if options.mxfp4_arm.is_split_scale() {
             ExpertScaleBinding::SplitE8M0
@@ -286,6 +290,7 @@ impl QuantKernels {
             mxfp4_grouped_pipeline,
             mxfp4_grouped_x2_pipeline,
             mxfp4_grouped_x2_gu_pipeline,
+            mxfp4_down_combine4_pipeline,
             mxfp4_grouped_binding,
             mxfp4_grouped_arm,
         }

@@ -280,6 +280,59 @@ impl MetalBackend {
         let n_out = hidden as u32;
         let k_in = inter_padded as u32;
         let xstride_own: u32 = inter_padded as u32;
+        // A-12: for a top-4 MXFP4 route the down projection and the
+        // weighted combine fuse into one dispatch (bit-identical: same
+        // per-(row,slot) walk, same combine order). The staged down bias
+        // moves BEFORE it; the separate combine kernel is skipped.
+        let fused_down_combine = scratch.format == larql_compute::QuantFormat::MXFP4
+            && n_slots == 4
+            && table.payload_offsets_vec16
+            && expert_down_combine_enabled()
+            && !ablate.combine;
+        if fused_down_combine {
+            let has_down_bias = table.down_bias_bank.is_some() && !ablate.bias;
+            if let Some(bank) = &table.down_bias_bank {
+                if !ablate.bias {
+                    let hidden_u32 = hidden as u32;
+                    let n = n_slots as u32;
+                    enc.set_compute_pipeline_state(&self.moe_down_bias_stage_pipeline);
+                    enc.set_buffer(0, Some(bank), 0);
+                    enc.set_buffer(1, Some(&bindings.slot_descs), 0);
+                    enc.set_buffer(2, Some(&scratch.down_bias_staged), 0);
+                    enc.set_bytes(3, 4, &hidden_u32 as *const u32 as *const c_void);
+                    enc.set_bytes(4, 4, &n as *const u32 as *const c_void);
+                    enc.dispatch_threads(
+                        MTLSize::new(hidden as u64, n_slots as u64, 1),
+                        MTLSize::new(64.min(hidden as u64).max(1), 1, 1),
+                    );
+                }
+            }
+            let scale_base = table
+                .down_scale_base
+                .as_ref()
+                .expect("gpu_route_supported checked the scale streams");
+            let khdc = &self.quant.mxfp4_down_combine4_pipeline;
+            let has_bias_u: u32 = u32::from(has_down_bias);
+            enc.set_compute_pipeline_state(&khdc.state);
+            enc.set_buffer(0, Some(&table.down_base), 0);
+            enc.set_buffer(1, Some(&bindings.down_offs), 0);
+            enc.set_buffer(2, Some(scale_base), 0);
+            enc.set_buffer(3, Some(&bindings.dn_scale_offs), 0);
+            enc.set_buffer(4, Some(&scratch.act_buf), 0);
+            enc.set_buffer(5, Some(new_h), 0);
+            enc.set_bytes(6, 4, &n_out as *const u32 as *const c_void);
+            enc.set_bytes(7, 4, &k_in as *const u32 as *const c_void);
+            enc.set_bytes(8, 4, &xstride_own as *const u32 as *const c_void);
+            enc.set_buffer(9, Some(h_post_attn), 0);
+            enc.set_buffer(10, Some(selected_weights), 0);
+            enc.set_buffer(11, Some(&scratch.down_bias_staged), 0);
+            enc.set_bytes(12, 4, &has_bias_u as *const u32 as *const c_void);
+            enc.dispatch_thread_groups(
+                MTLSize::new((hidden as u64).div_ceil(khdc.rows_per_tg), 1, 1),
+                MTLSize::new(khdc.threads_per_tg, 1, 1),
+            );
+            return;
+        }
         match scratch.format {
             larql_compute::QuantFormat::MXFP4 => {
                 use crate::shaders::mxfp4_grouped_experts::{
@@ -595,6 +648,17 @@ fn moe_ablation() -> MoeAblation {
         }
         a
     })
+}
+
+/// Opt-in for the fused down+combine dispatch (`LARQL_MXFP4_EXPERT_DC=1`).
+/// A/B/A/B on gpt-oss read −0.21 then +0.12 ms under battery drift —
+/// ambiguous, so the split form stays the default until a rested AC
+/// re-run decides. (The in-situ ablation's −0.32 ms for `combine` was
+/// mostly a dependency-break artifact: skipping the kernel also freed
+/// the next layer from waiting on the down projection.)
+fn expert_down_combine_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("LARQL_MXFP4_EXPERT_DC").as_deref() == Ok("1"))
 }
 
 /// Control for the x2 expert GEMV arm: `LARQL_MXFP4_EXPERT_X2=0` keeps

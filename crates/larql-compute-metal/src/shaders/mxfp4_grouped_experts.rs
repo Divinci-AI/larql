@@ -418,6 +418,81 @@ kernel void mxfp4g_split_lut16_vec_x2_gu(
 }
 "#;
 
+/// A2dc — the down projection and the weighted combine in ONE dispatch,
+/// for top-4 routes: each threadgroup owns 2 output rows × 4 slots (8
+/// simdgroups, 256 threads); simdgroup (r,s) computes `down_s[row_r] ·
+/// act_s` with A2's exact walk (bit-identical per (row, slot) to the
+/// grouped down GEMV), then lane 0s stage the four per-slot dots and one
+/// thread folds `h + Σ_s w_s·(dot_s + bias_s)` — the combine kernel's
+/// exact order, so the result is bit-identical to the GPU down→combine
+/// pair (a CPU emulation of the combine differs at the last ulp: Metal
+/// contracts the multiply-add). Removes the down→combine serialization
+/// and puts 11520 simdgroups in flight where the split form's down
+/// dispatch carries 5760. A/B on gpt-oss was AMBIGUOUS under battery
+/// drift (−0.21/+0.12 ms) — opt-in via `LARQL_MXFP4_EXPERT_DC=1` until a
+/// rested AC re-run decides.
+const KERNEL_A2DC: &str = r#"
+kernel void mxfp4g_down_combine4(
+    device const uchar*  Wp        [[buffer(0)]],
+    device const uint*   offsets   [[buffer(1)]],
+    device const uchar*  Ws        [[buffer(2)]],
+    device const uint*   s_offsets [[buffer(3)]],
+    device const float*  X         [[buffer(4)]],   // act, [4, XSTRIDE]
+    device float*        new_h     [[buffer(5)]],
+    constant uint&       N         [[buffer(6)]],
+    constant uint&       K         [[buffer(7)]],
+    constant uint&       XSTRIDE   [[buffer(8)]],
+    device const float*  Hin       [[buffer(9)]],   // [N] post-attn residual
+    constant float*      Wroute    [[buffer(10)]],  // [4] routing weights
+    device const float*  Bias      [[buffer(11)]],  // [4, N] staged down bias
+    constant uint&       has_bias  [[buffer(12)]],
+    uint2 tg_id [[threadgroup_position_in_grid]],
+    uint  tid   [[thread_index_in_threadgroup]],
+    uint  lane  [[thread_index_in_simdgroup]],
+    uint  sg_id [[simdgroup_index_in_threadgroup]])
+{
+    const uint r = sg_id >> 2u;          // 0..2: row within the pair
+    const uint slot = sg_id & 3u;        // 0..4
+    const uint row = tg_id.x * 2u + r;
+    const uint groups = K / MXG_GROUP_ELEMS;
+
+    float dot = 0.0f;
+    if (row < N) {
+        const ulong pbase = (ulong)offsets[slot] + (ulong)row * groups * MXG_GROUP_BYTES;
+        device const uint4* row_p = (device const uint4*)(Wp + pbase);
+        device const uchar* row_s = Ws + (ulong)s_offsets[slot] + (ulong)row * groups;
+        device const float4* Xs4 = (device const float4*)(X + (ulong)slot * XSTRIDE);
+        for (uint g = lane; g < groups; g += 32u) {
+            const float scale = mxg_e8m0(row_s[g]);
+            const uint4 w = row_p[g];
+            const uint xb = g * 8u;
+            float part = mxg_dot8(w.x, Xs4[xb],      Xs4[xb + 1u])
+                       + mxg_dot8(w.y, Xs4[xb + 2u], Xs4[xb + 3u])
+                       + mxg_dot8(w.z, Xs4[xb + 4u], Xs4[xb + 5u])
+                       + mxg_dot8(w.w, Xs4[xb + 6u], Xs4[xb + 7u]);
+            dot += scale * part;
+        }
+        dot = simd_sum(dot);
+    }
+
+    threadgroup float parts[2][4];
+    if (lane == 0u) { parts[r][slot] = dot; }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // One thread per row folds the combine, in the combine kernel's
+    // exact order: acc = h[row]; for j: acc += w_j * (dot_j [+ bias_j]).
+    if (lane == 0u && slot == 0u && row < N) {
+        float acc = Hin[row];
+        for (uint j = 0u; j < 4u; ++j) {
+            float v = parts[r][j];
+            if (has_bias != 0u) { v += Bias[j * N + row]; }
+            acc += Wroute[j] * v;
+        }
+        new_h[row] = acc;
+    }
+}
+"#;
+
 /// Body shared by the interleaved arms; only the inner decode differs.
 fn interleaved(name: &str, decode: &str) -> String {
     format!(
@@ -568,6 +643,7 @@ pub fn shader() -> String {
     s.push_str(KERNEL_A2);
     s.push_str(KERNEL_A2X2);
     s.push_str(KERNEL_A2X2GU);
+    s.push_str(KERNEL_A2DC);
     s.push_str(&interleaved("mxfp4g_inter_lut16", DECODE_LUT16));
     s.push_str(&interleaved("mxfp4g_inter_pair", DECODE_PAIR));
     s.push_str(&interleaved("mxfp4g_inter_magsign", DECODE_MAG_SIGN));
@@ -590,6 +666,13 @@ macro_rules! arm {
 
 arm!(KernelSplitLut16, "mxfp4g_split_lut16");
 arm!(KernelSplitLut16Vec, "mxfp4g_split_lut16_vec");
+/// A2dc — down + weighted combine for top-4, 2 rows per threadgroup.
+pub struct KernelDownCombine4;
+impl crate::kernels::TiledKernel for KernelDownCombine4 {
+    const KERNEL_NAME: &'static str = "mxfp4g_down_combine4";
+    const ROWS_PER_TG: u64 = 2;
+    const THREADS_PER_TG: u64 = 256;
+}
 /// A2x2gu — gate+up in one dispatch, 8 logical rows per threadgroup.
 pub struct KernelSplitLut16VecX2Gu;
 impl crate::kernels::TiledKernel for KernelSplitLut16VecX2Gu {
@@ -788,7 +871,8 @@ mod tests {
             .replace(KERNEL_A, "")
             .replace(KERNEL_A2, "")
             .replace(KERNEL_A2X2, "")
-            .replace(KERNEL_A2X2GU, "");
+            .replace(KERNEL_A2X2GU, "")
+            .replace(KERNEL_A2DC, "");
         assert!(!interleaved_src.contains("s_offsets"));
         assert!(!interleaved_src.contains("ROWSTRIDE"));
     }

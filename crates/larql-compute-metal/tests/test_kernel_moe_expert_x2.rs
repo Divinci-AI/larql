@@ -169,6 +169,137 @@ fn gu_fused_matches_two_x2_dispatches_bit_for_bit() {
 }
 
 #[test]
+fn down_combine4_matches_down_then_combine_bit_for_bit() {
+    let Some(gpu) = MetalBackend::new() else {
+        eprintln!("no Metal device; skipping");
+        return;
+    };
+    // Down geometry: N output rows (hidden), K = inter, 4 slots with
+    // per-slot activations; odd N so the last threadgroup is ragged.
+    let n = 353;
+    let slots = 4;
+    let f = fixture(n, slots, 11);
+    // Per-slot activations, XSTRIDE = K.
+    let acts: Vec<f32> = (0..slots * K)
+        .map(|i| ((i % 23) as f32) * 0.04 - 0.4)
+        .collect();
+    let h: Vec<f32> = (0..n).map(|i| (i % 9) as f32 - 4.0).collect();
+    let wroute = [0.4f32, 0.3, 0.2, 0.1];
+    let bias: Vec<f32> = (0..slots * n).map(|i| (i % 5) as f32 * 0.01).collect();
+
+    let packed = gpu.lowering_weight(f.packed);
+    let scales = gpu.lowering_weight(f.scales);
+    let offs_b: Vec<u8> = f.offs.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let soffs_b: Vec<u8> = f.soffs.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let offs = gpu.lowering_weight(&offs_b);
+    let soffs = gpu.lowering_weight(&soffs_b);
+    let act_b = gpu.lowering_upload(&acts).expect("acts");
+    let h_b = gpu.lowering_upload(&h).expect("h");
+    let w_b = gpu.lowering_upload(&wroute).expect("w");
+    let bias_b = gpu.lowering_upload(&bias).expect("bias");
+
+    for has_bias in [0u32, 1] {
+        // Reference: grouped x2 down per slot, then the combine on the CPU
+        // in the combine kernel's exact order.
+        let expert_outs = {
+            let kh = &gpu.quant.mxfp4_grouped_x2_pipeline;
+            let out = gpu.lowering_scratch(slots * n);
+            let cmd = gpu.new_lowering_command_buffer();
+            let enc = cmd.new_compute_command_encoder();
+            enc.set_compute_pipeline_state(&kh.state);
+            enc.set_buffer(0, Some(&packed), 0);
+            enc.set_buffer(1, Some(&offs), 0);
+            enc.set_buffer(2, Some(&scales), 0);
+            enc.set_buffer(3, Some(&soffs), 0);
+            enc.set_buffer(4, Some(&act_b), 0);
+            enc.set_buffer(5, Some(&out), 0);
+            let set =
+                |i: u64, v: u32| enc.set_bytes(i, 4, &v as *const u32 as *const std::ffi::c_void);
+            set(6, n as u32);
+            set(7, K as u32);
+            set(8, K as u32); // per-slot activations
+            set(9, 0);
+            set(10, 1);
+            enc.dispatch_thread_groups(
+                MTLSize::new((n as u64).div_ceil(kh.rows_per_tg), slots as u64, 1),
+                MTLSize::new(kh.threads_per_tg, 1, 1),
+            );
+            enc.end_encoding();
+            cmd.commit();
+            cmd.wait_until_completed();
+            let got = gpu.lowering_readback(&out, slots * n).expect("outs");
+            gpu.recycle_lowering_scratch(out);
+            got
+        };
+        // Reference combine on the GPU — the production kernel, so FMA
+        // contraction rounds identically (a CPU emulation differs at the
+        // last ulp).
+        let want = {
+            let outs_b = gpu.lowering_upload(&expert_outs).expect("outs");
+            let new_h = gpu.lowering_scratch(n);
+            let cmd = gpu.new_lowering_command_buffer();
+            let enc = cmd.new_compute_command_encoder();
+            enc.set_compute_pipeline_state(&gpu.ffn.moe_weighted_combine_pipeline);
+            enc.set_buffer(0, Some(&outs_b), 0);
+            enc.set_buffer(1, Some(&h_b), 0);
+            enc.set_buffer(2, Some(&new_h), 0);
+            let set =
+                |i: u64, v: u32| enc.set_bytes(i, 4, &v as *const u32 as *const std::ffi::c_void);
+            set(3, n as u32);
+            set(4, slots as u32);
+            enc.set_buffer(5, Some(&w_b), 0);
+            enc.set_buffer(6, Some(&bias_b), 0);
+            set(7, has_bias);
+            enc.dispatch_threads(
+                MTLSize::new(n as u64, 1, 1),
+                MTLSize::new(256.min(n as u64), 1, 1),
+            );
+            enc.end_encoding();
+            cmd.commit();
+            cmd.wait_until_completed();
+            let w = gpu.lowering_readback(&new_h, n).expect("want");
+            gpu.recycle_lowering_scratch(new_h);
+            gpu.recycle_lowering_scratch(outs_b);
+            w
+        };
+
+        let khdc = &gpu.quant.mxfp4_down_combine4_pipeline;
+        let new_h = gpu.lowering_scratch(n);
+        let cmd = gpu.new_lowering_command_buffer();
+        let enc = cmd.new_compute_command_encoder();
+        enc.set_compute_pipeline_state(&khdc.state);
+        enc.set_buffer(0, Some(&packed), 0);
+        enc.set_buffer(1, Some(&offs), 0);
+        enc.set_buffer(2, Some(&scales), 0);
+        enc.set_buffer(3, Some(&soffs), 0);
+        enc.set_buffer(4, Some(&act_b), 0);
+        enc.set_buffer(5, Some(&new_h), 0);
+        let set = |i: u64, v: u32| enc.set_bytes(i, 4, &v as *const u32 as *const std::ffi::c_void);
+        set(6, n as u32);
+        set(7, K as u32);
+        set(8, K as u32);
+        enc.set_buffer(9, Some(&h_b), 0);
+        enc.set_buffer(10, Some(&w_b), 0);
+        enc.set_buffer(11, Some(&bias_b), 0);
+        set(12, has_bias);
+        enc.dispatch_thread_groups(
+            MTLSize::new((n as u64).div_ceil(khdc.rows_per_tg), 1, 1),
+            MTLSize::new(khdc.threads_per_tg, 1, 1),
+        );
+        enc.end_encoding();
+        cmd.commit();
+        cmd.wait_until_completed();
+        let got = gpu.lowering_readback(&new_h, n).expect("new_h");
+        assert_eq!(want, got, "down+combine diverged (has_bias={has_bias})");
+        gpu.recycle_lowering_scratch(new_h);
+    }
+    gpu.recycle_lowering_scratch(act_b);
+    gpu.recycle_lowering_scratch(h_b);
+    gpu.recycle_lowering_scratch(w_b);
+    gpu.recycle_lowering_scratch(bias_b);
+}
+
+#[test]
 fn x2_matches_the_vec_arm_bit_for_bit_across_walks_and_slots() {
     let Some(gpu) = MetalBackend::new() else {
         eprintln!("no Metal device; skipping");
