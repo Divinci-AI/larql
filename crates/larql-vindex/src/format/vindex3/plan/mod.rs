@@ -199,11 +199,19 @@ fn carriage_finding(
     built: &BuiltGraph,
 ) -> Finding {
     let class = semantics::classify_key(leaf);
-    // Only execution semantics are gated on carriage here. Tensor
-    // semantics are proven carried by the placed-object findings (the
-    // graph holds the operands themselves), and interface semantics by
-    // the resolved edges.
-    if class != SemanticClass::ExecutionSemantic {
+    // Tensor semantics are proven carried by the placed-object findings
+    // (the graph holds the operands themselves), and interface semantics
+    // by the resolved edges — both classes are demonstrated *elsewhere* in
+    // the plan, so passing them through here is not a hole. `Unknown` has
+    // no such elsewhere: nothing proves it, so — same as an unconsumed key
+    // — it must not take this exit. Before this arm named it, a key the
+    // parser read but this registry had never classified graded
+    // `representable` here regardless, which is exactly the "consumed but
+    // unjudged" shape the module exists to refuse (A-11 census, 2026-08-18:
+    // Granite's four multipliers and 37 other keys were silently passing
+    // this way — `plan/tests/semantics.rs::every_consumed_leaf_key_is_judged`
+    // now keeps the registry complete enough that this arm cannot fire).
+    if class != SemanticClass::ExecutionSemantic && class != SemanticClass::Unknown {
         return Finding {
             category: FindingCategory::Representable,
             class,
@@ -213,6 +221,21 @@ fn carriage_finding(
             resolved: None,
             carriage: Some(carriage::Carriage::Parsed),
             detail: "read by a registered parser".to_string(),
+        };
+    }
+    if class == SemanticClass::Unknown {
+        return Finding {
+            category: FindingCategory::Unrepresented,
+            class: SemanticClass::Unknown,
+            component: component_name,
+            subject: fact.path.clone(),
+            declared: Some(fact.value.clone()),
+            resolved: None,
+            carriage: Some(carriage::Carriage::Parsed),
+            detail: "consumed by a registered parser, but the semantics registry has never \
+                     classified this key — parser consumption is not representation \
+                     authority, so an unjudged key blocks whether or not a parser reads it"
+                .to_string(),
         };
     }
     let Some(rule) = carriage::rule_for(leaf) else {

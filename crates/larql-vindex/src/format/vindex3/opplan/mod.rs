@@ -248,6 +248,12 @@ pub struct LayerPlan {
     /// Normalises FFN output before its residual add (four-norm only).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub post_ffn_norm: Option<NormOp>,
+    /// Residual-stream scaling: the attention/FFN sublayer's own output
+    /// (after any post-norm above) is multiplied by this immediately
+    /// before its residual add, at both sites with the same value.
+    /// `None` = the op is absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub residual_scale: Option<f32>,
     /// Operand accounting: consumed by the ops above / present in the
     /// segment for this layer. Closure requires equality.
     pub operands_accounted: usize,

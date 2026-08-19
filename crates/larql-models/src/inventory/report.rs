@@ -222,6 +222,20 @@ pub struct ResolvedExecution {
     /// Final-logit softcap; `None` = the op is absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub final_logit_softcapping: Option<f32>,
+    /// Residual-stream scaling: the attention/FFN sublayer's own output is
+    /// multiplied by this before its residual add, at both sites with the
+    /// same value (Granite's `residual_multiplier`). `None` = the model
+    /// declares no such operation, distinct from `Some(1.0)`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub residual_scale: Option<f32>,
+    /// Whether a missing standalone output-head tensor means "tied to the
+    /// embedding matrix" rather than "lost". See
+    /// [`ModelArchitecture::output_head_reuses_embedding`](crate::config::ModelArchitecture::output_head_reuses_embedding).
+    /// `#[serde(default)]` so a pre-existing inventory JSON without this
+    /// field deserialises to `false` — the conservative "not proven tied"
+    /// reading, not a silent claim either way.
+    #[serde(default)]
+    pub head_reuses_embedding: bool,
 }
 
 /// Counts over [`ResolvedTopology::layers`].
