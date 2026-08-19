@@ -401,7 +401,11 @@ impl LoweredSession<'_> {
                         &ArgmaxScratch {
                             partial_vals: vals,
                             partial_idx: idx,
-                            out: if t.is_multiple_of(2) { out_even } else { out_odd },
+                            out: if t.is_multiple_of(2) {
+                                out_even
+                            } else {
+                                out_odd
+                            },
                         },
                     );
                 }
