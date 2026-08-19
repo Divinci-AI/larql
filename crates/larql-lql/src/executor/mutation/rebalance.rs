@@ -46,11 +46,13 @@ impl Session {
         }
 
         let n_facts = self.installed_edges.len();
-        let (path, _config, _patched) = self.require_vindex()?;
+        let (path, config, _patched) = self.require_vindex()?;
+        let path = path.to_path_buf();
+        let config = config.clone();
         let mut cb = larql_vindex::SilentLoadCallbacks;
-        let weights = larql_vindex::load_model_weights(path, &mut cb)
+        let weights = larql_vindex::load_model_weights(&path, &mut cb)
             .map_err(|e| LqlError::exec("rebalance: load weights", e))?;
-        let tokenizer = larql_vindex::load_vindex_tokenizer(path)
+        let tokenizer = larql_vindex::load_vindex_tokenizer(&path)
             .map_err(|e| LqlError::exec("rebalance: load tokenizer", e))?;
 
         // DOWN_SCALE / UP_SCALE / PROBE_TOP_K live in `executor::tuning`
@@ -65,10 +67,11 @@ impl Session {
             let facts_snapshot = self.installed_edges.clone();
 
             for (i, fact) in facts_snapshot.iter().enumerate() {
-                let enc = tokenizer
-                    .encode(fact.canonical_prompt.as_str(), true)
-                    .map_err(|e| LqlError::exec("rebalance: tokenize", e))?;
-                let ids: Vec<u32> = enc.get_ids().to_vec();
+                let ids = crate::executor::query::encode_vindex_prompt(
+                    &config,
+                    &tokenizer,
+                    fact.canonical_prompt.as_str(),
+                )?;
 
                 let (_, _, patched) = self.require_vindex()?;
                 let walk =

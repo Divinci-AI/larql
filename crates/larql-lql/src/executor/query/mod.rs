@@ -18,8 +18,10 @@ use crate::error::LqlError;
 /// add it (Gemma 4). Every text-prompt query path must route through
 /// this (or [`encode_dense_prompt`]) rather than calling
 /// `tokenizer.encode` directly — a silently missing BOS is enough to
-/// turn gemma-4 prose into token salad. Legacy vindexes without a
-/// recorded `model_config` fall back to the tokenizer's own output.
+/// turn gemma-4 prose into token salad. Mutation paths that capture or
+/// calibrate residuals must use the same helper so their coordinates match
+/// query-time inference. Legacy vindexes without a recorded `model_config`
+/// fall back to the tokenizer's own output.
 pub(super) fn encode_vindex_prompt(
     config: &larql_vindex::VindexConfig,
     tokenizer: &larql_inference::tokenizers::Tokenizer,
@@ -61,4 +63,66 @@ pub(super) fn resolve_bands(config: &larql_vindex::VindexConfig) -> larql_vindex
             knowledge: (0, last),
             output: (0, last),
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tokenizer_without_bos_postprocessor() -> larql_inference::tokenizers::Tokenizer {
+        let json = serde_json::json!({
+            "version": "1.0",
+            "truncation": null,
+            "padding": null,
+            "added_tokens": [],
+            "normalizer": null,
+            "pre_tokenizer": {"type": "Whitespace"},
+            "post_processor": null,
+            "decoder": null,
+            "model": {
+                "type": "WordLevel",
+                "vocab": {"[UNK]": 0, "<bos>": 2, "hello": 3},
+                "unk_token": "[UNK]"
+            }
+        });
+        larql_inference::tokenizers::Tokenizer::from_bytes(
+            serde_json::to_vec(&json).expect("tokenizer json"),
+        )
+        .expect("tokenizer")
+    }
+
+    #[test]
+    fn encode_vindex_prompt_prepends_gemma4_bos() {
+        let config = larql_vindex::VindexConfig {
+            family: "gemma4".into(),
+            num_layers: 2,
+            hidden_size: 8,
+            intermediate_size: 16,
+            vocab_size: 32,
+            model_config: Some(larql_vindex::VindexModelConfig {
+                model_type: "gemma4_text".into(),
+                head_dim: 4,
+                num_q_heads: 2,
+                num_kv_heads: 1,
+                rope_base: 10_000.0,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let tokenizer = tokenizer_without_bos_postprocessor();
+
+        let ids = encode_vindex_prompt(&config, &tokenizer, "hello").expect("encode");
+
+        assert_eq!(ids, vec![2, 3]);
+    }
+
+    #[test]
+    fn encode_vindex_prompt_preserves_legacy_fallback() {
+        let config = larql_vindex::VindexConfig::default();
+        let tokenizer = tokenizer_without_bos_postprocessor();
+
+        let ids = encode_vindex_prompt(&config, &tokenizer, "hello").expect("encode");
+
+        assert_eq!(ids, vec![3]);
+    }
 }

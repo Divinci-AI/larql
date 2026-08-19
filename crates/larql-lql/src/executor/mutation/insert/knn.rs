@@ -67,10 +67,8 @@ impl Session {
 
             let rel_words = relation.replace(['-', '_'], " ");
             let prompt = format!("The {rel_words} of {entity} is");
-            let encoding = tokenizer
-                .encode(prompt.as_str(), true)
-                .map_err(|e| LqlError::exec("tokenize error", e))?;
-            let token_ids: Vec<u32> = encoding.get_ids().to_vec();
+            let token_ids =
+                crate::executor::query::encode_vindex_prompt(config, &tokenizer, prompt.as_str())?;
 
             // `InferenceWeights::load` branches on `config.quant` — callers
             // do not need to know the on-disk format.
