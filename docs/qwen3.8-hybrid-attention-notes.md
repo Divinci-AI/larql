@@ -7,8 +7,8 @@ abstraction should be shaped, not a separate work item.
 **Scope:** ground-truth architecture facts for `Qwen/Qwen3.8-27B`, and what
 they imply VINDEX3 needs to be able to represent once R2 lands for real.
 **Status:** research note, 2026-08-19. Nothing here is implemented; the
-concurrent [`worktree-qwen35-linear-cfg`](../.claude/worktrees/qwen35-linear-cfg)
-branch is the actual (config-plumbing-only) code change this cycle.
+concurrent `worktree-qwen35-linear-cfg` branch (larql#274) is the actual
+(config-plumbing-only) code change this cycle.
 
 ---
 
