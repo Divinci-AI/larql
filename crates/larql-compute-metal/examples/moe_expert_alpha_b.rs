@@ -256,11 +256,10 @@ fn main() {
                 let b = c % n_banks;
                 match arm {
                     Arm::F16x4 => {
-                        #[allow(clippy::needless_range_loop)]
-                        for e in 0..TOP_K {
+                        for (e, w) in f16_experts[b].iter().enumerate() {
                             gpu.encode_f16_matvec(
                                 enc,
-                                &f16_experts[b][e],
+                                w,
                                 &MatvecTarget {
                                     x: &xb,
                                     out: &out,
