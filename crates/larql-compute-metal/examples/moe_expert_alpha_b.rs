@@ -193,11 +193,16 @@ fn main() {
         );
     };
 
-    // A2x2: two rows per simdgroup sharing X loads.
+    // A2x2 (production) and the 313→346 candidates.
     let kh2 = &gpu.quant.mxfp4_grouped_x2_pipeline;
-    let grouped_x2 = |enc: &metal::ComputeCommandEncoderRef, b: usize, slots: usize| {
-        let row_tiles = (N as u64).div_ceil(kh2.rows_per_tg);
-        enc.set_compute_pipeline_state(&kh2.state);
+    let kh2p = &gpu.quant.mxfp4_grouped_x2p_pipeline;
+    let kh4 = &gpu.quant.mxfp4_grouped_x4_pipeline;
+    let grouped_arm = |enc: &metal::ComputeCommandEncoderRef,
+                       kh: &larql_compute_metal::kernels::KernelHandle,
+                       b: usize,
+                       slots: usize| {
+        let row_tiles = (N as u64).div_ceil(kh.rows_per_tg);
+        enc.set_compute_pipeline_state(&kh.state);
         enc.set_buffer(0, Some(&banks_p_buf[b]), 0);
         enc.set_buffer(1, Some(&offs_buf), 0);
         enc.set_buffer(2, Some(&banks_s_buf[b]), 0);
@@ -211,7 +216,7 @@ fn main() {
         set_u32(enc, 10, 1);
         enc.dispatch_thread_groups(
             MTLSize::new(row_tiles, slots as u64, 1),
-            MTLSize::new(kh2.threads_per_tg, 1, 1),
+            MTLSize::new(kh.threads_per_tg, 1, 1),
         );
     };
 
@@ -222,6 +227,8 @@ fn main() {
         Grouped1x4,
         Grouped4,
         GroupedX2,
+        GroupedX2P,
+        GroupedX4,
     }
     let arms = [
         Arm::F16x4,
@@ -229,13 +236,17 @@ fn main() {
         Arm::Grouped1x4,
         Arm::Grouped4,
         Arm::GroupedX2,
+        Arm::GroupedX2P,
+        Arm::GroupedX4,
     ];
     let name = |a: Arm| match a {
         Arm::F16x4 => "f16 x4 (attainable)",
         Arm::Matvec1x4 => "mxfp4_matvec x4 (no indirection)",
         Arm::Grouped1x4 => "grouped kernel, 1 slot x4",
         Arm::Grouped4 => "grouped kernel, 4 slots x1 (production)",
-        Arm::GroupedX2 => "grouped x2, 4 slots x1 (candidate)",
+        Arm::GroupedX2 => "grouped x2, 4 slots x1 (production)",
+        Arm::GroupedX2P => "grouped x2 + byte-pair LUT",
+        Arm::GroupedX4 => "grouped x4 (4 rows/lane)",
     };
 
     println!(
@@ -292,7 +303,9 @@ fn main() {
                         }
                     }
                     Arm::Grouped4 => grouped(enc, b, TOP_K, 0),
-                    Arm::GroupedX2 => grouped_x2(enc, b, TOP_K),
+                    Arm::GroupedX2 => grouped_arm(enc, kh2, b, TOP_K),
+                    Arm::GroupedX2P => grouped_arm(enc, kh2p, b, TOP_K),
+                    Arm::GroupedX4 => grouped_arm(enc, kh4, b, TOP_K),
                 }
             }
             enc.end_encoding();
@@ -315,6 +328,16 @@ fn main() {
     let (m, g1, g4, gx2) = (&outputs[1], &outputs[2], &outputs[3], &outputs[4]);
     assert_eq!(g1, g4, "grouped 1-slot vs 4-slot differ");
     assert_eq!(g4, gx2, "x2 arm diverged from the production kernel");
+    for (name, o) in [("x2p", &outputs[5]), ("x4", &outputs[6])] {
+        let (mut num, mut den) = (0.0f64, 0.0f64);
+        for (a, b) in gx2.iter().zip(o.iter()) {
+            num += ((a - b) as f64).powi(2);
+            den += (*a as f64).powi(2);
+        }
+        let rel = (num / den.max(1e-30)).sqrt();
+        assert!(rel < 1e-6, "{name} rel_rms {rel}");
+        println!("{name} vs x2 rel_rms {rel:.1e}");
+    }
     let close = m
         .iter()
         .zip(g4)

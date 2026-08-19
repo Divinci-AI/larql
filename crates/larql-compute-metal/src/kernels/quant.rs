@@ -116,6 +116,10 @@ pub struct QuantKernels {
     pub mxfp4_grouped_x2_gu_pipeline: KernelHandle,
     /// A2dc — down projection + weighted combine in one dispatch (top-4).
     pub mxfp4_down_combine4_pipeline: KernelHandle,
+    /// A2x2p / A2x4 — the 313→346 candidate arms (byte-pair LUT; four
+    /// rows per lane).
+    pub mxfp4_grouped_x2p_pipeline: KernelHandle,
+    pub mxfp4_grouped_x4_pipeline: KernelHandle,
     /// How [`Self::mxfp4_grouped_pipeline`] receives its e8m0 exponents.
     /// Travels with the pipeline because the two layouts have different
     /// binding arities, so a call site cannot bind one without knowing
@@ -251,6 +255,10 @@ impl QuantKernels {
             h::<shaders::mxfp4_grouped_experts::KernelSplitLut16VecX2Gu>(device, library);
         let mxfp4_down_combine4_pipeline =
             h::<shaders::mxfp4_grouped_experts::KernelDownCombine4>(device, library);
+        let mxfp4_grouped_x2p_pipeline =
+            h::<shaders::mxfp4_grouped_experts::KernelSplitLut16VecX2P>(device, library);
+        let mxfp4_grouped_x4_pipeline =
+            h::<shaders::mxfp4_grouped_experts::KernelSplitLut16VecX4>(device, library);
         let mxfp4_grouped_arm = options.mxfp4_arm;
         let mxfp4_grouped_binding = if options.mxfp4_arm.is_split_scale() {
             ExpertScaleBinding::SplitE8M0
@@ -291,6 +299,8 @@ impl QuantKernels {
             mxfp4_grouped_x2_pipeline,
             mxfp4_grouped_x2_gu_pipeline,
             mxfp4_down_combine4_pipeline,
+            mxfp4_grouped_x2p_pipeline,
+            mxfp4_grouped_x4_pipeline,
             mxfp4_grouped_binding,
             mxfp4_grouped_arm,
         }
