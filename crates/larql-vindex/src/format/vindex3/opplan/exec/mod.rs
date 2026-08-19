@@ -21,6 +21,7 @@
 pub mod backend;
 pub mod decode;
 pub mod device;
+mod experts;
 pub mod kernels;
 pub mod operands;
 pub mod production;
@@ -33,8 +34,8 @@ mod tests;
 use super::{AttentionOp, ComponentOpPlan, LayerPlan, NormOp};
 use crate::error::VindexError;
 use backend::{
-    AttentionCall, FfnCall, GateCall, MatrixClass, NormCall, PlanBackend, ProjectCall, QkNormCall,
-    WeightFormat,
+    AttentionCall, BiasCall, GateCall, MatrixClass, NormCall, PlanBackend, ProjectCall, QkNormCall,
+    SinkCall, WeightFormat,
 };
 use operands::OperandStore;
 use rayon::prelude::*;
@@ -319,23 +320,10 @@ fn execute_layer<B: PlanBackend + ?Sized>(
     // token would dominate the run on a real model without changing a
     // single number.
     let format = backend.weight_format(MatrixClass::FfnProjection);
-    let up = load_weight(store, &layer.ffn.up, format)?;
-    let down = load_weight(store, &layer.ffn.down, format)?;
-    let gate = match &layer.ffn.gate {
-        Some(gate_ref) => Some(load_weight(store, gate_ref, format)?),
-        None => None,
-    };
+    let ffn = experts::FfnOperands::load(&layer.ffn, store, format)?;
     h.par_iter_mut().try_for_each(|row| {
         let normed = apply_norm_op(&layer.pre_ffn_norm, store, row, backend)?;
-        let ffn_out = backend.ffn(FfnCall {
-            x: &normed,
-            hidden,
-            intermediate: layer.ffn.intermediate_size,
-            gate: gate.as_ref().map(LoadedWeight::slice),
-            up: up.slice(),
-            down: down.slice(),
-            activation: layer.ffn.activation,
-        })?;
+        let ffn_out = ffn.apply(&layer.ffn, backend, &normed, hidden)?;
         let mut ffn_out = match &layer.post_ffn_norm {
             Some(op) => apply_norm_op(op, store, &ffn_out, backend)?,
             None => ffn_out,
@@ -361,6 +349,10 @@ pub(super) struct AttentionOperands {
     w_o: LoadedWeight,
     qk_weights: Option<(Vec<f32>, Vec<f32>)>,
     gate: Option<LoadedWeight>,
+    /// Q/K/V/O biases, f32 (elementwise glue, not matrix traffic).
+    biases: Option<[Vec<f32>; 4]>,
+    /// Sink logits, f32.
+    sinks: Option<Vec<f32>>,
 }
 
 impl AttentionOperands {
@@ -371,6 +363,17 @@ impl AttentionOperands {
         store: &OperandStore,
         format: WeightFormat,
     ) -> Result<Self, VindexError> {
+        // Carried by the container, not executed yet (V3-F0 witness 3,
+        // G4.2): a K≡V layer and the parameter-free V norm. Loading `v`
+        // as the K matrix and running the plain path would silently skip
+        // the V norm — refuse, typed, before any bytes move.
+        if op.v_from_k || op.parameter_free_qk_norm.v {
+            return Err(VindexError::Parse(format!(
+                "attention op carries v_from_k={} / parameter-free v_norm={}, which no \
+                 executor runs yet (G4.2) — refusing rather than executing a different model",
+                op.v_from_k, op.parameter_free_qk_norm.v
+            )));
+        }
         Ok(Self {
             w_q: load_weight(store, &op.q, format)?,
             w_k: load_weight(store, &op.k, format)?,
@@ -382,6 +385,28 @@ impl AttentionOperands {
             },
             gate: match &op.output_gate {
                 Some(gate) => Some(load_weight(store, &gate.projection, format)?),
+                None => None,
+            },
+            biases: match (&op.q_bias, &op.k_bias, &op.v_bias, &op.o_bias) {
+                (Some(q), Some(k), Some(v), Some(o)) => Some([
+                    store.load(q)?,
+                    store.load(k)?,
+                    store.load(v)?,
+                    store.load(o)?,
+                ]),
+                (None, None, None, None) => None,
+                // Closure emits all four or none; a partial set is a
+                // plan the closure never produced.
+                _ => {
+                    return Err(VindexError::Parse(
+                        "attention op carries a partial Q/K/V/O bias set; operand closure \
+                         emits all four or none"
+                            .to_string(),
+                    ))
+                }
+            },
+            sinks: match &op.sinks {
+                Some(sinks) => Some(store.load(&sinks.logits)?),
                 None => None,
             },
         })
@@ -429,6 +454,19 @@ impl AttentionOperands {
             }),
             _ => None,
         };
+        let bias = self.biases.as_ref().map(|[q, k, v, o]| BiasCall {
+            q: q.as_slice(),
+            k: k.as_slice(),
+            v: v.as_slice(),
+            o: o.as_slice(),
+        });
+        let sinks = match (&op.sinks, &self.sinks) {
+            (Some(op_sinks), Some(logits)) => Some(SinkCall {
+                spec: op_sinks.spec,
+                logits: logits.as_slice(),
+            }),
+            _ => None,
+        };
         AttentionCall {
             inputs,
             hidden,
@@ -449,6 +487,8 @@ impl AttentionOperands {
             span: op.span,
             window: op.window,
             gate,
+            bias,
+            sinks,
         }
     }
 }

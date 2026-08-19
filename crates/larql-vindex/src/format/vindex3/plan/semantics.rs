@@ -34,6 +34,20 @@ pub const EXECUTION_SEMANTIC_KEYS: &[&str] = &[
     "final_logit_softcapping",
     "attn_logit_softcapping",
     "partial_rotary_factor",
+    // The YaRN block's leaves. Each changes what attention computes —
+    // `factor` sets the frequency blend AND the amplitude on every logit,
+    // the betas and `truncate` set the correction band, and
+    // `original_max_position_embeddings` is the window those bounds are
+    // defined against — so each is judged against `PositionPolicy::Yarn`
+    // by its own carriage rule, not credited for being parsed. Under a
+    // non-YaRN `rope_type` (llama3, linear) the probes answer `None` and
+    // the leaves report unrepresented, which is the truth until those
+    // classes have a variant.
+    "factor",
+    "beta_fast",
+    "beta_slow",
+    "truncate",
+    "original_max_position_embeddings",
     // GPT-OSS clamps both halves of the fused gate/up projection at
     // ±this value before the GLU. It changes what the FFN computes, so
     // it is execution-semantic wherever it is declared.
@@ -50,27 +64,17 @@ pub const EXECUTION_SEMANTIC_KEYS: &[&str] = &[
     "sliding_window_pattern",
     // A second rope base for local/sliding layers, alongside `rope_theta`.
     "rope_local_base_freq",
-    // Whether K and V share storage — changes what attention reads.
-    "attention_k_eq_v",
-    // Whether the FFN routes through MoE at all.
-    "enable_moe_block",
     // Whether router weights are renormalised after top-k selection.
     "norm_topk_prob",
     // Routing width: how many experts activate per token.
     "num_experts_per_tok",
     "num_experts_per_token",
-    "top_k_experts",
     // The rope-scaling (YaRN / Llama-3-style) block's own leaves, besides
     // `rope_type` — every one of them is consumed and changes what rope
     // computes, and none has a schema field yet (the A-9.0 YaRN work).
     "type",
-    "factor",
     "low_freq_factor",
     "high_freq_factor",
-    "original_max_position_embeddings",
-    "beta_fast",
-    "beta_slow",
-    "truncate",
     "mscale",
     "mscale_all_dim",
     // Granite-style scaling multipliers (A-11.1): consumed into
@@ -83,6 +87,23 @@ pub const EXECUTION_SEMANTIC_KEYS: &[&str] = &[
     "attention_multiplier",
     "residual_multiplier",
     "logits_scaling",
+    // Gemma 4 (V3-F0 witness 3). Each changes what a layer computes:
+    // V taken from the K projection on the layers a family says so;
+    // whether a routed expert block runs beside the dense MLP and how
+    // many experts each token routes to; the head geometry the full
+    // layers use instead of the component's (`global_head_dim`,
+    // `num_global_key_value_heads`); the per-layer-input (PLE) width and
+    // the double-wide MLP on shared-KV layers, both of which the graph
+    // represents only as ABSENT (`0` / `false`), so any other declaration
+    // blocks; and the tower's clipped-linears flag, likewise `false` only.
+    "attention_k_eq_v",
+    "enable_moe_block",
+    "top_k_experts",
+    "global_head_dim",
+    "num_global_key_value_heads",
+    "hidden_size_per_layer_input",
+    "use_double_wide_mlp",
+    "use_clipped_linears",
 ];
 
 /// Keys that describe stored operands: widths, depths, head geometry,
@@ -109,15 +130,19 @@ pub const TENSOR_SEMANTIC_KEYS: &[&str] = &[
     "n_layer",
     "n_inner",
     "n_head",
-    // Per-layer attention geometry (Gemma 4 style global/local split) —
-    // widths, not behaviour.
-    "global_head_dim",
-    "num_global_key_value_heads",
-    // Per-layer embedding width (PLE).
-    "hidden_size_per_layer_input",
+    // The stored representation: what the checkpoint's raw-byte tensors
+    // *are*. `quantization_config.quant_method` (`mxfp4` on GPT-OSS) and
+    // its `modules_to_not_convert` exclusion list decide the encoding a
+    // `U8` blocks/scales pair is placed under. Read by the inventory's
+    // representation reader; proven carried by the placed object's
+    // `representations[].encoding` (which names MXFP4, not U8), the same
+    // way every other tensor semantic is proven by placement.
+    "quant_method",
+    "modules_to_not_convert",
     // MoE operand counts: how many expert tensors exist, not how the
     // forward pass selects among them (that's `num_experts_per_tok` etc.,
-    // in `EXECUTION_SEMANTIC_KEYS`).
+    // in `EXECUTION_SEMANTIC_KEYS`) — proven carried by the placed
+    // `expert_bank` object and the operand closure over its shapes.
     "n_routed_experts",
     "num_local_experts",
     "num_experts",
@@ -129,6 +154,18 @@ pub const TENSOR_SEMANTIC_KEYS: &[&str] = &[
     "qk_nope_head_dim",
     "qk_rope_head_dim",
     "v_head_dim",
+    // Gemma 4's per-layer-input vocabulary: the width of a table that is
+    // absent when `hidden_size_per_layer_input` is 0 (that leaf's rule
+    // holds the gate); a non-zero PLE width would place the table.
+    "vocab_size_per_layer_input",
+    // Perception-tower stored geometry: the output projector's pooling
+    // kernel, its position-embedding table size, and its declared global
+    // head width (equal to `head_dim` on Gemma 4 vision).
+    "pooling_kernel_size",
+    "position_embedding_size",
+    // Input standardisation: its parameters are the placed `std_scale` /
+    // `std_bias` tensors; the flag says they apply.
+    "standardize",
 ];
 
 /// Keys that declare a cross-component contract: hidden-state taps, block
@@ -139,6 +176,21 @@ pub const INTERFACE_SEMANTIC_KEYS: &[&str] = &[
     "mask_token_id",
     "image_token_id",
     "video_token_id",
+    // The rest of a multimodal join (Gemma 4): the tokens that open,
+    // close or stand in for an audio / image span, how many soft tokens
+    // an image expands to (declared twice — root and tower), the span
+    // kind the text model attends bidirectionally over, and a tower the
+    // checkpoint declares it does NOT have (`audio_config: null`).
+    "audio_token_id",
+    "boi_token_id",
+    "eoi_token_id",
+    "boa_token_id",
+    "eoa_token_id",
+    "eoa_token_index",
+    "vision_soft_tokens_per_image",
+    "default_output_length",
+    "use_bidirectional_attention",
+    "audio_config",
 ];
 
 /// Identity facts inert for a forward pass wherever they appear.

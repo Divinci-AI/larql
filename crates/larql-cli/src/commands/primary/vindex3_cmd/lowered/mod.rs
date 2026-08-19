@@ -21,7 +21,9 @@ use larql_compute::backend::MatMul;
 use larql_compute_metal::lowering::attention::{AttnShape, AttnWeights, LoweredPosition};
 use larql_compute_metal::lowering::ffn::{FfnShape, FfnWeights};
 use larql_compute_metal::lowering::head::{HeadScratch, HeadShape, HeadWeights};
-use larql_compute_metal::lowering::stack::{LayerLowering, StackScratch};
+use larql_compute_metal::lowering::stack::{
+    LayerFfnLowering, LayerLowering, RoutedFfnLowering, StackScratch,
+};
 use larql_compute_metal::lowering::{DeviceBuffer, LoweredMatrix, PostNorm};
 use larql_compute_metal::MetalBackend;
 use larql_models::config::PositionPolicy;
@@ -29,23 +31,33 @@ use larql_vindex::error::VindexError;
 use larql_vindex::format::vindex3::graph::policy::AttentionSpan;
 use larql_vindex::format::vindex3::opplan::exec::backend::{WeightFormat, WeightFormats};
 use larql_vindex::format::vindex3::opplan::exec::operands::OperandStore;
-use larql_vindex::format::vindex3::opplan::exec::weights::{load_weight, LoadedWeight};
-use larql_vindex::format::vindex3::opplan::{ComponentOpPlan, LayerPlan, NormOp, OperandRef};
+use larql_vindex::format::vindex3::opplan::exec::weights::LoadedWeight;
+use larql_vindex::format::vindex3::opplan::{ComponentOpPlan, LayerPlan};
 
 /// One matrix operand, resident on the device.
-struct DeviceMatrix {
+mod dump;
+mod resident;
+mod routed;
+
+use dump::dump_lowered;
+use resident::{
+    resident_matrix, resident_norm, resident_vector, rope_inv_freq_table, rope_table_key, Ablation,
+};
+use routed::{build_ffn, FfnResident};
+
+pub(super) struct DeviceMatrix {
     /// `scales` is unused for f16; the representation is what the plan's
     /// per-class policy asked for, not something inferred here.
-    packed: DeviceBuffer,
-    scales: DeviceBuffer,
-    tensor_scale: f32,
-    format: WeightFormat,
-    rows: usize,
-    cols: usize,
+    pub(super) packed: DeviceBuffer,
+    pub(super) scales: DeviceBuffer,
+    pub(super) tensor_scale: f32,
+    pub(super) format: WeightFormat,
+    pub(super) rows: usize,
+    pub(super) cols: usize,
 }
 
 impl DeviceMatrix {
-    fn as_lowered(&self) -> LoweredMatrix<'_> {
+    pub(super) fn as_lowered(&self) -> LoweredMatrix<'_> {
         match self.format {
             WeightFormat::F16 => LoweredMatrix::F16 {
                 bytes: &self.packed,
@@ -70,54 +82,19 @@ struct LayerResident {
     k: DeviceMatrix,
     v: DeviceMatrix,
     o: DeviceMatrix,
+    q_bias: Option<DeviceBuffer>,
+    k_bias: Option<DeviceBuffer>,
+    v_bias: Option<DeviceBuffer>,
+    o_bias: Option<DeviceBuffer>,
+    sinks: Option<DeviceBuffer>,
     gate: Option<DeviceMatrix>,
-    ffn_gate: DeviceMatrix,
-    ffn_up: DeviceMatrix,
-    ffn_down: DeviceMatrix,
+    ffn: FfnResident,
     pre_attn_norm: DeviceBuffer,
     post_attn_norm: Option<(DeviceBuffer, f32, f32)>,
     pre_ffn_norm: DeviceBuffer,
     post_ffn_norm: Option<(DeviceBuffer, f32, f32)>,
     k_cache: DeviceBuffer,
     v_cache: DeviceBuffer,
-}
-
-/// Stages this run omits, for marginal-cost profiling.
-///
-/// Every one of these is an operation the plan marks **optional**, so
-/// omitting it exercises a path the lowering already supports rather
-/// than a special diagnostic branch. The numbers are wrong by
-/// construction; the *time difference* is the measurement.
-///
-/// Ablation is used because this hardware supports counter sampling only
-/// at compute-pass boundaries (`AtDispatchBoundary` is false on M3), so
-/// per-dispatch GPU timestamps are unavailable. Splitting stages into
-/// separate encoders to get boundaries would change what can overlap;
-/// ablation leaves the schedule of everything that remains intact.
-#[derive(Clone, Copy, Default)]
-pub struct Ablation {
-    pub no_query_scale: bool,
-    pub no_rope: bool,
-    pub no_qk_norm: bool,
-    pub no_gate: bool,
-    pub no_post_norms: bool,
-}
-
-impl Ablation {
-    fn from_env() -> Self {
-        let on = |k: &str| std::env::var(k).is_ok();
-        Self {
-            no_query_scale: on("LARQL_ABLATE_QUERY_SCALE"),
-            no_rope: on("LARQL_ABLATE_ROPE"),
-            no_qk_norm: on("LARQL_ABLATE_QK_NORM"),
-            no_gate: on("LARQL_ABLATE_GATE"),
-            no_post_norms: on("LARQL_ABLATE_POST_NORMS"),
-        }
-    }
-
-    fn any(&self) -> bool {
-        self.no_query_scale || self.no_rope || self.no_qk_norm || self.no_gate || self.no_post_norms
-    }
 }
 
 /// A plan lowered onto the device, ready to step positions.
@@ -141,75 +118,6 @@ pub struct LoweredSession<'a> {
     ablate: Ablation,
 }
 
-/// Load one matrix operand as NVFP4 and hand it to the device.
-///
-/// The buffers are keyed on the `AlignedBytes` address, which lives for
-/// the session, so `lowering_weight` caches them and the weight is
-/// uploaded once rather than per position.
-fn resident_matrix(
-    gpu: &MetalBackend,
-    store: &OperandStore,
-    operand: &OperandRef,
-    format: WeightFormat,
-    keep: &mut Vec<LoadedWeight>,
-) -> Result<DeviceMatrix, VindexError> {
-    let rows = operand.shape.first().copied().unwrap_or(0);
-    let cols = operand.shape.get(1).copied().unwrap_or(0);
-    let loaded = load_weight(store, operand, format)?;
-    let m = match &loaded {
-        LoadedWeight::Nvfp4 {
-            packed,
-            scales,
-            tensor_scale,
-        } => DeviceMatrix {
-            packed: gpu.lowering_weight(packed.as_slice()),
-            scales: gpu.lowering_weight(scales.as_slice()),
-            tensor_scale: *tensor_scale,
-            format: WeightFormat::Nvfp4,
-            rows,
-            cols,
-        },
-        LoadedWeight::Mxfp4 { packed, scales } => DeviceMatrix {
-            packed: gpu.lowering_weight(packed.as_slice()),
-            scales: gpu.lowering_weight(scales.as_slice()),
-            tensor_scale: 1.0,
-            format: WeightFormat::Mxfp4,
-            rows,
-            cols,
-        },
-        LoadedWeight::F16(bytes) => DeviceMatrix {
-            packed: gpu.lowering_weight(bytes.as_slice()),
-            scales: gpu.lowering_weight(&[]),
-            tensor_scale: 1.0,
-            format: WeightFormat::F16,
-            rows,
-            cols,
-        },
-        _ => {
-            return Err(VindexError::Parse(format!(
-                "operand `{}`: unsupported lowering format {format:?}",
-                operand.tensor
-            )))
-        }
-    };
-    // The device buffers alias these allocations, so the session owns
-    // them for its lifetime.
-    keep.push(loaded);
-    Ok(m)
-}
-
-fn resident_norm(
-    gpu: &MetalBackend,
-    store: &OperandStore,
-    op: &NormOp,
-) -> Result<(DeviceBuffer, f32, f32), VindexError> {
-    let w = store.load(&op.weight)?;
-    let buf = gpu
-        .lowering_upload(&w)
-        .ok_or_else(|| VindexError::Parse("norm weight upload failed".into()))?;
-    Ok((buf, op.eps as f32, op.weight_offset))
-}
-
 impl<'a> LoweredSession<'a> {
     /// Load every operand the plan consumes, once, resident on the
     /// device.
@@ -224,6 +132,52 @@ impl<'a> LoweredSession<'a> {
         max_positions: usize,
         keep: &mut Vec<LoadedWeight>,
     ) -> Result<Self, VindexError> {
+        // YaRN, sinks and Q/K/V/O biases are lowered (A-9.4): the
+        // amplitude rides slot 6 of the rope kernel, the sinks slot 10/11
+        // of the attention kernel, the biases the `bias_add` kernel after
+        // each projection, and a routed FFN through the served descriptor
+        // MoE path (build_routed). A dense clamped-GLU FFN: the
+        // lowering encodes plain gated FFNs only, and running the clamped
+        // policy as plain gating would be a different model (A-9.4).
+        if let Some(l) = plan.layers.iter().find(|l| {
+            l.ffn
+                .dense()
+                .is_some_and(|f| !matches!(f.gate_policy, larql_models::ExpertGatePolicy::Gated))
+        }) {
+            return Err(VindexError::Parse(format!(
+                "layer {} carries {:?}, which the Metal lowering does not execute yet (A-9.4); \
+                 refusing rather than lowering it as plain gating",
+                l.layer,
+                l.ffn.dense().map(|f| f.gate_policy)
+            )));
+        }
+        // K≡V layers and the parameter-free V norm (Gemma 4): carried by
+        // the plan, not lowered until G4.3.
+        if let Some(l) = plan
+            .layers
+            .iter()
+            .find(|l| l.attention.v_from_k || l.attention.parameter_free_qk_norm.v)
+        {
+            return Err(VindexError::Parse(format!(
+                "layer {} carries v_from_k={} / parameter-free v_norm={}, which the Metal \
+                 lowering does not execute yet (G4.3); refusing",
+                l.layer, l.attention.v_from_k, l.attention.parameter_free_qk_norm.v
+            )));
+        }
+        // A partial rotary (Gemma 4's proportional rope on its global
+        // layers): carried by the plan, not lowered until G4.3 — the rope
+        // kernel rotates the whole head at plain frequencies.
+        if let Some(l) = plan
+            .layers
+            .iter()
+            .find(|l| matches!(l.attention.position, PositionPolicy::PartialRope { .. }))
+        {
+            return Err(VindexError::Parse(format!(
+                "layer {} carries {:?}, which the Metal lowering does not execute yet (G4.3); \
+                 refusing rather than rotating the whole head",
+                l.layer, l.attention.position
+            )));
+        }
         let embedding = plan
             .embedding
             .as_ref()
@@ -241,6 +195,11 @@ impl<'a> LoweredSession<'a> {
                 k: resident_matrix(gpu, store, &a.k, formats.attention, keep)?,
                 v: resident_matrix(gpu, store, &a.v, formats.attention, keep)?,
                 o: resident_matrix(gpu, store, &a.o, formats.attention, keep)?,
+                q_bias: resident_vector(gpu, store, a.q_bias.as_ref())?,
+                k_bias: resident_vector(gpu, store, a.k_bias.as_ref())?,
+                v_bias: resident_vector(gpu, store, a.v_bias.as_ref())?,
+                o_bias: resident_vector(gpu, store, a.o_bias.as_ref())?,
+                sinks: resident_vector(gpu, store, a.sinks.as_ref().map(|s| &s.logits))?,
                 gate: match &a.output_gate {
                     Some(g) => Some(resident_matrix(
                         gpu,
@@ -251,17 +210,7 @@ impl<'a> LoweredSession<'a> {
                     )?),
                     None => None,
                 },
-                ffn_gate: resident_matrix(
-                    gpu,
-                    store,
-                    layer.ffn.gate.as_ref().ok_or_else(|| {
-                        VindexError::Parse("lowering requires a gated FFN".into())
-                    })?,
-                    formats.ffn,
-                    keep,
-                )?,
-                ffn_up: resident_matrix(gpu, store, &layer.ffn.up, formats.ffn, keep)?,
-                ffn_down: resident_matrix(gpu, store, &layer.ffn.down, formats.ffn, keep)?,
+                ffn: build_ffn(gpu, store, layer, formats, keep)?,
                 pre_attn_norm: resident_norm(gpu, store, &layer.pre_attention_norm)?.0,
                 post_attn_norm: match &layer.post_attention_norm {
                     Some(op) => Some(resident_norm(gpu, store, op)?),
@@ -309,7 +258,7 @@ impl<'a> LoweredSession<'a> {
         let max_inter = plan
             .layers
             .iter()
-            .map(|l| l.ffn.intermediate_size)
+            .filter_map(|l| l.ffn.dense().map(|f| f.intermediate_size))
             .max()
             .unwrap_or(hidden);
         // Slots 16 and 17 are both vocabulary-sized: the head writes raw
@@ -340,15 +289,18 @@ impl<'a> LoweredSession<'a> {
         ];
         let scratch = sizes.iter().map(|n| gpu.lowering_scratch(*n)).collect();
 
-        // One inverse-frequency table per distinct rope base in the plan.
-        let mut inv_freq = HashMap::new();
+        // One inverse-frequency table per distinct rotary policy in the
+        // plan — keyed on (theta, yarn-or-plain), so a YaRN layer's ramped
+        // frequencies and a plain layer's `theta^(-2i/d)` never collide on
+        // theta alone. The table matches the interpreter's exactly: plain
+        // rope from `rope_rotate`, YaRN from `kernels::yarn_frequencies`.
+        let mut inv_freq: HashMap<u64, DeviceBuffer> = HashMap::new();
         for layer in &plan.layers {
-            if let PositionPolicy::Rope { theta } = layer.attention.position {
-                let hd = layer.attention.head_dim;
-                inv_freq.entry(theta.to_bits()).or_insert_with(|| {
-                    let table: Vec<f32> = (0..hd / 2)
-                        .map(|i| theta.powf(-2.0 * i as f64 / hd as f64) as f32)
-                        .collect();
+            let a = &layer.attention;
+            let key = rope_table_key(&a.position);
+            if let Some(key) = key {
+                inv_freq.entry(key).or_insert_with(|| {
+                    let table = rope_inv_freq_table(&a.position, a.head_dim);
                     gpu.lowering_upload(&table).expect("inv_freq upload")
                 });
             }
@@ -386,6 +338,13 @@ impl<'a> LoweredSession<'a> {
             wiring.elapsed().as_secs_f64()
         );
 
+        if inv_freq.len() > 1 {
+            return Err(VindexError::Parse(format!(
+                "plan carries {} distinct rotary tables; the lowered stack binds one shared \
+                 inv_freq per token and cannot yet select per layer",
+                inv_freq.len()
+            )));
+        }
         Ok(Self {
             gpu,
             plan,
@@ -409,6 +368,27 @@ impl<'a> LoweredSession<'a> {
     /// Step one token: embed on the host, then the entire stack and
     /// head in one command buffer with a single wait.
     pub fn step(&mut self, token: u32) -> Result<Option<Vec<f32>>, VindexError> {
+        self.step_impl(token, None)
+    }
+
+    /// One step, capturing the embedding row and every layer's output for
+    /// this position — the per-layer planes a `shannon layer-diff` reads.
+    /// `layers_out[i]` is layer `i`'s post-FFN-residual hidden state.
+    pub fn step_capturing(
+        &mut self,
+        token: u32,
+    ) -> Result<(Option<Vec<f32>>, Vec<f32>, Vec<Vec<f32>>), VindexError> {
+        let mut embedding = Vec::new();
+        let mut layers_out = Vec::new();
+        let logits = self.step_impl(token, Some((&mut embedding, &mut layers_out)))?;
+        Ok((logits, embedding, layers_out))
+    }
+
+    fn step_impl(
+        &mut self,
+        token: u32,
+        capture: Option<(&mut Vec<f32>, &mut Vec<Vec<f32>>)>,
+    ) -> Result<Option<Vec<f32>>, VindexError> {
         let t = self.position;
         let row = &self.embed_table[token as usize * self.hidden..][..self.hidden];
         let embedding = self
@@ -433,6 +413,17 @@ impl<'a> LoweredSession<'a> {
             let inv = 1.0 / (ms + norm.eps).sqrt();
             h0.iter_mut().for_each(|v| *v = (*v as f64 * inv) as f32);
         }
+        let capturing = capture.is_some();
+        // Per-layer capture buffers (hidden-sized), read back after the
+        // command buffer completes — a copy inside the stream, never a
+        // mid-stream readback.
+        let captures: Vec<DeviceBuffer> = if capturing {
+            (0..self.plan.layers.len())
+                .map(|_| self.gpu.lowering_scratch(self.hidden))
+                .collect()
+        } else {
+            Vec::new()
+        };
         let h_in = self
             .gpu
             .lowering_upload(&h0)
@@ -455,10 +446,9 @@ impl<'a> LoweredSession<'a> {
             ffn_act: &s[11],
             ffn_down: &s[13],
             ffn_post: &s[14],
-            // Every rotary layer in this plan shares one base; a plan
-            // with several would need per-layer selection, which the
-            // stack encoder does not yet express. Refuse rather than
-            // silently rotate at the wrong frequency.
+            // Every rotary layer in this plan shares one table (checked
+            // in `new`); a plan with several would need per-layer
+            // selection, which the stack encoder does not yet express.
             inv_freq: self.inv_freq.values().next().unwrap_or(&self.scratch[0]),
         };
 
@@ -470,9 +460,21 @@ impl<'a> LoweredSession<'a> {
             .map(|(plan_layer, r)| self.layer_lowering(plan_layer, r, t))
             .collect();
 
+        let checkpoints: Vec<larql_compute_metal::lowering::stack::Checkpoint> = captures
+            .iter()
+            .enumerate()
+            .map(
+                |(i, buf)| larql_compute_metal::lowering::stack::Checkpoint {
+                    after_layer: i,
+                    into: buf,
+                },
+            )
+            .collect();
         let cmd = self.gpu.new_lowering_command_buffer();
         let enc = cmd.new_compute_command_encoder();
-        let h_final = self.gpu.encode_stack(enc, &h_in, &layers, &scratch, &[]);
+        let h_final = self
+            .gpu
+            .encode_stack(enc, &h_in, &layers, &scratch, &checkpoints);
 
         let logits_buf = match (&self.final_norm, &self.head) {
             (Some((nw, eps, off)), Some(head)) => {
@@ -502,6 +504,19 @@ impl<'a> LoweredSession<'a> {
         cmd.wait_until_completed();
 
         let out = logits_buf.and_then(|b| self.gpu.lowering_readback(b, self.vocab));
+        if let Some((embedding, layers_out)) = capture {
+            *embedding = h0;
+            for buf in &captures {
+                layers_out.push(
+                    self.gpu
+                        .lowering_readback(buf, self.hidden)
+                        .ok_or_else(|| VindexError::Parse("capture readback failed".into()))?,
+                );
+            }
+        }
+        for buf in captures {
+            self.gpu.recycle_lowering_scratch(buf);
+        }
         self.gpu.recycle_lowering_scratch(h_in);
         self.position += 1;
         Ok(out)
@@ -533,6 +548,11 @@ impl<'a> LoweredSession<'a> {
                     .as_ref()
                     .filter(|_| !self.ablate.no_gate)
                     .map(DeviceMatrix::as_lowered),
+                q_bias: r.q_bias.as_ref(),
+                k_bias: r.k_bias.as_ref(),
+                v_bias: r.v_bias.as_ref(),
+                o_bias: r.o_bias.as_ref(),
+                sinks: r.sinks.as_ref(),
                 norm_weight: &r.pre_attn_norm,
                 post_norm: post(&r.post_attn_norm, &self.scratch[7])
                     .filter(|_| !self.ablate.no_post_norms),
@@ -555,10 +575,24 @@ impl<'a> LoweredSession<'a> {
                     .filter(|_| !self.ablate.no_query_scale),
                 score_scale: a.score_scale as f32,
                 position: match a.position {
-                    PositionPolicy::Rope { theta } if !self.ablate.no_rope => {
-                        LoweredPosition::Rope { theta }
+                    _ if self.ablate.no_rope => LoweredPosition::None,
+                    PositionPolicy::Rope { theta } => LoweredPosition::Rope { theta },
+                    // YaRN's ramped `inv_freq` rides the shared table
+                    // (built for this layer's policy in `new`); the
+                    // amplitude rides slot 6 of the rope kernel.
+                    PositionPolicy::Yarn { theta, scaling } => {
+                        let amplitude =
+                            larql_vindex::format::vindex3::opplan::exec::kernels::yarn_frequencies(
+                                &scaling, a.head_dim, theta,
+                            )
+                            .1;
+                        LoweredPosition::Scaled { theta, amplitude }
                     }
-                    _ => LoweredPosition::None,
+                    PositionPolicy::None => LoweredPosition::None,
+                    // Refused in `new`; a plan carrying it never gets here.
+                    PositionPolicy::PartialRope { .. } => {
+                        unreachable!("PartialRope is refused before the session is built")
+                    }
                 },
                 // A window applies only to a sliding span; a full layer
                 // attends the whole prefix whatever the plan records.
@@ -570,19 +604,34 @@ impl<'a> LoweredSession<'a> {
                 position_index: t,
                 kv_len: t + 1,
             },
-            ffn: FfnWeights {
-                gate: r.ffn_gate.as_lowered(),
-                up: r.ffn_up.as_lowered(),
-                down: r.ffn_down.as_lowered(),
-                norm_weight: &r.pre_ffn_norm,
-                post_norm: post(&r.post_ffn_norm, &self.scratch[14])
-                    .filter(|_| !self.ablate.no_post_norms),
-            },
-            ffn_shape: FfnShape {
-                hidden: self.hidden,
-                intermediate: plan_layer.ffn.intermediate_size,
-                norm_eps: plan_layer.pre_ffn_norm.eps as f32,
-                norm_weight_offset: plan_layer.pre_ffn_norm.weight_offset,
+            ffn: match &r.ffn {
+                FfnResident::Dense { gate, up, down } => LayerFfnLowering::Dense {
+                    weights: FfnWeights {
+                        gate: gate.as_lowered(),
+                        up: up.as_lowered(),
+                        down: down.as_lowered(),
+                        norm_weight: &r.pre_ffn_norm,
+                        post_norm: post(&r.post_ffn_norm, &self.scratch[14])
+                            .filter(|_| !self.ablate.no_post_norms),
+                    },
+                    shape: FfnShape {
+                        hidden: self.hidden,
+                        intermediate: plan_layer
+                            .ffn
+                            .dense()
+                            .map_or(self.hidden, |f| f.intermediate_size),
+                        norm_eps: plan_layer.pre_ffn_norm.eps as f32,
+                        norm_weight_offset: plan_layer.pre_ffn_norm.weight_offset,
+                    },
+                },
+                FfnResident::Routed(routed) => {
+                    LayerFfnLowering::Routed(Box::new(RoutedFfnLowering {
+                        moe: routed.moe(),
+                        scratch: &routed.scratch,
+                        table: &routed.table,
+                        eps: routed.eps,
+                    }))
+                }
             },
             k_cache: &r.k_cache,
             v_cache: &r.v_cache,
@@ -646,6 +695,22 @@ pub(super) fn run_lowered(
     eprintln!("weights resident in {load_seconds:.1} s");
     if let Some((rows, cols)) = session.head_geometry() {
         eprintln!("head geometry: [{rows}, {cols}]");
+    }
+    eprintln!(
+        "plan: {} rope base(s), final norm {}",
+        session.rope_bases(),
+        if session.has_final_norm() {
+            "present"
+        } else {
+            "absent"
+        }
+    );
+
+    // ── per-layer dump: teacher-force the given tokens, capturing every
+    //    layer's output per position into [seq, hidden] planes a
+    //    `shannon layer-diff` reads (the lowered arm of the A-9.5 chain).
+    if let Some(dir) = &args.dump_layers {
+        return dump_lowered(&mut session, tokens, plan, &args.container, label, dir);
     }
 
     let prompt_started = std::time::Instant::now();

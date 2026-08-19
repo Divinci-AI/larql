@@ -98,3 +98,122 @@ fn non_directory_is_an_error() {
     std::fs::write(&file, "x").unwrap();
     assert!(build_inventory(&file).is_err());
 }
+
+/// Minimal gpt-oss-shaped checkpoint: a routed family with a
+/// `quantization_config` block and one packed expert tensor.
+fn write_routed_fixture(dir: &std::path::Path) {
+    let config = serde_json::json!({
+        "architectures": ["GptOssForCausalLM"],
+        "model_type": "gpt_oss",
+        "hidden_size": 64,
+        "intermediate_size": 64,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 8,
+        "num_key_value_heads": 2,
+        "head_dim": 8,
+        "num_local_experts": 4,
+        "experts_per_token": 2,
+        "vocab_size": 128,
+        "rope_theta": 150000.0,
+        "swiglu_limit": 7.0,
+        "layer_types": ["sliding_attention", "full_attention"],
+        "sliding_window": 16,
+        "quantization_config": {
+            "quant_method": "mxfp4",
+            "modules_to_not_convert": ["model.layers.*.self_attn", "lm_head"]
+        }
+    });
+    std::fs::write(
+        dir.join("config.json"),
+        serde_json::to_string_pretty(&config).unwrap(),
+    )
+    .unwrap();
+
+    let header = serde_json::json!({
+        "model.layers.0.mlp.experts.gate_up_proj_blocks": {
+            "dtype": "U8", "shape": [4, 128, 2, 16], "data_offsets": [0, 16384]
+        }
+    });
+    let header_bytes = serde_json::to_vec(&header).unwrap();
+    let mut file = std::fs::File::create(dir.join("model.safetensors")).unwrap();
+    file.write_all(&(header_bytes.len() as u64).to_le_bytes())
+        .unwrap();
+    file.write_all(&header_bytes).unwrap();
+}
+
+/// A routed checkpoint's inventory records the stored representation it
+/// read (crediting the keys as consumed) and binds the one expert bank the
+/// shard actually spells; the layer with no spelled bank stays unbound.
+#[test]
+fn routed_inventory_records_representation_and_binds_spelled_banks() {
+    let dir = tempfile::tempdir().unwrap();
+    write_routed_fixture(dir.path());
+
+    let inv = build_inventory(dir.path()).unwrap();
+    assert_eq!(inv.detection.family, "gpt_oss");
+    let representation = inv
+        .stored_representation
+        .expect("quantization_config was read");
+    assert_eq!(representation.method, "mxfp4");
+    assert_eq!(representation.excluded_modules.len(), 2);
+    for path in [
+        "quantization_config.quant_method",
+        "quantization_config.modules_to_not_convert",
+    ] {
+        let fact = inv.config_keys.iter().find(|f| f.path == path).unwrap();
+        assert_eq!(fact.status, KeyStatus::Consumed, "{path}");
+    }
+    assert_eq!(
+        inv.resolved.layers[0].expert_bank.as_deref(),
+        Some("model.layers.0.mlp.experts")
+    );
+    assert_eq!(inv.resolved.layers[1].expert_bank, None);
+    assert!(inv.resolved.execution.unwrap().moe.is_some());
+}
+
+/// A multimodal checkpoint's root interface facts and its declared-absent
+/// text features are read by the inventory's recorded readers, stored,
+/// and credited as consumed — nothing at the root is "read by nothing".
+#[test]
+fn interface_and_text_feature_readers_store_and_credit_what_they_read() {
+    let dir = tempfile::tempdir().unwrap();
+    write_fixture(dir.path());
+    // Extend the Glimmer-shaped fixture's config with the Gemma-4-style
+    // root interface and text knobs.
+    let path = dir.path().join("config.json");
+    let mut config: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    config["audio_config"] = serde_json::Value::Null;
+    config["boi_token_id"] = serde_json::json!(255999);
+    config["vision_soft_tokens_per_image"] = serde_json::json!(280);
+    config["text_config"]["use_bidirectional_attention"] = serde_json::json!("vision");
+    config["text_config"]["use_double_wide_mlp"] = serde_json::json!(false);
+    config["text_config"]["vocab_size_per_layer_input"] = serde_json::json!(128);
+    std::fs::write(&path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
+
+    let inv = build_inventory(dir.path()).unwrap();
+    let interface = inv.multimodal_interface.expect("interface read");
+    assert_eq!(
+        interface.absent_components,
+        vec!["audio_config".to_string()]
+    );
+    assert_eq!(interface.soft_tokens_per_image, Some(280));
+    assert_eq!(interface.bidirectional_attention.as_deref(), Some("vision"));
+    assert!(interface
+        .token_roles
+        .contains(&("boi_token_id".to_string(), 255999)));
+    let features = inv.text_features.expect("text features read");
+    assert_eq!(features.double_wide_mlp, Some(false));
+    assert_eq!(features.per_layer_input_vocab, Some(128));
+    for path in [
+        "audio_config",
+        "boi_token_id",
+        "vision_soft_tokens_per_image",
+        "text_config.use_bidirectional_attention",
+        "text_config.use_double_wide_mlp",
+        "text_config.vocab_size_per_layer_input",
+    ] {
+        let fact = inv.config_keys.iter().find(|f| f.path == path).unwrap();
+        assert_eq!(fact.status, KeyStatus::Consumed, "{path}");
+    }
+}

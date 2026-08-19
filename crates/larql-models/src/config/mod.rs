@@ -22,6 +22,7 @@
 pub mod activation;
 pub mod architecture;
 pub mod attention_gate;
+pub mod attention_sinks;
 pub mod experts;
 pub mod layer_types;
 pub mod model_config;
@@ -36,6 +37,7 @@ pub use architecture::{score_scale_from_query_pre_attn_scalar, ModelArchitecture
 pub use attention_gate::{
     AttentionGateSpec, GateActivation, GateCombine, GatePlacement, GateSource,
 };
+pub use attention_sinks::AttentionSinkSpec;
 pub use experts::{
     ExpertFormat, ExpertGatePolicy, ExpertRoutingPolicy, GateUpBranch, GateUpLayout,
 };
@@ -45,9 +47,11 @@ pub use layer_types::{
 pub use model_config::ModelConfig;
 pub use moe_router::MoeRouterKind;
 pub use norm::{EmbeddingNorm, NormSpec, NormType, ParameterFreeQkNorm, PostNormEps, QkNormScope};
-pub use position::PositionPolicy;
+pub use position::{PositionPolicy, RotaryFrequencyBasis};
 pub use rope::{Llama3RopeScaling, RopeScaling, YarnRopeScaling};
-pub use rope_types::{ROPE_TYPE_DEFAULT, ROPE_TYPE_LINEAR, ROPE_TYPE_LLAMA3, ROPE_TYPE_YARN};
+pub use rope_types::{
+    ROPE_TYPE_DEFAULT, ROPE_TYPE_LINEAR, ROPE_TYPE_LLAMA3, ROPE_TYPE_PROPORTIONAL, ROPE_TYPE_YARN,
+};
 
 #[cfg(test)]
 mod tests;
