@@ -150,13 +150,25 @@ tok/s) rather than one blended tok/s headline.
 
 ## 4. Relationship to current work
 
-- **This cycle's actual code change** is `worktree-qwen35-linear-cfg`:
-  parse the declared `linear_*`/`attn_output_gate`/`output_gate_type`/
-  `mtp_*`/`partial_rotary_factor` fields into `ModelConfig` (§1's table is
-  the full field list) and fix the `layer_types` mismatch so `plan` reports
-  the real 48/16 interleave instead of collapsing it — no compute, no
-  vision, config-plumbing only. That's a prerequisite for any of §3 being
-  buildable, not an alternative to it.
+- **This cycle's actual code change** is `worktree-qwen35-linear-cfg`
+  (`3ab70a5a`): the 12 hybrid-attention/gate/MTP/mRoPE fields in §1's table
+  now parse into `ModelConfig`, and `layer_types` no longer *fabricates* a
+  pass — it previously resolved every `linear_attention` layer to
+  `full_attention` and reported "declared interleave honoured" regardless;
+  it now correctly reports `mismatched`. No compute, no vision,
+  config-plumbing only. **`vindex3 plan`'s blocking count is unchanged at
+  30/30**, independently re-verified against the real checkpoint — the goal
+  was turning silent gaps into labeled, honest ones, not passing the gate
+  outright, and that's what happened: 12 fields moved from silent `unknown`
+  to named `execution_semantic` blocks, `layer_types` moved from a false
+  `representable` to an honest `mismatched`, and `full_attention_interval`
+  dropped off the blocking list as a recognized alias. Along the way the
+  pass surfaced (but did not fix — out of scope) a separate real gap: MTP's
+  non-`fc` tensor groups (`mtp.layers`, `mtp.norm`,
+  `mtp.pre_fc_norm_{hidden,embedding}`) are currently silently absorbed
+  into the main decoder's tensor groups by generic substring
+  classification, architecture-wide, not Qwen-specific. That's a
+  prerequisite for any of §3 being buildable, not an alternative to it.
 - **R2/P1's own first task** — "verify a reference implementation runs on
   Apple Silicon before any adapter work" — now has two candidate
   architectures instead of one (Kimi Linear, Qwen3.8), which is useful:
