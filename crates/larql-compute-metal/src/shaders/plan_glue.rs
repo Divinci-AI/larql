@@ -87,6 +87,131 @@ kernel void head_scale_softcap(
     out[tid] = v;
 }
 
+// Up to three RMS norms of ONE input in one dispatch (A-5b rung 2c):
+// Gemma 4's hybrid layer normalises the post-attention residual three
+// ways (pre-FFN, pre-experts, router conditioning) — three reductions of
+// the same vector, three serialised ~11 us dispatches. The sum of squares
+// is computed exactly as `rms_norm` does (same stripe, same simd/TG
+// reduction) and each output applies its own weight and offset, so every
+// output is bit-identical to the separate kernel. `n_out` in 1..=3.
+kernel void rms_norm_multi3(
+    device const float* x      [[buffer(0)]],
+    device const float* w0     [[buffer(1)]],
+    device const float* w1     [[buffer(2)]],
+    device const float* w2     [[buffer(3)]],
+    device float*       out0   [[buffer(4)]],
+    device float*       out1   [[buffer(5)]],
+    device float*       out2   [[buffer(6)]],
+    constant uint&      len    [[buffer(7)]],
+    constant float&     eps    [[buffer(8)]],
+    constant float&     off0   [[buffer(9)]],
+    constant float&     off1   [[buffer(10)]],
+    constant float&     off2   [[buffer(11)]],
+    constant uint&      n_out  [[buffer(12)]],
+    uint tid    [[thread_index_in_threadgroup]],
+    uint tg_sz  [[threads_per_threadgroup]],
+    uint lane   [[thread_index_in_simdgroup]],
+    uint sg_id  [[simdgroup_index_in_threadgroup]])
+{
+    float partial = 0.0f;
+    for (uint i = tid; i < len; i += tg_sz) {
+        partial += x[i] * x[i];
+    }
+    float sg_sum = simd_sum(partial);
+    threadgroup float tg_p[32];
+    if (lane == 0) tg_p[sg_id] = sg_sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float sum_sq = tg_p[0];
+    uint n_sg = (tg_sz + 31) / 32;
+    for (uint i = 1; i < n_sg; i++) sum_sq += tg_p[i];
+    float rms = 1.0f / sqrt(sum_sq / float(len) + eps);
+    for (uint i = tid; i < len; i += tg_sz) {
+        const float xi = x[i];
+        out0[i] = xi * (w0[i] + off0) * rms;
+        if (n_out > 1u) { out1[i] = xi * (w1[i] + off1) * rms; }
+        if (n_out > 2u) { out2[i] = xi * (w2[i] + off2) * rms; }
+    }
+}
+
+// Argmax over a vector, two passes, first index on ties — the same
+// contract as the host `argmax_of` (strict `>` scanning upward).
+//
+// Pass 1: one threadgroup per ARGMAX_BLOCK elements; each thread scans
+// its stride, then a simdgroup shuffle reduction and a threadgroup
+// combine leave one (value, index) per block. Pass 2: one threadgroup
+// reduces the block partials to a single index. NaNs never win (every
+// comparison is false), matching the host.
+#define ARGMAX_TG 256u
+
+static inline void argmax_combine(thread float& v, thread uint& i,
+                                  float ov, uint oi) {
+    if (ov > v || (ov == v && oi < i)) { v = ov; i = oi; }
+}
+
+static inline void argmax_reduce_tg(thread float& v, thread uint& i,
+                                    threadgroup float* tv, threadgroup uint* ti,
+                                    uint tid, uint lane, uint sg, uint tg_sz) {
+    for (uint off = 16u; off > 0u; off >>= 1u) {
+        const float ov = simd_shuffle_down(v, off);
+        const uint  oi = simd_shuffle_down(i, off);
+        argmax_combine(v, i, ov, oi);
+    }
+    if (lane == 0u) { tv[sg] = v; ti[sg] = i; }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid == 0u) {
+        const uint num_sg = (tg_sz + 31u) / 32u;
+        for (uint s = 1u; s < num_sg; ++s) { argmax_combine(v, i, tv[s], ti[s]); }
+    }
+}
+
+kernel void argmax_partial(
+    device const float* x         [[buffer(0)]],
+    constant uint&      N         [[buffer(1)]],
+    constant uint&      block     [[buffer(2)]],
+    device float*       part_val  [[buffer(3)]],
+    device uint*        part_idx  [[buffer(4)]],
+    uint tg    [[threadgroup_position_in_grid]],
+    uint tid   [[thread_index_in_threadgroup]],
+    uint tg_sz [[threads_per_threadgroup]],
+    uint lane  [[thread_index_in_simdgroup]],
+    uint sg    [[simdgroup_index_in_threadgroup]])
+{
+    const uint start = tg * block;
+    const uint end   = min(start + block, N);
+    float v = -INFINITY;
+    uint  i = 0xFFFFFFFFu;
+    for (uint k = start + tid; k < end; k += tg_sz) {
+        const float xv = x[k];
+        if (xv > v || i == 0xFFFFFFFFu) { v = xv; i = k; }
+    }
+    threadgroup float tv[32];
+    threadgroup uint  ti[32];
+    argmax_reduce_tg(v, i, tv, ti, tid, lane, sg, tg_sz);
+    if (tid == 0u) { part_val[tg] = v; part_idx[tg] = i; }
+}
+
+kernel void argmax_final(
+    device const float* part_val [[buffer(0)]],
+    device const uint*  part_idx [[buffer(1)]],
+    constant uint&      M        [[buffer(2)]],
+    device uint*        out      [[buffer(3)]],
+    uint tid   [[thread_index_in_threadgroup]],
+    uint tg_sz [[threads_per_threadgroup]],
+    uint lane  [[thread_index_in_simdgroup]],
+    uint sg    [[simdgroup_index_in_threadgroup]])
+{
+    float v = -INFINITY;
+    uint  i = 0xFFFFFFFFu;
+    for (uint k = tid; k < M; k += tg_sz) {
+        argmax_combine(v, i, part_val[k], part_idx[k]);
+        if (i == 0xFFFFFFFFu) { v = part_val[k]; i = part_idx[k]; }
+    }
+    threadgroup float tv[32];
+    threadgroup uint  ti[32];
+    argmax_reduce_tg(v, i, tv, ti, tid, lane, sg, tg_sz);
+    if (tid == 0u) { out[0] = (i == 0xFFFFFFFFu) ? 0u : i; }
+}
+
 // out = a * sigmoid(g) — the judged attention output gate.
 kernel void sigmoid_gate_multiply(
     device const float* a   [[buffer(0)]],
@@ -110,6 +235,24 @@ impl crate::kernels::ShaderKernel for QkNormParameterFreeKernel {
 pub struct HeadScaleSoftcapKernel;
 impl crate::kernels::ShaderKernel for HeadScaleSoftcapKernel {
     const KERNEL_NAME: &'static str = "head_scale_softcap";
+}
+
+/// Marker for the one-input, up-to-three-output RMS norm.
+pub struct RmsNormMulti3Kernel;
+impl crate::kernels::ShaderKernel for RmsNormMulti3Kernel {
+    const KERNEL_NAME: &'static str = "rms_norm_multi3";
+}
+
+/// Marker for the per-block argmax pass.
+pub struct ArgmaxPartialKernel;
+impl crate::kernels::ShaderKernel for ArgmaxPartialKernel {
+    const KERNEL_NAME: &'static str = "argmax_partial";
+}
+
+/// Marker for the final argmax reduction over block partials.
+pub struct ArgmaxFinalKernel;
+impl crate::kernels::ShaderKernel for ArgmaxFinalKernel {
+    const KERNEL_NAME: &'static str = "argmax_final";
 }
 
 /// Marker for the judged sigmoid attention-gate pipeline.

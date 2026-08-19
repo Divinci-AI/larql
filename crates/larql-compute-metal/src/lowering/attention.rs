@@ -32,7 +32,12 @@
 
 use metal::{Buffer, ComputeCommandEncoderRef};
 
-use super::{LoweredMatrix, MatvecTarget, PostNorm};
+use super::profile::{Stage, StageEncoders};
+
+use super::{
+    nvfp4_residual_fusion_enabled, nvfp4_segment, LoweredMatrix, MatvecOperands, MatvecTarget,
+    Nvfp4Segment, PostNorm,
+};
 use crate::MetalBackend;
 
 /// Position encoding for this layer, from its own policy entry — never a
@@ -172,7 +177,7 @@ impl MetalBackend {
     #[allow(clippy::too_many_arguments)]
     pub fn encode_attention(
         &self,
-        enc: &ComputeCommandEncoderRef,
+        encs: &mut dyn StageEncoders,
         h_in: &Buffer,
         h_out: &Buffer,
         w: &AttnWeights<'_>,
@@ -183,6 +188,7 @@ impl MetalBackend {
         let slot = shape.kv_slot_offset();
 
         // 1. pre-attention norm.
+        let enc = encs.stage(Stage::AttnNorm);
         crate::stages::input_norm::encode_f32(
             enc,
             &self.norms.rms_norm_pipeline,
@@ -198,24 +204,41 @@ impl MetalBackend {
         // 2. projections. K and V land in their cache slots directly;
         //    a projection's bias joins its output there, before anything
         //    downstream reads it.
-        for (p, bias, out, off, n) in [
+        let enc = encs.stage(Stage::AttnProj);
+        let projections = [
             (&w.q, w.q_bias, s.q, 0u64, q_rows),
             (&w.k, w.k_bias, s.k_cache, slot, kv_rows),
             (&w.v, w.v_bias, s.v_cache, slot, kv_rows),
-        ] {
-            self.encode_matvec(
-                enc,
-                p,
-                &MatvecTarget {
-                    x: s.normed,
-                    out,
-                    out_offset: off,
-                    n,
-                    k: shape.hidden,
-                },
-            );
+        ];
+        // A-5b: three NVFP4 projections of one input are one dispatch —
+        // the per-dispatch α paid once. Any other mix encodes per matrix.
+        let fused: Option<Vec<Nvfp4Segment<'_>>> = projections
+            .iter()
+            .map(|(p, _, out, off, n)| nvfp4_segment(p, out, *off, *n))
+            .collect();
+        match fused {
+            Some(segments) => {
+                self.encode_nvfp4_matvec_segments(enc, s.normed, shape.hidden, &segments)
+            }
+            None => {
+                for (p, _, out, off, n) in &projections {
+                    self.encode_matvec(
+                        enc,
+                        p,
+                        &MatvecTarget {
+                            x: s.normed,
+                            out,
+                            out_offset: *off,
+                            n: *n,
+                            k: shape.hidden,
+                        },
+                    );
+                }
+            }
+        }
+        for (_, bias, out, off, n) in &projections {
             if let Some(bias) = bias {
-                self.encode_bias_add(enc, out, off, bias, n);
+                self.encode_bias_add(enc, out, *off, bias, *n);
             }
         }
         if let Some(g) = &w.gate {
@@ -236,6 +259,7 @@ impl MetalBackend {
         // 3. norms on the projections. V first: its norm reads the raw
         //    projection (on a K≡V layer V was projected from the K matrix
         //    into its own slot, so the key's norm below does not touch it).
+        let enc = encs.stage(Stage::AttnQkOps);
         if shape.parameter_free_v {
             self.encode_parameter_free_qk_norm(
                 enc,
@@ -320,8 +344,10 @@ impl MetalBackend {
             );
         }
         // 6. attention over the cache.
+        let enc = encs.stage(Stage::AttnCore);
         self.encode_kv_attention(enc, s, shape, w.sinks);
         // 7. the judged gate, then the output projection.
+        let enc = encs.stage(Stage::AttnOut);
         let aggregated = match &w.gate {
             Some(_) => {
                 self.encode_sigmoid_gate(enc, s.concat, s.gate, s.gated, q_rows);
@@ -329,30 +355,58 @@ impl MetalBackend {
             }
             None => s.concat,
         };
-        self.encode_matvec(
-            enc,
-            &w.o,
-            &MatvecTarget {
-                x: aggregated,
-                out: s.attn_out,
-                out_offset: 0,
-                n: shape.hidden,
-                k: q_rows,
-            },
-        );
-        if let Some(bias) = w.o_bias {
-            self.encode_bias_add(enc, s.attn_out, 0, bias, shape.hidden);
+        // A-5b rung 2a: under two-norm placement with no output bias the
+        // residual add folds into the o-proj write (bit-identical: the
+        // same fp32 add), saving one dispatch per layer. Otherwise the
+        // projection, bias and branch-norm/residual encode as before.
+        let fused_out = match (w.post_norm.as_ref(), w.o_bias) {
+            (None, None) if nvfp4_residual_fusion_enabled() => {
+                nvfp4_segment(&w.o, h_out, 0, shape.hidden)
+            }
+            _ => None,
+        };
+        match fused_out {
+            Some(seg) => self.encode_nvfp4_matvec_residual(
+                enc,
+                &MatvecOperands {
+                    packed: seg.packed,
+                    scales: seg.scales,
+                    x: aggregated,
+                    out: h_out,
+                    out_offset: 0,
+                    n: shape.hidden,
+                    k: q_rows,
+                },
+                seg.tensor_scale,
+                h_in,
+            ),
+            None => {
+                self.encode_matvec(
+                    enc,
+                    &w.o,
+                    &MatvecTarget {
+                        x: aggregated,
+                        out: s.attn_out,
+                        out_offset: 0,
+                        n: shape.hidden,
+                        k: q_rows,
+                    },
+                );
+                if let Some(bias) = w.o_bias {
+                    self.encode_bias_add(enc, s.attn_out, 0, bias, shape.hidden);
+                }
+                // 8. post-attention norm (four-norm placement only), then
+                //    the residual — branch output normalised *before* the add.
+                self.encode_branch_norm_then_residual(
+                    enc,
+                    h_in,
+                    s.attn_out,
+                    h_out,
+                    w.post_norm.as_ref(),
+                    shape.hidden,
+                );
+            }
         }
-        // 8. post-attention norm (four-norm placement only), then the
-        //    residual — branch output normalised *before* the add.
-        self.encode_branch_norm_then_residual(
-            enc,
-            h_in,
-            s.attn_out,
-            h_out,
-            w.post_norm.as_ref(),
-            shape.hidden,
-        );
     }
 
     /// Attention over the cache: the same tiered dispatch the production

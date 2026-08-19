@@ -22,6 +22,7 @@ use larql_compute_metal::lowering::attention::{
     AttnScratch, AttnShape, AttnWeights, LoweredPosition, QkNormWeights,
 };
 use larql_compute_metal::lowering::ffn::{FfnActivation, FfnScratch, FfnShape, FfnWeights};
+use larql_compute_metal::lowering::profile::SingleEncoder;
 use larql_compute_metal::lowering::stack::{
     Checkpoint, HybridFfnLowering, HybridScratch, LayerFfnLowering, LayerLowering,
     RoutedFfnLowering, StackScratch,
@@ -221,7 +222,7 @@ fn run_attention(gpu: &MetalBackend, fx: &AttnFixture, arms: AttnArms) -> Vec<f3
         kv_len: A_T,
     };
     run_once(gpu, |enc| {
-        gpu.encode_attention(enc, &h_in, &h_out, &w, &s, &shape)
+        gpu.encode_attention(&mut SingleEncoder(enc), &h_in, &h_out, &w, &s, &shape)
     });
     gpu.lowering_readback(&h_out, HIDDEN).unwrap()
 }
@@ -361,7 +362,14 @@ fn run_ffn(
         activation: act,
     };
     run_once(gpu, |enc| {
-        gpu.encode_gated_ffn(enc, &h_in, &h_out, &weights, &scratch, &shape)
+        gpu.encode_gated_ffn(
+            &mut SingleEncoder(enc),
+            &h_in,
+            &h_out,
+            &weights,
+            &scratch,
+            &shape,
+        )
     });
     gpu.lowering_readback(&h_out, HIDDEN).unwrap()
 }
@@ -534,7 +542,7 @@ fn gpu_stack(gpu: &MetalBackend, h0: &[f32], fx: &[StackLayer]) -> Vec<Vec<f32>>
 
     let mut final_buf: Option<&metal::Buffer> = None;
     run_once(gpu, |enc| {
-        final_buf = Some(gpu.encode_stack(enc, &h_a, &layers, &scratch, &cps));
+        final_buf = Some(gpu.encode_stack(&mut SingleEncoder(enc), &h_a, &layers, &scratch, &cps));
     });
     assert!(
         std::ptr::eq(final_buf.unwrap(), &h_a),

@@ -40,7 +40,10 @@
 //! layers whose output should be *copied to its own device buffer*; all
 //! of them are read after the single scheduling domain completes.
 
-use metal::{Buffer, ComputeCommandEncoderRef};
+use metal::Buffer;
+
+use super::profile::{Stage, StageEncoders};
+use super::NormOutput;
 
 use super::attention::{AttnScratch, AttnShape, AttnWeights};
 use super::ffn::{FfnScratch, FfnShape, FfnWeights};
@@ -206,7 +209,7 @@ impl MetalBackend {
     /// scheduling domain, which is what keeps the queue full.
     pub fn encode_stack<'a>(
         &self,
-        enc: &ComputeCommandEncoderRef,
+        encs: &mut dyn StageEncoders,
         h_in: &'a Buffer,
         layers: &[LayerLowering<'_>],
         s: &StackScratch<'a>,
@@ -238,7 +241,7 @@ impl MetalBackend {
                 attn_out: s.attn_out,
                 inv_freq: layer.inv_freq,
             };
-            self.encode_attention(enc, src, mid, &layer.attn, &ascratch, &layer.attn_shape);
+            self.encode_attention(encs, src, mid, &layer.attn, &ascratch, &layer.attn_shape);
 
             let hidden = match &layer.ffn {
                 LayerFfnLowering::Dense { weights, shape } => {
@@ -249,7 +252,7 @@ impl MetalBackend {
                         act: s.ffn_act,
                         down: s.ffn_down,
                     };
-                    self.encode_gated_ffn(enc, mid, dst, weights, &fscratch, shape);
+                    self.encode_gated_ffn(encs, mid, dst, weights, &fscratch, shape);
                     shape.hidden
                 }
                 // The routed FFN reads the post-attention residual (`mid`)
@@ -257,6 +260,7 @@ impl MetalBackend {
                 // dense FFN fills, so the stack schedule is unchanged. The
                 // pre-experts norm rides inside the routed encode.
                 LayerFfnLowering::Routed(r) => {
+                    let enc = encs.stage(Stage::RoutedFfn);
                     self.encode_moe_layer_gpu_route(
                         enc, &r.moe, r.scratch, r.table, mid, dst, r.eps,
                     );
@@ -274,7 +278,7 @@ impl MetalBackend {
                         act: s.ffn_act,
                         down: s.ffn_down,
                     };
-                    self.encode_hybrid_ffn(enc, mid, dst, h, &fscratch, hs);
+                    self.encode_hybrid_ffn(encs, mid, dst, h, &fscratch, hs);
                     h.dense_shape.hidden
                 }
             };
@@ -283,6 +287,7 @@ impl MetalBackend {
                 // A copy, not a readback: the value lands in a device
                 // buffer the caller reads *after* the stream completes,
                 // so localisation costs no round trip.
+                let enc = encs.stage(Stage::Checkpoint);
                 self.encode_residual_add(enc, dst, dst, cp.into, hidden, 0.0);
             }
             src = dst;
@@ -306,7 +311,7 @@ impl MetalBackend {
     /// residual) into `dst` — see [`HybridFfnLowering`] for the program.
     fn encode_hybrid_ffn(
         &self,
-        enc: &ComputeCommandEncoderRef,
+        encs: &mut dyn StageEncoders,
         mid: &Buffer,
         dst: &Buffer,
         h: &HybridFfnLowering<'_>,
@@ -314,8 +319,74 @@ impl MetalBackend {
         hs: &HybridScratch<'_>,
     ) {
         let hidden = h.dense_shape.hidden;
+        let x_experts = h.routed.scratch.x_buf.clone();
+        // A-5b rung 2c: the three norms of `mid` — pre-FFN (into the
+        // dense branch's `normed`), pre-experts (into the MoE staging
+        // buffer; its zero tail serves a padded row width exactly as the
+        // served path's does) and the router conditioning
+        // (rms_no_weight(r)·scale·hidden^-0.5 as one weighted norm,
+        // offset 0) — share one reduction when they share `eps`; they
+        // are three serialised ~11 µs reductions otherwise.
+        let enc = encs.stage(Stage::FfnNorms);
+        let one_eps = h.dense_shape.norm_eps == h.branch_norm_eps
+            && crate::lowering::nvfp4_residual_fusion_enabled();
+        if one_eps {
+            self.encode_rms_norm_multi(
+                enc,
+                mid,
+                hidden,
+                h.branch_norm_eps,
+                &[
+                    NormOutput {
+                        weight: h.dense.norm_weight,
+                        offset: h.dense_shape.norm_weight_offset,
+                        out: fscratch.normed,
+                    },
+                    NormOutput {
+                        weight: h.pre_experts_norm,
+                        offset: h.branch_norm_weight_offset,
+                        out: &x_experts,
+                    },
+                    NormOutput {
+                        weight: h.router_conditioning,
+                        offset: 0.0,
+                        out: hs.router_in,
+                    },
+                ],
+            );
+        } else {
+            crate::stages::input_norm::encode_f32(
+                enc,
+                &self.norms.rms_norm_pipeline,
+                mid,
+                0,
+                h.pre_experts_norm,
+                &x_experts,
+                0,
+                hidden,
+                h.branch_norm_eps,
+                h.branch_norm_weight_offset,
+            );
+            crate::stages::input_norm::encode_f32(
+                enc,
+                &self.norms.rms_norm_pipeline,
+                mid,
+                0,
+                h.router_conditioning,
+                hs.router_in,
+                0,
+                hidden,
+                h.branch_norm_eps,
+                0.0,
+            );
+        }
         // Dense branch: d = post_dense_norm(dense(pre_ffn_norm(r))).
-        self.encode_gated_ffn_branch(enc, mid, &h.dense, fscratch, &h.dense_shape);
+        let enc = encs.stage(Stage::DenseFfn);
+        if one_eps {
+            self.encode_gated_ffn_branch_prenormed(enc, &h.dense, fscratch, &h.dense_shape);
+        } else {
+            self.encode_gated_ffn_branch(enc, mid, &h.dense, fscratch, &h.dense_shape);
+        }
         crate::stages::input_norm::encode_f32(
             enc,
             &self.norms.rms_norm_pipeline,
@@ -328,38 +399,9 @@ impl MetalBackend {
             h.branch_norm_eps,
             h.branch_norm_weight_offset,
         );
-        // Expert input: pre_experts_norm(r), into the MoE scratch's
-        // staging buffer (its zero tail serves a padded row width exactly
-        // as the served path's does).
-        let x_experts = h.routed.scratch.x_buf.clone();
-        crate::stages::input_norm::encode_f32(
-            enc,
-            &self.norms.rms_norm_pipeline,
-            mid,
-            0,
-            h.pre_experts_norm,
-            &x_experts,
-            0,
-            hidden,
-            h.branch_norm_eps,
-            h.branch_norm_weight_offset,
-        );
-        // Router input: rms_no_weight(r) · scale · hidden^-0.5, one
-        // weighted norm with the folded weight (offset 0).
-        crate::stages::input_norm::encode_f32(
-            enc,
-            &self.norms.rms_norm_pipeline,
-            mid,
-            0,
-            h.router_conditioning,
-            hs.router_in,
-            0,
-            hidden,
-            h.branch_norm_eps,
-            0.0,
-        );
         let moe = &h.routed.moe;
         let w_buf = self.bufs.get_f32(moe.router_proj);
+        let enc = encs.stage(Stage::Router);
         let logits =
             self.encode_moe_router_logits(enc, &w_buf, hs.router_in, None, moe.num_experts, hidden);
         let (ids, weights) = self.encode_moe_router_select(
@@ -372,6 +414,7 @@ impl MetalBackend {
         );
         // Experts over pre_experts_norm(r), combined onto a ZERO residual:
         // the bare weighted sum lands in `expert_sum`.
+        let enc = encs.stage(Stage::Experts);
         self.encode_experts_and_combine_descriptor_x_buf(
             enc,
             &x_experts,
@@ -383,6 +426,7 @@ impl MetalBackend {
             hs.zero,
             hs.expert_sum,
         );
+        let enc = encs.stage(Stage::FfnOut);
         crate::stages::input_norm::encode_f32(
             enc,
             &self.norms.rms_norm_pipeline,

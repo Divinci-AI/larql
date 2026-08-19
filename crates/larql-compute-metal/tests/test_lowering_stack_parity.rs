@@ -26,6 +26,7 @@
 
 use larql_compute_metal::lowering::attention::{AttnShape, AttnWeights, LoweredPosition};
 use larql_compute_metal::lowering::ffn::{FfnActivation, FfnShape, FfnWeights};
+use larql_compute_metal::lowering::profile::SingleEncoder;
 use larql_compute_metal::lowering::stack::{Checkpoint, LayerLowering, StackScratch};
 use larql_compute_metal::lowering::{LoweredMatrix, PostNorm};
 use larql_models::quant::nvfp4;
@@ -483,7 +484,7 @@ fn fifty_two_layers_lower_into_one_scheduling_domain() {
     // ── ONE command buffer, ONE wait ────────────────────────────────
     let cmd = gpu.new_lowering_command_buffer();
     let enc = cmd.new_compute_command_encoder();
-    let final_buf = gpu.encode_stack(enc, &h_in, &layers, &scratch, &cps);
+    let final_buf = gpu.encode_stack(&mut SingleEncoder(enc), &h_in, &layers, &scratch, &cps);
     enc.end_encoding();
     cmd.commit();
     cmd.wait_until_completed();

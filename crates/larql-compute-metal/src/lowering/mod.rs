@@ -28,7 +28,15 @@
 pub mod attention;
 pub mod ffn;
 pub mod head;
+pub mod nvfp4;
+pub mod profile;
 pub mod stack;
+
+pub use nvfp4::{
+    nvfp4_fusion_enabled, nvfp4_kernel_choice, nvfp4_residual_fusion_enabled, nvfp4_segment,
+    NormOutput, Nvfp4Kernel, Nvfp4Segment, PreNorm, NVFP4_FUSE_ENV, NVFP4_KERNEL_ENV,
+    NVFP4_MAX_SEGMENTS, RMS_NORM_MAX_OUTPUTS,
+};
 
 use metal::{Buffer, ComputeCommandEncoderRef};
 
@@ -37,6 +45,9 @@ use metal::{Buffer, ComputeCommandEncoderRef};
 /// and a device meet, and it should not need the graphics API in its
 /// dependency list to say "this is resident".
 pub use metal::Buffer as DeviceBuffer;
+/// A command buffer, re-exported for the same reason: a caller holding
+/// an encoded-but-uncommitted token should not need to link `metal`.
+pub use metal::CommandBuffer as DeviceCommandBuffer;
 
 use crate::MetalBackend;
 
@@ -195,40 +206,6 @@ impl MetalBackend {
         );
     }
 
-    /// Encode `out = W · x` for an NVFP4 matrix into `enc`.
-    ///
-    /// Every operand is already a device buffer, so nothing crosses to the
-    /// host and the caller may chain this with other encodes in one
-    /// command buffer. Dispatches are independent unless they share a
-    /// buffer; Metal's default `MTLDispatchTypeSerial` encoder orders
-    /// them, so a chain that feeds `out` into the next call's `x` is
-    /// correctly sequenced without explicit barriers.
-    ///
-    /// Geometry is the caller's responsibility — this is a lowering
-    /// primitive, and validating `k % 16` on every encode would put a
-    /// branch in the hot path for an invariant the plan already fixed at
-    /// load time.
-    pub fn encode_nvfp4_matvec(
-        &self,
-        enc: &ComputeCommandEncoderRef,
-        op: &MatvecOperands<'_>,
-        tensor_scale: f32,
-    ) {
-        let kernel = &self.quant.nvfp4_matvec_pipeline;
-        enc.set_compute_pipeline_state(&kernel.state);
-        enc.set_buffer(0, Some(op.packed), 0);
-        enc.set_buffer(1, Some(op.scales), 0);
-        enc.set_buffer(2, Some(op.x), 0);
-        enc.set_buffer(3, Some(op.out), op.out_offset);
-        set_u32(enc, 4, op.n as u32);
-        set_u32(enc, 5, op.k as u32);
-        set_f32(enc, 6, tensor_scale);
-        enc.dispatch_thread_groups(
-            metal::MTLSize::new((op.n as u64).div_ceil(kernel.rows_per_tg), 1, 1),
-            metal::MTLSize::new(kernel.threads_per_tg, 1, 1),
-        );
-    }
-
     /// Encode the MXFP4 sibling, same contract.
     pub fn encode_mxfp4_matvec(&self, enc: &ComputeCommandEncoderRef, op: &MatvecOperands<'_>) {
         let kernel = &self.quant.mxfp4_matvec_pipeline;
@@ -320,7 +297,11 @@ impl MetalBackend {
     /// which decides how much to encode into it before committing —
     /// the decision this whole rung exists to hand over.
     pub fn new_lowering_command_buffer(&self) -> metal::CommandBuffer {
-        self.queue.new_command_buffer().to_owned()
+        // `new_command_buffer` hands back an autoreleased reference; a
+        // decode loop with no pool of its own would keep every token's
+        // command buffer (and what it retains) alive until the thread
+        // ends. Retain explicitly, drain the rest here.
+        objc::rc::autoreleasepool(|| self.queue.new_command_buffer().to_owned())
     }
 }
 

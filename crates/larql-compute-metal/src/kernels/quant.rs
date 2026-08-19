@@ -44,6 +44,21 @@ pub struct QuantKernels {
     /// group scales plus one f32 tensor scale (VINDEX3-Q2). Sibling of
     /// `mxfp4_matvec_pipeline`, differing only in the scale geometry.
     pub nvfp4_matvec_pipeline: KernelHandle,
+    /// `nvfp4_matvec_v2` — arithmetic E2M1 decode, vector loads; the
+    /// falsified A-5 hypothesis, retained as an explicit arm
+    /// (`LARQL_NVFP4_KERNEL=v2`; default v1). Same values to fp32 rounding.
+    pub nvfp4_matvec_v2_pipeline: KernelHandle,
+    /// A-5 sweep arms — v1's inner loop at (groups per lane, rows per
+    /// TG) ∈ {(2,4),(4,4),(1,2),(1,8),(2,2),(2,8)}; `examples/nvfp4_gemv_shapes.rs`.
+    pub nvfp4_sweep_pipelines: [KernelHandle; 11],
+    /// A-5b: segmented x2 — Q+K+V or gate+up in one dispatch.
+    pub nvfp4_matvec_x2_seg3_pipeline: KernelHandle,
+    /// A-5b rung 2a: x2 with the residual add folded into the write.
+    pub nvfp4_matvec_x2r_pipeline: KernelHandle,
+    /// A-5b rung 2d: x2 with the pre-norm folded into the prologue.
+    pub nvfp4_matvec_x2n_pipeline: KernelHandle,
+    /// Rung 2d form B: pre-norm staged in threadgroup memory.
+    pub nvfp4_matvec_x2m_pipeline: KernelHandle,
 
     /// Q6_K grouped-expert matvec: every selected expert in one dispatch, so
     /// the grid carries 16x the threadgroups of a single expert matrix (K3a).
@@ -153,6 +168,25 @@ impl QuantKernels {
 
         let mxfp4_matvec_pipeline = h::<shaders::mxfp4_matvec::Kernel>(device, library);
         let nvfp4_matvec_pipeline = h::<shaders::nvfp4_matvec::Kernel>(device, library);
+        let nvfp4_matvec_v2_pipeline = h::<shaders::nvfp4_matvec::KernelV2>(device, library);
+        let nvfp4_sweep_pipelines = [
+            h::<shaders::nvfp4_matvec::KernelG2R4>(device, library),
+            h::<shaders::nvfp4_matvec::KernelG4R4>(device, library),
+            h::<shaders::nvfp4_matvec::KernelG1R2>(device, library),
+            h::<shaders::nvfp4_matvec::KernelG1R8>(device, library),
+            h::<shaders::nvfp4_matvec::KernelG2R2>(device, library),
+            h::<shaders::nvfp4_matvec::KernelG2R8>(device, library),
+            h::<shaders::nvfp4_matvec::KernelX2>(device, library),
+            h::<shaders::nvfp4_matvec::KernelX4>(device, library),
+            h::<shaders::nvfp4_matvec::KernelX1B>(device, library),
+            h::<shaders::nvfp4_matvec::KernelX2B>(device, library),
+            h::<shaders::nvfp4_matvec::KernelX4B>(device, library),
+        ];
+        let nvfp4_matvec_x2_seg3_pipeline =
+            h::<shaders::nvfp4_matvec::KernelX2Seg3>(device, library);
+        let nvfp4_matvec_x2r_pipeline = h::<shaders::nvfp4_matvec::KernelX2R>(device, library);
+        let nvfp4_matvec_x2n_pipeline = h::<shaders::nvfp4_matvec::KernelX2N>(device, library);
+        let nvfp4_matvec_x2m_pipeline = h::<shaders::nvfp4_matvec::KernelX2M>(device, library);
         let q6k_grouped_experts_pipeline =
             h::<shaders::q6k_grouped_experts::Kernel>(device, library);
         let q4k_grouped_experts_pipeline =
@@ -214,6 +248,12 @@ impl QuantKernels {
             q8_matvec_pipeline,
             mxfp4_matvec_pipeline,
             nvfp4_matvec_pipeline,
+            nvfp4_matvec_v2_pipeline,
+            nvfp4_sweep_pipelines,
+            nvfp4_matvec_x2_seg3_pipeline,
+            nvfp4_matvec_x2r_pipeline,
+            nvfp4_matvec_x2n_pipeline,
+            nvfp4_matvec_x2m_pipeline,
             q6k_grouped_experts_pipeline,
             q4k_grouped_experts_pipeline,
             mxfp4g_split_lut16_pipeline,

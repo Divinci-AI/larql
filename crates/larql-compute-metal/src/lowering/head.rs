@@ -18,7 +18,9 @@
 //!   nonlinear, so `softcap(m·x)` and `m·softcap(x)` are different
 //!   functions.
 
-use metal::{Buffer, ComputeCommandEncoderRef};
+use metal::Buffer;
+
+use super::profile::{Stage, StageEncoders};
 
 use super::{LoweredMatrix, MatvecTarget};
 use crate::MetalBackend;
@@ -54,13 +56,14 @@ impl MetalBackend {
     /// Encode final norm → head projection → multiplier → softcap.
     pub fn encode_head(
         &self,
-        enc: &ComputeCommandEncoderRef,
+        encs: &mut dyn StageEncoders,
         h_final: &Buffer,
         logits_out: &Buffer,
         w: &HeadWeights<'_>,
         s: &HeadScratch<'_>,
         shape: &HeadShape,
     ) {
+        let enc = encs.stage(Stage::Head);
         crate::stages::input_norm::encode_f32(
             enc,
             &self.norms.rms_norm_pipeline,
@@ -94,5 +97,62 @@ impl MetalBackend {
         super::set_f32(enc, 3, shape.multiplier.unwrap_or(0.0));
         super::set_f32(enc, 4, shape.softcap.unwrap_or(0.0));
         super::dispatch_linear(enc, pipeline, shape.vocab);
+    }
+}
+
+/// Elements one `argmax_partial` threadgroup scans. 256 threads × 16
+/// elements; a 262K vocabulary leaves 64 partials for the final pass.
+pub const ARGMAX_BLOCK: usize = 4096;
+/// Threads per argmax threadgroup (both passes).
+pub const ARGMAX_THREADS: u64 = 256;
+
+/// Device scratch for the two-pass argmax: block partials and the
+/// single output index.
+pub struct ArgmaxScratch<'a> {
+    /// `argmax_partials(n)` f32s.
+    pub partial_vals: &'a Buffer,
+    /// `argmax_partials(n)` u32s.
+    pub partial_idx: &'a Buffer,
+    /// One u32: the index of the maximum (first on ties).
+    pub out: &'a Buffer,
+}
+
+/// Number of block partials an argmax over `n` elements produces.
+pub fn argmax_partials(n: usize) -> usize {
+    n.div_ceil(ARGMAX_BLOCK).max(1)
+}
+
+impl MetalBackend {
+    /// Encode `out[0] = argmax(x[0..n])`, first index on ties — the same
+    /// contract as a host scan with strict `>`. Two dispatches.
+    pub fn encode_argmax(
+        &self,
+        enc: &metal::ComputeCommandEncoderRef,
+        x: &Buffer,
+        n: usize,
+        s: &ArgmaxScratch<'_>,
+    ) {
+        let blocks = argmax_partials(n);
+        let p1 = &self.norms.argmax_partial_pipeline;
+        enc.set_compute_pipeline_state(p1);
+        enc.set_buffer(0, Some(x), 0);
+        super::set_u32(enc, 1, n as u32);
+        super::set_u32(enc, 2, ARGMAX_BLOCK as u32);
+        enc.set_buffer(3, Some(s.partial_vals), 0);
+        enc.set_buffer(4, Some(s.partial_idx), 0);
+        enc.dispatch_thread_groups(
+            metal::MTLSize::new(blocks as u64, 1, 1),
+            metal::MTLSize::new(ARGMAX_THREADS, 1, 1),
+        );
+        let p2 = &self.norms.argmax_final_pipeline;
+        enc.set_compute_pipeline_state(p2);
+        enc.set_buffer(0, Some(s.partial_vals), 0);
+        enc.set_buffer(1, Some(s.partial_idx), 0);
+        super::set_u32(enc, 2, blocks as u32);
+        enc.set_buffer(3, Some(s.out), 0);
+        enc.dispatch_thread_groups(
+            metal::MTLSize::new(1, 1, 1),
+            metal::MTLSize::new(ARGMAX_THREADS, 1, 1),
+        );
     }
 }

@@ -29,6 +29,7 @@ use larql_compute::{
     MoeWeightLayout, QuantFormat,
 };
 use larql_compute_metal::lowering::attention::{AttnShape, AttnWeights, LoweredPosition};
+use larql_compute_metal::lowering::profile::SingleEncoder;
 use larql_compute_metal::lowering::stack::{
     Checkpoint, LayerFfnLowering, LayerLowering, RoutedFfnLowering, StackScratch,
 };
@@ -569,7 +570,7 @@ fn gpu_stack(gpu: &MetalBackend, h0: &[f32], fx: &[LayerFixture]) -> Vec<Vec<f32
 
     let mut final_buf: Option<&metal::Buffer> = None;
     run_once(gpu, |enc| {
-        final_buf = Some(gpu.encode_stack(enc, &h_a, &layers, &scratch, &cps));
+        final_buf = Some(gpu.encode_stack(&mut SingleEncoder(enc), &h_a, &layers, &scratch, &cps));
     });
     // Two layers entered from h_a: each layer writes mid = h_b, dst = h_a.
     assert!(

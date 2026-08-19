@@ -30,7 +30,12 @@
 
 use metal::{Buffer, ComputeCommandEncoderRef};
 
-use super::{LoweredMatrix, MatvecTarget, PostNorm};
+use super::profile::{Stage, StageEncoders};
+
+use super::{
+    nvfp4_residual_fusion_enabled, nvfp4_segment, LoweredMatrix, MatvecOperands, MatvecTarget,
+    PostNorm,
+};
 use crate::MetalBackend;
 
 /// The weight streams one gated FFN reads, already resident.
@@ -86,26 +91,57 @@ impl MetalBackend {
     /// residual reads both, so they must differ.
     pub fn encode_gated_ffn(
         &self,
-        enc: &ComputeCommandEncoderRef,
+        encs: &mut dyn StageEncoders,
         h_in: &Buffer,
         h_out: &Buffer,
         w: &FfnWeights<'_>,
         s: &FfnScratch<'_>,
         shape: &FfnShape,
     ) {
-        self.encode_gated_ffn_branch(enc, h_in, w, s, shape);
-        // 5. post-FFN norm (four-norm placement only), then the
-        //    residual. `b_scale` is 1.0: a residual multiplier is a
-        //    judged plan fact and Glimmer's FFN residual has none, so
-        //    passing anything else here would invent semantics.
-        self.encode_branch_norm_then_residual(
-            enc,
-            h_in,
-            s.down,
-            h_out,
-            w.post_norm.as_ref(),
-            shape.hidden,
-        );
+        let enc = encs.stage(Stage::DenseFfn);
+        // A-5b rung 2a: under two-norm placement the residual add folds
+        // into the down-projection write (bit-identical), one dispatch
+        // fewer per layer. Four-norm placement keeps the branch norm.
+        let fused_down = match w.post_norm.as_ref() {
+            None if nvfp4_residual_fusion_enabled() => {
+                nvfp4_segment(&w.down, h_out, 0, shape.hidden)
+            }
+            _ => None,
+        };
+        match fused_down {
+            Some(seg) => {
+                self.encode_gated_ffn_gate_up_act(enc, h_in, w, s, shape);
+                self.encode_nvfp4_matvec_residual(
+                    enc,
+                    &MatvecOperands {
+                        packed: seg.packed,
+                        scales: seg.scales,
+                        x: s.act,
+                        out: h_out,
+                        out_offset: 0,
+                        n: shape.hidden,
+                        k: shape.intermediate,
+                    },
+                    seg.tensor_scale,
+                    h_in,
+                );
+            }
+            None => {
+                self.encode_gated_ffn_branch(enc, h_in, w, s, shape);
+                // 5. post-FFN norm (four-norm placement only), then the
+                //    residual. `b_scale` is 1.0: a residual multiplier is a
+                //    judged plan fact and Glimmer's FFN residual has none,
+                //    so passing anything else here would invent semantics.
+                self.encode_branch_norm_then_residual(
+                    enc,
+                    h_in,
+                    s.down,
+                    h_out,
+                    w.post_norm.as_ref(),
+                    shape.hidden,
+                );
+            }
+        }
     }
 
     /// The FFN branch alone — `s.down = down(act(gate(norm(h))) *
@@ -113,6 +149,55 @@ impl MetalBackend {
     /// normalise and sum it with the expert branch before the layer's own
     /// post-FFN norm.
     pub fn encode_gated_ffn_branch(
+        &self,
+        enc: &ComputeCommandEncoderRef,
+        h_in: &Buffer,
+        w: &FfnWeights<'_>,
+        s: &FfnScratch<'_>,
+        shape: &FfnShape,
+    ) {
+        self.encode_gated_ffn_gate_up_act(enc, h_in, w, s, shape);
+        // 4. down projection.
+        self.encode_matvec(
+            enc,
+            &w.down,
+            &MatvecTarget {
+                x: s.act,
+                out: s.down,
+                out_offset: 0,
+                n: shape.hidden,
+                k: shape.intermediate,
+            },
+        );
+    }
+
+    /// The branch from an input that is ALREADY pre-normed into
+    /// `s.normed` (a hybrid layer's multi-norm wrote it): gate/up,
+    /// activation, down into `s.down`.
+    pub fn encode_gated_ffn_branch_prenormed(
+        &self,
+        enc: &ComputeCommandEncoderRef,
+        w: &FfnWeights<'_>,
+        s: &FfnScratch<'_>,
+        shape: &FfnShape,
+    ) {
+        self.encode_gate_up_act_from_normed(enc, w, s, shape);
+        self.encode_matvec(
+            enc,
+            &w.down,
+            &MatvecTarget {
+                x: s.act,
+                out: s.down,
+                out_offset: 0,
+                n: shape.hidden,
+                k: shape.intermediate,
+            },
+        );
+    }
+
+    /// Steps 1–3 of the branch: pre-norm, gate/up, activation into
+    /// `s.act` — shared by the plain branch and the residual-fused down.
+    fn encode_gated_ffn_gate_up_act(
         &self,
         enc: &ComputeCommandEncoderRef,
         h_in: &Buffer,
@@ -133,49 +218,58 @@ impl MetalBackend {
             shape.norm_eps,
             shape.norm_weight_offset,
         );
+        self.encode_gate_up_act_from_normed(enc, w, s, shape);
+    }
+
+    /// Steps 2–3: gate/up over `s.normed`, activation into `s.act`.
+    fn encode_gate_up_act_from_normed(
+        &self,
+        enc: &ComputeCommandEncoderRef,
+        w: &FfnWeights<'_>,
+        s: &FfnScratch<'_>,
+        shape: &FfnShape,
+    ) {
         // 2. gate and up projections. Independent of each other, and the
         //    serial encoder still orders them after the norm that feeds
-        //    them.
-        self.encode_matvec(
-            enc,
-            &w.gate,
-            &MatvecTarget {
-                x: s.normed,
-                out: s.gate,
-                out_offset: 0,
-                n: shape.intermediate,
-                k: shape.hidden,
-            },
-        );
-        self.encode_matvec(
-            enc,
-            &w.up,
-            &MatvecTarget {
-                x: s.normed,
-                out: s.up,
-                out_offset: 0,
-                n: shape.intermediate,
-                k: shape.hidden,
-            },
-        );
+        //    them. A-5b: both NVFP4 → one dispatch.
+        match (
+            nvfp4_segment(&w.gate, s.gate, 0, shape.intermediate),
+            nvfp4_segment(&w.up, s.up, 0, shape.intermediate),
+        ) {
+            (Some(g), Some(u)) => {
+                self.encode_nvfp4_matvec_segments(enc, s.normed, shape.hidden, &[g, u])
+            }
+            _ => {
+                self.encode_matvec(
+                    enc,
+                    &w.gate,
+                    &MatvecTarget {
+                        x: s.normed,
+                        out: s.gate,
+                        out_offset: 0,
+                        n: shape.intermediate,
+                        k: shape.hidden,
+                    },
+                );
+                self.encode_matvec(
+                    enc,
+                    &w.up,
+                    &MatvecTarget {
+                        x: s.normed,
+                        out: s.up,
+                        out_offset: 0,
+                        n: shape.intermediate,
+                        k: shape.hidden,
+                    },
+                );
+            }
+        }
         // 3. the gated nonlinearity, by the plan's activation.
         let geglu = match shape.activation {
             FfnActivation::Silu => &self.ffn.geglu_pipeline,
             FfnActivation::GeluTanh => &self.ffn.geglu_gelu_tanh_pipeline,
         };
         encode_elementwise(enc, geglu, &[s.gate, s.up, s.act], shape.intermediate);
-        // 4. down projection.
-        self.encode_matvec(
-            enc,
-            &w.down,
-            &MatvecTarget {
-                x: s.act,
-                out: s.down,
-                out_offset: 0,
-                n: shape.hidden,
-                k: shape.intermediate,
-            },
-        );
     }
 }
 
