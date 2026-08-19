@@ -35,6 +35,7 @@
 
 use larql_compute_metal::lowering::attention::{AttnShape, AttnWeights, LoweredPosition};
 use larql_compute_metal::lowering::ffn::{FfnActivation, FfnShape, FfnWeights};
+use larql_compute_metal::lowering::profile::SingleEncoder;
 use larql_compute_metal::lowering::stack::{LayerLowering, StackScratch};
 use larql_compute_metal::lowering::{LoweredMatrix, PostNorm};
 use larql_models::quant::nvfp4;
@@ -461,7 +462,9 @@ fn step(d: &Device<'_>, ws: &[LayerW], h0: &[f32], t: usize, share: bool) -> Vec
 
     let cmd = d.gpu.new_lowering_command_buffer();
     let enc = cmd.new_compute_command_encoder();
-    let out = d.gpu.encode_stack(enc, &h_in, &layers, &scratch, &[]);
+    let out = d
+        .gpu
+        .encode_stack(&mut SingleEncoder(enc), &h_in, &layers, &scratch, &[]);
     enc.end_encoding();
     cmd.commit();
     cmd.wait_until_completed();

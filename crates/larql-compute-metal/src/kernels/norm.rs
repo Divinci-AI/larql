@@ -87,6 +87,12 @@ pub struct NormKernels {
     /// `logits = softcap(multiplier * x)` — the head's two judged
     /// elementwise ops, fused because their order is semantic.
     pub head_scale_softcap_pipeline: ComputePipelineState,
+    /// Two-pass argmax over the logits — the sampled id leaves the
+    /// device as four bytes instead of the whole vocabulary.
+    /// One input, up to three RMS-normed outputs in one dispatch.
+    pub rms_norm_multi3_pipeline: ComputePipelineState,
+    pub argmax_partial_pipeline: ComputePipelineState,
+    pub argmax_final_pipeline: ComputePipelineState,
 }
 
 impl NormKernels {
@@ -144,6 +150,9 @@ impl NormKernels {
             head_scale_softcap_pipeline: r::<shaders::plan_glue::HeadScaleSoftcapKernel>(
                 device, library,
             ),
+            rms_norm_multi3_pipeline: r::<shaders::plan_glue::RmsNormMulti3Kernel>(device, library),
+            argmax_partial_pipeline: r::<shaders::plan_glue::ArgmaxPartialKernel>(device, library),
+            argmax_final_pipeline: r::<shaders::plan_glue::ArgmaxFinalKernel>(device, library),
             scale_vector_pipeline: r::<shaders::residual_inject::ScaleVectorKernel>(
                 device, library,
             ),

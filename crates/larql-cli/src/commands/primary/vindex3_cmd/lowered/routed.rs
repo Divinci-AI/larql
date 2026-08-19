@@ -28,6 +28,21 @@ pub(super) enum FfnResident {
     Hybrid(Box<HybridResident>),
 }
 
+impl FfnResident {
+    /// `(dense matrix bytes, active expert bytes)` one token reads
+    /// through this layer's FFN.
+    pub(super) fn bytes_per_token(&self) -> (usize, usize) {
+        match self {
+            FfnResident::Dense { gate, up, down } => (gate.bytes() + up.bytes() + down.bytes(), 0),
+            FfnResident::Routed(r) => (0, r.active_expert_bytes()),
+            FfnResident::Hybrid(h) => (
+                h.gate.bytes() + h.up.bytes() + h.down.bytes(),
+                h.routed.active_expert_bytes(),
+            ),
+        }
+    }
+}
+
 /// A hybrid layer's resident operands beyond the two branches.
 pub(super) struct HybridResident {
     pub(super) gate: DeviceMatrix,
@@ -192,6 +207,16 @@ fn expert_slices(bank: &AlignedBytes, per: usize, experts: usize) -> Vec<&[u8]> 
 }
 
 impl RoutedLayer {
+    /// Expert bytes one token reads: `top_k` experts' gate/up and down
+    /// blocks plus their scales. The router itself is f32 and small.
+    pub(super) fn active_expert_bytes(&self) -> usize {
+        self.top_k
+            * (self.gu_expert_bytes
+                + self.gu_scale_bytes
+                + self.dn_expert_bytes
+                + self.dn_scale_bytes)
+    }
+
     /// The `MoeLayerWeights` view the served descriptor path consumes,
     /// assembled from a `RoutedFfnOp` — per-expert slices into the
     /// registered banks, router/bias from f32 storage, GPT-OSS routing

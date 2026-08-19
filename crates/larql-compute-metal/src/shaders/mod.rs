@@ -116,6 +116,7 @@ pub fn all_shaders() -> String {
     src.push_str(q8_attn_proj::SHADER);
     src.push_str(mxfp4_matvec::SHADER);
     src.push_str(nvfp4_matvec::SHADER);
+    src.push_str(nvfp4_matvec::SWEEP_SHADER);
     src.push_str(plan_glue::SHADER);
     src.push_str(&mxfp4_grouped_experts::shader());
     src.push_str(q6k_grouped_experts::SHADER);

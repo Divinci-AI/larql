@@ -35,6 +35,7 @@
 #![cfg(target_os = "macos")]
 
 use larql_compute_metal::lowering::ffn::{FfnActivation, FfnScratch, FfnShape, FfnWeights};
+use larql_compute_metal::lowering::profile::SingleEncoder;
 use larql_compute_metal::lowering::LoweredMatrix;
 use larql_models::quant::nvfp4;
 
@@ -255,7 +256,7 @@ fn run_lowered(
 
     let cmd = gpu.new_lowering_command_buffer();
     let enc = cmd.new_compute_command_encoder();
-    gpu.encode_gated_ffn(enc, &h_in, &h_out, &w, &s, &shape);
+    gpu.encode_gated_ffn(&mut SingleEncoder(enc), &h_in, &h_out, &w, &s, &shape);
     enc.end_encoding();
     cmd.commit();
     cmd.wait_until_completed();

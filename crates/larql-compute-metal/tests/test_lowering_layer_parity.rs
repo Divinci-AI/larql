@@ -62,6 +62,7 @@ use larql_compute_metal::lowering::attention::{
     AttnScratch, AttnShape, AttnWeights, LoweredPosition,
 };
 use larql_compute_metal::lowering::ffn::{FfnActivation, FfnScratch, FfnShape, FfnWeights};
+use larql_compute_metal::lowering::profile::SingleEncoder;
 use larql_compute_metal::lowering::LoweredMatrix;
 use larql_models::quant::nvfp4;
 
@@ -514,8 +515,8 @@ fn run_lowered(
         Schedule::OneCommandBuffer => {
             let cmd = gpu.new_lowering_command_buffer();
             let enc = cmd.new_compute_command_encoder();
-            gpu.encode_attention(enc, &h0, &h1, &aw, &ascratch, &ashape);
-            gpu.encode_gated_ffn(enc, &h1, &h2, &fw, &fscratch, &fshape);
+            gpu.encode_attention(&mut SingleEncoder(enc), &h0, &h1, &aw, &ascratch, &ashape);
+            gpu.encode_gated_ffn(&mut SingleEncoder(enc), &h1, &h2, &fw, &fscratch, &fshape);
             enc.end_encoding();
             cmd.commit();
             cmd.wait_until_completed();
@@ -523,14 +524,14 @@ fn run_lowered(
         Schedule::TwoCommandBuffers => {
             let c1 = gpu.new_lowering_command_buffer();
             let e1 = c1.new_compute_command_encoder();
-            gpu.encode_attention(e1, &h0, &h1, &aw, &ascratch, &ashape);
+            gpu.encode_attention(&mut SingleEncoder(e1), &h0, &h1, &aw, &ascratch, &ashape);
             e1.end_encoding();
             c1.commit();
             c1.wait_until_completed();
 
             let c2 = gpu.new_lowering_command_buffer();
             let e2 = c2.new_compute_command_encoder();
-            gpu.encode_gated_ffn(e2, &h1, &h2, &fw, &fscratch, &fshape);
+            gpu.encode_gated_ffn(&mut SingleEncoder(e2), &h1, &h2, &fw, &fscratch, &fshape);
             e2.end_encoding();
             c2.commit();
             c2.wait_until_completed();

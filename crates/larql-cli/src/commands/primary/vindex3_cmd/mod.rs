@@ -155,6 +155,14 @@ pub struct ExecArgs {
     /// `--generate` cannot supply it.
     #[arg(long, conflicts_with_all = ["dump_layers", "resume", "generate"])]
     pub logit_dump: Option<PathBuf>,
+
+    /// Lowered backends only: attribute each decode token's GPU time to
+    /// its stage classes (stage-boundary timestamp counters) and print
+    /// the ledger against the bytes each class reads. Sampling drains the
+    /// pipeline at every stage boundary, so judge throughput from an
+    /// unprofiled run and attribution from this one.
+    #[arg(long, requires = "generate")]
+    pub profile: bool,
 }
 
 #[derive(Args)]

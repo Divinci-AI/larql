@@ -24,6 +24,7 @@
 use larql_compute_metal::lowering::attention::{
     AttnScratch, AttnShape, AttnWeights, LoweredPosition,
 };
+use larql_compute_metal::lowering::profile::SingleEncoder;
 use larql_compute_metal::lowering::LoweredMatrix;
 use larql_models::quant::nvfp4;
 use larql_models::YarnRopeScaling;
@@ -349,7 +350,7 @@ fn run_lowered(
 
     let cmd = gpu.new_lowering_command_buffer();
     let enc = cmd.new_compute_command_encoder();
-    gpu.encode_attention(enc, &h_in, &h_out, &w, &s, &shape);
+    gpu.encode_attention(&mut SingleEncoder(enc), &h_in, &h_out, &w, &s, &shape);
     enc.end_encoding();
     cmd.commit();
     cmd.wait_until_completed();

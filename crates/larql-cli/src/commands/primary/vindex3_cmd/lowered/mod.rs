@@ -22,10 +22,8 @@ use larql_compute_metal::lowering::attention::{
     AttnShape, AttnWeights, LoweredPosition, QkNormWeights,
 };
 use larql_compute_metal::lowering::ffn::{FfnActivation, FfnShape, FfnWeights};
-use larql_compute_metal::lowering::head::{HeadScratch, HeadShape, HeadWeights};
 use larql_compute_metal::lowering::stack::{
-    HybridFfnLowering, HybridScratch, LayerFfnLowering, LayerLowering, RoutedFfnLowering,
-    StackScratch,
+    HybridFfnLowering, LayerFfnLowering, LayerLowering, RoutedFfnLowering,
 };
 use larql_compute_metal::lowering::{DeviceBuffer, LoweredMatrix, PostNorm};
 use larql_compute_metal::MetalBackend;
@@ -39,10 +37,17 @@ use larql_vindex::format::vindex3::opplan::{ComponentOpPlan, LayerPlan};
 
 /// One matrix operand, resident on the device.
 mod dump;
+mod profile;
 mod resident;
 mod routed;
+mod run;
+mod step;
+#[cfg(test)]
+mod tests;
 
-use dump::dump_lowered;
+pub(super) use run::run_lowered;
+
+use profile::{StageBytes, StageLedger};
 use resident::{
     resident_matrix, resident_norm, resident_vector, rope_inv_freq_table, rope_table_key, Ablation,
 };
@@ -60,6 +65,16 @@ pub(super) struct DeviceMatrix {
 }
 
 impl DeviceMatrix {
+    /// Bytes a matvec over this matrix reads: packed codes, plus scales
+    /// for the block formats (f16 carries an empty scales buffer).
+    pub(super) fn bytes(&self) -> usize {
+        let scales = match self.format {
+            WeightFormat::F16 => 0,
+            _ => self.scales.length() as usize,
+        };
+        self.packed.length() as usize + scales
+    }
+
     pub(super) fn as_lowered(&self) -> LoweredMatrix<'_> {
         match self.format {
             WeightFormat::F16 => LoweredMatrix::F16 {
@@ -125,9 +140,35 @@ pub struct LoweredSession<'a> {
     scratch: Vec<DeviceBuffer>,
     inv_freq: HashMap<u64, DeviceBuffer>,
     position: usize,
-    /// Destination for resolved GPU timestamps, when profiling.
     ablate: Ablation,
+    /// `Some` while `--profile` is recording decode tokens.
+    ledger: Option<StageLedger>,
+    /// GPU span of the most recent step's command buffer, in ms — the
+    /// token's device time, so wall minus this is host time.
+    last_gpu_ms: f64,
+    /// Host time the most recent step spent encoding the command buffer
+    /// (before commit), in ms — overlapped with the previous token's GPU
+    /// execution by `step`, so only the first token pays it on the wall.
+    last_encode_ms: f64,
+    /// The next position's command buffer, encoded ahead of its input
+    /// (see `step.rs`).
+    prepared: Option<step::PreparedStep>,
+    /// KV capacity in positions; nothing is encoded past it.
+    max_positions: usize,
+    /// Device scratch for the head's argmax: block partials (values,
+    /// indices) and the one-u32 result. `None` without a head.
+    argmax: Option<[DeviceBuffer; 3]>,
 }
+
+/// Set to keep the argmax on the host (full-logits readback + scan) —
+/// the control arm for the device argmax, not a production setting.
+const HOST_ARGMAX_ENV: &str = "LARQL_LOWERED_HOST_ARGMAX";
+
+/// Stage runs one profiled token may hold before attribution stops. The
+/// device refuses a timestamp sample buffer above 4096 samples (two per
+/// run — `examples/stage_profiler_probe.rs`), and 2048 runs covers the
+/// finest class split (≤ 10 per layer) on a 200-layer stack.
+const PROFILE_MAX_STAGE_RUNS: usize = 2048;
 
 impl<'a> LoweredSession<'a> {
     /// Load every operand the plan consumes, once, resident on the
@@ -406,6 +447,19 @@ impl<'a> LoweredSession<'a> {
             wiring.elapsed().as_secs_f64()
         );
 
+        // Argmax scratch sized for the head's vocabulary. The control arm
+        // (`LARQL_LOWERED_HOST_ARGMAX=1`) keeps the argmax on the host so
+        // the device kernel can be A/B'd under one power state.
+        let host_argmax = std::env::var_os(HOST_ARGMAX_ENV).is_some();
+        let argmax = (vocab > 0 && !host_argmax).then(|| {
+            use larql_compute_metal::lowering::head::argmax_partials;
+            let parts = argmax_partials(vocab);
+            [
+                gpu.lowering_scratch(parts),
+                gpu.lowering_scratch(parts),
+                gpu.lowering_scratch(1),
+            ]
+        });
         Ok(Self {
             gpu,
             plan,
@@ -421,170 +475,13 @@ impl<'a> LoweredSession<'a> {
             inv_freq,
             position: 0,
             ablate: Ablation::from_env(),
+            ledger: None,
+            last_gpu_ms: 0.0,
+            last_encode_ms: 0.0,
+            prepared: None,
+            max_positions,
+            argmax,
         })
-    }
-
-    /// Step one token: embed on the host, then the entire stack and head
-    /// in **one** command buffer with a single wait.
-    /// Step one token: embed on the host, then the entire stack and
-    /// head in one command buffer with a single wait.
-    pub fn step(&mut self, token: u32) -> Result<Option<Vec<f32>>, VindexError> {
-        self.step_impl(token, None)
-    }
-
-    /// One step, capturing the embedding row and every layer's output for
-    /// this position — the per-layer planes a `shannon layer-diff` reads.
-    /// `layers_out[i]` is layer `i`'s post-FFN-residual hidden state.
-    pub fn step_capturing(
-        &mut self,
-        token: u32,
-    ) -> Result<(Option<Vec<f32>>, Vec<f32>, Vec<Vec<f32>>), VindexError> {
-        let mut embedding = Vec::new();
-        let mut layers_out = Vec::new();
-        let logits = self.step_impl(token, Some((&mut embedding, &mut layers_out)))?;
-        Ok((logits, embedding, layers_out))
-    }
-
-    fn step_impl(
-        &mut self,
-        token: u32,
-        capture: Option<(&mut Vec<f32>, &mut Vec<Vec<f32>>)>,
-    ) -> Result<Option<Vec<f32>>, VindexError> {
-        let t = self.position;
-        let row = &self.embed_table[token as usize * self.hidden..][..self.hidden];
-        let embedding = self
-            .plan
-            .embedding
-            .as_ref()
-            .ok_or_else(|| VindexError::Parse("no embedding".into()))?;
-        let mut h0 = row.to_vec();
-        if let Some(scale) = embedding.scale {
-            h0.iter_mut().for_each(|v| *v *= scale);
-        }
-        // The judged embedding norm: Muse-Glimmer RMS-normalises every
-        // looked-up row **weightlessly**. Nothing in the checkpoint
-        // records that it happens — there is no operand to classify, so
-        // no closure or parity gate over the container can see it, and
-        // omitting it produced entirely plausible logits with the wrong
-        // argmax (368 against the oracle's 13796). It was caught here
-        // only by comparing against the independent model oracle, which
-        // is precisely why that anchor exists.
-        if let Some(norm) = embedding.norm {
-            let ms = h0.iter().map(|v| (*v as f64).powi(2)).sum::<f64>() / h0.len() as f64;
-            let inv = 1.0 / (ms + norm.eps).sqrt();
-            h0.iter_mut().for_each(|v| *v = (*v as f64 * inv) as f32);
-        }
-        let capturing = capture.is_some();
-        // Per-layer capture buffers (hidden-sized), read back after the
-        // command buffer completes — a copy inside the stream, never a
-        // mid-stream readback.
-        let captures: Vec<DeviceBuffer> = if capturing {
-            (0..self.plan.layers.len())
-                .map(|_| self.gpu.lowering_scratch(self.hidden))
-                .collect()
-        } else {
-            Vec::new()
-        };
-        let h_in = self
-            .gpu
-            .lowering_upload(&h0)
-            .ok_or_else(|| VindexError::Parse("hidden upload failed".into()))?;
-
-        let s = &self.scratch;
-        let scratch = StackScratch {
-            h_a: &s[0],
-            h_b: &s[1],
-            attn_normed: &s[2],
-            q: &s[3],
-            gate: &s[4],
-            concat: &s[5],
-            gated: &s[12],
-            attn_out: &s[6],
-            attn_post: &s[7],
-            ffn_normed: &s[8],
-            ffn_gate: &s[9],
-            ffn_up: &s[10],
-            ffn_act: &s[11],
-            ffn_down: &s[13],
-            ffn_post: &s[14],
-            hybrid: (s.len() > HYBRID_SCRATCH_BASE).then(|| HybridScratch {
-                dense_out: &s[HYBRID_SCRATCH_BASE],
-                router_in: &s[HYBRID_SCRATCH_BASE + 1],
-                expert_sum: &s[HYBRID_SCRATCH_BASE + 2],
-                experts_out: &s[HYBRID_SCRATCH_BASE + 3],
-                branch_sum: &s[HYBRID_SCRATCH_BASE + 4],
-                zero: &s[HYBRID_SCRATCH_BASE + 6],
-            }),
-        };
-
-        let layers: Vec<LayerLowering> = self
-            .plan
-            .layers
-            .iter()
-            .zip(&self.layers)
-            .map(|(plan_layer, r)| self.layer_lowering(plan_layer, r, t))
-            .collect();
-
-        let checkpoints: Vec<larql_compute_metal::lowering::stack::Checkpoint> = captures
-            .iter()
-            .enumerate()
-            .map(
-                |(i, buf)| larql_compute_metal::lowering::stack::Checkpoint {
-                    after_layer: i,
-                    into: buf,
-                },
-            )
-            .collect();
-        let cmd = self.gpu.new_lowering_command_buffer();
-        let enc = cmd.new_compute_command_encoder();
-        let h_final = self
-            .gpu
-            .encode_stack(enc, &h_in, &layers, &scratch, &checkpoints);
-
-        let logits_buf = match (&self.final_norm, &self.head) {
-            (Some((nw, eps, off)), Some(head)) => {
-                let hs = HeadScratch {
-                    normed: &s[15],
-                    raw_logits: &s[17],
-                };
-                let hw = HeadWeights {
-                    projection: head.as_lowered(),
-                    norm_weight: nw,
-                };
-                let shape = HeadShape {
-                    hidden: self.hidden,
-                    vocab: self.vocab,
-                    norm_eps: *eps,
-                    norm_weight_offset: *off,
-                    multiplier: self.head_multiplier,
-                    softcap: self.head_softcap,
-                };
-                self.gpu.encode_head(enc, h_final, &s[16], &hw, &hs, &shape);
-                Some(&s[16])
-            }
-            _ => None,
-        };
-        enc.end_encoding();
-        cmd.commit();
-        cmd.wait_until_completed();
-
-        let out = logits_buf.and_then(|b| self.gpu.lowering_readback(b, self.vocab));
-        if let Some((embedding, layers_out)) = capture {
-            *embedding = h0;
-            for buf in &captures {
-                layers_out.push(
-                    self.gpu
-                        .lowering_readback(buf, self.hidden)
-                        .ok_or_else(|| VindexError::Parse("capture readback failed".into()))?,
-                );
-            }
-        }
-        for buf in captures {
-            self.gpu.recycle_lowering_scratch(buf);
-        }
-        self.gpu.recycle_lowering_scratch(h_in);
-        self.position += 1;
-        Ok(out)
     }
 
     fn layer_lowering<'b>(
@@ -760,6 +657,54 @@ impl<'a> LoweredSession<'a> {
     }
 
     /// Matrix geometry the loader saw, for diagnostics.
+    /// GPU span of the most recent step, in ms.
+    pub fn last_gpu_ms(&self) -> f64 {
+        self.last_gpu_ms
+    }
+
+    /// Host encode time of the most recent step, in ms.
+    pub fn last_encode_ms(&self) -> f64 {
+        self.last_encode_ms
+    }
+
+    /// Start recording per-stage GPU time for every following step.
+    pub fn start_profile(&mut self) {
+        // A step encoded ahead of this call carries no sampler; drop it
+        // so the first profiled token is encoded under the profiler.
+        if let Some(p) = self.prepared.take() {
+            self.discard(p);
+        }
+        self.ledger = Some(StageLedger {
+            bytes: self.stage_bytes(),
+            ..Default::default()
+        });
+    }
+
+    /// The recorded ledger, rendered; `None` if profiling never started.
+    pub fn profile_report(&self) -> Option<Vec<String>> {
+        self.ledger.as_ref().map(|l| l.render())
+    }
+
+    /// Bytes one token reads per stage class, from the resident
+    /// operands.
+    fn stage_bytes(&self) -> StageBytes {
+        let mut b = StageBytes::default();
+        for l in &self.layers {
+            b.attn_proj += l.q.bytes() + l.k.bytes() + l.v.bytes();
+            b.attn_out += l.o.bytes();
+            if let Some(g) = &l.gate {
+                b.attn_proj += g.bytes();
+            }
+            let (dense, experts) = l.ffn.bytes_per_token();
+            b.dense_ffn += dense;
+            b.experts += experts;
+        }
+        if let Some(h) = &self.head {
+            b.head = h.bytes();
+        }
+        b
+    }
+
     pub fn head_geometry(&self) -> Option<(usize, usize)> {
         self.head.as_ref().map(|h| (h.rows, h.cols))
     }
@@ -796,151 +741,4 @@ fn ffn_activation(
             "the lowering has no gate/up kernel for activation {other:?}; refusing"
         ))),
     }
-}
-
-fn argmax_of(logits: &[f32]) -> u32 {
-    logits
-        .iter()
-        .enumerate()
-        .fold(
-            (0usize, f32::MIN),
-            |(bi, bv), (i, v)| {
-                if *v > bv {
-                    (i, *v)
-                } else {
-                    (bi, bv)
-                }
-            },
-        )
-        .0 as u32
-}
-
-/// Run the plan through the lowering and report the final position's
-/// logits, in the same shape `run_exec`'s other arms do.
-pub(super) fn run_lowered(
-    args: &super::ExecArgs,
-    tokens: &[u32],
-    plan: &ComponentOpPlan,
-    store: &OperandStore,
-    formats: WeightFormats,
-    label: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let gpu = MetalBackend::new().ok_or("no Metal device available for --backend metal-lowered")?;
-    let total = tokens.len() + args.generate.unwrap_or(0);
-    let loading = std::time::Instant::now();
-    let mut keep = Vec::new();
-    let mut session = LoweredSession::new(&gpu, plan, store, formats, total.max(1), &mut keep)?;
-    let load_seconds = loading.elapsed().as_secs_f64();
-    eprintln!("weights resident in {load_seconds:.1} s");
-    if let Some((rows, cols)) = session.head_geometry() {
-        eprintln!("head geometry: [{rows}, {cols}]");
-    }
-    eprintln!(
-        "plan: {} rope base(s), final norm {}",
-        session.rope_bases(),
-        if session.has_final_norm() {
-            "present"
-        } else {
-            "absent"
-        }
-    );
-
-    // ── per-layer dump: teacher-force the given tokens, capturing every
-    //    layer's output per position into [seq, hidden] planes a
-    //    `shannon layer-diff` reads (the lowered arm of the A-9.5 chain).
-    if let Some(dir) = &args.dump_layers {
-        return dump_lowered(&mut session, tokens, plan, &args.container, label, dir);
-    }
-
-    let prompt_started = std::time::Instant::now();
-    let mut logits: Option<Vec<f32>> = None;
-    for &token in tokens {
-        logits = session.step(token)?;
-    }
-    // ── decode, kept strictly separate from prefill ─────────────────
-    let mut decode_ms: Vec<f64> = Vec::new();
-    let mut generated: Vec<u32> = Vec::new();
-    if let Some(n) = args.generate {
-        let mut next = logits
-            .as_ref()
-            .map(|l| argmax_of(l))
-            .ok_or("plan carries no output head — cannot generate")?;
-        for _ in 0..n {
-            generated.push(next);
-            let started = std::time::Instant::now();
-            let l = session.step(next)?.ok_or("plan carries no output head")?;
-            decode_ms.push(started.elapsed().as_secs_f64() * 1e3);
-            next = argmax_of(&l);
-            logits = Some(l);
-        }
-    }
-
-    let prompt_seconds = prompt_started.elapsed().as_secs_f64();
-    if session.ablation_active() {
-        println!("ABLATED RUN — numbers are wrong by construction; timing only");
-    }
-    println!("engine: vindex3-metal-lowered-{label}");
-    println!("weights loaded: {load_seconds:.1} s");
-    println!(
-        "prompt: {} tokens in {prompt_seconds:.1} s ({:.0} ms/token)",
-        tokens.len(),
-        prompt_seconds * 1e3 / tokens.len().max(1) as f64,
-    );
-    if !decode_ms.is_empty() {
-        let mut sorted = decode_ms.clone();
-        sorted.sort_by(|a, b| a.partial_cmp(b).expect("finite"));
-        let pct = |q: f64| sorted[((sorted.len() - 1) as f64 * q).round() as usize];
-        // Steady state = the second half, so warmup and first-touch
-        // residency do not flatter or penalise the median.
-        let steady = &decode_ms[decode_ms.len() / 2..];
-        let steady_mean = steady.iter().sum::<f64>() / steady.len() as f64;
-        println!("decode tokens: {}", decode_ms.len());
-        println!("first token: {:.0} ms", decode_ms[0]);
-        println!("decode p50: {:.0} ms  p95: {:.0} ms", pct(0.50), pct(0.95));
-        println!(
-            "steady (last half): {:.0} ms/token ({:.3} tok/s)",
-            steady_mean,
-            1000.0 / steady_mean
-        );
-        println!("generated ids: {generated:?}");
-        // Which attention kernel actually ran — the seqpar port is judged
-        // by this witness, not inferred from a throughput number.
-        {
-            use std::sync::atomic::Ordering;
-            let serial =
-                larql_compute_metal::route_witness::LOWERED_ATTEND_SERIAL.load(Ordering::Relaxed);
-            let seqpar =
-                larql_compute_metal::route_witness::LOWERED_ATTEND_SEQPAR.load(Ordering::Relaxed);
-            println!("attention dispatches: serial {serial}  seqpar {seqpar}");
-        }
-    }
-    match &logits {
-        Some(l) => {
-            let (best, value) =
-                l.iter()
-                    .enumerate()
-                    .fold(
-                        (0usize, f32::MIN),
-                        |(bi, bv), (i, v)| {
-                            if *v > bv {
-                                (i, *v)
-                            } else {
-                                (bi, bv)
-                            }
-                        },
-                    );
-            println!("logits: {}, argmax {best} ({value:+.4})", l.len());
-            if let Some(path) = &args.logit_dump {
-                use std::io::Write;
-                let mut f = std::io::BufWriter::new(std::fs::File::create(path)?);
-                for v in l {
-                    f.write_all(&v.to_le_bytes())?;
-                }
-                f.flush()?;
-                println!("wrote [{}] f32 to {}", l.len(), path.display());
-            }
-        }
-        None => println!("logits: none (plan carries no output head)"),
-    }
-    Ok(())
 }
