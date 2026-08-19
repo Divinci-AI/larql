@@ -453,6 +453,35 @@ impl MetalBackend {
         );
     }
 
+    /// Encode `out = table[idx[0]] * scale` — the embedding lookup for
+    /// the id a prior `encode_argmax` wrote, on the device (1c). `scale`
+    /// 0.0 encodes an absent multiplier, as the head kernel does.
+    pub fn encode_embed_gather(
+        &self,
+        enc: &ComputeCommandEncoderRef,
+        table: &Buffer,
+        idx: &Buffer,
+        out: &Buffer,
+        hidden: usize,
+        scale: f32,
+    ) {
+        let pipeline = &self.norms.embed_gather_pipeline;
+        enc.set_compute_pipeline_state(pipeline);
+        enc.set_buffer(0, Some(table), 0);
+        enc.set_buffer(1, Some(idx), 0);
+        enc.set_buffer(2, Some(out), 0);
+        set_u32(enc, 3, hidden as u32);
+        set_f32(enc, 4, scale);
+        enc.dispatch_thread_groups(
+            metal::MTLSize::new(1, 1, 1),
+            metal::MTLSize::new(
+                crate::kernels::DISPATCH_TG_MAX_THREADS.min(hidden as u64),
+                1,
+                1,
+            ),
+        );
+    }
+
     /// Encode up to three RMS norms of one `x` (shared `eps`) in ONE
     /// dispatch — bit-identical to three `rms_norm` dispatches.
     pub fn encode_rms_norm_multi(

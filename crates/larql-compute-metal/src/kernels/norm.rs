@@ -91,6 +91,8 @@ pub struct NormKernels {
     /// device as four bytes instead of the whole vocabulary.
     /// One input, up to three RMS-normed outputs in one dispatch.
     pub rms_norm_multi3_pipeline: ComputePipelineState,
+    /// Embedding row lookup + scale from the device argmax result.
+    pub embed_gather_pipeline: ComputePipelineState,
     pub argmax_partial_pipeline: ComputePipelineState,
     pub argmax_final_pipeline: ComputePipelineState,
 }
@@ -151,6 +153,7 @@ impl NormKernels {
                 device, library,
             ),
             rms_norm_multi3_pipeline: r::<shaders::plan_glue::RmsNormMulti3Kernel>(device, library),
+            embed_gather_pipeline: r::<shaders::plan_glue::EmbedGatherKernel>(device, library),
             argmax_partial_pipeline: r::<shaders::plan_glue::ArgmaxPartialKernel>(device, library),
             argmax_final_pipeline: r::<shaders::plan_glue::ArgmaxFinalKernel>(device, library),
             scale_vector_pipeline: r::<shaders::residual_inject::ScaleVectorKernel>(

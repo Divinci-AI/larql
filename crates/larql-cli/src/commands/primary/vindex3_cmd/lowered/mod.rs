@@ -156,8 +156,28 @@ pub struct LoweredSession<'a> {
     /// KV capacity in positions; nothing is encoded past it.
     max_positions: usize,
     /// Device scratch for the head's argmax: block partials (values,
-    /// indices) and the one-u32 result. `None` without a head.
-    argmax: Option<[DeviceBuffer; 3]>,
+    /// indices) and TWO one-u32 results, alternated by position parity —
+    /// with commit-ahead (1c) step t+1 executes while the host still
+    /// reads step t's id, so they must not share the output word.
+    /// `None` without a head.
+    argmax: Option<[DeviceBuffer; 4]>,
+    /// The embedding table resident on the device (zero-copy over the
+    /// host allocation), for the 1c gather path. `None` when the plan
+    /// carries a judged embedding norm — the host computes that in f64,
+    /// which the f32 kernel cannot reproduce, so those plans keep the
+    /// host embed.
+    device_embed: Option<DeviceBuffer>,
+    /// The id the device argmax produced for the most recent completed
+    /// step; a decode step whose input token equals it can gather the
+    /// embedding on the device instead of uploading a host row.
+    last_device_id: Option<u32>,
+    /// Set by `begin_decode`: every following step continues from the
+    /// device argmax, so look-ahead steps may gather their embedding on
+    /// the device and be committed before their predecessor completes.
+    /// Never set during the prompt — a prompt look-ahead's token is the
+    /// caller's, not the argmax's, and a committed wrong-token step
+    /// would execute (and burn GPU time) before being discarded.
+    decode_chain: bool,
 }
 
 /// Set to keep the argmax on the host (full-logits readback + scan) —
@@ -447,6 +467,22 @@ impl<'a> LoweredSession<'a> {
             wiring.elapsed().as_secs_f64()
         );
 
+        // The embedding table as a device buffer over the same host
+        // floats — a row lookup on the GPU reads only the sampled row's
+        // 4·hidden bytes, so residency does not change. Refused when the
+        // plan judges a weightless embedding norm (host f64 semantics).
+        let device_embed = (plan.embedding.as_ref().is_some_and(|e| e.norm.is_none())).then(|| {
+            // SAFETY: an f32 slice viewed as bytes, same length; the Vec
+            // lives in `Self` for the session, outliving the buffer's use.
+            let bytes = unsafe {
+                std::slice::from_raw_parts(
+                    embed_table.as_ptr() as *const u8,
+                    std::mem::size_of_val(embed_table.as_slice()),
+                )
+            };
+            gpu.lowering_weight(bytes)
+        });
+
         // Argmax scratch sized for the head's vocabulary. The control arm
         // (`LARQL_LOWERED_HOST_ARGMAX=1`) keeps the argmax on the host so
         // the device kernel can be A/B'd under one power state.
@@ -457,6 +493,7 @@ impl<'a> LoweredSession<'a> {
             [
                 gpu.lowering_scratch(parts),
                 gpu.lowering_scratch(parts),
+                gpu.lowering_scratch(1),
                 gpu.lowering_scratch(1),
             ]
         });
@@ -481,6 +518,9 @@ impl<'a> LoweredSession<'a> {
             prepared: None,
             max_positions,
             argmax,
+            device_embed,
+            last_device_id: None,
+            decode_chain: false,
         })
     }
 

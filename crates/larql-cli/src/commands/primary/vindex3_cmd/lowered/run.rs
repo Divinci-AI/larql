@@ -66,6 +66,10 @@ pub(in super::super) fn run_lowered(
         if args.profile {
             session.start_profile();
         }
+        // From here every step continues from the device argmax: the
+        // session gathers each next embedding on the device and commits
+        // the look-ahead before its predecessor completes (1c).
+        session.begin_decode();
         for _ in 0..n {
             generated.push(next);
             let started = std::time::Instant::now();
@@ -76,8 +80,10 @@ pub(in super::super) fn run_lowered(
             next = id;
         }
     }
-    // The final position's logits, for the summary line and
-    // `--logit-dump`: read once, after the loop, not per token.
+    // Wait out the committed look-ahead step (its logits now occupy the
+    // head slot; its argmax id is the one they belong to), then read the
+    // final logits once for the summary line.
+    let quiesced_id = session.quiesce();
     let logits = session.last_logits();
 
     let prompt_seconds = prompt_started.elapsed().as_secs_f64();
@@ -146,11 +152,11 @@ pub(in super::super) fn run_lowered(
             // standing gate on the kernel, free on every run.
             let best = host_argmax(l) as usize;
             let value = l[best];
-            let device = if generated.is_empty() {
+            let device = quiesced_id.or(if generated.is_empty() {
                 next_id
             } else {
                 Some(next)
-            };
+            });
             let check = match device {
                 Some(d) if d as usize == best => "device argmax agrees",
                 Some(d) => {
