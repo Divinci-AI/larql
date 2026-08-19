@@ -112,8 +112,9 @@ impl MetalBackend {
             gate_half_bytes as u32,
         );
 
+        let ablate = moe_ablation();
         // E3: bias presence is a layer fact, stated by the table.
-        let stage_gate_up_bias = table.gate_up_bias_bank.is_some();
+        let stage_gate_up_bias = table.gate_up_bias_bank.is_some() && !ablate.bias;
         if let Some(bank) = &table.gate_up_bias_bank {
             self.encode_bias_stage(
                 enc,
@@ -235,7 +236,7 @@ impl MetalBackend {
         // Activation — slot-shaped, route-independent (identical to the
         // legacy path; only the bias-presence authority changed).
         let inter_u32 = inter as u32;
-        for e in 0..n_slots {
+        for e in 0..if ablate.act { 0 } else { n_slots } {
             let g_offset = (e * inter * 4) as u64;
             let a_offset = (e * inter_padded * 4) as u64;
             match moe.gate_rule {
@@ -327,7 +328,7 @@ impl MetalBackend {
 
         // Down biases: descriptor-driven staging into the same scratch the
         // combine kernel reads (E1 — the last route-dependent CPU memcpy).
-        let has_down_bias = table.down_bias_bank.is_some();
+        let has_down_bias = table.down_bias_bank.is_some() && !ablate.bias;
         if let Some(bank) = &table.down_bias_bank {
             let hidden_u32 = hidden as u32;
             let n = n_slots as u32;
@@ -343,6 +344,9 @@ impl MetalBackend {
             );
         }
 
+        if ablate.combine {
+            return;
+        }
         // Combine — same kernel, routing weights from rung B's GPU buffer
         // (E2: the set_bytes → set_buffer flip, kernel signature unchanged).
         let hidden_u = hidden as u32;
@@ -551,6 +555,47 @@ impl MetalBackend {
 
 #[cfg(test)]
 mod tests;
+
+/// Timing-only ablation of the expert tail machinery, for the A-12
+/// in-situ decomposition: `LARQL_ABLATE_MOE=bias,act,combine` (any
+/// subset). **Numbers are wrong by construction** — the run exists to
+/// price a component's wall time, never to produce output — and the
+/// switch announces itself once on stderr so no measurement can quietly
+/// inherit it.
+#[derive(Clone, Copy, Default)]
+struct MoeAblation {
+    bias: bool,
+    act: bool,
+    combine: bool,
+}
+
+fn moe_ablation() -> MoeAblation {
+    static A: std::sync::OnceLock<MoeAblation> = std::sync::OnceLock::new();
+    *A.get_or_init(|| {
+        let Ok(spec) = std::env::var("LARQL_ABLATE_MOE") else {
+            return MoeAblation::default();
+        };
+        let mut a = MoeAblation::default();
+        for part in spec.split(',') {
+            match part.trim() {
+                "bias" => a.bias = true,
+                "act" => a.act = true,
+                "combine" => a.combine = true,
+                "" => {}
+                other => eprintln!("[moe] unknown LARQL_ABLATE_MOE part: {other}"),
+            }
+        }
+        if a.bias || a.act || a.combine {
+            eprintln!(
+                "[moe] ABLATED RUN — skipping{}{}{}; numbers are wrong by construction, timing only",
+                if a.bias { " bias" } else { "" },
+                if a.act { " act" } else { "" },
+                if a.combine { " combine" } else { "" },
+            );
+        }
+        a
+    })
+}
 
 /// Control for the x2 expert GEMV arm: `LARQL_MXFP4_EXPERT_X2=0` keeps
 /// the single-row vec kernel. Read once.
