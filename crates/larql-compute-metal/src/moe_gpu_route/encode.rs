@@ -144,32 +144,69 @@ impl MetalBackend {
                     .gate_up_scale_base
                     .as_ref()
                     .expect("gpu_route_supported checked the scale streams");
-                let row_tiles = (inter as u64).div_ceil(kh.rows_per_tg);
-                for half in [FusedHalf::Gate, FusedHalf::Up] {
-                    // Halves are selected by WHICH ROWS the kernel walks —
-                    // one payload table and one scale table serve both.
-                    let (row_base, row_stride) = moe.fused_row_layout.row_walk(half, inter);
-                    let (row_base, row_stride) = (row_base as u32, row_stride as u32);
-                    let out_buf = match half {
-                        FusedHalf::Gate => &scratch.g_out,
-                        FusedHalf::Up => &scratch.u_out,
-                    };
-                    enc.set_compute_pipeline_state(&kh.state);
+                let fused_gu = std::ptr::eq(
+                    kh as *const _,
+                    &self.quant.mxfp4_grouped_x2_pipeline as *const _,
+                ) && expert_gu_fusion_enabled();
+                if fused_gu {
+                    // A-12 expert pass: both halves in ONE dispatch — one
+                    // GEMV α per layer instead of two, and twice the
+                    // threadgroups the x2 arm alone launches. Bit-identical
+                    // per row to the two-dispatch form.
+                    let khgu = &self.quant.mxfp4_grouped_x2_gu_pipeline;
+                    let (g_base, g_stride) = moe.fused_row_layout.row_walk(FusedHalf::Gate, inter);
+                    let (u_base, u_stride) = moe.fused_row_layout.row_walk(FusedHalf::Up, inter);
+                    let (g_base, g_stride) = (g_base as u32, g_stride as u32);
+                    let (u_base, u_stride) = (u_base as u32, u_stride as u32);
+                    let row_tiles = (2 * inter as u64).div_ceil(khgu.rows_per_tg);
+                    enc.set_compute_pipeline_state(&khgu.state);
                     enc.set_buffer(0, Some(&table.gate_up_base), 0);
                     enc.set_buffer(1, Some(&bindings.gate0_offs), 0);
                     enc.set_buffer(2, Some(scale_base), 0);
                     enc.set_buffer(3, Some(&bindings.gu_scale_offs), 0);
                     enc.set_buffer(4, Some(x_buf), 0);
-                    enc.set_buffer(5, Some(out_buf), 0);
+                    enc.set_buffer(5, Some(&scratch.g_out), 0);
                     enc.set_bytes(6, 4, &n_rows as *const u32 as *const c_void);
                     enc.set_bytes(7, 4, &k_cols as *const u32 as *const c_void);
                     enc.set_bytes(8, 4, &xstride_shared as *const u32 as *const c_void);
-                    enc.set_bytes(9, 4, &row_base as *const u32 as *const c_void);
-                    enc.set_bytes(10, 4, &row_stride as *const u32 as *const c_void);
+                    enc.set_bytes(9, 4, &g_base as *const u32 as *const c_void);
+                    enc.set_bytes(10, 4, &g_stride as *const u32 as *const c_void);
+                    enc.set_buffer(11, Some(&scratch.u_out), 0);
+                    enc.set_bytes(12, 4, &u_base as *const u32 as *const c_void);
+                    enc.set_bytes(13, 4, &u_stride as *const u32 as *const c_void);
                     enc.dispatch_thread_groups(
                         MTLSize::new(row_tiles, n_slots as u64, 1),
-                        MTLSize::new(kh.threads_per_tg, 1, 1),
+                        MTLSize::new(khgu.threads_per_tg, 1, 1),
                     );
+                } else {
+                    let row_tiles = (inter as u64).div_ceil(kh.rows_per_tg);
+                    for half in [FusedHalf::Gate, FusedHalf::Up] {
+                        // Halves are selected by WHICH ROWS the kernel
+                        // walks — one payload table and one scale table
+                        // serve both.
+                        let (row_base, row_stride) = moe.fused_row_layout.row_walk(half, inter);
+                        let (row_base, row_stride) = (row_base as u32, row_stride as u32);
+                        let out_buf = match half {
+                            FusedHalf::Gate => &scratch.g_out,
+                            FusedHalf::Up => &scratch.u_out,
+                        };
+                        enc.set_compute_pipeline_state(&kh.state);
+                        enc.set_buffer(0, Some(&table.gate_up_base), 0);
+                        enc.set_buffer(1, Some(&bindings.gate0_offs), 0);
+                        enc.set_buffer(2, Some(scale_base), 0);
+                        enc.set_buffer(3, Some(&bindings.gu_scale_offs), 0);
+                        enc.set_buffer(4, Some(x_buf), 0);
+                        enc.set_buffer(5, Some(out_buf), 0);
+                        enc.set_bytes(6, 4, &n_rows as *const u32 as *const c_void);
+                        enc.set_bytes(7, 4, &k_cols as *const u32 as *const c_void);
+                        enc.set_bytes(8, 4, &xstride_shared as *const u32 as *const c_void);
+                        enc.set_bytes(9, 4, &row_base as *const u32 as *const c_void);
+                        enc.set_bytes(10, 4, &row_stride as *const u32 as *const c_void);
+                        enc.dispatch_thread_groups(
+                            MTLSize::new(row_tiles, n_slots as u64, 1),
+                            MTLSize::new(kh.threads_per_tg, 1, 1),
+                        );
+                    }
                 }
             }
             _ => {
@@ -351,6 +388,14 @@ impl MetalBackend {
         if self.quant.mxfp4_grouped_arm == Mxfp4Arm::SplitLut16Vec && !table.payload_offsets_vec16 {
             return (&self.quant.mxfp4g_split_lut16_pipeline, binding);
         }
+        // A-12 expert pass: the x2 arm (two rows per simdgroup sharing X
+        // loads) is bit-identical per row and needs the same 16-byte
+        // alignment as the vec arm. Decomposition bench: 262 → 313 GB/s
+        // at the gpt-oss expert shape (`examples/moe_expert_alpha_b.rs`).
+        // `LARQL_MXFP4_EXPERT_X2=0` restores the single-row arm (control).
+        if self.quant.mxfp4_grouped_arm == Mxfp4Arm::SplitLut16Vec && expert_x2_enabled() {
+            return (&self.quant.mxfp4_grouped_x2_pipeline, binding);
+        }
         (kh, binding)
     }
 
@@ -506,3 +551,19 @@ impl MetalBackend {
 
 #[cfg(test)]
 mod tests;
+
+/// Control for the x2 expert GEMV arm: `LARQL_MXFP4_EXPERT_X2=0` keeps
+/// the single-row vec kernel. Read once.
+fn expert_x2_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("LARQL_MXFP4_EXPERT_X2").as_deref() != Ok("0"))
+}
+
+/// Opt-in for the fused gate+up expert dispatch (`LARQL_MXFP4_EXPERT_GU=1`).
+/// Measured NULL on gpt-oss (−0.04 ms, within noise): the second GEMV's α
+/// is hidden behind the first's tail and 1440 threadgroups already fill
+/// the machine — the class-aware α model's prediction. Retained as an arm.
+fn expert_gu_fusion_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("LARQL_MXFP4_EXPERT_GU").as_deref() == Ok("1"))
+}

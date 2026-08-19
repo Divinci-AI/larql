@@ -245,6 +245,179 @@ kernel void mxfp4g_split_lut16_vec(
 }
 "#;
 
+/// Arm A2x2 — A2's layout and math with **two rows per simdgroup sharing
+/// one set of X loads** (the A-5a lesson transplanted: the NVFP4 GEMV
+/// moved 332 → 373 GB/s from exactly this change, and the expert
+/// decomposition priced the deficit in the kernel body, not the routing
+/// machinery — indirection measured free, 212 vs 214 GB/s). Per-row group
+/// walk and summation order are A2's exactly, so each row's output is
+/// bit-identical to A2's.
+const KERNEL_A2X2: &str = r#"
+kernel void mxfp4g_split_lut16_vec_x2(
+    device const uchar*  Wp        [[buffer(0)]],
+    device const uint*   offsets   [[buffer(1)]],
+    device const uchar*  Ws        [[buffer(2)]],
+    device const uint*   s_offsets [[buffer(3)]],
+    device const float*  X         [[buffer(4)]],
+    device float*        out       [[buffer(5)]],
+    constant uint&       N         [[buffer(6)]],
+    constant uint&       K         [[buffer(7)]],
+    constant uint&       XSTRIDE   [[buffer(8)]],
+    constant uint&       ROWBASE   [[buffer(9)]],
+    constant uint&       ROWSTRIDE [[buffer(10)]],
+    uint2 tg_id [[threadgroup_position_in_grid]],
+    uint  lane  [[thread_index_in_simdgroup]],
+    uint  sg_id [[simdgroup_index_in_threadgroup]])
+{
+    const uint slot = tg_id.y;
+    const uint row0 = (tg_id.x * MXG_ROWS_PER_TG + sg_id) * 2u;
+    if (row0 >= N) { return; }
+    const bool has1 = row0 + 1u < N;
+
+    const uint groups = K / MXG_GROUP_ELEMS;
+    const uint frow0 = ROWBASE + row0 * ROWSTRIDE;
+    const uint frow1 = frow0 + ROWSTRIDE;
+    const ulong pbase = (ulong)offsets[slot];
+    const ulong sbase = (ulong)s_offsets[slot];
+    device const uint4* row_p0 =
+        (device const uint4*)(Wp + pbase + (ulong)frow0 * groups * MXG_GROUP_BYTES);
+    device const uchar* row_s0 = Ws + sbase + (ulong)frow0 * groups;
+    device const uint4* row_p1 =
+        (device const uint4*)(Wp + pbase + (ulong)frow1 * groups * MXG_GROUP_BYTES);
+    device const uchar* row_s1 = Ws + sbase + (ulong)frow1 * groups;
+    device const float4* Xs4 =
+        (device const float4*)(X + (ulong)slot * XSTRIDE);
+
+    float acc0 = 0.0f;
+    float acc1 = 0.0f;
+    for (uint g = lane; g < groups; g += 32u) {
+        const uint xb = g * 8u;
+        const float4 xa = Xs4[xb];
+        const float4 xbv = Xs4[xb + 1u];
+        const float4 xc = Xs4[xb + 2u];
+        const float4 xd = Xs4[xb + 3u];
+        const float4 xe = Xs4[xb + 4u];
+        const float4 xf = Xs4[xb + 5u];
+        const float4 xg = Xs4[xb + 6u];
+        const float4 xh = Xs4[xb + 7u];
+        {
+            const float scale = mxg_e8m0(row_s0[g]);
+            const uint4 w = row_p0[g];
+            float part = mxg_dot8(w.x, xa, xbv)
+                       + mxg_dot8(w.y, xc, xd)
+                       + mxg_dot8(w.z, xe, xf)
+                       + mxg_dot8(w.w, xg, xh);
+            acc0 += scale * part;
+        }
+        if (has1) {
+            const float scale = mxg_e8m0(row_s1[g]);
+            const uint4 w = row_p1[g];
+            float part = mxg_dot8(w.x, xa, xbv)
+                       + mxg_dot8(w.y, xc, xd)
+                       + mxg_dot8(w.z, xe, xf)
+                       + mxg_dot8(w.w, xg, xh);
+            acc1 += scale * part;
+        }
+    }
+    acc0 = simd_sum(acc0);
+    acc1 = simd_sum(acc1);
+    if (lane == 0u) {
+        out[slot * N + row0] = acc0;
+        if (has1) { out[slot * N + row0 + 1u] = acc1; }
+    }
+}
+"#;
+
+/// A2x2gu — BOTH fused halves in one dispatch: logical rows `0..2N` where
+/// row `l < N` walks the gate half into `out`, `l >= N` walks the up half
+/// into `out2`. Doubles the threadgroup count the x2 arm halved (the
+/// decomposition showed slot-grid parallelism worth +50 GB/s at this
+/// shape) and pays one GEMV α per layer instead of two. Per-row body is
+/// A2x2's exactly → bit-identical to two x2 dispatches.
+const KERNEL_A2X2GU: &str = r#"
+kernel void mxfp4g_split_lut16_vec_x2_gu(
+    device const uchar*  Wp        [[buffer(0)]],
+    device const uint*   offsets   [[buffer(1)]],
+    device const uchar*  Ws        [[buffer(2)]],
+    device const uint*   s_offsets [[buffer(3)]],
+    device const float*  X         [[buffer(4)]],
+    device float*        out       [[buffer(5)]],
+    constant uint&       N         [[buffer(6)]],
+    constant uint&       K         [[buffer(7)]],
+    constant uint&       XSTRIDE   [[buffer(8)]],
+    constant uint&       ROWBASE   [[buffer(9)]],
+    constant uint&       ROWSTRIDE [[buffer(10)]],
+    device float*        out2      [[buffer(11)]],
+    constant uint&       ROWBASE2  [[buffer(12)]],
+    constant uint&       ROWSTRIDE2 [[buffer(13)]],
+    uint2 tg_id [[threadgroup_position_in_grid]],
+    uint  lane  [[thread_index_in_simdgroup]],
+    uint  sg_id [[simdgroup_index_in_threadgroup]])
+{
+    const uint slot = tg_id.y;
+    const uint l0 = (tg_id.x * MXG_ROWS_PER_TG + sg_id) * 2u;
+    const uint total = 2u * N;
+    if (l0 >= total) { return; }
+    const bool has1 = l0 + 1u < total;
+
+    const uint groups = K / MXG_GROUP_ELEMS;
+    const ulong pbase = (ulong)offsets[slot];
+    const ulong sbase = (ulong)s_offsets[slot];
+
+    // Per-row half resolution into scalars (the seg3 lesson: a
+    // dynamically indexed pointer array spills).
+    const uint l1 = l0 + 1u;
+    const bool up0 = l0 >= N;
+    const bool up1 = l1 >= N;
+    const uint r0 = up0 ? (l0 - N) : l0;
+    const uint r1 = up1 ? (l1 - N) : l1;
+    const uint frow0 = (up0 ? ROWBASE2 : ROWBASE) + r0 * (up0 ? ROWSTRIDE2 : ROWSTRIDE);
+    const uint frow1 = (up1 ? ROWBASE2 : ROWBASE) + r1 * (up1 ? ROWSTRIDE2 : ROWSTRIDE);
+    device const uint4* row_p0 =
+        (device const uint4*)(Wp + pbase + (ulong)frow0 * groups * MXG_GROUP_BYTES);
+    device const uchar* row_s0 = Ws + sbase + (ulong)frow0 * groups;
+    device const uint4* row_p1 =
+        (device const uint4*)(Wp + pbase + (ulong)frow1 * groups * MXG_GROUP_BYTES);
+    device const uchar* row_s1 = Ws + sbase + (ulong)frow1 * groups;
+    device const float4* Xs4 =
+        (device const float4*)(X + (ulong)slot * XSTRIDE);
+
+    float acc0 = 0.0f;
+    float acc1 = 0.0f;
+    for (uint g = lane; g < groups; g += 32u) {
+        const uint xb = g * 8u;
+        const float4 xa = Xs4[xb];
+        const float4 xbv = Xs4[xb + 1u];
+        const float4 xc = Xs4[xb + 2u];
+        const float4 xd = Xs4[xb + 3u];
+        const float4 xe = Xs4[xb + 4u];
+        const float4 xf = Xs4[xb + 5u];
+        const float4 xg = Xs4[xb + 6u];
+        const float4 xh = Xs4[xb + 7u];
+        {
+            const float scale = mxg_e8m0(row_s0[g]);
+            const uint4 w = row_p0[g];
+            acc0 += scale * (mxg_dot8(w.x, xa, xbv) + mxg_dot8(w.y, xc, xd)
+                           + mxg_dot8(w.z, xe, xf) + mxg_dot8(w.w, xg, xh));
+        }
+        if (has1) {
+            const float scale = mxg_e8m0(row_s1[g]);
+            const uint4 w = row_p1[g];
+            acc1 += scale * (mxg_dot8(w.x, xa, xbv) + mxg_dot8(w.y, xc, xd)
+                           + mxg_dot8(w.z, xe, xf) + mxg_dot8(w.w, xg, xh));
+        }
+    }
+    acc0 = simd_sum(acc0);
+    acc1 = simd_sum(acc1);
+    if (lane == 0u) {
+        if (up0) { out2[slot * N + r0] = acc0; } else { out[slot * N + r0] = acc0; }
+        if (has1) {
+            if (up1) { out2[slot * N + r1] = acc1; } else { out[slot * N + r1] = acc1; }
+        }
+    }
+}
+"#;
+
 /// Body shared by the interleaved arms; only the inner decode differs.
 fn interleaved(name: &str, decode: &str) -> String {
     format!(
@@ -393,6 +566,8 @@ pub fn shader() -> String {
     s.push_str(&pair_table());
     s.push_str(KERNEL_A);
     s.push_str(KERNEL_A2);
+    s.push_str(KERNEL_A2X2);
+    s.push_str(KERNEL_A2X2GU);
     s.push_str(&interleaved("mxfp4g_inter_lut16", DECODE_LUT16));
     s.push_str(&interleaved("mxfp4g_inter_pair", DECODE_PAIR));
     s.push_str(&interleaved("mxfp4g_inter_magsign", DECODE_MAG_SIGN));
@@ -415,6 +590,20 @@ macro_rules! arm {
 
 arm!(KernelSplitLut16, "mxfp4g_split_lut16");
 arm!(KernelSplitLut16Vec, "mxfp4g_split_lut16_vec");
+/// A2x2gu — gate+up in one dispatch, 8 logical rows per threadgroup.
+pub struct KernelSplitLut16VecX2Gu;
+impl crate::kernels::TiledKernel for KernelSplitLut16VecX2Gu {
+    const KERNEL_NAME: &'static str = "mxfp4g_split_lut16_vec_x2_gu";
+    const ROWS_PER_TG: u64 = 8;
+    const THREADS_PER_TG: u64 = 128;
+}
+/// A2x2 — 8 rows per threadgroup (4 simdgroups × 2 rows), 128 threads.
+pub struct KernelSplitLut16VecX2;
+impl crate::kernels::TiledKernel for KernelSplitLut16VecX2 {
+    const KERNEL_NAME: &'static str = "mxfp4g_split_lut16_vec_x2";
+    const ROWS_PER_TG: u64 = 8;
+    const THREADS_PER_TG: u64 = 128;
+}
 arm!(KernelInterLut16, "mxfp4g_inter_lut16");
 arm!(KernelInterPair, "mxfp4g_inter_pair");
 arm!(KernelInterMagSign, "mxfp4g_inter_magsign");
@@ -586,7 +775,20 @@ mod tests {
         // shared inline-scale arity, which is also why they can only serve a
         // contiguous-halves bank. A call site holding an interleaved bank must
         // refuse rather than pick one of them.
-        let interleaved_src: String = src.replace(KERNEL_A, "").replace(KERNEL_A2, "");
+        // A2x2 binds the same table too — it substitutes for A2 wherever
+        // the alignment holds.
+        let flat_x2 = KERNEL_A2X2.split_whitespace().collect::<Vec<_>>().join(" ");
+        for (name, slot) in [("s_offsets", 3), ("ROWBASE", 9), ("ROWSTRIDE", 10)] {
+            assert!(
+                flat_x2.contains(&format!("{name} [[buffer({slot})]]")),
+                "arm A2x2 must bind {name} at buffer({slot})"
+            );
+        }
+        let interleaved_src: String = src
+            .replace(KERNEL_A, "")
+            .replace(KERNEL_A2, "")
+            .replace(KERNEL_A2X2, "")
+            .replace(KERNEL_A2X2GU, "");
         assert!(!interleaved_src.contains("s_offsets"));
         assert!(!interleaved_src.contains("ROWSTRIDE"));
     }

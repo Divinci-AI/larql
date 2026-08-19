@@ -107,6 +107,13 @@ pub struct QuantKernels {
     /// per dispatch: the arm is a startup choice, and reading it inside
     /// the encode path would put an env lookup on the per-layer hot path.
     pub mxfp4_grouped_pipeline: KernelHandle,
+    /// A2x2 — the vec arm with two rows per simdgroup sharing X loads
+    /// (A-12 expert pass). Bit-identical per row to the vec arm; only
+    /// valid where the vec arm is (16-byte-aligned offsets).
+    pub mxfp4_grouped_x2_pipeline: KernelHandle,
+    /// A2x2gu — gate+up halves in one dispatch (buffers 11–13 add the
+    /// second output and row walk).
+    pub mxfp4_grouped_x2_gu_pipeline: KernelHandle,
     /// How [`Self::mxfp4_grouped_pipeline`] receives its e8m0 exponents.
     /// Travels with the pipeline because the two layouts have different
     /// binding arities, so a call site cannot bind one without knowing
@@ -236,6 +243,10 @@ impl QuantKernels {
             Mxfp4Arm::InterPair => mxfp4g_inter_pair_pipeline.clone(),
             Mxfp4Arm::InterMagSign => mxfp4g_inter_magsign_pipeline.clone(),
         };
+        let mxfp4_grouped_x2_pipeline =
+            h::<shaders::mxfp4_grouped_experts::KernelSplitLut16VecX2>(device, library);
+        let mxfp4_grouped_x2_gu_pipeline =
+            h::<shaders::mxfp4_grouped_experts::KernelSplitLut16VecX2Gu>(device, library);
         let mxfp4_grouped_arm = options.mxfp4_arm;
         let mxfp4_grouped_binding = if options.mxfp4_arm.is_split_scale() {
             ExpertScaleBinding::SplitE8M0
@@ -273,6 +284,8 @@ impl QuantKernels {
             q6k_matvec_4sg_pipeline,
             q6k_matvec_8sg_pipeline,
             mxfp4_grouped_pipeline,
+            mxfp4_grouped_x2_pipeline,
+            mxfp4_grouped_x2_gu_pipeline,
             mxfp4_grouped_binding,
             mxfp4_grouped_arm,
         }
