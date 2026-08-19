@@ -3,6 +3,7 @@
 mod carriage;
 mod compare;
 mod gemma4;
+mod hybrid_linear_attention;
 mod semantics;
 mod system;
 

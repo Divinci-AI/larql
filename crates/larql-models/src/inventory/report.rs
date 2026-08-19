@@ -39,7 +39,16 @@ use serde::{Deserialize, Serialize};
 /// parity would later expose. Adds the judged attention-gate spec and
 /// parameter-free QK norm. A v3 inventory fails to parse rather than
 /// answering with a folded scale.
-pub const INVENTORY_SCHEMA: u32 = 4;
+///
+/// v5: [`LayerPolicy`] carries `declared_span` — the checkpoint's own
+/// `layer_types` entry for the layer, verbatim, alongside the resolved
+/// `"sliding"`/`"full"` boolean. Closes the gap a hybrid linear-attention
+/// interleave (Qwen3.5, Kimi-Linear-style) fell into: `is_sliding_window_
+/// layer` only ever answers a boolean, so every layer that was not
+/// literally `"sliding_attention"` resolved to `"full"` with nothing
+/// downstream able to tell a genuine full-attention layer from a
+/// defaulted one. A v4 inventory deserialises with `declared_span: None`.
+pub const INVENTORY_SCHEMA: u32 = 5;
 
 /// Machine-readable architecture inventory of one HF checkpoint directory.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -245,8 +254,23 @@ pub struct AttentionSummary {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LayerPolicy {
     pub layer: usize,
-    /// `"sliding"` or `"full"`.
+    /// `"sliding"` or `"full"` — the boolean split
+    /// `ModelArchitecture::is_sliding_window_layer` resolves to.
+    /// [`Self::declared_span`] is the finer-grained fact when the
+    /// checkpoint states one.
     pub attention: String,
+    /// The checkpoint's own `layer_types` entry for this layer, verbatim,
+    /// when it declares one. `None` when the config states no per-layer
+    /// array (an implicit stride, or a plain single-attention-type model)
+    /// — [`Self::attention`] is then the only source of truth.
+    ///
+    /// Carries a vocabulary [`Self::attention`] cannot: a hybrid
+    /// linear-attention interleave (`"linear_attention"`) is neither
+    /// `"sliding"` nor `"full"`, and the boolean split alone cannot tell
+    /// a defaulted layer from a genuine one. See `docs/k3-funnel.md`
+    /// §4.7.8.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declared_span: Option<String>,
     /// Window size when sliding, `None` on full-attention layers.
     pub window: Option<usize>,
     /// How this layer encodes position — rotary at a base, or not at all.

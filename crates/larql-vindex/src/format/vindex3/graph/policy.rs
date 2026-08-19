@@ -70,7 +70,7 @@ impl AttentionSpan {
 /// This is architectural liveness information — a KV planner reading it
 /// knows that positions beyond `window` on a sliding layer are
 /// *architecturally* dead, before any semantic analysis runs.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AttentionLayerPolicy {
     pub span: AttentionSpan,
     /// Window size when [`AttentionSpan::Sliding`]; `None` on full and
@@ -96,6 +96,20 @@ pub struct AttentionLayerPolicy {
     /// written before it was recorded.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub v_from_k: bool,
+    /// The checkpoint's own `layer_types` entry for this layer, verbatim,
+    /// when it declares one. `None` when the config states no per-layer
+    /// array.
+    ///
+    /// Carried alongside [`Self::span`], never folded into it: `span` is
+    /// this schema's *executable* three-way vocabulary, and a checkpoint
+    /// declaring a spelling outside it (a hybrid linear-attention layer)
+    /// still needs its raw declaration recorded rather than silently
+    /// collapsed to whatever `span` defaulted to. Consumers that need to
+    /// know whether `span` is a genuine resolution or a fallback default
+    /// compare this field against `span` via [`AttentionSpan::from_declared`]
+    /// — see `plan::carriage::probe_layer_types`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declared_span: Option<String>,
 }
 
 /// One layer's attention head geometry. Query-head count is a component

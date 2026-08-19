@@ -390,6 +390,13 @@ fn attention_table(inventory: &ArchitectureInventory) -> Vec<AttentionLayerPolic
                 num_kv_heads: layer.num_kv_heads,
             }),
             v_from_k: layer.v_from_k,
+            // Carried alongside the boolean-derived `span` verbatim, so a
+            // declared spelling the vocabulary cannot express (a hybrid
+            // linear-attention interleave) is recorded rather than
+            // silently lost behind whatever `span` defaulted to. See
+            // `AttentionLayerPolicy::declared_span` and
+            // `plan::carriage::probe_layer_types`.
+            declared_span: layer.declared_span.clone(),
         })
         .collect()
 }
@@ -444,6 +451,7 @@ fn nested_attention_table(
                 // whole tower; the surface carries it.
                 geometry: None,
                 v_from_k: false,
+                declared_span: Some(entry.clone()),
             })
         })
         .collect()

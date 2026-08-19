@@ -96,6 +96,11 @@ pub fn resolve(config: &Value, identity: &Identity) -> (Detection, ResolvedTopol
                     ATTENTION_FULL
                 }
                 .to_string(),
+                declared_span: cfg
+                    .layer_types
+                    .as_ref()
+                    .and_then(|types| types.get(layer))
+                    .cloned(),
                 window: if sliding {
                     arch.sliding_window_size()
                 } else {

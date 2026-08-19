@@ -540,6 +540,90 @@ pub const CARRIAGE_RULES: &[CarriageRule] = &[
         site: "no schema field — a KV-allocation bound, read by no generic op",
         probe: None,
     },
+    // ── Hybrid linear-attention + multi-token-prediction (declared, not
+    //    yet executed — R2/Kimi-Linear rung, see docs/k3-funnel.md) ──
+    //
+    // No `AttentionOp` variant computes a linear-attention layer and no
+    // MTP-head object exists in the schema, so every one of these always
+    // refuses via the shared `probe_unrepresented` — the same idiom
+    // `norm_topk_prob`/`high_freq_factor` above use for "no schema field
+    // yet". Each still gets its own rule (rather than falling through
+    // `carriage_finding`'s generic no-rule message) so
+    // `every_execution_semantic_leaf_has_a_carriage_rule` covers it: a
+    // future field added to the registry without a rule fails there
+    // before it fails on a checkpoint.
+    CarriageRule {
+        leaf: "linear_conv_kernel_dim",
+        reaches: Carriage::Represented,
+        site: "no schema field — the linear-attention block's short-conv geometry is not represented yet",
+        probe: Some(probe_unrepresented),
+    },
+    CarriageRule {
+        leaf: "linear_key_head_dim",
+        reaches: Carriage::Represented,
+        site: "no schema field — the linear-attention block's head geometry is not represented yet",
+        probe: Some(probe_unrepresented),
+    },
+    CarriageRule {
+        leaf: "linear_value_head_dim",
+        reaches: Carriage::Represented,
+        site: "no schema field — the linear-attention block's head geometry is not represented yet",
+        probe: Some(probe_unrepresented),
+    },
+    CarriageRule {
+        leaf: "linear_num_key_heads",
+        reaches: Carriage::Represented,
+        site: "no schema field — the linear-attention block's head geometry is not represented yet",
+        probe: Some(probe_unrepresented),
+    },
+    CarriageRule {
+        leaf: "linear_num_value_heads",
+        reaches: Carriage::Represented,
+        site: "no schema field — the linear-attention block's head geometry is not represented yet",
+        probe: Some(probe_unrepresented),
+    },
+    CarriageRule {
+        leaf: "mamba_ssm_dtype",
+        reaches: Carriage::Represented,
+        site: "no schema field — the linear-attention block's recurrent/SSM-adjacent state precision is not represented yet",
+        probe: Some(probe_unrepresented),
+    },
+    CarriageRule {
+        leaf: "attn_output_gate",
+        reaches: Carriage::Represented,
+        site: "no schema field — the attention output gate is not represented yet",
+        probe: Some(probe_unrepresented),
+    },
+    CarriageRule {
+        leaf: "output_gate_type",
+        reaches: Carriage::Represented,
+        site: "no schema field — the attention output gate is not represented yet",
+        probe: Some(probe_unrepresented),
+    },
+    CarriageRule {
+        leaf: "mtp_num_hidden_layers",
+        reaches: Carriage::Represented,
+        site: "no schema field — the multi-token-prediction head is not represented yet",
+        probe: Some(probe_unrepresented),
+    },
+    CarriageRule {
+        leaf: "mtp_use_dedicated_embeddings",
+        reaches: Carriage::Represented,
+        site: "no schema field — the multi-token-prediction head is not represented yet",
+        probe: Some(probe_unrepresented),
+    },
+    CarriageRule {
+        leaf: "mrope_interleaved",
+        reaches: Carriage::Represented,
+        site: "no schema field — mRoPE multi-axis sectioning is not represented yet",
+        probe: Some(probe_unrepresented),
+    },
+    CarriageRule {
+        leaf: "mrope_section",
+        reaches: Carriage::Represented,
+        site: "no schema field — mRoPE multi-axis sectioning is not represented yet",
+        probe: Some(probe_unrepresented),
+    },
 ];
 
 /// The rule governing a config leaf, if any.
@@ -764,8 +848,24 @@ fn probe_yarn_original_max(component: &Component, _ctx: &ProbeContext<'_>) -> Op
 /// Per-layer span kinds in the checkpoint's own vocabulary, so the
 /// comparison is against the declared spelling rather than a rendering
 /// this probe invents.
+///
+/// Refuses (returns `None`) rather than vouching for the interleave when
+/// any layer's own [`declared_span`](super::super::graph::policy::AttentionLayerPolicy::declared_span)
+/// disagrees with what `span` resolved to. `AttentionLayerPolicy::span`
+/// is built off a boolean sliding/full split that silently defaults any
+/// spelling outside its three-way vocabulary (a hybrid linear-attention
+/// layer, e.g.) to `Full` — echoing `span.declared_name()` back in that
+/// state would report the declared interleave as carried when the graph
+/// actually dropped it. See `docs/k3-funnel.md` §4.7.8.
 fn probe_layer_types(component: &Component, _ctx: &ProbeContext<'_>) -> Option<Value> {
     let table = component.attention.as_ref()?;
+    let all_faithful = table.iter().all(|l| match l.declared_span.as_deref() {
+        Some(raw) => AttentionSpan::from_declared(raw) == Some(l.span),
+        None => true,
+    });
+    if !all_faithful {
+        return None;
+    }
     Some(Value::Array(
         table
             .iter()
