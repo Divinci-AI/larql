@@ -321,7 +321,9 @@ fn run_lowered(
 
     let proj = |m: &nvfp4::Nvfp4Matrix| LoweredMatrix::Nvfp4 {
         packed: Box::leak(Box::new(gpu.lowering_weight(&m.packed))),
+        packed_offset: 0,
         scales: Box::leak(Box::new(gpu.lowering_weight(&m.scales))),
+        scales_offset: 0,
         tensor_scale: m.tensor_scale,
     };
     let w = AttnWeights {

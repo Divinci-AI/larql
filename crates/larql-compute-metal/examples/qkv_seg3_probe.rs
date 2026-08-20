@@ -8,8 +8,12 @@
 //!   A: three separate x2 dispatches (Q, K, V)      — no segment resolve
 //!   B: one seg3 dispatch (production QKV fusion)   — the real form
 //!   C: one x2 dispatch over a 5120-row matrix      — resolve-free upper bound
+//!   D: one seg3 dispatch, segments = OFFSETS into one allocation
+//!      (the loader-packing rung: same kernel, one base address range)
 //!
-//! B vs C prices the segment machinery; B vs A prices fusion net of α.
+//! B vs C prices the segment machinery; B vs A prices fusion net of α;
+//! D vs B prices allocation packing alone, and D vs C is the residual a
+//! kernel change would have to chase.
 use larql_compute_metal::lowering::profile::gpu_span_ms;
 use larql_compute_metal::lowering::{MatvecOperands, Nvfp4Kernel, Nvfp4Segment};
 use larql_compute_metal::MetalBackend;
@@ -98,13 +102,40 @@ fn main() {
                             .map(|(i, n)| {
                                 let s = Nvfp4Segment {
                                     packed: &segs_p[b][i],
+                                    packed_offset: 0,
                                     scales: &segs_s[b][i],
+                                    scales_offset: 0,
                                     tensor_scale: m.tensor_scale,
                                     out: &out,
                                     out_offset: off,
                                     n: *n,
                                 };
                                 off += (*n as u64) * 4;
+                                s
+                            })
+                            .collect();
+                        gpu.encode_nvfp4_matvec_segments(enc, &xb, K, &segments);
+                    }
+                    3 => {
+                        // one seg3 dispatch, all three segments offsets
+                        // into ONE allocation — the loader-packing rung
+                        let mut off = 0u64;
+                        let mut row0 = 0usize;
+                        let segments: Vec<Nvfp4Segment<'_>> = ROWS
+                            .iter()
+                            .map(|n| {
+                                let s = Nvfp4Segment {
+                                    packed: &whole_p[b],
+                                    packed_offset: (row0 * row_p) as u64,
+                                    scales: &whole_s[b],
+                                    scales_offset: (row0 * row_s) as u64,
+                                    tensor_scale: m.tensor_scale,
+                                    out: &out,
+                                    out_offset: off,
+                                    n: *n,
+                                };
+                                off += (*n as u64) * 4;
+                                row0 += n;
                                 s
                             })
                             .collect();
@@ -139,7 +170,20 @@ fn main() {
 
     let a = run(0);
     let bt = run(1);
+    // Parity gate: the packed arm must reproduce the production seg3
+    // arm bitwise — same kernel, same rows, different base bindings. A
+    // wrong offset would otherwise be TIMED, silently.
+    let b_out = gpu.lowering_readback(&out, total).expect("readback B");
     let c = run(2);
+    let d = run(3);
+    let d_out = gpu.lowering_readback(&out, total).expect("readback D");
+    assert!(
+        b_out
+            .iter()
+            .zip(&d_out)
+            .all(|(x, y)| x.to_bits() == y.to_bits()),
+        "packed arm diverged from seg3 — offset defect"
+    );
     println!(
         "QKV [{}+{}+{}, {K}], {:.1} MB",
         ROWS[0],
@@ -151,12 +195,16 @@ fn main() {
         ("A 3 dispatches", a),
         ("B seg3 fused  ", bt),
         ("C flat x2     ", c),
+        ("D seg3 packed ", d),
     ] {
         println!("{name}: {v:>7.1} µs  {:>4.0} GB/s", bytes / (v / 1e6) / 1e9);
     }
     println!(
-        "segment-resolve cost (B−C): {:.1} µs; fusion net (A−B): {:.1} µs",
+        "segment-resolve cost (B−C): {:.1} µs; fusion net (A−B): {:.1} µs; \
+         packing recovers (B−D): {:.1} µs; kernel residual (D−C): {:.1} µs",
         bt - c,
-        a - bt
+        a - bt,
+        bt - d,
+        d - c
     );
 }

@@ -84,9 +84,18 @@ pub enum LoweredMatrix<'a> {
     /// Little-endian IEEE f16, `[n, k]` row-major.
     F16 { bytes: &'a Buffer },
     /// e2m1 codes + E4M3 group scales + one f32 tensor scale.
+    ///
+    /// `packed_offset`/`scales_offset` are byte offsets into their
+    /// buffers: non-zero when the matrix is a row slice of a SHARED
+    /// allocation (the QKV loader-packing rung), so projections fused
+    /// into one dispatch stream one contiguous address range. A packed
+    /// offset must lie on a row boundary — a multiple of 16 bytes, the
+    /// bind alignment the x2 body's `uint2` loads require.
     Nvfp4 {
         packed: &'a Buffer,
+        packed_offset: u64,
         scales: &'a Buffer,
+        scales_offset: u64,
         tensor_scale: f32,
     },
     /// The same e2m1 codes under E8M0 group scales, 32 to a group. Kept
@@ -155,7 +164,9 @@ impl MetalBackend {
         match w {
             LoweredMatrix::Nvfp4 {
                 packed,
+                packed_offset: 0,
                 scales,
+                scales_offset: 0,
                 tensor_scale,
             } => self.encode_nvfp4_matvec(
                 enc,
@@ -169,6 +180,31 @@ impl MetalBackend {
                     k: at.k,
                 },
                 *tensor_scale,
+            ),
+            // A sliced matrix (shared allocation, non-zero offsets): the
+            // flat kernels bind at offset 0, so it goes through the
+            // segmented form as one segment — same per-row walk,
+            // bit-identical, offsets honoured at bind time.
+            LoweredMatrix::Nvfp4 {
+                packed,
+                packed_offset,
+                scales,
+                scales_offset,
+                tensor_scale,
+            } => self.encode_nvfp4_matvec_segments(
+                enc,
+                at.x,
+                at.k,
+                &[Nvfp4Segment {
+                    packed,
+                    packed_offset: *packed_offset,
+                    scales,
+                    scales_offset: *scales_offset,
+                    tensor_scale: *tensor_scale,
+                    out: at.out,
+                    out_offset: at.out_offset,
+                    n: at.n,
+                }],
             ),
             LoweredMatrix::Mxfp4 { packed, scales } => self.encode_mxfp4_matvec(
                 enc,

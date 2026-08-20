@@ -49,7 +49,8 @@ pub(super) use run::run_lowered;
 
 use profile::{StageBytes, StageLedger};
 use resident::{
-    resident_matrix, resident_norm, resident_vector, rope_inv_freq_table, rope_table_key, Ablation,
+    resident_matrix, resident_norm, resident_qkv, resident_vector, rope_inv_freq_table,
+    rope_table_key, Ablation,
 };
 use routed::{build_ffn, FfnResident};
 
@@ -58,6 +59,15 @@ pub(super) struct DeviceMatrix {
     /// per-class policy asked for, not something inferred here.
     pub(super) packed: DeviceBuffer,
     pub(super) scales: DeviceBuffer,
+    /// Byte offsets of this matrix's rows inside `packed`/`scales` —
+    /// non-zero when the matrix is a slice of a shared allocation (the
+    /// QKV packing rung). NVFP4 only; the other formats are always
+    /// whole-buffer residents.
+    pub(super) packed_offset: u64,
+    pub(super) scales_offset: u64,
+    /// Bytes a matvec over this matrix reads — its own rows, not the
+    /// (possibly shared) allocation the buffers measure.
+    pub(super) read_bytes: usize,
     pub(super) tensor_scale: f32,
     pub(super) format: WeightFormat,
     pub(super) rows: usize,
@@ -68,11 +78,7 @@ impl DeviceMatrix {
     /// Bytes a matvec over this matrix reads: packed codes, plus scales
     /// for the block formats (f16 carries an empty scales buffer).
     pub(super) fn bytes(&self) -> usize {
-        let scales = match self.format {
-            WeightFormat::F16 => 0,
-            _ => self.scales.length() as usize,
-        };
-        self.packed.length() as usize + scales
+        self.read_bytes
     }
 
     pub(super) fn as_lowered(&self) -> LoweredMatrix<'_> {
@@ -86,7 +92,9 @@ impl DeviceMatrix {
             },
             _ => LoweredMatrix::Nvfp4 {
                 packed: &self.packed,
+                packed_offset: self.packed_offset,
                 scales: &self.scales,
+                scales_offset: self.scales_offset,
                 tensor_scale: self.tensor_scale,
             },
         }
@@ -285,10 +293,15 @@ impl<'a> LoweredSession<'a> {
             // bytes load through the same cache, so the V projection
             // binds the K matrix — the raw K projection lands in the V
             // slot before the key's own norm and rotation.
+            // QKV as slices of one allocation where the format and
+            // alignment admit it (the seg3t follow-up rung); otherwise
+            // three separate residents, unchanged.
+            let (q_m, k_m, v_m) =
+                resident_qkv(gpu, store, &a.q, &a.k, &a.v, formats.attention, keep)?;
             layers.push(LayerResident {
-                q: resident_matrix(gpu, store, &a.q, formats.attention, keep)?,
-                k: resident_matrix(gpu, store, &a.k, formats.attention, keep)?,
-                v: resident_matrix(gpu, store, &a.v, formats.attention, keep)?,
+                q: q_m,
+                k: k_m,
+                v: v_m,
                 o: resident_matrix(gpu, store, &a.o, formats.attention, keep)?,
                 qk_norm: match &a.qk_norm {
                     Some(qk) => {

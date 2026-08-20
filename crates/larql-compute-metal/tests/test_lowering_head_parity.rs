@@ -144,7 +144,9 @@ fn run_lowered(
     let w = HeadWeights {
         projection: LoweredMatrix::Nvfp4 {
             packed: &pk,
+            packed_offset: 0,
             scales: &sk,
+            scales_offset: 0,
             tensor_scale: proj.tensor_scale,
         },
         norm_weight: &n_buf,

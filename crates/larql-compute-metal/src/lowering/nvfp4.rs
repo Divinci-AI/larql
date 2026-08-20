@@ -14,10 +14,19 @@ pub const NVFP4_MAX_SEGMENTS: usize = 3;
 
 /// One matrix of a fused (segmented) NVFP4 GEMV: its packed codes and
 /// scales, its tensor scale, its row count and where its rows land.
+///
+/// `packed_offset`/`scales_offset` are byte offsets into their buffers,
+/// so segments may be slices of ONE shared allocation (the QKV packing
+/// rung): the kernel then streams one contiguous address range, as the
+/// flat single-matrix dispatch does. A packed offset must fall on a row
+/// boundary, which for NVFP4 is a multiple of 16 bytes — Metal's bind
+/// alignment for the `uint2` loads the x2 body performs.
 #[derive(Clone, Copy)]
 pub struct Nvfp4Segment<'a> {
     pub packed: &'a Buffer,
+    pub packed_offset: u64,
     pub scales: &'a Buffer,
+    pub scales_offset: u64,
     pub tensor_scale: f32,
     pub out: &'a Buffer,
     pub out_offset: u64,
@@ -73,11 +82,15 @@ pub fn nvfp4_segment<'a>(
     match m {
         LoweredMatrix::Nvfp4 {
             packed,
+            packed_offset,
             scales,
+            scales_offset,
             tensor_scale,
         } => Some(Nvfp4Segment {
             packed,
+            packed_offset: *packed_offset,
             scales,
+            scales_offset: *scales_offset,
             tensor_scale: *tensor_scale,
             out,
             out_offset,
@@ -312,8 +325,8 @@ impl MetalBackend {
             let (wp, ws, out, m, ts) = *slots;
             match segments.get(i) {
                 Some(seg) => {
-                    enc.set_buffer(wp, Some(seg.packed), 0);
-                    enc.set_buffer(ws, Some(seg.scales), 0);
+                    enc.set_buffer(wp, Some(seg.packed), seg.packed_offset);
+                    enc.set_buffer(ws, Some(seg.scales), seg.scales_offset);
                     enc.set_buffer(out, Some(seg.out), seg.out_offset);
                     set_u32(enc, m, seg.n as u32);
                     set_f32(enc, ts, seg.tensor_scale);
@@ -323,8 +336,8 @@ impl MetalBackend {
                     // Absent segment: M = 0, buffers aliased to the first
                     // so every slot is bound.
                     let first = &segments[0];
-                    enc.set_buffer(wp, Some(first.packed), 0);
-                    enc.set_buffer(ws, Some(first.scales), 0);
+                    enc.set_buffer(wp, Some(first.packed), first.packed_offset);
+                    enc.set_buffer(ws, Some(first.scales), first.scales_offset);
                     enc.set_buffer(out, Some(first.out), first.out_offset);
                     set_u32(enc, m, 0);
                     set_f32(enc, ts, 0.0);

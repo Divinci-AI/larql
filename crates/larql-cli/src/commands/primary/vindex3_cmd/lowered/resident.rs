@@ -2,13 +2,16 @@
 //! ablation flags the lowered session binds — loaded once, held for the
 //! session's lifetime.
 
+use larql_compute_metal::lowering::nvfp4_fusion_enabled;
 use larql_compute_metal::lowering::DeviceBuffer;
 use larql_compute_metal::MetalBackend;
 use larql_models::config::{PositionPolicy, RotaryFrequencyBasis};
 use larql_vindex::error::VindexError;
 use larql_vindex::format::vindex3::opplan::exec::backend::WeightFormat;
 use larql_vindex::format::vindex3::opplan::exec::operands::OperandStore;
-use larql_vindex::format::vindex3::opplan::exec::weights::{load_weight, LoadedWeight};
+use larql_vindex::format::vindex3::opplan::exec::weights::{
+    load_weight, AlignedBytes, LoadedWeight,
+};
 use larql_vindex::format::vindex3::opplan::{NormOp, OperandRef};
 
 use super::DeviceMatrix;
@@ -74,6 +77,9 @@ pub(super) fn resident_matrix(
         } => DeviceMatrix {
             packed: gpu.lowering_weight(packed.as_slice()),
             scales: gpu.lowering_weight(scales.as_slice()),
+            packed_offset: 0,
+            scales_offset: 0,
+            read_bytes: packed.as_slice().len() + scales.as_slice().len(),
             tensor_scale: *tensor_scale,
             format: WeightFormat::Nvfp4,
             rows,
@@ -82,6 +88,9 @@ pub(super) fn resident_matrix(
         LoadedWeight::Mxfp4 { packed, scales } => DeviceMatrix {
             packed: gpu.lowering_weight(packed.as_slice()),
             scales: gpu.lowering_weight(scales.as_slice()),
+            packed_offset: 0,
+            scales_offset: 0,
+            read_bytes: packed.as_slice().len() + scales.as_slice().len(),
             tensor_scale: 1.0,
             format: WeightFormat::Mxfp4,
             rows,
@@ -90,6 +99,9 @@ pub(super) fn resident_matrix(
         LoadedWeight::F16(bytes) => DeviceMatrix {
             packed: gpu.lowering_weight(bytes.as_slice()),
             scales: gpu.lowering_weight(&[]),
+            packed_offset: 0,
+            scales_offset: 0,
+            read_bytes: bytes.as_slice().len(),
             tensor_scale: 1.0,
             format: WeightFormat::F16,
             rows,
@@ -106,6 +118,116 @@ pub(super) fn resident_matrix(
     // them for its lifetime.
     keep.push(loaded);
     Ok(m)
+}
+
+/// Operator control for the QKV single-allocation rung: `LARQL_QKV_PACK=0`
+/// keeps the three per-matrix allocations (the A/B control arm). Read
+/// once.
+pub(super) const QKV_PACK_ENV: &str = "LARQL_QKV_PACK";
+
+fn qkv_pack_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var(QKV_PACK_ENV).as_deref() != Ok("0"))
+}
+
+/// Metal bind alignment the packed slices must land on: the x2 body
+/// loads codes as `uint2`, so a segment's base (buffer offset included)
+/// must be 16-byte aligned; scales are held to the same bound.
+const PACK_OFFSET_ALIGN: usize = 16;
+
+/// Load Q, K and V resident as slices of ONE allocation each for codes
+/// and scales — the loader half of the seg3t rung: the fused projection
+/// dispatch then streams one contiguous address range, exactly as the
+/// flat single-matrix kernel does (`examples/qkv_seg3_probe.rs` arm D).
+///
+/// Packing applies only when the attention class is NVFP4, projection
+/// fusion is on and every slice boundary meets the bind alignment; any
+/// other case loads the three matrices separately, unchanged.
+pub(super) fn resident_qkv(
+    gpu: &MetalBackend,
+    store: &OperandStore,
+    q: &OperandRef,
+    k: &OperandRef,
+    v: &OperandRef,
+    format: WeightFormat,
+    keep: &mut Vec<LoadedWeight>,
+) -> Result<(DeviceMatrix, DeviceMatrix, DeviceMatrix), VindexError> {
+    let unpacked = |gpu, store, keep: &mut Vec<LoadedWeight>| {
+        Ok((
+            resident_matrix(gpu, store, q, format, keep)?,
+            resident_matrix(gpu, store, k, format, keep)?,
+            resident_matrix(gpu, store, v, format, keep)?,
+        ))
+    };
+    if format != WeightFormat::Nvfp4 || !qkv_pack_enabled() || !nvfp4_fusion_enabled() {
+        return unpacked(gpu, store, keep);
+    }
+    let ops = [q, k, v];
+    let loaded = [
+        load_weight(store, q, format)?,
+        load_weight(store, k, format)?,
+        load_weight(store, v, format)?,
+    ];
+    let parts: Vec<(&AlignedBytes, &AlignedBytes, f32)> = loaded
+        .iter()
+        .filter_map(|w| match w {
+            LoadedWeight::Nvfp4 {
+                packed,
+                scales,
+                tensor_scale,
+            } => Some((packed, scales, *tensor_scale)),
+            _ => None,
+        })
+        .collect();
+    // NVFP4 was requested, so all three load as NVFP4; anything else is
+    // a load_weight contract change — fall back rather than misbind.
+    if parts.len() != 3 {
+        return unpacked(gpu, store, keep);
+    }
+    // Slice boundaries are cumulative LOGICAL lengths; every boundary
+    // must meet the bind alignment or the dispatch would misread rows.
+    let aligned = parts.iter().all(|(p, s, _)| {
+        p.logical_len() % PACK_OFFSET_ALIGN == 0 && s.logical_len() % PACK_OFFSET_ALIGN == 0
+    });
+    if !aligned {
+        return unpacked(gpu, store, keep);
+    }
+    let mut packed_all = Vec::with_capacity(parts.iter().map(|(p, ..)| p.logical_len()).sum());
+    let mut scales_all = Vec::with_capacity(parts.iter().map(|(_, s, _)| s.logical_len()).sum());
+    let mut offsets = [(0u64, 0u64); 3];
+    for (i, (p, s, _)) in parts.iter().enumerate() {
+        offsets[i] = (packed_all.len() as u64, scales_all.len() as u64);
+        packed_all.extend_from_slice(&p.as_slice()[..p.logical_len()]);
+        scales_all.extend_from_slice(&s.as_slice()[..s.logical_len()]);
+    }
+    let packed_all = AlignedBytes::from_bytes(&packed_all);
+    let scales_all = AlignedBytes::from_bytes(&scales_all);
+    let packed_buf = gpu.lowering_weight(packed_all.as_slice());
+    let scales_buf = gpu.lowering_weight(scales_all.as_slice());
+    let mut out = Vec::with_capacity(3);
+    for (i, (p, s, tensor_scale)) in parts.iter().enumerate() {
+        out.push(DeviceMatrix {
+            packed: packed_buf.clone(),
+            scales: scales_buf.clone(),
+            packed_offset: offsets[i].0,
+            scales_offset: offsets[i].1,
+            read_bytes: p.logical_len() + s.logical_len(),
+            tensor_scale: *tensor_scale,
+            format: WeightFormat::Nvfp4,
+            rows: ops[i].shape.first().copied().unwrap_or(0),
+            cols: ops[i].shape.get(1).copied().unwrap_or(0),
+        });
+    }
+    // The device buffers alias the COMBINED allocations; the per-matrix
+    // loads can drop, the pack owns the bytes for the session.
+    keep.push(LoadedWeight::Nvfp4 {
+        packed: packed_all,
+        scales: scales_all,
+        tensor_scale: 1.0,
+    });
+    let [q_m, k_m, v_m] = <[DeviceMatrix; 3]>::try_from(out)
+        .map_err(|_| VindexError::Parse("qkv pack produced a wrong-arity matrix set".into()))?;
+    Ok((q_m, k_m, v_m))
 }
 
 /// Upload an optional f32 vector operand (a bias or the sink logits) to
