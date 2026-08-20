@@ -585,6 +585,98 @@ NVFP4_SWEEP_KERNEL(nvfp4_matvec_g1r2, 1u, 2u)
 NVFP4_SWEEP_KERNEL(nvfp4_matvec_g1r8, 1u, 8u)
 NVFP4_SWEEP_KERNEL(nvfp4_matvec_g2r2, 2u, 2u)
 NVFP4_SWEEP_KERNEL(nvfp4_matvec_g2r8, 2u, 8u)
+
+
+// ── seg3t: per-THREADGROUP segment resolution ──────────────────────────
+//
+// The row-pair resolve above prices at ~4.8 µs per dispatch on the
+// gpt-oss QKV shape (238 vs a resolve-free 276 GB/s,
+// `examples/qkv_seg3_probe.rs`): every simdgroup pays the 3-way branch
+// chain and carries the resolved pointers in registers. Here the grid is
+// tiled so each threadgroup lies wholly inside ONE segment —
+// `TILE_END[s]` are prefix sums of ceil(M_s / 8) — and the resolve is
+// two uniform compares. Per-row walk unchanged → bit-identical.
+kernel void nvfp4_matvec_x2_seg3t(
+    device const uchar*  Wp0    [[buffer(0)]],
+    device const uchar*  Ws0    [[buffer(1)]],
+    device const float*  X      [[buffer(2)]],
+    device float*        out0   [[buffer(3)]],
+    constant uint&       M0     [[buffer(4)]],
+    constant uint&       K      [[buffer(5)]],
+    constant float&      Ts0    [[buffer(6)]],
+    device const uchar*  Wp1    [[buffer(7)]],
+    device const uchar*  Ws1    [[buffer(8)]],
+    device float*        out1   [[buffer(9)]],
+    constant uint&       M1     [[buffer(10)]],
+    constant float&      Ts1    [[buffer(11)]],
+    device const uchar*  Wp2    [[buffer(12)]],
+    device const uchar*  Ws2    [[buffer(13)]],
+    device float*        out2   [[buffer(14)]],
+    constant uint&       M2     [[buffer(15)]],
+    constant float&      Ts2    [[buffer(16)]],
+    device const float*  R      [[buffer(17)]],
+    constant uint&       has_R  [[buffer(18)]],
+    constant uint3&      TILE_END [[buffer(19)]],
+    uint tg_id     [[threadgroup_position_in_grid]],
+    uint lane      [[thread_index_in_simdgroup]],
+    uint sg_id     [[simdgroup_index_in_threadgroup]])
+{
+    // Uniform per-TG segment pick: two compares, no divergence.
+    device const uchar* wp;
+    device const uchar* ws;
+    device float*       op;
+    float ts;
+    uint  m;
+    uint  tile0;
+    bool  res;
+    if (tg_id < TILE_END.x) {
+        wp = Wp0; ws = Ws0; op = out0; ts = Ts0; m = M0; tile0 = 0u;
+        res = has_R != 0u;
+    } else if (tg_id < TILE_END.y) {
+        wp = Wp1; ws = Ws1; op = out1; ts = Ts1; m = M1; tile0 = TILE_END.x;
+        res = false;
+    } else {
+        wp = Wp2; ws = Ws2; op = out2; ts = Ts2; m = M2; tile0 = TILE_END.y;
+        res = false;
+    }
+    const uint row0 = ((tg_id - tile0) * 4u + sg_id) * 2u;
+    if (row0 >= m) { return; }
+    const bool has1 = row0 + 1u < m;
+
+    const uint groups = K / NVFP4_GROUP_ELEMS;
+    device const uchar* rp0 = wp + (ulong)row0 * (ulong)groups * NVFP4_GROUP_BYTES;
+    device const uchar* rs0 = ws + (ulong)row0 * (ulong)groups;
+    device const uchar* rp1 = rp0 + (ulong)groups * NVFP4_GROUP_BYTES;
+    device const uchar* rs1 = rs0 + groups;
+    float acc0 = 0.0f;
+    float acc1 = 0.0f;
+    for (uint g = lane; g < groups; g += 32u) {
+        const uint base = g * NVFP4_GROUP_ELEMS;
+        float xv[NVFP4_GROUP_ELEMS];
+        for (uint i = 0u; i < NVFP4_GROUP_ELEMS; ++i) { xv[i] = X[base + i]; }
+        {
+            const float step = ts * nvfp4_e4m3(rs0[g]);
+            device const uchar* blk = rp0 + (ulong)g * NVFP4_GROUP_BYTES;
+            float part = 0.0f;
+            NVFP4_GROUP_DOT(part, blk, xv, 0)
+            acc0 += step * part;
+        }
+        if (has1) {
+            const float step = ts * nvfp4_e4m3(rs1[g]);
+            device const uchar* blk = rp1 + (ulong)g * NVFP4_GROUP_BYTES;
+            float part = 0.0f;
+            NVFP4_GROUP_DOT(part, blk, xv, 0)
+            acc1 += step * part;
+        }
+    }
+    const float t0 = simd_sum(acc0);
+    const float t1 = simd_sum(acc1);
+    if (lane == 0u) {
+        op[row0] = res ? (R[row0] + t0) : t0;
+        if (has1) { op[row0 + 1u] = res ? (R[row0 + 1u] + t1) : t1; }
+    }
+}
+
 "#;
 
 macro_rules! sweep_kernel {
@@ -629,6 +721,13 @@ sweep_kernel!(KernelX4, "nvfp4_matvec_x4", 16, 128);
 sweep_kernel!(KernelX1B, "nvfp4_matvec_x1b", 4, 128);
 sweep_kernel!(KernelX2B, "nvfp4_matvec_x2b", 8, 128);
 sweep_kernel!(KernelX4B, "nvfp4_matvec_x4b", 16, 128);
+/// seg3t: per-threadgroup segment resolution (8 rows/TG, tile-aligned).
+pub struct KernelX2Seg3T;
+impl crate::kernels::TiledKernel for KernelX2Seg3T {
+    const KERNEL_NAME: &'static str = "nvfp4_matvec_x2_seg3t";
+    const ROWS_PER_TG: u64 = 8;
+    const THREADS_PER_TG: u64 = 128;
+}
 /// A-5b: segmented x2, up to three matrices in one dispatch (8 rows/TG).
 pub struct KernelX2Seg3;
 impl crate::kernels::TiledKernel for KernelX2Seg3 {

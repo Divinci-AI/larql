@@ -279,12 +279,31 @@ impl MetalBackend {
             !segments.is_empty() && segments.len() <= NVFP4_MAX_SEGMENTS,
             "1..=3 segments"
         );
-        let kernel = &self.quant.nvfp4_matvec_x2_seg3_pipeline;
+        // seg3t: the grid is tiled so no threadgroup straddles a segment
+        // (prefix sums of each segment's tile count) and the segment is
+        // resolved once per threadgroup. NOTE the probe's verdict
+        // (`examples/qkv_seg3_probe.rs`): this did NOT close the fused
+        // form's ~5 µs deficit against a flat single-matrix dispatch —
+        // the per-row resolve hypothesis is falsified; what remains is
+        // attributed to streaming from three base addresses instead of
+        // one. The follow-up rung is loader-level: pack Q/K/V into ONE
+        // allocation so the fused dispatch is literally the flat kernel.
+        let kernel = &self.quant.nvfp4_matvec_x2_seg3t_pipeline;
         enc.set_compute_pipeline_state(&kernel.state);
         enc.set_buffer(2, Some(x), 0);
         set_u32(enc, 5, k as u32);
         enc.set_buffer(17, Some(residual.unwrap_or(x)), 0);
         set_u32(enc, 18, residual.is_some() as u32);
+        // MSL `uint3` is 16 bytes (non-packed) — bind four words.
+        let mut tile_end = [0u32; 4];
+        let mut acc = 0u32;
+        for i in 0..NVFP4_MAX_SEGMENTS {
+            acc += segments
+                .get(i)
+                .map_or(0, |s| (s.n as u32).div_ceil(kernel.rows_per_tg as u32));
+            tile_end[i] = acc;
+        }
+        enc.set_bytes(19, 16, tile_end.as_ptr() as *const std::ffi::c_void);
         // (packed, scales, out, M, tensor_scale) slots per segment.
         const SLOTS: [(u64, u64, u64, u64, u64); NVFP4_MAX_SEGMENTS] =
             [(0, 1, 3, 4, 6), (7, 8, 9, 10, 11), (12, 13, 14, 15, 16)];
@@ -312,8 +331,9 @@ impl MetalBackend {
                 }
             }
         }
+        let _ = total_rows;
         enc.dispatch_thread_groups(
-            metal::MTLSize::new(total_rows.div_ceil(kernel.rows_per_tg), 1, 1),
+            metal::MTLSize::new(tile_end[2] as u64, 1, 1),
             metal::MTLSize::new(kernel.threads_per_tg, 1, 1),
         );
     }

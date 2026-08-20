@@ -53,6 +53,9 @@ pub struct QuantKernels {
     pub nvfp4_sweep_pipelines: [KernelHandle; 11],
     /// A-5b: segmented x2 — Q+K+V or gate+up in one dispatch.
     pub nvfp4_matvec_x2_seg3_pipeline: KernelHandle,
+    /// seg3t — per-threadgroup segment resolution (the production form;
+    /// seg3's per-row-pair resolve cost 4.8 µs/dispatch at the QKV shape).
+    pub nvfp4_matvec_x2_seg3t_pipeline: KernelHandle,
     /// A-5b rung 2a: x2 with the residual add folded into the write.
     pub nvfp4_matvec_x2r_pipeline: KernelHandle,
     /// A-5b rung 2d: x2 with the pre-norm folded into the prologue.
@@ -197,6 +200,8 @@ impl QuantKernels {
         ];
         let nvfp4_matvec_x2_seg3_pipeline =
             h::<shaders::nvfp4_matvec::KernelX2Seg3>(device, library);
+        let nvfp4_matvec_x2_seg3t_pipeline =
+            h::<shaders::nvfp4_matvec::KernelX2Seg3T>(device, library);
         let nvfp4_matvec_x2r_pipeline = h::<shaders::nvfp4_matvec::KernelX2R>(device, library);
         let nvfp4_matvec_x2n_pipeline = h::<shaders::nvfp4_matvec::KernelX2N>(device, library);
         let nvfp4_matvec_x2m_pipeline = h::<shaders::nvfp4_matvec::KernelX2M>(device, library);
@@ -274,6 +279,7 @@ impl QuantKernels {
             nvfp4_matvec_v2_pipeline,
             nvfp4_sweep_pipelines,
             nvfp4_matvec_x2_seg3_pipeline,
+            nvfp4_matvec_x2_seg3t_pipeline,
             nvfp4_matvec_x2r_pipeline,
             nvfp4_matvec_x2n_pipeline,
             nvfp4_matvec_x2m_pipeline,
