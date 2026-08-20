@@ -297,11 +297,11 @@ impl MetalBackend {
         // MSL `uint3` is 16 bytes (non-packed) — bind four words.
         let mut tile_end = [0u32; 4];
         let mut acc = 0u32;
-        for i in 0..NVFP4_MAX_SEGMENTS {
+        for (i, end) in tile_end.iter_mut().enumerate().take(NVFP4_MAX_SEGMENTS) {
             acc += segments
                 .get(i)
                 .map_or(0, |s| (s.n as u32).div_ceil(kernel.rows_per_tg as u32));
-            tile_end[i] = acc;
+            *end = acc;
         }
         enc.set_bytes(19, 16, tile_end.as_ptr() as *const std::ffi::c_void);
         // (packed, scales, out, M, tensor_scale) slots per segment.
