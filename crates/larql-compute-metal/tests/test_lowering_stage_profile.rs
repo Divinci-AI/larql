@@ -83,7 +83,10 @@ fn profiled_and_single_encoder_chains_are_bit_identical() {
     // Arm 2: profiler seam.
     let (a2, b2) = fresh_inputs(&gpu);
     let cmd = gpu.new_lowering_command_buffer();
-    let mut prof = StageProfiler::new(&gpu.device_ref(), cmd.clone(), 64).expect("stage profiler");
+    let Some(mut prof) = StageProfiler::new(&gpu.device_ref(), cmd.clone(), 64) else {
+        eprintln!("no stage-boundary counters (CI paravirtual GPU); skipping");
+        return;
+    };
     encode_chain(&gpu, &mut prof, &stages, &a2, &b2);
     let (cmd, samples) = prof.finish();
     cmd.commit();
@@ -137,7 +140,10 @@ fn revisiting_a_stage_opens_a_new_run() {
     let stages = [Stage::AttnNorm, Stage::AttnProj, Stage::AttnNorm];
     let (a, b) = fresh_inputs(&gpu);
     let cmd = gpu.new_lowering_command_buffer();
-    let mut prof = StageProfiler::new(&gpu.device_ref(), cmd.clone(), 64).expect("stage profiler");
+    let Some(mut prof) = StageProfiler::new(&gpu.device_ref(), cmd.clone(), 64) else {
+        eprintln!("no stage-boundary counters (CI paravirtual GPU); skipping");
+        return;
+    };
     encode_chain(&gpu, &mut prof, &stages, &a, &b);
     let (cmd, samples) = prof.finish();
     cmd.commit();
@@ -172,7 +178,10 @@ fn overflow_past_capacity_still_executes_and_is_counted() {
     // Capacity 2: the third and fourth stages overflow.
     let (a, b) = fresh_inputs(&gpu);
     let cmd = gpu.new_lowering_command_buffer();
-    let mut prof = StageProfiler::new(&gpu.device_ref(), cmd.clone(), 2).expect("stage profiler");
+    let Some(mut prof) = StageProfiler::new(&gpu.device_ref(), cmd.clone(), 2) else {
+        eprintln!("no stage-boundary counters (CI paravirtual GPU); skipping");
+        return;
+    };
     encode_chain(&gpu, &mut prof, &stages, &a, &b);
     let (cmd, samples) = prof.finish();
     cmd.commit();
