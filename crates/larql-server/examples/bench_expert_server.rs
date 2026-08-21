@@ -119,6 +119,7 @@ fn bench_remote<F: FnMut() -> Result<(), String>>(
 fn make_app_state(model: LoadedModel) -> Arc<AppState> {
     Arc::new(AppState {
         models: vec![Arc::new(model)],
+        v3_models: Vec::new(),
         started_at: Instant::now(),
         requests_served: AtomicU64::new(0),
         api_key: None,

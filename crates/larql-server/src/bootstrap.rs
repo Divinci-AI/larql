@@ -74,7 +74,7 @@ pub fn parse_layer_range(s: &str) -> Result<(usize, usize), BoxError> {
     Ok((start, end + 1))
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct LoadVindexOptions {
     pub no_infer: bool,
     pub ffn_only: bool,
@@ -138,6 +138,38 @@ pub fn parse_unit_manifest(
     let manifest: UnitManifest = serde_json::from_slice(&bytes)
         .map_err(|e| -> BoxError { format!("--units: parse {}: {e}", path.display()).into() })?;
     manifest.into_unit_set()
+}
+
+/// One bound model artifact — which runtime family serves it. The
+/// V2/V3 decision is made HERE, at binding time, from the container's
+/// own generation marker; nothing downstream re-detects it.
+pub enum LoadedArtifact {
+    V2(Box<LoadedModel>),
+    V3(Box<crate::vindex3::V3Model>),
+}
+
+/// Detect the artifact's container generation and bind it with the
+/// matching loader. A VINDEX3 container binds as an executable
+/// program ([`crate::vindex3::load_v3_model`]) — it structurally
+/// cannot take the V2 path, whose `load_vindex_config` refuses
+/// non-V2 generations.
+pub fn load_artifact(path_str: &str, opts: LoadVindexOptions) -> Result<LoadedArtifact, BoxError> {
+    let path = if larql_vindex::is_hf_path(path_str) {
+        larql_vindex::resolve_hf_vindex(path_str)?
+    } else {
+        PathBuf::from(path_str)
+    };
+    match larql_vindex::format::generation::detect_generation(&path)? {
+        larql_vindex::format::generation::ContainerGeneration::V3 => {
+            info!("Loading VINDEX3 container: {}", path.display());
+            Ok(LoadedArtifact::V3(Box::new(crate::vindex3::load_v3_model(
+                &path,
+            )?)))
+        }
+        larql_vindex::format::generation::ContainerGeneration::V2 => Ok(LoadedArtifact::V2(
+            Box::new(load_single_vindex(path_str, opts)?),
+        )),
+    }
 }
 
 pub fn load_single_vindex(
@@ -816,6 +848,7 @@ pub async fn serve(cli: Cli) -> Result<(), BoxError> {
     );
 
     let mut models: Vec<Arc<LoadedModel>> = Vec::new();
+    let mut v3_models: Vec<Arc<crate::vindex3::V3Model>> = Vec::new();
 
     let layer_range = cli.layers.as_deref().map(parse_layer_range).transpose()?;
     let expert_filter = cli.experts.as_deref().map(parse_layer_range).transpose()?;
@@ -919,19 +952,22 @@ pub async fn serve(cli: Cli) -> Result<(), BoxError> {
             // `LoadVindexOptions` is `Clone` (was `Copy` until `unit_filter`
             // added an `Arc<HashSet<...>>` field) — clone per iteration so
             // the loop owns each call's argument.
-            match load_single_vindex(&p.to_string_lossy(), load_opts.clone()) {
-                Ok(m) => models.push(Arc::new(m)),
+            match load_artifact(&p.to_string_lossy(), load_opts.clone()) {
+                Ok(LoadedArtifact::V2(m)) => models.push(Arc::new(*m)),
+                Ok(LoadedArtifact::V3(m)) => v3_models.push(Arc::new(*m)),
                 Err(e) => warn!("  Skipping {}: {}", p.display(), e),
             }
         }
     } else if let Some(ref vindex_path) = cli.vindex_path {
-        let m = load_single_vindex(vindex_path, load_opts)?;
-        models.push(Arc::new(m));
+        match load_artifact(vindex_path, load_opts)? {
+            LoadedArtifact::V2(m) => models.push(Arc::new(*m)),
+            LoadedArtifact::V3(m) => v3_models.push(Arc::new(*m)),
+        }
     } else {
         return Err("must provide a vindex path or --dir".into());
     }
 
-    if models.is_empty() {
+    if models.is_empty() && v3_models.is_empty() {
         return Err("no vindexes loaded".into());
     }
 
@@ -1021,6 +1057,7 @@ pub async fn serve(cli: Cli) -> Result<(), BoxError> {
 
     let state = Arc::new(AppState {
         models: models.clone(),
+        v3_models: v3_models.clone(),
         started_at: std::time::Instant::now(),
         requests_served: std::sync::atomic::AtomicU64::new(0),
         api_key: cli.api_key.clone(),
@@ -1047,8 +1084,10 @@ pub async fn serve(cli: Cli) -> Result<(), BoxError> {
         }
         routes::multi_model_router(Arc::clone(&state))
     } else {
-        let m = &models[0];
-        info!("Single-model mode: {}", m.config.model);
+        match models.first() {
+            Some(m) => info!("Single-model mode: {}", m.config.model),
+            None => info!("Single-model mode: {} (VINDEX3)", v3_models[0].id),
+        }
         routes::single_model_router(Arc::clone(&state))
     };
 

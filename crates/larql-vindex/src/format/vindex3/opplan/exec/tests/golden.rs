@@ -21,186 +21,19 @@
 
 use std::path::Path;
 
-use super::{lcg_values, norm_values, ShardBuilder};
+// The miniature writer and its geometry moved to the public
+// `format::vindex3::fixtures` module; the re-exports keep every test
+// file's `super::golden::*` imports stable.
+pub(super) use crate::format::vindex3::fixtures::{
+    miniature_glimmer, miniature_glimmer_with, MiniatureExtras, BIAS_SUFFIXES, G_FFN, G_HEAD_DIM,
+    G_HIDDEN, G_KV_HEADS, G_LAYERS, G_Q_HEADS, G_TOKENS, G_VOCAB, G_WINDOW, SINKS_SUFFIX,
+};
+
 use crate::format::vindex3::encode::encode_system;
 use crate::format::vindex3::inspect::inspect_container;
 use crate::format::vindex3::opplan::exec::operands::OperandStore;
 use crate::format::vindex3::opplan::exec::{execute_text, ExecutionTrace};
 use crate::format::vindex3::opplan::plan_component_ops;
-
-// ── The awkward fixture geometry, shared only as *numbers* ──
-pub(super) const G_HIDDEN: usize = 12;
-pub(super) const G_Q_HEADS: usize = 3;
-pub(super) const G_KV_HEADS: usize = 1;
-pub(super) const G_HEAD_DIM: usize = 4;
-pub(super) const G_FFN: usize = 20;
-pub(super) const G_VOCAB: usize = 29;
-pub(super) const G_LAYERS: usize = 2;
-pub(super) const G_WINDOW: usize = 3;
-pub(super) const G_TOKENS: [u32; 5] = [3, 17, 28, 0, 11];
-
-/// Optional attention operands the miniature can carry (A-9.1): Q/K/V/O
-/// projection biases (with `attention_bias: true` declared) and
-/// per-query-head sink logits. `perturb` names one of those tensors by
-/// suffix; the writer scales it by [`PERTURB_GAIN`], so a test can ask
-/// whether that single operand is load-bearing.
-#[derive(Default, Clone, Copy)]
-pub(super) struct MiniatureExtras {
-    pub attention_bias: bool,
-    pub sinks: bool,
-    pub perturb: Option<&'static str>,
-}
-
-/// Multiplier applied to a perturbed extra operand.
-pub(super) const PERTURB_GAIN: f32 = 3.0;
-
-/// The five extra attention operands, by layer-relative suffix.
-pub(super) const BIAS_SUFFIXES: [&str; 4] = [
-    "self_attn.q_proj.bias",
-    "self_attn.k_proj.bias",
-    "self_attn.v_proj.bias",
-    "self_attn.o_proj.bias",
-];
-pub(super) const SINKS_SUFFIX: &str = "self_attn.sinks";
-
-/// The two-layer miniature Glimmer checkpoint (F32, judged family).
-pub(super) fn miniature_glimmer(dir: &Path) {
-    miniature_glimmer_with(dir, MiniatureExtras::default());
-}
-
-/// The miniature with the A-9.1 extras.
-pub(super) fn miniature_glimmer_with(dir: &Path, extras: MiniatureExtras) {
-    let mut config = serde_json::json!({
-            "architectures": ["MuseGlimmerForConditionalGeneration"],
-            "torch_dtype": "float32",
-            "model_type": "muse_glimmer_text",
-            "hidden_size": G_HIDDEN,
-            "num_hidden_layers": G_LAYERS,
-            "intermediate_size": G_FFN,
-            "num_attention_heads": G_Q_HEADS,
-            "num_key_value_heads": G_KV_HEADS,
-            "head_dim": G_HEAD_DIM,
-            "vocab_size": G_VOCAB,
-            "sliding_window": G_WINDOW,
-            "rms_norm_eps": 1e-5,
-            "rope_parameters": { "rope_theta": 500000.0, "rope_type": "default" },
-            "layer_types": ["sliding_attention", "full_attention"],
-            "layer_rope_theta": [500000.0, 0.0],
-            "qk_scale_factor": 3.87,
-            "output_multiplier": 0.196,
-            "post_norm_eps": 1e-8,
-            "attn_logit_softcapping": 50.0,
-            "final_logit_softcapping": 20.0
-    });
-    if extras.attention_bias {
-        config["attention_bias"] = serde_json::json!(true);
-    }
-    std::fs::write(dir.join("config.json"), config.to_string()).unwrap();
-
-    let q_rows = G_Q_HEADS * G_HEAD_DIM;
-    let kv_rows = G_KV_HEADS * G_HEAD_DIM;
-    let mut shard = ShardBuilder::new();
-    shard.push(
-        "model.embed_tokens.weight",
-        &[G_VOCAB, G_HIDDEN],
-        &lcg_values(G_VOCAB * G_HIDDEN, 1),
-    );
-    shard.push("model.norm.weight", &[G_HIDDEN], &norm_values(G_HIDDEN, 2));
-    shard.push(
-        "lm_head.weight",
-        &[G_VOCAB, G_HIDDEN],
-        &lcg_values(G_VOCAB * G_HIDDEN, 3),
-    );
-    for layer in 0..G_LAYERS {
-        let seed = 900 + layer as u64 * 30;
-        let prefix = format!("model.layers.{layer}");
-        for (suffix, shape, values) in [
-            (
-                "self_attn.q_proj.weight",
-                vec![q_rows, G_HIDDEN],
-                lcg_values(q_rows * G_HIDDEN, seed),
-            ),
-            (
-                "self_attn.k_proj.weight",
-                vec![kv_rows, G_HIDDEN],
-                lcg_values(kv_rows * G_HIDDEN, seed + 1),
-            ),
-            (
-                "self_attn.v_proj.weight",
-                vec![kv_rows, G_HIDDEN],
-                lcg_values(kv_rows * G_HIDDEN, seed + 2),
-            ),
-            (
-                "self_attn.o_proj.weight",
-                vec![G_HIDDEN, q_rows],
-                lcg_values(G_HIDDEN * q_rows, seed + 3),
-            ),
-            (
-                "self_attn.gate_proj.weight",
-                vec![q_rows, G_HIDDEN],
-                lcg_values(q_rows * G_HIDDEN, seed + 4),
-            ),
-            (
-                "input_layernorm.weight",
-                vec![G_HIDDEN],
-                norm_values(G_HIDDEN, seed + 5),
-            ),
-            (
-                "post_attention_layernorm.weight",
-                vec![G_HIDDEN],
-                norm_values(G_HIDDEN, seed + 6),
-            ),
-            (
-                "pre_feedforward_layernorm.weight",
-                vec![G_HIDDEN],
-                norm_values(G_HIDDEN, seed + 7),
-            ),
-            (
-                "post_feedforward_layernorm.weight",
-                vec![G_HIDDEN],
-                norm_values(G_HIDDEN, seed + 8),
-            ),
-            (
-                "mlp.gate_proj.weight",
-                vec![G_FFN, G_HIDDEN],
-                lcg_values(G_FFN * G_HIDDEN, seed + 9),
-            ),
-            (
-                "mlp.up_proj.weight",
-                vec![G_FFN, G_HIDDEN],
-                lcg_values(G_FFN * G_HIDDEN, seed + 10),
-            ),
-            (
-                "mlp.down_proj.weight",
-                vec![G_HIDDEN, G_FFN],
-                lcg_values(G_HIDDEN * G_FFN, seed + 11),
-            ),
-        ] {
-            shard.push(&format!("{prefix}.{suffix}"), &shape, &values);
-        }
-        // Extras: values well away from zero so an unapplied bias or sink
-        // is a visible absence, not a rounding-level one.
-        let mut extra = |suffix: &str, len: usize, seed: u64| {
-            let mut values: Vec<f32> = lcg_values(len, seed).into_iter().map(|v| v * 4.0).collect();
-            if extras.perturb == Some(suffix) {
-                for v in &mut values {
-                    *v *= PERTURB_GAIN;
-                }
-            }
-            shard.push(&format!("{prefix}.{suffix}"), &[len], &values);
-        };
-        if extras.attention_bias {
-            extra(BIAS_SUFFIXES[0], q_rows, seed + 12);
-            extra(BIAS_SUFFIXES[1], kv_rows, seed + 13);
-            extra(BIAS_SUFFIXES[2], kv_rows, seed + 14);
-            extra(BIAS_SUFFIXES[3], G_HIDDEN, seed + 15);
-        }
-        if extras.sinks {
-            extra(SINKS_SUFFIX, G_Q_HEADS, seed + 16);
-        }
-    }
-    shard.write(dir);
-}
 
 // ── The oracle's own safetensors reader: header JSON + F32 bytes ──
 

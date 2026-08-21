@@ -25,7 +25,7 @@ use crate::format::vindex3::opplan::exec::production::ProductionBackend;
 use crate::format::vindex3::opplan::exec::reference::ReferenceBackend;
 use crate::format::vindex3::opplan::{plan_component_ops, ComponentOpPlan};
 
-fn fixture() -> (tempfile::TempDir, ComponentOpPlan, OperandStore) {
+pub(super) fn fixture() -> (tempfile::TempDir, ComponentOpPlan, OperandStore) {
     let dir = tempfile::tempdir().unwrap();
     miniature_glimmer(dir.path());
     let inventory = larql_models::inventory::build_inventory(dir.path()).unwrap();
@@ -41,7 +41,7 @@ fn fixture() -> (tempfile::TempDir, ComponentOpPlan, OperandStore) {
 
 /// Step every fixture token through a fresh session and return the last
 /// position's logits.
-fn decode_logits<B: PlanBackend>(
+pub(super) fn decode_logits<B: PlanBackend>(
     plan: &ComponentOpPlan,
     store: &OperandStore,
     backend: &B,

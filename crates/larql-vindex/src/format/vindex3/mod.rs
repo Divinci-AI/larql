@@ -38,6 +38,10 @@
 
 pub mod build;
 pub mod encode;
+/// Miniature whole-model checkpoint writers, public so sibling crates'
+/// integration tests can encode a real container without duplicating
+/// the frozen fixture geometry the executor's parity gates certify.
+pub mod fixtures;
 pub mod graph;
 pub mod import;
 pub mod index;

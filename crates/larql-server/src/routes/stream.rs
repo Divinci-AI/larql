@@ -720,6 +720,7 @@ mod tests {
     fn test_state(models: Vec<Arc<LoadedModel>>) -> Arc<AppState> {
         Arc::new(AppState {
             models,
+            v3_models: Vec::new(),
             started_at: std::time::Instant::now(),
             requests_served: AtomicU64::new(0),
             api_key: None,

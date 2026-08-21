@@ -29,6 +29,7 @@ pub mod embeddings;
 pub mod error;
 pub mod schema;
 pub mod util;
+mod v3_completions;
 
 pub use error::OpenAIError;
 

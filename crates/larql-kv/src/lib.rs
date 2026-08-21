@@ -23,9 +23,11 @@ pub mod engines;
 pub mod generation;
 pub mod model_walk;
 pub mod profiler;
+pub mod vindex3;
 pub mod vindex_compare;
 
 pub use cache::KvCache;
+pub use vindex3::CanonicalKvState;
 
 pub use engines::apollo;
 pub use engines::boundary_kv;

@@ -468,6 +468,7 @@ pub fn model_with_q4k_weights(
 pub fn state(models: Vec<Arc<LoadedModel>>) -> Arc<AppState> {
     Arc::new(AppState {
         models,
+        v3_models: Vec::new(),
         started_at: std::time::Instant::now(),
         requests_served: AtomicU64::new(0),
         api_key: None,
@@ -480,6 +481,7 @@ pub fn state(models: Vec<Arc<LoadedModel>>) -> Arc<AppState> {
 pub fn state_with_key(models: Vec<Arc<LoadedModel>>, key: &str) -> Arc<AppState> {
     Arc::new(AppState {
         models,
+        v3_models: Vec::new(),
         started_at: std::time::Instant::now(),
         requests_served: AtomicU64::new(0),
         api_key: Some(key.to_string()),
@@ -492,6 +494,7 @@ pub fn state_with_key(models: Vec<Arc<LoadedModel>>, key: &str) -> Arc<AppState>
 pub fn state_with_cache(models: Vec<Arc<LoadedModel>>, cache_size: u64) -> Arc<AppState> {
     Arc::new(AppState {
         models,
+        v3_models: Vec::new(),
         started_at: std::time::Instant::now(),
         requests_served: AtomicU64::new(0),
         api_key: None,

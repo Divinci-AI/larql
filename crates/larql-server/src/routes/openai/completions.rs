@@ -61,8 +61,8 @@ use crate::state::{AppState, LoadedModel};
 
 use super::util::{contains_any, error_chunk, new_id_suffix, trim_at_stop, unix_now, StopSpec};
 
-const TEXT_COMPLETION_OBJECT: &str = "text_completion";
-const DEFAULT_MAX_TOKENS: usize = 16;
+pub(super) const TEXT_COMPLETION_OBJECT: &str = "text_completion";
+pub(super) const DEFAULT_MAX_TOKENS: usize = 16;
 
 #[derive(Deserialize)]
 #[serde(untagged)]
@@ -190,11 +190,16 @@ pub async fn handle_completions(
         ));
     }
 
-    let model = state.model_or_err(req.model.as_deref())?;
-    if model.infer_disabled {
-        return Err(OpenAIError::service_unavailable(
-            "inference disabled (--no-infer / --embed-only / --ffn-only)",
-        ));
+    // The one V2/V3 decision point: the registry resolves the request's
+    // model to a runtime binding; below this match nothing re-detects
+    // the container generation.
+    let served = state.served_or_err(req.model.as_deref())?;
+    if let crate::state::ServedModel::V2(model) = &served {
+        if model.infer_disabled {
+            return Err(OpenAIError::service_unavailable(
+                "inference disabled (--no-infer / --embed-only / --ffn-only)",
+            ));
+        }
     }
 
     let prompts: Vec<String> = match req.prompt {
@@ -219,16 +224,13 @@ pub async fn handle_completions(
         .map(|s| s.as_slice().to_vec())
         .unwrap_or_default();
     let echo = req.echo.unwrap_or(false);
+    let stream = req.stream.unwrap_or(false);
 
-    // Model id for the response (matches the request when given,
-    // otherwise the loaded model's id).
-    let model_id = req.model.clone().unwrap_or_else(|| model.id.clone());
-    let model_arc = model.clone();
-
-    if req.stream.unwrap_or(false) {
+    if stream {
         // Streaming mode: SSE response. `echo` and batched prompts are
         // not supported in stream mode (OpenAI's stream contract is
-        // one prompt → one stream of chunks).
+        // one prompt → one stream of chunks). Validated here, before
+        // runtime dispatch, so both runtimes share one contract.
         if echo {
             return Err(OpenAIError::invalid_request(
                 "echo=true is not supported with stream=true",
@@ -240,6 +242,34 @@ pub async fn handle_completions(
                  send one prompt per request",
             ));
         }
+    }
+
+    // Model id for the response (matches the request when given,
+    // otherwise the loaded model's id).
+    let model_id = req.model.clone().unwrap_or_else(|| match &served {
+        crate::state::ServedModel::V2(m) => m.id.clone(),
+        crate::state::ServedModel::V3(m) => m.id.clone(),
+    });
+
+    let model_arc = match served {
+        crate::state::ServedModel::V3(v3) => {
+            return super::v3_completions::respond(
+                v3.clone(),
+                prompts,
+                max_tokens,
+                sampling_params,
+                stop_strings,
+                echo,
+                stream,
+                model_id,
+                state.infer_timeout,
+            )
+            .await;
+        }
+        crate::state::ServedModel::V2(model) => model.clone(),
+    };
+
+    if stream {
         let prompt = prompts.into_iter().next().unwrap();
         return Ok(stream_completions(
             model_arc,
@@ -409,7 +439,7 @@ fn stream_completions(
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
-fn build_text_completion_chunk(
+pub(super) fn build_text_completion_chunk(
     id: &str,
     model: &str,
     text: Option<&str>,
@@ -444,7 +474,7 @@ fn build_text_completion_chunk(
 /// non-deterministic across platforms: the synthetic CI model emits
 /// different tokens on Ubuntu vs macOS, which is exactly what made
 /// `completions.rs` coverage flap. Keeping this logic pure pins it.)
-fn finalize_completion(
+pub(super) fn finalize_completion(
     tokens: &[(String, f64)],
     stop_strings: &[String],
 ) -> (String, Vec<(String, f64)>, &'static str) {

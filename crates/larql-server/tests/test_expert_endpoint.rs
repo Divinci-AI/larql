@@ -328,6 +328,7 @@ fn make_loaded_model(
 async fn spawn_server_with_model(model: LoadedModel) -> String {
     let state = Arc::new(AppState {
         models: vec![Arc::new(model)],
+        v3_models: Vec::new(),
         started_at: std::time::Instant::now(),
         requests_served: std::sync::atomic::AtomicU64::new(0),
         api_key: None,

@@ -75,6 +75,7 @@ pub mod test_utils;
 pub mod tokenizer;
 pub mod trace;
 pub mod vindex;
+pub mod vindex3;
 
 // Re-export dependencies for downstream crates.
 pub use larql_models;
@@ -280,6 +281,15 @@ pub use trace::{
 pub use vindex::{
     generate_kquant_cpu_remote, open_inference_vindex, predict_kquant, FfnL1Cache, WalkFfn,
     WalkFfnConfig,
+};
+// The VINDEX3 runtime seam (VI3-INF-0): a container's executable plan
+// served through `LogitsSession` — no ModelWeights, no family
+// detection, no V2 fallback. Deliberately NOT folded into
+// `open_inference_vindex`: the two formats have different authority
+// models and converge only above the session trait.
+pub use vindex3::{
+    continue_session, generate_session, LogitsSession, SessionGeneration, Vindex3Runtime,
+    Vindex3Session,
 };
 
 /// Stable, application-facing inference imports.
