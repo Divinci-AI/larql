@@ -29,6 +29,45 @@ impl Session {
                     p
                 };
 
+                // The one V2/V3 decision in LQL: bind by the container's
+                // own generation marker. Everything after binding
+                // consumes the bound runtime's facts and capabilities —
+                // no statement executor asks "is this VINDEX3?" again.
+                if matches!(
+                    larql_vindex::format::generation::detect_generation(&path),
+                    Ok(larql_vindex::format::generation::ContainerGeneration::V3)
+                ) {
+                    let (runtime, tokenizer) = crate::executor::vindex3::bind(&path)?;
+                    let plan_layers = runtime.plan().layers.len();
+                    let out = vec![
+                        format!(
+                            "Using: {} (VINDEX3, model: {}, component {}, {} layers, \
+                             execution closed)",
+                            path.display(),
+                            runtime.model_name(),
+                            crate::executor::vindex3::V3_COMPONENT,
+                            plan_layers,
+                        ),
+                        format!(
+                            "Supported: INFER [TOP n] [GENERATE n], STATS, SHOW LAYERS. \
+                             Tokenizer: {}.",
+                            if tokenizer.is_some() {
+                                "present"
+                            } else {
+                                "absent (token-id capability only)"
+                            },
+                        ),
+                    ];
+                    self.backend = Backend::Vindex3 {
+                        path,
+                        runtime,
+                        tokenizer,
+                    };
+                    self.patch_recording = None;
+                    self.auto_patch = false;
+                    return Ok(out);
+                }
+
                 let config = larql_vindex::load_vindex_config(&path)
                     .map_err(|e| LqlError::exec("failed to load vindex config", e))?;
 

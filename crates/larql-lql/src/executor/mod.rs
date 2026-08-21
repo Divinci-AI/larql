@@ -15,6 +15,7 @@ mod relation_resolver;
 mod remote;
 mod trace;
 mod tuning;
+mod vindex3;
 
 #[cfg(test)]
 mod tests;
@@ -247,7 +248,8 @@ impl Session {
                 top,
                 compare,
                 route,
-            } => self.exec_infer(prompt, *top, *compare, route.as_ref()),
+                generate,
+            } => self.exec_infer(prompt, *top, *compare, route.as_ref(), *generate),
             Statement::Delete { conditions } => {
                 let mut out = self.ensure_patch_session();
                 out.extend(self.exec_delete(conditions)?);
@@ -306,7 +308,12 @@ impl Session {
             Statement::Walk { prompt, top, layers, .. } => {
                 self.remote_walk(prompt, *top, layers.as_ref())
             }
-            Statement::Infer { prompt, top, compare, route: _ } => {
+            Statement::Infer { prompt, top, compare, route: _, generate } => {
+                if generate.is_some() {
+                    return Err(LqlError::Execution(
+                        "INFER GENERATE is not supported on a remote backend yet".into(),
+                    ));
+                }
                 self.remote_infer(prompt, *top, *compare)
             }
             Statement::Stats { .. } => self.remote_stats(),

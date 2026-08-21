@@ -232,6 +232,12 @@ impl Session {
     }
 
     pub(crate) fn exec_show_layers(&self, range: Option<&Range>) -> Result<Vec<String>, LqlError> {
+        if matches!(self.backend, super::Backend::Vindex3 { .. }) {
+            // Ranges are cheap to add later; the V3 fixture stacks are
+            // small and the whole table is the point.
+            let _ = range;
+            return self.exec_v3_show_layers();
+        }
         let (_path, _config, patched) = self.require_vindex()?;
 
         let all_layers = patched.loaded_layers();

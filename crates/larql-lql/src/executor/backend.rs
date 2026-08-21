@@ -46,6 +46,21 @@ pub(crate) enum Backend {
         weights: larql_inference::ModelWeights,
         tokenizer: larql_inference::tokenizers::Tokenizer,
     },
+    /// A bound VINDEX3 container: the opened executable program plus
+    /// serving glue (LQL-1). Holds NO `ModelWeights`, `VectorIndex`, or
+    /// `ModelArchitecture` — statements consume the runtime's declared
+    /// facts and capabilities; nothing below the binding re-detects the
+    /// format. Supports INFER [GENERATE], STATS, SHOW LAYERS.
+    Vindex3 {
+        #[allow(dead_code)]
+        path: PathBuf,
+        runtime: larql_inference::Vindex3Runtime<
+            larql_vindex::format::vindex3::opplan::exec::production::ProductionBackend,
+        >,
+        /// The container's tokenizer, when it carries one — the text
+        /// capability. INFER requires it; USE/STATS/SHOW do not.
+        tokenizer: Option<larql_inference::tokenizers::Tokenizer>,
+    },
     /// Remote server backend — queries forwarded via HTTP.
     /// Local patches can be applied for client-side overlay.
     Remote {
@@ -82,6 +97,7 @@ impl Session {
     pub(crate) fn require_patched(&self) -> Result<&larql_vindex::PatchedVindex, LqlError> {
         match &self.backend {
             Backend::Vindex { patched, .. } => Ok(patched),
+            Backend::Vindex3 { .. } => Err(super::vindex3::unsupported("this statement")),
             Backend::Weight { model_id, .. } => Err(LqlError::Execution(format!(
                 "this operation requires a vindex. Extract first:\n  \
                  EXTRACT MODEL \"{}\" INTO \"{}.vindex\"",
@@ -110,6 +126,7 @@ impl Session {
                 patched,
                 ..
             } => Ok((path, config, patched)),
+            Backend::Vindex3 { .. } => Err(super::vindex3::unsupported("mutation")),
             Backend::Weight { model_id, .. } => Err(LqlError::Execution(format!(
                 "mutation requires a vindex. Extract first:\n  \
                  EXTRACT MODEL \"{}\" INTO \"{}.vindex\"",
@@ -138,6 +155,7 @@ impl Session {
                 patched,
                 ..
             } => Ok((path, config, patched)),
+            Backend::Vindex3 { .. } => Err(super::vindex3::unsupported("this statement")),
             Backend::Weight { model_id, .. } => Err(LqlError::Execution(format!(
                 "this operation requires a vindex. Extract first:\n  \
                  EXTRACT MODEL \"{}\" INTO \"{}.vindex\"",

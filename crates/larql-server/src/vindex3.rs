@@ -61,10 +61,15 @@ pub fn load_v3_model(path: &Path) -> Result<V3Model, Box<dyn std::error::Error +
         .map_err(|e| format!("open VINDEX3 container: {e}"))?;
     let tokenizer = larql_vindex::load_vindex_tokenizer(path)
         .map_err(|e| format!("VINDEX3 container has no servable tokenizer.json: {e}"))?;
-    let name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "vindex3".to_string());
+    // The container names itself (`index.model`); the directory name is
+    // only the last-resort fallback for a container encoded nameless.
+    let name = match runtime.model_name() {
+        "" => path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "vindex3".to_string()),
+        named => named.to_string(),
+    };
     Ok(V3Model {
         id: model_id_from_name(&name),
         path: path.to_path_buf(),

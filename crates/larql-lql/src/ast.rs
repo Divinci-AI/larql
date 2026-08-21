@@ -50,6 +50,10 @@ pub enum Statement {
         /// FR1/FR2 KnnStore router selection (`ROUTE VERIFY [FALLBACK] [TOPK n]`).
         /// `None` = inherit the env default (`KnnRouteMode::from_env`).
         route: Option<InferRoute>,
+        /// `GENERATE n` — greedy autoregressive continuation through the
+        /// bound runtime (VINDEX3 backends; LQL-1). `None` = classic
+        /// single-step top-k prediction.
+        generate: Option<u32>,
     },
     Select {
         source: SelectSource,

@@ -11,8 +11,22 @@ impl Session {
         top: Option<u32>,
         compare: bool,
         route: Option<&crate::ast::InferRoute>,
+        generate: Option<u32>,
     ) -> Result<Vec<String>, LqlError> {
         let top_k = top.unwrap_or(5) as usize;
+
+        // VINDEX3 binding: the runtime seam serves INFER (and the
+        // GENERATE continuation); no other backend supports GENERATE.
+        if matches!(self.backend, Backend::Vindex3 { .. }) {
+            return self.exec_v3_infer(prompt, top_k, generate);
+        }
+        if generate.is_some() {
+            return Err(LqlError::Execution(
+                "INFER GENERATE currently requires a VINDEX3 container \
+                 (USE \"path/to/container\")"
+                    .into(),
+            ));
+        }
         // Resolve the KnnStore router: an explicit `ROUTE VERIFY [FALLBACK]
         // [TOPK n]` clause wins; otherwise inherit the `LARQL_KNN_*` env default
         // (so unclaused INFER stays byte-identical to the Python binding —

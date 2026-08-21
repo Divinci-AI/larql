@@ -20,7 +20,7 @@ use super::session::Vindex3Session;
 fn open_component(
     container: &Path,
     component: &str,
-) -> Result<(ComponentOpPlan, OperandStore), InferenceError> {
+) -> Result<(ComponentOpPlan, OperandStore, String), InferenceError> {
     let inspection = inspect_container(container, false)?;
     let outcome = plan_component_ops(&inspection, container, component)?;
     if !outcome.closed() {
@@ -30,7 +30,9 @@ fn open_component(
         InferenceError::Parse(format!("component `{component}` produced no plan"))
     })?;
     let store = OperandStore::open(container, &inspection)?;
-    Ok((plan, store))
+    // The container names itself (`index.model`) — identity travels
+    // with the artifact, never a sidecar or a directory name.
+    Ok((plan, store, inspection.index.model.clone()))
 }
 
 /// Built outside the generic impl so the refusal exists (and is
@@ -62,18 +64,27 @@ pub struct Vindex3Runtime<B: PlanBackend> {
     plan: ComponentOpPlan,
     store: OperandStore,
     backend: B,
+    model_name: String,
 }
 
 impl<B: PlanBackend> Vindex3Runtime<B> {
     /// Open `component` from the container, refusing any closure
     /// defect (see [`unclosed_component`]'s doc).
     pub fn open(container: &Path, component: &str, backend: B) -> Result<Self, InferenceError> {
-        let (plan, store) = open_component(container, component)?;
+        let (plan, store, model_name) = open_component(container, component)?;
         Ok(Self {
             plan,
             store,
             backend,
+            model_name,
         })
+    }
+
+    /// The container's self-declared model name (`index.model`) — the
+    /// identity authority; callers must not fall back to directory
+    /// names when this is non-empty.
+    pub fn model_name(&self) -> &str {
+        &self.model_name
     }
 
     /// Open an incremental session at position zero. Each call loads
