@@ -279,3 +279,89 @@ fn an_empty_prompt_is_refused_before_the_runtime() {
     let err = session.execute(&parsed).unwrap_err().to_string();
     assert!(err.contains("tokenises to empty"), "{err}");
 }
+
+// ── LQL-2: EXPLAIN INFER / TRACE ──
+
+/// EXPLAIN INFER renders the executable authority — statically,
+/// deterministically, and with the miniature's real anatomy: the
+/// sliding(3)/full split, the four-norm op order, operand bindings,
+/// and plan-derived continuation geometry. Repeated runs render
+/// identically (the structured value is `PartialEq`-gated below the
+/// renderer too).
+#[test]
+fn explain_infer_renders_the_executable_plan() {
+    let container = v3_container();
+    let mut session = bound_session(container.path());
+    let first = run(&mut session, &format!("EXPLAIN INFER \"{PROMPT}\";"));
+    let second = run(&mut session, &format!("EXPLAIN INFER \"{PROMPT}\";"));
+    assert_eq!(first, second, "explain must be deterministic");
+
+    let text = first.join("\n");
+    assert!(text.contains("MODEL"), "{text}");
+    assert!(text.contains("name: lql-fixture"), "{text}");
+    assert!(text.contains("generation: 3"), "{text}");
+    assert!(text.contains("execution: closed"), "{text}");
+    assert!(text.contains("mode sliding window 3"), "{text}");
+    assert!(text.contains("mode full window -"), "{text}");
+    // Four-norm placement is explicit ops, not implied structure.
+    assert!(text.contains("post_attention_norm"), "{text}");
+    assert!(text.contains("post_ffn_norm"), "{text}");
+    // Operand provenance: object::tensor @dtype bindings.
+    assert!(text.contains("self_attn.q_proj.weight @F32"), "{text}");
+    assert!(text.contains("mlp.up_proj.weight @F32"), "{text}");
+    // Continuation geometry from the plan.
+    assert!(text.contains("layer 0: kv_dim 4 window 3"), "{text}");
+    assert!(text.contains("layer 1: kv_dim 4 window -"), "{text}");
+    assert!(text.contains("output_head: present"), "{text}");
+    // No family/architecture reconstruction anywhere on this path —
+    // the V2 loader cannot even open the container.
+    assert!(load_vindex_config(container.path()).is_err());
+}
+
+/// TRACE observes the canonical executor: every explained layer
+/// appears in the observed stream, and enabling observation changes
+/// nothing — the traced next token equals INFER's.
+#[test]
+fn trace_is_observational_and_agrees_with_explain() {
+    let container = v3_container();
+    let mut session = bound_session(container.path());
+
+    let trace = run(&mut session, &format!("TRACE \"{PROMPT}\";"));
+    let text = trace.join("\n");
+    // One prompt position, both layers observed, in order.
+    assert!(text.contains("position 0"), "{text}");
+    assert!(text.contains("layer 0: attention"), "{text}");
+    assert!(text.contains("layer 0: ffn"), "{text}");
+    assert!(text.contains("layer 1: attention"), "{text}");
+    assert!(text.contains("layer 1: ffn"), "{text}");
+    assert!(text.contains("output_head (vocab 29)"), "{text}");
+
+    // Explain/execution agreement: the explained layer set is exactly
+    // the observed layer set.
+    let explain = run(&mut session, &format!("EXPLAIN INFER \"{PROMPT}\";"));
+    let explained_layers = explain
+        .iter()
+        .filter(|l| l.trim_start().starts_with("layer ") && l.contains("kv_dim"))
+        .count();
+    let observed_layers = trace.iter().filter(|l| l.contains(": ffn")).count();
+    assert_eq!(explained_layers, observed_layers, "explain/trace disagree");
+
+    // Observation is observational: the traced greedy token is INFER's.
+    let first_greedy = direct_arm(container.path())[0];
+    assert!(
+        text.contains(&format!("next token {first_greedy} ")),
+        "traced token diverges from the untraced run: {text}"
+    );
+}
+
+#[test]
+fn trace_with_options_refuses_on_v3() {
+    let container = v3_container();
+    let mut session = bound_session(container.path());
+    let parsed = parse(&format!("TRACE \"{PROMPT}\" DECOMPOSE;")).unwrap();
+    let err = session.execute(&parsed).unwrap_err().to_string();
+    assert!(
+        err.contains("not supported on a VINDEX3 container"),
+        "{err}"
+    );
+}

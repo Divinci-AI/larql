@@ -30,8 +30,8 @@ use larql_vindex::format::vindex3::opplan::exec::reference::ReferenceBackend;
 use larql_vindex::format::vindex3::opplan::plan_component_ops;
 
 use super::{
-    generate_session, plan_kv_geometry, KvState, LogitsSession, RowKvState, Vindex3Runtime,
-    Vindex3Session,
+    generate_session, plan_kv_geometry, KvState, LogitsSession, RecordingObserver, RowKvState,
+    StepEvent, Vindex3Runtime, Vindex3Session,
 };
 use crate::error::InferenceError;
 use crate::layer_graph::generate::eos::EosConfig;
@@ -531,4 +531,138 @@ fn a_plan_without_an_output_head_is_refused() {
         Err(err) => err,
     };
     assert!(err.to_string().contains("no output head"), "{err}");
+}
+
+// ── EXPLAIN (LQL-2): the structured explanation IS the authority ──
+
+#[test]
+fn explain_is_stable_and_reads_the_plan() {
+    let container = container_with(miniature_glimmer);
+    let a = Vindex3Runtime::open(container.path(), COMPONENT, ReferenceBackend::new()).unwrap();
+    let b = Vindex3Runtime::open(container.path(), COMPONENT, ReferenceBackend::new()).unwrap();
+    let explain = super::ExplainPlan::from_runtime(&a);
+    // Stability: same container, identical structured explanation.
+    assert_eq!(explain, super::ExplainPlan::from_runtime(&b));
+
+    assert_eq!(explain.generation, 3);
+    assert_eq!(explain.component, COMPONENT);
+    assert!(explain.execution_closed);
+    assert_eq!(explain.layers.len(), 2);
+    // The miniature's sliding(3)/full split, from the plan alone.
+    assert_eq!(explain.layers[0].attention.mode, "sliding");
+    assert_eq!(explain.layers[0].attention.window, Some(3));
+    assert_eq!(explain.layers[1].attention.mode, "full");
+    // Four-norm placement shows as explicit ops, in execution order.
+    assert_eq!(
+        explain.layers[0].ops,
+        vec![
+            "pre_attention_norm",
+            "attention",
+            "post_attention_norm",
+            "residual_add",
+            "pre_ffn_norm",
+            "ffn",
+            "post_ffn_norm",
+            "residual_add",
+        ]
+    );
+    // Continuation geometry matches what a provider is prepared with.
+    let geometry = plan_kv_geometry(a.plan());
+    assert_eq!(explain.continuation.len(), geometry.len());
+    for (e, g) in explain.continuation.iter().zip(&geometry) {
+        assert_eq!(e.kv_dim, g.kv_dim);
+        assert_eq!(e.window, g.window);
+    }
+    assert!(explain.output.is_some());
+    assert!(explain.final_norm);
+}
+
+/// The negative control: mutate the plan and the explanation must
+/// change with it — the instrument sees the program, not a cached
+/// family notion.
+#[test]
+fn explain_changes_when_the_plan_changes() {
+    let container = container_with(miniature_glimmer);
+    let inspection = inspect_container(container.path(), false).unwrap();
+    let outcome = plan_component_ops(&inspection, container.path(), COMPONENT).unwrap();
+    let plan = outcome.plan.unwrap();
+    let baseline = super::ExplainPlan::from_plan(&plan, "m");
+
+    let mut widened = plan.clone();
+    widened.layers[0].attention.window = None;
+    let explained = super::ExplainPlan::from_plan(&widened, "m");
+    assert_ne!(baseline, explained);
+    assert_eq!(explained.layers[0].attention.mode, "full");
+
+    let mut headless = plan.clone();
+    headless.output = None;
+    assert!(super::ExplainPlan::from_plan(&headless, "m")
+        .output
+        .is_none());
+}
+
+/// Provenance closure: the coordinates the explanation quotes are
+/// sufficient, alone, to reach the exact bytes execution loads — the
+/// explain chain and the execution chain cannot name different
+/// operands.
+#[test]
+fn explain_operand_coordinates_resolve_to_the_executed_bytes() {
+    use larql_vindex::format::vindex3::opplan::OperandRef;
+    let container = container_with(miniature_glimmer);
+    let inspection = inspect_container(container.path(), false).unwrap();
+    let outcome = plan_component_ops(&inspection, container.path(), COMPONENT).unwrap();
+    let plan = outcome.plan.unwrap();
+    let store = OperandStore::open(container.path(), &inspection).unwrap();
+    let explain = super::ExplainPlan::from_plan(&plan, "m");
+
+    // One attention operand and one FFN operand, per the gate.
+    let q = &explain.layers[0].attention.operands[0];
+    assert_eq!(q.role, "q");
+    let ffn_up = explain.layers[0]
+        .ffn
+        .operands
+        .iter()
+        .find(|o| o.role == "up")
+        .unwrap();
+    for (quoted, executed) in [
+        (q, &plan.layers[0].attention.q),
+        (ffn_up, &plan.layers[0].ffn.dense().unwrap().up),
+    ] {
+        let rebuilt = OperandRef {
+            object: quoted.object.clone(),
+            tensor: quoted.tensor.clone(),
+            dtype: quoted.dtype.clone(),
+            shape: quoted.shape.clone(),
+        };
+        let via_explain = store.load(&rebuilt).unwrap();
+        let via_execution = store.load(executed).unwrap();
+        assert_eq!(via_explain, via_execution, "{} bytes diverge", quoted.role);
+        assert!(!via_explain.is_empty());
+    }
+}
+
+/// The session-level observation seam: observed and unobserved steps
+/// are bit-identical, and the recorder sees the step's boundaries —
+/// one execution path, many consumers.
+#[test]
+fn an_observed_session_step_is_bit_identical_and_records_boundaries() {
+    let container = container_with(miniature_glimmer);
+    let runtime =
+        Vindex3Runtime::open(container.path(), COMPONENT, ReferenceBackend::new()).unwrap();
+
+    let mut plain = runtime.session().unwrap();
+    let mut observed = runtime.session().unwrap();
+    let mut recorder = RecordingObserver::default();
+    for &token in G_TOKENS.iter() {
+        let a = plain.step(token).unwrap();
+        let b = observed.step_observed(token, &mut recorder).unwrap();
+        assert_eq!(a, b, "observation changed the arithmetic");
+    }
+    // Per position: embed + (attention, ffn) per layer + logits.
+    let per_position = 1 + 2 * runtime.plan().layers.len() + 1;
+    assert_eq!(recorder.events.len(), G_TOKENS.len() * per_position);
+    assert!(matches!(
+        recorder.events[0],
+        StepEvent::Embedded { position: 0 }
+    ));
 }

@@ -25,6 +25,7 @@
 
 use super::backend::{AttentionStepCall, MatrixClass, NormCall, PlanBackend};
 use super::kv::{plan_kv_geometry, KvState, RowKvState};
+use super::observe::{NoopObserver, StepEvent, StepObserver};
 use super::operands::OperandStore;
 use super::weights::{load_weight, LoadedWeight};
 use super::AttentionOperands;
@@ -245,6 +246,18 @@ impl<'a, B: PlanBackend> DecodeSession<'a, B> {
     /// Operation ordering mirrors the batch traversal exactly — the
     /// decode-vs-batch parity tests are the guarantee.
     pub fn step(&mut self, token: u32) -> Result<StepOutput, VindexError> {
+        self.step_observed(token, &mut NoopObserver)
+    }
+
+    /// [`step`](Self::step) with a subscriber on the step's operation
+    /// boundaries (LQL-2 TRACE). This IS the step — `step()` calls it
+    /// with [`NoopObserver`] — so observation can never fork the
+    /// semantics; the observed-vs-unobserved parity gate pins it.
+    pub fn step_observed(
+        &mut self,
+        token: u32,
+        observer: &mut dyn StepObserver,
+    ) -> Result<StepOutput, VindexError> {
         let embedding = self
             .plan
             .embedding
@@ -269,6 +282,7 @@ impl<'a, B: PlanBackend> DecodeSession<'a, B> {
         }
 
         let position = self.kv.state().position();
+        observer.event(StepEvent::Embedded { position });
         for (index, (state, layer)) in self.layers.iter_mut().zip(&self.plan.layers).enumerate() {
             // Attention input is normalised once and handed over; the
             // judged gate reads the same vector (same as the batch path).
@@ -292,6 +306,7 @@ impl<'a, B: PlanBackend> DecodeSession<'a, B> {
             };
             super::scale_residual_delta(layer.residual_scale, &mut attn_out);
             self.backend.residual_add(&mut h, &attn_out);
+            observer.event(StepEvent::AttentionDone { layer: index });
 
             let normed = state.pre_ffn.apply(self.backend, &h);
             let ffn_out = state.ffn.apply_from_residual(
@@ -310,6 +325,7 @@ impl<'a, B: PlanBackend> DecodeSession<'a, B> {
             if let Some(scale) = state.layer_scale {
                 self.backend.scale_row(&mut h, scale);
             }
+            observer.event(StepEvent::FfnDone { layer: index });
         }
 
         let final_hidden = match &self.final_norm {
@@ -327,6 +343,11 @@ impl<'a, B: PlanBackend> DecodeSession<'a, B> {
             )?),
             None => None,
         };
+        if let Some(logits) = &logits {
+            observer.event(StepEvent::Logits {
+                vocab: logits.len(),
+            });
+        }
         self.kv.state_mut().set_position(position + 1);
         Ok(StepOutput { logits })
     }

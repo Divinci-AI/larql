@@ -41,6 +41,7 @@
 //! continuation position, and `session_with_kv` resumes from it; no
 //! batch-state → decode-state translation exists anywhere.
 
+mod explain;
 mod generate;
 mod runtime;
 mod session;
@@ -52,8 +53,18 @@ pub use generate::{continue_session, generate_session, SessionGeneration};
 pub use runtime::Vindex3Runtime;
 pub use session::{LogitsSession, Vindex3Session};
 
+pub use explain::{
+    ExplainAttention, ExplainEmbedding, ExplainFfn, ExplainKvGeometry, ExplainLayer,
+    ExplainOperand, ExplainOutput, ExplainPlan,
+};
+
 // The continuation-state seam, re-exported so engine authors reach it
 // from the runtime module without deep `larql_vindex` paths.
 pub use larql_vindex::format::vindex3::opplan::exec::kv::{
     plan_kv_geometry, KvState, LayerKvGeometry, RowKvState,
+};
+// The observation seam (LQL-2 TRACE): subscribers to the canonical
+// executor's step boundaries — one execution path, many consumers.
+pub use larql_vindex::format::vindex3::opplan::exec::observe::{
+    RecordingObserver, StepEvent, StepObserver,
 };

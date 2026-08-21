@@ -123,3 +123,20 @@ impl<B: PlanBackend> LogitsSession for Vindex3Session<'_, B> {
         self.inner.position()
     }
 }
+
+impl<B: PlanBackend> Vindex3Session<'_, B> {
+    /// [`LogitsSession::step`] with a subscriber on the canonical
+    /// step's operation boundaries (LQL-2 TRACE). Observation is
+    /// observational: the executor's own parity gate pins that the
+    /// observed and unobserved paths are bit-identical.
+    pub fn step_observed(
+        &mut self,
+        token: u32,
+        observer: &mut dyn larql_vindex::format::vindex3::opplan::exec::observe::StepObserver,
+    ) -> Result<Vec<f32>, InferenceError> {
+        self.inner
+            .step_observed(token, observer)?
+            .logits
+            .ok_or_else(missing_logits_error)
+    }
+}

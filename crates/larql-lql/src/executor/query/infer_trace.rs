@@ -17,6 +17,11 @@ impl Session {
         relations_only: bool,
         with_attention: bool,
     ) -> Result<Vec<String>, LqlError> {
+        // VINDEX3 binding: EXPLAIN INFER renders the executable plan —
+        // static, no reconstruction, no execution (LQL-2).
+        if matches!(self.backend, crate::executor::Backend::Vindex3 { .. }) {
+            return self.exec_v3_explain();
+        }
         let top_k = top.unwrap_or(5) as usize;
         let per_layer = top.unwrap_or(3) as usize;
 

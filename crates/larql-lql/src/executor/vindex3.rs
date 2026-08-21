@@ -21,7 +21,7 @@ use crate::executor::{Backend, Session};
 
 /// The statements a VINDEX3 binding serves today. Everything else gets
 /// [`unsupported`] — a capability refusal, not a format apology.
-const SUPPORTED: &str = "INFER [TOP n] [GENERATE n], STATS, SHOW LAYERS, USE";
+const SUPPORTED: &str = "INFER [TOP n] [GENERATE n], EXPLAIN INFER, TRACE, STATS, SHOW LAYERS, USE";
 
 /// Component id a container's text stack is bound under.
 pub(crate) const V3_COMPONENT: &str = "target";
@@ -200,6 +200,156 @@ impl Session {
                 attention.head_dim,
             ));
         }
+        Ok(out)
+    }
+}
+
+impl Session {
+    /// `EXPLAIN INFER` on a V3 binding (LQL-2): render the structured
+    /// [`ExplainPlan`] — the executable authority that will run, not a
+    /// reconstruction. Static: no tokens execute.
+    pub(crate) fn exec_v3_explain(&self) -> Result<Vec<String>, LqlError> {
+        let Backend::Vindex3 { runtime, .. } = &self.backend else {
+            unreachable!("caller matched the backend");
+        };
+        let explain = larql_inference::vindex3::ExplainPlan::from_runtime(runtime);
+
+        let mut out = Vec::new();
+        out.push("MODEL".into());
+        out.push(format!("  name: {}", explain.model));
+        out.push(format!("  generation: {}", explain.generation));
+        out.push(format!("  component: {}", explain.component));
+        out.push("  execution: closed".into());
+        out.push(String::new());
+        out.push("PLAN".into());
+        out.push(format!(
+            "  embedding  vocab {} scaled {} normed {}",
+            explain.embedding.vocab_size, explain.embedding.scaled, explain.embedding.normed,
+        ));
+        for layer in &explain.layers {
+            out.push(format!("  layer {}", layer.layer));
+            for op in &layer.ops {
+                match op.as_str() {
+                    "attention" => {
+                        let a = &layer.attention;
+                        out.push(format!(
+                            "    attention  mode {} window {}  q/kv {}/{}  head_dim {}{}{}",
+                            a.mode,
+                            a.window.map_or("-".into(), |w| w.to_string()),
+                            a.q_heads,
+                            a.kv_heads,
+                            a.head_dim,
+                            if a.gated { "  gated" } else { "" },
+                            if a.qk_norm { "  qk_norm" } else { "" },
+                        ));
+                        for operand in &a.operands {
+                            out.push(format!(
+                                "      {:12} {}::{} @{}",
+                                operand.role, operand.object, operand.tensor, operand.dtype,
+                            ));
+                        }
+                    }
+                    "ffn" => {
+                        let f = &layer.ffn;
+                        out.push(format!(
+                            "    ffn        kind {}{}",
+                            f.kind,
+                            f.experts
+                                .map_or(String::new(), |(e, k)| format!("  experts {e} top_k {k}")),
+                        ));
+                        for operand in &f.operands {
+                            out.push(format!(
+                                "      {:12} {}::{} @{}",
+                                operand.role, operand.object, operand.tensor, operand.dtype,
+                            ));
+                        }
+                    }
+                    other => out.push(format!("    {other}")),
+                }
+            }
+        }
+        out.push(String::new());
+        out.push("CONTINUATION".into());
+        out.push("  provider: caller-owned KvState (CanonicalKvState default)".into());
+        for (layer, g) in explain.continuation.iter().enumerate() {
+            out.push(format!(
+                "  layer {layer}: kv_dim {} window {}",
+                g.kv_dim,
+                g.window.map_or("-".into(), |w| w.to_string()),
+            ));
+        }
+        out.push(String::new());
+        out.push("OUTPUT".into());
+        match &explain.output {
+            Some(head) => {
+                out.push(format!(
+                    "  output_head: present  vocab {}{}{}",
+                    head.vocab,
+                    if head.multiplied { "  multiplied" } else { "" },
+                    if head.softcapped { "  softcapped" } else { "" },
+                ));
+            }
+            None => out.push("  output_head: absent".into()),
+        }
+        out.push(format!(
+            "  final_norm: {}",
+            if explain.final_norm {
+                "present"
+            } else {
+                "absent"
+            }
+        ));
+        Ok(out)
+    }
+
+    /// `TRACE "prompt"` on a V3 binding (LQL-2): observe the canonical
+    /// executor while it ingests the prompt, then report the greedy
+    /// next token. Observation is subscription — the executor's parity
+    /// gate pins that tracing never changes arithmetic, and the LQL
+    /// gate pins that the reported token equals INFER's.
+    pub(crate) fn exec_v3_trace(&self, prompt: &str) -> Result<Vec<String>, LqlError> {
+        use larql_inference::vindex3::{RecordingObserver, StepEvent};
+        let Backend::Vindex3 {
+            runtime, tokenizer, ..
+        } = &self.backend
+        else {
+            unreachable!("caller matched the backend");
+        };
+        let tokenizer = tokenizer.as_ref().ok_or_else(|| {
+            LqlError::Execution("TRACE needs a tokenizer — this container carries none".into())
+        })?;
+        let prompt_ids = encode_v3_prompt(tokenizer, prompt)?;
+
+        let mut session = runtime
+            .session()
+            .map_err(|e| LqlError::exec("v3 session failed", e))?;
+        let mut out = vec!["Trace (VINDEX3 program, observed execution):".into()];
+        let mut logits = Vec::new();
+        for (offset, &token) in prompt_ids.iter().enumerate() {
+            let mut recorder = RecordingObserver::default();
+            logits = session
+                .step_observed(token, &mut recorder)
+                .map_err(|e| LqlError::exec("v3 step failed", e))?;
+            out.push(format!("position {offset} (prompt token {token})"));
+            for event in &recorder.events {
+                match event {
+                    StepEvent::Embedded { .. } => out.push("  embed".into()),
+                    StepEvent::AttentionDone { layer } => {
+                        out.push(format!("  layer {layer}: attention"))
+                    }
+                    StepEvent::FfnDone { layer } => out.push(format!("  layer {layer}: ffn")),
+                    StepEvent::Logits { vocab } => {
+                        out.push(format!("  output_head (vocab {vocab})"))
+                    }
+                }
+            }
+        }
+        let mut sampler = larql_inference::Sampler::new(SamplingConfig::greedy());
+        let next = sampler
+            .sample(&logits)
+            .ok_or_else(|| LqlError::Execution("no next token from the logits".into()))?;
+        let text = tokenizer.decode(&[next], false).unwrap_or_default();
+        out.push(format!("next token {next} {text:?} (greedy)"));
         Ok(out)
     }
 }

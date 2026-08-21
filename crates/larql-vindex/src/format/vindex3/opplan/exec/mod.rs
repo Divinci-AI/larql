@@ -24,6 +24,7 @@ pub mod device;
 mod experts;
 pub mod kernels;
 pub mod kv;
+pub mod observe;
 pub mod operands;
 pub mod production;
 pub mod reference;
