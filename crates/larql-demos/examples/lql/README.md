@@ -11,6 +11,7 @@ cargo run -p larql-demos --example compact_demo
 | `compact_demo` | Storage-tier walkthrough for the LSM-style storage engine. | weight-free · 0.2s |
 | `compile_demo` | End-to-end COMPILE. | needs a vindex · 88s |
 | `lql_demo` | Parse, session, execute, error handling. | weight-free · 0.3s |
+| `vindex3_demo` | The control plane over a VINDEX3 container: USE/STATS/SHOW LAYERS/INFER [GENERATE]/EXPLAIN INFER/TRACE + capability refusals, on a self-encoded miniature. | weight-free · <1s |
 | `parser_demo` | Every statement type in spec v0.4, with its AST. | weight-free · 0.3s |
 | `refine_demo` | End-to-end INSERT + COMPILE — Rust port of `experiments/14_vindex_compilation`. | needs a vindex · **541s** |
 | `trace_demo` | Residual-stream decomposition. | needs a vindex · 124s |

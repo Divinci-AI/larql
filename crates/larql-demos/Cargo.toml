@@ -23,6 +23,8 @@ larql-core = { path = "../larql-core" }
 larql-inference = { path = "../larql-inference" }
 larql-kv = { path = "../larql-kv" }
 larql-lql = { path = "../larql-lql" }
+# Scratch dirs for the self-contained VINDEX3 LQL demo.
+tempfile = "3"
 larql-models = { path = "../larql-models" }
 larql-router-protocol = { path = "../larql-router-protocol" }
 larql-server = { path = "../larql-server" }
@@ -181,6 +183,10 @@ path = "examples/lql/compile_demo.rs"
 [[example]]
 name = "lql_demo"
 path = "examples/lql/lql_demo.rs"
+
+[[example]]
+name = "vindex3_demo"
+path = "examples/lql/vindex3_demo.rs"
 
 [[example]]
 name = "parser_demo"

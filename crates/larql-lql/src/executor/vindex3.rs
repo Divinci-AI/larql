@@ -21,7 +21,8 @@ use crate::executor::{Backend, Session};
 
 /// The statements a VINDEX3 binding serves today. Everything else gets
 /// [`unsupported`] — a capability refusal, not a format apology.
-const SUPPORTED: &str = "INFER [TOP n] [GENERATE n], EXPLAIN INFER, TRACE, STATS, SHOW LAYERS, USE";
+pub(crate) const SUPPORTED: &str =
+    "INFER [TOP n] [GENERATE n], EXPLAIN INFER, TRACE, STATS, SHOW LAYERS, USE";
 
 /// Component id a container's text stack is bound under.
 pub(crate) const V3_COMPONENT: &str = "target";

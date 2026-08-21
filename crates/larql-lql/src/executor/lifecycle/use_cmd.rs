@@ -49,8 +49,8 @@ impl Session {
                             plan_layers,
                         ),
                         format!(
-                            "Supported: INFER [TOP n] [GENERATE n], STATS, SHOW LAYERS. \
-                             Tokenizer: {}.",
+                            "Supported: {}. Tokenizer: {}.",
+                            crate::executor::vindex3::SUPPORTED,
                             if tokenizer.is_some() {
                                 "present"
                             } else {

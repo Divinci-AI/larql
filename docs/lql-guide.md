@@ -286,14 +286,37 @@ DESCRIBE "France" ALL LAYERS;   -- All three bands
 
 Bands are model-specific — computed automatically during EXTRACT from known architecture boundaries.
 
+## VINDEX3 Containers
+
+`USE` binds a VINDEX3 container directly — the container's own
+generation marker decides, and the binding holds the executable
+program, never a reconstructed model:
+
+```
+larql> USE "gpt-oss-20b.v3";
+Using: gpt-oss-20b.v3 (VINDEX3, model: gpt-oss-20b, component target, 24 layers, execution closed)
+Supported: INFER [TOP n] [GENERATE n], STATS, SHOW LAYERS. Tokenizer: present.
+
+larql> STATS;                      -- the container's own authority
+larql> SHOW LAYERS;                -- per-layer facts off the plan
+larql> INFER "The capital of France is" TOP 5;
+larql> INFER "The capital of France is" GENERATE 16;   -- greedy continuation
+larql> EXPLAIN INFER "x";          -- the executable plan, statically
+larql> TRACE "x";                  -- observe the executor while it runs
+```
+
+Everything else (browse, mutation, patches) refuses with a message
+naming the supported statements — a capability boundary, not a
+missing feature apology. See the spec's §4.4 for the full contract.
+
 ## Statement Reference
 
 | Category | Statements |
 |----------|-----------|
 | Lifecycle | EXTRACT, COMPILE, DIFF, USE |
 | Browse | WALK, DESCRIBE, SELECT, EXPLAIN WALK |
-| Inference | INFER, EXPLAIN INFER |
-| Trace | TRACE (with FOR, DECOMPOSE, LAYERS, POSITIONS, SAVE) |
+| Inference | INFER (with TOP, GENERATE, ROUTE, COMPARE), EXPLAIN INFER |
+| Trace | TRACE (with FOR, DECOMPOSE, LAYERS, POSITIONS, SAVE; plain form on VINDEX3) |
 | Mutation | INSERT, DELETE, UPDATE, MERGE |
 | Patches | BEGIN PATCH, SAVE PATCH, APPLY PATCH, SHOW PATCHES, REMOVE PATCH |
 | Introspection | SHOW RELATIONS/LAYERS/FEATURES/MODELS/PATCHES, STATS |

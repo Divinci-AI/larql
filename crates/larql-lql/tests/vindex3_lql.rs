@@ -365,3 +365,109 @@ fn trace_with_options_refuses_on_v3() {
         "{err}"
     );
 }
+
+/// The whole-language sweep: every LQL statement, executed against a
+/// V3 binding, must do something sensible — execute, or refuse with a
+/// message that names what the binding supports. Never a panic, and
+/// never the misleading "No backend loaded" (a backend IS loaded).
+///
+/// This is the gate that keeps the capability model honest as the
+/// language grows: a new statement that reaches a V3 session without
+/// a deliberate decision fails here.
+#[test]
+fn every_statement_is_sensible_on_a_v3_binding() {
+    let container = v3_container();
+    let mut session = bound_session(container.path());
+
+    // (statement, expectation): Ok = must succeed, Refuse = must error
+    // mentioning the VINDEX3 capability set, Err = any helpful error.
+    enum Expect {
+        Ok,
+        Refuse,
+        Err,
+    }
+    use Expect::*;
+    let cases: Vec<(&str, Expect)> = vec![
+        // ── Serves on V3 ──
+        (r#"STATS;"#, Ok),
+        (r#"SHOW LAYERS;"#, Ok),
+        (r#"INFER "[3]" TOP 3;"#, Ok),
+        (r#"INFER "[3]" GENERATE 2;"#, Ok),
+        (r#"EXPLAIN INFER "[3]";"#, Ok),
+        (r#"TRACE "[3]";"#, Ok),
+        (r#"SHOW MODELS;"#, Ok),             // registry listing, backend-free
+        (r#"SHOW COMPACT STATUS;"#, Refuse), // LSM state is a vindex concept
+        (r#"SHOW PATCHES;"#, Refuse),
+        // ── Browse: refuses with capabilities ──
+        (r#"WALK "[3]";"#, Refuse),
+        (r#"DESCRIBE "x";"#, Refuse),
+        (r#"SELECT * FROM EDGES LIMIT 5;"#, Refuse),
+        (r#"SELECT * FROM FEATURES WHERE layer = 0;"#, Refuse),
+        (r#"SELECT * FROM ENTITIES;"#, Refuse),
+        (r#"EXPLAIN WALK "[3]";"#, Refuse),
+        (r#"SHOW RELATIONS;"#, Refuse),
+        (r#"SHOW FEATURES 0;"#, Refuse),
+        (r#"SHOW ENTITIES;"#, Refuse),
+        // ── Mutation: refuses with capabilities ──
+        (
+            r#"INSERT INTO EDGES (entity, relation, target) VALUES ("a", "b", "c");"#,
+            Refuse,
+        ),
+        (r#"DELETE FROM EDGES WHERE layer = 0;"#, Refuse),
+        (
+            r#"UPDATE EDGES SET confidence = 0.5 WHERE layer = 0;"#,
+            Refuse,
+        ),
+        (r#"MERGE "other.vindex";"#, Err), // refuses at source validation
+        // Vacuously true on V3: INSERT refuses, so there is never
+        // anything to rebalance and the no-op report is honest.
+        (r#"REBALANCE;"#, Ok),
+        (r#"COMPACT MINOR;"#, Refuse),
+        (r#"COMPACT MAJOR;"#, Refuse),
+        // ── Patch lifecycle: refuses (a V3 binding has no overlay) ──
+        (r#"BEGIN PATCH "p.vlp";"#, Refuse),
+        (r#"SAVE PATCH;"#, Refuse),
+        (r#"APPLY PATCH "p.vlp";"#, Err), // refuses at file validation
+        (r#"REMOVE PATCH "p.vlp";"#, Refuse),
+        // ── Lifecycle that targets other artifacts: any helpful error ──
+        (r#"COMPILE "x.vindex" INTO MODEL "out";"#, Err),
+        (r#"DIFF "a.vindex" "b.vindex";"#, Err),
+        (r#"TRACE "[3]" DECOMPOSE;"#, Refuse),
+    ];
+
+    for (stmt, expect) in cases {
+        let parsed = match parse(stmt) {
+            std::result::Result::Ok(p) => p,
+            std::result::Result::Err(e) => panic!("sweep statement fails to parse: {stmt}: {e}"),
+        };
+        let outcome = session.execute(&parsed);
+        match (expect, outcome) {
+            (Ok, std::result::Result::Ok(_)) => {}
+            (Ok, std::result::Result::Err(e)) => panic!("{stmt}: expected success, got: {e}"),
+            (Refuse, std::result::Result::Err(e)) => {
+                let msg = e.to_string();
+                assert!(
+                    msg.contains("not supported on a VINDEX3 container"),
+                    "{stmt}: refusal must name the capability set, got: {msg}"
+                );
+                assert!(
+                    msg.contains("INFER"),
+                    "{stmt}: refusal must list what IS supported: {msg}"
+                );
+            }
+            (Refuse, std::result::Result::Ok(out)) => {
+                panic!("{stmt}: must refuse on a V3 binding, got: {out:?}")
+            }
+            (Err, std::result::Result::Err(e)) => {
+                let msg = e.to_string();
+                assert!(
+                    !msg.contains("No backend loaded"),
+                    "{stmt}: a backend IS loaded; misleading error: {msg}"
+                );
+            }
+            (Err, std::result::Result::Ok(out)) => {
+                panic!("{stmt}: expected an error, got: {out:?}")
+            }
+        }
+    }
+}

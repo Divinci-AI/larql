@@ -356,6 +356,11 @@ impl Session {
     // ── Patch execution ──
 
     fn exec_begin_patch(&mut self, path: &str) -> Result<Vec<String>, LqlError> {
+        if matches!(self.backend, Backend::Vindex3 { .. }) {
+            // A V3 binding has no patch overlay; starting a recording
+            // that can never record would mislead.
+            return Err(vindex3::unsupported("patches"));
+        }
         if self.patch_recording.is_some() && !self.auto_patch {
             return Err(LqlError::Execution(
                 "patch session already active. Run SAVE PATCH or discard first.".into(),
@@ -379,6 +384,9 @@ impl Session {
     }
 
     fn exec_save_patch(&mut self) -> Result<Vec<String>, LqlError> {
+        if matches!(self.backend, Backend::Vindex3 { .. }) {
+            return Err(vindex3::unsupported("patches"));
+        }
         let recording = self.patch_recording.take().ok_or_else(|| {
             LqlError::Execution("no active patch session. Run BEGIN PATCH first.".into())
         })?;
@@ -440,6 +448,7 @@ impl Session {
             Backend::Vindex { patched, .. } => {
                 patched.apply_patch(patch);
             }
+            Backend::Vindex3 { .. } => return Err(vindex3::unsupported("patches")),
             _ => return Err(LqlError::NoBackend),
         }
 
@@ -503,6 +512,7 @@ impl Session {
     fn exec_remove_patch(&mut self, path: &str) -> Result<Vec<String>, LqlError> {
         let patched = match &mut self.backend {
             Backend::Vindex { patched, .. } => patched,
+            Backend::Vindex3 { .. } => return Err(vindex3::unsupported("patches")),
             _ => return Err(LqlError::NoBackend),
         };
 
