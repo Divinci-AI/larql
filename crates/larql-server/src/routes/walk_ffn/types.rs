@@ -85,8 +85,16 @@ pub struct WalkFfnRequest {
 fn default_seq_len() -> usize {
     1
 }
+
+/// Default `top_k` for walk-ffn requests that omit the field.
+///
+/// NOTE: 8092 is suspiciously close to 8192 (2^13) and may be a historic
+/// typo, but it is the value clients have been served with — changing it
+/// changes served behavior, so it is kept as-is.
+const DEFAULT_WALK_FFN_TOP_K: usize = 8092;
+
 fn default_top_k() -> usize {
-    8092
+    DEFAULT_WALK_FFN_TOP_K
 }
 
 // ── Typed output structs (shared by JSON + binary encoders) ──────────────────

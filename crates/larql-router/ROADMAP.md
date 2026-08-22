@@ -2,24 +2,40 @@
 
 For shipped work, see [CHANGELOG.md](CHANGELOG.md).
 
-## Current state (verified 2026-08-04)
+## Current state (verified 2026-08-22)
 
-**Tests.** 219 tests passing across `larql-router` and
-`larql-router-protocol`.
+**Tests.** 286 tests passing — 256 in `larql-router`, 30 in
+`larql-router-protocol` (the latter only under `--all-features`; its
+tests live behind `quic`).
 
-**Layout.** 23 source files. The library surface is
-`larql_router::{grid, tasks, dispatch, shards, http, admin, cli_helpers}`.
+**Layout.** 27 source files. The library surface is
+`larql_router::{grid, tasks, dispatch, shards, http, openai, admin, cli_helpers}`.
 `grid/` holds one file per concern (`mod` state core, `routing`, `replication`,
 `hot_shard`, `status`, `service` gRPC impl, and a `#[cfg(test)] testing`
 helper); `tasks/` holds `rebalancer/` (6 sub-files) alongside `rtt_probe.rs`,
-signalling both as long-lived background tasks spawned at router startup.
+signalling both as long-lived background tasks spawned at router startup;
+`openai/` is the N0-router proxy (`mod.rs` for the model aggregation and
+the verbatim chat/completions/embeddings pass-through, `responses.rs` for
+`/v1/responses` sticky routing).
 
-**Coverage.** Enforced: 90% per file; totals at 91% (router) and 90%
-(router-protocol). One debt baseline each — `grid/service.rs` at 88% (the
-gRPC streaming join handler; the residual gap is mainly unreachable Mode B
-gap-fill code and tx-send-failure races) and, **new since the 2026-05-16
-snapshot**, `transport/h3.rs` at 89% in router-protocol. The old snapshot
-recorded router-protocol as having zero debt baselines; that is no longer true.
+**N0-router SHIPPED 2026-08-22.** The grid answers as a single OpenAI
+endpoint: servers announce `AnnounceMsg.serves_openai` (grid.proto
+field 9) when they can serve a complete request alone, and the router
+aggregates `/v1/models` and proxies chat/completions/embeddings to the
+least-loaded capable server, streaming SSE back unbuffered. The
+Responses API is proxied with sticky id → backend routing so
+`previous_response_id` chains return to the server holding the
+conversation's resident KV state. Grid-only: a static `--shards` map
+carries no capability signal and answers 503. Full contract in
+[`CHANGELOG.md`](CHANGELOG.md); e2e coverage in
+`tests/test_openai_proxy.rs`.
+
+**Coverage.** Enforced: 90% per file; router total 93.05%. One debt
+baseline each — `grid/service.rs` at 88% (the gRPC streaming join
+handler; the residual gap is mainly unreachable Mode B gap-fill code
+and tx-send-failure races) and, **new since the 2026-05-16 snapshot**,
+`transport/h3.rs` at 89% in router-protocol. The old snapshot recorded
+router-protocol as having zero debt baselines; that is no longer true.
 
 ```bash
 make larql-router-coverage-summary

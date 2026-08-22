@@ -45,14 +45,11 @@ use super::cpu::{count_nonzero_weights, run_experts_cpu_batch};
 fn compute_semaphore() -> &'static Semaphore {
     static SEM: OnceLock<Semaphore> = OnceLock::new();
     SEM.get_or_init(|| {
-        let n = std::env::var("LARQL_COMPUTE_CONCURRENCY")
-            .ok()
-            .and_then(|s| s.parse::<usize>().ok())
-            .unwrap_or_else(|| {
-                std::thread::available_parallelism()
-                    .map(|n| n.get())
-                    .unwrap_or(8)
-            });
+        let n = env_flags::compute_concurrency().unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(8)
+        });
         Semaphore::new(n)
     })
 }

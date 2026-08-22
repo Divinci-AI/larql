@@ -12,6 +12,10 @@ use tracing::{info, warn};
 
 const SHARD_ENDPOINT: &str = "/v1/shard";
 
+/// Whole-request timeout for downloading one shard tar (connect + full body):
+/// 10 minutes, sized for multi-GB layer tars over LAN links.
+const SHARD_DOWNLOAD_TIMEOUT_SECS: u64 = 600;
+
 /// Download a shard tar from `origin_url`, verify the hash, atomically unpack
 /// to `store_path/{model_id}/layers-{layer_start}-{layer_end}/`.
 pub async fn download_and_load_shard(
@@ -46,7 +50,7 @@ pub async fn download_and_load_shard(
     info!(url = %url, dest = %shard_dir.display(), "Mode B: downloading shard tar…");
 
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(600))
+        .timeout(std::time::Duration::from_secs(SHARD_DOWNLOAD_TIMEOUT_SECS))
         .build()?;
     let resp = client.get(&url).send().await?;
     if !resp.status().is_success() {

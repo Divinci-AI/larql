@@ -247,7 +247,7 @@ pub fn null_moe_layer_with_format<'a>(
         fused_row_layout: larql_compute::MoeFusedRowLayout::ContiguousHalves,
         experts_gate_up: Vec::new(),
         experts_down: Vec::new(),
-        routing_policy: larql_compute::MoeRoutingPolicy::default(),
+        routing_policy: larql_compute::MoeRoutingPolicy::gemma4_hybrid(),
         weight_layout: larql_compute::MoeWeightLayout::default(),
         router_proj: &[],
         router_scale: &[],

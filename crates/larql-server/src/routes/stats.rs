@@ -157,6 +157,48 @@ async fn add_q4k_ffn(model: &LoadedModel, mut stats: serde_json::Value) -> serde
     stats
 }
 
+/// The server-level block: process counters plus every bounded
+/// per-client store the maintenance sweeper keeps in check — the
+/// operational counterpart of the P1 eviction fix and the N1 KV cache.
+async fn server_block(state: &AppState) -> serde_json::Value {
+    serde_json::json!({
+        "uptime_secs": state.started_at.elapsed().as_secs(),
+        "requests_served": state
+            .requests_served
+            .load(std::sync::atomic::Ordering::Relaxed),
+        "sessions": {
+            "active": state.sessions.session_count().await,
+            "ttl_secs": state.sessions.ttl().as_secs(),
+        },
+        "responses_stored": {
+            "entries": state.responses.len(),
+            "capacity": crate::response_store::MAX_STORED_RESPONSES,
+        },
+        "v3_kv": {
+            "enabled": state.v3_kv.enabled(),
+            "entries": state.v3_kv.len(),
+            "capacity": state.v3_kv.max_entries(),
+            "ttl_secs": state.v3_kv.ttl().as_secs(),
+            // `hits` = a resident state was found; `resumptions` = the
+            // state also passed the exact ids-prefix check and prefill
+            // work was skipped. The difference is the prefix-stability
+            // gap under real request construction.
+            "hits": state.v3_kv.hits(),
+            "misses": state.v3_kv.misses(),
+            "resumptions": state.v3_kv.resumptions(),
+            "reused_tokens_total": state.v3_kv.reused_tokens_total(),
+        },
+    })
+}
+
+/// Merge the server-level block into a per-model stats payload.
+async fn add_server_block(state: &AppState, mut stats: serde_json::Value) -> serde_json::Value {
+    if let Some(obj) = stats.as_object_mut() {
+        obj.insert("server".into(), server_block(state).await);
+    }
+    stats
+}
+
 #[utoipa::path(
     get,
     path = "/v1/stats",
@@ -172,7 +214,8 @@ pub async fn handle_stats(
     state.bump_requests();
     let model = state.model_or_err(None)?;
     let stats = build_stats(model);
-    Ok(Json(add_q4k_ffn(model, stats).await))
+    let stats = add_q4k_ffn(model, stats).await;
+    Ok(Json(add_server_block(&state, stats).await))
 }
 
 #[utoipa::path(
@@ -192,5 +235,6 @@ pub async fn handle_stats_multi(
     state.bump_requests();
     let model = state.model_or_err(Some(&model_id))?;
     let stats = build_stats(model);
-    Ok(Json(add_q4k_ffn(model, stats).await))
+    let stats = add_q4k_ffn(model, stats).await;
+    Ok(Json(add_server_block(&state, stats).await))
 }

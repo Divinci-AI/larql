@@ -133,6 +133,11 @@ pub mod schemas {
         #[serde(skip_serializing_if = "Option::is_none")]
         pub layer_bands: Option<LayerBands>,
         pub loaded: LoadedCapabilities,
+        /// Server-level counters: uptime, request count, and the
+        /// bounded per-client stores (patch sessions, stored
+        /// responses, V3 KV continuation cache with hit/miss counts).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub server: Option<serde_json::Value>,
     }
 
     /// One entry in the OpenAI-compatible `/v1/models` list.
@@ -270,6 +275,66 @@ pub mod schemas {
         pub active_patches: usize,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub session: Option<String>,
+    }
+
+    // ---- sessions ----------------------------------------------------
+
+    #[derive(Serialize, ToSchema)]
+    pub struct SessionPatches {
+        /// How many patches are applied to this session.
+        pub active: usize,
+        /// Patch identities, in application order. Contents are not
+        /// exposed here — `/v1/patches` is the authority for those.
+        pub ids: Vec<String>,
+    }
+
+    #[derive(Serialize, ToSchema)]
+    pub struct SessionContinuation {
+        /// Whether a resident KV state owned by this session can be
+        /// resumed from.
+        pub available: bool,
+        /// Prompt tokens already absorbed into the resident state(s).
+        pub input_tokens: u64,
+        /// Generations on this session where resumption engaged.
+        pub resumptions: u64,
+        /// Prompt tokens served from resumed KV, cumulative.
+        pub reused_tokens_total: u64,
+    }
+
+    #[derive(Serialize, ToSchema)]
+    pub struct SessionResponse {
+        pub object: String,
+        /// The `X-Session-Id` value the client uses.
+        pub id: String,
+        /// Runtime binding the session was created against.
+        pub model: String,
+        pub created_at: u64,
+        pub last_used_at: u64,
+        /// When the session expires if left idle from `last_used_at`.
+        pub expires_at: u64,
+        /// Lifecycle state; `active` is the only observable value —
+        /// expired sessions are absent, not listed.
+        pub state: String,
+        pub patches: SessionPatches,
+        pub continuation: SessionContinuation,
+    }
+
+    #[derive(Serialize, ToSchema)]
+    pub struct SessionListResponse {
+        pub object: String,
+        /// Live sessions, most recently used first.
+        pub data: Vec<SessionResponse>,
+    }
+
+    #[derive(Serialize, ToSchema)]
+    pub struct SessionDeletedResponse {
+        pub object: String,
+        pub id: String,
+        /// False when the session was already gone — deletion is
+        /// idempotent, not an error.
+        pub deleted: bool,
+        pub patches_freed: usize,
+        pub continuations_freed: usize,
     }
 
     // ---- admin -------------------------------------------------------
@@ -434,6 +499,63 @@ pub mod schemas {
         #[serde(skip_serializing_if = "Option::is_none")]
         pub usage: Option<serde_json::Value>,
     }
+
+    /// OpenAI `POST /v1/responses` request. `input` is a string or an
+    /// array of input items (`message`, `function_call`,
+    /// `function_call_output`); tools use the flattened Responses shape.
+    #[derive(Serialize, ToSchema)]
+    pub struct OpenAiResponsesRequest {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub model: Option<String>,
+        /// String, or array of input items.
+        pub input: serde_json::Value,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub instructions: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub max_output_tokens: Option<u32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub temperature: Option<f32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub top_p: Option<f32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub stream: Option<bool>,
+        /// Persist for `previous_response_id` chaining (default true;
+        /// in-memory and bounded).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub store: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub previous_response_id: Option<String>,
+        /// Function tools, Responses shape: `[{type, name, description, parameters}]`.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub tools: Option<serde_json::Value>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub tool_choice: Option<serde_json::Value>,
+        /// `{format: {type: "text" | "json_object" | "json_schema", ...}}`.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub text: Option<serde_json::Value>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub metadata: Option<serde_json::Value>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub user: Option<String>,
+    }
+
+    /// OpenAI Responses envelope (`object: "response"`).
+    #[derive(Serialize, ToSchema)]
+    pub struct OpenAiResponsesResponse {
+        pub id: String,
+        pub object: String,
+        pub created_at: u64,
+        /// `completed` | `incomplete` | `failed`.
+        pub status: String,
+        pub model: String,
+        /// Output items: `message` (with `output_text` content parts)
+        /// and `function_call`.
+        pub output: Vec<serde_json::Value>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub previous_response_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub usage: Option<serde_json::Value>,
+    }
 }
 
 #[derive(OpenApi)]
@@ -449,6 +571,7 @@ pub mod schemas {
         (name = "openai",    description = "OpenAI-compatible endpoints"),
         (name = "expert",    description = "Remote MoE shard endpoints (binary wire)"),
         (name = "patches",   description = "Runtime patch overlay"),
+        (name = "sessions",  description = "Session observability and eviction"),
         (name = "admin",     description = "Health, models, embed, tokens, WebSocket"),
     ),
     paths(
@@ -465,6 +588,10 @@ pub mod schemas {
         crate::routes::explain::handle_explain,
         crate::routes::insert::handle_insert,
         crate::routes::warmup::handle_warmup,
+        // sessions
+        crate::routes::sessions::handle_list_sessions,
+        crate::routes::sessions::handle_get_session,
+        crate::routes::sessions::handle_delete_session,
         // patches
         crate::routes::patches::handle_apply_patch,
         crate::routes::patches::handle_list_patches,
@@ -481,6 +608,10 @@ pub mod schemas {
         crate::routes::openai::embeddings::handle_embeddings,
         crate::routes::openai::completions::handle_completions,
         crate::routes::openai::chat::handle_chat_completions,
+        crate::routes::openai::responses::handler::handle_responses,
+        crate::routes::openai::responses::retrieve::handle_get_response,
+        crate::routes::openai::responses::retrieve::handle_delete_response,
+        crate::routes::models::handle_model_retrieve,
         // expert
         crate::routes::walk_ffn::handle_walk_ffn,
         crate::routes::walk_ffn::handle_walk_ffn_q8k,
@@ -545,6 +676,12 @@ pub mod schemas {
         schemas::PatchEntry,
         schemas::ListPatchesResponse,
         schemas::RemovePatchResponse,
+        // sessions
+        schemas::SessionPatches,
+        schemas::SessionContinuation,
+        schemas::SessionResponse,
+        schemas::SessionListResponse,
+        schemas::SessionDeletedResponse,
         // admin
         schemas::HealthResponse,
         schemas::TokenEncodeResponse,
@@ -563,6 +700,8 @@ pub mod schemas {
         schemas::OpenAiCompletionsResponse,
         schemas::OpenAiChatRequest,
         schemas::OpenAiChatResponse,
+        schemas::OpenAiResponsesRequest,
+        schemas::OpenAiResponsesResponse,
         // expert
         crate::routes::expert::SingleExpertRequest,
         crate::routes::expert::SingleExpertResponse,

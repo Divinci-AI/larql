@@ -422,9 +422,14 @@ fn run_moe_block(
         fused_row_layout: larql_compute::MoeFusedRowLayout::ContiguousHalves,
         experts_gate_up: experts_gate_up.clone(),
         experts_down: experts_down.clone(),
-        routing_policy: match arch.moe_router_type() {
-            "gemma4_top_k_softmax" => MoeRoutingPolicy::gemma4_hybrid(),
-            _ => MoeRoutingPolicy::top_k_softmax(),
+        // Typed dispatch on `MoeRouterKind` — the string form
+        // (`moe_router_type()`) is serialisation-only, and a missed
+        // string arm here would silently rescale the whole expert
+        // branch (the §4.7.10 failure class).
+        routing_policy: match arch.moe_router_kind() {
+            larql_models::MoeRouterKind::TopKSoftmax => MoeRoutingPolicy::top_k_softmax(),
+            larql_models::MoeRouterKind::TopKThenSoftmax => MoeRoutingPolicy::top_k_then_softmax(),
+            larql_models::MoeRouterKind::Gemma4Hybrid => MoeRoutingPolicy::gemma4_hybrid(),
         },
         weight_layout: MoeWeightLayout::default(),
         expert_data_format: QuantFormat::Q4_K,

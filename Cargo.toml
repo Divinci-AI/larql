@@ -62,7 +62,7 @@ edition = "2021"
 rust-version = "1.88"
 authors = []
 license = "Apache-2.0"
-repository = "https://github.com/chrishayuk/chuk-larql-rs"
+repository = "https://github.com/chrishayuk/larql"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }

@@ -73,7 +73,7 @@ impl Bank {
             experts_down: self.dn.iter().map(|v| v.as_slice()).collect(),
             expert_scales: MoeExpertScales::Inline,
             fused_row_layout: MoeFusedRowLayout::ContiguousHalves,
-            routing_policy: MoeRoutingPolicy::default(),
+            routing_policy: MoeRoutingPolicy::gemma4_hybrid(),
             weight_layout: MoeWeightLayout::default(),
             expert_data_format: QuantFormat::Q6_K,
             router_proj: &self.router_w,

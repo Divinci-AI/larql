@@ -308,7 +308,7 @@ fn decode_backend_decode_token_with_moe_split_runs() {
         fused_row_layout: larql_compute::MoeFusedRowLayout::ContiguousHalves,
         experts_gate_up: Vec::new(),
         experts_down: Vec::new(),
-        routing_policy: MoeRoutingPolicy::default(),
+        routing_policy: MoeRoutingPolicy::gemma4_hybrid(),
         weight_layout: MoeWeightLayout::default(),
         router_proj: &[],
         router_scale: &[],

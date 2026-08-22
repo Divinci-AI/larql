@@ -47,26 +47,33 @@ larql-compute-metal  Metal GPU backend (first-class PEER of larql-compute — sa
     ↓
 larql-vindex      vindex lifecycle: extract, load, query, mutate, patch, save,
                   Vindexfile. Implements `KvIndex for VectorIndex` (Step 3a).
+                  VINDEX3 container format lives in `src/format/vindex3/`
+                  (plan/encode/verify/execute; spec in
+                  docs/vindex3-format-spec.md + docs/vindex3-format.md).
     ↓
 larql-core        graph algorithms (merge, diff, BFS, pagerank, shortest-path)
 larql-inference   engines (Standard, MarkovResidual, Apollo, etc.), chat,
                   sessions, tokenizer, FFN routing impls (Graph/Remote/MoE),
-                  layer_executor, layer_graph orchestration. KvEngine trait
-                  (with supports_multimodal + prefill_from_hidden per
-                  ADR-0023), AnyEngine dispatch enum (KvEngine | RetrievalEngine).
-                  The inference-shaped layer that composes substrate primitives +
-                  engine state; the substrate itself lives in larql-compute.
+                  layer_executor, layer_graph orchestration, V3 runtime
+                  (`src/vindex3/`: Vindex3Runtime, PreparedVindex3,
+                  LogitsSession). KvEngine trait (with supports_multimodal +
+                  prefill_from_hidden per ADR-0023), AnyEngine dispatch enum
+                  (KvEngine | RetrievalEngine). The inference-shaped layer
+                  that composes substrate primitives + engine state; the
+                  substrate itself lives in larql-compute.
     ↓
 larql-kv          pluggable KV-cache engines — 9 implementations (standard,
                   markov-rs, boundary-per-layer, turbo-quant, apollo, …),
                   state-policy classified (canonical vs derivative), W10 mask
-                  cascade. Depends on larql-inference (its dev-dep cycle stays
-                  out of the substrate).
+                  cascade, CanonicalKvState for the V3 runtime
+                  (`src/vindex3/`). Depends on larql-inference (its dev-dep
+                  cycle stays out of the substrate).
 larql-boundary    confidence-gated BOUNDARY ref codec (used by larql-kv)
     ↓
 larql-lql         lexer/parser/executor/REPL + USE REMOTE client
     ↓
-larql-server      HTTP + gRPC server serving vindexes
+larql-server      HTTP + gRPC server serving vindexes (V2 and VINDEX3
+                  containers — bootstrap::load_artifact forks on generation)
 larql-router      layer-shard router for distributed larql-server; pairs with
                   larql-router-protocol (generated tonic/prost + QUIC wrapper)
 larql-factory     Vindex Factory driver: recipe schema, build_id, structural
@@ -77,12 +84,25 @@ larql-cli         top-level `larql` binary (subcommands live in
                   image decode/resize (image_input.rs), plan assembly
                   (run_cmd_image.rs). 3-image regression test in
                   tests/multimodal_e2e.rs (#[ignore], NOT FOR CI).
+larql-factory     Vindex Factory: recipe schema, build_id canonicaliser,
+                  structural validator (docs/vindex-factory.md)
+larql-boundary    confidence-gated BOUNDARY ref codec (final-layer residuals
+                  → contract-bearing protocol objects)
+larql-demos       runnable demos of shipped capabilities — every `--example`
+                  demo lives here (examples/{boundary,compute,core,inference,
+                  kv,lql,models,server,vindex}/); benches stay per-crate
+larql-experts     nested workspace of WASM virtual experts (wasm32-wasip1
+                  cdylibs, JSON ABI) the engine dispatches to
 larql-python      PyO3 bindings (maturin-built, module name `larql._native`)
 larql-demos       runnable examples, one per shipped capability
 
-# Portable (no LARQL deps; extract to sibling repo later, name stable)
+# Portable (no larql-* deps; extract to sibling repo later, name stable)
 model-compute         bounded native kernels (arithmetic/datetime) and optional
                       wasmtime-hosted WASM modules (features: `native`/`wasm`)
+larql-vindex-spec     public vindex on-disk contract: Rust types, JSON Schema,
+                      validation thresholds (canonical home of ExtractLevel)
+larql-execution       execution-refusal semantics (RefusalKind) shared across
+                      the runtime crates
 ```
 
 **`crates/larql-experts` is its own nested workspace** (own Cargo.toml with `[workspace]` members) — it builds the `wasm32-wasip1` expert modules that `model-compute`'s `wasm` feature hosts. Root `cargo build --workspace` does not include it.
@@ -147,7 +167,7 @@ Or via the Makefile: `make python-setup | python-build | python-test | python-cl
 - **Storage is mmap-first.** Gate vectors, embeddings, down weights are zero-copy `mmap`'d. f16 is the default dtype (`--f16` halves size with negligible accuracy loss). Don't load entire tensors into RAM unless an operation requires it.
 - **Extraction tiers, not features.** `browse` (~3 GB), `attention` (client-side slice for `run --ffn URL`), `inference` (~6 GB), `all` (~10 GB) — gated by `ExtractLevel`, canonical in [crates/larql-vindex-spec/src/lib.rs](crates/larql-vindex-spec/src/lib.rs) (mirrored in [crates/larql-vindex/src/config/index.rs](crates/larql-vindex/src/config/index.rs)). Check level before attempting an operation; fail loudly if weights aren't present.
 - **Walk FFN is sparse-by-design and can beat dense** (517ms vs 535ms on Gemma 4B) because gate KNN (K≈10) skips most of the 10,240 features per layer. If you touch FFN code, preserve this invariant — see [docs/ffn-graph-layer.md](docs/ffn-graph-layer.md).
-- **MXFP4 quantized MoE (GPT-OSS) has degraded DESCRIBE/WALK** due to 4-bit precision; `INFER` is the supported path. Don't assume all model families are equivalent — see [docs/specs/vindex-operations-spec.md](crates/larql-vindex/docs/operations-spec.md).
+- **MXFP4 quantized MoE (GPT-OSS) has degraded DESCRIBE/WALK** due to 4-bit precision; `INFER` is the supported path. Don't assume all model families are equivalent — see [crates/larql-vindex/docs/operations-spec.md](crates/larql-vindex/docs/operations-spec.md).
 - **A tensor the extractor doesn't name is silently dropped.** There is no coverage audit: extraction writes what `ModelArchitecture` returns keys for, and anything else in the checkpoint vanishes without a warning. This cost GPT-OSS 5 of its 11 per-layer attention tensors (four projection biases + `self_attn.sinks`) for months, while the module header claimed both existed — fixed 2026-07-29, but the *class* of bug is still open. When adding an architecture, diff the source tensor inventory against the written `weight_manifest.json`; when adding a tensor kind, check both `write_f32.rs` and `write_kquant/norms.rs` ask for it. See [docs/k3-funnel.md](docs/k3-funnel.md) §4.6.
 - **Diff the forward before you theorise about it.** `larql shannon layer-dump` + `scripts/dump_layers_hf.py` + `larql shannon layer-diff` give a per-layer f32 comparison against HF and name the *first* drifting capture; `shannon verify` only compares one scalar at the end, so it says *that* two engines disagree and never *where*. Reach for the layer diff first — it closed OLMoE and GPT-OSS in an afternoon each after weeks of scalar-level guessing. See [docs/k3-funnel.md](docs/k3-funnel.md) §4.8–4.9.
 - **A short fixture cannot test a long-range behaviour, and will pass.** GPT-OSS's sliding-attention layers use a 128-token window, so an 85-token layer diff computes the identical thing on sliding and full layers — it passed while half the model's attention was still wrong. Before quoting a gate result, ask which behaviours the fixture is *structurally capable* of distinguishing: this is the same failure as an `out_features = 2` split test and a `--bytes 384` corpus slice. Three instances, three subsystems — see [docs/k3-funnel.md](docs/k3-funnel.md) §4.9.1.
@@ -158,12 +178,12 @@ Or via the Makefile: `make python-setup | python-build | python-test | python-cl
 
 ## Where to find things
 
-- LQL language spec: [docs/specs/lql-spec.md](crates/larql-lql/docs/spec.md) (v0.4)
-- Vindex file format: [docs/specs/vindex-format-spec.md](crates/larql-vindex/docs/format-spec.md)
-- Operations + patches: [docs/specs/vindex-operations-spec.md](crates/larql-vindex/docs/operations-spec.md)
-- Ecosystem (HF publish, Vindexfile): [docs/specs/vindex-ecosystem-spec.md](crates/larql-vindex/docs/ecosystem-spec.md)
+- LQL language spec: [crates/larql-lql/docs/spec.md](crates/larql-lql/docs/spec.md) (v0.4)
+- Vindex file format: [crates/larql-vindex/docs/format-spec.md](crates/larql-vindex/docs/format-spec.md) (VINDEX2); VINDEX3: [crates/larql-vindex/docs/vindex3-format-spec.md](crates/larql-vindex/docs/vindex3-format-spec.md) (container ABI) + [docs/vindex3-format.md](docs/vindex3-format.md) (model-system spec) + [docs/vindex3-runtime.md](docs/vindex3-runtime.md) (runtime/serving)
+- Operations + patches: [crates/larql-vindex/docs/operations-spec.md](crates/larql-vindex/docs/operations-spec.md)
+- Ecosystem (HF publish, Vindexfile): [crates/larql-vindex/docs/ecosystem-spec.md](crates/larql-vindex/docs/ecosystem-spec.md)
 - Inference engine internals: [docs/inference-engine.md](docs/inference-engine.md), [docs/ffn-graph-layer.md](docs/ffn-graph-layer.md)
-- Trace format (.bin/.bndx/.ctxt): [docs/specs/trace-format-spec.md](crates/larql-inference/docs/trace-format.md), [docs/residual-trace.md](docs/residual-trace.md)
+- Trace format (.bin/.bndx/.ctxt): [crates/larql-inference/docs/trace-format.md](crates/larql-inference/docs/trace-format.md), [docs/residual-trace.md](docs/residual-trace.md)
 - ADRs: [docs/adr/](docs/adr/) (0001–0026 — wire format, grid, compute-trait extraction ADR-0022, multimodal seam ADR-0023, ...). Some crates have their own specifc ADRs in `crates/<crate-name>/doc/adr`.
 - KV-cache engines: [crates/larql-kv/README.md](crates/larql-kv/README.md), [crates/larql-kv/docs/state-policy.md](crates/larql-kv/docs/state-policy.md); Vindex Factory: [docs/vindex-factory.md](docs/vindex-factory.md)
 - Experimental work: `~/chris-source/chris-experiments/` — numbered 01-45, grouped into foundations, compilation, routing, and shannon series

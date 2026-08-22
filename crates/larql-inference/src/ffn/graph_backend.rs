@@ -19,6 +19,15 @@ use crate::error::InferenceError;
 use crate::ffn::sigmoid;
 use crate::model::ModelWeights;
 
+/// Tokens per batch when projecting the vocabulary through a layer's gate
+/// matrix during index builds. 8192 tokens × 10240 features × 4 bytes ≈
+/// 320 MB per batch (vs ~10 GB for the full vocab at once).
+const INDEX_BUILD_TOKEN_BATCH: usize = 8192;
+
+/// `features_per_token` assumed when loading an index file whose header
+/// omits the field (pre-header or malformed files).
+const FALLBACK_FEATURES_PER_TOKEN: u64 = 100;
+
 /// Precomputed gate index: for each (layer, token_id), which features activate.
 /// Built offline from the gate weight matrix and embedding matrix.
 /// Serializable to disk for reuse across predict calls.
@@ -78,8 +87,7 @@ impl GateIndex {
             let k = features_per_token.min(intermediate);
 
             // Process tokens in batches to avoid OOM on the (vocab × intermediate) matrix.
-            // 8192 tokens × 10240 features × 4 bytes = 320MB per batch (vs 10GB for full vocab).
-            let batch_size = 8192;
+            let batch_size = INDEX_BUILD_TOKEN_BATCH;
             let mut layer_index: Vec<Vec<(usize, f32)>> = Vec::with_capacity(vocab_size);
 
             for batch_start in (0..vocab_size).step_by(batch_size) {
@@ -163,7 +171,7 @@ impl GateIndex {
 
             let intermediate = w_gate.shape()[0];
             let k = features_per_token.min(intermediate);
-            let batch_size = 8192;
+            let batch_size = INDEX_BUILD_TOKEN_BATCH;
             let mut tok_id = 0usize;
 
             for batch_start in (0..vocab_size).step_by(batch_size) {
@@ -276,7 +284,10 @@ impl GateIndex {
                 serde_json::from_str(line).map_err(|e| InferenceError::Parse(e.to_string()))?;
 
             if obj.get("_header").is_some() {
-                features_per_token = obj["features_per_token"].as_u64().unwrap_or(100) as usize;
+                features_per_token = obj["features_per_token"]
+                    .as_u64()
+                    .unwrap_or(FALLBACK_FEATURES_PER_TOKEN)
+                    as usize;
                 continue;
             }
 

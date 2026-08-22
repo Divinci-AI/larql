@@ -27,6 +27,11 @@ use crate::http::{
 };
 use crate::state::{AppState, LoadedModel};
 
+/// Cache-Control for single-token embedding responses: a token's embedding
+/// row never changes for a given model, so cache for a year and mark
+/// immutable (same precedent as `DESCRIBE_CACHE_CONTROL` in `describe.rs`).
+const EMBED_CACHE_CONTROL: &str = "public, max-age=31536000, immutable";
+
 // ── Request / response types ──────────────────────────────────────────────────
 
 #[derive(Deserialize, ToSchema)]
@@ -676,7 +681,7 @@ fn handle_embed_single_inner(
     };
 
     let cache_headers = [
-        (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+        (header::CACHE_CONTROL, EMBED_CACHE_CONTROL),
         (header::VARY, "Accept"),
     ];
 
@@ -703,7 +708,7 @@ fn handle_embed_single_inner(
     (
         [
             (header::CONTENT_TYPE, BINARY_FFN_CONTENT_TYPE),
-            (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+            (header::CACHE_CONTROL, EMBED_CACHE_CONTROL),
             (header::VARY, "Accept"),
         ],
         out,

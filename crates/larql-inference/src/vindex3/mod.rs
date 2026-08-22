@@ -49,7 +49,9 @@ mod session;
 #[cfg(test)]
 mod tests;
 
-pub use generate::{continue_session, generate_session, SessionGeneration};
+pub use generate::{
+    continue_session, continue_session_masked, generate_session, LogitsMask, SessionGeneration,
+};
 pub use runtime::Vindex3Runtime;
 pub use session::{LogitsSession, Vindex3Session};
 

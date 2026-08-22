@@ -12,6 +12,7 @@ pub mod openai;
 pub mod patches;
 pub mod relations;
 pub mod select;
+pub mod sessions;
 pub mod shard;
 pub mod stats;
 pub mod stream;
@@ -41,6 +42,8 @@ const SELECT: &str = "/v1/select";
 const RELATIONS: &str = "/v1/relations";
 const STATS: &str = "/v1/stats";
 const INFER: &str = "/v1/infer";
+const SESSIONS: &str = "/v1/sessions";
+const SESSION_BY_ID: &str = "/v1/sessions/{session_id}";
 const PATCHES_APPLY: &str = "/v1/patches/apply";
 const PATCHES: &str = "/v1/patches";
 const PATCH_BY_NAME: &str = "/v1/patches/{name}";
@@ -69,6 +72,9 @@ const SHARD: &str = "/v1/shard/{model_id}/{range}";
 const OPENAI_EMBEDDINGS: &str = "/v1/embeddings";
 const OPENAI_COMPLETIONS: &str = "/v1/completions";
 const OPENAI_CHAT_COMPLETIONS: &str = "/v1/chat/completions";
+const OPENAI_RESPONSES: &str = "/v1/responses";
+const OPENAI_RESPONSE_BY_ID: &str = "/v1/responses/{response_id}";
+const MODEL_BY_ID: &str = "/v1/models/{model}";
 
 const M_DESCRIBE: &str = "/v1/{model_id}/describe";
 const M_WALK: &str = "/v1/{model_id}/walk";
@@ -96,6 +102,11 @@ pub fn single_model_router(state: Arc<AppState>) -> Router {
         .route(RELATIONS, get(relations::handle_relations))
         .route(STATS, get(stats::handle_stats))
         .route(INFER, post(infer::handle_infer))
+        .route(SESSIONS, get(sessions::handle_list_sessions))
+        .route(
+            SESSION_BY_ID,
+            get(sessions::handle_get_session).delete(sessions::handle_delete_session),
+        )
         .route(PATCHES_APPLY, post(patches::handle_apply_patch))
         .route(PATCHES, get(patches::handle_list_patches))
         .route(PATCH_BY_NAME, delete(patches::handle_remove_patch))
@@ -146,6 +157,12 @@ pub fn single_model_router(state: Arc<AppState>) -> Router {
             OPENAI_CHAT_COMPLETIONS,
             post(openai::handle_chat_completions),
         )
+        .route(OPENAI_RESPONSES, post(openai::handle_responses))
+        .route(
+            OPENAI_RESPONSE_BY_ID,
+            get(openai::handle_get_response).delete(openai::handle_delete_response),
+        )
+        .route(MODEL_BY_ID, get(models::handle_model_retrieve))
         .with_state(state)
 }
 
@@ -160,6 +177,11 @@ pub fn multi_model_router(state: Arc<AppState>) -> Router {
         .route(M_RELATIONS, get(relations::handle_relations_multi))
         .route(M_STATS, get(stats::handle_stats_multi))
         .route(M_INFER, post(infer::handle_infer_multi))
+        .route(SESSIONS, get(sessions::handle_list_sessions))
+        .route(
+            SESSION_BY_ID,
+            get(sessions::handle_get_session).delete(sessions::handle_delete_session),
+        )
         .route(M_PATCHES_APPLY, post(patches::handle_apply_patch_multi))
         .route(M_PATCHES, get(patches::handle_list_patches_multi))
         .route(M_PATCH_BY_NAME, delete(patches::handle_remove_patch_multi))
@@ -179,5 +201,11 @@ pub fn multi_model_router(state: Arc<AppState>) -> Router {
             OPENAI_CHAT_COMPLETIONS,
             post(openai::handle_chat_completions),
         )
+        .route(OPENAI_RESPONSES, post(openai::handle_responses))
+        .route(
+            OPENAI_RESPONSE_BY_ID,
+            get(openai::handle_get_response).delete(openai::handle_delete_response),
+        )
+        .route(MODEL_BY_ID, get(models::handle_model_retrieve))
         .with_state(state)
 }
