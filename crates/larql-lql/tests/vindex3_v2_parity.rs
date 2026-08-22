@@ -7,11 +7,9 @@
 //! READ        ✓ SELECT   ✓ DESCRIBE   ✓ WALK   ✓ SHOW
 //! INFERENCE   ✓ INFER    ✓ GENERATE (V3-only surface, chain-gated)
 //! MUTATION    ✓ INSERT KNN   ✓ DELETE   ✓ UPDATE   ✓ MERGE
-//!             ◐ INSERT COMPOSE — executes on V3 through the
-//!               operand-source seam (closed-loop gated in
-//!               vindex3_mutation.rs); cross-format parity NOT yet
-//!               claimed: the V2 arm runs refine/balance passes the
-//!               V3 arm deliberately omits
+//!             ✓ INSERT COMPOSE — the full V2 pipeline (capture,
+//!               refine, balance, cross-fact, decoys) ported onto the
+//!               operand-source seam; staged parity below
 //! PATCH       ✓ BEGIN/SAVE/APPLY/REMOVE/SHOW   ✓ stacking order
 //! LIFECYCLE   → COMPILE   → DIFF   → COMPACT
 //! ```
@@ -742,6 +740,230 @@ fn disjoint_patches_commute_under_every_application_order() {
             assert_eq!(
                 &states[0], state,
                 "order {i} diverged — disjoint patches must commute"
+            );
+        }
+    }
+}
+
+/// A word-level tokenizer WITH a whitespace pre-tokenizer, for the
+/// compose parity arm: distinct facts must tokenize to distinct
+/// canonical prompts, or every capture is the same `[UNK]` residual
+/// and refine annihilates the whole constellation on both arms
+/// (vacuous parity). Word ids stay inside the dense fixture's vocab.
+fn word_tokenizer_json() -> String {
+    // One distinct word per canonical decoy prompt (ids 9..18): with a
+    // degenerate vocab every decoy tokenizes to the same [UNK] run,
+    // giving bitwise-duplicate decoy residuals whose cross-arm noise
+    // straddles the Gram-Schmidt near-dependency threshold — the two
+    // arms then build different suppress-basis RANKS and refine
+    // directions diverge grossly. Real decoy prompts are distinct;
+    // the fixture must be too.
+    let vocab = r#""[UNK]":0,"The":1,"of":2,"is":3,"a":4,"b":5,"c":6,"[5]":7,"[6]":8,"Once":9,"quick":10,"To":11,"Water":12,"long":13,"beginning":14,"weather":15,"She":16,"He":17,"children":18"#;
+    format!(
+        "{{\"version\":\"1.0\",\"truncation\":null,\"padding\":null,\"added_tokens\":[],\
+         \"normalizer\":null,\"pre_tokenizer\":{{\"type\":\"Whitespace\"}},\
+         \"post_processor\":null,\"decoder\":null,\
+         \"model\":{{\"type\":\"WordLevel\",\"vocab\":{{{vocab}}},\"unk_token\":\"[UNK]\"}}}}"
+    )
+}
+
+fn v2_vindex_worded() -> tempfile::TempDir {
+    let checkpoint = tempfile::tempdir().unwrap();
+    dense_f32_model(checkpoint.path());
+    let weights = larql_inference::load_model_dir(checkpoint.path()).expect("load checkpoint");
+    let out = tempfile::tempdir().unwrap();
+    let tok_json = word_tokenizer_json();
+    std::fs::write(out.path().join("tokenizer.json"), &tok_json).unwrap();
+    let tokenizer = larql_vindex::tokenizers::Tokenizer::from_bytes(tok_json.as_bytes()).unwrap();
+    let mut cb = larql_vindex::SilentBuildCallbacks;
+    larql_vindex::build_vindex(
+        &weights,
+        &tokenizer,
+        "parity/dense",
+        out.path(),
+        8,
+        larql_vindex::ExtractLevel::All,
+        larql_vindex::StorageDtype::F32,
+        &mut cb,
+    )
+    .expect("build V2 vindex");
+    std::fs::write(out.path().join("tokenizer.json"), word_tokenizer_json()).unwrap();
+    out
+}
+
+fn v3_container_worded() -> tempfile::TempDir {
+    let checkpoint = tempfile::tempdir().unwrap();
+    let container = tempfile::tempdir().unwrap();
+    encode_fixture_container(
+        dense_f32_model,
+        checkpoint.path(),
+        container.path(),
+        "parity-dense",
+    );
+    std::fs::write(
+        container.path().join("tokenizer.json"),
+        word_tokenizer_json(),
+    )
+    .unwrap();
+    container
+}
+
+fn cosine(a: &[f32], b: &[f32]) -> f32 {
+    let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
+    let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    dot / (na * nb).max(1e-12)
+}
+
+/// The compose half of the mutation parity claim, staged so the first
+/// divergence names its stage:
+///
+/// 1. **capture** — the two engines' residual statistic (the normed
+///    FFN input, V2's walk-trace tap) agrees to cos ≥ 1 − 1e-5;
+/// 2. **identity** — slots, layers, entities, targets, ids: EXACT;
+/// 3. **magnitudes** — the reference norms are computed from the same
+///    bytes with the same statistic, so vector norms agree within
+///    0.1%. For the down column this doubles as an exact
+///    balance-decision proxy: one diverged ×1.6/×0.7 step would shift
+///    the norm ≥ 40% (observed agreement: 7+ digits — the two arms
+///    took identical amplify/shrink/cross-fact sequences);
+/// 4. **directions** — cos ≥ 1 − 1e-5 for all three vectors. The
+///    refine path earns this tightness because the suppress-basis
+///    RANK is stable: this gate's first run caught bitwise-duplicate
+///    decoy residuals (degenerate fixture vocab) whose cross-arm
+///    noise straddled Gram-Schmidt's 1e-6 near-dependency threshold,
+///    flipping basis rank per arm and swinging refined directions to
+///    cos ~0.98. With distinct decoy prompts (the real-model regime)
+///    the only substrate delta is the stage-1-gated 1e-7 capture
+///    noise through shared math.
+#[test]
+fn v2_and_v3_compose_installs_agree() {
+    // ── Stage 1: capture parity, both install layers ──
+    {
+        let v2 = v2_vindex_worded();
+        let v3 = v3_container_worded();
+        let mut cb = larql_vindex::SilentLoadCallbacks;
+        let weights = larql_vindex::load_model_weights(v2.path(), &mut cb).unwrap();
+        let tokenizer = larql_vindex::load_vindex_tokenizer(v2.path()).unwrap();
+        let index = larql_vindex::VectorIndex::load_vindex(v2.path(), &mut cb).unwrap();
+        let ids: Vec<u32> = tokenizer
+            .encode("The b of a is", true)
+            .unwrap()
+            .get_ids()
+            .to_vec();
+        let walk = larql_inference::vindex::WalkFfn::new_unlimited_with_trace(&weights, &index);
+        let _ = larql_inference::predict_with_ffn(&weights, &tokenizer, &ids, 1, &walk);
+        let v2_res = walk.take_residuals();
+
+        use larql_vindex::format::vindex3::opplan::exec::production::ProductionBackend;
+        let runtime = larql_inference::vindex3::Vindex3Runtime::open(
+            v3.path(),
+            "target",
+            ProductionBackend::new(),
+        )
+        .unwrap();
+        let mut v3_res: Vec<(usize, Vec<f32>)> = Vec::new();
+        runtime
+            .execute_streaming(&ids, &mut |ev| {
+                if let larql_inference::vindex3::PlaneEvent::Layer { index, trace } = ev {
+                    v3_res.push((index, trace.ffn_input.last().unwrap().clone()));
+                }
+                Ok(())
+            })
+            .unwrap();
+        for (layer, r2) in &v2_res {
+            let r3 = &v3_res.iter().find(|(l, _)| l == layer).unwrap().1;
+            let cos = cosine(r2, r3);
+            assert!(
+                cos >= 1.0 - 1e-5,
+                "stage 1: capture diverges at layer {layer}: cos {cos}"
+            );
+        }
+    }
+
+    let patch_dir = tempfile::tempdir().unwrap();
+    let script = |session: &mut Session, patch: &str| {
+        run(session, &format!("BEGIN PATCH \"{patch}\";"));
+        run(
+            session,
+            r#"INSERT INTO EDGES (entity, relation, target) VALUES ("a", "b", "[5]") AT LAYER 1 MODE COMPOSE;"#,
+        );
+        run(
+            session,
+            r#"INSERT INTO EDGES (entity, relation, target) VALUES ("c", "b", "[6]") AT LAYER 1 MODE COMPOSE;"#,
+        );
+        run(session, "SAVE PATCH;");
+    };
+
+    let v2 = v2_vindex_worded();
+    let v2_patch = lql_path(&patch_dir.path().join("v2.vlp"));
+    let mut v2_session = session_for(v2.path());
+    script(&mut v2_session, &v2_patch);
+
+    let v3 = v3_container_worded();
+    let v3_patch = lql_path(&patch_dir.path().join("v3.vlp"));
+    let mut v3_session = session_for(v3.path());
+    script(&mut v3_session, &v3_patch);
+
+    let load = |p: &str| larql_vindex::VindexPatch::load(std::path::Path::new(p)).unwrap();
+    let (p2, p3) = (load(&v2_patch), load(&v3_patch));
+    assert_eq!(p2.operations.len(), p3.operations.len(), "op counts");
+
+    for (a, b) in p2.operations.iter().zip(&p3.operations) {
+        let larql_vindex::PatchOp::Insert {
+            layer: l2,
+            feature: f2,
+            entity: e2,
+            target: t2,
+            gate_vector_b64: g2,
+            up_vector_b64: u2,
+            down_vector_b64: d2,
+            down_meta: m2,
+            ..
+        } = a
+        else {
+            panic!("V2 arm emitted a non-Insert op: {a:?}")
+        };
+        let larql_vindex::PatchOp::Insert {
+            layer: l3,
+            feature: f3,
+            entity: e3,
+            target: t3,
+            gate_vector_b64: g3,
+            up_vector_b64: u3,
+            down_vector_b64: d3,
+            down_meta: m3,
+            ..
+        } = b
+        else {
+            panic!("V3 arm emitted a non-Insert op: {b:?}")
+        };
+        assert_eq!((l2, f2, e2, t2), (l3, f3, e3, t3), "slot identity");
+        assert_eq!(
+            m2.as_ref().map(|m| m.top_token_id),
+            m3.as_ref().map(|m| m.top_token_id),
+            "target id"
+        );
+        for (name, min_cos, x, y) in [
+            ("gate", 1.0f32 - 1e-5, g2, g3),
+            ("up", 1.0 - 1e-5, u2, u3),
+            ("down", 1.0 - 1e-5, d2, d3),
+        ] {
+            let (x, y) = (x.as_ref().unwrap(), y.as_ref().unwrap());
+            let vx = larql_vindex::patch::core::decode_gate_vector(x).unwrap();
+            let vy = larql_vindex::patch::core::decode_gate_vector(y).unwrap();
+            let cos = cosine(&vx, &vy);
+            let (nx, ny) = (
+                vx.iter().map(|v| v * v).sum::<f32>().sqrt(),
+                vy.iter().map(|v| v * v).sum::<f32>().sqrt(),
+            );
+            assert!(
+                cos >= min_cos,
+                "stage 4: {name} direction diverges for {e2}: cos {cos} (norms {nx} vs {ny})"
+            );
+            assert!(
+                (nx - ny).abs() <= 1e-3 * nx.max(ny).max(1e-12),
+                "stage 3: {name} magnitude diverges for {e2}: {nx} vs {ny}"
             );
         }
     }

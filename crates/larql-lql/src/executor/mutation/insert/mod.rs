@@ -22,6 +22,8 @@ mod capture;
 mod compose;
 mod compose_v3;
 mod knn;
+
+pub(crate) use compose_v3::probe_target_prob;
 mod knn_v3;
 mod plan;
 

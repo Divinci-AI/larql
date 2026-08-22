@@ -29,7 +29,7 @@ pub(crate) const SUPPORTED: &str = "SELECT, DESCRIBE, WALK, EXPLAIN WALK, \
 /// Component id a container's text stack is bound under.
 pub(crate) const V3_COMPONENT: &str = "target";
 
-type V3Runtime = Vindex3Runtime<ProductionBackend>;
+pub(crate) type V3Runtime = Vindex3Runtime<ProductionBackend>;
 
 /// The capability refusal for statements a V3 binding does not serve.
 pub(crate) fn unsupported(what: &str) -> LqlError {
@@ -82,9 +82,9 @@ impl Session {
                     if capture_residuals {
                         if let larql_inference::vindex3::PlaneEvent::Layer { index, trace } = event
                         {
-                            // FFN-entry residuals — the same tap the
+                            // Normed FFN inputs — the same tap the
                             // stored keys were captured from.
-                            if let Some(last) = trace.post_attention.last() {
+                            if let Some(last) = trace.ffn_input.last() {
                                 residuals.push((index, last.clone()));
                             }
                         }
@@ -496,9 +496,9 @@ pub(crate) fn bind(
 }
 
 /// One observed pass over the runtime's plan, returning the last
-/// position's **FFN-entry** residual (post-attention, pre-FFN) at
-/// `layer` — V2's install statistic: the vector the layer's gates
-/// multiply, so a gate built from it fires on the prompt that
+/// position's **normed FFN input** at `layer` — V2's exact install
+/// statistic (its walk-FFN trace captures the post-norm vector the
+/// gates multiply), so a gate built from it fires on the prompt that
 /// produced it (V3-LQL-3B capture: the KNN key and the compose gate
 /// direction). The pass is the same canonical traversal INFER runs;
 /// the tap is a subscription, never a second executor.
@@ -530,7 +530,7 @@ pub(crate) fn capture_layer_residual(
     let mut sink = |event: larql_inference::vindex3::PlaneEvent| {
         if let larql_inference::vindex3::PlaneEvent::Layer { index, trace } = event {
             if index == layer {
-                captured = trace.post_attention.last().cloned();
+                captured = trace.ffn_input.last().cloned();
             }
         }
         Ok(())
@@ -558,7 +558,7 @@ pub(crate) fn encode_v3_prompt(tokenizer: &Tokenizer, prompt: &str) -> Result<Ve
 
 /// Softmax over the logits, then the top-k `(token_id, probability)`
 /// pairs, ties keeping the lower id (the greedy sampler's rule).
-fn top_k_probs(logits: &[f32], k: usize) -> Vec<(u32, f32)> {
+pub(crate) fn top_k_probs(logits: &[f32], k: usize) -> Vec<(u32, f32)> {
     let max = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
     let exps: Vec<f32> = logits.iter().map(|&l| (l - max).exp()).collect();
     let sum: f32 = exps.iter().sum();

@@ -601,3 +601,38 @@ fn compose_insert_pins_the_layer_and_needs_the_tokenizer() {
         .expect_err("compose needs the tokenizer capability");
     assert!(err.to_string().contains("tokenizer"), "{err}");
 }
+
+/// REBALANCE on V3: the fixed-point loop runs over the composed
+/// program. A wide band converges instantly (every fact in band), and
+/// the pass is honest when the overlay was emptied by REMOVE PATCH —
+/// the registered facts probe the base program and nothing is scaled.
+#[test]
+fn rebalance_converges_and_survives_an_emptied_overlay() {
+    let container = v3_container();
+    let patch_dir = tempfile::tempdir().unwrap();
+    let patch_file = lql_path(patch_dir.path().join("rb.vlp"));
+    let mut session = bound_session(container.path());
+    run(&mut session, &format!("BEGIN PATCH \"{patch_file}\";"));
+    run(
+        &mut session,
+        r#"INSERT INTO EDGES (entity, relation, target) VALUES ("a", "b", "[5]") AT LAYER 1 MODE COMPOSE;"#,
+    );
+
+    // Wide band: every fact is in band on the first probe — the loop
+    // converges in one iteration.
+    let out = run(&mut session, "REBALANCE MAX 4 FLOOR 0.0 CEILING 1.0;").join("\n");
+    assert!(out.contains("1 compose installs"), "{out}");
+    assert!(out.contains("all converged in band"), "{out}");
+
+    // Emptied overlay: rebinding the container rebuilds the backend
+    // (fresh, empty overlay) while the session's registered facts
+    // survive — the probe runs the base program and REBALANCE still
+    // reports rather than panicking.
+    run(&mut session, "SAVE PATCH;");
+    run(
+        &mut session,
+        &format!("USE \"{}\";", lql_path(container.path())),
+    );
+    let out = run(&mut session, "REBALANCE MAX 2 FLOOR 0.0 CEILING 1.0;").join("\n");
+    assert!(out.contains("all converged in band"), "{out}");
+}

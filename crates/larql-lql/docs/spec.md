@@ -902,10 +902,13 @@ overlay's gate/up rows and down columns reach execution through the
 effective operand), so a compose install alters what the program
 computes, WALK surfaces the slot, TRACE observes the same effective
 program, and REMOVE PATCH returns execution bit-for-bit to baseline.
-¹ The V3 compose install is the single-fact `install_compiled_slot`
-formula; the multi-fact refine/balance passes are not ported yet, so
-V2↔V3 compose parity is not claimed. Remaining refusals:
-COMPILE/DIFF/COMPACT (lifecycle). The whole-language sweep test
+¹ The V3 compose install runs V2's full pipeline — clean-base capture
+(normed FFN-input tap), decoy suppression, batch refine from raw
+captures, probability-band balance, and the cross-fact regression
+check — with V2 as the staged parity oracle (identical scripts emit
+equivalent patches; directions within 1e-5, identical balance
+decisions). Remaining refusals: COMPILE/DIFF/COMPACT (lifecycle). The
+whole-language sweep test
 (`tests/vindex3_lql.rs::every_statement_is_sensible_on_a_v3_binding`)
 pins that every statement either executes or refuses this way — never
 a panic, never a misleading "no backend loaded".

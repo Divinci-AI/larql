@@ -322,9 +322,9 @@ overlay addressed by semantic identity, the KNN key is captured from
 the plan's own execution taps, and the `.vlp` patch is the same
 logical format V2 writes — one patch applies to either backend.
 Compose-mode INSERT executes too: the FFN slot lands in the overlay
-and execution observes it through the operand-source seam (single-fact
-install formula; the multi-fact refine/balance passes are V2-only for
-now). COMPILE/DIFF/COMPACT still refuse with a message naming the
+and execution observes it through the operand-source seam, running
+V2's full install pipeline (capture, decoy-suppressed refine, balance,
+cross-fact regression) with cross-format parity gated. COMPILE/DIFF/COMPACT still refuse with a message naming the
 supported statements — a capability boundary, not a missing feature
 apology. See the spec's §4.2/§4.4 for the full contract.
 

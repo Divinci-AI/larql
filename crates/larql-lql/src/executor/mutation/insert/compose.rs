@@ -425,7 +425,7 @@ fn compute_layer_median_norms(
 /// |      1 |      0 | no   | single input has no suppressors           |
 /// |      1 |     ≥1 | yes  | project input against decoys              |
 /// |     ≥2 |      * | yes  | peers orthogonalize among themselves      |
-fn should_refine(n_inputs: usize, n_decoys: usize) -> bool {
+pub(super) fn should_refine(n_inputs: usize, n_decoys: usize) -> bool {
     n_inputs >= 2 || (n_inputs >= 1 && n_decoys >= 1)
 }
 

@@ -50,6 +50,12 @@ use weights::{load_weight, LoadedWeight};
 pub struct LayerTrace {
     /// Hidden state after the attention residual add, per position.
     pub post_attention: Vec<Vec<f32>>,
+    /// The FFN's NORMED input (pre-FFN norm applied), per position —
+    /// the vector the layer's gates multiply. This is the residual
+    /// statistic V2's walk-FFN trace captures, and therefore the tap
+    /// mutation capture must use: a gate built from anything else
+    /// fires against a different vector than it was aimed at.
+    pub ffn_input: Vec<Vec<f32>>,
     /// Hidden state after the FFN residual add, per position.
     pub post_layer: Vec<Vec<f32>>,
 }
@@ -414,22 +420,31 @@ fn execute_layer<B: PlanBackend + ?Sized, K: KvState + ?Sized>(
         .as_ref()
         .map(|op| store.load(op))
         .transpose()?;
-    h.par_iter_mut().try_for_each(|row| {
-        let normed = apply_norm_op(&layer.pre_ffn_norm, store, row, backend)?;
-        let ffn_out = ffn.apply_from_residual(&layer.ffn, backend, row, &normed, hidden)?;
-        let mut ffn_out = match &layer.post_ffn_norm {
-            Some(op) => apply_norm_op(op, store, &ffn_out, backend)?,
-            None => ffn_out,
-        };
-        scale_residual_delta(layer.residual_scale, &mut ffn_out);
-        backend.residual_add(row, &ffn_out);
-        if let Some(scale) = &layer_scale {
-            backend.scale_row(row, layer_scalar_of(scale)?);
-        }
-        Ok::<(), VindexError>(())
-    })?;
+    // The normed FFN inputs are computed once here (same values the
+    // in-loop computation produced — one deterministic norm per row)
+    // so the trace can carry the tap without a second norm pass.
+    let ffn_inputs: Vec<Vec<f32>> = h
+        .par_iter()
+        .map(|row| apply_norm_op(&layer.pre_ffn_norm, store, row, backend))
+        .collect::<Result<_, _>>()?;
+    h.par_iter_mut()
+        .zip(&ffn_inputs)
+        .try_for_each(|(row, normed)| {
+            let ffn_out = ffn.apply_from_residual(&layer.ffn, backend, row, normed, hidden)?;
+            let mut ffn_out = match &layer.post_ffn_norm {
+                Some(op) => apply_norm_op(op, store, &ffn_out, backend)?,
+                None => ffn_out,
+            };
+            scale_residual_delta(layer.residual_scale, &mut ffn_out);
+            backend.residual_add(row, &ffn_out);
+            if let Some(scale) = &layer_scale {
+                backend.scale_row(row, layer_scalar_of(scale)?);
+            }
+            Ok::<(), VindexError>(())
+        })?;
     Ok(LayerTrace {
         post_attention,
+        ffn_input: ffn_inputs,
         post_layer: h.to_vec(),
     })
 }

@@ -103,12 +103,38 @@ impl KnowledgeOverlay {
         }
     }
 
+    /// Replace a composed slot's gate row without touching its
+    /// annotation — the refine pass's write-back (V2's
+    /// `set_gate_override`).
+    pub fn set_gate_vector(&mut self, layer: usize, feature: usize, gate: Vec<f32>) {
+        self.overrides_gate.insert((layer, feature), gate);
+    }
+
     pub fn set_up_vector(&mut self, layer: usize, feature: usize, up: Vec<f32>) {
         self.overrides_up.insert((layer, feature), up);
     }
 
     pub fn set_down_vector(&mut self, layer: usize, feature: usize, down: Vec<f32>) {
         self.overrides_down.insert((layer, feature), down);
+    }
+
+    /// One slot's overridden gate row, when present.
+    pub fn gate_override_at(&self, layer: usize, feature: usize) -> Option<&[f32]> {
+        self.overrides_gate
+            .get(&(layer, feature))
+            .map(Vec::as_slice)
+    }
+
+    /// One slot's overridden up row, when present.
+    pub fn up_override_at(&self, layer: usize, feature: usize) -> Option<&[f32]> {
+        self.overrides_up.get(&(layer, feature)).map(Vec::as_slice)
+    }
+
+    /// One slot's overridden down column, when present.
+    pub fn down_override_at(&self, layer: usize, feature: usize) -> Option<&[f32]> {
+        self.overrides_down
+            .get(&(layer, feature))
+            .map(Vec::as_slice)
     }
 
     /// The overridden gate rows at one layer — browse merges these
