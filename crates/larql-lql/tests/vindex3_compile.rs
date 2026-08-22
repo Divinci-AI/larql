@@ -144,7 +144,13 @@ fn compile_bakes_the_overlay_into_a_clean_equivalent_container() {
     );
     run(
         &mut session,
-        r#"INSERT INTO EDGES (entity, relation, target) VALUES ("c", "d", "[6]") AT LAYER 1 ALPHA 5.0 MODE COMPOSE;"#,
+        // ALPHA 5000: the pristine-vs-compiled negative control below
+        // observes the payload through INFER's 2-decimal display; on
+        // the random-head LCG fixture a small alpha's change is below
+        // the display quantum and platform rounding decides whether a
+        // digit flips (the same hazard the mutation suite hit on
+        // Windows CI).
+        r#"INSERT INTO EDGES (entity, relation, target) VALUES ("c", "d", "[6]") AT LAYER 1 ALPHA 5000.0 MODE COMPOSE;"#,
     );
 
     let overlaid_infer = infer_lines(&mut session, PROMPT);
