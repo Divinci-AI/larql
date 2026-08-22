@@ -11,7 +11,10 @@
 //!               refine, balance, cross-fact, decoys) ported onto the
 //!               operand-source seam; staged parity below
 //! PATCH       ✓ BEGIN/SAVE/APPLY/REMOVE/SHOW   ✓ stacking order
-//! LIFECYCLE   → COMPILE   → DIFF   → COMPACT
+//! LIFECYCLE   ◐ COMPILE — INTO VINDEX bakes on V3 (equivalence-
+//!               gated in vindex3_compile.rs; derived-annotation
+//!               refusals documented; INTO MODEL later)
+//!             → DIFF   → COMPACT
 //! ```
 //!
 //! One source checkpoint (the dense Llama-shaped fixture, LCG-seeded

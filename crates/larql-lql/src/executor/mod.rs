@@ -473,7 +473,7 @@ impl Session {
         // V3's KNN entries.
         let (patches, session_overrides) = match &self.backend {
             Backend::Vindex { patched, .. } => (&patched.patches, patched.num_overrides()),
-            Backend::Vindex3 { overlay, .. } => (&overlay.patches, overlay.knn_store.len()),
+            Backend::Vindex3 { overlay, .. } => (&overlay.patches, overlay.num_overrides()),
             _ => {
                 self.require_patched()?;
                 unreachable!("require_patched errors on every other backend");

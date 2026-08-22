@@ -880,7 +880,8 @@ family metadata.
 | UPDATE | ✅ | ❌ Error: "requires vindex" | ✅ overlay meta overrides |
 | BEGIN/SAVE/APPLY/REMOVE PATCH | ✅ | ❌ Error: "requires vindex" | ✅ vector-free patches (all-or-nothing) |
 | SHOW PATCHES | ✅ | ❌ | ✅ overlay's applied list |
-| COMPILE | ✅ | ❌ Error: "requires vindex" | ❌ capability refusal |
+| COMPILE INTO VINDEX | ✅ | ❌ Error: "requires vindex" | ✅ bake via the operand-source seam² |
+| COMPILE INTO MODEL | ✅ | ❌ Error: "requires vindex" | ❌ container→checkpoint export, later |
 | DIFF | ✅ | ⚠️ One side can be weights | ❌ capability refusal |
 | MERGE | ✅ | ❌ Error: "requires vindex" | ✅ V2 source into the overlay |
 | COMPACT | ✅ LSM compaction | ❌ | ❌ capability refusal |
@@ -908,7 +909,14 @@ captures, probability-band balance, and the cross-fact regression
 check — with V2 as the staged parity oracle (identical scripts emit
 equivalent patches; directions within 1e-5, identical balance
 decisions). Remaining refusals: COMPILE/DIFF/COMPACT (lifecycle). The
-whole-language sweep test
+² `COMPILE CURRENT INTO VINDEX` on V3 materialises the overlay's
+effective operands into rewritten segments (untouched segments
+hard-linked), carries L0 knowledge as `knn_store.bin`, and the result
+binds with a zero-override overlay — behaviour comes from the stored
+bytes (equivalence-gated: INFER/GENERATE/TRACE/WALK exact). Refusals
+follow the derived-annotation authority: tombstones and meta-only
+relabels have no clean-container form and refuse rather than drop.
+The whole-language sweep test
 (`tests/vindex3_lql.rs::every_statement_is_sensible_on_a_v3_binding`)
 pins that every statement either executes or refuses this way — never
 a panic, never a misleading "no backend loaded".

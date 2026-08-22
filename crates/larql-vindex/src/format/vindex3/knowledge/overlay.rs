@@ -147,6 +147,42 @@ impl KnowledgeOverlay {
             .collect()
     }
 
+    /// Slot-state override count — V2's `num_overrides` semantics
+    /// (meta and vector overrides; NOT the KNN store, which is L0
+    /// knowledge a container legitimately carries as `knn_store.bin`).
+    pub fn num_overrides(&self) -> usize {
+        let mut keys: std::collections::BTreeSet<(usize, usize)> =
+            self.overrides_meta.keys().copied().collect();
+        keys.extend(self.overrides_gate.keys());
+        keys.extend(self.overrides_up.keys());
+        keys.extend(self.overrides_down.keys());
+        keys.len()
+    }
+
+    /// Overlay state a clean-container bake cannot represent: V3
+    /// annotations are DERIVED from weights (`embed · feature_down`),
+    /// so a tombstone or a meta-only relabel (an UPDATE that changed
+    /// no vectors) has no physical form in a compiled container —
+    /// they live as overlay/patch state only. COMPILE refuses while
+    /// any exist rather than silently dropping them.
+    pub fn bake_blockers(&self) -> Vec<String> {
+        let mut blockers: Vec<String> = self
+            .deleted
+            .iter()
+            .map(|(l, f)| format!("tombstone at ({l},{f})"))
+            .collect();
+        for (&(l, f), meta) in &self.overrides_meta {
+            let has_vectors = self.overrides_gate.contains_key(&(l, f))
+                || self.overrides_up.contains_key(&(l, f))
+                || self.overrides_down.contains_key(&(l, f));
+            if meta.is_some() && !has_vectors && !self.deleted.contains(&(l, f)) {
+                blockers.push(format!("meta-only override at ({l},{f})"));
+            }
+        }
+        blockers.sort();
+        blockers
+    }
+
     /// Whether any compose vector state exists — execution only takes
     /// the overlaid path while this is true.
     pub fn has_vector_state(&self) -> bool {

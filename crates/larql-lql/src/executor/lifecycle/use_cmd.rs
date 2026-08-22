@@ -58,12 +58,27 @@ impl Session {
                             },
                         ),
                     ];
+                    // A compiled container carries its L0 knowledge as
+                    // `knn_store.bin` (the same file V2 binds) — load it
+                    // into the overlay's store, exactly as the V2 arm
+                    // does below.
+                    let mut overlay =
+                        larql_vindex::format::vindex3::knowledge::KnowledgeOverlay::default();
+                    let knn_path = path.join(KNN_STORE_BIN);
+                    if knn_path.exists() {
+                        match larql_vindex::KnnStore::load(&knn_path) {
+                            Ok(store) => overlay.knn_store = store,
+                            Err(e) => {
+                                eprintln!("warning: failed to load knn_store.bin: {e}");
+                            }
+                        }
+                    }
                     self.backend = Backend::Vindex3 {
                         path,
                         runtime,
                         tokenizer,
                         knowledge,
-                        overlay: Default::default(),
+                        overlay,
                     };
                     self.patch_recording = None;
                     self.auto_patch = false;
