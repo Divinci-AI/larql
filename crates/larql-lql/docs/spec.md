@@ -884,7 +884,8 @@ family metadata.
 | COMPILE INTO MODEL | ✅ | ❌ Error: "requires vindex" | ❌ container→checkpoint export, later |
 | DIFF | ✅ | ⚠️ One side can be weights | ✅ logical-first³ (+ PHYSICAL mode) |
 | MERGE | ✅ | ❌ Error: "requires vindex" | ✅ V2 source into the overlay |
-| COMPACT | ✅ LSM compaction | ❌ | ❌ capability refusal |
+| COMPACT MINOR/MAJOR | ✅ LSM tier promotion | ❌ | ❌ tier model is V2's; later |
+| COMPACT INTO VINDEX | — (V3 statement) | ❌ | ✅ physical reorganisation⁴ |
 
 A VINDEX3 refusal is a *capability* statement, not a format apology:
 the error names what the binding supports. Since V3-LQL-3A the browse
@@ -924,6 +925,12 @@ reverse: an overlay and its bake diff identically against any third
 side and diff each other as equivalent, while `DIFF … PHYSICAL` (the
 subordinate segment-hash report) shows the rewrite. Mixed-generation
 diffs and `INTO PATCH` are later rungs.
+⁴ `COMPACT INTO VINDEX` preserves meaning exactly while reorganising
+storage (today: garbage collection — unreferenced files dropped and
+named, referenced segments carried byte-identically). The logical
+DIFF is its proof instrument (`SemanticDiff(input, output) = ∅`), and
+it refuses while the session holds overlay state: COMPILE materialises
+meaning, COMPACT reorganises it — never a second compiler.
 The whole-language sweep test
 (`tests/vindex3_lql.rs::every_statement_is_sensible_on_a_v3_binding`)
 pins that every statement either executes or refuses this way — never

@@ -318,6 +318,7 @@ larql> SAVE PATCH "france.vlp";    -- persists; the container is untouched
 larql> COMPILE CURRENT INTO VINDEX "gpt-oss-france.v3";  -- bake: clean container
 larql> DIFF "gpt-oss-20b.v3" CURRENT;   -- logical: knowledge edges + feature slots
 larql> DIFF "gpt-oss-20b.v3" "gpt-oss-france.v3" PHYSICAL;  -- segment-level
+larql> COMPACT INTO VINDEX "gpt-oss-min.v3";  -- same meaning, cleaner storage
 ```
 
 The container stays immutable on disk: edits live in a knowledge

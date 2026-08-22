@@ -37,6 +37,7 @@
 //! would look for it. Regions are placed exactly as their producer wrote them.
 
 pub mod build;
+pub mod compact;
 pub mod compile;
 pub mod diff;
 pub mod encode;

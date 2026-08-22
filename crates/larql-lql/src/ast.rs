@@ -157,6 +157,13 @@ pub enum Statement {
         vindex: Option<String>,
     },
     ShowCompactStatus,
+    /// `COMPACT INTO VINDEX "out"` (VINDEX3): semantics-preserving
+    /// physical reorganisation — dead files dropped, referenced
+    /// segments carried byte-identically. DIFF is its proof
+    /// instrument: SemanticDiff(input, output) must be empty.
+    CompactInto {
+        output: String,
+    },
     CompactMinor,
     CompactMajor {
         full: bool,

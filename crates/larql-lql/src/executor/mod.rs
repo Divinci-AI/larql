@@ -185,6 +185,7 @@ impl Session {
             Statement::ShowEntities { layer, limit } => self.exec_show_entities(*layer, *limit),
             Statement::ShowModels => self.exec_show_models(),
             Statement::ShowCompactStatus => self.exec_show_compact_status(),
+            Statement::CompactInto { output } => self.exec_compact_into(output),
             Statement::CompactMinor => self.exec_compact_minor(),
             Statement::CompactMajor { full, lambda } => self.exec_compact_major(*full, *lambda),
             Statement::Extract {

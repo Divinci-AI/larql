@@ -17,7 +17,10 @@
 //!             ✓ DIFF — logical-first on V3, gated as the COMPILE
 //!               oracle in reverse (meaning ≠ storage); PHYSICAL
 //!               subordinate; mixed-generation + INTO PATCH later
-//!             → COMPACT
+//!             ✓ COMPACT INTO VINDEX — semantics-preserving physical
+//!               reorganisation, proven by DIFF (SemanticDiff = ∅);
+//!               refuses overlay state (COMPILE first); V2's tiered
+//!               MINOR/MAJOR remain a later capability on V3
 //! ```
 //!
 //! One source checkpoint (the dense Llama-shaped fixture, LCG-seeded
@@ -1007,4 +1010,16 @@ fn physical_diff_refuses_on_v2_sides() {
         .execute(&parse(&stmt).unwrap())
         .expect_err("V2 sides must refuse PHYSICAL");
     assert!(err.to_string().contains("VINDEX3 report"), "{err}");
+}
+
+/// `COMPACT INTO VINDEX` is the V3 physical statement — a V2 binding
+/// is directed to its own tiered compaction.
+#[test]
+fn compact_into_vindex_refuses_on_v2_with_direction() {
+    let v2 = v2_vindex();
+    let mut session = session_for(v2.path());
+    let err = session
+        .execute(&parse(r#"COMPACT INTO VINDEX "out.v3";"#).unwrap())
+        .expect_err("V2 must refuse the V3 physical compact");
+    assert!(err.to_string().contains("COMPACT MINOR"), "{err}");
 }

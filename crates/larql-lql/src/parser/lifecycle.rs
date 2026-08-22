@@ -223,6 +223,23 @@ impl Parser {
     pub(crate) fn parse_compact(&mut self) -> Result<Statement, ParseError> {
         self.expect_keyword(Keyword::Compact)?;
         match self.peek() {
+            crate::lexer::Token::Keyword(Keyword::Into) => {
+                self.advance();
+                // "VINDEX" is an identifier, as in COMPILE INTO VINDEX.
+                match self.peek() {
+                    crate::lexer::Token::Ident(ref s) if s.eq_ignore_ascii_case("vindex") => {
+                        self.advance();
+                    }
+                    other => {
+                        return Err(ParseError(format!(
+                            "COMPACT INTO expects VINDEX, found {other:?}"
+                        )))
+                    }
+                }
+                let output = self.expect_string()?;
+                self.eat_semicolon();
+                Ok(Statement::CompactInto { output })
+            }
             crate::lexer::Token::Ident(ref s) if s.eq_ignore_ascii_case("MINOR") => {
                 self.advance();
                 self.eat_semicolon();

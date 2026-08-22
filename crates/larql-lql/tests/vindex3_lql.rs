@@ -398,6 +398,8 @@ fn every_statement_is_sensible_on_a_v3_binding() {
     let patch_file = lql_path(patch_dir.path().join("p.vlp"));
     let compile_out = lql_path(patch_dir.path().join("sweep-out.v3"));
     let compile_stmt = format!(r#"COMPILE CURRENT INTO VINDEX "{compile_out}";"#);
+    let compact_out = lql_path(patch_dir.path().join("sweep-compact.v3"));
+    let compact_stmt = format!(r#"COMPACT INTO VINDEX "{compact_out}";"#);
     let begin_patch = format!(r#"BEGIN PATCH "{patch_file}";"#);
     let apply_patch = format!(r#"APPLY PATCH "{patch_file}";"#);
     let remove_patch = format!(r#"REMOVE PATCH "{patch_file}";"#);
@@ -459,6 +461,9 @@ fn every_statement_is_sensible_on_a_v3_binding() {
         // the overlay empty, so the bake is the faithful-copy path.
         // (The refusal paths are gated in vindex3_compile.rs.)
         (compile_stmt.clone(), Ok),
+        // Physical compact of the (overlay-empty) session — the
+        // COMPILE-first refusal is gated in vindex3_compact.rs.
+        (compact_stmt.clone(), Ok),
         (r#"DIFF "a.vindex" "b.vindex";"#.to_string(), Err),
         (r#"DIFF CURRENT CURRENT;"#.to_string(), Ok),
         (r#"DIFF CURRENT CURRENT PHYSICAL;"#.to_string(), Ok),
