@@ -47,7 +47,7 @@
 
 use super::backend::{MatrixClass, NormCall, PlanBackend, WeightSlice};
 use super::experts::FfnOperands;
-use super::operands::OperandSource;
+use super::operands::{OperandSource, SourceStamp};
 use super::weights::{load_weight, LoadedWeight};
 use super::AttentionOperands;
 use crate::error::VindexError;
@@ -152,6 +152,8 @@ pub(super) struct PreparedLayer {
 /// rather than mutating them, so one prepared image can serve every
 /// concurrent request on the model.
 pub struct PreparedOperands {
+    /// Which effective source this image was compiled from.
+    stamp: SourceStamp,
     slice: ExecutionSlice,
     hidden: usize,
     /// Present only for a slice that carries the stack's input end.
@@ -177,6 +179,7 @@ impl PreparedOperands {
     ) -> Result<Self, VindexError> {
         let store = store.into();
         slice.validate(plan)?;
+        let stamp = store.stamp();
         let whole = slice.is_whole_stack();
         let embedding = plan.embedding.as_ref().ok_or_else(|| {
             VindexError::Parse(format!(
@@ -253,6 +256,7 @@ impl PreparedOperands {
         };
 
         let prepared = Self {
+            stamp,
             slice,
             hidden,
             embed_table,
@@ -282,6 +286,36 @@ impl PreparedOperands {
     /// The slice this image was prepared for.
     pub fn slice(&self) -> &ExecutionSlice {
         &self.slice
+    }
+
+    /// The effective source this image was compiled from.
+    pub fn source_stamp(&self) -> SourceStamp {
+        self.stamp
+    }
+
+    /// Whether this image still describes `source`.
+    ///
+    /// False after any overlay mutation, and for a different store or a
+    /// different override set. A caller that has the source in hand
+    /// should ask before reusing a cached image; one that does not
+    /// (the serve path, which holds only its own image) is safe by
+    /// ownership — it has nothing else to confuse it with.
+    pub fn is_current_for(&self, source: &OperandSource<'_>) -> bool {
+        self.stamp == source.stamp()
+    }
+
+    /// [`Self::is_current_for`] as a refusal, for callers that would
+    /// otherwise execute a stale image.
+    pub fn ensure_current_for(&self, source: &OperandSource<'_>) -> Result<(), VindexError> {
+        if self.is_current_for(source) {
+            return Ok(());
+        }
+        Err(VindexError::Parse(
+            "this prepared image was compiled from a different effective operand source — \
+             the overlay changed, or it belongs to another container. Re-prepare rather than \
+             executing a stale compilation of the model."
+                .to_string(),
+        ))
     }
 
     /// Hidden width, read from the plan's embedding op.

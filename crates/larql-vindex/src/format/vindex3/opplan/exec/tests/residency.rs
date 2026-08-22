@@ -417,3 +417,143 @@ fn preparing_through_an_overlaid_source_bakes_the_overlay_in() {
         "an empty overlay must prepare bit-identically to the bare store"
     );
 }
+
+/// **The staleness invariant.** A prepared image is a *compiled
+/// derivative* of an effective operand source. Once compose mutation
+/// can change that source under a long-lived image, "still valid?" has
+/// to be answerable — otherwise residency quietly becomes a second
+/// authority for what the model means, executing the pre-edit model
+/// forever.
+///
+/// The dangerous shape this pins:
+///
+/// ```text
+/// prepare(base + overlay A) -> image A
+/// overlay A mutates to B
+/// request reuses image A        <- must be refusable
+/// ```
+#[test]
+fn a_prepared_image_cannot_masquerade_as_current_after_the_overlay_moves() {
+    use crate::format::vindex3::opplan::exec::operands::{
+        OperandEdit, OperandOverrides, OperandSource,
+    };
+    use crate::format::vindex3::opplan::LayerFfn;
+
+    let (_container, plan, store) = fixture();
+    let backend = ProductionBackend::new();
+    let gate = match &plan.layers[0].ffn {
+        LayerFfn::Dense(op) => op.gate.clone().expect("the miniature FFN is gated"),
+        other => panic!("layer 0 should be dense, got {other:?}"),
+    };
+    let cols = gate.shape[1];
+
+    let mut overrides = OperandOverrides::new();
+    overrides.push(
+        &gate,
+        OperandEdit::Row {
+            index: 0,
+            values: vec![3.0; cols],
+        },
+    );
+    let image = PreparedOperands::load(
+        &plan,
+        OperandSource::overlaid(&store, &overrides),
+        &backend,
+        ExecutionSlice::Full,
+    )
+    .unwrap();
+    assert!(
+        image.is_current_for(&OperandSource::overlaid(&store, &overrides)),
+        "an untouched overlay must leave its image current"
+    );
+
+    // The overlay moves under the image.
+    overrides.push(
+        &gate,
+        OperandEdit::Row {
+            index: 1,
+            values: vec![5.0; cols],
+        },
+    );
+    let moved = OperandSource::overlaid(&store, &overrides);
+    assert!(
+        !image.is_current_for(&moved),
+        "an image compiled before the edit must not pass as current"
+    );
+    let err = image
+        .ensure_current_for(&moved)
+        .expect_err("and the refusal must be available as an error");
+    assert!(
+        err.to_string().contains("different effective operand"),
+        "{err}"
+    );
+
+    // And it is genuinely stale, not merely flagged: re-preparing from
+    // the moved source computes something else.
+    let fresh = PreparedOperands::load(&plan, moved, &backend, ExecutionSlice::Full).unwrap();
+    assert_ne!(
+        one_request(&plan, &image, &backend, &TOKENS),
+        one_request(&plan, &fresh, &backend, &TOKENS),
+        "the stale image really does execute the pre-edit model"
+    );
+}
+
+/// Conservative in the right direction: a stale image may be judged
+/// stale twice over, but is never judged valid. Two things follow from
+/// that, and one thing deliberately does not.
+#[test]
+fn staleness_errs_toward_re_preparation_never_toward_reuse() {
+    use crate::format::vindex3::opplan::exec::operands::{
+        OperandEdit, OperandOverrides, OperandSource,
+    };
+    use crate::format::vindex3::opplan::LayerFfn;
+
+    let (_container, plan, store) = fixture();
+    let backend = ProductionBackend::new();
+    let gate = match &plan.layers[0].ffn {
+        LayerFfn::Dense(op) => op.gate.clone().expect("the miniature FFN is gated"),
+        other => panic!("layer 0 should be dense, got {other:?}"),
+    };
+    let cols = gate.shape[1];
+    let edit = |index| OperandEdit::Row {
+        index,
+        values: vec![3.0; cols],
+    };
+
+    let mut overrides = OperandOverrides::new();
+    overrides.push(&gate, edit(0));
+    let image = PreparedOperands::load(
+        &plan,
+        OperandSource::overlaid(&store, &overrides),
+        &backend,
+        ExecutionSlice::Full,
+    )
+    .unwrap();
+
+    // A clone holds the same edits *now*, but the two sets diverge
+    // independently from here — so it takes a fresh identity and the
+    // image does not claim to describe it.
+    let twin = overrides.clone();
+    assert!(
+        !image.is_current_for(&OperandSource::overlaid(&store, &twin)),
+        "a clone diverges independently, so it gets its own identity"
+    );
+
+    // Reverting is still a mutation: content may return to where it
+    // was, the generation does not. Costs one re-preparation; buys the
+    // guarantee that the check never has to reason about content.
+    overrides.push(&gate, edit(1));
+    assert!(!image.is_current_for(&OperandSource::overlaid(&store, &overrides)));
+
+    // What is deliberately NOT a difference: an EMPTY overlay is the
+    // bare store — `OperandSource::overlaid` drops it — so an image
+    // prepared from one is genuinely current for the other. The stamp
+    // tracks effective sources, not the syntax used to build them.
+    let bare = PreparedOperands::load(&plan, &store, &backend, ExecutionSlice::Full).unwrap();
+    let empty = OperandOverrides::new();
+    assert!(bare.is_current_for(&OperandSource::from(&store)));
+    assert!(
+        bare.is_current_for(&OperandSource::overlaid(&store, &empty)),
+        "an empty overlay is the bare store, so the image describes both"
+    );
+}

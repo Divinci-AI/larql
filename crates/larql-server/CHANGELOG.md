@@ -6,6 +6,60 @@ The format follows the conventions of [Keep a Changelog](https://keepachangelog.
 with dated entries (`YYYY-MM-DD`) instead of semantic versions during the
 pre-1.0 phase. Forward-looking work lives in [`ROADMAP.md`](ROADMAP.md).
 
+## [2026-08-23] — residency and mutation land on one operand authority
+
+Rebased onto main, which had landed the **operand-source seam**
+(`9a8c627e`): execution resolves operands through an `OperandSource`
+(base store + optional `OperandOverrides`) rather than the store
+directly. That is the *overlay* half of the same code the residency
+work rewrote, and the two compose rather than compete:
+
+```text
+base representation + logical overlay → OperandSource → PreparedOperands → executor
+```
+
+`OperandSource` decides what the effective model **means**;
+`PreparedOperands` decides how that effective model is **represented
+for execution**; the executor sees neither mutation nor storage
+mechanics. `PreparedOperands::load` therefore takes
+`impl Into<OperandSource>`, so a prepared image is *the effective
+operands for that source*.
+
+**Staleness invariant.** A prepared image is now a compiled derivative,
+so it must be able to say which source it describes — otherwise it
+outlives an overlay mutation and quietly keeps executing the pre-edit
+model, becoming exactly the second authority the operand seam exists to
+prevent. `OperandOverrides` carries a process-unique identity and a
+generation bumped on every mutation, `OperandStore` carries an
+identity, and `OperandSource::stamp()` combines them into a
+`SourceStamp` that preparation records. `PreparedOperands::
+is_current_for` / `ensure_current_for` answer the question.
+
+Deliberately conservative: a clone takes a fresh identity, and
+reverting an edit yields a new generation, so a *valid* image can be
+judged stale (costing one re-preparation) while a stale one can never
+be judged valid. What is deliberately **not** a difference: an empty
+overlay is the bare store, so an image prepared from either is current
+for both — the stamp tracks effective sources, not the syntax used to
+build them. Gated both ways.
+
+**`PreparedVindex3` keeps the operand store.** It looked like a small
+merge decision; it is what lets a prepared model derive further images
+— attention, FFN, expert, layer-range, or an overlay-specific one —
+without reopening the container, and keeps `knowledge_view` available
+on a prepared model. The compiler input is preserved alongside the
+compiled image.
+
+Also: main's rust-1.98 CI fix cleared the `larql-boundary` /
+`larql-models` lint noise, which exposed two genuine lints in this
+branch's own code — `large_enum_variant` on the operand slot and
+`result_large_err` on the router proxy. Both boxed; workspace clippy is
+clean across all seven crates for the first time on this branch.
+
+Gates: vindex 2938, inference 1788, kv 1279, server 1145, lql 1078,
+router 256 — all green; fmt and clippy clean; server coverage included
+93.18%.
+
 ## [2026-08-22] — V3-SERVE-1: prepared execution state (42.7x on a warm request)
 
 The server was loading the model **twice per request**. It now lowers a
