@@ -35,3 +35,6 @@ tempfile = "3"
 [[bench]]
 name = "models"
 harness = false
+
+[lints]
+workspace = true

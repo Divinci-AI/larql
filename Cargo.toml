@@ -44,6 +44,18 @@ default-members = [
     "crates/model-compute",
 ]
 
+# Workspace-wide lint policy, inherited by every member via
+# `[lints] workspace = true`. New toolchains ship new clippy lints that
+# would otherwise turn CI red overnight (every workflow runs
+# `clippy -D warnings` on latest stable); allows recorded here are
+# deliberate deferrals with a cleanup owner, not permanent exemptions.
+[workspace.lints.clippy]
+# rust 1.98: prefers `as_chunks::<N>()` over `chunks_exact(N)`. Dozens
+# of pre-existing sites across the workspace (models, cli, compute…);
+# the touched crates were converted in-place, the long tail is a
+# dedicated mechanical cleanup.
+chunks_exact_to_as_chunks = "allow"
+
 [workspace.package]
 version = "0.2.0"
 edition = "2021"

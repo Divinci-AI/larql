@@ -20,3 +20,6 @@ harness = false
 
 [[example]]
 name = "accuracy"
+
+[lints]
+workspace = true

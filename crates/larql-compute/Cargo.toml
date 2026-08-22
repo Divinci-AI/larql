@@ -95,3 +95,6 @@ harness = false
 # No external `cfg(cargo-clippy)` macros reach this crate after the
 # `metal-rs` / `objc` deps moved to larql-compute-metal, so no
 # crate-wide cfg-allowlist is needed.
+
+[lints]
+workspace = true

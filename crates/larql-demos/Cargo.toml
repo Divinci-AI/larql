@@ -251,3 +251,6 @@ path = "examples/vindex/q4k_demo.rs"
 name = "walker_demo"
 path = "examples/vindex/walker_demo.rs"
 
+
+[lints]
+workspace = true

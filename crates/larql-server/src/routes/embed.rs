@@ -101,8 +101,10 @@ fn parse_binary_logits_request(bytes: &[u8]) -> Result<Vec<f32>, ServerError> {
         ));
     }
     Ok(bytes
-        .chunks_exact(4)
-        .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| f32::from_le_bytes(*c))
         .collect())
 }
 
@@ -790,8 +792,8 @@ mod tests {
             out.extend_from_slice(&v.to_le_bytes());
         }
         let payload = &out[8..];
-        for (i, chunk) in payload.chunks_exact(4).enumerate() {
-            let got = f32::from_le_bytes(chunk.try_into().unwrap());
+        for (i, chunk) in payload.as_chunks::<4>().0.iter().enumerate() {
+            let got = f32::from_le_bytes(*chunk);
             assert!(
                 (got - values[i]).abs() < 1e-6,
                 "float[{i}]: {got} != {}",
@@ -815,8 +817,8 @@ mod tests {
         let residual = [1.5f32, -2.0, 0.0, 99.9];
         let body = make_binary_logits_request(&residual);
         assert_eq!(parse_binary_logits_request(&body).unwrap(), residual);
-        for (i, chunk) in body.chunks_exact(4).enumerate() {
-            let got = f32::from_le_bytes(chunk.try_into().unwrap());
+        for (i, chunk) in body.as_chunks::<4>().0.iter().enumerate() {
+            let got = f32::from_le_bytes(*chunk);
             assert!((got - residual[i]).abs() < 1e-6);
         }
     }

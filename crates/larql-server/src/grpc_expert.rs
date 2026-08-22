@@ -34,8 +34,10 @@ fn process_batch_item(
     }
     let residual: Vec<f32> = item
         .residual
-        .chunks_exact(4)
-        .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|b| f32::from_le_bytes(*b))
         .collect();
     let output = crate::routes::expert::run_expert(state, layer, expert_id, &residual)
         .map_err(|e| Status::internal(e.to_string()))?;
@@ -148,8 +150,12 @@ impl ExpertService for ExpertGrpcService {
                 if !input.residual.len().is_multiple_of(4) {
                     Err(Status::invalid_argument("residual not 4-byte aligned"))?;
                 }
-                let residual: Vec<f32> = input.residual.chunks_exact(4)
-                    .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+                let residual: Vec<f32> = input
+                    .residual
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|b| f32::from_le_bytes(*b))
                     .collect();
                 // post_experts_norm / norm_offset / eps are reserved for a
                 // future server-side post-norm path; ignored today (the

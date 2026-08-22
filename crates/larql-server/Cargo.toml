@@ -115,3 +115,6 @@ tonic-build = "0.13"
 # (installed by CI via `arduino/setup-protoc`).
 [target.'cfg(not(windows))'.build-dependencies]
 protobuf-src = "2"
+
+[lints]
+workspace = true

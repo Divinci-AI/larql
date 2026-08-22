@@ -57,3 +57,6 @@ rand_distr = "0.4"
 name = "engine_decode"
 harness = false
 
+
+[lints]
+workspace = true

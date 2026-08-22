@@ -123,3 +123,6 @@ larql-kv = { path = "../larql-kv" }
 [[bench]]
 name = "wire_codec"
 harness = false
+
+[lints]
+workspace = true
