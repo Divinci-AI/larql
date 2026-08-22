@@ -87,17 +87,36 @@ impl KnowledgeSource<'_> {
         match self {
             Self::V2(patched) => patched.gate_knn(layer, query, top_k),
             Self::V3 { view, overlay } => {
-                // Tombstoned slots must vanish from the scan (V2's
+                // Tombstoned slots must vanish from the scan and
+                // overridden gate rows must be re-scored (V2's
                 // agreement contract between the meta path and the
-                // gate path). Oversampling by the layer's tombstone
-                // count keeps the result full — each tombstone removes
-                // at most one hit, so this is exact, no retry loop.
+                // gate path, and its `GateOverlay` merge). Oversampling
+                // by the layer's tombstone + override counts keeps the
+                // result full — each removes at most one base hit, so
+                // this is exact, no retry loop.
                 let tombstones = overlay.tombstones_at(layer);
-                if tombstones == 0 {
+                let gate_overrides = overlay.gate_overrides_at(layer);
+                if tombstones == 0 && gate_overrides.is_empty() {
                     return view.gate_knn(layer, query, top_k);
                 }
-                let mut hits = view.gate_knn(layer, query, top_k + tombstones);
-                hits.retain(|&(feature, _)| !overlay.is_tombstoned(layer, feature));
+                let mut hits =
+                    view.gate_knn(layer, query, top_k + tombstones + gate_overrides.len());
+                hits.retain(|&(feature, _)| {
+                    !overlay.is_tombstoned(layer, feature)
+                        && !gate_overrides.iter().any(|&(f, _)| f == feature)
+                });
+                for (feature, row) in gate_overrides {
+                    if overlay.is_tombstoned(layer, feature) {
+                        continue;
+                    }
+                    let score: f32 = row.iter().zip(query.iter()).map(|(a, b)| a * b).sum();
+                    hits.push((feature, score));
+                }
+                hits.sort_by(|a, b| {
+                    b.1.abs()
+                        .partial_cmp(&a.1.abs())
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
                 hits.truncate(top_k);
                 hits
             }

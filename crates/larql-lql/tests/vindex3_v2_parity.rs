@@ -7,7 +7,11 @@
 //! READ        ✓ SELECT   ✓ DESCRIBE   ✓ WALK   ✓ SHOW
 //! INFERENCE   ✓ INFER    ✓ GENERATE (V3-only surface, chain-gated)
 //! MUTATION    ✓ INSERT KNN   ✓ DELETE   ✓ UPDATE   ✓ MERGE
-//!             → INSERT COMPOSE (operand-source seam)
+//!             ◐ INSERT COMPOSE — executes on V3 through the
+//!               operand-source seam (closed-loop gated in
+//!               vindex3_mutation.rs); cross-format parity NOT yet
+//!               claimed: the V2 arm runs refine/balance passes the
+//!               V3 arm deliberately omits
 //! PATCH       ✓ BEGIN/SAVE/APPLY/REMOVE/SHOW   ✓ stacking order
 //! LIFECYCLE   → COMPILE   → DIFF   → COMPACT
 //! ```

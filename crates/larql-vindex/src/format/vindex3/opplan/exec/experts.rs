@@ -14,7 +14,7 @@ use larql_models::config::ExpertFormat;
 use larql_models::quant::mxfp4::{dequantize_expert, MXFP4_GROUP_BYTES, MXFP4_GROUP_ELEMS};
 
 use super::backend::{FfnCall, NormCall, RoutedFfnCall, WeightFormat, WeightSlice};
-use super::operands::{widen, OperandStore};
+use super::operands::{widen, OperandSource};
 use super::weights::{
     bf16_bytes_to_f16, f32_bytes_to_f16, load_weight, quantize_mxfp4, quantize_nvfp4, AlignedBytes,
     LoadedWeight,
@@ -62,7 +62,7 @@ pub(super) struct LoadedNormWeight {
 }
 
 impl LoadedNormWeight {
-    fn load(op: &NormOp, store: &OperandStore) -> Result<Self, VindexError> {
+    fn load(op: &NormOp, store: OperandSource<'_>) -> Result<Self, VindexError> {
         Ok(Self {
             op: op.clone(),
             weight: store.load(&op.weight)?,
@@ -97,7 +97,7 @@ pub(super) struct RoutedOperands {
 impl FfnOperands {
     pub(super) fn load(
         ffn: &LayerFfn,
-        store: &OperandStore,
+        store: OperandSource<'_>,
         format: WeightFormat,
     ) -> Result<Self, VindexError> {
         match ffn {
@@ -194,7 +194,11 @@ impl FfnOperands {
 }
 
 impl DenseOperands {
-    fn load(op: &FfnOp, store: &OperandStore, format: WeightFormat) -> Result<Self, VindexError> {
+    fn load(
+        op: &FfnOp,
+        store: OperandSource<'_>,
+        format: WeightFormat,
+    ) -> Result<Self, VindexError> {
         Ok(Self {
             gate: match &op.gate {
                 Some(gate) => Some(load_weight(store, gate, format)?),
@@ -284,7 +288,7 @@ impl RoutedOperands {
 
     fn load(
         op: &RoutedFfnOp,
-        store: &OperandStore,
+        store: OperandSource<'_>,
         format: WeightFormat,
     ) -> Result<Self, VindexError> {
         let hidden = op.router.shape.get(1).copied().unwrap_or(0);
@@ -326,7 +330,7 @@ impl RoutedOperands {
 /// Load one packed projection as `experts` matrices of `[rows, k]` in
 /// `format`.
 fn load_packed(
-    store: &OperandStore,
+    store: OperandSource<'_>,
     projection: &PackedProjection,
     op: &RoutedFfnOp,
     rows: usize,

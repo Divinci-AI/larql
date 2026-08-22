@@ -20,18 +20,22 @@
 //! UPDATE resurrects it, and every read path — `feature_meta`, the
 //! gate scan, WALK — must agree about the slot's existence.
 //!
-//! What this overlay refuses today: patch operations carrying gate/up/
-//! down **vectors** (compose installs). Those must be observed by
-//! *execution*, which needs the operand-source seam of the compose
-//! rung. A patch containing them is refused **whole** — a partial
-//! apply would misrepresent the patch's meaning.
+//! Since the compose rung, vector-bearing operations (compose
+//! installs) apply too: gate/up rows and down columns land in the
+//! overlay and reach execution through the operand-source seam
+//! (`KnowledgeOverlay::operand_overrides` → `OperandSource`), so a compose patch
+//! alters what the program computes without touching the container.
 
 use std::collections::{HashMap, HashSet};
 
 use crate::error::VindexError;
-use crate::index::types::FeatureMeta;
+use crate::format::vindex3::opplan::exec::operands::{OperandEdit, OperandOverrides};
+use crate::format::vindex3::opplan::{ComponentOpPlan, LayerFfn};
+use crate::index::types::{FeatureMeta, DEFAULT_C_SCORE};
 use crate::patch::format::{decode_gate_vector, PatchOp, VindexPatch};
 use crate::patch::knn_store::KnnStore;
+
+use super::KnowledgeView;
 
 /// Logical mutation state over one bound VINDEX3 container.
 #[derive(Default)]
@@ -48,6 +52,13 @@ pub struct KnowledgeOverlay {
     /// Tombstoned feature slots — excluded from every read path until
     /// an UPDATE resurrects them.
     deleted: HashSet<(usize, usize)>,
+    /// Compose-install vector state (V3-LQL-3B compose): per-slot gate
+    /// and up **rows** and down **columns**, in f32. Browse merges the
+    /// gate rows into its scan; execution observes all three through
+    /// the operand-source seam ([`Self::operand_overrides`]).
+    overrides_gate: HashMap<(usize, usize), Vec<f32>>,
+    overrides_up: HashMap<(usize, usize), Vec<f32>>,
+    overrides_down: HashMap<(usize, usize), Vec<f32>>,
 }
 
 impl KnowledgeOverlay {
@@ -62,6 +73,9 @@ impl KnowledgeOverlay {
         let key = (layer, feature);
         self.overrides_meta.insert(key, None);
         self.deleted.insert(key);
+        // V2's contract: deleting the slot drops its gate override
+        // (the per-layer feature set shrinks either way).
+        self.overrides_gate.remove(&key);
     }
 
     /// Override a feature's metadata; a prior tombstone on the slot is
@@ -70,6 +84,147 @@ impl KnowledgeOverlay {
         let key = (layer, feature);
         self.overrides_meta.insert(key, Some(meta));
         self.deleted.remove(&key);
+    }
+
+    /// Install a compose slot: gate row + annotation, resurrecting a
+    /// tombstoned slot (V2's `PatchedVindex::insert_feature` contract).
+    pub fn insert_feature(
+        &mut self,
+        layer: usize,
+        feature: usize,
+        gate: Vec<f32>,
+        meta: FeatureMeta,
+    ) {
+        let key = (layer, feature);
+        self.overrides_meta.insert(key, Some(meta));
+        self.deleted.remove(&key);
+        if !gate.is_empty() {
+            self.overrides_gate.insert(key, gate);
+        }
+    }
+
+    pub fn set_up_vector(&mut self, layer: usize, feature: usize, up: Vec<f32>) {
+        self.overrides_up.insert((layer, feature), up);
+    }
+
+    pub fn set_down_vector(&mut self, layer: usize, feature: usize, down: Vec<f32>) {
+        self.overrides_down.insert((layer, feature), down);
+    }
+
+    /// The overridden gate rows at one layer — browse merges these
+    /// into its scan the way V2's `GateOverlay` merge does.
+    pub fn gate_overrides_at(&self, layer: usize) -> Vec<(usize, &[f32])> {
+        self.overrides_gate
+            .iter()
+            .filter(|((l, _), _)| *l == layer)
+            .map(|((_, f), v)| (*f, v.as_slice()))
+            .collect()
+    }
+
+    /// Whether any compose vector state exists — execution only takes
+    /// the overlaid path while this is true.
+    pub fn has_vector_state(&self) -> bool {
+        !self.overrides_gate.is_empty()
+            || !self.overrides_up.is_empty()
+            || !self.overrides_down.is_empty()
+    }
+
+    /// V2's free-slot rule (`PatchedVindex::find_free_feature`): first
+    /// preference a slot with no base metadata and no overlay claim;
+    /// else the weakest-`c_score` unclaimed slot. A pinned-`None` meta
+    /// (tombstone) leaves the slot free.
+    pub fn find_free_feature(&self, view: &KnowledgeView, layer: usize) -> Option<usize> {
+        let n = view.num_features(layer);
+        if n == 0 {
+            return None;
+        }
+        let taken_by_overlay = |i: usize| -> bool {
+            self.overrides_gate.contains_key(&(layer, i))
+                || matches!(self.overrides_meta.get(&(layer, i)), Some(Some(_)))
+        };
+        for i in 0..n {
+            if view.feature_meta(layer, i).is_none() && !taken_by_overlay(i) {
+                return Some(i);
+            }
+        }
+        let mut weakest: Option<(usize, f32)> = None;
+        for i in 0..n {
+            if taken_by_overlay(i) {
+                continue;
+            }
+            let Some(meta) = view.feature_meta(layer, i) else {
+                continue;
+            };
+            if weakest.is_none_or(|(_, score)| meta.c_score < score) {
+                weakest = Some((i, meta.c_score));
+            }
+        }
+        weakest.map(|(i, _)| i)
+    }
+
+    /// Derive the executor-facing operand edits from the compose state:
+    /// gate/up rows and down columns mapped onto the plan's own FFN
+    /// operand identities. Fails closed on a layer whose FFN the
+    /// overlay cannot yet address (routed/MoE — a later role rung).
+    pub fn operand_overrides(
+        &self,
+        plan: &ComponentOpPlan,
+    ) -> Result<OperandOverrides, VindexError> {
+        let mut overrides = OperandOverrides::new();
+        // Deterministic derivation order (HashMap iteration is not).
+        let keys: std::collections::BTreeSet<(usize, usize)> = self
+            .overrides_gate
+            .keys()
+            .chain(self.overrides_up.keys())
+            .chain(self.overrides_down.keys())
+            .copied()
+            .collect();
+
+        for (layer, feature) in keys {
+            let key = (layer, feature);
+            let (gate, up, down) = (
+                self.overrides_gate.get(&key),
+                self.overrides_up.get(&key),
+                self.overrides_down.get(&key),
+            );
+            let layer_plan = plan.layers.get(layer).ok_or_else(|| {
+                VindexError::Parse(format!("overlay addresses layer {layer} beyond the plan"))
+            })?;
+            let LayerFfn::Dense(ffn) = &layer_plan.ffn else {
+                return Err(VindexError::Parse(format!(
+                    "layer {layer} is routed — compose installs on MoE layers are a later                      role rung"
+                )));
+            };
+            if let Some(gate) = gate {
+                let target = ffn.gate.as_ref().unwrap_or(&ffn.up);
+                overrides.push(
+                    target,
+                    OperandEdit::Row {
+                        index: feature,
+                        values: gate.clone(),
+                    },
+                );
+            }
+            if let Some(up) = up {
+                overrides.push(
+                    &ffn.up,
+                    OperandEdit::Row {
+                        index: feature,
+                        values: up.clone(),
+                    },
+                );
+            }
+            if let Some(down) = down {
+                overrides.push(
+                    &ffn.down,
+                    OperandEdit::Column {
+                        index: feature,
+                        values: down.clone(),
+                    },
+                );
+            }
+        }
+        Ok(overrides)
     }
 
     /// Resolve a slot's metadata over the base view's answer — V2's
@@ -143,6 +298,9 @@ impl KnowledgeOverlay {
         self.knn_store = KnnStore::default();
         self.overrides_meta.clear();
         self.deleted.clear();
+        self.overrides_gate.clear();
+        self.overrides_up.clear();
+        self.overrides_down.clear();
         let patches = std::mem::take(&mut self.patches);
         for patch in patches {
             self.apply_unchecked(&patch);
@@ -180,17 +338,35 @@ impl KnowledgeOverlay {
                 PatchOp::Delete { layer, feature, .. } => {
                     self.delete_feature(*layer, *feature);
                 }
-                // Vector-free Update — V2's resolution (overlay_apply)
-                // verbatim: a carried meta becomes the override; the
-                // resurrect rule drops a pinned `None` only when this
-                // Update carries no replacement meta.
+                // V2's Update resolution (overlay_apply) verbatim:
+                // carried vectors land in the overlay, a carried meta
+                // becomes the override, and the resurrect rule drops a
+                // pinned `None` only when this Update carries no
+                // replacement meta.
                 PatchOp::Update {
                     layer,
                     feature,
                     down_meta,
-                    ..
+                    gate_vector_b64,
+                    up_vector_b64,
+                    down_vector_b64,
                 } => {
                     let key = (*layer, *feature);
+                    if let Some(b64) = gate_vector_b64 {
+                        if let Ok(vec) = decode_gate_vector(b64) {
+                            self.overrides_gate.insert(key, vec);
+                        }
+                    }
+                    if let Some(b64) = up_vector_b64 {
+                        if let Ok(vec) = decode_gate_vector(b64) {
+                            self.overrides_up.insert(key, vec);
+                        }
+                    }
+                    if let Some(b64) = down_vector_b64 {
+                        if let Ok(vec) = decode_gate_vector(b64) {
+                            self.overrides_down.insert(key, vec);
+                        }
+                    }
                     if let Some(dm) = down_meta {
                         let meta = FeatureMeta {
                             top_token: dm.top_token.clone(),
@@ -210,21 +386,27 @@ impl KnowledgeOverlay {
                         self.overrides_meta.remove(&key);
                     }
                 }
-                // validate_v3_patch refused these before apply.
-                PatchOp::Insert { .. } => {}
-                // Vector-free Update — V2's resolution (overlay_apply)
-                // verbatim: a carried meta becomes the override; the
-                // resurrect rule drops a pinned `None` only when this
-                // Update carries no replacement meta.
-                PatchOp::Update {
+                // V2's Insert resolution (`overlay_apply`): meta from
+                // `down_meta` when carried, else synthesised from the
+                // op's target/confidence; vectors land in the overlay.
+                // (V2 splits up/down onto the base index so COMPILE can
+                // hard-link gate_vectors.bin — a physical-bake concern
+                // V3 does not have; all three live in the overlay
+                // here, resolved through the operand-source seam.)
+                PatchOp::Insert {
                     layer,
                     feature,
+                    target,
+                    confidence,
+                    gate_vector_b64,
+                    up_vector_b64,
+                    down_vector_b64,
                     down_meta,
                     ..
                 } => {
                     let key = (*layer, *feature);
-                    if let Some(dm) = down_meta {
-                        let meta = FeatureMeta {
+                    let meta = if let Some(dm) = down_meta {
+                        FeatureMeta {
                             top_token: dm.top_token.clone(),
                             top_token_id: dm.top_token_id,
                             c_score: dm.c_score,
@@ -233,13 +415,31 @@ impl KnowledgeOverlay {
                                 token_id: dm.top_token_id,
                                 logit: dm.c_score,
                             }],
-                        };
-                        self.overrides_meta.insert(key, Some(meta));
+                        }
+                    } else {
+                        FeatureMeta {
+                            top_token: target.clone(),
+                            top_token_id: 0,
+                            c_score: confidence.unwrap_or(DEFAULT_C_SCORE),
+                            top_k: vec![],
+                        }
+                    };
+                    self.overrides_meta.insert(key, Some(meta));
+                    self.deleted.remove(&key);
+                    if let Some(b64) = gate_vector_b64 {
+                        if let Ok(vec) = decode_gate_vector(b64) {
+                            self.overrides_gate.insert(key, vec);
+                        }
                     }
-                    if self.deleted.remove(&key)
-                        && matches!(self.overrides_meta.get(&key), Some(None))
-                    {
-                        self.overrides_meta.remove(&key);
+                    if let Some(b64) = up_vector_b64 {
+                        if let Ok(vec) = decode_gate_vector(b64) {
+                            self.overrides_up.insert(key, vec);
+                        }
+                    }
+                    if let Some(b64) = down_vector_b64 {
+                        if let Ok(vec) = decode_gate_vector(b64) {
+                            self.overrides_down.insert(key, vec);
+                        }
                     }
                 }
             }
@@ -263,26 +463,26 @@ fn validate_v3_patch(patch: &VindexPatch) -> Result<(), VindexError> {
                 up_vector_b64,
                 down_vector_b64,
                 ..
-            } => {
-                if gate_vector_b64.is_some() || up_vector_b64.is_some() || down_vector_b64.is_some()
-                {
-                    return Err(compose_rung_refusal(i, "an Update carrying vectors"));
-                }
             }
-            PatchOp::Insert { .. } => {
-                return Err(compose_rung_refusal(i, "an Insert (compose install)"));
+            | PatchOp::Insert {
+                gate_vector_b64,
+                up_vector_b64,
+                down_vector_b64,
+                ..
+            } => {
+                for (field, b64) in [
+                    ("gate_vector_b64", gate_vector_b64),
+                    ("up_vector_b64", up_vector_b64),
+                    ("down_vector_b64", down_vector_b64),
+                ] {
+                    if let Some(b64) = b64 {
+                        decode_gate_vector(b64).map_err(|e| {
+                            VindexError::Parse(format!("patch op {i}: corrupt {field}: {e}"))
+                        })?;
+                    }
+                }
             }
         }
     }
     Ok(())
-}
-
-/// The vectors these operations carry must be observed by execution,
-/// which needs the operand-source seam of the compose rung.
-fn compose_rung_refusal(op_index: usize, what: &str) -> VindexError {
-    VindexError::Parse(format!(
-        "patch op {op_index} is {what} — vector-bearing feature-slot patches on a \
-         VINDEX3 container arrive with the compose rung (V3-LQL-3B compose); \
-         the patch was not applied"
-    ))
 }

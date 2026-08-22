@@ -340,11 +340,11 @@ pub(super) fn routed(op: &RoutedFfnOp) -> LayerFfn {
 }
 
 pub(super) fn load(op: &RoutedFfnOp, store: &OperandStore, format: WeightFormat) -> FfnOperands {
-    FfnOperands::load(&routed(op), store, format).unwrap()
+    FfnOperands::load(&routed(op), store.into(), format).unwrap()
 }
 
 pub(super) fn load_err(op: &RoutedFfnOp, store: &OperandStore, format: WeightFormat) -> String {
-    FfnOperands::load(&routed(op), store, format)
+    FfnOperands::load(&routed(op), store.into(), format)
         .err()
         .expect("loading must refuse")
         .to_string()

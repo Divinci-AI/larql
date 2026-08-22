@@ -17,7 +17,7 @@
 //! the f32 backends and the upstream trace are its judge.
 
 use super::backend::{WeightFormat, WeightSlice};
-use super::operands::OperandStore;
+use super::operands::OperandSource;
 use crate::error::VindexError;
 use crate::format::vindex3::opplan::OperandRef;
 use larql_models::quant::mxfp4::{e8m0_to_f32, MXFP4_TABLE};
@@ -159,7 +159,7 @@ impl LoadedWeight {
 /// Load one matrix operand in `format`, through the closure-verified
 /// path only.
 pub fn load_weight(
-    store: &OperandStore,
+    store: OperandSource<'_>,
     operand: &OperandRef,
     format: WeightFormat,
 ) -> Result<LoadedWeight, VindexError> {

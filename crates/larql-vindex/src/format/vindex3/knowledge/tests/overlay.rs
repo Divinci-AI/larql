@@ -64,51 +64,77 @@ fn delete_knn_removes_by_entity() {
     assert_eq!(overlay.knn_store.entries_for_entity("lemuria").len(), 1);
 }
 
-/// A vector-bearing op poisons the whole patch — no state change, not
-/// recorded (the compose rung owns those ops). Both shapes refuse: a
-/// compose Insert, and an Update carrying vectors.
+/// Since the compose rung, vector-bearing ops apply into the overlay:
+/// a compose Insert lands gate/up/down + meta (V2's resolution), an
+/// Update's vectors land too — and a corrupt vector still refuses the
+/// whole patch.
 #[test]
-fn a_vector_bearing_op_refuses_the_whole_patch() {
+fn vector_bearing_ops_apply_into_the_compose_overlay() {
     let mut overlay = KnowledgeOverlay::new();
-    let err = overlay
+    overlay
         .try_apply_patch(patch_of(
-            "mixed",
-            vec![
-                knn_op("atlantis", "[5]", 1),
-                PatchOp::Insert {
-                    layer: 0,
-                    feature: 3,
-                    relation: Some("rel".into()),
-                    entity: "atlantis".into(),
-                    target: "[5]".into(),
-                    confidence: Some(1.0),
-                    gate_vector_b64: Some(encode_gate_vector(&[1.0, 0.0])),
-                    up_vector_b64: None,
-                    down_vector_b64: None,
-                    down_meta: None,
-                },
-            ],
+            "compose",
+            vec![PatchOp::Insert {
+                layer: 0,
+                feature: 3,
+                relation: Some("rel".into()),
+                entity: "atlantis".into(),
+                target: "[5]".into(),
+                confidence: Some(1.0),
+                gate_vector_b64: Some(encode_gate_vector(&[1.0, 0.0])),
+                up_vector_b64: Some(encode_gate_vector(&[0.5, 0.5])),
+                down_vector_b64: Some(encode_gate_vector(&[0.0, 1.0])),
+                down_meta: None,
+            }],
         ))
-        .expect_err("compose installs are the compose rung's");
-    assert!(err.to_string().contains("compose rung"), "{err}");
-    assert!(overlay.knn_store.is_empty(), "all-or-nothing was violated");
-    assert!(overlay.patches.is_empty());
+        .unwrap();
+    assert!(overlay.has_vector_state());
+    assert_eq!(overlay.gate_overrides_at(0), vec![(3, &[1.0f32, 0.0][..])]);
+    let meta = overlay.resolve_feature_meta(0, 3, None).unwrap();
+    assert_eq!(meta.top_token, "[5]", "insert synthesises the meta");
 
-    let err = overlay
+    // An Update's vectors replace the slot's state.
+    overlay
         .try_apply_patch(patch_of(
-            "update-with-vectors",
+            "retune",
             vec![PatchOp::Update {
                 layer: 0,
                 feature: 3,
-                gate_vector_b64: Some(encode_gate_vector(&[1.0, 0.0])),
+                gate_vector_b64: Some(encode_gate_vector(&[2.0, 0.0])),
                 up_vector_b64: None,
                 down_vector_b64: None,
                 down_meta: None,
             }],
         ))
-        .expect_err("an Update carrying vectors is a compose edit");
-    assert!(err.to_string().contains("compose rung"), "{err}");
-    assert!(overlay.patches.is_empty());
+        .unwrap();
+    assert_eq!(overlay.gate_overrides_at(0), vec![(3, &[2.0f32, 0.0][..])]);
+
+    // Corrupt vectors still refuse the whole patch.
+    let before_patches = overlay.patches.len();
+    let err = overlay
+        .try_apply_patch(patch_of(
+            "corrupt-compose",
+            vec![PatchOp::Insert {
+                layer: 1,
+                feature: 0,
+                relation: None,
+                entity: "mu".into(),
+                target: "[6]".into(),
+                confidence: None,
+                gate_vector_b64: Some("!!!".into()),
+                up_vector_b64: None,
+                down_vector_b64: None,
+                down_meta: None,
+            }],
+        ))
+        .expect_err("corrupt vectors must refuse");
+    assert!(err.to_string().contains("gate_vector_b64"), "{err}");
+    assert_eq!(overlay.patches.len(), before_patches);
+
+    // remove_patch clears vector state on rebuild.
+    overlay.remove_patch(0);
+    overlay.remove_patch(0);
+    assert!(!overlay.has_vector_state());
 }
 
 #[test]
@@ -344,4 +370,91 @@ fn remove_patch_clears_feature_state_too() {
             .map(|m| m.top_token),
         Some("[3]".to_string())
     );
+}
+
+/// Compose mutators + the free-slot rule + operand derivation, against
+/// a real miniature plan/view.
+#[test]
+fn compose_state_derives_operand_edits_from_the_plan() {
+    use crate::format::vindex3::fixtures::{miniature_glimmer, G_FFN, G_HIDDEN, G_VOCAB};
+    use crate::format::vindex3::inspect::inspect_container;
+    use crate::format::vindex3::opplan::plan_component_ops;
+
+    let checkpoint = tempfile::tempdir().unwrap();
+    let container = tempfile::tempdir().unwrap();
+    crate::format::vindex3::fixtures::encode_fixture_container(
+        miniature_glimmer,
+        checkpoint.path(),
+        container.path(),
+        "overlay-compose",
+    );
+    let tok_json = super::larql_inference_free_tokenizer(G_VOCAB);
+    let tokenizer = crate::tokenizers::Tokenizer::from_bytes(tok_json.as_bytes()).unwrap();
+    let inspection = inspect_container(container.path(), false).unwrap();
+    let outcome = plan_component_ops(&inspection, container.path(), "target").unwrap();
+    let plan = outcome.plan.unwrap();
+    let store = crate::format::vindex3::opplan::exec::operands::OperandStore::open(
+        container.path(),
+        &inspection,
+    )
+    .unwrap();
+    let view = super::super::KnowledgeView::from_plan(&plan, &store, &tokenizer).unwrap();
+
+    let mut overlay = KnowledgeOverlay::new();
+    assert!(!overlay.has_vector_state());
+
+    // Free-slot rule: every miniature slot is annotated, so the first
+    // pick is the weakest c_score; claiming it moves the next pick;
+    // a tombstoned slot is free again.
+    let first = overlay.find_free_feature(&view, 0).expect("a slot");
+    overlay.insert_feature(0, first, vec![9.0; G_HIDDEN], meta("[5]", 0.9));
+    let second = overlay.find_free_feature(&view, 0).expect("another slot");
+    assert_ne!(first, second, "a claimed slot is not offered again");
+    overlay.delete_feature(0, second);
+    assert_eq!(
+        overlay.find_free_feature(&view, 0),
+        Some(second),
+        "a tombstoned slot is free (its pinned None is not a claim)"
+    );
+
+    // delete_feature dropped nothing of `first`'s state…
+    assert!(overlay.has_vector_state());
+    overlay.set_up_vector(0, first, vec![1.0; G_HIDDEN]);
+    overlay.set_down_vector(0, first, vec![2.0; G_HIDDEN]);
+    assert_eq!(overlay.gate_overrides_at(0).len(), 1);
+    assert_eq!(overlay.gate_overrides_at(1).len(), 0);
+    // …but deleting the composed slot itself drops its gate row.
+    overlay.delete_feature(0, first);
+    assert!(overlay.gate_overrides_at(0).is_empty());
+    overlay.insert_feature(0, first, vec![9.0; G_HIDDEN], meta("[5]", 0.9));
+
+    // Operand derivation: gate/up rows and the down column, addressed
+    // by the plan's own FFN operands.
+    let derived = overlay.operand_overrides(&plan).unwrap();
+    let crate::format::vindex3::opplan::LayerFfn::Dense(ffn) = &plan.layers[0].ffn else {
+        panic!("miniature layer 0 is dense");
+    };
+    assert!(derived.is_overridden(ffn.gate.as_ref().unwrap()));
+    assert!(derived.is_overridden(&ffn.up));
+    assert!(derived.is_overridden(&ffn.down));
+
+    // The derived edits resolve: the effective gate row is the
+    // overlay's, the down column is the overlay's.
+    let source =
+        crate::format::vindex3::opplan::exec::operands::OperandSource::overlaid(&store, &derived);
+    let gate_ref = ffn.gate.as_ref().unwrap();
+    let effective = source.load(gate_ref).unwrap();
+    assert_eq!(
+        &effective[first * G_HIDDEN..(first + 1) * G_HIDDEN],
+        &vec![9.0; G_HIDDEN][..]
+    );
+    let down = source.load(&ffn.down).unwrap();
+    for r in 0..G_HIDDEN {
+        assert_eq!(down[r * G_FFN + first], 2.0, "down column at row {r}");
+    }
+
+    // A slot address beyond the plan fails closed.
+    overlay.set_up_vector(9, 0, vec![1.0; G_HIDDEN]);
+    let err = overlay.operand_overrides(&plan).unwrap_err();
+    assert!(err.to_string().contains("beyond the plan"), "{err}");
 }

@@ -71,3 +71,9 @@ pub use larql_vindex::format::vindex3::opplan::exec::observe::{
 // The batch-execution taps (V3-LQL-3B): plane events streamed from the
 // one traversal, consumed by residual capture and retrieval keys.
 pub use larql_vindex::format::vindex3::opplan::exec::{FinalOutput, LayerTrace, PlaneEvent};
+// The operand-source seam (V3-LQL-3B compose): base representation +
+// overlay override → effective operand — how a mutation reaches
+// execution without touching the container.
+pub use larql_vindex::format::vindex3::opplan::exec::operands::{
+    OperandEdit, OperandOverrides, OperandSource,
+};

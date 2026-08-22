@@ -5,7 +5,9 @@ use std::path::Path;
 use larql_vindex::format::vindex3::inspect::inspect_container;
 use larql_vindex::format::vindex3::opplan::exec::backend::PlanBackend;
 use larql_vindex::format::vindex3::opplan::exec::kv::KvState;
-use larql_vindex::format::vindex3::opplan::exec::operands::OperandStore;
+use larql_vindex::format::vindex3::opplan::exec::operands::{
+    OperandOverrides, OperandSource, OperandStore,
+};
 use larql_vindex::format::vindex3::opplan::exec::{
     execute_plan_streaming, prefill_plan, FinalOutput, PlaneEvent,
 };
@@ -112,6 +114,20 @@ impl<B: PlanBackend> Vindex3Runtime<B> {
         Vindex3Session::new(&self.plan, &self.store, &self.backend)
     }
 
+    /// [`session`](Self::session) with a mutation overlay's operand
+    /// edits applied — the session captures the effective operands at
+    /// construction.
+    pub fn session_overlaid(
+        &self,
+        overrides: &OperandOverrides,
+    ) -> Result<Vindex3Session<'_, B>, InferenceError> {
+        Vindex3Session::new(
+            &self.plan,
+            OperandSource::overlaid(&self.store, overrides),
+            &self.backend,
+        )
+    }
+
     /// Open a session whose continuation state lives in — and outlives
     /// the session as — the caller's [`KvState`] provider (VI3-INF-2).
     /// The session continues from `kv.position()`, so this is also the
@@ -159,6 +175,70 @@ impl<B: PlanBackend> Vindex3Runtime<B> {
             None,
             sink,
         )?)
+    }
+
+    /// The runtime's operand resolver (base representation, no
+    /// overlay) — for analyses that read stored operands through the
+    /// same resolution execution uses (e.g. the compose install's
+    /// layer-norm statistics).
+    pub fn operands(&self) -> OperandSource<'_> {
+        (&self.store).into()
+    }
+
+    /// [`execute_streaming`](Self::execute_streaming) with a mutation
+    /// overlay's operand edits applied (V3-LQL-3B compose): the same
+    /// canonical traversal, resolving operands as base + override →
+    /// effective. An empty overrides value is bit-identical to the
+    /// plain call.
+    pub fn execute_streaming_overlaid(
+        &self,
+        tokens: &[u32],
+        overrides: &OperandOverrides,
+        sink: &mut dyn FnMut(PlaneEvent) -> Result<(), larql_vindex::VindexError>,
+    ) -> Result<FinalOutput, InferenceError> {
+        Ok(execute_plan_streaming(
+            &self.plan,
+            OperandSource::overlaid(&self.store, overrides),
+            tokens,
+            &self.backend,
+            None,
+            sink,
+        )?)
+    }
+
+    /// [`prefill_into`](Self::prefill_into) with a mutation overlay's
+    /// operand edits applied — generation over an edited program.
+    pub fn prefill_into_overlaid(
+        &self,
+        tokens: &[u32],
+        overrides: &OperandOverrides,
+        kv: &mut dyn KvState,
+    ) -> Result<Vec<f32>, InferenceError> {
+        let out = prefill_plan(
+            &self.plan,
+            OperandSource::overlaid(&self.store, overrides),
+            tokens,
+            &self.backend,
+            kv,
+        )?;
+        out.logits.ok_or_else(headless_prefill_error)
+    }
+
+    /// [`session_with_kv`](Self::session_with_kv) with a mutation
+    /// overlay's operand edits applied. The session captures the
+    /// effective operands at construction, so the overlay may change
+    /// afterwards without affecting a running continuation.
+    pub fn session_with_kv_overlaid<'a>(
+        &'a self,
+        kv: &'a mut dyn KvState,
+        overrides: &OperandOverrides,
+    ) -> Result<Vindex3Session<'a, B>, InferenceError> {
+        Vindex3Session::with_kv_state(
+            &self.plan,
+            OperandSource::overlaid(&self.store, overrides),
+            &self.backend,
+            kv,
+        )
     }
 
     /// The component's executable plan — the model-meaning authority.

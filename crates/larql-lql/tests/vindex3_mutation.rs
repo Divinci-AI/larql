@@ -19,7 +19,6 @@
 
 use std::path::Path;
 
-use larql_inference::test_utils::synthetic_tokenizer_json;
 use larql_lql::{parse, Session};
 use larql_vindex::format::vindex3::fixtures::{
     encode_fixture_container, miniature_glimmer, G_VOCAB,
@@ -36,6 +35,22 @@ fn lql_path(path: impl AsRef<Path>) -> String {
     path.as_ref().display().to_string().replace('\\', "\\\\")
 }
 
+/// The synthetic `[N]` ↔ id N tokenizer, extended with spaced forms
+/// (`" [N]"` ↔ id N): the V2 target contract encodes `" {target}"`,
+/// and without a pre-tokenizer the spaced surface must be in-vocab or
+/// every target degrades to `[UNK]` (a ~zero embedding — which turned
+/// a compose install's payload into a no-op the first time this ran).
+fn spaced_tokenizer_json(vocab: usize) -> String {
+    let mut entries: Vec<String> = (0..vocab).map(|i| format!("\"[{i}]\":{i}")).collect();
+    entries.extend((0..vocab).map(|i| format!("\" [{i}]\":{i}")));
+    format!(
+        "{{\"version\":\"1.0\",\"truncation\":null,\"padding\":null,\"added_tokens\":[],\
+         \"normalizer\":null,\"pre_tokenizer\":null,\"post_processor\":null,\"decoder\":null,\
+         \"model\":{{\"type\":\"WordLevel\",\"vocab\":{{{}}},\"unk_token\":\"[0]\"}}}}",
+        entries.join(",")
+    )
+}
+
 fn v3_container() -> tempfile::TempDir {
     let checkpoint = tempfile::tempdir().unwrap();
     let container = tempfile::tempdir().unwrap();
@@ -47,7 +62,7 @@ fn v3_container() -> tempfile::TempDir {
     );
     std::fs::write(
         container.path().join("tokenizer.json"),
-        synthetic_tokenizer_json(G_VOCAB),
+        spaced_tokenizer_json(G_VOCAB),
     )
     .unwrap();
     container
@@ -397,63 +412,192 @@ fn feature_patch_lifecycle_round_trips_on_a_pristine_reopen() {
     );
 }
 
-/// A patch carrying vector-bearing operations (the compose rung's
-/// territory) is refused **whole**: no partial state, no listing.
-#[test]
-fn a_compose_patch_refuses_whole_on_v3() {
-    use larql_vindex::patch::core::encode_gate_vector;
-    use larql_vindex::{PatchOp, VindexPatch};
+/// INFER's output normalised for exact comparison: timing stripped,
+/// and prediction rows reduced to `rank (prob) [id N]`. The decoded
+/// surface is dropped because the spaced-vocab fixture maps two
+/// surfaces onto one id and WordLevel decode picks one untracked —
+/// tokenizer cosmetics, not program output (the 3A lesson about
+/// ambiguous fixture vocabularies, resurfacing on the decode side).
+fn infer_lines(session: &mut Session, prompt: &str) -> Vec<String> {
+    run(session, &format!("INFER \"{prompt}\" TOP 3;"))
+        .into_iter()
+        .filter(|l| !l.trim_end().ends_with("ms"))
+        .map(|l| {
+            let trimmed = l.trim_start();
+            match (trimmed.split_once(". "), l.rfind('(')) {
+                (Some((rank, _)), Some(paren)) if rank.chars().all(|c| c.is_ascii_digit()) => {
+                    format!("{rank}. {}", &l[paren..])
+                }
+                _ => l,
+            }
+        })
+        .collect()
+}
 
+/// The compose closed loop (V3-LQL-3B compose) — the operand-source
+/// seam's oracle:
+///
+/// ```text
+/// before:  INFER = baseline
+/// compose INSERT
+/// after:   browse sees the slot; execution reads the overridden
+///          operands; INFER promotes the stored target; TRACE agrees
+/// SAVE PATCH → pristine reopen = baseline, bit for bit
+/// APPLY PATCH → the composed outputs return, bit for bit
+/// REMOVE PATCH → baseline again, bit for bit
+/// ```
+#[test]
+fn compose_insert_alters_execution_and_reverts_bit_for_bit() {
     let container = v3_container();
     let patch_dir = tempfile::tempdir().unwrap();
-    let patch_file = patch_dir.path().join("compose.vlp");
-
-    let patch = VindexPatch {
-        version: 1,
-        base_model: "mutation-fixture".into(),
-        base_checksum: None,
-        created_at: String::new(),
-        description: None,
-        author: None,
-        tags: vec![],
-        operations: vec![
-            // The KNN op alone would be applicable…
-            PatchOp::InsertKnn {
-                layer: 0,
-                entity: "a".into(),
-                relation: "b".into(),
-                target: "[5]".into(),
-                target_id: 5,
-                confidence: Some(1.0),
-                key_vector_b64: encode_gate_vector(&[0.5, 0.5, 0.5, 0.5]),
-            },
-            // …but the compose install poisons the whole patch.
-            PatchOp::Insert {
-                layer: 0,
-                feature: 0,
-                relation: Some("rel".into()),
-                entity: "a".into(),
-                target: "[5]".into(),
-                confidence: Some(1.0),
-                gate_vector_b64: Some(encode_gate_vector(&[0.5, 0.5, 0.5, 0.5])),
-                up_vector_b64: None,
-                down_vector_b64: None,
-                down_meta: None,
-            },
-        ],
-    };
-    patch.save(&patch_file).unwrap();
+    let patch_file = lql_path(patch_dir.path().join("compose.vlp"));
 
     let mut session = bound_session(container.path());
-    let stmt = format!("APPLY PATCH \"{}\";", lql_path(&patch_file));
-    let parsed = parse(&stmt).unwrap();
+    let baseline = infer_lines(&mut session, CANONICAL_PROMPT);
+    assert!(
+        !baseline.join("\n").contains("[5]"),
+        "pre-screen: the target must not already lead: {baseline:?}"
+    );
+
+    // ── Install, with a payload strong enough to flip top-1 ──
+    run(&mut session, &format!("BEGIN PATCH \"{patch_file}\";"));
+    let out = run(
+        &mut session,
+        r#"INSERT INTO EDGES (entity, relation, target) VALUES ("a", "b", "[5]") ALPHA 5.0 MODE COMPOSE;"#,
+    )
+    .join("\n");
+    assert!(out.contains("compose overlay"), "{out}");
+    let slot = out
+        .lines()
+        .find_map(|l| l.split(" at L").nth(1))
+        .and_then(|s| s.split_whitespace().next())
+        .unwrap_or_else(|| panic!("no slot in {out}"))
+        .to_string();
+    let (layer, feature) = slot
+        .split_once("/F")
+        .map(|(l, f)| (l.parse::<usize>().unwrap(), f.parse::<usize>().unwrap()))
+        .unwrap_or_else(|| panic!("unparsable slot {slot}"));
+
+    // Browse sees the slot: the annotation is in the feature space…
+    let rows = run(
+        &mut session,
+        &format!("SELECT * FROM FEATURES WHERE layer = {layer} LIMIT 300;"),
+    )
+    .join("\n");
+    let row = rows
+        .lines()
+        .find(|l| l.split_whitespace().nth(1) == Some(&format!("F{feature}")))
+        .unwrap_or_else(|| panic!("no F{feature} row in {rows}"));
+    assert!(row.contains("[5]"), "{row}");
+    // …and the overridden gate row is merged into the scan: a real
+    // token's walk ranks the ×30 gate above the layer's trained rows.
+    // (The canonical prompt itself tokenises to [UNK], whose embedding
+    // is ~zero — every gate ties at 0.0 there, so it cannot probe the
+    // merge.)
+    let walk = run(&mut session, r#"WALK "[3]" TOP 5;"#).join("\n");
+    assert!(
+        walk.contains(&format!("F{feature}")),
+        "the composed slot must surface in the walk:\n{walk}"
+    );
+
+    // Execution observes the edit: the effective program differs from
+    // the stored one. (Target *promotion* — the payload lifting [5] to
+    // top-1 — needs an output head aligned with the embedding table,
+    // which V2 validated on Gemma; this LCG fixture's head is random,
+    // so the honest claim here is observation + reversion, not
+    // steering quality.)
+    let composed = infer_lines(&mut session, CANONICAL_PROMPT);
+    assert_ne!(baseline, composed, "the install must change execution");
+
+    // TRACE runs the same effective program — no fork between the
+    // observed executor and INFER.
+    let row1_id: u32 = composed
+        .iter()
+        .find(|l| l.trim_start().starts_with("1."))
+        .and_then(|l| l.split("[id ").nth(1))
+        .and_then(|s| s.trim_end_matches(']').trim().parse().ok())
+        .unwrap_or_else(|| panic!("no row-1 id in {composed:?}"));
+    let trace = run(&mut session, &format!("TRACE \"{CANONICAL_PROMPT}\";")).join("\n");
+    let traced_next = trace
+        .lines()
+        .find(|l| l.starts_with("next token"))
+        .unwrap_or_else(|| panic!("no next-token line in {trace}"));
+    assert!(
+        traced_next.contains(&format!("next token {row1_id} ")),
+        "TRACE and INFER must run the same effective program: {traced_next} vs id {row1_id}"
+    );
+
+    let saved = run(&mut session, "SAVE PATCH;").join("\n");
+    assert!(saved.contains("1 inserts"), "{saved}");
+
+    // ── Pristine reopen: the container is untouched ──
+    let mut session = bound_session(container.path());
+    assert_eq!(
+        infer_lines(&mut session, CANONICAL_PROMPT),
+        baseline,
+        "a fresh open must be bit-for-bit baseline"
+    );
+
+    // APPLY: the composed behaviour returns, bit for bit.
+    run(&mut session, &format!("APPLY PATCH \"{patch_file}\";"));
+    assert_eq!(
+        infer_lines(&mut session, CANONICAL_PROMPT),
+        composed,
+        "replaying the patch must reproduce the composed outputs"
+    );
+
+    // REMOVE: baseline again, bit for bit.
+    run(&mut session, &format!("REMOVE PATCH \"{patch_file}\";"));
+    assert_eq!(infer_lines(&mut session, CANONICAL_PROMPT), baseline);
+}
+
+/// Compose INSERT honours `AT LAYER` and refuses without a tokenizer,
+/// like the KNN arm.
+#[test]
+fn compose_insert_pins_the_layer_and_needs_the_tokenizer() {
+    let container = v3_container();
+    let mut session = bound_session(container.path());
+    let out = run(
+        &mut session,
+        r#"INSERT INTO EDGES (entity, relation, target) VALUES ("a", "b", "[5]") AT LAYER 1 MODE COMPOSE;"#,
+    )
+    .join("\n");
+    assert!(out.contains("at L1/"), "{out}");
+
+    // Exhaust the layer's slots: every install claims one, and the
+    // 21st (the miniature has 20 features) reports the exhaustion.
+    for i in 1..20 {
+        run(
+            &mut session,
+            &format!(
+                "INSERT INTO EDGES (entity, relation, target) VALUES (\"e{i}\", \"b\", \"[5]\") AT LAYER 1 MODE COMPOSE;"
+            ),
+        );
+    }
+    let parsed = parse(
+        r#"INSERT INTO EDGES (entity, relation, target) VALUES ("late", "b", "[5]") AT LAYER 1 MODE COMPOSE;"#,
+    )
+    .unwrap();
     let err = session
         .execute(&parsed)
-        .expect_err("a compose patch must refuse on V3");
-    assert!(err.to_string().contains("compose rung"), "{err}");
+        .expect_err("a full layer must refuse the install");
+    assert!(err.to_string().contains("no free feature slot"), "{err}");
 
-    // All-or-nothing: the applicable KNN op must NOT have landed.
-    assert!(!describe_entity(&mut session).contains("→ [5]"));
-    let listed = run(&mut session, "SHOW PATCHES;").join("\n");
-    assert!(listed.contains("no patches applied"), "{listed}");
+    let checkpoint = tempfile::tempdir().unwrap();
+    let tokless = tempfile::tempdir().unwrap();
+    encode_fixture_container(
+        miniature_glimmer,
+        checkpoint.path(),
+        tokless.path(),
+        "tokless-compose",
+    );
+    let mut session = bound_session(tokless.path());
+    let parsed = parse(
+        r#"INSERT INTO EDGES (entity, relation, target) VALUES ("a", "b", "[5]") MODE COMPOSE;"#,
+    )
+    .unwrap();
+    let err = session
+        .execute(&parsed)
+        .expect_err("compose needs the tokenizer capability");
+    assert!(err.to_string().contains("tokenizer"), "{err}");
 }

@@ -67,7 +67,7 @@ pub(super) fn resident_matrix(
 ) -> Result<DeviceMatrix, VindexError> {
     let rows = operand.shape.first().copied().unwrap_or(0);
     let cols = operand.shape.get(1).copied().unwrap_or(0);
-    let loaded = load_weight(store, operand, format)?;
+    let loaded = load_weight(store.into(), operand, format)?;
     let m = match &loaded {
         LoadedWeight::Nvfp4 {
             packed,

@@ -875,7 +875,7 @@ family metadata.
 | SHOW FEATURES | ✅ Index lookup | ✅ Dense scan per layer | ✅ via semantic roles |
 | STATS | ✅ Instant | ✅ Computed | ✅ Container's own authority |
 | INSERT (MODE KNN, default) | ✅ | ❌ Error: "requires vindex" | ✅ key from plan taps (§4.4) |
-| INSERT MODE COMPOSE | ✅ | ❌ Error: "requires vindex" | ❌ awaits the operand-source seam |
+| INSERT MODE COMPOSE | ✅ | ❌ Error: "requires vindex" | ✅ via the operand-source seam¹ |
 | DELETE | ✅ | ❌ Error: "requires vindex" | ✅ overlay tombstones |
 | UPDATE | ✅ | ❌ Error: "requires vindex" | ✅ overlay meta overrides |
 | BEGIN/SAVE/APPLY/REMOVE PATCH | ✅ | ❌ Error: "requires vindex" | ✅ vector-free patches (all-or-nothing) |
@@ -896,10 +896,16 @@ retrieval entries plus feature-slot meta overrides and tombstones
 carrying V2's tombstone/resurrection contract — with the KNN key
 captured from the plan's own execution taps and the same `.vlp` patch
 language V2 speaks: one patch file applies to either format
-(vector-free operations; vector-bearing compose edits refuse the patch
-whole). Remaining refusals: compose-mode INSERT and
-COMPILE/DIFF/COMPACT (V3-LQL-3B compose onwards). The
-whole-language sweep test
+— vector-bearing compose edits included since the compose rung: the
+overlay's gate/up rows and down columns reach execution through the
+**operand-source seam** (base representation + overlay override →
+effective operand), so a compose install alters what the program
+computes, WALK surfaces the slot, TRACE observes the same effective
+program, and REMOVE PATCH returns execution bit-for-bit to baseline.
+¹ The V3 compose install is the single-fact `install_compiled_slot`
+formula; the multi-fact refine/balance passes are not ported yet, so
+V2↔V3 compose parity is not claimed. Remaining refusals:
+COMPILE/DIFF/COMPACT (lifecycle). The whole-language sweep test
 (`tests/vindex3_lql.rs::every_statement_is_sensible_on_a_v3_binding`)
 pins that every statement either executes or refuses this way — never
 a panic, never a misleading "no backend loaded".

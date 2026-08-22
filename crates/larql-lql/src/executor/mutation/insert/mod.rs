@@ -20,6 +20,7 @@
 mod balance;
 mod capture;
 mod compose;
+mod compose_v3;
 mod knn;
 mod knn_v3;
 mod plan;
@@ -57,10 +58,17 @@ impl Session {
             InsertMode::Compose => { /* fallthrough */ }
         }
 
-        // The FFN-overlay install writes vectors execution must observe,
-        // which needs the V3 operand-source seam — the compose rung.
+        // The V3 compose install: vectors land in the knowledge
+        // overlay and reach execution through the operand-source seam.
         if matches!(self.backend, crate::executor::Backend::Vindex3 { .. }) {
-            return Err(crate::executor::vindex3::unsupported("INSERT MODE COMPOSE"));
+            return self.exec_insert_compose_v3(
+                entity,
+                relation,
+                target,
+                layer_hint,
+                confidence,
+                alpha_override,
+            );
         }
 
         // ALPHA is the dimensionless multiplier on the layer's median

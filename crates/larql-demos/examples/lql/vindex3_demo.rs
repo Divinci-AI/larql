@@ -154,11 +154,16 @@ fn main() {
         r#"SELECT * FROM FEATURES WHERE layer = 1 LIMIT 5;"#,
     );
 
-    // ── Refusals are capability statements (compose is a later rung) ──
+    // ── Compose install: the FFN slot lands in the overlay and
+    // execution observes it through the operand-source seam ──
     run(
         &mut session,
-        r#"INSERT INTO EDGES (entity, relation, target) VALUES ("a", "b", "c") MODE COMPOSE;"#,
+        r#"INSERT INTO EDGES (entity, relation, target) VALUES ("x", "y", "[7]") MODE COMPOSE;"#,
     );
+    run(&mut session, r#"INFER "The y of x is" TOP 3;"#);
+
+    // ── Refusals are capability statements (lifecycle is next) ──
+    run(&mut session, "COMPACT MINOR;");
 
     println!("=== Done ===");
 }

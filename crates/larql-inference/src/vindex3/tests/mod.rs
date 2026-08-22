@@ -733,3 +733,81 @@ fn knowledge_view_binds_from_the_runtime() {
     assert_eq!(view.num_layers(), runtime.plan().layers.len());
     assert!(view.max_features() > 0, "the miniature carries dense FFNs");
 }
+
+/// The overlaid runtime surface (V3-LQL-3B compose): with EMPTY
+/// overrides every overlaid entry point is its plain counterpart bit
+/// for bit, and a real edit changes what execution computes — the
+/// runtime-level statement of the operand-source seam's contract.
+#[test]
+fn overlaid_entry_points_are_bit_identical_when_empty_and_observe_edits() {
+    use super::{OperandEdit, OperandOverrides};
+    use larql_vindex::format::vindex3::opplan::LayerFfn;
+
+    let container = container_with(miniature_glimmer);
+    let runtime =
+        Vindex3Runtime::open(container.path(), COMPONENT, ReferenceBackend::new()).unwrap();
+
+    // Plain arms.
+    let mut kv = RowKvState::default();
+    let prefill = runtime.prefill_into(&G_TOKENS, &mut kv).unwrap();
+    let streamed = runtime
+        .execute_streaming(&G_TOKENS, &mut |_| Ok(()))
+        .unwrap();
+
+    // Empty overlay: bit-identical on every entry point.
+    let empty = OperandOverrides::new();
+    let mut kv2 = RowKvState::default();
+    assert_eq!(
+        runtime
+            .prefill_into_overlaid(&G_TOKENS, &empty, &mut kv2)
+            .unwrap(),
+        prefill
+    );
+    assert_eq!(
+        runtime
+            .execute_streaming_overlaid(&G_TOKENS, &empty, &mut |_| Ok(()))
+            .unwrap()
+            .logits,
+        streamed.logits
+    );
+    let step_plain = {
+        let mut session = runtime.session().unwrap();
+        session.step(G_TOKENS[0]).unwrap()
+    };
+    let step_overlaid = {
+        let mut session = runtime.session_overlaid(&empty).unwrap();
+        session.step(G_TOKENS[0]).unwrap()
+    };
+    assert_eq!(step_plain, step_overlaid);
+    let resumed = {
+        let mut session = runtime.session_with_kv_overlaid(&mut kv2, &empty).unwrap();
+        session.step(G_TOKENS[0]).unwrap()
+    };
+    let resumed_plain = {
+        let mut session = runtime.session_with_kv(&mut kv).unwrap();
+        session.step(G_TOKENS[0]).unwrap()
+    };
+    assert_eq!(resumed, resumed_plain);
+
+    // A real edit is observed.
+    let LayerFfn::Dense(ffn) = &runtime.plan().layers[0].ffn else {
+        panic!("miniature layer 0 is dense");
+    };
+    let gate = ffn.gate.as_ref().unwrap().clone();
+    let mut edited = OperandOverrides::new();
+    edited.push(
+        &gate,
+        OperandEdit::Row {
+            index: 0,
+            values: vec![5.0; gate.shape[1]],
+        },
+    );
+    let out = runtime
+        .execute_streaming_overlaid(&G_TOKENS, &edited, &mut |_| Ok(()))
+        .unwrap();
+    assert_ne!(out.logits, streamed.logits, "the edit must be observed");
+    // …and the resolver serves the effective row.
+    let effective = runtime.operands();
+    let base_gate = effective.load(&gate).unwrap();
+    assert_ne!(&base_gate[..gate.shape[1]], &vec![5.0; gate.shape[1]][..]);
+}

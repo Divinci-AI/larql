@@ -220,10 +220,7 @@ fn the_v2_path_refuses_the_container_lql_serves() {
 fn remaining_mutation_statements_refuse_with_capabilities() {
     let container = v3_container();
     let mut session = bound_session(container.path());
-    for stmt in [
-        "COMPACT MINOR;",
-        r#"INSERT INTO EDGES (entity, relation, target) VALUES ("a", "b", "c") MODE COMPOSE;"#,
-    ] {
+    for stmt in ["COMPACT MINOR;", "COMPACT MAJOR;"] {
         let parsed = parse(stmt).unwrap();
         let err = session.execute(&parsed).unwrap_err().to_string();
         assert!(
@@ -434,7 +431,7 @@ fn every_statement_is_sensible_on_a_v3_binding() {
         (
             r#"INSERT INTO EDGES (entity, relation, target) VALUES ("a", "b", "c") MODE COMPOSE;"#
                 .to_string(),
-            Refuse,
+            Ok,
         ),
         (r#"DELETE FROM EDGES WHERE layer = 0 AND feature = 0;"#.to_string(), Ok),
         (

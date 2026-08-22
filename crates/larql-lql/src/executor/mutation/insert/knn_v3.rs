@@ -32,7 +32,10 @@ impl Session {
         let (install_layer, key, target_id);
         {
             let Backend::Vindex3 {
-                runtime, tokenizer, ..
+                runtime,
+                tokenizer,
+                overlay,
+                ..
             } = &self.backend
             else {
                 unreachable!("caller matched the backend");
@@ -63,13 +66,16 @@ impl Session {
                 .map_err(|e| LqlError::exec("tokenize error", e))?;
             target_id = target_encoding.get_ids().first().copied().unwrap_or(0);
 
-            // ── Phase 2: capture the residual via the plan's taps ──
+            // ── Phase 2: capture the residual via the plan's taps,
+            // over the same effective program INFER runs ──
             let prompt = knn_canonical_prompt(entity, relation);
+            let overrides = crate::executor::vindex3::compose_overrides(runtime, overlay)?;
             key = crate::executor::vindex3::capture_layer_residual(
                 runtime,
                 tokenizer,
                 prompt.as_str(),
                 install_layer,
+                overrides.as_ref(),
             )?;
         }
 

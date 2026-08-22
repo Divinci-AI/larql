@@ -3,7 +3,7 @@
 use larql_vindex::format::vindex3::opplan::exec::backend::PlanBackend;
 use larql_vindex::format::vindex3::opplan::exec::decode::DecodeSession;
 use larql_vindex::format::vindex3::opplan::exec::kv::KvState;
-use larql_vindex::format::vindex3::opplan::exec::operands::OperandStore;
+use larql_vindex::format::vindex3::opplan::exec::operands::OperandSource;
 use larql_vindex::format::vindex3::opplan::ComponentOpPlan;
 
 use crate::error::InferenceError;
@@ -62,9 +62,9 @@ impl<'a, B: PlanBackend> Vindex3Session<'a, B> {
     /// Load the plan's operands and open an incremental session at
     /// position zero. The plan must carry an output head — a session
     /// that cannot produce logits cannot serve generation.
-    pub fn new(
+    pub fn new<'s>(
         plan: &'a ComponentOpPlan,
-        store: &OperandStore,
+        store: impl Into<OperandSource<'s>>,
         backend: &'a B,
     ) -> Result<Self, InferenceError> {
         if plan.output.is_none() {
@@ -83,9 +83,9 @@ impl<'a, B: PlanBackend> Vindex3Session<'a, B> {
     /// position authority. It is `prepare`d with the plan's per-layer
     /// KV geometry, so residency and windowing policy read explicit
     /// program properties, never a family registry.
-    pub fn with_kv_state(
+    pub fn with_kv_state<'s>(
         plan: &'a ComponentOpPlan,
-        store: &OperandStore,
+        store: impl Into<OperandSource<'s>>,
         backend: &'a B,
         kv: &'a mut dyn KvState,
     ) -> Result<Self, InferenceError> {

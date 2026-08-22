@@ -23,7 +23,7 @@ use crate::executor::{Backend, Session};
 /// [`unsupported`] — a capability refusal, not a format apology.
 pub(crate) const SUPPORTED: &str = "SELECT, DESCRIBE, WALK, EXPLAIN WALK, \
      SHOW RELATIONS/LAYERS/FEATURES/ENTITIES/PATCHES, INFER [TOP n] [GENERATE n], \
-     EXPLAIN INFER, TRACE, STATS, USE, INSERT [MODE KNN], DELETE, UPDATE, MERGE, \
+     EXPLAIN INFER, TRACE, STATS, USE, INSERT [MODE KNN|COMPOSE], DELETE, UPDATE, MERGE, \
      BEGIN/SAVE/APPLY/REMOVE PATCH";
 
 /// Component id a container's text stack is bound under.
@@ -78,20 +78,30 @@ impl Session {
                 // overlay holds entries).
                 let capture_residuals = !overlay.knn_store.is_empty();
                 let mut residuals: Vec<(usize, Vec<f32>)> = Vec::new();
-                let output = runtime
-                    .execute_streaming(&prompt_ids, &mut |event| {
-                        if capture_residuals {
-                            if let larql_inference::vindex3::PlaneEvent::Layer { index, trace } =
-                                event
-                            {
-                                if let Some(last) = trace.post_layer.last() {
-                                    residuals.push((index, last.clone()));
-                                }
+                let mut sink = |event: larql_inference::vindex3::PlaneEvent| {
+                    if capture_residuals {
+                        if let larql_inference::vindex3::PlaneEvent::Layer { index, trace } = event
+                        {
+                            // FFN-entry residuals — the same tap the
+                            // stored keys were captured from.
+                            if let Some(last) = trace.post_attention.last() {
+                                residuals.push((index, last.clone()));
                             }
                         }
-                        Ok(())
-                    })
-                    .map_err(|e| LqlError::exec("v3 prefill failed", e))?;
+                    }
+                    Ok(())
+                };
+                // Compose edits reach execution through the operand-
+                // source seam; without them this is the plain pass,
+                // bit for bit.
+                let output = match compose_overrides(runtime, overlay)? {
+                    Some(overrides) => runtime
+                        .execute_streaming_overlaid(&prompt_ids, &overrides, &mut sink)
+                        .map_err(|e| LqlError::exec("v3 prefill failed", e))?,
+                    None => runtime
+                        .execute_streaming(&prompt_ids, &mut sink)
+                        .map_err(|e| LqlError::exec("v3 prefill failed", e))?,
+                };
                 let logits = output.logits.ok_or_else(|| {
                     LqlError::Execution("the component carries no output head".into())
                 })?;
@@ -172,12 +182,17 @@ impl Session {
             }
             Some(n) => {
                 let mut kv = CanonicalKvState::new();
-                let prefill_logits = runtime
-                    .prefill_into(&prompt_ids, &mut kv)
-                    .map_err(|e| LqlError::exec("v3 prefill failed", e))?;
-                let mut session = runtime
-                    .session_with_kv(&mut kv)
-                    .map_err(|e| LqlError::exec("v3 session failed", e))?;
+                let overrides = compose_overrides(runtime, overlay)?;
+                let prefill_logits = match &overrides {
+                    Some(ov) => runtime.prefill_into_overlaid(&prompt_ids, ov, &mut kv),
+                    None => runtime.prefill_into(&prompt_ids, &mut kv),
+                }
+                .map_err(|e| LqlError::exec("v3 prefill failed", e))?;
+                let mut session = match &overrides {
+                    Some(ov) => runtime.session_with_kv_overlaid(&mut kv, ov),
+                    None => runtime.session_with_kv(&mut kv),
+                }
+                .map_err(|e| LqlError::exec("v3 session failed", e))?;
                 let mut detok = Detokenizer::new(tokenizer);
                 detok.seed(&prompt_ids);
                 let mut text = String::new();
@@ -406,7 +421,10 @@ impl Session {
     pub(crate) fn exec_v3_trace(&self, prompt: &str) -> Result<Vec<String>, LqlError> {
         use larql_inference::vindex3::{RecordingObserver, StepEvent};
         let Backend::Vindex3 {
-            runtime, tokenizer, ..
+            runtime,
+            tokenizer,
+            overlay,
+            ..
         } = &self.backend
         else {
             unreachable!("caller matched the backend");
@@ -416,9 +434,13 @@ impl Session {
         })?;
         let prompt_ids = encode_v3_prompt(tokenizer, prompt)?;
 
-        let mut session = runtime
-            .session()
-            .map_err(|e| LqlError::exec("v3 session failed", e))?;
+        // TRACE observes the same effective program INFER runs — a
+        // compose edit must not fork the two.
+        let mut session = match compose_overrides(runtime, overlay)? {
+            Some(overrides) => runtime.session_overlaid(&overrides),
+            None => runtime.session(),
+        }
+        .map_err(|e| LqlError::exec("v3 session failed", e))?;
         let mut out = vec!["Trace (VINDEX3 program, observed execution):".into()];
         let mut logits = Vec::new();
         for (offset, &token) in prompt_ids.iter().enumerate() {
@@ -474,28 +496,52 @@ pub(crate) fn bind(
 }
 
 /// One observed pass over the runtime's plan, returning the last
-/// position's post-layer residual at `layer` (V3-LQL-3B capture — the
-/// KNN insert's key, and any later analysis that needs a residual).
-/// The pass is the same canonical traversal INFER runs; the tap is a
-/// subscription, never a second executor.
+/// position's **FFN-entry** residual (post-attention, pre-FFN) at
+/// `layer` — V2's install statistic: the vector the layer's gates
+/// multiply, so a gate built from it fires on the prompt that
+/// produced it (V3-LQL-3B capture: the KNN key and the compose gate
+/// direction). The pass is the same canonical traversal INFER runs;
+/// the tap is a subscription, never a second executor.
+/// The overlay's compose edits as executor operand overrides — `None`
+/// while no compose state exists, so callers keep the plain (bit-for-
+/// bit identical) execution path.
+pub(crate) fn compose_overrides(
+    runtime: &V3Runtime,
+    overlay: &larql_vindex::format::vindex3::knowledge::KnowledgeOverlay,
+) -> Result<Option<larql_inference::vindex3::OperandOverrides>, LqlError> {
+    if !overlay.has_vector_state() {
+        return Ok(None);
+    }
+    overlay
+        .operand_overrides(runtime.plan())
+        .map(Some)
+        .map_err(|e| LqlError::exec("failed to derive operand overrides", e))
+}
+
 pub(crate) fn capture_layer_residual(
     runtime: &V3Runtime,
     tokenizer: &Tokenizer,
     prompt: &str,
     layer: usize,
+    overrides: Option<&larql_inference::vindex3::OperandOverrides>,
 ) -> Result<Vec<f32>, LqlError> {
     let prompt_ids = encode_v3_prompt(tokenizer, prompt)?;
     let mut captured: Option<Vec<f32>> = None;
-    runtime
-        .execute_streaming(&prompt_ids, &mut |event| {
-            if let larql_inference::vindex3::PlaneEvent::Layer { index, trace } = event {
-                if index == layer {
-                    captured = trace.post_layer.last().cloned();
-                }
+    let mut sink = |event: larql_inference::vindex3::PlaneEvent| {
+        if let larql_inference::vindex3::PlaneEvent::Layer { index, trace } = event {
+            if index == layer {
+                captured = trace.post_attention.last().cloned();
             }
-            Ok(())
-        })
-        .map_err(|e| LqlError::exec("v3 capture pass failed", e))?;
+        }
+        Ok(())
+    };
+    // The capture runs over the same effective program INFER runs —
+    // V2's contract (its capture forward observes the patch overlay).
+    match overrides {
+        Some(overrides) => runtime.execute_streaming_overlaid(&prompt_ids, overrides, &mut sink),
+        None => runtime.execute_streaming(&prompt_ids, &mut sink),
+    }
+    .map_err(|e| LqlError::exec("v3 capture pass failed", e))?;
     captured.ok_or_else(|| LqlError::Execution(format!("no residual captured at layer {layer}")))
 }
 

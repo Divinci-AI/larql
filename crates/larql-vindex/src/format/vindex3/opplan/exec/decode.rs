@@ -26,7 +26,7 @@
 use super::backend::{AttentionStepCall, MatrixClass, NormCall, PlanBackend};
 use super::kv::{plan_kv_geometry, KvState, RowKvState};
 use super::observe::{NoopObserver, StepEvent, StepObserver};
-use super::operands::OperandStore;
+use super::operands::OperandSource;
 use super::weights::{load_weight, LoadedWeight};
 use super::AttentionOperands;
 use crate::error::VindexError;
@@ -40,7 +40,7 @@ struct LoadedNorm {
 }
 
 impl LoadedNorm {
-    fn load(op: &NormOp, store: &OperandStore) -> Result<Self, VindexError> {
+    fn load(op: &NormOp, store: OperandSource<'_>) -> Result<Self, VindexError> {
         Ok(Self {
             op: op.clone(),
             weight: store.load(&op.weight)?,
@@ -118,12 +118,17 @@ impl<'a, B: PlanBackend> DecodeSession<'a, B> {
     /// declared weight format. The embedding table stays f32 — it is a
     /// row lookup, not matrix traffic. Continuation state is the
     /// default in-place [`RowKvState`].
-    pub fn new(
+    pub fn new<'s>(
         plan: &'a ComponentOpPlan,
-        store: &OperandStore,
+        store: impl Into<OperandSource<'s>>,
         backend: &'a B,
     ) -> Result<Self, VindexError> {
-        Self::build(plan, store, backend, KvSlot::Owned(RowKvState::default()))
+        Self::build(
+            plan,
+            store.into(),
+            backend,
+            KvSlot::Owned(RowKvState::default()),
+        )
     }
 
     /// Like [`new`](Self::new), but the caller provides — and keeps
@@ -135,18 +140,18 @@ impl<'a, B: PlanBackend> DecodeSession<'a, B> {
     /// session — resumes exactly where it left off. The provider is
     /// the *only* position authority; no separate start argument
     /// exists to disagree with it.
-    pub fn with_kv_state(
+    pub fn with_kv_state<'s>(
         plan: &'a ComponentOpPlan,
-        store: &OperandStore,
+        store: impl Into<OperandSource<'s>>,
         backend: &'a B,
         kv: &'a mut dyn KvState,
     ) -> Result<Self, VindexError> {
-        Self::build(plan, store, backend, KvSlot::Borrowed(kv))
+        Self::build(plan, store.into(), backend, KvSlot::Borrowed(kv))
     }
 
     fn build(
         plan: &'a ComponentOpPlan,
-        store: &OperandStore,
+        store: OperandSource<'_>,
         backend: &'a B,
         mut kv: KvSlot<'a>,
     ) -> Result<Self, VindexError> {
