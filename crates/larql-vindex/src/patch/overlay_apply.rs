@@ -242,7 +242,7 @@ impl PatchedVindex {
         self.overrides_gate.clear();
         self.deleted.clear();
         self.knn_store = super::knn_store::KnnStore::default();
-        let patches: Vec<VindexPatch> = self.patches.drain(..).collect();
+        let patches: Vec<VindexPatch> = std::mem::take(&mut self.patches);
         for patch in patches {
             self.apply_patch(patch);
         }

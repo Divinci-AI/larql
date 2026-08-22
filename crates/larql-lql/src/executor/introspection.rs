@@ -69,9 +69,9 @@ impl Session {
         with_examples: bool,
         mode: DescribeMode,
     ) -> Result<Vec<String>, LqlError> {
-        let (_path, _config, patched) = self.require_vindex()?;
+        let ctx = self.browse()?;
 
-        let all_layers = patched.loaded_layers();
+        let all_layers = ctx.source.loaded_layers();
         let scan_layers: Vec<usize> = if let Some(l) = layer_filter {
             vec![l as usize]
         } else {
@@ -88,7 +88,7 @@ impl Session {
         if mode != DescribeMode::Raw {
             if let Some(rc) = classifier {
                 for &layer in &scan_layers {
-                    let num_features = patched.num_features(layer);
+                    let num_features = ctx.source.num_features(layer);
                     for feat in 0..num_features {
                         if let Some(label) = rc.label_for_feature(layer, feat) {
                             *probe_relations.entry(label.to_string()).or_insert(0) += 1;
@@ -115,7 +115,7 @@ impl Session {
         let mut tokens: HashMap<String, TokenInfo> = HashMap::new();
         if show_raw {
             for &layer in &scan_layers {
-                if let Some(metas) = patched.down_meta_at(layer) {
+                if let Some(metas) = ctx.source.feature_metas(layer) {
                     for meta in metas.iter().flatten() {
                         let tok = meta.top_token.trim();
                         if !is_content_token(tok) {
@@ -232,6 +232,12 @@ impl Session {
     }
 
     pub(crate) fn exec_show_layers(&self, range: Option<&Range>) -> Result<Vec<String>, LqlError> {
+        if matches!(self.backend, super::Backend::Vindex3 { .. }) {
+            // Ranges are cheap to add later; the V3 fixture stacks are
+            // small and the whole table is the point.
+            let _ = range;
+            return self.exec_v3_show_layers();
+        }
         let (_path, _config, patched) = self.require_vindex()?;
 
         let all_layers = patched.loaded_layers();
@@ -289,10 +295,10 @@ impl Session {
         conditions: &[Condition],
         limit: Option<u32>,
     ) -> Result<Vec<String>, LqlError> {
-        let (_path, config, patched) = self.require_vindex()?;
+        let ctx = self.browse()?;
         // Default to num_layers — a manageable screenful that matches
         // the model's depth. Use LIMIT for more or fewer.
-        let limit = limit.unwrap_or(config.num_layers as u32) as usize;
+        let limit = limit.unwrap_or(ctx.num_layers as u32) as usize;
 
         // Extract filters from WHERE conditions
         let token_filter = conditions
@@ -314,7 +320,7 @@ impl Session {
                 _ => None,
             });
 
-        let nf = patched.num_features(layer as usize);
+        let nf = ctx.source.num_features(layer as usize);
         if nf == 0 {
             return Err(LqlError::Execution(format!("no features at layer {layer}")));
         }
@@ -331,7 +337,7 @@ impl Session {
             if count >= limit {
                 break;
             }
-            if let Some(meta) = patched.feature_meta(layer as usize, feat_idx) {
+            if let Some(meta) = ctx.source.feature_meta(layer as usize, feat_idx) {
                 // Apply WHERE filters
                 if let Some(tf) = token_filter {
                     if !meta.top_token.to_lowercase().contains(&tf.to_lowercase()) {
@@ -368,13 +374,13 @@ impl Session {
         layer_filter: Option<u32>,
         limit: Option<u32>,
     ) -> Result<Vec<String>, LqlError> {
-        let (_path, config, patched) = self.require_vindex()?;
+        let ctx = self.browse()?;
         let limit = limit.unwrap_or(50) as usize;
 
         let scan_layers: Vec<usize> = if let Some(l) = layer_filter {
             vec![l as usize]
         } else {
-            (0..config.num_layers).collect()
+            (0..ctx.num_layers).collect()
         };
 
         // Collect distinct top_tokens across all scanned features.
@@ -382,9 +388,9 @@ impl Session {
             std::collections::HashMap::new();
 
         for layer in &scan_layers {
-            let nf = patched.num_features(*layer);
+            let nf = ctx.source.num_features(*layer);
             for feat in 0..nf {
-                if let Some(meta) = patched.feature_meta(*layer, feat) {
+                if let Some(meta) = ctx.source.feature_meta(*layer, feat) {
                     let tok = meta.top_token.trim().to_string();
                     // Filter to named entities: starts with uppercase
                     // ASCII, 3+ chars, all alphabetic. This skips

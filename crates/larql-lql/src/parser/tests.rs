@@ -1591,11 +1591,13 @@ fn parse_infer_minimal() {
             top,
             compare,
             route,
+            generate,
         } => {
             assert_eq!(prompt, "The capital of France is");
             assert_eq!(top, Some(5));
             assert!(!compare);
             assert!(route.is_none());
+            assert!(generate.is_none());
         }
         _ => panic!("expected Infer"),
     }
@@ -1610,7 +1612,9 @@ fn parse_infer_with_compare() {
             top,
             compare,
             route,
+            generate,
         } => {
+            let _ = generate;
             assert_eq!(prompt, "test prompt");
             assert_eq!(top, Some(3));
             assert!(compare);

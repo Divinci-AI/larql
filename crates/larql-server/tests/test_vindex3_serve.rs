@@ -348,6 +348,79 @@ async fn v3_stream_reports_an_untokenizable_prompt_as_an_error_chunk() {
     assert!(body.contains("[DONE]"));
 }
 
+/// Binding refuses a directory that is not a V3 container, naming the
+/// open step — never a panic, never a half-bound model.
+#[test]
+fn load_v3_model_refuses_a_non_container_directory() {
+    let empty = tempfile::tempdir().unwrap();
+    let err = larql_server::vindex3::load_v3_model(empty.path())
+        .err()
+        .expect("an empty directory must not bind");
+    assert!(err.to_string().contains("open VINDEX3 container"), "{err}");
+}
+
+/// A valid container without `tokenizer.json` cannot serve the
+/// text-facing API; the refusal names the missing capability.
+#[test]
+fn load_v3_model_refuses_a_tokenizerless_container() {
+    let checkpoint = tempfile::tempdir().unwrap();
+    let container = tempfile::tempdir().unwrap();
+    encode_fixture_container(
+        miniature_glimmer,
+        checkpoint.path(),
+        container.path(),
+        "serve-fixture",
+    );
+    let err = larql_server::vindex3::load_v3_model(container.path())
+        .err()
+        .expect("a tokenizerless container must not bind for serving");
+    assert!(err.to_string().contains("tokenizer.json"), "{err}");
+}
+
+/// A container encoded nameless falls back to the directory name —
+/// the last-resort identity, never an empty id.
+#[test]
+fn a_nameless_container_takes_its_id_from_the_directory() {
+    let checkpoint = tempfile::tempdir().unwrap();
+    let container = tempfile::tempdir().unwrap();
+    encode_fixture_container(miniature_glimmer, checkpoint.path(), container.path(), "");
+    std::fs::write(
+        container.path().join("tokenizer.json"),
+        synthetic_tokenizer_json(G_VOCAB),
+    )
+    .unwrap();
+    let model = larql_server::vindex3::load_v3_model(container.path()).unwrap();
+    let dir_name = container
+        .path()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(model.id, dir_name);
+}
+
+/// A prefill failure surfaces as a server error naming the stage, not
+/// a panic — driven through the same `generate_v3` the routes use.
+#[test]
+fn generate_v3_reports_a_prefill_failure_as_a_server_error() {
+    let container = v3_container();
+    let model = larql_server::vindex3::load_v3_model(container.path()).unwrap();
+    let result = larql_server::vindex3::generate_v3(
+        &model,
+        &[],
+        4,
+        SamplingConfig::greedy(),
+        &EosConfig::builtin(),
+        |_, _| {},
+    );
+    match result {
+        Err(e) => assert!(e.to_string().contains("prefill"), "{e}"),
+        // If the runtime ever learns to prefill zero tokens this arm
+        // keeps the gate honest instead of silently passing.
+        Ok(generation) => panic!("empty prefill unexpectedly succeeded: {:?}", generation.ids),
+    }
+}
+
 /// …and the other arm of the same binding decision: an ordinary V2
 /// vindex must resolve to the V2 runtime through the identical
 /// `load_artifact` call, so the dispatch is proven in both directions.

@@ -270,8 +270,10 @@ mod tests {
         let bytes = encode_binary_output(&out);
         // Skip 12-byte header; decode float values.
         let decoded: Vec<f32> = bytes[12..]
-            .chunks_exact(4)
-            .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| f32::from_le_bytes(*c))
             .collect();
         assert_eq!(decoded, original_output);
     }

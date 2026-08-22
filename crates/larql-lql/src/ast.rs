@@ -29,6 +29,10 @@ pub enum Statement {
         relation: Option<String>,
         limit: Option<u32>,
         into_patch: Option<String>,
+        /// `DIFF … PHYSICAL` — subordinate segment-level report
+        /// (VINDEX3): hashes and linked/rewritten status instead of
+        /// the logical model-fact diff.
+        physical: bool,
     },
     Use {
         target: UseTarget,
@@ -50,6 +54,10 @@ pub enum Statement {
         /// FR1/FR2 KnnStore router selection (`ROUTE VERIFY [FALLBACK] [TOPK n]`).
         /// `None` = inherit the env default (`KnnRouteMode::from_env`).
         route: Option<InferRoute>,
+        /// `GENERATE n` — greedy autoregressive continuation through the
+        /// bound runtime (VINDEX3 backends; LQL-1). `None` = classic
+        /// single-step top-k prediction.
+        generate: Option<u32>,
     },
     Select {
         source: SelectSource,
@@ -149,6 +157,13 @@ pub enum Statement {
         vindex: Option<String>,
     },
     ShowCompactStatus,
+    /// `COMPACT INTO VINDEX "out"` (VINDEX3): semantics-preserving
+    /// physical reorganisation — dead files dropped, referenced
+    /// segments carried byte-identically. DIFF is its proof
+    /// instrument: SemanticDiff(input, output) must be empty.
+    CompactInto {
+        output: String,
+    },
     CompactMinor,
     CompactMajor {
         full: bool,

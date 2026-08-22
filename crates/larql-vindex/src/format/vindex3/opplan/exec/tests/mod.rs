@@ -20,6 +20,8 @@ mod gemma4_refusals;
 mod golden;
 mod kernels;
 mod kv;
+mod observe;
+mod overrides;
 mod parity;
 mod routed;
 mod seam;

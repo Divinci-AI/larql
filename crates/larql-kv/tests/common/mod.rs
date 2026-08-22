@@ -58,8 +58,10 @@ impl BinFixtures {
     fn f32_values(&self, key: &str) -> Vec<f32> {
         let bytes = std::fs::read(self.dir.join(format!("{key}.bin"))).expect(key);
         bytes
-            .chunks_exact(std::mem::size_of::<f32>())
-            .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+            .as_chunks::<{ std::mem::size_of::<f32>() }>()
+            .0
+            .iter()
+            .map(|c| f32::from_le_bytes(*c))
             .collect()
     }
 

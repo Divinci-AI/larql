@@ -37,6 +37,9 @@
 //! would look for it. Regions are placed exactly as their producer wrote them.
 
 pub mod build;
+pub mod compact;
+pub mod compile;
+pub mod diff;
 pub mod encode;
 /// Miniature whole-model checkpoint writers, public so sibling crates'
 /// integration tests can encode a real container without duplicating
@@ -46,6 +49,9 @@ pub mod graph;
 pub mod import;
 pub mod index;
 pub mod inspect;
+/// The V3 query surface: browse-facing semantic roles bound to the
+/// executable plan's operands (V3-LQL-3A).
+pub mod knowledge;
 pub mod opplan;
 pub mod plan;
 pub mod profile;

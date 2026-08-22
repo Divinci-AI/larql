@@ -26,3 +26,6 @@ tempfile = "3"
 # HF_TOKEN env var — parallel test threads racing on it is a real,
 # observed flake (see #[serial] on those two tests in estimate/http.rs).
 serial_test = "3.2"
+
+[lints]
+workspace = true

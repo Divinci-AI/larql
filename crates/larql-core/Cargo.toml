@@ -36,3 +36,6 @@ harness = false
 [[example]]
 name = "bench_graph"
 
+
+[lints]
+workspace = true

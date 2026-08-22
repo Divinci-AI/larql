@@ -5,8 +5,12 @@ use std::path::Path;
 use larql_vindex::format::vindex3::inspect::inspect_container;
 use larql_vindex::format::vindex3::opplan::exec::backend::PlanBackend;
 use larql_vindex::format::vindex3::opplan::exec::kv::KvState;
-use larql_vindex::format::vindex3::opplan::exec::operands::OperandStore;
-use larql_vindex::format::vindex3::opplan::exec::prefill_plan;
+use larql_vindex::format::vindex3::opplan::exec::operands::{
+    OperandOverrides, OperandSource, OperandStore,
+};
+use larql_vindex::format::vindex3::opplan::exec::{
+    execute_plan_streaming, prefill_plan, FinalOutput, PlaneEvent,
+};
 use larql_vindex::format::vindex3::opplan::{plan_component_ops, ClosureDefect, ComponentOpPlan};
 
 use crate::error::InferenceError;
@@ -20,7 +24,7 @@ use super::session::Vindex3Session;
 fn open_component(
     container: &Path,
     component: &str,
-) -> Result<(ComponentOpPlan, OperandStore), InferenceError> {
+) -> Result<(ComponentOpPlan, OperandStore, String), InferenceError> {
     let inspection = inspect_container(container, false)?;
     let outcome = plan_component_ops(&inspection, container, component)?;
     if !outcome.closed() {
@@ -30,7 +34,9 @@ fn open_component(
         InferenceError::Parse(format!("component `{component}` produced no plan"))
     })?;
     let store = OperandStore::open(container, &inspection)?;
-    Ok((plan, store))
+    // The container names itself (`index.model`) — identity travels
+    // with the artifact, never a sidecar or a directory name.
+    Ok((plan, store, inspection.index.model.clone()))
 }
 
 /// Built outside the generic impl so the refusal exists (and is
@@ -62,24 +68,64 @@ pub struct Vindex3Runtime<B: PlanBackend> {
     plan: ComponentOpPlan,
     store: OperandStore,
     backend: B,
+    model_name: String,
 }
 
 impl<B: PlanBackend> Vindex3Runtime<B> {
     /// Open `component` from the container, refusing any closure
     /// defect (see [`unclosed_component`]'s doc).
     pub fn open(container: &Path, component: &str, backend: B) -> Result<Self, InferenceError> {
-        let (plan, store) = open_component(container, component)?;
+        let (plan, store, model_name) = open_component(container, component)?;
         Ok(Self {
             plan,
             store,
             backend,
+            model_name,
         })
+    }
+
+    /// The container's browse view (V3-LQL-3A): the query surface's
+    /// semantic roles bound to this runtime's own plan and operand
+    /// store, so the queryable view and the executed program cannot
+    /// name different bytes. `tokenizer` decodes feature annotations.
+    pub fn knowledge_view(
+        &self,
+        tokenizer: &larql_vindex::tokenizers::Tokenizer,
+    ) -> Result<larql_vindex::format::vindex3::knowledge::KnowledgeView, InferenceError> {
+        Ok(
+            larql_vindex::format::vindex3::knowledge::KnowledgeView::from_plan(
+                &self.plan,
+                &self.store,
+                tokenizer,
+            )?,
+        )
+    }
+
+    /// The container's self-declared model name (`index.model`) — the
+    /// identity authority; callers must not fall back to directory
+    /// names when this is non-empty.
+    pub fn model_name(&self) -> &str {
+        &self.model_name
     }
 
     /// Open an incremental session at position zero. Each call loads
     /// the operands in the backend's declared weight format.
     pub fn session(&self) -> Result<Vindex3Session<'_, B>, InferenceError> {
         Vindex3Session::new(&self.plan, &self.store, &self.backend)
+    }
+
+    /// [`session`](Self::session) with a mutation overlay's operand
+    /// edits applied — the session captures the effective operands at
+    /// construction.
+    pub fn session_overlaid(
+        &self,
+        overrides: &OperandOverrides,
+    ) -> Result<Vindex3Session<'_, B>, InferenceError> {
+        Vindex3Session::new(
+            &self.plan,
+            OperandSource::overlaid(&self.store, overrides),
+            &self.backend,
+        )
     }
 
     /// Open a session whose continuation state lives in — and outlives
@@ -107,6 +153,92 @@ impl<B: PlanBackend> Vindex3Runtime<B> {
     ) -> Result<Vec<f32>, InferenceError> {
         let out = prefill_plan(&self.plan, &self.store, tokens, &self.backend, kv)?;
         out.logits.ok_or_else(headless_prefill_error)
+    }
+
+    /// One observed analysis pass over the component's plan (V3-LQL-3B):
+    /// execute `tokens` and stream every plane event — the embedded
+    /// rows and each layer's residual taps — to `sink`, returning the
+    /// final output. This is the **same** `traverse` every other entry
+    /// point runs (observation is subscription, never a second
+    /// executor); no continuation state is kept, so use it for
+    /// analyses (residual capture, retrieval keys), not generation.
+    pub fn execute_streaming(
+        &self,
+        tokens: &[u32],
+        sink: &mut dyn FnMut(PlaneEvent) -> Result<(), larql_vindex::VindexError>,
+    ) -> Result<FinalOutput, InferenceError> {
+        Ok(execute_plan_streaming(
+            &self.plan,
+            &self.store,
+            tokens,
+            &self.backend,
+            None,
+            sink,
+        )?)
+    }
+
+    /// The runtime's operand resolver (base representation, no
+    /// overlay) — for analyses that read stored operands through the
+    /// same resolution execution uses (e.g. the compose install's
+    /// layer-norm statistics).
+    pub fn operands(&self) -> OperandSource<'_> {
+        (&self.store).into()
+    }
+
+    /// [`execute_streaming`](Self::execute_streaming) with a mutation
+    /// overlay's operand edits applied (V3-LQL-3B compose): the same
+    /// canonical traversal, resolving operands as base + override →
+    /// effective. An empty overrides value is bit-identical to the
+    /// plain call.
+    pub fn execute_streaming_overlaid(
+        &self,
+        tokens: &[u32],
+        overrides: &OperandOverrides,
+        sink: &mut dyn FnMut(PlaneEvent) -> Result<(), larql_vindex::VindexError>,
+    ) -> Result<FinalOutput, InferenceError> {
+        Ok(execute_plan_streaming(
+            &self.plan,
+            OperandSource::overlaid(&self.store, overrides),
+            tokens,
+            &self.backend,
+            None,
+            sink,
+        )?)
+    }
+
+    /// [`prefill_into`](Self::prefill_into) with a mutation overlay's
+    /// operand edits applied — generation over an edited program.
+    pub fn prefill_into_overlaid(
+        &self,
+        tokens: &[u32],
+        overrides: &OperandOverrides,
+        kv: &mut dyn KvState,
+    ) -> Result<Vec<f32>, InferenceError> {
+        let out = prefill_plan(
+            &self.plan,
+            OperandSource::overlaid(&self.store, overrides),
+            tokens,
+            &self.backend,
+            kv,
+        )?;
+        out.logits.ok_or_else(headless_prefill_error)
+    }
+
+    /// [`session_with_kv`](Self::session_with_kv) with a mutation
+    /// overlay's operand edits applied. The session captures the
+    /// effective operands at construction, so the overlay may change
+    /// afterwards without affecting a running continuation.
+    pub fn session_with_kv_overlaid<'a>(
+        &'a self,
+        kv: &'a mut dyn KvState,
+        overrides: &OperandOverrides,
+    ) -> Result<Vindex3Session<'a, B>, InferenceError> {
+        Vindex3Session::with_kv_state(
+            &self.plan,
+            OperandSource::overlaid(&self.store, overrides),
+            &self.backend,
+            kv,
+        )
     }
 
     /// The component's executable plan — the model-meaning authority.

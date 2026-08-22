@@ -119,3 +119,152 @@ pub(super) fn widen(dtype: &str, bytes: &[u8], name: &str) -> Result<Vec<f32>, V
         ))),
     }
 }
+
+/// One logical f32 edit to a stored operand (V3-LQL-3B compose): a row
+/// or a column replaced by new values. Addressed semantically — the
+/// operand's identity plus a slot index — never by byte offsets, so an
+/// edit survives repacking or an alternative physical representation.
+#[derive(Debug, Clone, PartialEq)]
+pub enum OperandEdit {
+    Row { index: usize, values: Vec<f32> },
+    Column { index: usize, values: Vec<f32> },
+}
+
+/// Logical edits over stored operands, keyed by operand identity
+/// (object + tensor). Applied inside [`OperandSource::load`] — after
+/// widening to f32, before any backend requantization — so **every
+/// weight format observes the same effective values** (`load_weight`
+/// quantizes from the widened f32 buffer).
+#[derive(Debug, Default, Clone)]
+pub struct OperandOverrides {
+    edits: BTreeMap<(String, String), Vec<OperandEdit>>,
+}
+
+impl OperandOverrides {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.edits.is_empty()
+    }
+
+    /// Record one edit for an operand; edits apply in insertion order.
+    pub fn push(&mut self, operand: &OperandRef, edit: OperandEdit) {
+        self.edits
+            .entry((operand.object.clone(), operand.tensor.clone()))
+            .or_default()
+            .push(edit);
+    }
+
+    pub fn is_overridden(&self, operand: &OperandRef) -> bool {
+        self.edits
+            .contains_key(&(operand.object.clone(), operand.tensor.clone()))
+    }
+
+    /// Apply this operand's edits onto its widened f32 values.
+    /// Row-major 2-D shape; an edit that does not fit the operand's
+    /// declared shape is an error naming the operand — never a silent
+    /// partial write.
+    pub fn apply(&self, operand: &OperandRef, values: &mut [f32]) -> Result<(), VindexError> {
+        let key = (operand.object.clone(), operand.tensor.clone());
+        let Some(edits) = self.edits.get(&key) else {
+            return Ok(());
+        };
+        let (rows, cols) = match operand.shape[..] {
+            [rows, cols] => (rows, cols),
+            _ => {
+                return Err(VindexError::Parse(format!(
+                    "operand `{}/{}` is not 2-D; overlay edits address rows/columns",
+                    operand.object, operand.tensor
+                )))
+            }
+        };
+        for edit in edits {
+            match edit {
+                OperandEdit::Row { index, values: row } => {
+                    if *index >= rows || row.len() != cols {
+                        return Err(VindexError::Parse(format!(
+                            "row edit {index} (len {}) does not fit `{}/{}` [{rows}, {cols}]",
+                            row.len(),
+                            operand.object,
+                            operand.tensor
+                        )));
+                    }
+                    values[index * cols..(index + 1) * cols].copy_from_slice(row);
+                }
+                OperandEdit::Column { index, values: col } => {
+                    if *index >= cols || col.len() != rows {
+                        return Err(VindexError::Parse(format!(
+                            "column edit {index} (len {}) does not fit `{}/{}` [{rows}, {cols}]",
+                            col.len(),
+                            operand.object,
+                            operand.tensor
+                        )));
+                    }
+                    for (r, v) in col.iter().enumerate() {
+                        values[r * cols + *index] = *v;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The executor's operand resolver: base representation + overlay
+/// override → effective operand. Execution asks this seam, never the
+/// store directly, so a mutation can alter what execution computes
+/// without touching the container's bytes — and a source with no
+/// overrides resolves bit-identically to the bare store.
+#[derive(Clone, Copy)]
+pub struct OperandSource<'a> {
+    base: &'a OperandStore,
+    overrides: Option<&'a OperandOverrides>,
+}
+
+impl<'a> OperandSource<'a> {
+    /// A source with overlay edits. An empty overrides value behaves
+    /// exactly like the bare store.
+    pub fn overlaid(base: &'a OperandStore, overrides: &'a OperandOverrides) -> Self {
+        Self {
+            base,
+            overrides: (!overrides.is_empty()).then_some(overrides),
+        }
+    }
+
+    /// Load one operand as f32, with any overlay edits applied.
+    pub fn load(&self, operand: &OperandRef) -> Result<Vec<f32>, VindexError> {
+        let mut values = self.base.load(operand)?;
+        if let Some(overrides) = self.overrides {
+            overrides.apply(operand, &mut values)?;
+        }
+        Ok(values)
+    }
+
+    /// Load one operand's stored bytes unwidened. Overlay edits are
+    /// f32-space facts and cannot be represented in raw stored bytes,
+    /// so an overridden operand refuses here rather than serving stale
+    /// base bytes.
+    pub fn load_raw(&self, operand: &OperandRef) -> Result<RawOperand, VindexError> {
+        if let Some(overrides) = self.overrides {
+            if overrides.is_overridden(operand) {
+                return Err(VindexError::Parse(format!(
+                    "operand `{}/{}` carries overlay edits — raw (unwidened) access would \
+                     bypass them; load it widened instead",
+                    operand.object, operand.tensor
+                )));
+            }
+        }
+        self.base.load_raw(operand)
+    }
+}
+
+impl<'a> From<&'a OperandStore> for OperandSource<'a> {
+    fn from(base: &'a OperandStore) -> Self {
+        Self {
+            base,
+            overrides: None,
+        }
+    }
+}

@@ -3,7 +3,7 @@
 use larql_vindex::format::vindex3::opplan::exec::backend::PlanBackend;
 use larql_vindex::format::vindex3::opplan::exec::decode::DecodeSession;
 use larql_vindex::format::vindex3::opplan::exec::kv::KvState;
-use larql_vindex::format::vindex3::opplan::exec::operands::OperandStore;
+use larql_vindex::format::vindex3::opplan::exec::operands::OperandSource;
 use larql_vindex::format::vindex3::opplan::ComponentOpPlan;
 
 use crate::error::InferenceError;
@@ -62,9 +62,9 @@ impl<'a, B: PlanBackend> Vindex3Session<'a, B> {
     /// Load the plan's operands and open an incremental session at
     /// position zero. The plan must carry an output head — a session
     /// that cannot produce logits cannot serve generation.
-    pub fn new(
+    pub fn new<'s>(
         plan: &'a ComponentOpPlan,
-        store: &OperandStore,
+        store: impl Into<OperandSource<'s>>,
         backend: &'a B,
     ) -> Result<Self, InferenceError> {
         if plan.output.is_none() {
@@ -83,9 +83,9 @@ impl<'a, B: PlanBackend> Vindex3Session<'a, B> {
     /// position authority. It is `prepare`d with the plan's per-layer
     /// KV geometry, so residency and windowing policy read explicit
     /// program properties, never a family registry.
-    pub fn with_kv_state(
+    pub fn with_kv_state<'s>(
         plan: &'a ComponentOpPlan,
-        store: &OperandStore,
+        store: impl Into<OperandSource<'s>>,
         backend: &'a B,
         kv: &'a mut dyn KvState,
     ) -> Result<Self, InferenceError> {
@@ -121,5 +121,22 @@ impl<B: PlanBackend> LogitsSession for Vindex3Session<'_, B> {
 
     fn position(&self) -> usize {
         self.inner.position()
+    }
+}
+
+impl<B: PlanBackend> Vindex3Session<'_, B> {
+    /// [`LogitsSession::step`] with a subscriber on the canonical
+    /// step's operation boundaries (LQL-2 TRACE). Observation is
+    /// observational: the executor's own parity gate pins that the
+    /// observed and unobserved paths are bit-identical.
+    pub fn step_observed(
+        &mut self,
+        token: u32,
+        observer: &mut dyn larql_vindex::format::vindex3::opplan::exec::observe::StepObserver,
+    ) -> Result<Vec<f32>, InferenceError> {
+        self.inner
+            .step_observed(token, observer)?
+            .logits
+            .ok_or_else(missing_logits_error)
     }
 }

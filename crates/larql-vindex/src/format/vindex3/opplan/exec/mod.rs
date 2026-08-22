@@ -24,6 +24,7 @@ pub mod device;
 mod experts;
 pub mod kernels;
 pub mod kv;
+pub mod observe;
 pub mod operands;
 pub mod production;
 pub mod reference;
@@ -39,7 +40,7 @@ use backend::{
     ProjectCall, QkNormCall, SinkCall, WeightFormat,
 };
 use kv::KvState;
-use operands::OperandStore;
+use operands::OperandSource;
 use rayon::prelude::*;
 use reference::ReferenceBackend;
 use weights::{load_weight, LoadedWeight};
@@ -49,6 +50,12 @@ use weights::{load_weight, LoadedWeight};
 pub struct LayerTrace {
     /// Hidden state after the attention residual add, per position.
     pub post_attention: Vec<Vec<f32>>,
+    /// The FFN's NORMED input (pre-FFN norm applied), per position —
+    /// the vector the layer's gates multiply. This is the residual
+    /// statistic V2's walk-FFN trace captures, and therefore the tap
+    /// mutation capture must use: a gate built from anything else
+    /// fires against a different vector than it was aimed at.
+    pub ffn_input: Vec<Vec<f32>>,
     /// Hidden state after the FFN residual add, per position.
     pub post_layer: Vec<Vec<f32>>,
 }
@@ -111,12 +118,12 @@ pub struct FinalOutput {
 ///
 /// The semantic anchor: naive f32, sharing no arithmetic with
 /// `larql-compute`.
-pub fn execute_text(
+pub fn execute_text<'s>(
     plan: &ComponentOpPlan,
-    store: &OperandStore,
+    store: impl Into<OperandSource<'s>>,
     tokens: &[u32],
 ) -> Result<ExecutionTrace, VindexError> {
-    execute_plan(plan, store, tokens, &ReferenceBackend::new())
+    execute_plan(plan, store.into(), tokens, &ReferenceBackend::new())
 }
 
 /// Execute a text-component plan over `tokens` on `backend`, tracing
@@ -124,12 +131,13 @@ pub fn execute_text(
 ///
 /// The backend is a parameter, not a branch: nothing below reads its
 /// identity, and swapping it must not change which operations run.
-pub fn execute_plan<B: PlanBackend + ?Sized>(
+pub fn execute_plan<'s, B: PlanBackend + ?Sized>(
     plan: &ComponentOpPlan,
-    store: &OperandStore,
+    store: impl Into<OperandSource<'s>>,
     tokens: &[u32],
     backend: &B,
 ) -> Result<ExecutionTrace, VindexError> {
+    let store = store.into();
     let mut embedded = Vec::new();
     let mut layers = Vec::with_capacity(plan.layers.len());
     let out = execute_plan_streaming(plan, store, tokens, backend, None, &mut |event| {
@@ -154,14 +162,15 @@ pub fn execute_plan<B: PlanBackend + ?Sized>(
 /// [`execute_plan`] is a wrapper over this function, so the two can
 /// never disagree about what the program means — there is exactly one
 /// traversal in this module.
-pub fn execute_plan_streaming<B: PlanBackend + ?Sized>(
+pub fn execute_plan_streaming<'s, B: PlanBackend + ?Sized>(
     plan: &ComponentOpPlan,
-    store: &OperandStore,
+    store: impl Into<OperandSource<'s>>,
     tokens: &[u32],
     backend: &B,
     resume: Option<ResumePoint>,
     sink: &mut dyn FnMut(PlaneEvent) -> Result<(), VindexError>,
 ) -> Result<FinalOutput, VindexError> {
+    let store = store.into();
     traverse(
         plan,
         store,
@@ -192,13 +201,14 @@ pub fn execute_plan_streaming<B: PlanBackend + ?Sized>(
 /// Returns the last position's final-normed hidden state and logits,
 /// so generation can sample the first continuation token without an
 /// extra step.
-pub fn prefill_plan<B: PlanBackend + ?Sized>(
+pub fn prefill_plan<'s, B: PlanBackend + ?Sized>(
     plan: &ComponentOpPlan,
-    store: &OperandStore,
+    store: impl Into<OperandSource<'s>>,
     tokens: &[u32],
     backend: &B,
     kv: &mut dyn KvState,
 ) -> Result<FinalOutput, VindexError> {
+    let store = store.into();
     kv.prepare(&kv::plan_kv_geometry(plan));
     let base = kv.position();
     let out = traverse(
@@ -223,7 +233,7 @@ pub fn prefill_plan<B: PlanBackend + ?Sized>(
 /// layers whose rows a provider would need.
 fn traverse<B: PlanBackend + ?Sized, K: KvState + ?Sized>(
     plan: &ComponentOpPlan,
-    store: &OperandStore,
+    store: OperandSource<'_>,
     tokens: &[u32],
     backend: &B,
     resume: Option<ResumePoint>,
@@ -347,7 +357,7 @@ pub(super) fn scale_residual_delta(scale: Option<f32>, delta: &mut [f32]) {
 /// them — placement is data, not code structure.
 fn execute_layer<B: PlanBackend + ?Sized, K: KvState + ?Sized>(
     layer: &LayerPlan,
-    store: &OperandStore,
+    store: OperandSource<'_>,
     h: &mut [Vec<f32>],
     hidden: usize,
     backend: &B,
@@ -410,22 +420,31 @@ fn execute_layer<B: PlanBackend + ?Sized, K: KvState + ?Sized>(
         .as_ref()
         .map(|op| store.load(op))
         .transpose()?;
-    h.par_iter_mut().try_for_each(|row| {
-        let normed = apply_norm_op(&layer.pre_ffn_norm, store, row, backend)?;
-        let ffn_out = ffn.apply_from_residual(&layer.ffn, backend, row, &normed, hidden)?;
-        let mut ffn_out = match &layer.post_ffn_norm {
-            Some(op) => apply_norm_op(op, store, &ffn_out, backend)?,
-            None => ffn_out,
-        };
-        scale_residual_delta(layer.residual_scale, &mut ffn_out);
-        backend.residual_add(row, &ffn_out);
-        if let Some(scale) = &layer_scale {
-            backend.scale_row(row, layer_scalar_of(scale)?);
-        }
-        Ok::<(), VindexError>(())
-    })?;
+    // The normed FFN inputs are computed once here (same values the
+    // in-loop computation produced — one deterministic norm per row)
+    // so the trace can carry the tap without a second norm pass.
+    let ffn_inputs: Vec<Vec<f32>> = h
+        .par_iter()
+        .map(|row| apply_norm_op(&layer.pre_ffn_norm, store, row, backend))
+        .collect::<Result<_, _>>()?;
+    h.par_iter_mut()
+        .zip(&ffn_inputs)
+        .try_for_each(|(row, normed)| {
+            let ffn_out = ffn.apply_from_residual(&layer.ffn, backend, row, normed, hidden)?;
+            let mut ffn_out = match &layer.post_ffn_norm {
+                Some(op) => apply_norm_op(op, store, &ffn_out, backend)?,
+                None => ffn_out,
+            };
+            scale_residual_delta(layer.residual_scale, &mut ffn_out);
+            backend.residual_add(row, &ffn_out);
+            if let Some(scale) = &layer_scale {
+                backend.scale_row(row, layer_scalar_of(scale)?);
+            }
+            Ok::<(), VindexError>(())
+        })?;
     Ok(LayerTrace {
         post_attention,
+        ffn_input: ffn_inputs,
         post_layer: h.to_vec(),
     })
 }
@@ -452,7 +471,7 @@ impl AttentionOperands {
     /// (elementwise glue, not matrix traffic).
     pub(super) fn load(
         op: &AttentionOp,
-        store: &OperandStore,
+        store: OperandSource<'_>,
         format: WeightFormat,
     ) -> Result<Self, VindexError> {
         // A K≡V layer names the K operand as `v`: the value projection is
@@ -598,7 +617,7 @@ fn attention_into_kv<B: PlanBackend + ?Sized, K: KvState + ?Sized>(
     op: &AttentionOp,
     inputs: &[Vec<f32>],
     qk_norm_eps: f64,
-    store: &OperandStore,
+    store: OperandSource<'_>,
     hidden: usize,
     backend: &B,
     kv: &mut K,
@@ -631,7 +650,7 @@ fn attention<B: PlanBackend + ?Sized>(
     op: &AttentionOp,
     inputs: &[Vec<f32>],
     qk_norm_eps: f64,
-    store: &OperandStore,
+    store: OperandSource<'_>,
     hidden: usize,
     backend: &B,
 ) -> Result<Vec<Vec<f32>>, VindexError> {
@@ -646,7 +665,7 @@ fn attention<B: PlanBackend + ?Sized>(
 /// Apply one norm op to one vector.
 fn apply_norm_op<B: PlanBackend + ?Sized>(
     op: &NormOp,
-    store: &OperandStore,
+    store: OperandSource<'_>,
     x: &[f32],
     backend: &B,
 ) -> Result<Vec<f32>, VindexError> {

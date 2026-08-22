@@ -21,3 +21,6 @@ default = []
 # a consumer's `[dev-dependencies]` entry, e.g.
 # `larql-vindex-spec = { path = "../larql-vindex-spec", features = ["test-utils"] }`.
 test-utils = []
+
+[lints]
+workspace = true

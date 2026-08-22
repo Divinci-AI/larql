@@ -267,7 +267,7 @@ fn a_gate_less_dense_op_binds_two_operands_and_runs_ungated() {
     let mut op = plan.layers[0].ffn.dense().expect("dense layer").clone();
     op.gate = None;
     let ffn = LayerFfn::Dense(Box::new(op));
-    let operands = FfnOperands::load(&ffn, &store, WeightFormat::F32).unwrap();
+    let operands = FfnOperands::load(&ffn, (&store).into(), WeightFormat::F32).unwrap();
     assert_eq!(operands.weight_slices().len(), 2, "up and down only");
     let x = norm_values(super::HIDDEN, INPUT_SEED);
     let production = operands

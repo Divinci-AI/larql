@@ -67,7 +67,7 @@ pub(super) fn resident_matrix(
 ) -> Result<DeviceMatrix, VindexError> {
     let rows = operand.shape.first().copied().unwrap_or(0);
     let cols = operand.shape.get(1).copied().unwrap_or(0);
-    let loaded = load_weight(store, operand, format)?;
+    let loaded = load_weight(store.into(), operand, format)?;
     let m = match &loaded {
         LoadedWeight::Nvfp4 {
             packed,
@@ -214,7 +214,7 @@ pub(super) fn resident_attn(
     let n_packed = arity.packed();
     let mut loaded = Vec::with_capacity(n_packed);
     for op in ops.iter().take(n_packed) {
-        loaded.push(load_weight(store, op, format)?);
+        loaded.push(load_weight(store.into(), op, format)?);
     }
     let parts: Vec<(&AlignedBytes, &AlignedBytes, f32)> = loaded
         .iter()

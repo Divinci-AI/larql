@@ -41,6 +41,9 @@ async fn spawn_router(grid_key: Option<String>) -> (std::net::SocketAddr, Arc<Rw
     (addr, state)
 }
 
+// The Err shape is tonic's own `Status` (>128 bytes), matching what the
+// service under test returns (clippy::result_large_err, rust 1.98).
+#[allow(clippy::result_large_err)]
 async fn join_with_auth(
     addr: std::net::SocketAddr,
     bearer: Option<&'static str>,
