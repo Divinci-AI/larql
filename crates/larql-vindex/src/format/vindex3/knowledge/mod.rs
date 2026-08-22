@@ -68,15 +68,22 @@ const ANNOTATION_TOP_K: usize = 8;
 struct LayerKnowledge {
     /// Role `feature_gate`: `[num_features, hidden]`.
     gate: Array2<f32>,
+    /// Role `feature_down`: `[hidden, num_features]` — retained so
+    /// annotations can derive lazily.
+    down: Array2<f32>,
     /// Per-feature annotations (role `feature_down` scored against
-    /// role `embedding` — the V2 contract).
-    metas: Vec<Option<FeatureMeta>>,
+    /// role `embedding` — the V2 contract), derived on first access:
+    /// a full layer is `vocab × hidden × features` work, and a real
+    /// model's bind must not pay it for layers nobody browses.
+    metas: std::cell::OnceCell<Vec<Option<FeatureMeta>>>,
 }
 
 /// A VINDEX3 container's browse view: the feature/edge space LQL
 /// queries, derived from the executable plan's semantic roles.
 pub struct KnowledgeView {
     layers: Vec<Option<LayerKnowledge>>,
+    /// Decodes promoted token ids on demand (lazy annotation).
+    tokenizer: crate::tokenizers::Tokenizer,
     hidden_size: usize,
     /// Largest dense FFN width — the browse surface's
     /// "intermediate size" (per-layer counts come from the gate rows).
@@ -122,12 +129,16 @@ impl KnowledgeView {
             let num_features = gate.shape()[0];
             max_features = max_features.max(num_features);
 
-            let metas = annotate(&embedding, &down, tokenizer);
-            layers.push(Some(LayerKnowledge { gate, metas }));
+            layers.push(Some(LayerKnowledge {
+                gate,
+                down,
+                metas: std::cell::OnceCell::new(),
+            }));
         }
 
         Ok(Self {
             layers,
+            tokenizer: tokenizer.clone(),
             hidden_size: hidden,
             max_features,
             vocab_size: embedding_op.vocab_size,
@@ -170,17 +181,42 @@ impl KnowledgeView {
     }
 
     pub fn feature_meta(&self, layer: usize, feature: usize) -> Option<FeatureMeta> {
-        self.layers
-            .get(layer)?
-            .as_ref()?
-            .metas
-            .get(feature)?
-            .clone()
+        let knowledge = self.layers.get(layer)?.as_ref()?;
+        if let Some(metas) = knowledge.metas.get() {
+            return metas.get(feature)?.clone();
+        }
+        // Single-slot fast path: one matvec, no layer materialisation —
+        // walk hits annotate a handful of features and must not pay
+        // for the other thousands.
+        if feature >= knowledge.down.shape()[1] {
+            return None;
+        }
+        annotate_feature(
+            &self.embedding,
+            &knowledge.down.column(feature).to_owned(),
+            &self.tokenizer,
+        )
     }
 
-    /// Every feature annotation of one layer (LQL's raw-token views).
+    /// Every feature annotation of one layer (LQL's raw-token views),
+    /// derived on first access.
     pub fn feature_metas(&self, layer: usize) -> Option<&[Option<FeatureMeta>]> {
-        Some(&self.layers.get(layer)?.as_ref()?.metas)
+        let knowledge = self.layers.get(layer)?.as_ref()?;
+        // Capture only Sync pieces in the parallel closure (the cell
+        // itself is not shareable across threads).
+        let down = &knowledge.down;
+        let embedding = &self.embedding;
+        let tokenizer = &self.tokenizer;
+        Some(knowledge.metas.get_or_init(|| {
+            use rayon::prelude::*;
+            let features = down.shape()[1];
+            (0..features)
+                .into_par_iter()
+                .map(|feature| {
+                    annotate_feature(embedding, &down.column(feature).to_owned(), tokenizer)
+                })
+                .collect()
+        }))
     }
 
     /// Feature slots whose annotation mentions `entity` —
@@ -284,42 +320,45 @@ fn matrix(
 /// promotes — the V2 extractor's statement, verbatim: scores are
 /// `embedding · down_col` (unscaled), decoded skipping specials,
 /// trimmed, empty surfaces dropped; `c_score` is the top logit.
-fn annotate(
+/// One feature's annotation: `embedding · down_col` scored over the
+/// vocabulary, top-K by a single stable pass (ties keep the LOWER id —
+/// the order the V2 contract's stable descending sort produced).
+fn annotate_feature(
     embedding: &Array2<f32>,
-    down: &Array2<f32>,
+    down_col: &Array1<f32>,
     tokenizer: &crate::tokenizers::Tokenizer,
-) -> Vec<Option<FeatureMeta>> {
-    // `[vocab, hidden] × [hidden, num_features]` → `[vocab, num_features]`.
-    let logits = embedding.dot(down);
-    let num_features = down.shape()[1];
-    (0..num_features)
-        .map(|feature| {
-            let column = logits.column(feature);
-            let mut ranked: Vec<(usize, f32)> = column.iter().copied().enumerate().collect();
-            ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+) -> Option<FeatureMeta> {
+    let logits = embedding.dot(down_col);
+    let mut ranked: Vec<(usize, f32)> = Vec::with_capacity(ANNOTATION_TOP_K + 1);
+    for (id, &logit) in logits.iter().enumerate() {
+        // Insert before the first strictly-smaller entry: equal logits
+        // keep ascending-id order, matching the stable sort.
+        let pos = ranked.partition_point(|&(_, l)| l >= logit);
+        if pos < ANNOTATION_TOP_K {
+            ranked.insert(pos, (id, logit));
             ranked.truncate(ANNOTATION_TOP_K);
-            let top_k: Vec<TopKEntry> = ranked
-                .iter()
-                .filter_map(|&(id, logit)| {
-                    tokenizer
-                        .decode(&[id as u32], true)
-                        .ok()
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty())
-                        .map(|token| TopKEntry {
-                            token,
-                            token_id: id as u32,
-                            logit,
-                        })
+        }
+    }
+    let top_k: Vec<TopKEntry> = ranked
+        .iter()
+        .filter_map(|&(id, logit)| {
+            tokenizer
+                .decode(&[id as u32], true)
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .map(|token| TopKEntry {
+                    token,
+                    token_id: id as u32,
+                    logit,
                 })
-                .collect();
-            let first = top_k.first()?;
-            Some(FeatureMeta {
-                top_token: first.token.clone(),
-                top_token_id: first.token_id,
-                c_score: first.logit,
-                top_k,
-            })
         })
-        .collect()
+        .collect();
+    let first = top_k.first()?;
+    Some(FeatureMeta {
+        top_token: first.token.clone(),
+        top_token_id: first.token_id,
+        c_score: first.logit,
+        top_k,
+    })
 }
