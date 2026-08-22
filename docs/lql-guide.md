@@ -315,6 +315,9 @@ larql> UPDATE EDGES SET target = "Lyon" WHERE layer = 20 AND feature = 105;
 larql> DELETE FROM EDGES WHERE layer = 20 AND feature = 106;
 larql> MERGE "other-knowledge.vindex";                -- V2 source, V3 target
 larql> SAVE PATCH "france.vlp";    -- persists; the container is untouched
+larql> COMPILE CURRENT INTO VINDEX "gpt-oss-france.v3";  -- bake: clean container
+larql> DIFF "gpt-oss-20b.v3" CURRENT;   -- logical: knowledge edges + feature slots
+larql> DIFF "gpt-oss-20b.v3" "gpt-oss-france.v3" PHYSICAL;  -- segment-level
 ```
 
 The container stays immutable on disk: edits live in a knowledge

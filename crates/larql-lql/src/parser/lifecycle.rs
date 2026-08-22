@@ -142,9 +142,14 @@ impl Parser {
         let mut layer = None;
         let mut relation = None;
         let mut limit = None;
+        let mut physical = false;
 
         loop {
             match self.peek() {
+                crate::lexer::Token::Keyword(Keyword::Physical) => {
+                    self.advance();
+                    physical = true;
+                }
                 crate::lexer::Token::Keyword(Keyword::Layer) => {
                     self.advance();
                     layer = Some(self.expect_u32()?);
@@ -170,6 +175,7 @@ impl Parser {
                         relation,
                         limit,
                         into_patch: Some(path),
+                        physical,
                     });
                 }
                 _ => break,
@@ -184,6 +190,7 @@ impl Parser {
             relation,
             limit,
             into_patch: None,
+            physical,
         })
     }
 

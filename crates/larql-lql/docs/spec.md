@@ -882,7 +882,7 @@ family metadata.
 | SHOW PATCHES | ✅ | ❌ | ✅ overlay's applied list |
 | COMPILE INTO VINDEX | ✅ | ❌ Error: "requires vindex" | ✅ bake via the operand-source seam² |
 | COMPILE INTO MODEL | ✅ | ❌ Error: "requires vindex" | ❌ container→checkpoint export, later |
-| DIFF | ✅ | ⚠️ One side can be weights | ❌ capability refusal |
+| DIFF | ✅ | ⚠️ One side can be weights | ✅ logical-first³ (+ PHYSICAL mode) |
 | MERGE | ✅ | ❌ Error: "requires vindex" | ✅ V2 source into the overlay |
 | COMPACT | ✅ LSM compaction | ❌ | ❌ capability refusal |
 
@@ -916,6 +916,14 @@ binds with a zero-override overlay — behaviour comes from the stored
 bytes (equivalence-gated: INFER/GENERATE/TRACE/WALK exact). Refusals
 follow the derived-annotation authority: tombstones and meta-only
 relabels have no clean-container form and refuse rather than drop.
+³ V3 `DIFF` reports **model facts** — knowledge edges, feature-slot
+value changes (gate row / up row / down column), representation-level
+tensor changes, metadata — comparing EFFECTIVE states (`CURRENT` = the
+bound container plus its overlay). Gated as the COMPILE oracle in
+reverse: an overlay and its bake diff identically against any third
+side and diff each other as equivalent, while `DIFF … PHYSICAL` (the
+subordinate segment-hash report) shows the rewrite. Mixed-generation
+diffs and `INTO PATCH` are later rungs.
 The whole-language sweep test
 (`tests/vindex3_lql.rs::every_statement_is_sensible_on_a_v3_binding`)
 pins that every statement either executes or refuses this way — never

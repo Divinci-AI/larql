@@ -214,6 +214,7 @@ impl Session {
                 relation,
                 limit,
                 into_patch,
+                physical,
             } => self.exec_diff(
                 a,
                 b,
@@ -221,6 +222,7 @@ impl Session {
                 relation.as_deref(),
                 *limit,
                 into_patch.as_deref(),
+                *physical,
             ),
             Statement::Insert {
                 entity,

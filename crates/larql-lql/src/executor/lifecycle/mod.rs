@@ -5,6 +5,7 @@
 
 mod compile;
 mod diff;
+mod diff_v3;
 mod extract;
 mod stats;
 mod use_cmd;

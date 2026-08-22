@@ -14,7 +14,10 @@
 //! LIFECYCLE   ◐ COMPILE — INTO VINDEX bakes on V3 (equivalence-
 //!               gated in vindex3_compile.rs; derived-annotation
 //!               refusals documented; INTO MODEL later)
-//!             → DIFF   → COMPACT
+//!             ✓ DIFF — logical-first on V3, gated as the COMPILE
+//!               oracle in reverse (meaning ≠ storage); PHYSICAL
+//!               subordinate; mixed-generation + INTO PATCH later
+//!             → COMPACT
 //! ```
 //!
 //! One source checkpoint (the dense Llama-shaped fixture, LCG-seeded
@@ -970,4 +973,38 @@ fn v2_and_v3_compose_installs_agree() {
             );
         }
     }
+}
+
+/// DIFF across generations refuses with direction, never a confused
+/// half-comparison: realise both models in one generation first.
+#[test]
+fn diff_across_generations_refuses_with_direction() {
+    let v2 = v2_vindex();
+    let v3 = v3_container();
+    let mut session = Session::new();
+    let stmt = format!(
+        "DIFF \"{}\" \"{}\";",
+        lql_path(v2.path()),
+        lql_path(v3.path())
+    );
+    let err = session
+        .execute(&parse(&stmt).unwrap())
+        .expect_err("mixed-generation diff must refuse");
+    assert!(err.to_string().contains("across generations"), "{err}");
+}
+
+/// `PHYSICAL` is a VINDEX3 report — V2 sides refuse it with direction.
+#[test]
+fn physical_diff_refuses_on_v2_sides() {
+    let v2 = v2_vindex();
+    let mut session = Session::new();
+    let stmt = format!(
+        "DIFF \"{}\" \"{}\" PHYSICAL;",
+        lql_path(v2.path()),
+        lql_path(v2.path())
+    );
+    let err = session
+        .execute(&parse(&stmt).unwrap())
+        .expect_err("V2 sides must refuse PHYSICAL");
+    assert!(err.to_string().contains("VINDEX3 report"), "{err}");
 }

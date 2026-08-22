@@ -29,6 +29,10 @@ pub enum Statement {
         relation: Option<String>,
         limit: Option<u32>,
         into_patch: Option<String>,
+        /// `DIFF … PHYSICAL` — subordinate segment-level report
+        /// (VINDEX3): hashes and linked/rewritten status instead of
+        /// the logical model-fact diff.
+        physical: bool,
     },
     Use {
         target: UseTarget,

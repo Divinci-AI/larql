@@ -460,6 +460,8 @@ fn every_statement_is_sensible_on_a_v3_binding() {
         // (The refusal paths are gated in vindex3_compile.rs.)
         (compile_stmt.clone(), Ok),
         (r#"DIFF "a.vindex" "b.vindex";"#.to_string(), Err),
+        (r#"DIFF CURRENT CURRENT;"#.to_string(), Ok),
+        (r#"DIFF CURRENT CURRENT PHYSICAL;"#.to_string(), Ok),
         (r#"TRACE "[3]" DECOMPOSE;"#.to_string(), Refuse),
     ];
 

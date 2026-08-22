@@ -24,7 +24,7 @@ use crate::executor::{Backend, Session};
 pub(crate) const SUPPORTED: &str = "SELECT, DESCRIBE, WALK, EXPLAIN WALK, \
      SHOW RELATIONS/LAYERS/FEATURES/ENTITIES/PATCHES, INFER [TOP n] [GENERATE n], \
      EXPLAIN INFER, TRACE, STATS, USE, INSERT [MODE KNN|COMPOSE], DELETE, UPDATE, MERGE, \
-     BEGIN/SAVE/APPLY/REMOVE PATCH, COMPILE [CURRENT] INTO VINDEX";
+     BEGIN/SAVE/APPLY/REMOVE PATCH, COMPILE [CURRENT] INTO VINDEX, DIFF [PHYSICAL]";
 
 /// Component id a container's text stack is bound under.
 pub(crate) const V3_COMPONENT: &str = "target";
