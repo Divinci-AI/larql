@@ -79,11 +79,13 @@ pub fn compact_container(src: &Path, out: &Path) -> Result<CompactReport, Vindex
                 walk.push(path);
                 continue;
             }
+            // Index segment paths use `/`; normalise the walked path
+            // so Windows' `\` separators compare equal.
             let rel = path
                 .strip_prefix(src)
                 .map_err(|e| VindexError::Parse(format!("walk escaped the container: {e}")))?
                 .to_string_lossy()
-                .into_owned();
+                .replace('\\', "/");
             if referenced.contains(&rel) {
                 let dst = out.join(&rel);
                 if let Some(parent) = dst.parent() {
