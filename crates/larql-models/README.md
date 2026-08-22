@@ -237,13 +237,13 @@ dequantization is ~3.4 Gelem/s on the synthetic bench; line coverage is 77.86%.
 
 ```bash
 # Architecture detection — all 12 architectures, tensor keys, sliding window, MoE, quant
-cargo run -p larql-models --example architecture_demo
+cargo run -p larql-demos --example architecture_demo
 
 # Load a real model and inspect its structure
-cargo run -p larql-models --example demo_loading -- /path/to/model
+cargo run -p larql-demos --example demo_loading -- /path/to/model
 
 # Compare tensor key patterns across architectures
-cargo run -p larql-models --example demo_tensor_keys
+cargo run -p larql-demos --example demo_tensor_keys
 ```
 
 ## Documentation

@@ -689,7 +689,7 @@ The gap is **almost entirely in the GPU forward**. Within GPU forward (~0.35 ms/
 
 ⚠ The earlier "103 GB/s ALU-bound on q4k_ffn_gate_up" diagnosis was a **profiler bug** — the "batched" measurement was creating a fresh cmd buffer per call (with commit+wait per call) instead of running `n_layers` dispatches in ONE cmd buffer. The per-call overhead dominated, undercounting throughput 2-4×. Fixed 2026-04-28 in `metal/diag/kernel_profile.rs::measure_single_cmdbuf_batched`. With the fix, both big FFN kernels are bandwidth-bound at 74-84% of LPDDR5X peak — no compute-bound headroom.
 
-Reproduction: `cargo run --release --features gpu -p larql-cli --bin larql -- bench output/gemma3-4b-q4k-v2.vindex --backends metal --ollama gemma3:4b --tokens 50 --warmup 5` on a quiet system. Per-kernel detail: `cargo run --release --features gpu -p larql-compute --example diag_profile_kernels`.
+Reproduction: `cargo run --release --features gpu -p larql-compute-metal --bin larql -- bench output/gemma3-4b-q4k-v2.vindex --backends metal --ollama gemma3:4b --tokens 50 --warmup 5` on a quiet system. Per-kernel detail: `cargo run --release --features gpu -p larql-compute-metal --example diag_profile_kernels`.
 
 ### Decode kernel optimization — the path forward (2026-04-28, revised)
 
@@ -835,7 +835,7 @@ The widening ratio is the smoking gun: larql is per-position linear (`prefill �
    The current matvec loads the same Q4_K weight rows from device memory once per position dispatch. Cache one super-block of weights in threadgroup memory and run all `seq_len` positions through it before advancing rows. Same matvec primitive, reordered loops. Closes a chunk without writing new shaders. **Caveat**: the gate+up kernel is already compute-bound (272 GB/s, ALU-limited dequant), so weight-side caching may not help much; output-side caching across positions might.
 
 3. **Q4_K matmul (gemm) kernel** — **SHIPPED 2026-04-27** (kernel + parity tests; not yet wired into prefill).
-   `crates/larql-compute/src/metal/shaders/q4k_matmul.rs` — amortises Q4_K dequant across `COLS_PER_TG=4` positions per super-block. Same `ROWS_PER_TG=4` simdgroup geometry as `q4k_matvec`, plus a per-thread `acc[4]` accumulator array (16 bytes register footprint, fits comfortably). 5 parity tests in `tests/test_kernel_q4k_matmul.rs` assert bit-equivalence with stacked matvec calls across basic / seq_len=1 / ragged-tail / production shapes. Perf spot-check (`tests/test_kernel_q4k_matmul_perf.rs`, gated on `LARQL_PERF_SPOT_CHECK=1`) on N=2560, K=8192, M=18: **3.82× speedup** (4.99 ms stacked matvec → 1.31 ms matmul). At full closure that's ~196 ms → ~51 ms prefill on Gemma 3 4B (ollama parity).
+   `crates/larql-compute-metal/src/shaders/q4k_matmul.rs` — amortises Q4_K dequant across `COLS_PER_TG=4` positions per super-block. Same `ROWS_PER_TG=4` simdgroup geometry as `q4k_matvec`, plus a per-thread `acc[4]` accumulator array (16 bytes register footprint, fits comfortably). 5 parity tests in `tests/test_kernel_q4k_matmul.rs` assert bit-equivalence with stacked matvec calls across basic / seq_len=1 / ragged-tail / production shapes. Perf spot-check (`tests/test_kernel_q4k_matmul_perf.rs`, gated on `LARQL_PERF_SPOT_CHECK=1`) on N=2560, K=8192, M=18: **3.82× speedup** (4.99 ms stacked matvec → 1.31 ms matmul). At full closure that's ~196 ms → ~51 ms prefill on Gemma 3 4B (ollama parity).
 
    **Wiring status — partial 2026-04-27**: Wired into the O projection site (`dispatch.rs::5. O projection`). Added `q4k_matmul: Option<&KernelHandle>` to `quant_matvec::Pipelines`; threaded through `dispatch_full_pipeline` signature and all callers. Branches on `seq_len > 1 && format == Q4_K && pipeline.is_some()` and falls back to per-position matvec otherwise. Decode (seq=1) keeps the matvec path, decode tests (135 lib) all pass.
 
@@ -1569,7 +1569,7 @@ Gemma 3 4B and Gemma 4 27B (the models already validated on Metal).
 **Effort**: Medium  
 **Status**: ✅ Complete (2026-04-07)
 
-Vindex loader (`load_interleaved_q4k`), inference wiring (`predict_honest` prefers Q4_K FFN), and format tag propagation through `FullPipelineLayer` all wired. When `interleaved_q4k.bin` exists, Q4_K format flows through to compute shader dispatch.
+Vindex loader (`load_interleaved_q4k`), inference wiring (`predict_honest` prefers Q4_K FFN), and format tag propagation through `FullPipelineLayer` all wired. When `interleaved_kquant.bin` exists, Q4_K format flows through to compute shader dispatch.
 
 ### simdgroup_multiply_accumulate for tiled matmul
 **Effort**: Large  

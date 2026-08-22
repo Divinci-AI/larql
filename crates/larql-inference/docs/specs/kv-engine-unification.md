@@ -54,7 +54,7 @@ The duplication has three concrete costs:
    decode. `grep -r LARQL_KV_ENGINE crates/` returns zero matches.
    The capability does not exist; only `bench` can reach the engines.
 3. **Research engines never see real prompts.** TurboQuant, Apollo, and
-   UnlimitedContext are exercised only by synthetic bench input. Any
+   WindowedCheckpoint are exercised only by synthetic bench input. Any
    correctness regression that depends on prompt distribution
    (tokenisation edge cases, long-tail vocabulary, multi-turn chat) is
    invisible until someone re-runs bench at the right moment.
@@ -90,7 +90,7 @@ this is a wiring change, not a behaviour change for the default path.
   resolving to the new `Standard` / `NoCache` engine variants.
 - Wiring `--engine` and `LARQL_KV_ENGINE` into `larql run` and
   `larql walk`, giving access to the full engine catalog (Standard,
-  NoCache, MarkovResidual, UnlimitedContext, TurboQuant — see §5).
+  NoCache, MarkovResidual, WindowedCheckpoint, TurboQuant — see §5).
 - Migrating `walk_cmd.rs:1049-1075` and the server's decode entry to
   dispatch through `dyn KvEngine`.
 - Moving `larql-kv` from a dead Cargo.toml dep to a live one in
@@ -152,7 +152,7 @@ fn decode_step(
 ) -> Option<Array2<f32>>;
 ```
 
-Same widening applied to `prefill_q4k` / `decode_step_q4k`.
+Same widening applied to `prefill_quant` / `decode_step_quant`.
 
 **Option B — engine owns `Box<dyn FfnBackend>`:**
 
@@ -170,8 +170,8 @@ Option A is the spec.
 ### 4.3 Default impl for engines that don't care
 
 Engines that compute FFN locally from `weights` should not need to
-change. The trait accepts the parameter; default `prefill_q4k` /
-`decode_step_q4k` continue to dispatch to `prefill` / `decode_step`
+change. The trait accepts the parameter; default `prefill_quant` /
+`decode_step_quant` continue to dispatch to `prefill` / `decode_step`
 with `ffn` forwarded.
 
 ### 4.4 W10 (2026-05-18) — state-bridge mask cascade
@@ -218,7 +218,7 @@ impl.
 
 `read_kv_row_at` lets engines that dropped their CPU shadow query
 the backend's internal kv cache on demand (e.g.
-`UnlimitedContextEngine.close_window` reading the last position's
+`WindowedCheckpointEngine.close_window` reading the last position's
 K/V back for the checkpoint).
 
 Per-engine opt-in is gated by the `LARQL_W10_HONLY=1` env flag in
@@ -255,7 +255,7 @@ default path is bit-identical to today's `--kv-cache standard`.
 | `Standard { window_size: Some(N) }` | `--kv-cache markov-bounded --context-window N` | Current `generate_cached_bounded(window: Some(N))` — sliding-window K/V tensor cache | Opt-in via flag, bit-parity with current production |
 | `NoCache` | `--kv-cache none` | Current full re-forward per step (O(N²)) | Opt-in via flag, bit-parity with current production |
 | `MarkovResidual { window_size }` | (new) `--engine markov-rs[:window=N]` | Stores residuals, recomputes K/V at decode. **Different mechanism** from `Standard`; bit-identical output under preconditions per `markov-residual-engine.md` | Opt-in; research engine promoted to live path |
-| `UnlimitedContext { window_size }` | (new) `--engine unlimited-context:window=N` | Per-window K/V checkpoints | Opt-in, advertised as experimental |
+| `WindowedCheckpoint { window_size }` | (new) `--engine unlimited-context:window=N` | Per-window K/V checkpoints | Opt-in, advertised as experimental |
 | `TurboQuant { bits }` | (new) `--engine turbo-quant:bits=N` | Quantised K/V | Opt-in, advertised as experimental |
 | `Apollo { ... }` | (unchanged) `larql bench --engine apollo` only | Boundary store + residual injection | **Not wired into run/walk**, see §7 |
 
@@ -374,7 +374,7 @@ compiles. Every test passes. No semantic change anywhere.
 
 ### 8.2 Step 2 — trait widening (no behaviour change) ✅ landed
 
-Widen `KvEngine::{prefill, decode_step, prefill_q4k, decode_step_q4k}`
+Widen `KvEngine::{prefill, decode_step, prefill_quant, decode_step_quant}`
 to accept `&dyn FfnBackend`. `FfnBackend` itself is decided at
 implementation time:
 - If `FfnBackend` is small and self-contained, move it to
@@ -419,8 +419,8 @@ are unused outside their own unit tests.
 
 Behind an internal feature gate (e.g. `LARQL_KV_ENGINE_DISPATCH=1`),
 `walk_cmd.rs:1049-1075` dispatches through
-`EngineKind::build(backend).prefill_q4k(...) +
-decode_step_q4k(...)` in a token loop, replacing the call to
+`EngineKind::build(backend).prefill_quant(...) +
+decode_step_quant(...)` in a token loop, replacing the call to
 `generate_cached_backend`. The current `KvCacheKind` flag values map
 to `EngineKind` via the table in §6.1. Default off; existing path
 remains the fallback.
@@ -455,7 +455,7 @@ byte-for-byte.
 - Update `ROADMAP.md:643` C7 entry from "shipped (4 engines) but opt-in"
   to "shipped; `LARQL_KV_ENGINE` / `--engine` honoured on run / walk /
   server; default `standard` (current production K/V cache); MarkovRS /
-  UnlimitedContext / TurboQuant opt-in; Apollo bench-only".
+  WindowedCheckpoint / TurboQuant opt-in; Apollo bench-only".
 - Update bench help text (§6.3).
 
 ### 8.7 Step 7 — cleanup ✅ landed (partial-by-design, 2026-05-16)
@@ -496,7 +496,7 @@ surface remains opt-in via the env var.
 
 - **Speedup.** This unification is a refactor. End-to-end tok/s should
   be unchanged on the default path.
-- **Promoting MarkovRS / UnlimitedContext / TurboQuant as the default.**
+- **Promoting MarkovRS / WindowedCheckpoint / TurboQuant as the default.**
   Their compression ratios are isolated-kernel measurements; whether
   they win end-to-end on real prompts is exactly what running them
   through `larql run` will tell us. Promotion happens in a separate

@@ -29,7 +29,7 @@ verify wrapper.
 
 | Script | Engine | Notes |
 |---|---|---|
-| `larql shannon score MODEL --corpus FILE` | LARQL Rust F32 (raw safetensors) | Built-in CLI; see `crates/larql-cli/src/commands/primary/shannon_cmd.rs` |
+| `larql shannon score MODEL --corpus FILE` | LARQL Rust F32 (raw safetensors) | Built-in CLI; see `crates/larql-cli/src/commands/primary/shannon_cmd/` |
 | `python scripts/shannon_score_mlx.py MODEL --corpus FILE [--json]` | MLX F32 (cast from bf16/fp16) | Requires `mlx_lm` |
 | `python scripts/shannon_score_hf.py MODEL --corpus FILE [--json]` | HF transformers F32 (PyTorch, CPU recommended) | Requires `torch` |
 

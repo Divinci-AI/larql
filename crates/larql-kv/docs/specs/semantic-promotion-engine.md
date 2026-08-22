@@ -648,7 +648,7 @@ position while `cached_len()` has shrunk.
    position** ("cache rows are indexed by absolute stream position
    (prefill row 0 onward)"). After a compaction those diverge *silently*
    — the call returns the wrong row rather than failing.
-   `UnlimitedContextEngine::close_window` depends on it. Phase B needs
+   `WindowedCheckpointEngine::close_window` depends on it. Phase B needs
    either a logical→physical map on the handle or explicit invalidation.
    This is **B7**.
 2. **`CpuQ4kCacheHandle::cached_len()` reads layer 0 and assumes every

@@ -31,7 +31,7 @@ For kernel-level throughput regressions, use the criterion bench suite:
 
 ```
 make bench-compute   # quant_matvec Criterion bench with Metal
-cargo bench -p larql-compute --bench matmul
+cargo bench -p larql-compute-metal --bench matmul
 cargo bench -p larql-compute --bench linalg
 ```
 

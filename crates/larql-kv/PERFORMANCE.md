@@ -205,7 +205,9 @@ profiler data after W7:
 | ~~Per-layer commit overhead~~ | ~~~1.7 ms~~ | **Closed by W7** (single commit per token) |
 | CPU glue (state Vec→Array2, append, etc.) | ~3 ms | In-place state updates / pre-allocated buffers |
 
-## W10 — engine state on GPU (opt-in via `LARQL_W10_HONLY=1`)
+## W10 — engine state on GPU (**default ON**; opt out with `LARQL_W10_DISABLE=1`)
+
+> **Corrected 2026-08-23.** This heading said "opt-in via `LARQL_W10_HONLY=1`". W10 has been **default-on** since 2026-05-21 (`w10_enabled()` reads only `LARQL_W10_DISABLE`), and `LARQL_W10_HONLY` is accepted but **inert** — setting it does nothing. Anything below that reads as "turn this on to get X" is describing behaviour you already have.
 
 W10 lets engines that treat K/V (and optionally h_in) as derivative
 state declare so at the API boundary; the Metal kernel then skips

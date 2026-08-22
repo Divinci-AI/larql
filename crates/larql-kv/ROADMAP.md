@@ -120,7 +120,7 @@ without duplicating this crate's own state/execution machinery.
   harness were wrong; they exist, but on a representation `StandardEngine`
   no longer touches.
 - `KvEngine` (`larql-inference::kv_engine`) has 8 implementors —
-  `StandardEngine`, `NoCacheEngine`, `UnlimitedContextEngine`,
+  `StandardEngine`, `NoCacheEngine`, `WindowedCheckpointEngine`,
   `MarkovResidualEngine`, `MarkovResidualCodecEngine`, `TurboQuantEngine`,
   `BoundaryPerLayerEngine`, `BoundaryKvEngine` (`ApolloEngine` implements
   a separate `RetrievalEngine` trait, not this one) — a real, already-built

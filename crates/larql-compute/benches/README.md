@@ -68,9 +68,9 @@ For a Metal shader inventory plus direct isolated/batched GPU timings,
 use:
 
 ```
-cargo run --release  -p larql-compute --example diag_shader_bench
-cargo run --release  -p larql-compute --example diag_shader_bench -- --profile gemma3 --json /tmp/larql-shaders.json
-cargo run --release  -p larql-compute --example diag_shader_bench -- --profile gemma3 --compare /tmp/larql-shaders.json --threshold 5
+cargo run --release  -p larql-compute-metal --example diag_shader_bench
+cargo run --release  -p larql-compute-metal --example diag_shader_bench -- --profile gemma3 --json /tmp/larql-shaders.json
+cargo run --release  -p larql-compute-metal --example diag_shader_bench -- --profile gemma3 --compare /tmp/larql-shaders.json --threshold 5
 ```
 
 The shader bench is diagnostic rather than Criterion-based. Treat the

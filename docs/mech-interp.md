@@ -187,7 +187,7 @@ single forward pass when you need them.
 ## End-to-end demo
 
 ```bash
-cargo run --release -p larql-inference --example mech_interp_demo
+cargo run --release -p larql-demos --example mech_interp_demo
 ```
 
 Walks through all seven primitives on synthetic weights (no vindex

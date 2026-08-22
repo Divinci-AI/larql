@@ -478,7 +478,7 @@ Adding async columns to the engine × backend matrix:
 | `Standard:window=N` | ✅ | ✅ | Specialised windowed-attention shader, fused |
 | `NoCache` | ✅ | ❌ (no win — re-runs full forward each step) | n/a |
 | `MarkovResidual` | ✅ | ✅ | Recompute K/V batched into one CB per step |
-| `UnlimitedContext` | ✅ | ✅ | Window-checkpoint amortisation on GPU |
+| `WindowedCheckpoint` | ✅ | ✅ | Window-checkpoint amortisation on GPU |
 | `TurboQuant` | ✅ | ✅ | Codec encoded into the attention CB |
 | `Apollo` | ✅ | ✅ | Boundary upload pipelined with first attention |
 
@@ -587,7 +587,7 @@ on which constructor was used.
 - 8 new bit-parity tests in `larql-inference` (5 async-helper vs sync-helper)
   and `larql-kv` (2 sync-engine vs async-engine, 1 backend-name).
 
-**Other engines (`MarkovResidual`, `UnlimitedContext`, `TurboQuant`,
+**Other engines (`MarkovResidual`, `WindowedCheckpoint`, `TurboQuant`,
 `NoCache`, `Apollo`)** follow the same pattern in subsequent slices —
 each adds a `with_async_backend` constructor and a `BackendSlot`
 variant. Estimated ~1–2 weeks per engine.

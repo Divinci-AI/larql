@@ -41,7 +41,7 @@ Hidden=2560 (4B), 34 layers, 8 Q heads × head_dim=256, 4 KV heads, vocab=262K.
 | Post-attn norm + residual | `post_attn_residual_norm_store` | Triple-fused: post-attn RMS + residual + ffn-norm + store (one dispatch). |
 | FFN gate+up | `q4k_ffn_gate_up_8sg` (default, 8sg) — with `LARQL_GATE_UP_8SG=0` opt-out to `q4k_ffn_gate_up`, `LARQL_F16_ACC=1` to `q4k_ffn_gate_up_f16acc`, `LARQL_GATE_UP_COOP=1` to `q4k_ffn_gate_up_coop` | All production fired per-position; matmul wiring twice-falsified (D-PREFILL-MM closed). |
 | GEGLU activation | `geglu` (GELU-tanh variant) | Element-wise gate × up activation. |
-| FFN down | `q6k_matvec` (Q6_K weights via `q6k_matvec_pipeline` aliased to `q6k_matvec_8sg` since 2026-04-28) | Q6_K convention from ollama extracts. |
+| FFN down | `q6k_matvec` (Q6_K weights, **4sg — the default**; `LARQL_Q6K_8SG=1` opts into the 8sg arm, which did not translate end-to-end) | Q6_K convention from ollama extracts. |
 | Post-FFN norm + residual | `post_ffn_norm_residual_add` | Fused norm + residual into next-layer input. |
 | Final norm | `residual_inject::rms_norm` | Standalone one-TG dispatch. |
 | lm_head | `q4k_matvec` (production since 2026-05-02 dispatch fix) | Falls back to `q4k_matvec_stride32` if `LARQL_LM_HEAD_SKIP_Q4K=1`, then `f16_gemv` (tied embed), then `f32_gemv`. |
@@ -192,10 +192,10 @@ done
 ## How to add a new architecture
 
 1. Add the architecture trait impl: `crates/larql-models/src/architectures/{family}.rs` overriding `ModelArchitecture` methods that differ from defaults.
-2. Add detection logic in `crates/larql-models/src/detect.rs`.
+2. Add detection logic in `crates/larql-models/src/detect/`.
 3. Add at least one entry in `crates/larql-inference/tests/test_logits_goldens.rs` with the model's golden tokens.
 4. Bench with `./target/release/larql bench <vindex>` to verify dispatch works end-to-end.
-5. **If a new shader is needed**: add it under `crates/larql-compute/src/metal/shaders/`, document its applicability in `shader-inventory.md`, register in `metal/mod.rs::all_shaders`, and add a row to this doc's per-architecture table.
+5. **If a new shader is needed**: add it under `crates/larql-compute-metal/src/shaders/`, document its applicability in `shader-inventory.md`, register in `metal/mod.rs::all_shaders`, and add a row to this doc's per-architecture table.
 
 ## Related
 

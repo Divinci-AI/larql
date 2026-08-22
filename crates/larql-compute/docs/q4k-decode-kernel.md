@@ -44,7 +44,7 @@ LLVM's instruction scheduling from intrinsic IR is good but not optimal on this 
 
 ### Phase 1 — Hand-asm Q4K × Q8K matvec (highest leverage)
 
-Replace `crates/larql-compute/src/cpu/ops/q4k_q8k_dot.rs`'s NEON intrinsic path with hand-written `global_asm!` (or `asm!` per-function) aarch64 implementation modeled after llama.cpp's `ggml_vec_dot_q4_K_q8_K`. Two-super-block interleaved, explicit instruction scheduling, prefetch hints on the weight stream.
+Replace `crates/larql-compute/src/cpu/ops/q4k_q8k_dot/`'s NEON intrinsic path with hand-written `global_asm!` (or `asm!` per-function) aarch64 implementation modeled after llama.cpp's `ggml_vec_dot_q4_K_q8_K`. Two-super-block interleaved, explicit instruction scheduling, prefetch hints on the weight stream.
 
 **Acceptance:**
 1. Bit-identical output to today's intrinsic path on the full Gemma 3 4B Q4K test corpus.
@@ -103,13 +103,13 @@ Phases 1–4 land in order. After all four:
 
 ## Architectural notes
 
-This work is **orthogonal to the dispatch-trait redesign**. It lands inside `crates/larql-compute/src/cpu/ops/q4k_q8k_dot.rs` (and friends). The dispatch trait's `coarse_prefill` / `coarse_decode_step` already route through these kernels; no engine code changes when the kernel improves. Same `larql_compute::QuantMatVec::q4k_matvec` entry point.
+This work is **orthogonal to the dispatch-trait redesign**. It lands inside `crates/larql-compute/src/cpu/ops/q4k_q8k_dot/` (and friends). The dispatch trait's `coarse_prefill` / `coarse_decode_step` already route through these kernels; no engine code changes when the kernel improves. Same `larql_compute::QuantMatVec::q4k_matvec` entry point.
 
 Phase 2's pre-formatted layout is the only change that potentially touches the vindex layer. If we go with option (b) — repack on load — even that is contained to the loader and doesn't change disk formats or the trait surface.
 
 ## What this is NOT
 
-This spec is **not** about getting research engines (MarkovResidual, UnlimitedContext, TurboQuant, Apollo) to production speed. Those have a different problem: their bespoke `prefill_q4k` overrides bypass the dispatch trait's `coarse_*` intents and use slower CPU code paths. That's covered by `kv-dispatch-quantization.md` Phase 2 (engine migration) — separate work item.
+This spec is **not** about getting research engines (MarkovResidual, WindowedCheckpoint, TurboQuant, Apollo) to production speed. Those have a different problem: their bespoke `prefill_quant` overrides bypass the dispatch trait's `coarse_*` intents and use slower CPU code paths. That's covered by `kv-dispatch-quantization.md` Phase 2 (engine migration) — separate work item.
 
 After Phases 1–4 here, `StandardEngine` reaches parity with llama.cpp on CPU Q4K decode. Other engines need their own migration to benefit from the same kernels.
 
@@ -191,9 +191,16 @@ stay in Rust → parity reduces to "does the asm produce the same integer
 super-block dot in one `asm!` block, the 8 6-bit scales arriving as two
 i32x4 vectors with `mul (by element)` instead of 8 scalar `ldrb` +
 broadcast, and **4 independent group accumulators** (each written once,
-tree-summed) so no group carries a cross-group RAW chain. Gated opt-in
-via `LARQL_Q4K_ASM=1` in `q4k_q8k_matvec_into` (default off;
-`OnceLock`-cached env read, never in the hot loop).
+tree-summed) so no group carries a cross-group RAW chain. Gated by
+`LARQL_Q4K_ASM` in `q4k_q8k_matvec_into` (`OnceLock`-cached env read,
+never in the hot loop).
+
+> **Corrected 2026-08-23 — this said "opt-in … default off"; it is
+> default ON.** `options.rs` builds the flag with `on()`, which is "not
+> an opt-out value", so an unset environment gets the asm kernel and
+> `LARQL_Q4K_ASM=0` is the way to turn it off. The inversion matters
+> because a reader benchmarking "with and without asm" by *setting* the
+> variable measures the same arm twice.
 
 - **Parity:** `q8k_matvec_asm_matches_scalar_bit_exact` — bit-exact
   (`.to_bits()`) across 4 shapes incl. odd rows + production widths.

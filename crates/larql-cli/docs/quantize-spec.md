@@ -224,9 +224,9 @@ DST/
 ├── README.md                         # if SRC carried one
 │
 │  # ── Written by this run ──
-├── attn_weights_q4k.bin              # Q/K/O at Q4_K, V at Q6_K
+├── attn_weights_kquant.bin              # Q/K/O at Q4_K, V at Q6_K
 ├── attn_weights_q4k_manifest.json
-├── interleaved_q4k.bin               # gate + up at Q4_K, down at Q6_K (or Q4_K with --down-q4k)
+├── interleaved_kquant.bin               # gate + up at Q4_K, down at Q6_K (or Q4_K with --down-q4k)
 ├── interleaved_q4k_manifest.json
 ├── lm_head_q4.bin                    # output projection at Q4_K
 ├── norms.bin                         # layer + final norms (always f32)
@@ -397,7 +397,7 @@ established in `tests/test_fp4_synthetic.rs`.
       fns.
 - [x] Add the 4 CLI-level tests listed in §9 (FP4) plus 4 lifecycle
       tests for Q4K (preconditions + force/no-force + already-q4k).
-- [ ] Update `docs/cli.md` and `docs/specs/vindex-format-spec.md`
+- [ ] Update `docs/cli.md` and `crates/larql-vindex/docs/format-spec.md`
       §12.1 with the new subcommands and example invocations.
 - [x] Smoke: run on `gemma3-4b-f16.vindex` for both FP4 and Q4K,
       verify the converted vindex loads and decodes ("Paris is the

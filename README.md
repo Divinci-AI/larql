@@ -119,7 +119,7 @@ larql extract google/gemma-3-4b-it -o gemma3-4b.vindex --level all
 larql extract google/gemma-3-4b-it -o gemma3-4b.vindex --quant q4k
 
 # Maximum size reduction on Q4K — drop gate_vectors.bin, rebuild from
-# interleaved_q4k.bin at load (~1.6 s cost on 4B, ~12 s on 31B)
+# interleaved_kquant.bin at load (~1.6 s cost on 4B, ~12 s on 31B)
 larql extract google/gemma-3-4b-it -o gemma3-4b.vindex \
   --quant q4k --drop-gate-vectors
 

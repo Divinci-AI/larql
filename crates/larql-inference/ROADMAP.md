@@ -74,7 +74,7 @@ detail.
 
 2. **G-3 (= G-4) — flash-attention-style fused attention kernel** — highest
    GPU-fwd lever after G-1/G-2 missed. Stub at
-   `crates/larql-compute/src/metal/shaders/fused_attention.rs`; collapse
+   `crates/larql-compute-metal/src/shaders/fused_attention.rs`; collapse
    RoPE + QK_norm + KV_append + KV_attend into 1-2 dispatches → ~0.85 ms/tok
    recoverable, projects to 95-105 tok/s on Gemma 3 4B (ollama parity). See
    "Open: GPU-forward kernel utilization" → G-3 / G-4 (canonical entry: G-3).
@@ -103,7 +103,7 @@ detail.
 
 7. **Coverage push: synthetic-Q4K vindex fixture** (parallelisable, ~2-3 hr,
    line cov +1-1.5 pp) — would unlock the ~30 files at 0% line cov that
-   are gated on a Q4K vindex on disk: `vindex/q4k_forward/{metal, hidden,
+   are gated on a Q4K vindex on disk: `vindex/kquant_forward/{metal, hidden,
    interventions, walk_ffn, …}.rs`, `layer_graph/generate/gpu/{decode_loop,
    prefill}.rs` deeper paths, `forward/predict/honest.rs`. The fixture
    needs valid Q4_K bytes (144B per 256-element block) for attention +
@@ -211,7 +211,7 @@ Near-term order:
 ## Open: GPU-forward kernel utilization — closing the 4.4 ms gap to ollama
 
 **Status**: Open as of 2026-05-01. Diagnosed via
-`cargo run -p larql-compute --release --features metal --example diag_profile_kernels`
+`cargo run -p larql-compute-metal --release --features metal --example diag_profile_kernels`
 plus per-step `LARQL_PROFILE_DECODE=1` profiling on Gemma 3 4B; ollama's
 fine-grained timings via `/api/generate` (`total_duration`,
 `prompt_eval_duration`, `eval_duration`).
@@ -473,7 +473,7 @@ KV_attend + O_proj fragments into 1-2 dispatches → ~6-7 per layer ×
 3. Online softmax (re-normalising incrementally) — avoids the
    per-position Q output allocation our current `kv_attend` materializes.
 
-**File**: `crates/larql-compute/src/metal/shaders/fused_attention.rs`
+**File**: `crates/larql-compute-metal/src/shaders/fused_attention.rs`
 already exists as a stub — flesh out using llama.cpp's
 `kernel_flash_attn_ext_q4_K_f32` as the template (templated over Q
 quant type, K head_dim, V head_dim).
@@ -596,7 +596,7 @@ the new cached kernel AND the existing production
 gemma3-4b-q4k-v2 — model collapses to "The" and stops at first decode
 step). The prior memory claim "Q6_K fused kernels are
 parity-tested" no longer holds against the current
-`interleaved_q4k.bin` layout — likely the kernel's Q6_K block-byte
+`interleaved_kquant.bin` layout — likely the kernel's Q6_K block-byte
 offsets drifted vs the writer in `format/weights/write_q4k` at some
 point. Real fix needs a kernel-level parity test against
 `cpu/ops/q4_common::q6k_matvec` reference on synthetic data, then a
@@ -994,7 +994,7 @@ skip. Defaults configurable via `LARQL_SMOKE_PROMPT` / `LARQL_SMOKE_EXPECTED`.
 
 ### MoE-aware CPU forward pass
 **Status**: Partial — vindex Q4K hidden-forward path shipped; dense `WeightFfn` path not started
-**Files**: `vindex/q4k_forward/hidden.rs:169` (shipped), `forward/layer.rs` (open)
+**Files**: `vindex/kquant_forward/hidden.rs:169` (shipped), `forward/layer.rs` (open)
 The Q4K vindex hidden-forward path already calls
 `larql_compute::cpu::ops::moe::cpu_moe_forward`, so any MoE model loaded
 through the vindex path has a working CPU MoE branch (this is what the
@@ -1027,7 +1027,7 @@ the Metal-on path proportionally once that lands.
 
 ### M-CPU-1 — stop the `to_vec()` copy on cache hit
 **Status**: ✅ Done 2026-05-01  
-**File**: `crates/larql-compute/src/cpu/ops/moe/expert.rs`  
+**File**: `crates/larql-compute/src/cpu/ops/moe/expert/`  
 `run_single_expert_into` was doing `let gate_up_w_f32 = v.to_vec()` on every
 call, copying ~12 MB *even on cache hit*. Replaced with an
 `Option<ExpertF32>` (Arc) held for the call's lifetime; `gate_w` / `up_w`
@@ -1035,7 +1035,7 @@ slice into the cached payload directly. No behavioural change; tests pass.
 
 ### M-CPU-2 — K=8 per-layer experts run in parallel + fold/reduce accumulator
 **Status**: ✅ Done 2026-05-01  
-**File**: `crates/larql-server/src/routes/expert.rs`  
+**File**: `crates/larql-server/src/routes/expert/`  
 Confirmed the production gRPC path (`run_experts_cpu_batch`) already uses
 rayon `par_iter` over the K active experts with per-rayon-thread
 `ExpertScratch`. Refactored from `collect Vec<(Vec<f32>, weight)> + serial
@@ -1054,7 +1054,7 @@ entirely via direct Q4_K matvec); cap=256 is the right default until then.
 
 ### M-CPU-4 — NEON-vectorised Q4_K matvec (load-bearing item)
 **Status**: ✅ Done 2026-05-01 — measured **8.6× sweep speedup**  
-**File**: `crates/larql-compute/src/cpu/ops/q4k_q8k_dot.rs` (new module);
+**File**: `crates/larql-compute/src/cpu/ops/q4k_q8k_dot/` (new module);
 wired in `expert.rs::run_single_expert`, `expert.rs::run_single_expert_q4k_q8k_into`,
 `forward.rs::cpu_moe_forward`, `routes/expert.rs::run_experts_cpu_batch`.  
 New isolated module mirrors llama.cpp's `ggml_vec_dot_q4_K_q8_K`:
@@ -1444,7 +1444,7 @@ The `_pub` suffix is redundant on public functions. Rename to `embed_tokens` and
 inconsistent.
 
 **`ApolloEngine` and `TurboQuantEngine` not re-exported at crate root**  
-`MarkovResidualEngine` and `UnlimitedContextEngine` are re-exported; the other
+`MarkovResidualEngine` and `WindowedCheckpointEngine` are re-exported; the other
 two engines are not. Either export all four or none.
 
 **`experts/` has no module-level docs**  
@@ -1534,7 +1534,7 @@ Baseline 2026-04-26: 50.45% line coverage.
 Current 2026-05-09: **53.11% line coverage, 631 lib tests, 32/116 files at ≥90% per-file floor (84 below).**
 
 Most of the remaining gap is concentrated in:
-- 33 files at **0% line coverage** — GPU dispatch (`generate/gpu.rs`), Q4_K integration paths (`vindex/q4k_forward/*`), remote-shard orchestration (`grid/remote_*`, `ffn/moe_remote/*`). Mostly need real model fixtures or running services to cover.
+- 33 files at **0% line coverage** — GPU dispatch (`generate/gpu.rs`), Q4_K integration paths (`vindex/kquant_forward/*`), remote-shard orchestration (`grid/remote_*`, `ffn/moe_remote/*`). Mostly need real model fixtures or running services to cover.
 - 9 files at 1-29% — `attention/gpu.rs`, `forward/memit.rs`, `ffn/remote/http.rs`, `vindex/walk_ffn/sparse.rs`. Reachable with synthetic weights + tempfile fixtures.
 - 17 files at 70-89% — mechanical floor lifts (the 80-89% bucket cleared 2026-05-09).
 
@@ -1647,6 +1647,6 @@ Dated entries live in [`CHANGELOG.md`](CHANGELOG.md). Headline milestones:
 - **2026-04-30** — gRPC grid + dense Metal chat templates + Gemma 4 four-variant accuracy.
 - **2026-04-27** — Q4_K stride validation, strict vindex loader.
 - **2026-04-26** — Generation quality (EOS, detok, sampling, streaming, ChatSession) + structural splits + ~100 new tests.
-- **2026-04-25** — `KvEngine` trait, MarkovResidual, UnlimitedContext, BackendFfn, profiler.
+- **2026-04-25** — `KvEngine` trait, MarkovResidual, WindowedCheckpoint, BackendFfn, profiler.
 - **2026-04** — `WalkFfn`, `LayerGraph` trait, `predict_honest`, GPU prefill, Q4_K FFN format wiring, TurboQuant, Apollo, Metal Q4K parity.
 - **2026-03** — Forward pass (CPU BLAS) foundation.
