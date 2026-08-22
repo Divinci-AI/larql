@@ -173,11 +173,30 @@ prefill rate      before    after       fixed prefill term
 ```
 
 The slope did not move — residency does not touch per-token arithmetic —
-and it still halves with prompt length. That halving is the defect:
-`traverse`'s `kv` argument *switches the attention realisation*. `None`
-runs batched attention (`larql vindex3 exec`, ~21 tok/s class); `Some`
-runs the decode step's per-position arithmetic, which is the only
-realisation that fills the provider.
+and it still halves with prompt length.
+
+**The defect is a coupling, not a slow kernel.** `traverse`'s `kv`
+argument silently *switches the attention realisation*: `None` runs
+batched attention (the `larql vindex3 exec` path, ~21 tok/s class),
+`Some` runs the decode step's per-position arithmetic — because that is
+the only realisation which happens to fill the provider. So "I want the
+KV populated" currently implies "run attention one position at a time",
+and that implication is the bug.
+
+The API should express two **independent** dimensions:
+
+```text
+attention realization        KV behaviour
+  Batched                      None
+  DecodeStep                   Populate(&mut kv)
+                               Continue(&mut kv)
+```
+
+so a prefill reads as `{ realization: Batched, kv: Populate(..) }`
+rather than as today's accidental `kv.is_some() ⇒ per-position`. That
+separation is also what V3-DECOUPLE needs: an attention slice with an
+explicit KV contract is only expressible once the two axes are
+independent.
 
 Wanted — the KV rows as an **output of the same forward**, never a
 batched pass plus a replay to build the cache, which would be the
@@ -200,9 +219,12 @@ Frozen gates:
 - KV parity for continuation — the rows a resumed session reads must be
   the rows it would have read;
 - N1 continuation still resumes, bit-identically;
-- **no second pass over the prompt** to construct KV (assert it the way
-  residency is asserted — through `OperandStore::load_count`'s sibling
-  discipline, not a stopwatch);
+- **one traversal of the prompt, one attention realisation, KV
+  populated during that traversal** — no batched pass plus a replay to
+  build the cache, which would be the double-work defect again in a new
+  place. Assert it structurally, the way residency is asserted through
+  `OperandStore::load_count`, not with a stopwatch: a timing-only check
+  passes a batch-then-replay implementation that happens to be fast;
 - prompt-length slope improves materially toward the direct
   `vindex3 exec` batched class;
 - V3-SERVE-1's fixed-cost win intact — re-run the phase profiler and
@@ -220,15 +242,30 @@ measured 20.4 against production's 21.4 tok/s prefill. Do it after
 V3-SERVE-1 and 2, and re-measure rather than assuming.
 
 **V3-SERVE-4. Ship a servable container.** `load_v3_model` needs
-`<container>/tokenizer.json`. A container re-extracted 2026-08-23 has
-one and serves with no overlay, and main's `compact` / `compile` paths
-preserve an existing one — but `vindex3 encode` still does not write
-one *by construction*, so servability remains a property of how a
-particular artefact was built rather than a guarantee. The serve tests
-all write a synthetic tokenizer into their fixture, which is why this
-class of defect is invisible to them. Needs the encoder to carry the
-tokenizer **and** a gate that serves a container the encoder
-produced.
+`<container>/tokenizer.json`. Evidence that this is not yet a property
+of the format: of the two containers on disk on 2026-08-23, the freshly
+re-extracted Granite ships one and serves with no overlay, while
+gpt-oss-20b does not and still needs a hand-placed tokenizer. main's
+`compact` / `compile` paths *preserve* an existing one; `vindex3 encode`
+does not write one by construction. So servability is a property of how
+a particular artefact was built.
+
+"One container happens to contain a tokenizer" is a different claim from
+"every servable VINDEX3 artifact the canonical encoder produces is
+self-contained". The gate is the second claim, end to end:
+
+```text
+encode a real model
+  → the resulting container carries its own tokenizer authority
+  → move the artifact away from the source checkpoint
+  → larql-server opens it
+  → real OpenAI inference succeeds
+```
+
+No source-checkpoint fallback, no symlink, no fixture-added tokenizer.
+The existing serve tests all write a synthetic tokenizer into their
+fixture, which is exactly why this class of defect is invisible to
+them.
 
 **V3-SERVE-5. Sharding, decoupling, grid.** Not started, and now
 failing closed rather than silently: a V3 binding refuses `--layers` /
@@ -254,12 +291,25 @@ router does real multi-worker inference and `X-Session-Id` /
 worker that physically holds its KV and degrades to a cold prefill when
 that worker is gone. Not before.
 
-**Do not re-tune N1 first.** Cache on vs off measured 41.14 s against
-41.75 s on a 4-turn chain — 1.5%, inside the e2e noise floor — because
-the fixed tax dwarfs the 1–2 s of prefill it saves. The mechanism is
-correct and observable (`cached_tokens`, `resumptions`). Re-measure it
-after V3-SERVE-1; a longest-common-prefix resume is worth considering
-only once the saving is visible.
+**N1 — three-point ledger.** Measured at each state rather than only at
+the end, because each rung changes what the previous measurement meant:
+
+| state | cache off | cache on | saving |
+|---|---|---|---|
+| pre-2B (gemma-2-2b) | 41.75 s | 41.14 s | 1.5% — inside noise |
+| post-2B (gpt-oss-20b) | 45.02 s | 18.77 s | **2.40x** |
+| post-2B (granite-4.1-3b) | 15.94 s | 7.69 s | **2.07x** |
+| post-2C | — | — | to measure |
+
+N1 was never broken; it was masked by ~7 s of per-request model
+materialisation. The post-2C row matters because 2C may *reduce* N1's
+absolute saving — if prefill gets 2–3x faster, skipping 100 cached
+tokens buys less wall time — while leaving it valuable for long
+histories and TTFT. Taking the middle row now is what keeps those two
+effects separable.
+
+A longest-common-prefix resume is worth reconsidering after 2C, on the
+post-2C numbers, not before.
 
 ---
 

@@ -6,6 +6,49 @@ The format follows the conventions of [Keep a Changelog](https://keepachangelog.
 with dated entries (`YYYY-MM-DD`) instead of semantic versions during the
 pre-1.0 phase. Forward-looking work lives in [`ROADMAP.md`](ROADMAP.md).
 
+## [2026-08-23] — N1 measured post-2B: 2.4x, and a claim of mine corrected
+
+Taken **before** 2C, because 2B has created an intermediate state that
+2C destroys: fixed setup gone, slow prefill still present. Without this
+row it would be impossible to separate "N1 became useful because 2B
+removed the fixed tax" from "N1 behaves differently because 2C changed
+prefill".
+
+Four-turn `/v1/responses` chain, cache on vs off, min of two chains,
+*on battery*:
+
+| model | cache off | cache on | saving | speedup | reused |
+|---|---|---|---|---|---|
+| gpt-oss-20b (ChatML) | 45.02 s | 18.77 s | 26.25 s | **2.40x** | 254 tok |
+| granite-4.1-3b (Plain) | 15.94 s | 7.69 s | 8.25 s | **2.07x** | 146 tok |
+
+The per-turn shape is the signature, and it is model-independent:
+
+```text
+cache OFF   4.33 -> 8.81 -> 13.49 -> 18.38 s    linear — re-prefills the whole conversation
+cache ON    4.31 -> 4.96 ->  4.57 ->  4.92 s    flat   — prefills only the new turn
+```
+
+Against the pre-2B row (2026-08-22, gemma-2-2b: 41.75 s vs 41.14 s, a
+1.5% difference inside the noise floor), N1 has gone from unmeasurable
+to the largest per-request win available on a chained workload. It was
+never broken; it was masked by ~7 s of per-request model
+materialisation. Note the rows use different models — gemma-2-2b is no
+longer on disk — so the cross-row comparison is qualitative; the
+within-row A/B and the flat-vs-linear shape are not.
+
+**Correction.** This run falsified something recorded here twice
+yesterday: that Granite "gets 0% because it falls to the Plain
+template". Granite resumed cleanly here (cached 25 / 50 / 71). The
+accurate claim is narrower — Plain has no atomic turn terminator, so
+whether the seam survives depends on the **last token the model
+actually emitted**; it *raises the risk* of a break rather than
+guaranteeing one. Yesterday's zero came from replies that happened to
+end mid-markdown (`**Instruction**:`), not from the template alone.
+Template resolution is still worth fixing for output quality, and the
+bind-time warning stays — but it should not be described as the cause
+of a resumption failure.
+
 ## [2026-08-23] — residency and mutation land on one operand authority
 
 **V3-SERVE-1 confirmed on the re-extracted Granite 4.1 3B** (40 layers,

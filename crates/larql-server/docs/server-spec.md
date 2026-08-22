@@ -773,6 +773,21 @@ cached_tokens`; `/v1/stats.server.v3_kv` carries `hits`, `misses`,
 **prefix-stability gap** — resident state found but unusable under
 exact token-id identity.
 
+What it is worth, measured on a four-turn chain: **2.0–2.4x** on total
+wall time (gpt-oss-20b 45.02 s → 18.77 s; Granite 4.1 3B 15.94 s →
+7.69 s). The shape is the point — without the cache, turn time grows
+linearly as the conversation is re-prefilled from scratch (4.3 → 8.8 →
+13.5 → 18.4 s); with it, turn time is flat (4.3 → 5.0 → 4.6 → 4.9 s),
+because only the new turn is prefilled.
+
+Whether resumption engages on a given turn depends on the **last token
+the model emitted**: if the conversation is re-rendered and that token
+re-tokenises differently once the next turn follows, the exact-ids
+prefix breaks at the seam and the turn falls back to a full prefill. A
+chat template that terminates the assistant turn with an atomic special
+token makes the seam stable; the `Plain` fallback, which ends a turn
+with a bare newline, does not guarantee it either way.
+
 #### Constrained decoding (slice 4 / N0.6, shipped 2026-05-02)
 
 `response_format` and `tools` route the request through a
