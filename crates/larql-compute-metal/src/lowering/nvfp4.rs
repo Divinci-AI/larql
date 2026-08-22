@@ -14,10 +14,19 @@ pub const NVFP4_MAX_SEGMENTS: usize = 3;
 
 /// One matrix of a fused (segmented) NVFP4 GEMV: its packed codes and
 /// scales, its tensor scale, its row count and where its rows land.
+///
+/// `packed_offset`/`scales_offset` are byte offsets into their buffers,
+/// so segments may be slices of ONE shared allocation (the QKV packing
+/// rung): the kernel then streams one contiguous address range, as the
+/// flat single-matrix dispatch does. A packed offset must fall on a row
+/// boundary, which for NVFP4 is a multiple of 16 bytes — Metal's bind
+/// alignment for the `uint2` loads the x2 body performs.
 #[derive(Clone, Copy)]
 pub struct Nvfp4Segment<'a> {
     pub packed: &'a Buffer,
+    pub packed_offset: u64,
     pub scales: &'a Buffer,
+    pub scales_offset: u64,
     pub tensor_scale: f32,
     pub out: &'a Buffer,
     pub out_offset: u64,
@@ -73,11 +82,15 @@ pub fn nvfp4_segment<'a>(
     match m {
         LoweredMatrix::Nvfp4 {
             packed,
+            packed_offset,
             scales,
+            scales_offset,
             tensor_scale,
         } => Some(Nvfp4Segment {
             packed,
+            packed_offset: *packed_offset,
             scales,
+            scales_offset: *scales_offset,
             tensor_scale: *tensor_scale,
             out,
             out_offset,
@@ -279,12 +292,31 @@ impl MetalBackend {
             !segments.is_empty() && segments.len() <= NVFP4_MAX_SEGMENTS,
             "1..=3 segments"
         );
-        let kernel = &self.quant.nvfp4_matvec_x2_seg3_pipeline;
+        // seg3t: the grid is tiled so no threadgroup straddles a segment
+        // (prefix sums of each segment's tile count) and the segment is
+        // resolved once per threadgroup. NOTE the probe's verdict
+        // (`examples/qkv_seg3_probe.rs`): this did NOT close the fused
+        // form's ~5 µs deficit against a flat single-matrix dispatch —
+        // the per-row resolve hypothesis is falsified; what remains is
+        // attributed to streaming from three base addresses instead of
+        // one. The follow-up rung is loader-level: pack Q/K/V into ONE
+        // allocation so the fused dispatch is literally the flat kernel.
+        let kernel = &self.quant.nvfp4_matvec_x2_seg3t_pipeline;
         enc.set_compute_pipeline_state(&kernel.state);
         enc.set_buffer(2, Some(x), 0);
         set_u32(enc, 5, k as u32);
         enc.set_buffer(17, Some(residual.unwrap_or(x)), 0);
         set_u32(enc, 18, residual.is_some() as u32);
+        // MSL `uint3` is 16 bytes (non-packed) — bind four words.
+        let mut tile_end = [0u32; 4];
+        let mut acc = 0u32;
+        for (i, end) in tile_end.iter_mut().enumerate().take(NVFP4_MAX_SEGMENTS) {
+            acc += segments
+                .get(i)
+                .map_or(0, |s| (s.n as u32).div_ceil(kernel.rows_per_tg as u32));
+            *end = acc;
+        }
+        enc.set_bytes(19, 16, tile_end.as_ptr() as *const std::ffi::c_void);
         // (packed, scales, out, M, tensor_scale) slots per segment.
         const SLOTS: [(u64, u64, u64, u64, u64); NVFP4_MAX_SEGMENTS] =
             [(0, 1, 3, 4, 6), (7, 8, 9, 10, 11), (12, 13, 14, 15, 16)];
@@ -293,8 +325,8 @@ impl MetalBackend {
             let (wp, ws, out, m, ts) = *slots;
             match segments.get(i) {
                 Some(seg) => {
-                    enc.set_buffer(wp, Some(seg.packed), 0);
-                    enc.set_buffer(ws, Some(seg.scales), 0);
+                    enc.set_buffer(wp, Some(seg.packed), seg.packed_offset);
+                    enc.set_buffer(ws, Some(seg.scales), seg.scales_offset);
                     enc.set_buffer(out, Some(seg.out), seg.out_offset);
                     set_u32(enc, m, seg.n as u32);
                     set_f32(enc, ts, seg.tensor_scale);
@@ -304,16 +336,17 @@ impl MetalBackend {
                     // Absent segment: M = 0, buffers aliased to the first
                     // so every slot is bound.
                     let first = &segments[0];
-                    enc.set_buffer(wp, Some(first.packed), 0);
-                    enc.set_buffer(ws, Some(first.scales), 0);
+                    enc.set_buffer(wp, Some(first.packed), first.packed_offset);
+                    enc.set_buffer(ws, Some(first.scales), first.scales_offset);
                     enc.set_buffer(out, Some(first.out), first.out_offset);
                     set_u32(enc, m, 0);
                     set_f32(enc, ts, 0.0);
                 }
             }
         }
+        let _ = total_rows;
         enc.dispatch_thread_groups(
-            metal::MTLSize::new(total_rows.div_ceil(kernel.rows_per_tg), 1, 1),
+            metal::MTLSize::new(tile_end[2] as u64, 1, 1),
             metal::MTLSize::new(kernel.threads_per_tg, 1, 1),
         );
     }
@@ -432,6 +465,70 @@ impl MetalBackend {
         self.encode_nvfp4_with(&self.quant.nvfp4_matvec_v2_pipeline, enc, op, tensor_scale);
     }
 
+    /// As [`Self::encode_nvfp4_matvec`], with the weight streams bound at
+    /// byte offsets — the matrix is a row slice of a shared allocation.
+    ///
+    /// This binds the SAME kernel the unsliced call uses: the body reads
+    /// `Wp + row * groups * NVFP4_GROUP_BYTES`, so moving the base is
+    /// exactly equivalent to handing it a smaller buffer. Routing a
+    /// sliced matrix through the segmented kernel instead would change
+    /// which code shape runs, and Metal's fast-math means two code shapes
+    /// of one kernel are not bit-identical — a layout change must not
+    /// smuggle in an arithmetic one.
+    pub fn encode_nvfp4_matvec_sliced(
+        &self,
+        enc: &ComputeCommandEncoderRef,
+        op: &MatvecOperands<'_>,
+        tensor_scale: f32,
+        packed_offset: u64,
+        scales_offset: u64,
+    ) {
+        let q = &self.quant;
+        let kernel = match nvfp4_kernel_choice() {
+            Nvfp4Kernel::V1 => &q.nvfp4_matvec_pipeline,
+            Nvfp4Kernel::V2 => &q.nvfp4_matvec_v2_pipeline,
+            Nvfp4Kernel::G2R4 => &q.nvfp4_sweep_pipelines[0],
+            Nvfp4Kernel::G4R4 => &q.nvfp4_sweep_pipelines[1],
+            Nvfp4Kernel::G1R2 => &q.nvfp4_sweep_pipelines[2],
+            Nvfp4Kernel::G1R8 => &q.nvfp4_sweep_pipelines[3],
+            Nvfp4Kernel::G2R2 => &q.nvfp4_sweep_pipelines[4],
+            Nvfp4Kernel::G2R8 => &q.nvfp4_sweep_pipelines[5],
+            Nvfp4Kernel::X2 => &q.nvfp4_sweep_pipelines[6],
+            Nvfp4Kernel::X4 => &q.nvfp4_sweep_pipelines[7],
+            Nvfp4Kernel::X1B => &q.nvfp4_sweep_pipelines[8],
+            Nvfp4Kernel::X2B => &q.nvfp4_sweep_pipelines[9],
+            Nvfp4Kernel::X4B => &q.nvfp4_sweep_pipelines[10],
+        };
+        self.encode_nvfp4_at(kernel, enc, op, tensor_scale, packed_offset, scales_offset);
+    }
+
+    /// As [`Self::encode_nvfp4_matvec_residual`], weights bound at byte
+    /// offsets (a sliced matrix under rung 2a's folded residual).
+    pub fn encode_nvfp4_matvec_residual_sliced(
+        &self,
+        enc: &ComputeCommandEncoderRef,
+        op: &MatvecOperands<'_>,
+        tensor_scale: f32,
+        residual: &Buffer,
+        packed_offset: u64,
+        scales_offset: u64,
+    ) {
+        let kernel = &self.quant.nvfp4_matvec_x2r_pipeline;
+        enc.set_compute_pipeline_state(&kernel.state);
+        enc.set_buffer(0, Some(op.packed), packed_offset);
+        enc.set_buffer(1, Some(op.scales), scales_offset);
+        enc.set_buffer(2, Some(op.x), 0);
+        enc.set_buffer(3, Some(op.out), op.out_offset);
+        set_u32(enc, 4, op.n as u32);
+        set_u32(enc, 5, op.k as u32);
+        set_f32(enc, 6, tensor_scale);
+        enc.set_buffer(7, Some(residual), 0);
+        enc.dispatch_thread_groups(
+            metal::MTLSize::new((op.n as u64).div_ceil(kernel.rows_per_tg), 1, 1),
+            metal::MTLSize::new(kernel.threads_per_tg, 1, 1),
+        );
+    }
+
     fn encode_nvfp4_with(
         &self,
         kernel: &crate::kernels::KernelHandle,
@@ -439,9 +536,21 @@ impl MetalBackend {
         op: &MatvecOperands<'_>,
         tensor_scale: f32,
     ) {
+        self.encode_nvfp4_at(kernel, enc, op, tensor_scale, 0, 0);
+    }
+
+    fn encode_nvfp4_at(
+        &self,
+        kernel: &crate::kernels::KernelHandle,
+        enc: &ComputeCommandEncoderRef,
+        op: &MatvecOperands<'_>,
+        tensor_scale: f32,
+        packed_offset: u64,
+        scales_offset: u64,
+    ) {
         enc.set_compute_pipeline_state(&kernel.state);
-        enc.set_buffer(0, Some(op.packed), 0);
-        enc.set_buffer(1, Some(op.scales), 0);
+        enc.set_buffer(0, Some(op.packed), packed_offset);
+        enc.set_buffer(1, Some(op.scales), scales_offset);
         enc.set_buffer(2, Some(op.x), 0);
         enc.set_buffer(3, Some(op.out), op.out_offset);
         set_u32(enc, 4, op.n as u32);
@@ -450,6 +559,35 @@ impl MetalBackend {
         enc.dispatch_thread_groups(
             metal::MTLSize::new((op.n as u64).div_ceil(kernel.rows_per_tg), 1, 1),
             metal::MTLSize::new(kernel.threads_per_tg, 1, 1),
+        );
+    }
+
+    /// Encode `out = table[idx[0]] * scale` — the embedding lookup for
+    /// the id a prior `encode_argmax` wrote, on the device (1c). `scale`
+    /// 0.0 encodes an absent multiplier, as the head kernel does.
+    pub fn encode_embed_gather(
+        &self,
+        enc: &ComputeCommandEncoderRef,
+        table: &Buffer,
+        idx: &Buffer,
+        out: &Buffer,
+        hidden: usize,
+        scale: f32,
+    ) {
+        let pipeline = &self.norms.embed_gather_pipeline;
+        enc.set_compute_pipeline_state(pipeline);
+        enc.set_buffer(0, Some(table), 0);
+        enc.set_buffer(1, Some(idx), 0);
+        enc.set_buffer(2, Some(out), 0);
+        set_u32(enc, 3, hidden as u32);
+        set_f32(enc, 4, scale);
+        enc.dispatch_thread_groups(
+            metal::MTLSize::new(1, 1, 1),
+            metal::MTLSize::new(
+                crate::kernels::DISPATCH_TG_MAX_THREADS.min(hidden as u64),
+                1,
+                1,
+            ),
         );
     }
 

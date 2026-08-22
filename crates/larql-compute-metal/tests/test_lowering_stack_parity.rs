@@ -385,7 +385,9 @@ fn fifty_two_layers_lower_into_one_scheduling_domain() {
             let i = &idx[l];
             let pr = |(a, b): (usize, usize), ts: f32| LoweredMatrix::Nvfp4 {
                 packed: &keep[a],
+                packed_offset: 0,
                 scales: &keep[b],
+                scales_offset: 0,
                 tensor_scale: ts,
             };
             LayerLowering {
@@ -436,17 +438,23 @@ fn fifty_two_layers_lower_into_one_scheduling_domain() {
                     weights: FfnWeights {
                         gate: LoweredMatrix::Nvfp4 {
                             packed: &keep[i[5].0],
+                            packed_offset: 0,
                             scales: &keep[i[5].1],
+                            scales_offset: 0,
                             tensor_scale: w.fg.tensor_scale,
                         },
                         up: LoweredMatrix::Nvfp4 {
                             packed: &keep[i[6].0],
+                            packed_offset: 0,
                             scales: &keep[i[6].1],
+                            scales_offset: 0,
                             tensor_scale: w.fu.tensor_scale,
                         },
                         down: LoweredMatrix::Nvfp4 {
                             packed: &keep[i[7].0],
+                            packed_offset: 0,
                             scales: &keep[i[7].1],
+                            scales_offset: 0,
                             tensor_scale: w.fd.tensor_scale,
                         },
                         norm_weight: &norms[l][2],

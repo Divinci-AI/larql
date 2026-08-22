@@ -112,8 +112,9 @@ impl MetalBackend {
             gate_half_bytes as u32,
         );
 
+        let ablate = moe_ablation();
         // E3: bias presence is a layer fact, stated by the table.
-        let stage_gate_up_bias = table.gate_up_bias_bank.is_some();
+        let stage_gate_up_bias = table.gate_up_bias_bank.is_some() && !ablate.bias;
         if let Some(bank) = &table.gate_up_bias_bank {
             self.encode_bias_stage(
                 enc,
@@ -144,32 +145,69 @@ impl MetalBackend {
                     .gate_up_scale_base
                     .as_ref()
                     .expect("gpu_route_supported checked the scale streams");
-                let row_tiles = (inter as u64).div_ceil(kh.rows_per_tg);
-                for half in [FusedHalf::Gate, FusedHalf::Up] {
-                    // Halves are selected by WHICH ROWS the kernel walks —
-                    // one payload table and one scale table serve both.
-                    let (row_base, row_stride) = moe.fused_row_layout.row_walk(half, inter);
-                    let (row_base, row_stride) = (row_base as u32, row_stride as u32);
-                    let out_buf = match half {
-                        FusedHalf::Gate => &scratch.g_out,
-                        FusedHalf::Up => &scratch.u_out,
-                    };
-                    enc.set_compute_pipeline_state(&kh.state);
+                let fused_gu = std::ptr::eq(
+                    kh as *const _,
+                    &self.quant.mxfp4_grouped_x2_pipeline as *const _,
+                ) && expert_gu_fusion_enabled();
+                if fused_gu {
+                    // A-12 expert pass: both halves in ONE dispatch — one
+                    // GEMV α per layer instead of two, and twice the
+                    // threadgroups the x2 arm alone launches. Bit-identical
+                    // per row to the two-dispatch form.
+                    let khgu = &self.quant.mxfp4_grouped_x2_gu_pipeline;
+                    let (g_base, g_stride) = moe.fused_row_layout.row_walk(FusedHalf::Gate, inter);
+                    let (u_base, u_stride) = moe.fused_row_layout.row_walk(FusedHalf::Up, inter);
+                    let (g_base, g_stride) = (g_base as u32, g_stride as u32);
+                    let (u_base, u_stride) = (u_base as u32, u_stride as u32);
+                    let row_tiles = (2 * inter as u64).div_ceil(khgu.rows_per_tg);
+                    enc.set_compute_pipeline_state(&khgu.state);
                     enc.set_buffer(0, Some(&table.gate_up_base), 0);
                     enc.set_buffer(1, Some(&bindings.gate0_offs), 0);
                     enc.set_buffer(2, Some(scale_base), 0);
                     enc.set_buffer(3, Some(&bindings.gu_scale_offs), 0);
                     enc.set_buffer(4, Some(x_buf), 0);
-                    enc.set_buffer(5, Some(out_buf), 0);
+                    enc.set_buffer(5, Some(&scratch.g_out), 0);
                     enc.set_bytes(6, 4, &n_rows as *const u32 as *const c_void);
                     enc.set_bytes(7, 4, &k_cols as *const u32 as *const c_void);
                     enc.set_bytes(8, 4, &xstride_shared as *const u32 as *const c_void);
-                    enc.set_bytes(9, 4, &row_base as *const u32 as *const c_void);
-                    enc.set_bytes(10, 4, &row_stride as *const u32 as *const c_void);
+                    enc.set_bytes(9, 4, &g_base as *const u32 as *const c_void);
+                    enc.set_bytes(10, 4, &g_stride as *const u32 as *const c_void);
+                    enc.set_buffer(11, Some(&scratch.u_out), 0);
+                    enc.set_bytes(12, 4, &u_base as *const u32 as *const c_void);
+                    enc.set_bytes(13, 4, &u_stride as *const u32 as *const c_void);
                     enc.dispatch_thread_groups(
                         MTLSize::new(row_tiles, n_slots as u64, 1),
-                        MTLSize::new(kh.threads_per_tg, 1, 1),
+                        MTLSize::new(khgu.threads_per_tg, 1, 1),
                     );
+                } else {
+                    let row_tiles = (inter as u64).div_ceil(kh.rows_per_tg);
+                    for half in [FusedHalf::Gate, FusedHalf::Up] {
+                        // Halves are selected by WHICH ROWS the kernel
+                        // walks — one payload table and one scale table
+                        // serve both.
+                        let (row_base, row_stride) = moe.fused_row_layout.row_walk(half, inter);
+                        let (row_base, row_stride) = (row_base as u32, row_stride as u32);
+                        let out_buf = match half {
+                            FusedHalf::Gate => &scratch.g_out,
+                            FusedHalf::Up => &scratch.u_out,
+                        };
+                        enc.set_compute_pipeline_state(&kh.state);
+                        enc.set_buffer(0, Some(&table.gate_up_base), 0);
+                        enc.set_buffer(1, Some(&bindings.gate0_offs), 0);
+                        enc.set_buffer(2, Some(scale_base), 0);
+                        enc.set_buffer(3, Some(&bindings.gu_scale_offs), 0);
+                        enc.set_buffer(4, Some(x_buf), 0);
+                        enc.set_buffer(5, Some(out_buf), 0);
+                        enc.set_bytes(6, 4, &n_rows as *const u32 as *const c_void);
+                        enc.set_bytes(7, 4, &k_cols as *const u32 as *const c_void);
+                        enc.set_bytes(8, 4, &xstride_shared as *const u32 as *const c_void);
+                        enc.set_bytes(9, 4, &row_base as *const u32 as *const c_void);
+                        enc.set_bytes(10, 4, &row_stride as *const u32 as *const c_void);
+                        enc.dispatch_thread_groups(
+                            MTLSize::new(row_tiles, n_slots as u64, 1),
+                            MTLSize::new(kh.threads_per_tg, 1, 1),
+                        );
+                    }
                 }
             }
             _ => {
@@ -198,7 +236,7 @@ impl MetalBackend {
         // Activation — slot-shaped, route-independent (identical to the
         // legacy path; only the bias-presence authority changed).
         let inter_u32 = inter as u32;
-        for e in 0..n_slots {
+        for e in 0..if ablate.act { 0 } else { n_slots } {
             let g_offset = (e * inter * 4) as u64;
             let a_offset = (e * inter_padded * 4) as u64;
             match moe.gate_rule {
@@ -242,6 +280,59 @@ impl MetalBackend {
         let n_out = hidden as u32;
         let k_in = inter_padded as u32;
         let xstride_own: u32 = inter_padded as u32;
+        // A-12: for a top-4 MXFP4 route the down projection and the
+        // weighted combine fuse into one dispatch (bit-identical: same
+        // per-(row,slot) walk, same combine order). The staged down bias
+        // moves BEFORE it; the separate combine kernel is skipped.
+        let fused_down_combine = scratch.format == larql_compute::QuantFormat::MXFP4
+            && n_slots == 4
+            && table.payload_offsets_vec16
+            && expert_down_combine_enabled()
+            && !ablate.combine;
+        if fused_down_combine {
+            let has_down_bias = table.down_bias_bank.is_some() && !ablate.bias;
+            if let Some(bank) = &table.down_bias_bank {
+                if !ablate.bias {
+                    let hidden_u32 = hidden as u32;
+                    let n = n_slots as u32;
+                    enc.set_compute_pipeline_state(&self.moe_down_bias_stage_pipeline);
+                    enc.set_buffer(0, Some(bank), 0);
+                    enc.set_buffer(1, Some(&bindings.slot_descs), 0);
+                    enc.set_buffer(2, Some(&scratch.down_bias_staged), 0);
+                    enc.set_bytes(3, 4, &hidden_u32 as *const u32 as *const c_void);
+                    enc.set_bytes(4, 4, &n as *const u32 as *const c_void);
+                    enc.dispatch_threads(
+                        MTLSize::new(hidden as u64, n_slots as u64, 1),
+                        MTLSize::new(64.min(hidden as u64).max(1), 1, 1),
+                    );
+                }
+            }
+            let scale_base = table
+                .down_scale_base
+                .as_ref()
+                .expect("gpu_route_supported checked the scale streams");
+            let khdc = &self.quant.mxfp4_down_combine4_pipeline;
+            let has_bias_u: u32 = u32::from(has_down_bias);
+            enc.set_compute_pipeline_state(&khdc.state);
+            enc.set_buffer(0, Some(&table.down_base), 0);
+            enc.set_buffer(1, Some(&bindings.down_offs), 0);
+            enc.set_buffer(2, Some(scale_base), 0);
+            enc.set_buffer(3, Some(&bindings.dn_scale_offs), 0);
+            enc.set_buffer(4, Some(&scratch.act_buf), 0);
+            enc.set_buffer(5, Some(new_h), 0);
+            enc.set_bytes(6, 4, &n_out as *const u32 as *const c_void);
+            enc.set_bytes(7, 4, &k_in as *const u32 as *const c_void);
+            enc.set_bytes(8, 4, &xstride_own as *const u32 as *const c_void);
+            enc.set_buffer(9, Some(h_post_attn), 0);
+            enc.set_buffer(10, Some(selected_weights), 0);
+            enc.set_buffer(11, Some(&scratch.down_bias_staged), 0);
+            enc.set_bytes(12, 4, &has_bias_u as *const u32 as *const c_void);
+            enc.dispatch_thread_groups(
+                MTLSize::new((hidden as u64).div_ceil(khdc.rows_per_tg), 1, 1),
+                MTLSize::new(khdc.threads_per_tg, 1, 1),
+            );
+            return;
+        }
         match scratch.format {
             larql_compute::QuantFormat::MXFP4 => {
                 use crate::shaders::mxfp4_grouped_experts::{
@@ -290,7 +381,7 @@ impl MetalBackend {
 
         // Down biases: descriptor-driven staging into the same scratch the
         // combine kernel reads (E1 — the last route-dependent CPU memcpy).
-        let has_down_bias = table.down_bias_bank.is_some();
+        let has_down_bias = table.down_bias_bank.is_some() && !ablate.bias;
         if let Some(bank) = &table.down_bias_bank {
             let hidden_u32 = hidden as u32;
             let n = n_slots as u32;
@@ -306,6 +397,9 @@ impl MetalBackend {
             );
         }
 
+        if ablate.combine {
+            return;
+        }
         // Combine — same kernel, routing weights from rung B's GPU buffer
         // (E2: the set_bytes → set_buffer flip, kernel signature unchanged).
         let hidden_u = hidden as u32;
@@ -350,6 +444,14 @@ impl MetalBackend {
             .grouped_experts_for(larql_compute::QuantFormat::MXFP4);
         if self.quant.mxfp4_grouped_arm == Mxfp4Arm::SplitLut16Vec && !table.payload_offsets_vec16 {
             return (&self.quant.mxfp4g_split_lut16_pipeline, binding);
+        }
+        // A-12 expert pass: the x2 arm (two rows per simdgroup sharing X
+        // loads) is bit-identical per row and needs the same 16-byte
+        // alignment as the vec arm. Decomposition bench: 262 → 313 GB/s
+        // at the gpt-oss expert shape (`examples/moe_expert_alpha_b.rs`).
+        // `LARQL_MXFP4_EXPERT_X2=0` restores the single-row arm (control).
+        if self.quant.mxfp4_grouped_arm == Mxfp4Arm::SplitLut16Vec && expert_x2_enabled() {
+            return (&self.quant.mxfp4_grouped_x2_pipeline, binding);
         }
         (kh, binding)
     }
@@ -506,3 +608,71 @@ impl MetalBackend {
 
 #[cfg(test)]
 mod tests;
+
+/// Timing-only ablation of the expert tail machinery, for the A-12
+/// in-situ decomposition: `LARQL_ABLATE_MOE=bias,act,combine` (any
+/// subset). **Numbers are wrong by construction** — the run exists to
+/// price a component's wall time, never to produce output — and the
+/// switch announces itself once on stderr so no measurement can quietly
+/// inherit it.
+#[derive(Clone, Copy, Default)]
+struct MoeAblation {
+    bias: bool,
+    act: bool,
+    combine: bool,
+}
+
+fn moe_ablation() -> MoeAblation {
+    static A: std::sync::OnceLock<MoeAblation> = std::sync::OnceLock::new();
+    *A.get_or_init(|| {
+        let Ok(spec) = std::env::var("LARQL_ABLATE_MOE") else {
+            return MoeAblation::default();
+        };
+        let mut a = MoeAblation::default();
+        for part in spec.split(',') {
+            match part.trim() {
+                "bias" => a.bias = true,
+                "act" => a.act = true,
+                "combine" => a.combine = true,
+                "" => {}
+                other => eprintln!("[moe] unknown LARQL_ABLATE_MOE part: {other}"),
+            }
+        }
+        if a.bias || a.act || a.combine {
+            eprintln!(
+                "[moe] ABLATED RUN — skipping{}{}{}; numbers are wrong by construction, timing only",
+                if a.bias { " bias" } else { "" },
+                if a.act { " act" } else { "" },
+                if a.combine { " combine" } else { "" },
+            );
+        }
+        a
+    })
+}
+
+/// Opt-in for the fused down+combine dispatch (`LARQL_MXFP4_EXPERT_DC=1`).
+/// A/B/A/B on gpt-oss read −0.21 then +0.12 ms under battery drift —
+/// ambiguous, so the split form stays the default until a rested AC
+/// re-run decides. (The in-situ ablation's −0.32 ms for `combine` was
+/// mostly a dependency-break artifact: skipping the kernel also freed
+/// the next layer from waiting on the down projection.)
+fn expert_down_combine_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("LARQL_MXFP4_EXPERT_DC").as_deref() == Ok("1"))
+}
+
+/// Control for the x2 expert GEMV arm: `LARQL_MXFP4_EXPERT_X2=0` keeps
+/// the single-row vec kernel. Read once.
+fn expert_x2_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("LARQL_MXFP4_EXPERT_X2").as_deref() != Ok("0"))
+}
+
+/// Opt-in for the fused gate+up expert dispatch (`LARQL_MXFP4_EXPERT_GU=1`).
+/// Measured NULL on gpt-oss (−0.04 ms, within noise): the second GEMV's α
+/// is hidden behind the first's tail and 1440 threadgroups already fill
+/// the machine — the class-aware α model's prediction. Retained as an arm.
+fn expert_gu_fusion_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("LARQL_MXFP4_EXPERT_GU").as_deref() == Ok("1"))
+}

@@ -53,6 +53,9 @@ pub struct QuantKernels {
     pub nvfp4_sweep_pipelines: [KernelHandle; 11],
     /// A-5b: segmented x2 — Q+K+V or gate+up in one dispatch.
     pub nvfp4_matvec_x2_seg3_pipeline: KernelHandle,
+    /// seg3t — per-threadgroup segment resolution (the production form;
+    /// seg3's per-row-pair resolve cost 4.8 µs/dispatch at the QKV shape).
+    pub nvfp4_matvec_x2_seg3t_pipeline: KernelHandle,
     /// A-5b rung 2a: x2 with the residual add folded into the write.
     pub nvfp4_matvec_x2r_pipeline: KernelHandle,
     /// A-5b rung 2d: x2 with the pre-norm folded into the prologue.
@@ -107,6 +110,19 @@ pub struct QuantKernels {
     /// per dispatch: the arm is a startup choice, and reading it inside
     /// the encode path would put an env lookup on the per-layer hot path.
     pub mxfp4_grouped_pipeline: KernelHandle,
+    /// A2x2 — the vec arm with two rows per simdgroup sharing X loads
+    /// (A-12 expert pass). Bit-identical per row to the vec arm; only
+    /// valid where the vec arm is (16-byte-aligned offsets).
+    pub mxfp4_grouped_x2_pipeline: KernelHandle,
+    /// A2x2gu — gate+up halves in one dispatch (buffers 11–13 add the
+    /// second output and row walk).
+    pub mxfp4_grouped_x2_gu_pipeline: KernelHandle,
+    /// A2dc — down projection + weighted combine in one dispatch (top-4).
+    pub mxfp4_down_combine4_pipeline: KernelHandle,
+    /// A2x2p / A2x4 — the 313→346 candidate arms (byte-pair LUT; four
+    /// rows per lane).
+    pub mxfp4_grouped_x2p_pipeline: KernelHandle,
+    pub mxfp4_grouped_x4_pipeline: KernelHandle,
     /// How [`Self::mxfp4_grouped_pipeline`] receives its e8m0 exponents.
     /// Travels with the pipeline because the two layouts have different
     /// binding arities, so a call site cannot bind one without knowing
@@ -184,6 +200,8 @@ impl QuantKernels {
         ];
         let nvfp4_matvec_x2_seg3_pipeline =
             h::<shaders::nvfp4_matvec::KernelX2Seg3>(device, library);
+        let nvfp4_matvec_x2_seg3t_pipeline =
+            h::<shaders::nvfp4_matvec::KernelX2Seg3T>(device, library);
         let nvfp4_matvec_x2r_pipeline = h::<shaders::nvfp4_matvec::KernelX2R>(device, library);
         let nvfp4_matvec_x2n_pipeline = h::<shaders::nvfp4_matvec::KernelX2N>(device, library);
         let nvfp4_matvec_x2m_pipeline = h::<shaders::nvfp4_matvec::KernelX2M>(device, library);
@@ -236,6 +254,16 @@ impl QuantKernels {
             Mxfp4Arm::InterPair => mxfp4g_inter_pair_pipeline.clone(),
             Mxfp4Arm::InterMagSign => mxfp4g_inter_magsign_pipeline.clone(),
         };
+        let mxfp4_grouped_x2_pipeline =
+            h::<shaders::mxfp4_grouped_experts::KernelSplitLut16VecX2>(device, library);
+        let mxfp4_grouped_x2_gu_pipeline =
+            h::<shaders::mxfp4_grouped_experts::KernelSplitLut16VecX2Gu>(device, library);
+        let mxfp4_down_combine4_pipeline =
+            h::<shaders::mxfp4_grouped_experts::KernelDownCombine4>(device, library);
+        let mxfp4_grouped_x2p_pipeline =
+            h::<shaders::mxfp4_grouped_experts::KernelSplitLut16VecX2P>(device, library);
+        let mxfp4_grouped_x4_pipeline =
+            h::<shaders::mxfp4_grouped_experts::KernelSplitLut16VecX4>(device, library);
         let mxfp4_grouped_arm = options.mxfp4_arm;
         let mxfp4_grouped_binding = if options.mxfp4_arm.is_split_scale() {
             ExpertScaleBinding::SplitE8M0
@@ -251,6 +279,7 @@ impl QuantKernels {
             nvfp4_matvec_v2_pipeline,
             nvfp4_sweep_pipelines,
             nvfp4_matvec_x2_seg3_pipeline,
+            nvfp4_matvec_x2_seg3t_pipeline,
             nvfp4_matvec_x2r_pipeline,
             nvfp4_matvec_x2n_pipeline,
             nvfp4_matvec_x2m_pipeline,
@@ -273,6 +302,11 @@ impl QuantKernels {
             q6k_matvec_4sg_pipeline,
             q6k_matvec_8sg_pipeline,
             mxfp4_grouped_pipeline,
+            mxfp4_grouped_x2_pipeline,
+            mxfp4_grouped_x2_gu_pipeline,
+            mxfp4_down_combine4_pipeline,
+            mxfp4_grouped_x2p_pipeline,
+            mxfp4_grouped_x4_pipeline,
             mxfp4_grouped_binding,
             mxfp4_grouped_arm,
         }

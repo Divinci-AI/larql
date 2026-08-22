@@ -216,17 +216,23 @@ fn run_lowered(
     let w = FfnWeights {
         gate: LoweredMatrix::Nvfp4 {
             packed: &gpu.lowering_weight(&gate.packed),
+            packed_offset: 0,
             scales: &gpu.lowering_weight(&gate.scales),
+            scales_offset: 0,
             tensor_scale: gate.tensor_scale,
         },
         up: LoweredMatrix::Nvfp4 {
             packed: &gpu.lowering_weight(&up.packed),
+            packed_offset: 0,
             scales: &gpu.lowering_weight(&up.scales),
+            scales_offset: 0,
             tensor_scale: up.tensor_scale,
         },
         down: LoweredMatrix::Nvfp4 {
             packed: &gpu.lowering_weight(&down.packed),
+            packed_offset: 0,
             scales: &gpu.lowering_weight(&down.scales),
+            scales_offset: 0,
             tensor_scale: down.tensor_scale,
         },
         norm_weight: &norm_buf,

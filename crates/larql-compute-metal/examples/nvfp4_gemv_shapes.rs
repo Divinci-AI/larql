@@ -229,7 +229,9 @@ fn main() {
                         Arm::Seg1 | Arm::Seg1Residual => {
                             let seg = Nvfp4Segment {
                                 packed: &nv_packed[c % nv_packed.len()],
+                                packed_offset: 0,
                                 scales: &nv_scales[c % nv_scales.len()],
+                                scales_offset: 0,
                                 tensor_scale: nv.tensor_scale,
                                 out: &out,
                                 out_offset: 0,

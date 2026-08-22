@@ -412,7 +412,9 @@ fn run_lowered(
 
     let proj = |m: &nvfp4::Nvfp4Matrix| LoweredMatrix::Nvfp4 {
         packed: Box::leak(Box::new(gpu.lowering_weight(&m.packed))),
+        packed_offset: 0,
         scales: Box::leak(Box::new(gpu.lowering_weight(&m.scales))),
+        scales_offset: 0,
         tensor_scale: m.tensor_scale,
     };
     let aw = AttnWeights {
@@ -475,17 +477,23 @@ fn run_lowered(
     let fw = FfnWeights {
         gate: LoweredMatrix::Nvfp4 {
             packed: &gate_buf,
+            packed_offset: 0,
             scales: &gate_sc,
+            scales_offset: 0,
             tensor_scale: f.gate.tensor_scale,
         },
         up: LoweredMatrix::Nvfp4 {
             packed: &up_buf,
+            packed_offset: 0,
             scales: &up_sc,
+            scales_offset: 0,
             tensor_scale: f.up.tensor_scale,
         },
         down: LoweredMatrix::Nvfp4 {
             packed: &down_buf,
+            packed_offset: 0,
             scales: &down_sc,
+            scales_offset: 0,
             tensor_scale: f.down.tensor_scale,
         },
         norm_weight: &ffn_norm_buf,

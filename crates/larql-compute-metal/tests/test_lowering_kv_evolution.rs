@@ -373,7 +373,9 @@ fn step(d: &Device<'_>, ws: &[LayerW], h0: &[f32], t: usize, share: bool) -> Vec
             let ci = if share { 0 } else { l };
             let pr = |o: usize, ts: f32| LoweredMatrix::Nvfp4 {
                 packed: &d.keep[b + o],
+                packed_offset: 0,
                 scales: &d.keep[b + o + 1],
+                scales_offset: 0,
                 tensor_scale: ts,
             };
             LayerLowering {
@@ -424,17 +426,23 @@ fn step(d: &Device<'_>, ws: &[LayerW], h0: &[f32], t: usize, share: bool) -> Vec
                     weights: FfnWeights {
                         gate: LoweredMatrix::Nvfp4 {
                             packed: &d.keep[b + 10],
+                            packed_offset: 0,
                             scales: &d.keep[b + 11],
+                            scales_offset: 0,
                             tensor_scale: w.fg.tensor_scale,
                         },
                         up: LoweredMatrix::Nvfp4 {
                             packed: &d.keep[b + 12],
+                            packed_offset: 0,
                             scales: &d.keep[b + 13],
+                            scales_offset: 0,
                             tensor_scale: w.fu.tensor_scale,
                         },
                         down: LoweredMatrix::Nvfp4 {
                             packed: &d.keep[b + 14],
+                            packed_offset: 0,
                             scales: &d.keep[b + 15],
+                            scales_offset: 0,
                             tensor_scale: w.fd.tensor_scale,
                         },
                         norm_weight: &d.norms[l][2],

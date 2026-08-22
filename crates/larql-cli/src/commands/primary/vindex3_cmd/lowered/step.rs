@@ -38,11 +38,20 @@ use larql_vindex::error::VindexError;
 use super::{LoweredSession, HYBRID_SCRATCH_BASE, PROFILE_MAX_STAGE_RUNS};
 
 /// A position's command buffer, encoded but not committed: its input
-/// buffer is written with the embedding row once the id is known.
+/// buffer is written with the embedding row once the id is known — or,
+/// in gather mode (1c), looked up on the device from the argmax result,
+/// in which case the buffer may already be committed.
 pub(super) struct PreparedStep {
     position: usize,
     cmd: DeviceCommandBuffer,
     samples: Option<StageSamples>,
+    /// 1c: the step's first op gathers the embedding from the device
+    /// argmax buffer — no host write needed, and the command buffer is
+    /// committed AHEAD of the previous step completing (Metal's hazard
+    /// tracking orders the gather after the argmax write).
+    gather: bool,
+    /// Whether `cmd` has already been committed (gather mode).
+    committed: bool,
     /// The hidden-state input the stack reads; dedicated to this step
     /// until it completes.
     h_in: DeviceBuffer,
@@ -62,6 +71,34 @@ impl LoweredSession<'_> {
     /// Encodes the *next* position's command buffer while this one runs.
     pub fn step(&mut self, token: u32) -> Result<Option<u32>, VindexError> {
         self.step_impl(token, None)
+    }
+
+    /// Declare that every following `step` continues from the device
+    /// argmax (greedy decode). Look-ahead steps then gather their
+    /// embedding on the device and are committed before their
+    /// predecessor completes — the host leaves the token loop (1c).
+    pub fn begin_decode(&mut self) {
+        self.decode_chain = true;
+    }
+
+    /// Wait out any committed look-ahead step and discard it. Call
+    /// before reading session state (`last_logits`) that an in-flight
+    /// step would still be writing. Returns the in-flight step's argmax
+    /// id, if it ran to a head — the id belonging to the logits
+    /// `last_logits` will now read.
+    pub fn quiesce(&mut self) -> Option<u32> {
+        let p = self.prepared.take()?;
+        let mut id = None;
+        if p.committed {
+            p.cmd.wait_until_completed();
+            if let (Some(am), true) = (&self.argmax, p.has_logits) {
+                id = read_u32(&am[2 + p.position % 2]).ok();
+                self.last_device_id = id;
+            }
+            self.position += 1;
+        }
+        self.discard(p);
+        id
     }
 
     /// The logits of the most recent completed step, read from the
@@ -120,29 +157,57 @@ impl LoweredSession<'_> {
         capture: Option<(&mut Vec<f32>, &mut Vec<Vec<f32>>)>,
     ) -> Result<Option<u32>, VindexError> {
         let t = self.position;
-        let h0 = self.embed(token)?;
-        // A prepared buffer is for exactly one position and never carries
-        // captures; anything else is encoded now.
+        // A prepared buffer is for exactly one position; a gather-mode
+        // buffer is only valid if the caller's token IS the id the device
+        // argmax produced (greedy decode) — teacher forcing a different
+        // id discards it. Captures always encode fresh.
         let prepared = match self.prepared.take() {
-            Some(p) if p.position == t && capture.is_none() => p,
+            Some(p)
+                if p.position == t
+                    && capture.is_none()
+                    && (!p.gather || self.last_device_id == Some(token)) =>
+            {
+                p
+            }
             Some(stale) => {
                 self.discard(stale);
-                self.prepare(t, capture.is_some())?
+                self.prepare(t, capture.is_some(), false)?
             }
-            None => self.prepare(t, capture.is_some())?,
+            None => self.prepare(t, capture.is_some(), false)?,
         };
-        // The one input the encode could not know: the embedding row,
-        // written into the bound buffer before commit.
-        write_f32(&prepared.h_in, &h0)?;
+        let mut h0 = Vec::new();
+        if !prepared.gather {
+            // The one input the encode could not know: the embedding row,
+            // written into the bound buffer before commit.
+            h0 = self.embed(token)?;
+            write_f32(&prepared.h_in, &h0)?;
+        }
         self.last_encode_ms = prepared.encode_ms;
-        prepared.cmd.commit();
+        if !prepared.committed {
+            prepared.cmd.commit();
+        }
 
         // Overlap: encode the next position while this one executes. Only
         // within the session's KV capacity, and never for a capturing
-        // step (its caller may be dumping a fixed prompt).
+        // step (its caller may be dumping a fixed prompt). When this step
+        // carries a device argmax, the next step gathers its embedding
+        // from it on the device and is COMMITTED now, before this step
+        // completes — the queue pipelines and the host leaves the token
+        // loop entirely (1c).
         if capture.is_none() && t + 1 < self.max_positions {
-            let next = self.prepare(t + 1, false)?;
-            self.prepared = Some(next);
+            let gather_next = self.decode_chain
+                && self.device_embed.is_some()
+                && self.argmax.is_some()
+                && self.ledger.is_none()
+                && gather_enabled();
+            let next = self.prepare(t + 1, false, gather_next)?;
+            if next.gather {
+                next.cmd.commit();
+            }
+            self.prepared = Some(PreparedStep {
+                committed: gather_next,
+                ..next
+            });
         }
 
         prepared.cmd.wait_until_completed();
@@ -154,12 +219,13 @@ impl LoweredSession<'_> {
         }
 
         let out = match (&self.argmax, prepared.has_logits) {
-            (Some([_, _, idx]), true) => Some(read_u32(idx)?),
+            (Some(am), true) => Some(read_u32(&am[2 + t % 2])?),
             // Control arm: no device argmax — read the vocabulary back and
             // scan it on the host, as before.
             (None, true) => self.last_logits().map(|l| host_argmax(&l)),
             _ => None,
         };
+        self.last_device_id = out;
         if let Some((embedding, layers_out)) = capture {
             *embedding = h0;
             for buf in &prepared.captures {
@@ -179,6 +245,11 @@ impl LoweredSession<'_> {
     /// must follow its completion; for an uncommitted one nothing ever
     /// read them.
     pub(super) fn discard(&self, p: PreparedStep) {
+        // A committed step may still be executing; its buffers cannot
+        // rejoin the pool until the GPU is done with them.
+        if p.committed {
+            p.cmd.wait_until_completed();
+        }
         for buf in p.captures {
             self.gpu.recycle_lowering_scratch(buf);
         }
@@ -186,8 +257,15 @@ impl LoweredSession<'_> {
     }
 
     /// Encode position `t`'s whole command buffer — stack and head —
-    /// against an input buffer whose contents are written later.
-    fn prepare(&self, t: usize, capturing: bool) -> Result<PreparedStep, VindexError> {
+    /// against an input buffer whose contents are written later (host
+    /// mode) or gathered from the device argmax as the buffer's first op
+    /// (gather mode, 1c).
+    fn prepare(
+        &self,
+        t: usize,
+        capturing: bool,
+        gather: bool,
+    ) -> Result<PreparedStep, VindexError> {
         let encode_started = std::time::Instant::now();
         // Per-layer capture buffers (hidden-sized), read back after the
         // command buffer completes — a copy inside the stream, never a
@@ -268,6 +346,28 @@ impl LoweredSession<'_> {
             (None, Some(s)) => s,
             (None, None) => unreachable!("one of profiler / single encoder exists"),
         };
+        if gather {
+            let (table, am) = match (&self.device_embed, &self.argmax) {
+                (Some(tb), Some(am)) => (tb, am),
+                _ => {
+                    return Err(VindexError::Parse(
+                        "gather prepare without device state".into(),
+                    ))
+                }
+            };
+            // The PREVIOUS position's argmax word (parity-alternated:
+            // this step is `t`, its input id came from `t-1`).
+            let idx = &am[2 + (t + 1) % 2];
+            let scale = self
+                .plan
+                .embedding
+                .as_ref()
+                .and_then(|e| e.scale)
+                .unwrap_or(0.0);
+            let enc = encs.stage(Stage::AttnNorm);
+            self.gpu
+                .encode_embed_gather(enc, table, idx, &h_in, self.hidden, scale);
+        }
         let h_final = self
             .gpu
             .encode_stack(encs, &h_in, &layers, &scratch, &checkpoints);
@@ -292,7 +392,7 @@ impl LoweredSession<'_> {
                 };
                 self.gpu
                     .encode_head(encs, h_final, &s[HEAD_LOGITS_SLOT], &hw, &hs, &shape);
-                if let Some([vals, idx, out]) = &self.argmax {
+                if let Some([vals, idx, out_even, out_odd]) = &self.argmax {
                     let enc = encs.stage(Stage::Head);
                     self.gpu.encode_argmax(
                         enc,
@@ -301,7 +401,11 @@ impl LoweredSession<'_> {
                         &ArgmaxScratch {
                             partial_vals: vals,
                             partial_idx: idx,
-                            out,
+                            out: if t.is_multiple_of(2) {
+                                out_even
+                            } else {
+                                out_odd
+                            },
                         },
                     );
                 }
@@ -317,6 +421,8 @@ impl LoweredSession<'_> {
             position: t,
             cmd,
             samples,
+            gather,
+            committed: false,
             h_in,
             has_logits,
             captures,
@@ -328,6 +434,13 @@ impl LoweredSession<'_> {
 /// Scratch slot the head writes its final logits to (slot 15 is the
 /// normed hidden, 17 the raw logits).
 const HEAD_LOGITS_SLOT: usize = 16;
+
+/// Control for the 1c GPU-directed decode chain:
+/// `LARQL_LOWERED_GATHER=0` keeps the host embed + per-step commit.
+fn gather_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("LARQL_LOWERED_GATHER").as_deref() != Ok("0"))
+}
 
 /// Host argmax: strict `>` scanning upward, first maximum on ties — the
 /// contract the device kernel reproduces.

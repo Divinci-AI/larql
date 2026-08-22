@@ -49,7 +49,8 @@ pub(super) use run::run_lowered;
 
 use profile::{StageBytes, StageLedger};
 use resident::{
-    resident_matrix, resident_norm, resident_vector, rope_inv_freq_table, rope_table_key, Ablation,
+    resident_attn, resident_matrix, resident_norm, resident_vector, rope_inv_freq_table,
+    rope_table_key, Ablation,
 };
 use routed::{build_ffn, FfnResident};
 
@@ -58,6 +59,15 @@ pub(super) struct DeviceMatrix {
     /// per-class policy asked for, not something inferred here.
     pub(super) packed: DeviceBuffer,
     pub(super) scales: DeviceBuffer,
+    /// Byte offsets of this matrix's rows inside `packed`/`scales` —
+    /// non-zero when the matrix is a slice of a shared allocation (the
+    /// QKV packing rung). NVFP4 only; the other formats are always
+    /// whole-buffer residents.
+    pub(super) packed_offset: u64,
+    pub(super) scales_offset: u64,
+    /// Bytes a matvec over this matrix reads — its own rows, not the
+    /// (possibly shared) allocation the buffers measure.
+    pub(super) read_bytes: usize,
     pub(super) tensor_scale: f32,
     pub(super) format: WeightFormat,
     pub(super) rows: usize,
@@ -68,11 +78,7 @@ impl DeviceMatrix {
     /// Bytes a matvec over this matrix reads: packed codes, plus scales
     /// for the block formats (f16 carries an empty scales buffer).
     pub(super) fn bytes(&self) -> usize {
-        let scales = match self.format {
-            WeightFormat::F16 => 0,
-            _ => self.scales.length() as usize,
-        };
-        self.packed.length() as usize + scales
+        self.read_bytes
     }
 
     pub(super) fn as_lowered(&self) -> LoweredMatrix<'_> {
@@ -86,7 +92,9 @@ impl DeviceMatrix {
             },
             _ => LoweredMatrix::Nvfp4 {
                 packed: &self.packed,
+                packed_offset: self.packed_offset,
                 scales: &self.scales,
+                scales_offset: self.scales_offset,
                 tensor_scale: self.tensor_scale,
             },
         }
@@ -156,8 +164,28 @@ pub struct LoweredSession<'a> {
     /// KV capacity in positions; nothing is encoded past it.
     max_positions: usize,
     /// Device scratch for the head's argmax: block partials (values,
-    /// indices) and the one-u32 result. `None` without a head.
-    argmax: Option<[DeviceBuffer; 3]>,
+    /// indices) and TWO one-u32 results, alternated by position parity —
+    /// with commit-ahead (1c) step t+1 executes while the host still
+    /// reads step t's id, so they must not share the output word.
+    /// `None` without a head.
+    argmax: Option<[DeviceBuffer; 4]>,
+    /// The embedding table resident on the device (zero-copy over the
+    /// host allocation), for the 1c gather path. `None` when the plan
+    /// carries a judged embedding norm — the host computes that in f64,
+    /// which the f32 kernel cannot reproduce, so those plans keep the
+    /// host embed.
+    device_embed: Option<DeviceBuffer>,
+    /// The id the device argmax produced for the most recent completed
+    /// step; a decode step whose input token equals it can gather the
+    /// embedding on the device instead of uploading a host row.
+    last_device_id: Option<u32>,
+    /// Set by `begin_decode`: every following step continues from the
+    /// device argmax, so look-ahead steps may gather their embedding on
+    /// the device and be committed before their predecessor completes.
+    /// Never set during the prompt — a prompt look-ahead's token is the
+    /// caller's, not the argmax's, and a committed wrong-token step
+    /// would execute (and burn GPU time) before being discarded.
+    decode_chain: bool,
 }
 
 /// Set to keep the argmax on the host (full-logits readback + scan) —
@@ -265,11 +293,21 @@ impl<'a> LoweredSession<'a> {
             // bytes load through the same cache, so the V projection
             // binds the K matrix — the raw K projection lands in the V
             // slot before the key's own norm and rotation.
+            // Q, K, V and O as slices of one allocation, in touch order,
+            // where format and alignment admit it; otherwise four
+            // separate residents, unchanged.
+            let [q_m, k_m, v_m, o_m] = resident_attn(
+                gpu,
+                store,
+                [&a.q, &a.k, &a.v, &a.o],
+                formats.attention,
+                keep,
+            )?;
             layers.push(LayerResident {
-                q: resident_matrix(gpu, store, &a.q, formats.attention, keep)?,
-                k: resident_matrix(gpu, store, &a.k, formats.attention, keep)?,
-                v: resident_matrix(gpu, store, &a.v, formats.attention, keep)?,
-                o: resident_matrix(gpu, store, &a.o, formats.attention, keep)?,
+                q: q_m,
+                k: k_m,
+                v: v_m,
+                o: o_m,
                 qk_norm: match &a.qk_norm {
                     Some(qk) => {
                         let q = resident_vector(gpu, store, Some(&qk.q))?.expect("q norm weight");
@@ -447,6 +485,22 @@ impl<'a> LoweredSession<'a> {
             wiring.elapsed().as_secs_f64()
         );
 
+        // The embedding table as a device buffer over the same host
+        // floats — a row lookup on the GPU reads only the sampled row's
+        // 4·hidden bytes, so residency does not change. Refused when the
+        // plan judges a weightless embedding norm (host f64 semantics).
+        let device_embed = (plan.embedding.as_ref().is_some_and(|e| e.norm.is_none())).then(|| {
+            // SAFETY: an f32 slice viewed as bytes, same length; the Vec
+            // lives in `Self` for the session, outliving the buffer's use.
+            let bytes = unsafe {
+                std::slice::from_raw_parts(
+                    embed_table.as_ptr() as *const u8,
+                    std::mem::size_of_val(embed_table.as_slice()),
+                )
+            };
+            gpu.lowering_weight(bytes)
+        });
+
         // Argmax scratch sized for the head's vocabulary. The control arm
         // (`LARQL_LOWERED_HOST_ARGMAX=1`) keeps the argmax on the host so
         // the device kernel can be A/B'd under one power state.
@@ -457,6 +511,7 @@ impl<'a> LoweredSession<'a> {
             [
                 gpu.lowering_scratch(parts),
                 gpu.lowering_scratch(parts),
+                gpu.lowering_scratch(1),
                 gpu.lowering_scratch(1),
             ]
         });
@@ -481,6 +536,9 @@ impl<'a> LoweredSession<'a> {
             prepared: None,
             max_positions,
             argmax,
+            device_embed,
+            last_device_id: None,
+            decode_chain: false,
         })
     }
 

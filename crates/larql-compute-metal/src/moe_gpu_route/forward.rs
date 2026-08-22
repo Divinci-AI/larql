@@ -270,8 +270,7 @@ impl MetalBackend {
 
         let t0 = std::time::Instant::now();
         let mut windows: Vec<(f64, f64)> = Vec::with_capacity(layers);
-        let cmd_bufs;
-        if pre_encode {
+        let cmd_bufs = if pre_encode {
             let cmd = self.queue.new_command_buffer();
             let enc = cmd.new_compute_command_encoder();
             let mut prev = h0.clone();
@@ -290,7 +289,7 @@ impl MetalBackend {
                 let end: f64 = msg_send![cmd, GPUEndTime];
                 (start, end)
             });
-            cmd_bufs = 1;
+            1
         } else {
             let mut prev = h0.clone();
             for out in &new_hs {
@@ -310,8 +309,8 @@ impl MetalBackend {
                 });
                 prev = out.clone();
             }
-            cmd_bufs = layers;
-        }
+            layers
+        };
         let wall_ms = t0.elapsed().as_secs_f64() * 1e3;
 
         let gpu_busy_ms: f64 = windows.iter().map(|(s, e)| (e - s) * 1e3).sum();

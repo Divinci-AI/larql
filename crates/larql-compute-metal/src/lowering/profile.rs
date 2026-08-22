@@ -196,14 +196,19 @@ impl StageProfiler {
         cmd: CommandBuffer,
         max_runs: usize,
     ) -> Result<Self, String> {
-        let set = device
-            .counter_sets()
-            .into_iter()
-            .find(|s| s.name() == TIMESTAMP_COUNTER_SET)
-            .ok_or_else(|| format!("device exposes no `{TIMESTAMP_COUNTER_SET}` counter set"))?;
+        // Order matters, and the counter-set probe must be nil-safe: on
+        // GitHub's macos-14 runners the paravirtualized GPU can return a
+        // nil `counterSets` array, which `metal-rs`'s accessor derefs —
+        // a non-unwinding abort, not a catchable panic. Check the
+        // sampling capability (a plain bool) first, then read the array
+        // through a raw nil check.
         if !device.supports_counter_sampling(metal::MTLCounterSamplingPoint::AtStageBoundary) {
             return Err("device does not sample counters at stage boundaries".into());
         }
+        let set = nil_safe_counter_sets(device)
+            .into_iter()
+            .find(|s| s.name() == TIMESTAMP_COUNTER_SET)
+            .ok_or_else(|| format!("device exposes no `{TIMESTAMP_COUNTER_SET}` counter set"))?;
         let desc = metal::CounterSampleBufferDescriptor::new();
         desc.set_counter_set(&set);
         desc.set_sample_count((2 * max_runs) as u64);
@@ -253,6 +258,21 @@ impl StageProfiler {
 
 /// The timestamp counter set every Apple GPU exposes.
 const TIMESTAMP_COUNTER_SET: &str = "timestamp";
+
+/// `device.counter_sets()` with a nil guard: `metal-rs` 0.29 dereferences
+/// a nil `counterSets` NSArray (seen on paravirtualized CI GPUs).
+fn nil_safe_counter_sets(device: &metal::Device) -> Vec<metal::CounterSet> {
+    use metal::foreign_types::ForeignTypeRef;
+    use objc::{msg_send, sel, sel_impl};
+    let raw: *mut objc::runtime::Object = device.as_ptr() as *mut _;
+    // SAFETY: `counterSets` exists on MTLDevice and returns NSArray<...>
+    // or nil; nil is checked before any element access.
+    let arr: *mut objc::runtime::Object = unsafe { msg_send![raw, counterSets] };
+    if arr.is_null() {
+        return Vec::new();
+    }
+    device.counter_sets()
+}
 
 impl StageEncoders for StageProfiler {
     fn stage(&mut self, stage: Stage) -> &ComputeCommandEncoderRef {

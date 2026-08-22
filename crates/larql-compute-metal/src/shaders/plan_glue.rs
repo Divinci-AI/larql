@@ -87,6 +87,33 @@ kernel void head_scale_softcap(
     out[tid] = v;
 }
 
+// Embedding gather from the device argmax (A-12 lever 1c): the host's
+// per-token work was "read the sampled id back, look up the embedding
+// row, scale it, write it into the next command buffer's input" — the
+// one CPU step left in the decode loop. This kernel does the lookup and
+// scale on the device, reading the id the argmax kernel wrote, so the
+// next token's command buffer can be committed without any host write
+// (Metal's hazard tracking orders it after the argmax). One threadgroup;
+// rows wider than the threadgroup loop. The judged weightless embedding
+// norm (Muse-Glimmer) is NOT expressed here — the host computes it in
+// f64, which this f32 kernel cannot reproduce bit-for-bit, so a plan
+// carrying an embedding norm keeps the host path.
+kernel void embed_gather(
+    device const float* table  [[buffer(0)]],  // [vocab, hidden]
+    device const uint*  idx    [[buffer(1)]],  // [1], from argmax_final
+    device float*       out    [[buffer(2)]],  // [hidden]
+    constant uint&      hidden [[buffer(3)]],
+    constant float&     scale  [[buffer(4)]],  // 0 = op absent
+    uint tid   [[thread_index_in_threadgroup]],
+    uint tg_sz [[threads_per_threadgroup]])
+{
+    device const float* row = table + (ulong)idx[0] * (ulong)hidden;
+    const float s = (scale != 0.0f) ? scale : 1.0f;
+    for (uint i = tid; i < hidden; i += tg_sz) {
+        out[i] = row[i] * s;
+    }
+}
+
 // Up to three RMS norms of ONE input in one dispatch (A-5b rung 2c):
 // Gemma 4's hybrid layer normalises the post-attention residual three
 // ways (pre-FFN, pre-experts, router conditioning) — three reductions of
@@ -235,6 +262,12 @@ impl crate::kernels::ShaderKernel for QkNormParameterFreeKernel {
 pub struct HeadScaleSoftcapKernel;
 impl crate::kernels::ShaderKernel for HeadScaleSoftcapKernel {
     const KERNEL_NAME: &'static str = "head_scale_softcap";
+}
+
+/// Marker for the device embedding gather.
+pub struct EmbedGatherKernel;
+impl crate::kernels::ShaderKernel for EmbedGatherKernel {
+    const KERNEL_NAME: &'static str = "embed_gather";
 }
 
 /// Marker for the one-input, up-to-three-output RMS norm.
