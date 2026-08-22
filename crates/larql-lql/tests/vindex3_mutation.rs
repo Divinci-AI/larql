@@ -468,10 +468,17 @@ fn compose_insert_alters_execution_and_reverts_bit_for_bit() {
     );
 
     // ── Install, with a payload strong enough to flip top-1 ──
+    // ALPHA 5000: the LCG fixture's head is random, so the payload's
+    // projection onto any logit is tiny and the balance loop never
+    // reaches PROB_FLOOR to amplify it. At ALPHA 5.0 the change to
+    // INFER's 2-decimal display was sub-quantum — whether a digit
+    // flipped was platform rounding luck (it did on unix, not on
+    // Windows CI). 5000 makes the observed difference a top-1
+    // reordering with ~8x the display quantum in probability margin.
     run(&mut session, &format!("BEGIN PATCH \"{patch_file}\";"));
     let out = run(
         &mut session,
-        r#"INSERT INTO EDGES (entity, relation, target) VALUES ("[3]", "[7]", "[5]") ALPHA 5.0 MODE COMPOSE;"#,
+        r#"INSERT INTO EDGES (entity, relation, target) VALUES ("[3]", "[7]", "[5]") ALPHA 5000.0 MODE COMPOSE;"#,
     )
     .join("\n");
     assert!(out.contains("compose overlay"), "{out}");
