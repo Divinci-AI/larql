@@ -22,8 +22,9 @@ use crate::executor::{Backend, Session};
 /// The statements a VINDEX3 binding serves today. Everything else gets
 /// [`unsupported`] — a capability refusal, not a format apology.
 pub(crate) const SUPPORTED: &str = "SELECT, DESCRIBE, WALK, EXPLAIN WALK, \
-     SHOW RELATIONS/LAYERS/FEATURES/ENTITIES, INFER [TOP n] [GENERATE n], \
-     EXPLAIN INFER, TRACE, STATS, USE";
+     SHOW RELATIONS/LAYERS/FEATURES/ENTITIES/PATCHES, INFER [TOP n] [GENERATE n], \
+     EXPLAIN INFER, TRACE, STATS, USE, INSERT [MODE KNN], DELETE, UPDATE, MERGE, \
+     BEGIN/SAVE/APPLY/REMOVE PATCH";
 
 /// Component id a container's text stack is bound under.
 pub(crate) const V3_COMPONENT: &str = "target";
@@ -50,7 +51,10 @@ impl Session {
         generate: Option<u32>,
     ) -> Result<Vec<String>, LqlError> {
         let Backend::Vindex3 {
-            runtime, tokenizer, ..
+            runtime,
+            tokenizer,
+            overlay,
+            ..
         } = &self.backend
         else {
             unreachable!("caller matched the backend");
@@ -65,30 +69,112 @@ impl Session {
         let prompt_ids = encode_v3_prompt(tokenizer, prompt)?;
 
         let start = std::time::Instant::now();
-        let mut kv = CanonicalKvState::new();
-        let prefill_logits = runtime
-            .prefill_into(&prompt_ids, &mut kv)
-            .map_err(|e| LqlError::exec("v3 prefill failed", e))?;
 
         match generate {
             None => {
+                // One observed pass over the same traversal generation
+                // runs: logits for the display, per-layer residual taps
+                // for the KnnStore override (only captured while the
+                // overlay holds entries).
+                let capture_residuals = !overlay.knn_store.is_empty();
+                let mut residuals: Vec<(usize, Vec<f32>)> = Vec::new();
+                let output = runtime
+                    .execute_streaming(&prompt_ids, &mut |event| {
+                        if capture_residuals {
+                            if let larql_inference::vindex3::PlaneEvent::Layer { index, trace } =
+                                event
+                            {
+                                if let Some(last) = trace.post_layer.last() {
+                                    residuals.push((index, last.clone()));
+                                }
+                            }
+                        }
+                        Ok(())
+                    })
+                    .map_err(|e| LqlError::exec("v3 prefill failed", e))?;
+                let logits = output.logits.ok_or_else(|| {
+                    LqlError::Execution("the component carries no output head".into())
+                })?;
                 let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+
+                let scored = top_k_probs(&logits, top_k);
+                // The shared post-logits resolution rule — same
+                // first-stored-layer, fixed-threshold gate V2 runs.
+                let raw: Vec<(String, f64)> = scored
+                    .iter()
+                    .map(|(id, prob)| {
+                        (
+                            tokenizer.decode(&[*id], false).unwrap_or_default(),
+                            *prob as f64,
+                        )
+                    })
+                    .collect();
+                let (_, knn_override) = larql_inference::apply_knn_override(
+                    raw,
+                    &residuals,
+                    Some(&overlay.knn_store),
+                    top_k,
+                );
+
                 let mut out = Vec::new();
                 out.push("Predictions (VINDEX3 program):".into());
-                for (i, (id, prob)) in top_k_probs(&prefill_logits, top_k).iter().enumerate() {
-                    let token = tokenizer.decode(&[*id], false).unwrap_or_default();
-                    out.push(format!(
-                        "  {:2}. {:20} ({:.2}%)  [id {}]",
-                        i + 1,
-                        token,
-                        prob * 100.0,
-                        id,
-                    ));
+                match &knn_override {
+                    Some(ovr) => {
+                        let model_top1 = scored.first().map(|(id, prob)| {
+                            (
+                                tokenizer.decode(&[*id], false).unwrap_or_default(),
+                                *prob as f64,
+                            )
+                        });
+                        out.push(format!(
+                            "   1. {:20} (100.00%, {})",
+                            ovr.token,
+                            crate::executor::helpers::format_knn_override_summary(
+                                ovr,
+                                model_top1.as_ref(),
+                            ),
+                        ));
+                        for (i, (id, prob)) in
+                            scored.iter().take(top_k.saturating_sub(1)).enumerate()
+                        {
+                            let token = tokenizer.decode(&[*id], false).unwrap_or_default();
+                            out.push(format!(
+                                "  {:2}. {:20} ({:.2}%)  [id {}]",
+                                i + 2,
+                                token,
+                                prob * 100.0,
+                                id,
+                            ));
+                        }
+                    }
+                    None => {
+                        for (i, (id, prob)) in scored.iter().enumerate() {
+                            let token = tokenizer.decode(&[*id], false).unwrap_or_default();
+                            out.push(format!(
+                                "  {:2}. {:20} ({:.2}%)  [id {}]",
+                                i + 1,
+                                token,
+                                prob * 100.0,
+                                id,
+                            ));
+                        }
+                    }
                 }
                 out.push(format!("  {:.0}ms", elapsed_ms));
+                if knn_override.is_some() {
+                    out.push(
+                        "  note: KNN override is a post-logits retrieval sidecar, not an \
+                         FFN/residual edit."
+                            .into(),
+                    );
+                }
                 Ok(out)
             }
             Some(n) => {
+                let mut kv = CanonicalKvState::new();
+                let prefill_logits = runtime
+                    .prefill_into(&prompt_ids, &mut kv)
+                    .map_err(|e| LqlError::exec("v3 prefill failed", e))?;
                 let mut session = runtime
                     .session_with_kv(&mut kv)
                     .map_err(|e| LqlError::exec("v3 session failed", e))?;
@@ -387,7 +473,33 @@ pub(crate) fn bind(
     Ok((runtime, tokenizer, knowledge))
 }
 
-fn encode_v3_prompt(tokenizer: &Tokenizer, prompt: &str) -> Result<Vec<u32>, LqlError> {
+/// One observed pass over the runtime's plan, returning the last
+/// position's post-layer residual at `layer` (V3-LQL-3B capture — the
+/// KNN insert's key, and any later analysis that needs a residual).
+/// The pass is the same canonical traversal INFER runs; the tap is a
+/// subscription, never a second executor.
+pub(crate) fn capture_layer_residual(
+    runtime: &V3Runtime,
+    tokenizer: &Tokenizer,
+    prompt: &str,
+    layer: usize,
+) -> Result<Vec<f32>, LqlError> {
+    let prompt_ids = encode_v3_prompt(tokenizer, prompt)?;
+    let mut captured: Option<Vec<f32>> = None;
+    runtime
+        .execute_streaming(&prompt_ids, &mut |event| {
+            if let larql_inference::vindex3::PlaneEvent::Layer { index, trace } = event {
+                if index == layer {
+                    captured = trace.post_layer.last().cloned();
+                }
+            }
+            Ok(())
+        })
+        .map_err(|e| LqlError::exec("v3 capture pass failed", e))?;
+    captured.ok_or_else(|| LqlError::Execution(format!("no residual captured at layer {layer}")))
+}
+
+pub(crate) fn encode_v3_prompt(tokenizer: &Tokenizer, prompt: &str) -> Result<Vec<u32>, LqlError> {
     let encoding = tokenizer
         .encode(prompt, true)
         .map_err(|e| LqlError::Execution(format!("tokenize: {e}")))?;

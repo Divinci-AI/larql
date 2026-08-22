@@ -64,6 +64,11 @@ pub(crate) enum Backend {
         /// plan's operands. `Some` iff the tokenizer capability is
         /// present (annotations decode token ids); built at USE.
         knowledge: Option<larql_vindex::format::vindex3::knowledge::KnowledgeView>,
+        /// The logical mutation overlay (V3-LQL-3B): entity-keyed KNN
+        /// entries and applied patches over the read-only container.
+        /// Always present — mutation capability is not gated on the
+        /// tokenizer.
+        overlay: larql_vindex::format::vindex3::knowledge::KnowledgeOverlay,
     },
     /// Remote server backend — queries forwarded via HTTP.
     /// Local patches can be applied for client-side overlay.

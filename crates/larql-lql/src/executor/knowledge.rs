@@ -21,7 +21,7 @@
 use std::borrow::Cow;
 use std::path::Path;
 
-use larql_vindex::format::vindex3::knowledge::KnowledgeView;
+use larql_vindex::format::vindex3::knowledge::{KnowledgeOverlay, KnowledgeView};
 use larql_vindex::ndarray::{Array1, Array2};
 use larql_vindex::{FeatureMeta, LayerBands, PatchedVindex, VindexConfig, WalkTrace};
 
@@ -31,28 +31,36 @@ use crate::executor::{Backend, Session};
 /// The knowledge source behind one bound session.
 pub(crate) enum KnowledgeSource<'a> {
     V2(&'a PatchedVindex),
-    V3(&'a KnowledgeView),
+    V3 {
+        view: &'a KnowledgeView,
+        /// The logical mutation overlay (V3-LQL-3B) — browse must
+        /// observe session edits exactly as V2's browse observes
+        /// `PatchedVindex`.
+        overlay: &'a KnowledgeOverlay,
+    },
 }
 
 impl KnowledgeSource<'_> {
     pub(crate) fn loaded_layers(&self) -> Vec<usize> {
         match self {
             Self::V2(patched) => patched.loaded_layers(),
-            Self::V3(view) => view.loaded_layers(),
+            Self::V3 { view, .. } => view.loaded_layers(),
         }
     }
 
     pub(crate) fn num_features(&self, layer: usize) -> usize {
         match self {
             Self::V2(patched) => patched.num_features(layer),
-            Self::V3(view) => view.num_features(layer),
+            Self::V3 { view, .. } => view.num_features(layer),
         }
     }
 
     pub(crate) fn feature_meta(&self, layer: usize, feature: usize) -> Option<FeatureMeta> {
         match self {
             Self::V2(patched) => patched.feature_meta(layer, feature),
-            Self::V3(view) => view.feature_meta(layer, feature),
+            Self::V3 { view, overlay } => {
+                overlay.resolve_feature_meta(layer, feature, view.feature_meta(layer, feature))
+            }
         }
     }
 
@@ -62,7 +70,11 @@ impl KnowledgeSource<'_> {
     pub(crate) fn feature_metas(&self, layer: usize) -> Option<Vec<Option<FeatureMeta>>> {
         match self {
             Self::V2(patched) => patched.down_meta_at(layer).map(|m| m.to_vec()),
-            Self::V3(view) => view.feature_metas(layer).map(|m| m.to_vec()),
+            Self::V3 { view, overlay } => {
+                let mut metas = view.feature_metas(layer).map(|m| m.to_vec())?;
+                overlay.apply_meta_overrides(layer, &mut metas);
+                Some(metas)
+            }
         }
     }
 
@@ -74,33 +86,88 @@ impl KnowledgeSource<'_> {
     ) -> Vec<(usize, f32)> {
         match self {
             Self::V2(patched) => patched.gate_knn(layer, query, top_k),
-            Self::V3(view) => view.gate_knn(layer, query, top_k),
+            Self::V3 { view, overlay } => {
+                // Tombstoned slots must vanish from the scan (V2's
+                // agreement contract between the meta path and the
+                // gate path). Oversampling by the layer's tombstone
+                // count keeps the result full — each tombstone removes
+                // at most one hit, so this is exact, no retry loop.
+                let tombstones = overlay.tombstones_at(layer);
+                if tombstones == 0 {
+                    return view.gate_knn(layer, query, top_k);
+                }
+                let mut hits = view.gate_knn(layer, query, top_k + tombstones);
+                hits.retain(|&(feature, _)| !overlay.is_tombstoned(layer, feature));
+                hits.truncate(top_k);
+                hits
+            }
         }
     }
 
     pub(crate) fn walk(&self, query: &Array1<f32>, layers: &[usize], top_k: usize) -> WalkTrace {
         match self {
             Self::V2(patched) => patched.walk(query, layers, top_k),
-            Self::V3(view) => view.walk(query, layers, top_k),
+            Self::V3 { view, overlay } => {
+                if !overlay.has_feature_state() {
+                    return view.walk(query, layers, top_k);
+                }
+                // The overlay-aware walk is the same join V2's
+                // `PatchedVindex::walk` performs: the (tombstone-
+                // filtered) gate scan, annotated through the merged
+                // meta path.
+                let mut trace_layers = Vec::with_capacity(layers.len());
+                for &layer in layers {
+                    let hits = self.gate_knn(layer, query, top_k);
+                    let walk_hits: Vec<larql_vindex::WalkHit> = hits
+                        .into_iter()
+                        .filter_map(|(feature, gate_score)| {
+                            let meta = self.feature_meta(layer, feature)?;
+                            Some(larql_vindex::WalkHit::from_gate(
+                                layer, feature, gate_score, meta,
+                            ))
+                        })
+                        .collect();
+                    trace_layers.push((layer, walk_hits));
+                }
+                WalkTrace {
+                    layers: trace_layers,
+                }
+            }
         }
     }
 
-    /// KNN-store entries for an entity (DESCRIBE's L0 section). The
-    /// V3 overlay's store arrives with mutation (3B); until then the
-    /// V3 answer is honestly empty.
+    /// Feature slots whose annotation mentions `entity` — WHERE-clause
+    /// candidate resolution. Both arms scan the BASE (V2's documented
+    /// semantic: `resolve_candidates` reads `patched.base()`, so
+    /// overlay-renamed annotations do not change what an entity
+    /// predicate matches).
+    pub(crate) fn find_features(
+        &self,
+        entity: Option<&str>,
+        layer_filter: Option<usize>,
+    ) -> Vec<(usize, usize)> {
+        match self {
+            Self::V2(patched) => patched.base().find_features(entity, None, layer_filter),
+            Self::V3 { view, .. } => view.find_features(entity, layer_filter),
+        }
+    }
+
+    /// KNN-store entries for an entity (DESCRIBE's L0 section) —
+    /// V2's patch overlay and V3's knowledge overlay hold the same
+    /// logical store, so browse reads either through one shape.
     pub(crate) fn knn_entries_for_entity(
         &self,
         entity: &str,
     ) -> Vec<(usize, larql_vindex::KnnEntry)> {
-        match self {
-            Self::V2(patched) => patched
-                .knn_store
-                .entries_for_entity(entity)
-                .into_iter()
-                .map(|(index, entry)| (index, entry.clone()))
-                .collect(),
-            Self::V3(_) => Vec::new(),
-        }
+        let store = match self {
+            Self::V2(patched) => &patched.knn_store,
+            Self::V3 { overlay, .. } => &overlay.knn_store,
+        };
+        store
+            .entries_for_entity(entity)
+            .into_iter()
+            .map(|(index, entry)| (index, entry.clone()))
+            .collect()
     }
 }
 
@@ -129,7 +196,7 @@ impl BrowseCtx<'_> {
                     .map_err(|e| LqlError::exec("failed to load embeddings", e))?;
                 Ok((Cow::Owned(embed), scale))
             }
-            KnowledgeSource::V3(view) => {
+            KnowledgeSource::V3 { view, .. } => {
                 let (embed, scale) = view.embedding();
                 Ok((Cow::Borrowed(embed), scale))
             }
@@ -180,6 +247,7 @@ impl Session {
                 path,
                 runtime,
                 knowledge,
+                overlay,
                 ..
             } => {
                 let view = knowledge.as_ref().ok_or_else(|| {
@@ -202,7 +270,7 @@ impl Session {
                         output: (0, last),
                     },
                     config: None,
-                    source: KnowledgeSource::V3(view),
+                    source: KnowledgeSource::V3 { view, overlay },
                 })
             }
             Backend::Weight { model_id, .. } => Err(LqlError::Execution(format!(

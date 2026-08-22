@@ -94,10 +94,10 @@ fn main() {
     let mut session = Session::new();
 
     // ── Bind once; everything after consumes declared facts ──
-    run(
-        &mut session,
-        &format!("USE \"{}\";", container.path().display()),
-    );
+    // (backslashes doubled so the LQL lexer's escape pass keeps
+    // Windows paths intact)
+    let container_path = container.path().display().to_string().replace('\\', "\\\\");
+    run(&mut session, &format!("USE \"{container_path}\";"));
 
     // ── The container's own authority ──
     run(&mut session, "STATS;");
@@ -129,10 +129,35 @@ fn main() {
     run(&mut session, r#"SHOW RELATIONS;"#);
     run(&mut session, r#"DESCRIBE "[3]";"#);
 
-    // ── Refusals are capability statements (mutation is V3-LQL-3B) ──
+    // ── Mutation (V3-LQL-3B): the default KNN insert executes and is
+    // immediately observable — the container stays untouched on disk ──
     run(
         &mut session,
-        r#"INSERT INTO EDGES (entity, relation, target) VALUES ("a", "b", "c");"#,
+        r#"INSERT INTO EDGES (entity, relation, target) VALUES ("a", "b", "[5]");"#,
+    );
+    run(&mut session, r#"DESCRIBE "a";"#);
+    run(&mut session, r#"INFER "The b of a is" TOP 3;"#);
+    run(&mut session, "SHOW PATCHES;");
+
+    // ── Feature-slot mutation: overlay meta overrides + tombstones,
+    // V2's contract — the container stays untouched on disk ──
+    run(
+        &mut session,
+        r#"UPDATE EDGES SET target = "[9]" WHERE layer = 1 AND feature = 1;"#,
+    );
+    run(
+        &mut session,
+        "DELETE FROM EDGES WHERE layer = 0 AND feature = 0;",
+    );
+    run(
+        &mut session,
+        r#"SELECT * FROM FEATURES WHERE layer = 1 LIMIT 5;"#,
+    );
+
+    // ── Refusals are capability statements (compose is a later rung) ──
+    run(
+        &mut session,
+        r#"INSERT INTO EDGES (entity, relation, target) VALUES ("a", "b", "c") MODE COMPOSE;"#,
     );
 
     println!("=== Done ===");

@@ -21,6 +21,7 @@ mod balance;
 mod capture;
 mod compose;
 mod knn;
+mod knn_v3;
 mod plan;
 
 use crate::ast::InsertMode;
@@ -54,6 +55,12 @@ impl Session {
                 return self.exec_insert_knn(entity, relation, target, layer_hint, confidence);
             }
             InsertMode::Compose => { /* fallthrough */ }
+        }
+
+        // The FFN-overlay install writes vectors execution must observe,
+        // which needs the V3 operand-source seam — the compose rung.
+        if matches!(self.backend, crate::executor::Backend::Vindex3 { .. }) {
+            return Err(crate::executor::vindex3::unsupported("INSERT MODE COMPOSE"));
         }
 
         // ALPHA is the dimensionless multiplier on the layer's median

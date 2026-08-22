@@ -874,22 +874,32 @@ family metadata.
 | SHOW LAYERS | ✅ From metadata | ✅ Computed from weights | ✅ Per-layer plan facts |
 | SHOW FEATURES | ✅ Index lookup | ✅ Dense scan per layer | ✅ via semantic roles |
 | STATS | ✅ Instant | ✅ Computed | ✅ Container's own authority |
-| INSERT | ✅ | ❌ Error: "requires vindex" | ❌ capability refusal |
-| DELETE | ✅ | ❌ Error: "requires vindex" | ❌ capability refusal |
-| UPDATE | ✅ | ❌ Error: "requires vindex" | ❌ capability refusal |
-| BEGIN/SAVE/APPLY PATCH | ✅ | ❌ Error: "requires vindex" | ❌ capability refusal |
-| SHOW PATCHES | ✅ | ❌ | ❌ capability refusal |
+| INSERT (MODE KNN, default) | ✅ | ❌ Error: "requires vindex" | ✅ key from plan taps (§4.4) |
+| INSERT MODE COMPOSE | ✅ | ❌ Error: "requires vindex" | ❌ awaits the operand-source seam |
+| DELETE | ✅ | ❌ Error: "requires vindex" | ✅ overlay tombstones |
+| UPDATE | ✅ | ❌ Error: "requires vindex" | ✅ overlay meta overrides |
+| BEGIN/SAVE/APPLY/REMOVE PATCH | ✅ | ❌ Error: "requires vindex" | ✅ vector-free patches (all-or-nothing) |
+| SHOW PATCHES | ✅ | ❌ | ✅ overlay's applied list |
 | COMPILE | ✅ | ❌ Error: "requires vindex" | ❌ capability refusal |
 | DIFF | ✅ | ⚠️ One side can be weights | ❌ capability refusal |
-| MERGE | ✅ | ❌ Error: "requires vindex" | ❌ capability refusal |
+| MERGE | ✅ | ❌ Error: "requires vindex" | ✅ V2 source into the overlay |
 | COMPACT | ✅ LSM compaction | ❌ | ❌ capability refusal |
 
 A VINDEX3 refusal is a *capability* statement, not a format apology:
 the error names what the binding supports. Since V3-LQL-3A the browse
 surface (SELECT / DESCRIBE / WALK / EXPLAIN WALK / SHOW …) executes on
-V3 through the container's own semantic roles; mutation and patches
-are the remaining refusals (V3-LQL-3B/3C). The whole-language sweep
-test
+V3 through the container's own semantic roles. Since V3-LQL-3B the
+default (KNN) INSERT, DELETE, UPDATE, MERGE, and the patch lifecycle
+execute too: the container stays immutable on disk and edits live in a
+**knowledge overlay** addressed by semantic identity — entity-keyed
+retrieval entries plus feature-slot meta overrides and tombstones
+carrying V2's tombstone/resurrection contract — with the KNN key
+captured from the plan's own execution taps and the same `.vlp` patch
+language V2 speaks: one patch file applies to either format
+(vector-free operations; vector-bearing compose edits refuse the patch
+whole). Remaining refusals: compose-mode INSERT and
+COMPILE/DIFF/COMPACT (V3-LQL-3B compose onwards). The
+whole-language sweep test
 (`tests/vindex3_lql.rs::every_statement_is_sensible_on_a_v3_binding`)
 pins that every statement either executes or refuses this way — never
 a panic, never a misleading "no backend loaded".
@@ -936,10 +946,14 @@ Statement semantics on a V3 binding:
   store execution uses. No `VectorIndex` is manufactured and no V2
   loader runs. Annotation semantics match the V2 extractor's
   user-visible contract (`embed · feature_down`, top logit as
-  `c_score`), pinned by the V2↔V3 whole-language parity harness
+  `c_score`), pinned by the **V2→V3 LQL compatibility gate**
   (`tests/vindex3_v2_parity.rs`): one checkpoint realised as both
-  formats must report the same logical feature space and walk
-  results.
+  formats must report the same logical results for the same script —
+  reads (feature space, walks, DESCRIBE), mutations (identical
+  INSERT/DELETE/UPDATE/MERGE scripts leave identical logical state),
+  and patch stacking (replay order determines visible state). The gate
+  is the release criterion: VINDEX3 does not become the default
+  binding until every statement family V2 promises is green in it.
 - `INFER "…" [TOP n]` — single-step top-k next-token prediction from
   batch-prefill logits. `INFER "…" GENERATE n` — greedy continuation
   through the proven runtime seam (batch prefill into caller-owned

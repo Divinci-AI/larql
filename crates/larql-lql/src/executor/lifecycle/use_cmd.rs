@@ -63,6 +63,7 @@ impl Session {
                         runtime,
                         tokenizer,
                         knowledge,
+                        overlay: Default::default(),
                     };
                     self.patch_recording = None;
                     self.auto_patch = false;

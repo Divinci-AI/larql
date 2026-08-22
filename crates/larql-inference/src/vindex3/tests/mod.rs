@@ -666,3 +666,70 @@ fn an_observed_session_step_is_bit_identical_and_records_boundaries() {
         StepEvent::Embedded { position: 0 }
     ));
 }
+
+/// The analysis pass (V3-LQL-3B): `execute_streaming` runs the SAME
+/// traversal prefill does — bit-identical logits — while streaming
+/// each layer's residual taps to the sink. Observation is
+/// subscription, never a second executor.
+#[test]
+fn execute_streaming_matches_prefill_and_taps_every_layer() {
+    let container = container_with(miniature_glimmer);
+    let runtime =
+        Vindex3Runtime::open(container.path(), COMPONENT, ReferenceBackend::new()).unwrap();
+
+    let mut kv = RowKvState::default();
+    let prefill_logits = runtime.prefill_into(&G_TOKENS, &mut kv).unwrap();
+
+    let mut tapped: Vec<(usize, usize)> = Vec::new();
+    let output = runtime
+        .execute_streaming(&G_TOKENS, &mut |event| {
+            if let super::PlaneEvent::Layer { index, trace } = event {
+                tapped.push((index, trace.post_layer.len()));
+            }
+            Ok(())
+        })
+        .unwrap();
+
+    assert_eq!(
+        output.logits.as_deref(),
+        Some(&prefill_logits[..]),
+        "the observed pass must price the same logits bit-for-bit"
+    );
+    let layers = runtime.plan().layers.len();
+    let expected: Vec<(usize, usize)> = (0..layers).map(|l| (l, G_TOKENS.len())).collect();
+    assert_eq!(
+        tapped, expected,
+        "one tap per layer, one residual row per position"
+    );
+}
+
+/// A sink error aborts the pass and surfaces — the observer can stop
+/// an analysis, though it can never change what execution computes.
+#[test]
+fn execute_streaming_surfaces_a_sink_error() {
+    let container = container_with(miniature_glimmer);
+    let runtime =
+        Vindex3Runtime::open(container.path(), COMPONENT, ReferenceBackend::new()).unwrap();
+    let err = runtime
+        .execute_streaming(&G_TOKENS, &mut |_| {
+            Err(larql_vindex::VindexError::Parse("stop here".into()))
+        })
+        .expect_err("the sink's error must surface");
+    assert!(err.to_string().contains("stop here"), "{err}");
+}
+
+/// The browse view binds through the runtime, off the same plan and
+/// operand store execution uses.
+#[test]
+fn knowledge_view_binds_from_the_runtime() {
+    let container = container_with(miniature_glimmer);
+    let runtime =
+        Vindex3Runtime::open(container.path(), COMPONENT, ReferenceBackend::new()).unwrap();
+    let tok_json = crate::test_utils::synthetic_tokenizer_json(
+        larql_vindex::format::vindex3::fixtures::G_VOCAB,
+    );
+    let tokenizer = larql_vindex::tokenizers::Tokenizer::from_bytes(tok_json.as_bytes()).unwrap();
+    let view = runtime.knowledge_view(&tokenizer).unwrap();
+    assert_eq!(view.num_layers(), runtime.plan().layers.len());
+    assert!(view.max_features() > 0, "the miniature carries dense FFNs");
+}

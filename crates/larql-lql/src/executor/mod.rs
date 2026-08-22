@@ -357,11 +357,6 @@ impl Session {
     // ── Patch execution ──
 
     fn exec_begin_patch(&mut self, path: &str) -> Result<Vec<String>, LqlError> {
-        if matches!(self.backend, Backend::Vindex3 { .. }) {
-            // A V3 binding has no patch overlay; starting a recording
-            // that can never record would mislead.
-            return Err(vindex3::unsupported("patches"));
-        }
         if self.patch_recording.is_some() && !self.auto_patch {
             return Err(LqlError::Execution(
                 "patch session already active. Run SAVE PATCH or discard first.".into(),
@@ -385,9 +380,6 @@ impl Session {
     }
 
     fn exec_save_patch(&mut self) -> Result<Vec<String>, LqlError> {
-        if matches!(self.backend, Backend::Vindex3 { .. }) {
-            return Err(vindex3::unsupported("patches"));
-        }
         let recording = self.patch_recording.take().ok_or_else(|| {
             LqlError::Execution("no active patch session. Run BEGIN PATCH first.".into())
         })?;
@@ -400,6 +392,7 @@ impl Session {
 
         let model_name = match &self.backend {
             Backend::Vindex { config, .. } => config.model.clone(),
+            Backend::Vindex3 { runtime, .. } => runtime.model_name().to_string(),
             Backend::Weight { model_id, .. } => model_id.clone(),
             _ => "unknown".into(),
         };
@@ -438,18 +431,34 @@ impl Session {
             return Err(LqlError::Execution(format!("patch not found: {path}")));
         }
 
-        let patch = larql_vindex::VindexPatch::load(&patch_path)
+        let mut patch = larql_vindex::VindexPatch::load(&patch_path)
             .map_err(|e| LqlError::exec("failed to load patch", e))?;
 
         let (ins, upd, del) = patch.counts();
         let total = patch.len();
 
-        // Apply through the PatchedVindex overlay (base files untouched)
+        // REMOVE PATCH addresses applied patches by description; a
+        // patch saved without one is addressed by the path it was
+        // applied from — on every backend, or removal could never
+        // find it.
+        if patch.description.is_none() {
+            patch.description = Some(path.to_string());
+        }
+
+        // Apply through the session overlay (base files untouched).
         match &mut self.backend {
             Backend::Vindex { patched, .. } => {
                 patched.apply_patch(patch);
             }
-            Backend::Vindex3 { .. } => return Err(vindex3::unsupported("patches")),
+            // The V3 overlay is all-or-nothing and *reports* an
+            // inapplicable patch (corrupt vector, or feature-slot ops
+            // awaiting the compose rung) instead of silently dropping
+            // it.
+            Backend::Vindex3 { overlay, .. } => {
+                overlay
+                    .try_apply_patch(patch)
+                    .map_err(|e| LqlError::exec("failed to apply patch", e))?;
+            }
             _ => return Err(LqlError::NoBackend),
         }
 
@@ -459,13 +468,23 @@ impl Session {
     }
 
     fn exec_show_patches(&self) -> Result<Vec<String>, LqlError> {
-        let patched = self.require_patched()?;
+        // The applied-patch list plus the session-overlay entry count,
+        // whichever overlay the binding holds: V2's slot overrides or
+        // V3's KNN entries.
+        let (patches, session_overrides) = match &self.backend {
+            Backend::Vindex { patched, .. } => (&patched.patches, patched.num_overrides()),
+            Backend::Vindex3 { overlay, .. } => (&overlay.patches, overlay.knn_store.len()),
+            _ => {
+                self.require_patched()?;
+                unreachable!("require_patched errors on every other backend");
+            }
+        };
         let mut out = Vec::new();
 
-        if patched.patches.is_empty() && patched.num_overrides() == 0 {
+        if patches.is_empty() && session_overrides == 0 {
             out.push("  (no patches applied)".into());
         } else {
-            for (i, patch) in patched.patches.iter().enumerate() {
+            for (i, patch) in patches.iter().enumerate() {
                 let (ins, upd, del) = patch.counts();
                 let name = patch.description.as_deref().unwrap_or("(unnamed)");
                 out.push(format!(
@@ -478,14 +497,13 @@ impl Session {
                     del,
                 ));
             }
-            if patched.num_overrides() > 0 && patched.patches.is_empty() {
+            if session_overrides > 0 && patches.is_empty() {
                 out.push(format!(
-                    "  (anonymous session: {} overrides)",
-                    patched.num_overrides()
+                    "  (anonymous session: {session_overrides} overrides)"
                 ));
             }
-            let file_total: usize = patched.patches.iter().map(|p| p.len()).sum();
-            let overlay_total = patched.num_overrides();
+            let file_total: usize = patches.iter().map(|p| p.len()).sum();
+            let overlay_total = session_overrides;
             if file_total > 0 || overlay_total > 0 {
                 out.push(format!(
                     "  Total: {} from files, {} in session",
@@ -511,21 +529,26 @@ impl Session {
     }
 
     fn exec_remove_patch(&mut self, path: &str) -> Result<Vec<String>, LqlError> {
-        let patched = match &mut self.backend {
-            Backend::Vindex { patched, .. } => patched,
-            Backend::Vindex3 { .. } => return Err(vindex3::unsupported("patches")),
+        let by_name = |p: &larql_vindex::VindexPatch| p.description.as_deref() == Some(path);
+        let pos = match &mut self.backend {
+            Backend::Vindex { patched, .. } => match patched.patches.iter().position(by_name) {
+                Some(i) => {
+                    patched.remove_patch(i);
+                    Some(i)
+                }
+                None => None,
+            },
+            Backend::Vindex3 { overlay, .. } => match overlay.patches.iter().position(by_name) {
+                Some(i) => {
+                    overlay.remove_patch(i);
+                    Some(i)
+                }
+                None => None,
+            },
             _ => return Err(LqlError::NoBackend),
         };
-
-        let pos = patched
-            .patches
-            .iter()
-            .position(|p| p.description.as_deref() == Some(path));
         match pos {
-            Some(i) => {
-                patched.remove_patch(i);
-                Ok(vec![format!("Removed patch #{}", i + 1)])
-            }
+            Some(i) => Ok(vec![format!("Removed patch #{}", i + 1)]),
             None => Err(LqlError::Execution(format!("patch not found: {path}"))),
         }
     }

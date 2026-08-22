@@ -2,6 +2,8 @@
 //! the executed bytes, the annotation implements the V2 extractor's
 //! contract, and the KNN statistic matches the V2 gate scan.
 
+mod overlay;
+
 use ndarray::Array1;
 
 use crate::format::vindex3::fixtures::{
@@ -115,4 +117,44 @@ fn gate_knn_is_the_v2_statistic() {
     assert_eq!(trace.layers[0].1[0].feature, hits[0].0);
     assert_eq!(trace.layers[0].1[0].gate_score, hits[0].1);
     assert!(!trace.layers[0].1[0].meta.top_token.is_empty());
+}
+
+/// `find_features` implements `VectorIndex::find_features`'s matching
+/// rule: case-insensitive substring over the annotation surfaces, with
+/// an optional layer filter — the WHERE-clause candidate scan.
+#[test]
+fn find_features_matches_annotation_surfaces() {
+    let (_c, view) = view_for(miniature_glimmer, "know-find", G_VOCAB);
+
+    // Every annotated slot matches an absent entity filter.
+    let all = view.find_features(None, None);
+    let annotated: usize = view
+        .loaded_layers()
+        .into_iter()
+        .map(|l| {
+            (0..view.num_features(l))
+                .filter(|&f| view.feature_meta(l, f).is_some())
+                .count()
+        })
+        .sum();
+    assert_eq!(all.len(), annotated);
+    assert!(!all.is_empty(), "the fixture must annotate features");
+
+    // Entity filter: pick a real top token and find its slot again.
+    let (layer, feature) = all[0];
+    let token = view.feature_meta(layer, feature).unwrap().top_token;
+    let hits = view.find_features(Some(&token), None);
+    assert!(
+        hits.contains(&(layer, feature)),
+        "{token} must match its own slot"
+    );
+
+    // Layer filter restricts the scan.
+    let layer_hits = view.find_features(None, Some(0));
+    assert!(layer_hits.iter().all(|&(l, _)| l == 0));
+
+    // A nonsense entity matches nothing.
+    assert!(view
+        .find_features(Some("zz-no-such-token"), None)
+        .is_empty());
 }

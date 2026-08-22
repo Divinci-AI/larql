@@ -43,8 +43,12 @@
 //! conformance fixtures this rung gates on; lazy/memoised annotation
 //! for large containers is deliberately later, perf-shaped work.
 
+pub mod overlay;
+
 #[cfg(test)]
 mod tests;
+
+pub use overlay::KnowledgeOverlay;
 
 use larql_models::TopKEntry;
 use ndarray::{Array1, Array2};
@@ -177,6 +181,43 @@ impl KnowledgeView {
     /// Every feature annotation of one layer (LQL's raw-token views).
     pub fn feature_metas(&self, layer: usize) -> Option<&[Option<FeatureMeta>]> {
         Some(&self.layers.get(layer)?.as_ref()?.metas)
+    }
+
+    /// Feature slots whose annotation mentions `entity` —
+    /// `VectorIndex::find_features`'s matching rule verbatim
+    /// (case-insensitive substring over `top_token` and the `top_k`
+    /// surfaces), so WHERE-clause candidate resolution reads the same
+    /// on both backends. `entity: None` matches every annotated slot.
+    pub fn find_features(
+        &self,
+        entity: Option<&str>,
+        layer_filter: Option<usize>,
+    ) -> Vec<(usize, usize)> {
+        let mut results = Vec::new();
+        for layer in self.loaded_layers() {
+            if layer_filter.is_some_and(|l| l != layer) {
+                continue;
+            }
+            for feature in 0..self.num_features(layer) {
+                let Some(meta) = self.feature_meta(layer, feature) else {
+                    continue;
+                };
+                let entity_match = entity
+                    .map(|e| {
+                        let needle = e.to_lowercase();
+                        meta.top_token.to_lowercase().contains(&needle)
+                            || meta
+                                .top_k
+                                .iter()
+                                .any(|t| t.token.to_lowercase().contains(&needle))
+                    })
+                    .unwrap_or(true);
+                if entity_match {
+                    results.push((layer, feature));
+                }
+            }
+        }
+        results
     }
 
     /// Role `embedding` with its scale — the entity/query vector

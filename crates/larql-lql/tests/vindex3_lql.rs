@@ -32,6 +32,13 @@ const NEW_TOKENS: usize = 16;
 const PROMPT: &str = "[3]";
 const COMPONENT: &str = "target";
 
+/// Windows temp paths contain backslashes, which the LQL lexer's escape
+/// pass would consume; doubling them leaves the path untouched on every
+/// platform.
+fn lql_path(path: impl AsRef<Path>) -> String {
+    path.as_ref().display().to_string().replace('\\', "\\\\")
+}
+
 /// Encode the miniature container under its own name, with a servable
 /// tokenizer.
 fn v3_container() -> tempfile::TempDir {
@@ -60,7 +67,7 @@ fn run(session: &mut Session, stmt: &str) -> Vec<String> {
 
 fn bound_session(container: &Path) -> Session {
     let mut session = Session::new();
-    let use_stmt = format!("USE \"{}\";", container.display());
+    let use_stmt = format!("USE \"{}\";", lql_path(container));
     run(&mut session, &use_stmt);
     session
 }
@@ -142,7 +149,7 @@ fn use_binds_a_v3_container_under_its_own_name() {
     let mut session = Session::new();
     let out = run(
         &mut session,
-        &format!("USE \"{}\";", container.path().display()),
+        &format!("USE \"{}\";", lql_path(container.path())),
     );
     let banner = out.join("\n");
     assert!(banner.contains("VINDEX3"), "{banner}");
@@ -210,10 +217,13 @@ fn the_v2_path_refuses_the_container_lql_serves() {
 }
 
 #[test]
-fn browse_and_mutation_statements_refuse_with_capabilities() {
+fn remaining_mutation_statements_refuse_with_capabilities() {
     let container = v3_container();
     let mut session = bound_session(container.path());
-    for stmt in ["COMPACT MINOR;", r#"DELETE FROM EDGES WHERE layer = 0;"#] {
+    for stmt in [
+        "COMPACT MINOR;",
+        r#"INSERT INTO EDGES (entity, relation, target) VALUES ("a", "b", "c") MODE COMPOSE;"#,
+    ] {
         let parsed = parse(stmt).unwrap();
         let err = session.execute(&parsed).unwrap_err().to_string();
         assert!(
@@ -253,7 +263,7 @@ fn a_tokenizerless_container_binds_but_refuses_text_infer() {
     let mut session = Session::new();
     let out = run(
         &mut session,
-        &format!("USE \"{}\";", container.path().display()),
+        &format!("USE \"{}\";", lql_path(container.path())),
     );
     assert!(
         out.join("\n").contains("token-id capability only"),
@@ -387,56 +397,71 @@ fn every_statement_is_sensible_on_a_v3_binding() {
         Err,
     }
     use Expect::*;
-    let cases: Vec<(&str, Expect)> = vec![
+    let patch_dir = tempfile::tempdir().unwrap();
+    let patch_file = lql_path(patch_dir.path().join("p.vlp"));
+    let begin_patch = format!(r#"BEGIN PATCH "{patch_file}";"#);
+    let apply_patch = format!(r#"APPLY PATCH "{patch_file}";"#);
+    let remove_patch = format!(r#"REMOVE PATCH "{patch_file}";"#);
+    let cases: Vec<(String, Expect)> =
+        vec![
         // ── Serves on V3 ──
-        (r#"STATS;"#, Ok),
-        (r#"SHOW LAYERS;"#, Ok),
-        (r#"INFER "[3]" TOP 3;"#, Ok),
-        (r#"INFER "[3]" GENERATE 2;"#, Ok),
-        (r#"EXPLAIN INFER "[3]";"#, Ok),
-        (r#"TRACE "[3]";"#, Ok),
-        (r#"SHOW MODELS;"#, Ok),             // registry listing, backend-free
-        (r#"SHOW COMPACT STATUS;"#, Refuse), // LSM state is a vindex concept
-        (r#"SHOW PATCHES;"#, Refuse),
+        (r#"STATS;"#.to_string(), Ok),
+        (r#"SHOW LAYERS;"#.to_string(), Ok),
+        (r#"INFER "[3]" TOP 3;"#.to_string(), Ok),
+        (r#"INFER "[3]" GENERATE 2;"#.to_string(), Ok),
+        (r#"EXPLAIN INFER "[3]";"#.to_string(), Ok),
+        (r#"TRACE "[3]";"#.to_string(), Ok),
+        (r#"SHOW MODELS;"#.to_string(), Ok), // registry listing, backend-free
+        (r#"SHOW COMPACT STATUS;"#.to_string(), Refuse), // LSM state is a vindex concept
+        (r#"SHOW PATCHES;"#.to_string(), Ok),
         // ── Browse (V3-LQL-3A): executes over the container's own
         // semantic roles ──
-        (r#"WALK "[3]";"#, Ok),
-        (r#"DESCRIBE "[3]";"#, Ok),
-        (r#"SELECT * FROM EDGES LIMIT 5;"#, Ok),
-        (r#"SELECT * FROM FEATURES WHERE layer = 0;"#, Ok),
-        (r#"SELECT * FROM ENTITIES;"#, Ok),
-        (r#"EXPLAIN WALK "[3]";"#, Ok),
-        (r#"SHOW RELATIONS;"#, Ok),
-        (r#"SHOW FEATURES 0;"#, Ok),
-        (r#"SHOW ENTITIES;"#, Ok),
-        // ── Mutation: refuses with capabilities ──
+        (r#"WALK "[3]";"#.to_string(), Ok),
+        (r#"DESCRIBE "[3]";"#.to_string(), Ok),
+        (r#"SELECT * FROM EDGES LIMIT 5;"#.to_string(), Ok),
+        (r#"SELECT * FROM FEATURES WHERE layer = 0;"#.to_string(), Ok),
+        (r#"SELECT * FROM ENTITIES;"#.to_string(), Ok),
+        (r#"EXPLAIN WALK "[3]";"#.to_string(), Ok),
+        (r#"SHOW RELATIONS;"#.to_string(), Ok),
+        (r#"SHOW FEATURES 0;"#.to_string(), Ok),
+        (r#"SHOW ENTITIES;"#.to_string(), Ok),
+        // ── Mutation (V3-LQL-3B): the default KNN insert executes;
+        // the compose install refuses until the operand-source seam ──
         (
-            r#"INSERT INTO EDGES (entity, relation, target) VALUES ("a", "b", "c");"#,
+            r#"INSERT INTO EDGES (entity, relation, target) VALUES ("a", "b", "c");"#.to_string(),
+            Ok,
+        ),
+        (
+            r#"INSERT INTO EDGES (entity, relation, target) VALUES ("a", "b", "c") MODE COMPOSE;"#
+                .to_string(),
             Refuse,
         ),
-        (r#"DELETE FROM EDGES WHERE layer = 0;"#, Refuse),
+        (r#"DELETE FROM EDGES WHERE layer = 0 AND feature = 0;"#.to_string(), Ok),
         (
-            r#"UPDATE EDGES SET confidence = 0.5 WHERE layer = 0;"#,
-            Refuse,
+            r#"UPDATE EDGES SET confidence = 0.5 WHERE layer = 0 AND feature = 1;"#.to_string(),
+            Ok,
         ),
-        (r#"MERGE "other.vindex";"#, Err), // refuses at source validation
-        // Vacuously true on V3: INSERT refuses, so there is never
-        // anything to rebalance and the no-op report is honest.
-        (r#"REBALANCE;"#, Ok),
-        (r#"COMPACT MINOR;"#, Refuse),
-        (r#"COMPACT MAJOR;"#, Refuse),
-        // ── Patch lifecycle: refuses (a V3 binding has no overlay) ──
-        (r#"BEGIN PATCH "p.vlp";"#, Refuse),
-        (r#"SAVE PATCH;"#, Refuse),
-        (r#"APPLY PATCH "p.vlp";"#, Err), // refuses at file validation
-        (r#"REMOVE PATCH "p.vlp";"#, Refuse),
+        (r#"MERGE "other.vindex";"#.to_string(), Err), // refuses at source validation
+        // Vacuously true on V3: only compose installs need rebalancing
+        // (KNN entries are independent) and compose refuses, so the
+        // no-op report is honest.
+        (r#"REBALANCE;"#.to_string(), Ok),
+        (r#"COMPACT MINOR;"#.to_string(), Refuse),
+        (r#"COMPACT MAJOR;"#.to_string(), Refuse),
+        // ── Patch lifecycle (V3-LQL-3C): records and replays over the
+        // knowledge overlay ──
+        (begin_patch.clone(), Ok),
+        (r#"SAVE PATCH;"#.to_string(), Ok), // writes the recording (the INSERT above) to the temp path
+        (apply_patch.clone(), Ok),          // applies the file SAVE just wrote
+        (remove_patch.clone(), Ok),
         // ── Lifecycle that targets other artifacts: any helpful error ──
-        (r#"COMPILE "x.vindex" INTO MODEL "out";"#, Err),
-        (r#"DIFF "a.vindex" "b.vindex";"#, Err),
-        (r#"TRACE "[3]" DECOMPOSE;"#, Refuse),
+        (r#"COMPILE "x.vindex" INTO MODEL "out";"#.to_string(), Err),
+        (r#"DIFF "a.vindex" "b.vindex";"#.to_string(), Err),
+        (r#"TRACE "[3]" DECOMPOSE;"#.to_string(), Refuse),
     ];
 
     for (stmt, expect) in cases {
+        let stmt = stmt.as_str();
         let parsed = match parse(stmt) {
             std::result::Result::Ok(p) => p,
             std::result::Result::Err(e) => panic!("sweep statement fails to parse: {stmt}: {e}"),
@@ -489,7 +514,7 @@ fn a_tokenizerless_container_refuses_browse_naming_the_capability() {
     let mut session = Session::new();
     run(
         &mut session,
-        &format!("USE \"{}\";", container.path().display()),
+        &format!("USE \"{}\";", lql_path(container.path())),
     );
     let parsed = parse(r#"WALK "[3]";"#).unwrap();
     let err = session.execute(&parsed).unwrap_err().to_string();

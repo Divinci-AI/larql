@@ -68,3 +68,6 @@ pub use larql_vindex::format::vindex3::opplan::exec::kv::{
 pub use larql_vindex::format::vindex3::opplan::exec::observe::{
     RecordingObserver, StepEvent, StepObserver,
 };
+// The batch-execution taps (V3-LQL-3B): plane events streamed from the
+// one traversal, consumed by residual capture and retrieval keys.
+pub use larql_vindex::format::vindex3::opplan::exec::{FinalOutput, LayerTrace, PlaneEvent};

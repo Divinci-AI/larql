@@ -295,7 +295,7 @@ program, never a reconstructed model:
 ```
 larql> USE "gpt-oss-20b.v3";
 Using: gpt-oss-20b.v3 (VINDEX3, model: gpt-oss-20b, component target, 24 layers, execution closed)
-Supported: INFER [TOP n] [GENERATE n], STATS, SHOW LAYERS. Tokenizer: present.
+Supported: SELECT, DESCRIBE, WALK, INFER [TOP n] [GENERATE n], INSERT [MODE KNN], patches, … Tokenizer: present.
 
 larql> STATS;                      -- the container's own authority
 larql> SELECT * FROM FEATURES WHERE layer = 0 LIMIT 8;
@@ -306,11 +306,25 @@ larql> INFER "The capital of France is" TOP 5;
 larql> INFER "The capital of France is" GENERATE 16;   -- greedy continuation
 larql> EXPLAIN INFER "x";          -- the executable plan, statically
 larql> TRACE "x";                  -- observe the executor while it runs
+
+larql> INSERT INTO EDGES (entity, relation, target)
+   ..>     VALUES ("France", "capital", "Paris");     -- default MODE KNN
+larql> DESCRIBE "France";          -- the edit is immediately visible
+larql> INFER "The capital of France is" TOP 3;        -- …and overrides top-1
+larql> UPDATE EDGES SET target = "Lyon" WHERE layer = 20 AND feature = 105;
+larql> DELETE FROM EDGES WHERE layer = 20 AND feature = 106;
+larql> MERGE "other-knowledge.vindex";                -- V2 source, V3 target
+larql> SAVE PATCH "france.vlp";    -- persists; the container is untouched
 ```
 
-Mutation and patches (V3-LQL-3B/3C, in progress) refuse with a message
-naming the supported statements — a capability boundary, not a
-missing feature apology. See the spec's §4.4 for the full contract.
+The container stays immutable on disk: edits live in a knowledge
+overlay addressed by semantic identity, the KNN key is captured from
+the plan's own execution taps, and the `.vlp` patch is the same
+logical format V2 writes — one patch applies to either backend.
+Compose-mode INSERT and COMPILE/DIFF/COMPACT still
+refuse with a message naming the supported statements — a capability
+boundary, not a missing feature apology. See the spec's §4.2/§4.4 for
+the full contract.
 
 ## Statement Reference
 

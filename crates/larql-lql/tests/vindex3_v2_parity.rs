@@ -1,4 +1,16 @@
-//! The V2 ↔ V3 whole-language parity harness (V3-LQL-3A gate).
+//! **The V2→V3 LQL compatibility gate** — the release criterion for
+//! VINDEX3 becoming the default format: the same LQL means the same
+//! model, whatever the underlying authority model. VINDEX3 does not
+//! replace VINDEX2 until every row below is green.
+//!
+//! ```text
+//! READ        ✓ SELECT   ✓ DESCRIBE   ✓ WALK   ✓ SHOW
+//! INFERENCE   ✓ INFER    ✓ GENERATE (V3-only surface, chain-gated)
+//! MUTATION    ✓ INSERT KNN   ✓ DELETE   ✓ UPDATE   ✓ MERGE
+//!             → INSERT COMPOSE (operand-source seam)
+//! PATCH       ✓ BEGIN/SAVE/APPLY/REMOVE/SHOW   ✓ stacking order
+//! LIFECYCLE   → COMPILE   → DIFF   → COMPACT
+//! ```
 //!
 //! One source checkpoint (the dense Llama-shaped fixture, LCG-seeded
 //! and therefore byte-reproducible) is realised BOTH ways:
@@ -58,9 +70,16 @@ fn run(session: &mut Session, stmt: &str) -> Vec<String> {
         .unwrap_or_else(|e| panic!("execute {stmt}: {e}"))
 }
 
+/// Windows temp paths contain backslashes, which the LQL lexer's escape
+/// pass would consume; doubling them leaves the path untouched on every
+/// platform.
+fn lql_path(path: &Path) -> String {
+    path.display().to_string().replace('\\', "\\\\")
+}
+
 fn session_for(dir: &Path) -> Session {
     let mut session = Session::new();
-    run(&mut session, &format!("USE \"{}\";", dir.display()));
+    run(&mut session, &format!("USE \"{}\";", lql_path(dir)));
     session
 }
 
@@ -249,4 +268,477 @@ fn v2_and_v3_report_the_same_logical_results() {
         v3_describe.contains("(no edges found)"),
         "DESCRIBE disagrees about edge presence:\nV2: {v2_describe}\nV3: {v3_describe}"
     );
+}
+
+/// The logical outcome one arm reports after the identical KNN
+/// mutation script (V3-LQL-3B): the install layer INSERT chose, and
+/// whether the edit is observable through DESCRIBE and through
+/// INFER's post-logits override.
+fn knn_mutation_outcome(dir: &Path) -> (usize, bool, bool) {
+    let mut session = session_for(dir);
+
+    // Pre-screen on this arm: the edge must be absent before the
+    // insert, or "present after" proves nothing.
+    let before = run(&mut session, r#"DESCRIBE "[2]";"#).join("\n");
+    assert!(!before.contains("→ [5]"), "edge pre-exists: {before}");
+
+    let inserted = run(
+        &mut session,
+        r#"INSERT INTO EDGES (entity, relation, target) VALUES ("[2]", "b", "[5]");"#,
+    )
+    .join("\n");
+    let layer: usize = inserted
+        .split(" at L")
+        .nth(1)
+        .and_then(|s| s.split_whitespace().next())
+        .and_then(|n| n.parse().ok())
+        .unwrap_or_else(|| panic!("no install layer in: {inserted}"));
+
+    let describe = run(&mut session, r#"DESCRIBE "[2]";"#).join("\n");
+    let infer = run(&mut session, r#"INFER "The b of [2] is" TOP 3;"#).join("\n");
+    let override_leads = infer.contains("knn_override")
+        && infer
+            .lines()
+            .find(|l| l.trim_start().starts_with("1."))
+            .is_some_and(|row| row.contains("[5]"));
+    (layer, describe.contains("→ [5]"), override_leads)
+}
+
+/// The mutation half of the parity claim: the same INSERT lands on the
+/// same layer and is observable through the same statements on both
+/// formats — and the outcome is affirmative, not vacuously equal.
+#[test]
+fn v2_and_v3_agree_after_identical_knn_mutations() {
+    let v2 = v2_vindex();
+    let v3 = v3_container();
+    let v2_outcome = knn_mutation_outcome(v2.path());
+    let v3_outcome = knn_mutation_outcome(v3.path());
+    assert_eq!(
+        v2_outcome, v3_outcome,
+        "the two formats disagree about the mutation's observable outcome"
+    );
+    let (_, describe_shows, override_leads) = v2_outcome;
+    assert!(describe_shows, "the edit must be visible to DESCRIBE");
+    assert!(override_leads, "the stored target must override INFER");
+}
+
+/// The feature-mutation half of the parity claim (3B rung 2): the
+/// identical UPDATE + DELETE script leaves both formats reporting the
+/// same logical feature space — and genuinely changed it (affirmative
+/// control against a vacuous pass).
+#[test]
+fn v2_and_v3_agree_after_identical_feature_mutations() {
+    let v2 = v2_vindex();
+    let v3 = v3_container();
+    let mut v2_session = session_for(v2.path());
+    let mut v3_session = session_for(v3.path());
+
+    let pristine = feature_space(&mut v2_session, DENSE_LAYERS, 300);
+
+    for session in [&mut v2_session, &mut v3_session] {
+        run(
+            session,
+            r#"UPDATE EDGES SET target = "[7]", confidence = 0.5 WHERE layer = 1 AND feature = 1;"#,
+        );
+        run(
+            session,
+            "DELETE FROM EDGES WHERE layer = 0 AND feature = 2;",
+        );
+        // V2's statement contract: an UPDATE on the tombstoned slot
+        // matches nothing on either backend.
+        let out = run(
+            session,
+            r#"UPDATE EDGES SET target = "[7]" WHERE layer = 0 AND feature = 2;"#,
+        )
+        .join("\n");
+        assert!(out.contains("no matching features"), "{out}");
+    }
+
+    let v2_space = feature_space(&mut v2_session, DENSE_LAYERS, 300);
+    let v3_space = feature_space(&mut v3_session, DENSE_LAYERS, 300);
+    assert_eq!(
+        v2_space, v3_space,
+        "the two formats disagree about the mutated feature space"
+    );
+    assert_ne!(v2_space, pristine, "the script must have changed the space");
+    assert_eq!(v2_space.get(&(1, 1)).map(String::as_str), Some("[7]"));
+    assert!(
+        !v2_space.contains_key(&(0, 2)),
+        "the delete must be visible"
+    );
+
+    // WALK agrees about the mutated space too (the tombstone filter
+    // runs inside each backend's own scan path).
+    let v2_hits = walk_hits(&mut v2_session, "[3]");
+    let v3_hits = walk_hits(&mut v3_session, "[3]");
+    assert_eq!(v2_hits, v3_hits, "walks diverge after mutation");
+}
+
+/// MERGE of one V2 source lands identically on a V2 target and a V3
+/// target: same merged/skipped counts, same resulting feature space
+/// (the V3 overlay then holds every slot as an override — reading
+/// through it must equal V2's overlay reads).
+#[test]
+fn merge_of_a_v2_source_lands_on_both_backends() {
+    let source = v2_vindex();
+    let v2_target = v2_vindex();
+    let v3_target = v3_container();
+
+    let mut outcomes = Vec::new();
+    for target in [v2_target.path(), v3_target.path()] {
+        let mut session = session_for(target);
+        let out = run(
+            &mut session,
+            &format!("MERGE \"{}\";", lql_path(source.path())),
+        )
+        .join("\n");
+        let counts = out
+            .lines()
+            .find(|l| l.contains("features merged"))
+            .unwrap_or_else(|| panic!("no merge report in {out}"))
+            .trim()
+            .to_string();
+        outcomes.push((counts, feature_space(&mut session, DENSE_LAYERS, 300)));
+    }
+
+    assert_eq!(outcomes[0].0, outcomes[1].0, "merge counts diverge");
+    assert!(
+        outcomes[0].0.starts_with(char::is_numeric) && !outcomes[0].0.starts_with('0'),
+        "the merge must have written features: {}",
+        outcomes[0].0
+    );
+    assert_eq!(
+        outcomes[0].1, outcomes[1].1,
+        "post-merge feature spaces diverge"
+    );
+
+    // The conflict strategy's losing arm, on the V3 target: KEEP_TARGET
+    // skips every already-present slot.
+    let mut session = session_for(v3_target.path());
+    run(
+        &mut session,
+        &format!("MERGE \"{}\";", lql_path(source.path())),
+    );
+    let out = run(
+        &mut session,
+        &format!(
+            "MERGE \"{}\" ON CONFLICT KEEP_TARGET;",
+            lql_path(source.path())
+        ),
+    )
+    .join("\n");
+    assert!(out.contains("0 features merged"), "{out}");
+}
+
+/// MERGE into a tokenizerless V3 binding refuses naming the missing
+/// browse capability — after the source loaded, before any write.
+#[test]
+fn merge_refuses_on_a_tokenizerless_v3_target() {
+    let source = v2_vindex();
+    let checkpoint = tempfile::tempdir().unwrap();
+    let container = tempfile::tempdir().unwrap();
+    encode_fixture_container(
+        dense_f32_model,
+        checkpoint.path(),
+        container.path(),
+        "tokless-merge",
+    );
+    let mut session = session_for(container.path());
+    let stmt = format!("MERGE \"{}\";", lql_path(source.path()));
+    let parsed = parse(&stmt).unwrap();
+    let err = session
+        .execute(&parsed)
+        .expect_err("no tokenizer, no browse view, no merge");
+    assert!(err.to_string().contains("tokenizer.json"), "{err}");
+}
+
+/// The stacking invariant, on both backends: **overlay operations are
+/// logical facts; replay order determines visible state**. Two patches
+/// write the same slot — the later application wins; removing one
+/// replays the remainder; applying them in the opposite order flips
+/// the outcome. All four states must agree across formats.
+#[test]
+fn patch_stacking_replays_in_order_on_both_backends() {
+    let patch_dir = tempfile::tempdir().unwrap();
+    let patch_a = lql_path(&patch_dir.path().join("a.vlp"));
+    let patch_b = lql_path(&patch_dir.path().join("b.vlp"));
+
+    // Author the two patches once, from a V2 session (the .vlp is the
+    // portable artifact; both backends must replay it identically).
+    {
+        let author = v2_vindex();
+        let mut session = session_for(author.path());
+        run(&mut session, &format!("BEGIN PATCH \"{patch_a}\";"));
+        run(
+            &mut session,
+            r#"UPDATE EDGES SET target = "[7]" WHERE layer = 1 AND feature = 1;"#,
+        );
+        run(&mut session, "SAVE PATCH;");
+        run(&mut session, &format!("BEGIN PATCH \"{patch_b}\";"));
+        run(
+            &mut session,
+            r#"UPDATE EDGES SET target = "[8]" WHERE layer = 1 AND feature = 1;"#,
+        );
+        run(
+            &mut session,
+            "DELETE FROM EDGES WHERE layer = 0 AND feature = 1;",
+        );
+        run(&mut session, "SAVE PATCH;");
+    }
+
+    // One arm's observable state: (slot (1,1) token, slot (0,1) alive?).
+    let state = |session: &mut Session| -> (Option<String>, bool) {
+        let space = feature_space(session, DENSE_LAYERS, 300);
+        (space.get(&(1, 1)).cloned(), space.contains_key(&(0, 1)))
+    };
+
+    let v2 = v2_vindex();
+    let v3 = v3_container();
+    let mut outcomes = Vec::new();
+    for target in [v2.path(), v3.path()] {
+        // A then B: B is the last writer; the delete stands.
+        let mut session = session_for(target);
+        run(&mut session, &format!("APPLY PATCH \"{patch_a}\";"));
+        run(&mut session, &format!("APPLY PATCH \"{patch_b}\";"));
+        let ab = state(&mut session);
+
+        // Remove A: replaying B alone must not change what B decided.
+        run(&mut session, &format!("REMOVE PATCH \"{patch_a}\";"));
+        let b_only = state(&mut session);
+
+        // Fresh session, B then A: now A is the last writer.
+        let mut session = session_for(target);
+        run(&mut session, &format!("APPLY PATCH \"{patch_b}\";"));
+        run(&mut session, &format!("APPLY PATCH \"{patch_a}\";"));
+        let ba = state(&mut session);
+
+        outcomes.push((ab, b_only, ba));
+    }
+
+    assert_eq!(outcomes[0], outcomes[1], "stacking semantics diverge");
+    let (ab, b_only, ba) = outcomes[0].clone();
+    assert_eq!(ab.0.as_deref(), Some("[8]"), "last writer wins: {ab:?}");
+    assert!(!ab.1, "the delete stands under A+B");
+    assert_eq!(b_only.0.as_deref(), Some("[8]"), "B alone keeps B's write");
+    assert!(!b_only.1);
+    assert_eq!(
+        ba.0.as_deref(),
+        Some("[7]"),
+        "reversed order flips the winner"
+    );
+    assert!(!ba.1, "the delete is order-independent here");
+}
+
+// ── The patch-algebra gates ──────────────────────────────────────────────────
+//
+// The conceptual rule under test, on both backends:
+//
+//     VisibleModel = fold(BaseModel, ordered ActivePatches)
+//
+// Operations never mutate a progressively-corrupted working copy —
+// visible state is always derivable from the base plus the ordered
+// list of active patches. Removal is therefore recomputation, which
+// gives resurrection for free; it is never an inverse operation
+// reconstructing destroyed state.
+
+/// Hand-author a `.vlp` carrying `operations`. LQL statements author
+/// most patches (`BEGIN PATCH` … `SAVE PATCH;`), but some patch-format
+/// operations — `DeleteKnn` today — have no emitting statement yet;
+/// the portable artifact is still the contract both backends replay.
+fn write_patch(path: &std::path::Path, operations: Vec<larql_vindex::PatchOp>) {
+    let patch = larql_vindex::VindexPatch {
+        version: 1,
+        base_model: "parity/dense".into(),
+        base_checksum: None,
+        created_at: String::new(),
+        description: None,
+        author: None,
+        tags: vec![],
+        operations,
+    };
+    patch.save(path).expect("write patch");
+}
+
+/// Whether the KNN fact `[2] → [5]` is visible through DESCRIBE.
+fn knn_fact_visible(session: &mut Session) -> bool {
+    run(session, r#"DESCRIBE "[2]";"#)
+        .join("\n")
+        .contains("→ [5]")
+}
+
+/// insert → delete = absent; removing the delete patch resurrects the
+/// inserted fact; removing the insert too returns to base. The delete
+/// is a *fact* ("this entity has no KNN entries"), so removal replays
+/// visibility rather than un-deleting storage.
+#[test]
+fn knn_delete_patch_removal_resurrects_the_inserted_fact() {
+    let patch_dir = tempfile::tempdir().unwrap();
+    let insert_patch = lql_path(&patch_dir.path().join("insert.vlp"));
+    let delete_patch_file = patch_dir.path().join("delete.vlp");
+    let delete_patch = lql_path(&delete_patch_file);
+
+    {
+        let author = v2_vindex();
+        let mut session = session_for(author.path());
+        run(&mut session, &format!("BEGIN PATCH \"{insert_patch}\";"));
+        run(
+            &mut session,
+            r#"INSERT INTO EDGES (entity, relation, target) VALUES ("[2]", "b", "[5]");"#,
+        );
+        run(&mut session, "SAVE PATCH;");
+    }
+    write_patch(
+        &delete_patch_file,
+        vec![larql_vindex::PatchOp::DeleteKnn {
+            entity: "[2]".into(),
+        }],
+    );
+
+    let v2 = v2_vindex();
+    let v3 = v3_container();
+    let mut outcomes = Vec::new();
+    for target in [v2.path(), v3.path()] {
+        let mut session = session_for(target);
+        let base = knn_fact_visible(&mut session);
+        run(&mut session, &format!("APPLY PATCH \"{insert_patch}\";"));
+        let inserted = knn_fact_visible(&mut session);
+        run(&mut session, &format!("APPLY PATCH \"{delete_patch}\";"));
+        let deleted = knn_fact_visible(&mut session);
+        run(&mut session, &format!("REMOVE PATCH \"{delete_patch}\";"));
+        let resurrected = knn_fact_visible(&mut session);
+        run(&mut session, &format!("REMOVE PATCH \"{insert_patch}\";"));
+        let emptied = knn_fact_visible(&mut session);
+        outcomes.push((base, inserted, deleted, resurrected, emptied));
+    }
+
+    assert_eq!(outcomes[0], outcomes[1], "KNN patch algebra diverges");
+    assert_eq!(
+        outcomes[0],
+        (false, true, false, true, false),
+        "fold(base, active patches) must drive visibility: {:?}",
+        outcomes[0]
+    );
+}
+
+/// The logical-fingerprint gate: after applying and then removing
+/// every patch, the ENTIRE feature space equals the base exactly —
+/// the affected slots are restored AND no unaffected slot was dirtied
+/// along the way. This catches mutation that has the desired semantic
+/// effect but leaks state elsewhere.
+#[test]
+fn removing_every_patch_restores_the_exact_base_space() {
+    let patch_dir = tempfile::tempdir().unwrap();
+    let update_patch = lql_path(&patch_dir.path().join("u.vlp"));
+    let delete_patch = lql_path(&patch_dir.path().join("d.vlp"));
+
+    {
+        let author = v2_vindex();
+        let mut session = session_for(author.path());
+        run(&mut session, &format!("BEGIN PATCH \"{update_patch}\";"));
+        run(
+            &mut session,
+            r#"UPDATE EDGES SET target = "[7]" WHERE layer = 1 AND feature = 1;"#,
+        );
+        run(&mut session, "SAVE PATCH;");
+        run(&mut session, &format!("BEGIN PATCH \"{delete_patch}\";"));
+        run(
+            &mut session,
+            "DELETE FROM EDGES WHERE layer = 0 AND feature = 1;",
+        );
+        run(&mut session, "SAVE PATCH;");
+    }
+
+    let v2 = v2_vindex();
+    let v3 = v3_container();
+    let mut restored_spaces = Vec::new();
+    for target in [v2.path(), v3.path()] {
+        let mut session = session_for(target);
+        let base = feature_space(&mut session, DENSE_LAYERS, 300);
+
+        run(&mut session, &format!("APPLY PATCH \"{update_patch}\";"));
+        run(&mut session, &format!("APPLY PATCH \"{delete_patch}\";"));
+        let mutated = feature_space(&mut session, DENSE_LAYERS, 300);
+        assert_ne!(base, mutated, "affirmative control: the patches must bite");
+
+        run(&mut session, &format!("REMOVE PATCH \"{update_patch}\";"));
+        run(&mut session, &format!("REMOVE PATCH \"{delete_patch}\";"));
+        let restored = feature_space(&mut session, DENSE_LAYERS, 300);
+        assert_eq!(
+            base, restored,
+            "removal must restore the exact base space — affected slots \
+             back, unaffected slots never dirtied"
+        );
+        restored_spaces.push(restored);
+    }
+    assert_eq!(
+        restored_spaces[0], restored_spaces[1],
+        "restored spaces diverge across formats"
+    );
+}
+
+/// Patches touching DISJOINT objects commute: every application order
+/// of {KNN insert, slot update, slot delete} yields the same visible
+/// state, on both backends. (Same-object precedence — last applied
+/// wins — is gated in `patch_stacking_replays_in_order_on_both_backends`;
+/// together they pin fold-order determinism.)
+#[test]
+fn disjoint_patches_commute_under_every_application_order() {
+    let patch_dir = tempfile::tempdir().unwrap();
+    let knn = lql_path(&patch_dir.path().join("k.vlp"));
+    let upd = lql_path(&patch_dir.path().join("u.vlp"));
+    let del = lql_path(&patch_dir.path().join("d.vlp"));
+
+    {
+        let author = v2_vindex();
+        let mut session = session_for(author.path());
+        run(&mut session, &format!("BEGIN PATCH \"{knn}\";"));
+        run(
+            &mut session,
+            r#"INSERT INTO EDGES (entity, relation, target) VALUES ("[2]", "b", "[5]");"#,
+        );
+        run(&mut session, "SAVE PATCH;");
+        run(&mut session, &format!("BEGIN PATCH \"{upd}\";"));
+        run(
+            &mut session,
+            r#"UPDATE EDGES SET target = "[7]" WHERE layer = 1 AND feature = 1;"#,
+        );
+        run(&mut session, "SAVE PATCH;");
+        run(&mut session, &format!("BEGIN PATCH \"{del}\";"));
+        run(
+            &mut session,
+            "DELETE FROM EDGES WHERE layer = 0 AND feature = 1;",
+        );
+        run(&mut session, "SAVE PATCH;");
+    }
+
+    let orders: [[&String; 3]; 6] = [
+        [&knn, &upd, &del],
+        [&knn, &del, &upd],
+        [&upd, &knn, &del],
+        [&upd, &del, &knn],
+        [&del, &knn, &upd],
+        [&del, &upd, &knn],
+    ];
+
+    let v2 = v2_vindex();
+    let v3 = v3_container();
+    for target in [v2.path(), v3.path()] {
+        let mut states = Vec::new();
+        for order in &orders {
+            let mut session = session_for(target);
+            for patch in order {
+                run(&mut session, &format!("APPLY PATCH \"{patch}\";"));
+            }
+            let space = feature_space(&mut session, DENSE_LAYERS, 300);
+            let fact = knn_fact_visible(&mut session);
+            states.push((fact, space));
+        }
+        assert!(states[0].0, "the KNN fact must be visible in every order");
+        for (i, state) in states.iter().enumerate() {
+            assert_eq!(
+                &states[0], state,
+                "order {i} diverged — disjoint patches must commute"
+            );
+        }
+    }
 }

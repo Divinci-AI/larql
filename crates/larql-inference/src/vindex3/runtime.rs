@@ -6,7 +6,9 @@ use larql_vindex::format::vindex3::inspect::inspect_container;
 use larql_vindex::format::vindex3::opplan::exec::backend::PlanBackend;
 use larql_vindex::format::vindex3::opplan::exec::kv::KvState;
 use larql_vindex::format::vindex3::opplan::exec::operands::OperandStore;
-use larql_vindex::format::vindex3::opplan::exec::prefill_plan;
+use larql_vindex::format::vindex3::opplan::exec::{
+    execute_plan_streaming, prefill_plan, FinalOutput, PlaneEvent,
+};
 use larql_vindex::format::vindex3::opplan::{plan_component_ops, ClosureDefect, ComponentOpPlan};
 
 use crate::error::InferenceError;
@@ -135,6 +137,28 @@ impl<B: PlanBackend> Vindex3Runtime<B> {
     ) -> Result<Vec<f32>, InferenceError> {
         let out = prefill_plan(&self.plan, &self.store, tokens, &self.backend, kv)?;
         out.logits.ok_or_else(headless_prefill_error)
+    }
+
+    /// One observed analysis pass over the component's plan (V3-LQL-3B):
+    /// execute `tokens` and stream every plane event — the embedded
+    /// rows and each layer's residual taps — to `sink`, returning the
+    /// final output. This is the **same** `traverse` every other entry
+    /// point runs (observation is subscription, never a second
+    /// executor); no continuation state is kept, so use it for
+    /// analyses (residual capture, retrieval keys), not generation.
+    pub fn execute_streaming(
+        &self,
+        tokens: &[u32],
+        sink: &mut dyn FnMut(PlaneEvent) -> Result<(), larql_vindex::VindexError>,
+    ) -> Result<FinalOutput, InferenceError> {
+        Ok(execute_plan_streaming(
+            &self.plan,
+            &self.store,
+            tokens,
+            &self.backend,
+            None,
+            sink,
+        )?)
     }
 
     /// The component's executable plan — the model-meaning authority.
