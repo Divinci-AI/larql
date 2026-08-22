@@ -335,9 +335,11 @@ fn compressed_kv_append_delegates_to_cpu() {
         }
         fn decode(&self, bytes: &[u8], dim: usize) -> Vec<f32> {
             bytes
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .take(dim)
-                .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                .map(|b| f32::from_le_bytes(*b))
                 .collect()
         }
         fn name(&self) -> &str {

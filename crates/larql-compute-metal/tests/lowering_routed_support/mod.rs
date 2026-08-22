@@ -94,7 +94,7 @@ impl Mxfp4Matrix {
         let mut packed = Vec::with_capacity(rows * groups * MXFP4_GROUP_BYTES);
         let mut scales = Vec::with_capacity(rows * groups);
         for row in values.chunks_exact(k) {
-            for group in row.chunks_exact(MXFP4_GROUP_ELEMS) {
+            for group in row.as_chunks::<MXFP4_GROUP_ELEMS>().0 {
                 let max_abs = group.iter().fold(0.0f32, |m, v| m.max(v.abs()));
                 let byte = if max_abs == 0.0 {
                     0u8
