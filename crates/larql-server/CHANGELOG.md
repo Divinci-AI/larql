@@ -8,6 +8,50 @@ pre-1.0 phase. Forward-looking work lives in [`ROADMAP.md`](ROADMAP.md).
 
 ## [2026-08-23] — residency and mutation land on one operand authority
 
+**V3-SERVE-1 confirmed on the re-extracted Granite 4.1 3B** (40 layers,
+5 in / 1 out, both arms in one process, *on battery* — the original
+7.23 s baseline was on AC, so read the absolute seconds as ~10%
+pessimistic; the ratio and the decomposition are unaffected):
+
+| | load per call | prepared |
+|---|---|---|
+| `prefill_into` | 4.15 s | 0.45 s |
+| `session_with_kv` | 3.25 s | **0.000 s** |
+| decode | 0.13 s | 0.13 s |
+| **warm request** | **7.46 s** | **0.576 s** |
+
+**12.95×**, one-off preparation 3.21 s at boot. Arm A reproduces the
+original 7.23 s, so the baseline is intact.
+
+The important *negative* result, which is what makes 2C an independent
+problem rather than a mixed one: **residency removed a constant and
+left the prompt-length slope alone.**
+
+```
+prefill_into      arm A     arm B     A-B        rate      arm A   arm B
+  5 tokens        4.152     0.448    3.704     5 ->  64    19.61   16.16
+ 64 tokens        7.161     4.099    3.062    64 -> 325     9.07    8.56
+325 tokens       35.931    34.587    1.344
+fixed prefill term            3.897 s -> 0.139 s
+```
+
+The slope did not improve (the small differences are noise, and the run
+was on battery), because residency does not touch per-token
+arithmetic — and it still halves with prompt length, which is the
+per-position attention realisation. At 325 tokens a request is 34.7 s,
+**99.6% of it prefill**: time-to-first-token is now entirely
+prefill-bound. That is V3-SERVE-2's target, measured cleanly and
+separately.
+
+The re-extracted container also **ships its own `tokenizer.json`**, so
+it serves with no overlay — `/v1/completions` answered " Paris" in
+0.434 s over HTTP. Note this is a property of that artefact, not yet of
+the encoder: `vindex3 encode` still does not write one by construction
+(main's `compact` / `compile` paths preserve an existing one). V3-SERVE-4
+stays open until the encoder guarantees it and a gate serves a container
+the encoder produced.
+
+
 Rebased onto main, which had landed the **operand-source seam**
 (`9a8c627e`): execution resolves operands through an `OperandSource`
 (base store + optional `OperandOverrides`) rather than the store

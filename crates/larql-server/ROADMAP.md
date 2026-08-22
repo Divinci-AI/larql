@@ -149,30 +149,68 @@ already resident measures **0.84 s against 7.44 s (~8.8×)**.
 **V3-SERVE-1. Hoist operand residency to server lifetime — DONE.**
 Shipped 2026-08-22: `PreparedOperands` / `PreparedVindex3` lower a
 container's operands once at bind time, and both traversals read that
-image. Measured 42.7x on a warm request (gpt-oss-20b, 31.93 s → 0.75 s;
-`session_with_kv` 13.82 s → 0.000 s), with preparation taking `ExecutionSlice`
-so residency is slice-shaped from the start. See
+image; preparation takes an `ExecutionSlice`, so residency is
+slice-shaped from the start, and resolves through the operand-source
+seam, so it composes with compose mutation rather than competing with
+it. Confirmed on two real models — gpt-oss-20b 31.93 s → 0.75 s
+(**42.7x**), Granite 4.1 3B 7.46 s → 0.576 s (**12.95x**), with
+`session_with_kv` collapsing to 0.000 s on both. See
 [`CHANGELOG.md`](CHANGELOG.md).
 
-**V3-SERVE-2. Batch the KV-filling prefill.** The remaining half of the
-original gap, and now the dominant per-request cost: with operands
-resident, prefill is 81.5% of a warm request. Server prefill runs at
-~10 tok/s where `larql vindex3 exec` on the same container and backend
-gets ~21. That is not overhead — `traverse`'s `kv` argument *switches
-the attention realisation*: `None` runs batched attention, `Some` runs
-the decode step's per-position arithmetic, and the server must pass
-`Some` to fill the provider. Measured slopes: batched 28.5 tok/s
-(1→64) and 21.4 (64→256); per-position 16.0 (5→64) and 7.7 (64→325),
-degrading faster with length.
+**V3-SERVE-2. Batched prefill that also populates KV, with no second
+replay.** The only remaining server-side performance problem, and now
+an isolated one: with operands resident, prefill is **99.6%** of a
+325-token request and time-to-first-token is entirely prefill-bound.
 
-Wanted: a batched realisation that **emits the KV rows as an output of
-the same forward**, not a batched pass followed by a replay to build
-the cache — that would be the double-work defect again in a new place:
+V3-SERVE-1 removed a constant and deliberately left this alone, which
+is what makes it independently measurable (Granite 4.1 3B, both arms in
+one process):
 
 ```text
-batched Q/K/V → attention ├── output
-                          └── append K/V for positions [0..N)
+prefill rate      before    after       fixed prefill term
+  5 ->  64        19.61     16.16       3.897 s -> 0.139 s
+ 64 -> 325         9.07      8.56
 ```
+
+The slope did not move — residency does not touch per-token arithmetic —
+and it still halves with prompt length. That halving is the defect:
+`traverse`'s `kv` argument *switches the attention realisation*. `None`
+runs batched attention (`larql vindex3 exec`, ~21 tok/s class); `Some`
+runs the decode step's per-position arithmetic, which is the only
+realisation that fills the provider.
+
+Wanted — the KV rows as an **output of the same forward**, never a
+batched pass plus a replay to build the cache, which would be the
+double-work defect again in a new place:
+
+```text
+prepared operands
+        ↓
+batched prefill
+        ├── hidden / output
+        └── KV population for positions [0..N)
+        ↓
+decode
+```
+
+Frozen gates:
+
+- exact logits / generated-token parity with the present KV-filling
+  prefill;
+- KV parity for continuation — the rows a resumed session reads must be
+  the rows it would have read;
+- N1 continuation still resumes, bit-identically;
+- **no second pass over the prompt** to construct KV (assert it the way
+  residency is asserted — through `OperandStore::load_count`'s sibling
+  discipline, not a stopwatch);
+- prompt-length slope improves materially toward the direct
+  `vindex3 exec` batched class;
+- V3-SERVE-1's fixed-cost win intact — re-run the phase profiler and
+  show `session_open` still 0.000 s and the fixed prefill term still
+  ~0.1 s.
+
+Do not touch 2B while doing it. The two wins are cleanly separated
+right now; combining them would forfeit the ability to attribute either.
 
 **V3-SERVE-3. Backend injection.** The server hardcodes
 `ProductionBackend::new()`, so serving cannot use the Metal backend
@@ -181,12 +219,16 @@ but *not* the performance lever here: at these sizes metal rung-1
 measured 20.4 against production's 21.4 tok/s prefill. Do it after
 V3-SERVE-1 and 2, and re-measure rather than assuming.
 
-**V3-SERVE-4. Ship a servable container.** No real V3 container is
-servable as shipped — `load_v3_model` needs `<container>/tokenizer.json`
-and the encoder never writes one. The serve tests all write a synthetic
-tokenizer into their fixture, so this class of defect is invisible to
-them. Needs the encoder to carry the tokenizer *and* a gate that serves
-a container the encoder actually produced.
+**V3-SERVE-4. Ship a servable container.** `load_v3_model` needs
+`<container>/tokenizer.json`. A container re-extracted 2026-08-23 has
+one and serves with no overlay, and main's `compact` / `compile` paths
+preserve an existing one — but `vindex3 encode` still does not write
+one *by construction*, so servability remains a property of how a
+particular artefact was built rather than a guarantee. The serve tests
+all write a synthetic tokenizer into their fixture, which is why this
+class of defect is invisible to them. Needs the encoder to carry the
+tokenizer **and** a gate that serves a container the encoder
+produced.
 
 **V3-SERVE-5. Sharding, decoupling, grid.** Not started, and now
 failing closed rather than silently: a V3 binding refuses `--layers` /
