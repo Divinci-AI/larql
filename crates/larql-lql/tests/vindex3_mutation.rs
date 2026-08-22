@@ -448,14 +448,22 @@ fn infer_lines(session: &mut Session, prompt: &str) -> Vec<String> {
 /// ```
 #[test]
 fn compose_insert_alters_execution_and_reverts_bit_for_bit() {
+    // Entity and relation are REAL fixture tokens: the capture prompt
+    // "The [7] of [3] is" must carry actual embedding signal into the
+    // captured residual. With [UNK]-only words (`"a"`, `"b"`) the
+    // residual entering the RMS norm is rounding noise, the norm
+    // amplifies it to an O(1) but platform-random direction, and the
+    // walk-ranking assertion below becomes a coin toss (it lost on
+    // Windows CI while passing on unix).
+    const COMPOSE_PROMPT: &str = "The [7] of [3] is";
     let container = v3_container();
     let patch_dir = tempfile::tempdir().unwrap();
     let patch_file = lql_path(patch_dir.path().join("compose.vlp"));
 
     let mut session = bound_session(container.path());
-    let baseline = infer_lines(&mut session, CANONICAL_PROMPT);
+    let baseline = infer_lines(&mut session, COMPOSE_PROMPT);
     assert!(
-        !baseline.join("\n").contains("[5]"),
+        !baseline.join("\n").contains("\"[5]\""),
         "pre-screen: the target must not already lead: {baseline:?}"
     );
 
@@ -463,7 +471,7 @@ fn compose_insert_alters_execution_and_reverts_bit_for_bit() {
     run(&mut session, &format!("BEGIN PATCH \"{patch_file}\";"));
     let out = run(
         &mut session,
-        r#"INSERT INTO EDGES (entity, relation, target) VALUES ("a", "b", "[5]") ALPHA 5.0 MODE COMPOSE;"#,
+        r#"INSERT INTO EDGES (entity, relation, target) VALUES ("[3]", "[7]", "[5]") ALPHA 5.0 MODE COMPOSE;"#,
     )
     .join("\n");
     assert!(out.contains("compose overlay"), "{out}");
@@ -489,11 +497,11 @@ fn compose_insert_alters_execution_and_reverts_bit_for_bit() {
         .find(|l| l.split_whitespace().nth(1) == Some(&format!("F{feature}")))
         .unwrap_or_else(|| panic!("no F{feature} row in {rows}"));
     assert!(row.contains("[5]"), "{row}");
-    // …and the overridden gate row is merged into the scan: a real
-    // token's walk ranks the ×30 gate above the layer's trained rows.
-    // (The canonical prompt itself tokenises to [UNK], whose embedding
-    // is ~zero — every gate ties at 0.0 there, so it cannot probe the
-    // merge.)
+    // …and the overridden gate row is merged into the scan: the
+    // entity token's walk ranks the ×30 gate above the layer's trained
+    // rows. This needs the conditioned capture above — the composed
+    // gate is `unit(residual)·g_ref·30`, and only a residual carrying
+    // the entity's embedding gives it a stable response to "[3]".
     let walk = run(&mut session, r#"WALK "[3]" TOP 5;"#).join("\n");
     assert!(
         walk.contains(&format!("F{feature}")),
@@ -506,7 +514,7 @@ fn compose_insert_alters_execution_and_reverts_bit_for_bit() {
     // which V2 validated on Gemma; this LCG fixture's head is random,
     // so the honest claim here is observation + reversion, not
     // steering quality.)
-    let composed = infer_lines(&mut session, CANONICAL_PROMPT);
+    let composed = infer_lines(&mut session, COMPOSE_PROMPT);
     assert_ne!(baseline, composed, "the install must change execution");
 
     // TRACE runs the same effective program — no fork between the
@@ -517,7 +525,7 @@ fn compose_insert_alters_execution_and_reverts_bit_for_bit() {
         .and_then(|l| l.split("[id ").nth(1))
         .and_then(|s| s.trim_end_matches(']').trim().parse().ok())
         .unwrap_or_else(|| panic!("no row-1 id in {composed:?}"));
-    let trace = run(&mut session, &format!("TRACE \"{CANONICAL_PROMPT}\";")).join("\n");
+    let trace = run(&mut session, &format!("TRACE \"{COMPOSE_PROMPT}\";")).join("\n");
     let traced_next = trace
         .lines()
         .find(|l| l.starts_with("next token"))
@@ -533,7 +541,7 @@ fn compose_insert_alters_execution_and_reverts_bit_for_bit() {
     // ── Pristine reopen: the container is untouched ──
     let mut session = bound_session(container.path());
     assert_eq!(
-        infer_lines(&mut session, CANONICAL_PROMPT),
+        infer_lines(&mut session, COMPOSE_PROMPT),
         baseline,
         "a fresh open must be bit-for-bit baseline"
     );
@@ -541,14 +549,14 @@ fn compose_insert_alters_execution_and_reverts_bit_for_bit() {
     // APPLY: the composed behaviour returns, bit for bit.
     run(&mut session, &format!("APPLY PATCH \"{patch_file}\";"));
     assert_eq!(
-        infer_lines(&mut session, CANONICAL_PROMPT),
+        infer_lines(&mut session, COMPOSE_PROMPT),
         composed,
         "replaying the patch must reproduce the composed outputs"
     );
 
     // REMOVE: baseline again, bit for bit.
     run(&mut session, &format!("REMOVE PATCH \"{patch_file}\";"));
-    assert_eq!(infer_lines(&mut session, CANONICAL_PROMPT), baseline);
+    assert_eq!(infer_lines(&mut session, COMPOSE_PROMPT), baseline);
 }
 
 /// Compose INSERT honours `AT LAYER` and refuses without a tokenizer,
