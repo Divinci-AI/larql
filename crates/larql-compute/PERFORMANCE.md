@@ -25,6 +25,42 @@ Vindex: `gemma3-4b-q4k-v2` (Q4_K attn/gate/up, Q6_K V/down — Ollama convention
 > remaining ~1.17× decode gap to ollama is distributed across the
 > pipeline, not concentrated in any single kernel.
 
+> **Corrected 2026-08-22 — "at saturation" and "not concentrated in any
+> single kernel" are both isolated-bench conclusions, and the in-situ
+> measurement disagrees.** Every GB/s figure in this file (and in
+> `CHANGELOG.md`'s per-kernel table) is measured with the kernel batched
+> against itself. Running the *same* kernels inside a real decode, via the
+> VINDEX3 stage profiler, they do not reach those rates:
+>
+> | stage | in situ | isolated | ratio |
+> |---|---:|---:|---:|
+> | attention projections | ~205–209 GB/s | ~283 | **73%** |
+> | routed FFN (experts) | ~250–251 | ~322 | **78%** |
+> | lm_head | ~363–368 | ~377 | **97%** |
+>
+> Replicated across sessions to 0.4–1.9%, against ~±6% wobble on tok/s —
+> the per-stage ratio is the stable instrument here, not wall-clock. The
+> head is the control that makes it real: it runs **once** per token as one
+> long sequential stream and reaches its isolated rate; every stage
+> repeated 24× is 22–27% short. So the deficit **is** concentrated and
+> **is** kernel-specific, which is the direct negation of the sentence
+> above — anyone reading "nothing left here" would de-prioritise the two
+> kernels with the largest remaining headroom.
+>
+> What that deficit is NOT, as of 2026-08-22: plain repetition (a repeat
+> curve is a ~4% step by n=4, then flat), command-buffer structure
+> (splitting 24 dispatches across 24 command buffers does not recover it),
+> or operand co-location (packing attention operands into one allocation
+> measured a null). Same-matrix versus distinct-matrix is ~10%, the largest
+> single effect found, so the address stream stays in the frame. The
+> mechanism is open.
+>
+> This crate already held the lesson empirically and never generalised it:
+> see `CHANGELOG.md` on NR2 (wins isolated by 1.47×, **loses batched by
+> 4%**), on kernel-isolated 1.79–3.8× that did not translate end-to-end,
+> and on a thermal A/B where an apparent +23% became **parity on a quiet
+> GPU**.
+
 ---
 
 ## CPU kernels (2026-05-15)

@@ -4,12 +4,38 @@ Canonical rollup for the next execution slice. Keep the detailed design in
 `ROADMAP.md` and crate-local roadmaps; use this file to answer "what is active
 now?" without rereading every crate document.
 
-Last updated: 2026-08-10
+Last updated: 2026-08-22
+
+> **Delta since the 2026-08-16 body below, none of which it records.**
+> PR #283/#284 (VINDEX3 decode perf: stage-level GPU ledger, encode-ahead,
+> device argmax, GPU-directed decode, x2 expert GEMV, seg3t) — gpt-oss
+> reached **~8.63 ms/token ≈ 116 tok/s**; PR #286 (VI3-INF runtime stack);
+> PR #288 (LQL on VINDEX3 — logical `DIFF`, `COMPACT INTO VINDEX`), which
+> discharges several rows still marked "planned" in ROADMAP.md's P0
+> interpretability table; `rust-toolchain.toml` pinning Rust 1.98.0.
+>
+> **One retraction belongs here by this file's own Drift Check rule.** A
+> claimed +2.9 tok/s from QKV single-allocation packing was WITHDRAWN after
+> failing replication (arbiter: all arms within 0.23%); the e2e decode
+> instrument reproduces to only ~±6% cross-session.
+>
+> **Two CI reds standing on main**, also per the Drift Check: the
+> `larql-compute-metal` coverage gate (TOTAL below the 96% floor), and
+> `larql-cli`/`quality` clippy under the newly-pinned Rust 1.98.
 
 **Active slice: VINDEX3 container + execution binding**
 ([`ROADMAP.md` § VINDEX3](ROADMAP.md), spec
 [`crates/larql-vindex/docs/vindex3-format-spec.md`](crates/larql-vindex/docs/vindex3-format-spec.md),
 programme [`docs/vindex3-experiments.md`](docs/vindex3-experiments.md)).
+
+> **Superseded 2026-08-22.** The paragraph below was accurate when written
+> and is now false in both halves. `larql extract-index --expert-banks native
+> --expert-banks-out DIR` emits a **VINDEX3 expert-bank container for every
+> routed layer** (`crates/larql-vindex/src/extract/orchestrate.rs`), and
+> `larql vindex3 encode` writes a full standalone container. What remains
+> VINDEX2 is the *main* `index.json`. VINDEX3 also now writes **schema 4**,
+> reading 3 as legacy. Kept for the history of the §12.1 gate, not as
+> current state.
 
 **Read this first: `extract` writes VINDEX2, and has no VINDEX3 path at all.**
 Not "defaults to" — there is no flag and no branch; `index.json.version` is
@@ -38,7 +64,19 @@ reopens, verifies clean and reports `VINDEX3 (index.json schema 3)`.
 container executes on fixture A.** Those are two results, not one — the
 execution comparison still runs over VINDEX2 bytes. What c8 adds is that those
 are demonstrably the same bytes, which is what lets the execution result carry
-across. Nobody has run a real model *from* VINDEX3 end to end.
+across. ~~Nobody has run a real model *from* VINDEX3 end to end.~~
+
+> **False as of 2026-08-22 — five model families now decode end to end from
+> VINDEX3 containers**, through `larql vindex3 exec --backend metal-lowered`:
+> gpt-oss-20b, Granite 4.1 3B / 8B / 30B, Gemma 4 26B-A4B (HF-identical on
+> CPU, certified on Metal) and Muse-Glimmer 30B. Current board, rested-AC
+> arbiter: **gpt-oss ~8.63 ms/token ≈ 116 tok/s**, Granite 3B ~119.8 tok/s,
+> Gemma 4 ~79 tok/s. Two cautions that travel with those numbers: they are
+> the *lowered* path (not the served `--routed-from` path, whose gpt-oss
+> figure is 77.2 tok/s — different engine, not a regression), and this
+> instrument reproduces to only **~±6% across sessions**, so no sub-6%
+> single-block claim is admissible. See `bench/prompts/README.md` for the
+> protocol of record.
 
 **Open, in order:**
 

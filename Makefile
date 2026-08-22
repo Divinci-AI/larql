@@ -907,7 +907,9 @@ bench-inference:
 	cargo run --release -p larql-inference --example bench_inference
 
 # Compute kernel criterion bench (quant_matvec — Metal GPU, lives in
-# the larql-compute-metal sibling crate per ADR-019).
+# the larql-compute-metal sibling crate per ADR-019). That crate has no
+# `metal` feature either — it is gated on target_os = "macos" — so the
+# pre-ADR form failed on both counts and took `bench-all` down with it.
 bench-compute:
 	cargo bench -p larql-compute-metal --bench quant_matvec
 

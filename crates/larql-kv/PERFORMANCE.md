@@ -1,5 +1,33 @@
 # Performance — larql-kv
 
+> **Retracted 2026-08-22 — every per-engine tok/s figure below is inflated.**
+> The harness that produced them was not measuring a token: it stopped its
+> timer before `pick_next`, while the reference rows included lm_head, and
+> both landed in the same tok/s column. `CHANGELOG.md` (2026-08-04, §"the
+> bench was not measuring a token") puts the inflation at **2–3× for every
+> engine**. An earlier `total/n` conflation in this same table was already
+> flagged by `docs/diagnoses/remote-moe-bottlenecks.md:49`, so these rows
+> have now survived two independent instrument corrections.
+>
+> **Do not choose an engine on these numbers.** The *ordering* between
+> engines may survive — both arms shared the defect — but no absolute here,
+> and no comparison against a non-larql baseline, is usable until the table
+> is re-run through a harness that times a whole token.
+>
+> Three further hazards, established 2026-08-21/22 against the VINDEX3
+> lowered path and applicable to any re-run:
+> - **AC only.** On battery the same probe roughly halves; one runbook
+>   recorded llama.cpp itself falling 34 → 1.05 tok/s at 31% battery.
+> - **~±6% cross-session floor.** Identical code read 8.14 ms and 8.62 ms
+>   in two sessions, so no sub-6% claim survives a single block however
+>   clean its internal brackets. A textbook interleaved A/B/A/B with a
+>   0.48% control bracket still produced a false +2.4%.
+> - **Warm the GPU.** Short or unwarmed sampling reads a fake speedup —
+>   an unwarmed micro-probe read 3.8× slow, and this repo already caught
+>   the same class once (`larql-compute/CHANGELOG.md:89`: 58.5 GiB/s under
+>   default criterion sampling against a consistent 33 at
+>   `--measurement-time 20`).
+
 Machine: M3 Max, macOS. Numbers carried from the engine-level audits that
 preceded the crate extraction (2026-04-23 onward), with the source bench
 identified for each row. The extraction itself was a code move — no

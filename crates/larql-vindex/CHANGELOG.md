@@ -655,6 +655,23 @@ entry can land alongside.
 Earlier ROADMAPs sometimes drifted between `bench`, `bench_generate`,
 and `--warmup 0` numbers — those are not comparable.
 
+> **Superseded 2026-08-22 — `bench/prompts/README.md` is the protocol of
+> record, and it pins `--warmup 16 -n 256`.** Two standardisations existed
+> in this repo, neither citing the other, and this one loses on its own
+> evidence: the prompts README measures that *a 49-step run reads ~22%
+> slow*, and `-n 30` is shorter still, so a headline taken this way is
+> biased fast against a number taken the other way. Anything gated on the
+> thresholds set against this protocol (see the runbook below) is gating on
+> non-comparable numbers and needs re-deriving at 16/256 before it can
+> pass or fail anything. The same applies to two other variants in the
+> repo: `--warmup 3 -n 50` (`larql-compute/CHANGELOG.md`) and
+> `--warmup 5 -n 50` (`larql-inference/CHANGELOG.md`).
+>
+> The prompts README also now carries what none of these did: a stated
+> **±6% cross-session floor**, an AC-and-full-charge requirement, and a
+> per-arm warm-up rule. A single clean block is not sufficient evidence for
+> a sub-6% claim under any of the four protocols.
+
 **Spec doc**: `crates/larql-vindex/docs/per-layer-ffn-phase2-research.md`
 captures the cache-machinery audit + thermal-confound analysis.
 

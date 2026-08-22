@@ -8,8 +8,33 @@ not, and both move the number by more than the code changes being measured.
 |---|---|---|
 | `--warmup` | 16 | first-call allocation + Metal pipeline JIT land in the discarded steps |
 | `-n` | 256 | a 49-step run reads ~22% slow; 256 reaches steady state |
+| engine path | state it | see the engine-path note below — the numbers here are **not** the lowered path's |
 | `--prompt` | see below | context length sets the KV work per step — the single largest term |
-| power | AC, idle | battery and charging state both move decode by ~1-2 tok/s |
+| power | AC, idle | **not a small knob** — see below; on battery a probe can read half speed |
+
+> **Corrected 2026-08-22.** This table used to say power moved decode by
+> "~1-2 tok/s". That understates the most dangerous knob on the list. The
+> QKV isolated probe read 27–31 µs per arm on AC and 48–82 µs on battery —
+> roughly half speed, with two back-to-back runs disagreeing by 24% where
+> the AC runs had been stable. `bench/baselines/c10_gemma4-26b-a4b_cpu_RUNBOOK.md`
+> records llama.cpp itself falling **34 → 1.05 tok/s** at 31% battery. Treat
+> "on battery" as *no measurement*, not as a measurement with a caveat.
+>
+> **Charging is not the same as AC.** A bulk-charging box at 23–38% behaved
+> differently from a rested full charge; the arbiter run that settled the
+> QKV question needed 100% charge *and* an idle GPU before its arms agreed
+> to 0.23%.
+>
+> **Warm the GPU before timing anything small.** This machine accelerates
+> enormously under sustained load: an unwarmed single-dispatch arm read
+> **150.5 µs** where the warmed arm read **39.5 µs**, a 3.8× fake that
+> fabricated a textbook "penalty curve" purely from the frequency ramp,
+> because a small arm does too little work to leave idle clock while a
+> large one ramps itself. Warm before *every* arm, not once per session —
+> even after 192 warm-up dispatches the box kept improving 22% over two
+> minutes. `larql-compute/CHANGELOG.md` records the same class from the
+> other direction: default criterion sampling read 58.5 GiB/s where
+> `--measurement-time 20` read a consistent 33.
 
 ## The mechanism: decode cost is linear in KV depth
 
@@ -35,6 +60,20 @@ ms/token       ≈  11.4 + 0.0047 × mean_depth
 
 Measured on whole-run means, which are far more stable than within-run
 per-step fits (those have ~2x run-to-run spread and cannot resolve this):
+
+> **Engine path (added 2026-08-22): these rows are the SERVED path**
+> (VINDEX2 spine + `--routed-from`), not the VINDEX3 lowered path
+> (`vindex3 exec --backend metal-lowered`). The two are different engines
+> over the same model, and on gpt-oss the lowered path reads ~8.6 ms/token
+> (~116 tok/s) where the table below reads 11.99 (83.4). **That is not a
+> regression** — it is a different engine — but a reader comparing the two
+> numbers directly will conclude one. Always state the path beside the
+> figure.
+>
+> Note also that this repo standardised **four** incompatible protocols at
+> various times (16/256 here; 3/30 in `larql-vindex/CHANGELOG.md`; 3/50 in
+> `larql-compute`; 5/50 in `larql-inference`). This page is the protocol of
+> record; numbers taken under the others are not comparable to these.
 
 | `-n` | mean depth | ms/token | tok/s | marginal slope |
 |---:|---:|---:|---:|---:|
@@ -134,6 +173,37 @@ positions 2 and 4, so under any position-dependent drift the candidate is
 systematically later in the run than the baseline — a measured ~2.5%
 bias per position on this machine — and it only cancels drift that is
 monotonic, which this machine's is not.
+
+> **The bracket is necessary and NOT sufficient — established the hard way
+> 2026-08-21/22.** A block can pass every rule on this page and still be
+> wrong. One did: interleaved arms, verified-idle GPU, AC, both arms
+> internally self-consistent (baseline 8.32/8.36, candidate 8.15/8.14),
+> control bracket **0.48%**, identical token trajectory. It reported
+> −0.195 ms/token (+2.4%). Independent replication the next day — idle GPU,
+> 100% charge, four alternating rounds, minimum per arm — put all arms
+> within **0.020 ms (0.23%)**. The effect was zero.
+>
+> Why the bracket did not catch it: a bracket detects drift *within* a
+> block. It cannot detect the machine occupying **two performance states**
+> across the block, because then the arms align with the states rather than
+> with the treatment — and both arms looking self-consistent is the
+> *symptom* of that, not reassurance against it. Identical code read
+> 8.14 ms in one session and 8.62 in another.
+>
+> **So: ~±6% is this instrument's cross-session reproducibility floor, and
+> no sub-6% claim is banked from a single block, however clean.** It needs
+> two independent sessions, minimum-of-N over alternating rounds (the
+> minimum is the robust statistic — contention only ever adds time), a
+> verified-idle GPU and a full charge. Print the full per-round spread
+> beside the minimum so contention stays visible instead of being averaged
+> away.
+>
+> Corollary that would have saved a day: **if a kernel-level probe predicts
+> a delta below this floor, end-to-end cannot adjudicate it.** The QKV probe
+> predicted 0.038 ms (0.5%); the "measured" 0.195 ms was five times its own
+> model, and that gap was a reason to doubt the instrument, not evidence of
+> a missing cost term. It was read as the latter, and a whole cost-model
+> revision was written on top of it before the replication arrived.
 
 The unit is a **bracket**: `baseline / candidate / baseline`, warmed to
 plateau first, with the candidate counting only if the two baselines agree

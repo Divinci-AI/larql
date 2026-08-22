@@ -62,7 +62,7 @@ larql-inference   engines (Standard, MarkovResidual, Apollo, etc.), chat,
                   that composes substrate primitives + engine state; the
                   substrate itself lives in larql-compute.
     ↓
-larql-kv          pluggable KV-cache engines — 9 implementations (standard,
+larql-kv          pluggable KV-cache engines — 10 implementations (standard,
                   markov-rs, boundary-per-layer, turbo-quant, apollo, …),
                   state-policy classified (canonical vs derivative), W10 mask
                   cascade, CanonicalKvState for the V3 runtime
@@ -105,9 +105,12 @@ larql-execution       execution-refusal semantics (RefusalKind) shared across
                       the runtime crates
 ```
 
-**`crates/larql-experts` is its own nested workspace** (own Cargo.toml with `[workspace]` members) — it builds the `wasm32-wasip1` expert modules that `model-compute`'s `wasm` feature hosts. Root `cargo build --workspace` does not include it.
+**`crates/larql-experts` is its own nested workspace** (own Cargo.toml with `[workspace]` members) — it builds the `wasm32-wasip1` expert modules that `model-compute`'s `wasm` feature hosts. Root `cargo build --workspace` does not include it — which also means the workspace-wide `clippy`, `coverage` and `test` sweeps miss it, so code there is not gated by `make ci`.
 
-**Metal is a first-class peer** (ADR-0022, 2026-05-18). `larql-compute-metal`
+**Metal is a first-class peer** (ADR-0022, 2026-05-18). Its crate has its own
+[README](crates/larql-compute-metal/README.md) — read that before changing kernels,
+dispatch policy or anything under `shaders/`; the operator controls and the
+measurement protocol are documented there and nowhere else. `larql-compute-metal`
 is the same shape as a future `larql-compute-vulkan` / `larql-compute-cuda` —
 its own crate, implements the same trait surface, owns its kernels. Inference
 factories (`default_engine_backend()`, `default_async_engine_backend()`,
@@ -125,11 +128,13 @@ that stamps a compiled edge into gate/up/down tensors lives at
 it's the lowest-level step of the `COMPILE` verb and isn't a separate crate
 until a second consumer needs it.
 
-The CLI is a thin dispatcher: each `larql <cmd>` lives in [crates/larql-cli/src/commands/{primary,extraction,query,dev,diagnostics}/](crates/larql-cli/src/commands/) and is wired into the `Commands` enum in [crates/larql-cli/src/main.rs](crates/larql-cli/src/main.rs) under help headings (Run / Build / Query / LQL / Server / Research / Factory). Legacy research subcommands (`larql walk`, `larql weight-extract`, …) trampoline to `larql dev <subcmd>` via an argv rewrite in `main()`. `larql serve` exec's into `larql-server`. `larql repl` and `larql lql` delegate to `larql_lql::run_repl`/`run_statement`.
+The CLI is a thin dispatcher: each `larql <cmd>` lives in [crates/larql-cli/src/commands/{primary,extraction,query,dev,diagnostics}/](crates/larql-cli/src/commands/) and is wired into the `Commands` enum in [crates/larql-cli/src/main.rs](crates/larql-cli/src/main.rs) under help headings (Run / Build / Query / LQL / Server / Research / Factory). The everyday verbs — `run`, `chat`, `bench`, `serve`, `vindex3`, `shannon` — are in `primary/`, not `extraction/` or `query/`; check where a command's siblings live before adding one. Legacy research subcommands (`larql walk`, `larql weight-extract`, …) trampoline to `larql dev <subcmd>` via an argv rewrite in `main()`, and every name in that trampoline must resolve to a real `dev` subcommand — three did not until 2026-08-23, turning a clean error into a misleading one. `larql serve` exec's into `larql-server`. `larql repl` and `larql lql` delegate to `larql_lql::run_repl`/`run_statement`.
 
-LQL parser and executor are split: [crates/larql-lql/src/parser/](crates/larql-lql/src/parser/) and [crates/larql-lql/src/executor/](crates/larql-lql/src/executor/) both cover lifecycle/query/mutation/introspection/trace, but the executor has since grown subdirectories (`lifecycle/`, `mutation/`, `query/`). When adding a statement, touch the AST in [crates/larql-lql/src/ast.rs](crates/larql-lql/src/ast.rs), then both sides.
+LQL parser and executor are split: [crates/larql-lql/src/parser/](crates/larql-lql/src/parser/) and [crates/larql-lql/src/executor/](crates/larql-lql/src/executor/) both carry `lifecycle`, `query`, `mutation`, `introspection`, `trace` — though on the executor side several are now directories, and the executor additionally owns `vindex3.rs`, `compact.rs`, `knowledge.rs`, `tuning.rs`, `relation_resolver.rs` and `remote/` with no parser twin. The symmetry is a starting point, not an invariant. When adding a statement, touch the AST in [crates/larql-lql/src/ast.rs](crates/larql-lql/src/ast.rs), then both sides.
 
 ## Build, test, run
+
+**The toolchain is pinned.** [rust-toolchain.toml](rust-toolchain.toml) fixes it at **1.98.0** with clippy and rustfmt; rustup fetches that version automatically, so do not override it with your own `stable`. This exists because CI installs the newest stable while a developer's `stable` is whenever they last ran `rustup update` — the two drifted to 1.95 vs 1.98, and clippy failed in CI on lints that could not be reproduced locally. (`Cargo.toml`'s `rust-version = 1.88` is the MSRV — a different thing, and not what you build with.)
 
 ```bash
 cargo build --release                             # optimised build
@@ -147,7 +152,7 @@ make lint                                         # cargo clippy --workspace --t
 - `make test` is intentionally fast — `cargo test --workspace --lib --bins` (no integration tests). Use `make test-full` for `cargo test --workspace`, `make test-models` for the `#[ignore]`d model-backed goldens in larql-inference (`-- --ignored`), and `make larql-<crate>-ci` for the per-crate gate CI runs (fmt-check + lint + test + bench-test + coverage). Beyond per-crate workflows, `.github/workflows/quality.yml` adds cargo-audit/deny, MSRV, buf lint, and a dead-doc-link gate (scripts/check_doc_links.py).
 - Re-bench across architectures before landing perf claims — `make bench-cross-arch` runs Gemma 3 4B, Gemma 4 31B, Llama 2, Mistral 7B, Gemma 4 26B (ADR-017): an A/B promoted on Gemma 3 4B alone must be re-bench'd here.
 
-CLI (after `cargo build --release`): `./target/release/larql extract-index … | repl | lql '…' | convert | hf | build | serve | verify`. See [docs/cli.md](docs/cli.md) for the full surface.
+CLI (after `cargo build --release`): `./target/release/larql extract-index … | repl | lql '…' | convert | hf | build | serve | verify`, plus the **`larql vindex3`** family (`plan`, `ops`, `exec`, `encode`, …) — the VINDEX3 container surface, and the home of the current perf instrument `vindex3 exec --backend metal-lowered --generate N --profile`. See [docs/cli.md](docs/cli.md) for the full surface, but note it does not yet document `vindex3`; read `crates/larql-cli/src/commands/primary/vindex3_cmd/` for that family.
 
 Python bindings are maturin-built under uv (not cargo-run):
 
