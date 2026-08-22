@@ -486,9 +486,33 @@ real (unprefixed) name, `LARQL_DISABLE_Q8K_WIRE`. (This overlaps the
 
 ## Refuted / non-issues checked
 
-- No request-derived value builds a filesystem path or shell command anywhere
+- ~~No request-derived value builds a filesystem path or shell command anywhere
   in the reviewed surface (the 2026-06-12 `model_id` traversal item was already
-  fixed; `/v1/shard` streams the server-controlled `model.path`).
+  fixed; `/v1/shard` streams the server-controlled `model.path`).~~
+
+  > **WRONG — corrected 2026-08-22. This closed a live finding.** The
+  > 2026-06-12 item concerned the *download* side and was never fixed;
+  > `git log --since=2026-06-12 -- crates/larql-server/src/shard_loader.rs`
+  > was empty. `download_and_load_shard` joined `model_id` straight into
+  > `PathBuf::from(store_path).join(model_id)` and `create_dir_all`'d it,
+  > and that `model_id` arrives in the router's `AssignMsg` — remote
+  > input, not local config. A peer able to reach the announce socket
+  > could set `model_id` to `../../../../etc/cron.d` and choose where a
+  > downloaded tar was unpacked.
+  >
+  > Fixed the same day: `validated_model_id` refuses anything that is not
+  > a single path segment of `[A-Za-z0-9._-]` under 128 bytes, and
+  > `shard_dest_path` returns `Option` so a caller cannot fall back to an
+  > unvalidated path. Gated both ways — hostile ids refused, and real ids
+  > still accepted and still inside the store, because a validator that
+  > refused everything would have passed a one-sided test.
+  >
+  > The scoping error is the lesson: the earlier finding named one call
+  > site, this review checked "the reviewed surface", and the sibling
+  > path in another file was in neither. A traversal finding should be
+  > closed against every use of the tainted value, not against the site
+  > that raised it. Note `/v1/shard` streaming `model.path` was and
+  > remains fine — that half was right.
 - `gate_knn` clamps `top_k` from the wire (`gate_knn/mod.rs:94`,
   `dispatch.rs:283`) — no unbounded-heap DoS.
 - Client response validation checks every shard output length against expected
