@@ -406,6 +406,11 @@ fn compose_state_derives_operand_edits_from_the_plan() {
     // Free-slot rule: every miniature slot is annotated, so the first
     // pick is the weakest c_score; claiming it moves the next pick;
     // a tombstoned slot is free again.
+    assert_eq!(
+        overlay.find_free_feature(&view, 99),
+        None,
+        "a layer with no features offers no slot"
+    );
     let first = overlay.find_free_feature(&view, 0).expect("a slot");
     overlay.insert_feature(0, first, vec![9.0; G_HIDDEN], meta("[5]", 0.9));
     let second = overlay.find_free_feature(&view, 0).expect("another slot");
@@ -457,4 +462,103 @@ fn compose_state_derives_operand_edits_from_the_plan() {
     overlay.set_up_vector(9, 0, vec![1.0; G_HIDDEN]);
     let err = overlay.operand_overrides(&plan).unwrap_err();
     assert!(err.to_string().contains("beyond the plan"), "{err}");
+}
+
+/// The per-slot override accessors and the V2 `num_overrides` count
+/// (distinct slots with meta OR vector state; the KNN store excluded).
+#[test]
+fn override_accessors_count_distinct_slots() {
+    let mut overlay = KnowledgeOverlay::new();
+    assert!(overlay.gate_override_at(0, 1).is_none());
+    assert!(overlay.up_override_at(0, 1).is_none());
+    assert!(overlay.down_override_at(0, 1).is_none());
+    assert_eq!(overlay.num_overrides(), 0);
+
+    overlay.set_gate_vector(0, 1, vec![1.0, 2.0]);
+    overlay.set_up_vector(0, 1, vec![3.0, 4.0]);
+    overlay.set_down_vector(0, 2, vec![5.0, 6.0]);
+    overlay.update_feature_meta(1, 0, meta("[9]", 0.5));
+
+    assert_eq!(overlay.gate_override_at(0, 1), Some(&[1.0f32, 2.0][..]));
+    assert_eq!(overlay.up_override_at(0, 1), Some(&[3.0f32, 4.0][..]));
+    assert_eq!(overlay.down_override_at(0, 2), Some(&[5.0f32, 6.0][..]));
+    assert!(overlay.down_override_at(0, 1).is_none());
+    assert_eq!(
+        overlay.num_overrides(),
+        3,
+        "(0,1) counts once across gate+up; (0,2) and (1,0) once each"
+    );
+}
+
+/// COMPILE's refusal list: tombstones and meta-only relabels have no
+/// physical form in a baked container (annotations are derived), so
+/// they block; a vector-carrying slot does not.
+#[test]
+fn bake_blockers_name_exactly_the_unbakeable_state() {
+    let mut overlay = KnowledgeOverlay::new();
+    assert!(overlay.bake_blockers().is_empty());
+
+    overlay.delete_feature(0, 3);
+    overlay.update_feature_meta(0, 1, meta("[9]", 0.5));
+    overlay.insert_feature(0, 2, vec![1.0, 0.0], meta("[5]", 0.9));
+
+    assert_eq!(
+        overlay.bake_blockers(),
+        vec![
+            "meta-only override at (0,1)".to_string(),
+            "tombstone at (0,3)".to_string(),
+        ],
+        "vector-carrying (0,2) bakes; the other two cannot"
+    );
+}
+
+/// Update ops carrying up/down vectors and Insert ops carrying a
+/// `down_meta` replay with V2's resolution (vectors land in the
+/// overlay; a carried meta becomes the override verbatim).
+#[test]
+fn update_and_insert_replay_their_vector_and_meta_payloads() {
+    let mut overlay = KnowledgeOverlay::new();
+    overlay
+        .try_apply_patch(patch_of(
+            "payloads",
+            vec![
+                PatchOp::Update {
+                    layer: 0,
+                    feature: 0,
+                    gate_vector_b64: None,
+                    up_vector_b64: Some(encode_gate_vector(&[0.5, 0.5])),
+                    down_vector_b64: Some(encode_gate_vector(&[0.0, 1.0])),
+                    down_meta: None,
+                },
+                PatchOp::Insert {
+                    layer: 0,
+                    feature: 1,
+                    relation: Some("rel".into()),
+                    entity: "mu".into(),
+                    target: "[7]".into(),
+                    confidence: Some(0.4),
+                    gate_vector_b64: Some(encode_gate_vector(&[2.0, 0.0])),
+                    up_vector_b64: None,
+                    down_vector_b64: None,
+                    down_meta: Some(crate::patch::format::PatchDownMeta {
+                        top_token: "[8]".into(),
+                        top_token_id: 8,
+                        c_score: 0.7,
+                    }),
+                },
+            ],
+        ))
+        .unwrap();
+
+    assert_eq!(overlay.up_override_at(0, 0), Some(&[0.5f32, 0.5][..]));
+    assert_eq!(overlay.down_override_at(0, 0), Some(&[0.0f32, 1.0][..]));
+
+    let inserted = overlay.resolve_feature_meta(0, 1, None).unwrap();
+    assert_eq!(
+        inserted.top_token, "[8]",
+        "a carried down_meta wins over the synthesised target meta"
+    );
+    assert_eq!(inserted.top_k.len(), 1, "V2 builds a single-entry top_k");
+    assert_eq!(inserted.top_k[0].token_id, 8);
+    assert_eq!(overlay.gate_override_at(0, 1), Some(&[2.0f32, 0.0][..]));
 }
