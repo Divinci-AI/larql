@@ -223,6 +223,10 @@ name = "openai_demo"
 path = "examples/server/openai_demo.rs"
 
 [[example]]
+name = "vindex3_serve_demo"
+path = "examples/server/vindex3_serve_demo.rs"
+
+[[example]]
 name = "server_demo"
 path = "examples/server/server_demo.rs"
 

@@ -113,10 +113,20 @@ fn main() {
 
     // ── Browse: the model as a database, via semantic roles ──
     run(&mut session, r#"WALK "[3]" TOP 3;"#);
+    run(&mut session, r#"EXPLAIN WALK "[3]";"#);
     run(
         &mut session,
         r#"SELECT * FROM FEATURES WHERE layer = 0 LIMIT 5;"#,
     );
+    run(&mut session, r#"SELECT * FROM EDGES LIMIT 5;"#);
+    run(&mut session, r#"SELECT * FROM ENTITIES LIMIT 5;"#);
+    run(
+        &mut session,
+        r#"SELECT * FROM EDGES NEAREST TO "[3]" AT LAYER 0 LIMIT 3;"#,
+    );
+    run(&mut session, r#"SHOW FEATURES 0 LIMIT 5;"#);
+    run(&mut session, r#"SHOW ENTITIES LIMIT 5;"#);
+    run(&mut session, r#"SHOW RELATIONS;"#);
     run(&mut session, r#"DESCRIBE "[3]";"#);
 
     // ── Refusals are capability statements (mutation is V3-LQL-3B) ──
