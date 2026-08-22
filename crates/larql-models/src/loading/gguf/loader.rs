@@ -616,7 +616,6 @@ pub fn normalize_gguf_key_for_arch(name: &str, arch: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::super::constants::*;
     use super::super::types::ShardInfo;
     use super::*;
 
