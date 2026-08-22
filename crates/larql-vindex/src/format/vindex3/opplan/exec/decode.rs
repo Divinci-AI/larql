@@ -2,8 +2,10 @@
 //!
 //! A [`DecodeSession`] loads every operand **once** — in the format the
 //! backend declares — and then advances one token per [`step`], feeding
-//! the backend's [`attention_step`] against the session's per-layer K/V
-//! cache. Each step therefore computes exactly one position through the
+//! the backend's [`attention_step`] against a per-layer K/V
+//! continuation state ([`KvState`], default [`RowKvState`], or a
+//! caller-owned provider via [`with_kv_state`](DecodeSession::with_kv_state)).
+//! Each step therefore computes exactly one position through the
 //! whole stack instead of re-running the forward over the grown
 //! sequence, and every weight keeps a stable address for the session's
 //! lifetime, which is what lets a pointer-keyed device buffer cache
@@ -22,6 +24,7 @@
 //! [`attention_step`]: super::backend::PlanBackend::attention_step
 
 use super::backend::{AttentionStepCall, MatrixClass, NormCall, PlanBackend};
+use super::kv::{plan_kv_geometry, KvState, RowKvState};
 use super::operands::OperandStore;
 use super::weights::{load_weight, LoadedWeight};
 use super::AttentionOperands;
@@ -64,8 +67,30 @@ struct LayerState {
     post_ffn: Option<LoadedNorm>,
     /// The layer's output scalar, when the plan carries one.
     layer_scale: Option<f32>,
-    keys: Vec<Vec<f32>>,
-    values: Vec<Vec<f32>>,
+}
+
+/// Who holds the session's continuation state (VI3-INF-2): the default
+/// [`RowKvState`] owned in place, or a caller's provider borrowed for
+/// the session's lifetime so the state outlives the session.
+enum KvSlot<'a> {
+    Owned(RowKvState),
+    Borrowed(&'a mut dyn KvState),
+}
+
+impl KvSlot<'_> {
+    fn state(&self) -> &dyn KvState {
+        match self {
+            KvSlot::Owned(state) => state,
+            KvSlot::Borrowed(state) => &**state,
+        }
+    }
+
+    fn state_mut(&mut self) -> &mut dyn KvState {
+        match self {
+            KvSlot::Owned(state) => state,
+            KvSlot::Borrowed(state) => &mut **state,
+        }
+    }
 }
 
 /// What one decode step produces.
@@ -84,18 +109,47 @@ pub struct DecodeSession<'a, B: PlanBackend> {
     layers: Vec<LayerState>,
     final_norm: Option<LoadedNorm>,
     output: Option<(OutputOp, LoadedWeight)>,
-    position: usize,
+    kv: KvSlot<'a>,
 }
 
 impl<'a, B: PlanBackend> DecodeSession<'a, B> {
     /// Load every operand the plan consumes, once, in the backend's
     /// declared weight format. The embedding table stays f32 — it is a
-    /// row lookup, not matrix traffic.
+    /// row lookup, not matrix traffic. Continuation state is the
+    /// default in-place [`RowKvState`].
     pub fn new(
         plan: &'a ComponentOpPlan,
         store: &OperandStore,
         backend: &'a B,
     ) -> Result<Self, VindexError> {
+        Self::build(plan, store, backend, KvSlot::Owned(RowKvState::default()))
+    }
+
+    /// Like [`new`](Self::new), but the caller provides — and keeps
+    /// owning — the continuation state, so K/V policy composes outside
+    /// the executor and the state outlives the session. The session
+    /// continues from `kv.position()`: an empty provider starts a
+    /// fresh sequence, and one populated by
+    /// [`prefill_plan`](super::prefill_plan) — or by an earlier
+    /// session — resumes exactly where it left off. The provider is
+    /// the *only* position authority; no separate start argument
+    /// exists to disagree with it.
+    pub fn with_kv_state(
+        plan: &'a ComponentOpPlan,
+        store: &OperandStore,
+        backend: &'a B,
+        kv: &'a mut dyn KvState,
+    ) -> Result<Self, VindexError> {
+        Self::build(plan, store, backend, KvSlot::Borrowed(kv))
+    }
+
+    fn build(
+        plan: &'a ComponentOpPlan,
+        store: &OperandStore,
+        backend: &'a B,
+        mut kv: KvSlot<'a>,
+    ) -> Result<Self, VindexError> {
+        kv.state_mut().prepare(&plan_kv_geometry(plan));
         let embedding = plan.embedding.as_ref().ok_or_else(|| {
             VindexError::Parse(format!(
                 "component `{}` has no embedding op — external hidden-state input is a later rung",
@@ -135,8 +189,6 @@ impl<'a, B: PlanBackend> DecodeSession<'a, B> {
                     .as_ref()
                     .map(|op| store.load(op).and_then(|v| super::layer_scalar_of(&v)))
                     .transpose()?,
-                keys: Vec::new(),
-                values: Vec::new(),
             });
         }
         let final_norm = plan
@@ -167,7 +219,7 @@ impl<'a, B: PlanBackend> DecodeSession<'a, B> {
             layers,
             final_norm,
             output,
-            position: 0,
+            kv,
         };
         let mut weights: Vec<super::backend::WeightSlice<'_>> = Vec::new();
         for state in &session.layers {
@@ -181,9 +233,10 @@ impl<'a, B: PlanBackend> DecodeSession<'a, B> {
         Ok(session)
     }
 
-    /// Positions consumed so far.
+    /// Positions consumed so far — read from the continuation state,
+    /// which is the single position authority (VI3-INF-3).
     pub fn position(&self) -> usize {
-        self.position
+        self.kv.state().position()
     }
 
     /// Advance one token: embed it, run it through every layer against
@@ -215,7 +268,8 @@ impl<'a, B: PlanBackend> DecodeSession<'a, B> {
             });
         }
 
-        for (state, layer) in self.layers.iter_mut().zip(&self.plan.layers) {
+        let position = self.kv.state().position();
+        for (index, (state, layer)) in self.layers.iter_mut().zip(&self.plan.layers).enumerate() {
             // Attention input is normalised once and handed over; the
             // judged gate reads the same vector (same as the batch path).
             let inputs = [state.pre_attention.apply(self.backend, &h)];
@@ -227,12 +281,11 @@ impl<'a, B: PlanBackend> DecodeSession<'a, B> {
             );
             let out = self.backend.attention_step(AttentionStepCall {
                 op: call,
-                position: self.position,
-                keys: &state.keys,
-                values: &state.values,
+                position,
+                keys: self.kv.state().keys(index),
+                values: self.kv.state().values(index),
             })?;
-            state.keys.push(out.key);
-            state.values.push(out.value);
+            self.kv.state_mut().append(index, out.key, out.value);
             let mut attn_out = match &state.post_attention {
                 Some(norm) => norm.apply(self.backend, &out.output),
                 None => out.output,
@@ -274,7 +327,7 @@ impl<'a, B: PlanBackend> DecodeSession<'a, B> {
             )?),
             None => None,
         };
-        self.position += 1;
+        self.kv.state_mut().set_position(position + 1);
         Ok(StepOutput { logits })
     }
 }

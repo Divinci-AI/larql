@@ -18,6 +18,9 @@ path = "src/main.rs"
 [dependencies]
 larql-vindex = { path = "../larql-vindex" }
 larql-inference = { path = "../larql-inference" }
+# Continuation-state providers for the VINDEX3 serving path
+# (VI3-SERVE-1): the canonical KvCache behind the V3 KvState contract.
+larql-kv = { path = "../larql-kv" }
 larql-models = { path = "../larql-models" }
 larql-router-protocol = { path = "../larql-router-protocol" }
 # Optional Metal backend for shard-side GPU experts (macOS).  When the

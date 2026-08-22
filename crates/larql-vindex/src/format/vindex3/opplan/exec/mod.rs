@@ -23,6 +23,7 @@ pub mod decode;
 pub mod device;
 mod experts;
 pub mod kernels;
+pub mod kv;
 pub mod operands;
 pub mod production;
 pub mod reference;
@@ -34,9 +35,10 @@ mod tests;
 use super::{AttentionOp, ComponentOpPlan, LayerPlan, NormOp};
 use crate::error::VindexError;
 use backend::{
-    AttentionCall, BiasCall, GateCall, MatrixClass, NormCall, PlanBackend, ProjectCall, QkNormCall,
-    SinkCall, WeightFormat,
+    AttentionCall, AttentionStepCall, BiasCall, GateCall, MatrixClass, NormCall, PlanBackend,
+    ProjectCall, QkNormCall, SinkCall, WeightFormat,
 };
+use kv::KvState;
 use operands::OperandStore;
 use rayon::prelude::*;
 use reference::ReferenceBackend;
@@ -160,6 +162,74 @@ pub fn execute_plan_streaming<B: PlanBackend + ?Sized>(
     resume: Option<ResumePoint>,
     sink: &mut dyn FnMut(PlaneEvent) -> Result<(), VindexError>,
 ) -> Result<FinalOutput, VindexError> {
+    traverse(
+        plan,
+        store,
+        tokens,
+        backend,
+        resume,
+        sink,
+        None::<&mut dyn KvState>,
+    )
+}
+
+/// Batch prefill (VI3-INF-3): the batch traversal over `tokens`,
+/// populating the **caller's** continuation state — the same provider
+/// a [`decode::DecodeSession`] then resumes via
+/// [`with_kv_state`](decode::DecodeSession::with_kv_state). There is
+/// no batch-state → decode-state translation and the executor never
+/// manufactures a state implementation: continuation state belongs to
+/// the caller for its entire lifetime, and execution modes merely
+/// consume and update it.
+///
+/// The provider is `prepare`d with the plan's geometry, appended one
+/// conditioned K/V row pair per layer per position (all positions for
+/// layer 0, then layer 1 — the opposite interleaving to the decode
+/// step's), and its logical position advanced past `tokens`. A
+/// provider already holding state is *extended*: positions continue
+/// from `kv.position()`, so a long prompt can prefill in chunks.
+///
+/// Returns the last position's final-normed hidden state and logits,
+/// so generation can sample the first continuation token without an
+/// extra step.
+pub fn prefill_plan<B: PlanBackend + ?Sized>(
+    plan: &ComponentOpPlan,
+    store: &OperandStore,
+    tokens: &[u32],
+    backend: &B,
+    kv: &mut dyn KvState,
+) -> Result<FinalOutput, VindexError> {
+    kv.prepare(&kv::plan_kv_geometry(plan));
+    let base = kv.position();
+    let out = traverse(
+        plan,
+        store,
+        tokens,
+        backend,
+        None,
+        &mut |_| Ok(()),
+        Some(&mut *kv),
+    )?;
+    kv.set_position(base + tokens.len());
+    Ok(out)
+}
+
+/// The one traversal in this module (see [`execute_plan_streaming`]'s
+/// doc). `kv` switches the attention realisation: `None` runs the
+/// backend's batched attention; `Some` runs the decode step's
+/// per-position arithmetic into the provider — same numbers (the
+/// decode-vs-batch parity gates are the guarantee), plus the rows.
+/// `kv` and `resume` do not combine: a resumed run has already skipped
+/// layers whose rows a provider would need.
+fn traverse<B: PlanBackend + ?Sized, K: KvState + ?Sized>(
+    plan: &ComponentOpPlan,
+    store: &OperandStore,
+    tokens: &[u32],
+    backend: &B,
+    resume: Option<ResumePoint>,
+    sink: &mut dyn FnMut(PlaneEvent) -> Result<(), VindexError>,
+    mut kv: Option<&mut K>,
+) -> Result<FinalOutput, VindexError> {
     let embedding = plan.embedding.as_ref().ok_or_else(|| {
         VindexError::Parse(format!(
             "component `{}` has no embedding op — external hidden-state input is a later rung",
@@ -219,7 +289,8 @@ pub fn execute_plan_streaming<B: PlanBackend + ?Sized>(
     };
 
     for (index, layer) in plan.layers.iter().enumerate().skip(start_layer) {
-        let trace = execute_layer(layer, store, &mut h, hidden, backend)?;
+        let capture = kv.as_mut().map(|state| (&mut **state, index));
+        let trace = execute_layer(layer, store, &mut h, hidden, backend, capture)?;
         sink(PlaneEvent::Layer { index, trace })?;
     }
 
@@ -274,12 +345,13 @@ pub(super) fn scale_residual_delta(scale: Option<f32>, delta: &mut [f32]) {
 
 /// One decoder layer: norms and residuals exactly where the plan puts
 /// them — placement is data, not code structure.
-fn execute_layer<B: PlanBackend + ?Sized>(
+fn execute_layer<B: PlanBackend + ?Sized, K: KvState + ?Sized>(
     layer: &LayerPlan,
     store: &OperandStore,
     h: &mut [Vec<f32>],
     hidden: usize,
     backend: &B,
+    kv: Option<(&mut K, usize)>,
 ) -> Result<LayerTrace, VindexError> {
     // The attention input is normalised here, once, and handed to the
     // backend — the judged gate reads the same vector, so producing it
@@ -293,14 +365,26 @@ fn execute_layer<B: PlanBackend + ?Sized>(
         .par_iter()
         .map(|row| apply_norm_op(&layer.pre_attention_norm, store, row, backend))
         .collect::<Result<_, _>>()?;
-    let attn_out = attention(
-        &layer.attention,
-        &inputs,
-        layer.pre_attention_norm.eps,
-        store,
-        hidden,
-        backend,
-    )?;
+    let attn_out = match kv {
+        Some((kv, layer_index)) => attention_into_kv(
+            &layer.attention,
+            &inputs,
+            layer.pre_attention_norm.eps,
+            store,
+            hidden,
+            backend,
+            kv,
+            layer_index,
+        )?,
+        None => attention(
+            &layer.attention,
+            &inputs,
+            layer.pre_attention_norm.eps,
+            store,
+            hidden,
+            backend,
+        )?,
+    };
     h.par_iter_mut()
         .zip(attn_out.par_iter())
         .try_for_each(|(row, out)| {
@@ -493,6 +577,52 @@ impl AttentionOperands {
             sinks,
         }
     }
+}
+
+/// One layer's attention driven position-by-position into the caller's
+/// continuation state — the batch prefill's attention realisation.
+///
+/// The arithmetic per position is exactly the decode step's
+/// (`attention_step` against the rows appended so far), so the rows
+/// landing in the provider are the ones a later decode step reads,
+/// and bit-identity with the batched [`attention`] is what the
+/// decode-vs-batch parity gates already prove per backend — the
+/// prefill gates re-pin it end to end. Positions are absolute:
+/// appends continue from the provider's logical position, which the
+/// caller advances once the whole traversal completes.
+///
+/// Sequential by necessity (each position reads the previous ones'
+/// rows); the batch prefill is a semantic gate, not a fast path.
+#[allow(clippy::too_many_arguments)]
+fn attention_into_kv<B: PlanBackend + ?Sized, K: KvState + ?Sized>(
+    op: &AttentionOp,
+    inputs: &[Vec<f32>],
+    qk_norm_eps: f64,
+    store: &OperandStore,
+    hidden: usize,
+    backend: &B,
+    kv: &mut K,
+    layer_index: usize,
+) -> Result<Vec<Vec<f32>>, VindexError> {
+    let operands = AttentionOperands::load(
+        op,
+        store,
+        backend.weight_format(MatrixClass::AttentionProjection),
+    )?;
+    let base = kv.position();
+    let mut outputs = Vec::with_capacity(inputs.len());
+    for offset in 0..inputs.len() {
+        let call = operands.call(op, &inputs[offset..=offset], qk_norm_eps, hidden);
+        let out = backend.attention_step(AttentionStepCall {
+            op: call,
+            position: base + offset,
+            keys: kv.keys(layer_index),
+            values: kv.values(layer_index),
+        })?;
+        kv.append(layer_index, out.key, out.value);
+        outputs.push(out.output);
+    }
+    Ok(outputs)
 }
 
 /// Load the attention operands and hand the backend a fully resolved

@@ -351,6 +351,7 @@ async fn http_warmup_no_model_returns_404() {
     // single_model_router with empty model list → model(None) returns None → 404.
     let st = Arc::new(AppState {
         models: vec![],
+        v3_models: Vec::new(),
         started_at: std::time::Instant::now(),
         requests_served: AtomicU64::new(0),
         api_key: None,

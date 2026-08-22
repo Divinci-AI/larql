@@ -269,6 +269,12 @@ impl LoadedModel {
 pub struct AppState {
     /// Loaded models, keyed by model ID.
     pub models: Vec<Arc<LoadedModel>>,
+    /// Loaded VINDEX3 runtimes (VI3-SERVE-1), keyed by model ID.
+    /// A separate registry, deliberately: a V3 container binds as an
+    /// executable program ([`crate::vindex3::V3Model`]), never as a
+    /// reconstituted `ModelWeights`, and the two shapes share nothing
+    /// below the serving surface.
+    pub v3_models: Vec<Arc<crate::vindex3::V3Model>>,
     /// Server start time for uptime reporting.
     pub started_at: std::time::Instant,
     /// Request counter.
@@ -289,6 +295,15 @@ pub struct AppState {
     pub infer_timeout: std::time::Duration,
 }
 
+/// One request's resolved model binding: which runtime serves it.
+/// Produced only by [`AppState::served`]; the enum exists so the
+/// version distinction lives at model resolution, not inside
+/// generation code.
+pub enum ServedModel<'a> {
+    V2(&'a Arc<LoadedModel>),
+    V3(&'a Arc<crate::vindex3::V3Model>),
+}
+
 impl AppState {
     /// Get model by ID, or the only model if single-model serving.
     pub fn model(&self, id: Option<&str>) -> Option<&Arc<LoadedModel>> {
@@ -301,7 +316,47 @@ impl AppState {
 
     /// Whether this is multi-model serving.
     pub fn is_multi_model(&self) -> bool {
-        self.models.len() > 1
+        self.models.len() + self.v3_models.len() > 1
+    }
+
+    /// Resolve a request's model across BOTH registries. This is the
+    /// single place the V2/V3 distinction is decided — routes match
+    /// the returned binding once, at the top, and no version check
+    /// leaks below it.
+    pub fn served(&self, id: Option<&str>) -> Option<ServedModel<'_>> {
+        match id {
+            Some(id) => self
+                .models
+                .iter()
+                .find(|m| m.id == id)
+                .map(ServedModel::V2)
+                .or_else(|| {
+                    self.v3_models
+                        .iter()
+                        .find(|m| m.id == id)
+                        .map(ServedModel::V3)
+                }),
+            None if self.models.len() + self.v3_models.len() == 1 => self
+                .models
+                .first()
+                .map(ServedModel::V2)
+                .or_else(|| self.v3_models.first().map(ServedModel::V3)),
+            None => None,
+        }
+    }
+
+    /// [`served`](Self::served), or a `NotFound` error.
+    pub fn served_or_err(
+        &self,
+        id: Option<&str>,
+    ) -> Result<ServedModel<'_>, crate::error::ServerError> {
+        self.served(id).ok_or_else(|| {
+            let msg = match id {
+                Some(mid) => format!("model '{}' not found", mid),
+                None => "no model loaded".into(),
+            };
+            crate::error::ServerError::NotFound(msg)
+        })
     }
 
     pub fn bump_requests(&self) {

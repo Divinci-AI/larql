@@ -62,7 +62,7 @@ pub async fn handle_models(State(state): State<Arc<AppState>>) -> Json<serde_jso
     let created = server_boot_unix_secs(&state);
     let multi = state.is_multi_model();
 
-    let data: Vec<serde_json::Value> = state
+    let mut data: Vec<serde_json::Value> = state
         .models
         .iter()
         .map(|m| {
@@ -83,6 +83,25 @@ pub async fn handle_models(State(state): State<Arc<AppState>>) -> Json<serde_jso
             })
         })
         .collect();
+
+    // VINDEX3 runtimes (VI3-SERVE-1). `generation: 3` is a
+    // larql-specific extra; no `features` count — a V3 container is an
+    // executable program, not a feature index.
+    data.extend(state.v3_models.iter().map(|m| {
+        serde_json::json!({
+            "id": m.id,
+            "object": MODEL_OBJECT,
+            "created": created,
+            "owned_by": OWNED_BY,
+            "path": if multi {
+                format!("{}/{}", API_PREFIX, m.id)
+            } else {
+                API_PREFIX.to_string()
+            },
+            "generation": 3,
+            "loaded": true,
+        })
+    }));
 
     Json(serde_json::json!({
         "object": LIST_OBJECT,

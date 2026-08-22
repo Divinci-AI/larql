@@ -1,0 +1,363 @@
+//! VI3-SERVE-1 gates: a VINDEX3 container over the normal server API.
+//!
+//! The authoritative arm (A) is the direct runtime stack —
+//! `Vindex3Runtime` → `CanonicalKvState` → `prefill_into` →
+//! `session_with_kv` → `continue_session` — assembled by hand in this
+//! file. Arm B is an HTTP request through the server's model registry
+//! into `/v1/completions`. The gate demands the streamed tokens match
+//! arm A token-for-token: same first token, same ordering, same
+//! count, same finish behaviour.
+//!
+//! The negative control pins the architectural regression this rung
+//! exists to prevent: the served container **cannot** be opened by
+//! the V2 path at all (`load_vindex_config` refuses the generation,
+//! `load_single_vindex` errors), and the serving state holds zero V2
+//! models while requests succeed — so the server provably did not
+//! reconstitute an old-style model behind the scenes.
+
+mod common;
+
+use std::path::Path;
+use std::sync::Arc;
+
+use larql_inference::layer_graph::generate::detok::Detokenizer;
+use larql_inference::test_utils::synthetic_tokenizer_json;
+use larql_inference::vindex3::{continue_session, Vindex3Runtime};
+use larql_inference::{EosConfig, SamplingConfig};
+use larql_kv::CanonicalKvState;
+use larql_server::bootstrap::{
+    load_artifact, load_single_vindex, LoadVindexOptions, LoadedArtifact,
+};
+use larql_server::state::AppState;
+use larql_vindex::format::load::load_vindex_config;
+use larql_vindex::format::vindex3::fixtures::{
+    encode_fixture_container, miniature_glimmer, G_VOCAB,
+};
+use larql_vindex::format::vindex3::opplan::exec::production::ProductionBackend;
+
+const NEW_TOKENS: usize = 16;
+const PROMPT: &str = "[3]";
+const COMPONENT: &str = "target";
+
+/// Encode the miniature container and give it a servable tokenizer
+/// (`[N]` ↔ id N, no pre-tokenizer).
+fn v3_container() -> tempfile::TempDir {
+    let checkpoint = tempfile::tempdir().unwrap();
+    let container = tempfile::tempdir().unwrap();
+    encode_fixture_container(
+        miniature_glimmer,
+        checkpoint.path(),
+        container.path(),
+        "serve-fixture",
+    );
+    std::fs::write(
+        container.path().join("tokenizer.json"),
+        synthetic_tokenizer_json(G_VOCAB),
+    )
+    .unwrap();
+    container
+}
+
+/// Arm A: the direct runtime stack, by hand. Returns per-token
+/// `(id, text)` pairs in emission order.
+fn direct_arm(container: &Path, max_tokens: usize) -> Vec<(u32, String)> {
+    let runtime = Vindex3Runtime::open(container, COMPONENT, ProductionBackend::new()).unwrap();
+    let tokenizer = larql_vindex::load_vindex_tokenizer(container).unwrap();
+    let prompt_ids: Vec<u32> = tokenizer.encode(PROMPT, true).unwrap().get_ids().to_vec();
+    assert!(!prompt_ids.is_empty());
+
+    let mut kv = CanonicalKvState::new();
+    let prefill = runtime.prefill_into(&prompt_ids, &mut kv).unwrap();
+    let mut session = runtime.session_with_kv(&mut kv).unwrap();
+    let mut detok = Detokenizer::new(&tokenizer);
+    detok.seed(&prompt_ids);
+    let mut pairs = Vec::new();
+    continue_session(
+        &mut session,
+        prefill,
+        max_tokens,
+        SamplingConfig::greedy(),
+        &EosConfig::builtin(),
+        |id| {
+            let text = detok.push(id);
+            pairs.push((id, text));
+        },
+    )
+    .unwrap();
+    pairs
+}
+
+/// A serving state holding ONLY the V3 model — bound through the same
+/// `load_artifact` the real bootstrap uses.
+fn v3_state(container: &Path) -> Arc<AppState> {
+    let artifact =
+        load_artifact(&container.to_string_lossy(), LoadVindexOptions::default()).unwrap();
+    let v3 = match artifact {
+        LoadedArtifact::V3(m) => Arc::new(*m),
+        LoadedArtifact::V2(_) => panic!("a VINDEX3 container must bind as V3"),
+    };
+    Arc::new(AppState {
+        models: Vec::new(),
+        v3_models: vec![v3],
+        started_at: std::time::Instant::now(),
+        requests_served: std::sync::atomic::AtomicU64::new(0),
+        api_key: None,
+        sessions: larql_server::session::SessionManager::new(3600),
+        describe_cache: larql_server::cache::DescribeCache::new(0),
+        infer_timeout: std::time::Duration::from_secs(60),
+    })
+}
+
+/// Parse an SSE body into its JSON data chunks (excluding `[DONE]`).
+fn sse_chunks(body: &str) -> Vec<serde_json::Value> {
+    body.lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .filter(|data| *data != "[DONE]")
+        .map(|data| serde_json::from_str(data).expect("SSE chunk is JSON"))
+        .collect()
+}
+
+#[tokio::test]
+async fn v3_stream_over_the_api_matches_the_direct_runtime_token_for_token() {
+    let container = v3_container();
+    let expected = direct_arm(container.path(), NEW_TOKENS);
+    assert_eq!(expected.len(), NEW_TOKENS, "fixture must fill the budget");
+
+    let state = v3_state(container.path());
+    assert!(
+        state.models.is_empty(),
+        "no V2 model may exist while V3 serves"
+    );
+    let app = larql_server::routes::single_model_router(state);
+    let resp = common::post_json(
+        app,
+        "/v1/completions",
+        serde_json::json!({
+            "prompt": PROMPT,
+            "max_tokens": NEW_TOKENS,
+            "stream": true,
+        }),
+    )
+    .await;
+    assert_eq!(resp.status(), axum::http::StatusCode::OK);
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    assert!(content_type.contains("event-stream"), "{content_type}");
+
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body = String::from_utf8(bytes.to_vec()).unwrap();
+    assert!(body.contains("[DONE]"));
+
+    let chunks = sse_chunks(&body);
+    // One chunk per token plus the final finish_reason chunk.
+    assert_eq!(chunks.len(), NEW_TOKENS + 1, "chunk count");
+    for (chunk, (_, text)) in chunks[..NEW_TOKENS].iter().zip(&expected) {
+        assert_eq!(chunk["choices"][0]["text"], text.as_str());
+        assert_eq!(
+            chunk["choices"][0]["finish_reason"],
+            serde_json::Value::Null
+        );
+        assert_eq!(chunk["object"], "text_completion");
+    }
+    // Same first token, same ordering (asserted above), same EOS
+    // behaviour: the greedy run never hits a stop, so "length".
+    assert_eq!(chunks[NEW_TOKENS]["choices"][0]["finish_reason"], "length");
+}
+
+#[tokio::test]
+async fn v3_buffered_response_matches_the_direct_runtime() {
+    let container = v3_container();
+    let expected = direct_arm(container.path(), NEW_TOKENS);
+    let expected_text: String = expected.iter().map(|(_, t)| t.as_str()).collect();
+
+    let app = larql_server::routes::single_model_router(v3_state(container.path()));
+    let resp = common::post_json(
+        app,
+        "/v1/completions",
+        serde_json::json!({"prompt": PROMPT, "max_tokens": NEW_TOKENS}),
+    )
+    .await;
+    assert_eq!(resp.status(), axum::http::StatusCode::OK);
+    let json = common::body_json(resp.into_body()).await;
+    assert_eq!(json["choices"][0]["text"], expected_text.as_str());
+    assert_eq!(json["choices"][0]["finish_reason"], "length");
+    assert_eq!(json["usage"]["prompt_tokens"], 1);
+    assert_eq!(json["usage"]["completion_tokens"], NEW_TOKENS);
+    assert_eq!(json["object"], "text_completion");
+}
+
+#[tokio::test]
+async fn v3_stream_honours_client_stop_strings() {
+    let container = v3_container();
+    let expected = direct_arm(container.path(), NEW_TOKENS);
+    // Stop on the third token's surface text: chunks 1..=3 stream,
+    // then the final chunk closes with "stop".
+    let stop = expected[2].1.clone();
+    assert!(!stop.trim().is_empty(), "stop token must have surface text");
+
+    let app = larql_server::routes::single_model_router(v3_state(container.path()));
+    let resp = common::post_json(
+        app,
+        "/v1/completions",
+        serde_json::json!({
+            "prompt": PROMPT,
+            "max_tokens": NEW_TOKENS,
+            "stream": true,
+            "stop": stop,
+        }),
+    )
+    .await;
+    assert_eq!(resp.status(), axum::http::StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body = String::from_utf8(bytes.to_vec()).unwrap();
+    let chunks = sse_chunks(&body);
+    assert_eq!(chunks.len(), 3 + 1, "stream must stop after the match");
+    assert_eq!(chunks[3]["choices"][0]["finish_reason"], "stop");
+}
+
+/// The negative control: the container this server is happily serving
+/// CANNOT be opened by the V2 path at all — so V3 serving is provably
+/// not "reconstitute an old model, run old inference" in disguise.
+#[test]
+fn the_served_container_cannot_take_the_v2_path() {
+    let container = v3_container();
+
+    let config = load_vindex_config(container.path());
+    assert!(
+        config.is_err(),
+        "V2 config loader must refuse a V3 container"
+    );
+
+    let v2_load = load_single_vindex(
+        &container.path().to_string_lossy(),
+        LoadVindexOptions::default(),
+    );
+    assert!(
+        v2_load.is_err(),
+        "V2 model loader must refuse a V3 container"
+    );
+
+    let artifact = load_artifact(
+        &container.path().to_string_lossy(),
+        LoadVindexOptions::default(),
+    )
+    .unwrap();
+    assert!(
+        matches!(artifact, LoadedArtifact::V3(_)),
+        "binding must resolve to the V3 runtime"
+    );
+}
+
+#[tokio::test]
+async fn v3_model_appears_in_the_models_listing() {
+    let container = v3_container();
+    let app = larql_server::routes::single_model_router(v3_state(container.path()));
+    let resp = common::get(app, "/v1/models").await;
+    assert_eq!(resp.status(), axum::http::StatusCode::OK);
+    let json = common::body_json(resp.into_body()).await;
+    assert_eq!(json["object"], "list");
+    let data = json["data"].as_array().unwrap();
+    assert_eq!(data.len(), 1);
+    assert_eq!(data[0]["object"], "model");
+    assert_eq!(data[0]["generation"], 3);
+    assert_eq!(data[0]["loaded"], true);
+    assert!(data[0]["id"].as_str().is_some_and(|s| !s.is_empty()));
+}
+
+#[tokio::test]
+async fn v3_buffered_supports_echo_and_batched_prompts() {
+    let container = v3_container();
+    let app = larql_server::routes::single_model_router(v3_state(container.path()));
+    let resp = common::post_json(
+        app,
+        "/v1/completions",
+        serde_json::json!({
+            "prompt": ["[3]", "[5]"],
+            "max_tokens": 2,
+            "echo": true,
+        }),
+    )
+    .await;
+    assert_eq!(resp.status(), axum::http::StatusCode::OK);
+    let json = common::body_json(resp.into_body()).await;
+    let choices = json["choices"].as_array().unwrap();
+    assert_eq!(choices.len(), 2);
+    assert!(choices[0]["text"].as_str().unwrap().starts_with("[3]"));
+    assert!(choices[1]["text"].as_str().unwrap().starts_with("[5]"));
+    assert_eq!(json["usage"]["prompt_tokens"], 2);
+    assert_eq!(json["usage"]["completion_tokens"], 4);
+}
+
+#[tokio::test]
+async fn v3_buffered_trims_at_client_stop_strings() {
+    let container = v3_container();
+    let expected = direct_arm(container.path(), NEW_TOKENS);
+    let stop = expected[2].1.clone();
+
+    let app = larql_server::routes::single_model_router(v3_state(container.path()));
+    let resp = common::post_json(
+        app,
+        "/v1/completions",
+        serde_json::json!({
+            "prompt": PROMPT,
+            "max_tokens": NEW_TOKENS,
+            "stop": stop,
+        }),
+    )
+    .await;
+    assert_eq!(resp.status(), axum::http::StatusCode::OK);
+    let json = common::body_json(resp.into_body()).await;
+    assert_eq!(json["choices"][0]["finish_reason"], "stop");
+    let text = json["choices"][0]["text"].as_str().unwrap();
+    let full: String = expected.iter().map(|(_, t)| t.as_str()).collect();
+    assert!(text.len() < full.len(), "stop must trim the completion");
+}
+
+#[tokio::test]
+async fn v3_stream_reports_an_untokenizable_prompt_as_an_error_chunk() {
+    let container = v3_container();
+    let app = larql_server::routes::single_model_router(v3_state(container.path()));
+    // An empty prompt string passes the handler's list-level check but
+    // tokenises to zero ids — the in-stream failure path.
+    let resp = common::post_json(
+        app,
+        "/v1/completions",
+        serde_json::json!({
+            "prompt": "",
+            "max_tokens": 4,
+            "stream": true,
+        }),
+    )
+    .await;
+    // Headers are already SSE by the time tokenisation runs, so the
+    // failure arrives as an in-stream error chunk, mirroring V2.
+    assert_eq!(resp.status(), axum::http::StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body = String::from_utf8(bytes.to_vec()).unwrap();
+    assert!(body.contains("error"), "{body}");
+    assert!(body.contains("[DONE]"));
+}
+
+/// …and the other arm of the same binding decision: an ordinary V2
+/// vindex must resolve to the V2 runtime through the identical
+/// `load_artifact` call, so the dispatch is proven in both directions.
+#[test]
+fn a_v2_vindex_binds_as_v2_through_the_same_artifact_loader() {
+    let fixture = common::synthetic_vindex::build();
+    let artifact =
+        load_artifact(&fixture.dir.to_string_lossy(), LoadVindexOptions::default()).unwrap();
+    assert!(
+        matches!(artifact, LoadedArtifact::V2(_)),
+        "a V2 vindex must bind as V2"
+    );
+}

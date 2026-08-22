@@ -26,4 +26,5 @@ pub mod session;
 pub mod shard_loader;
 pub mod shard_query;
 pub mod state;
+pub mod vindex3;
 pub mod wire;
