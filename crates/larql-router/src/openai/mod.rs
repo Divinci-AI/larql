@@ -222,13 +222,17 @@ async fn proxy_openai(state: &AppState, path: &str, headers: &HeaderMap, body: B
     .await
     {
         Ok(upstream) => passthrough_response(upstream, Body::from_stream),
-        Err(resp) => resp,
+        Err(resp) => *resp,
     }
 }
 
 /// Send one request to a chosen backend, passing the client's bearer
 /// token through (the backend may enforce its own `--api-key`).
-/// Errors come back as a ready-to-return OpenAI 502.
+///
+/// Errors come back as a ready-to-return OpenAI 502, boxed: an
+/// `axum::Response` is far larger than the success value, and an
+/// unboxed `Err` would make every caller's `Result` carry that width on
+/// the hot path.
 pub(super) async fn send_to_backend(
     state: &AppState,
     backend: &OpenAIBackend,
@@ -236,7 +240,7 @@ pub(super) async fn send_to_backend(
     path: &str,
     headers: &HeaderMap,
     body: Option<Bytes>,
-) -> Result<reqwest::Response, Response> {
+) -> Result<reqwest::Response, Box<Response>> {
     let url = format!("{}{}", backend.listen_url, path);
     let mut req = state.client.request(method, &url);
     if let Some(b) = body {
@@ -250,12 +254,12 @@ pub(super) async fn send_to_backend(
         }
     }
     req.send().await.map_err(|e| {
-        openai_error(
+        Box::new(openai_error(
             StatusCode::BAD_GATEWAY,
             &format!("backend {}: {e}", backend.listen_url),
             SERVER_ERROR,
             None,
-        )
+        ))
     })
 }
 

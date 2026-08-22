@@ -249,7 +249,7 @@ pub async fn handle_responses(
     .await
     {
         Ok(r) => r,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
 
     // Only a success can mint a stored response worth routing back to.
@@ -308,6 +308,6 @@ async fn proxy_by_id(
     let path = format!("{}/{response_id}", super::RESPONSES_PATH);
     match send_to_backend(state, &backend, method, &path, headers, None).await {
         Ok(upstream) => passthrough_response(upstream, Body::from_stream),
-        Err(resp) => resp,
+        Err(resp) => *resp,
     }
 }
