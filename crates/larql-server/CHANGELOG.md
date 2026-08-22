@@ -6,6 +6,70 @@ The format follows the conventions of [Keep a Changelog](https://keepachangelog.
 with dated entries (`YYYY-MM-DD`) instead of semantic versions during the
 pre-1.0 phase. Forward-looking work lives in [`ROADMAP.md`](ROADMAP.md).
 
+## [2026-08-22] — V3-SERVE-1: prepared execution state (42.7x on a warm request)
+
+The server was loading the model **twice per request**. It now lowers a
+container's operands into the backend's execution form once, at bind
+time, and every request reads that one image.
+
+**The boundary.** New `PreparedOperands` in `larql-vindex`
+(`opplan/exec/prepared.rs`) and `PreparedVindex3` in `larql-inference`:
+plan + backend + resident operands, owned at model lifetime. A request
+contributes only continuation state. Deliberately *not* a cache inside
+`OperandStore::load` — residency is a fact about a served model, and
+hiding it behind a memoised loader would leave device placement,
+accounting, slicing and eventual overlay composition with nowhere to
+live. `DecodeSession` did **not** become long-lived; it stays
+per-request and borrows the image.
+
+**Both traversals consume it.** The batch path (`traverse` →
+`execute_layer`) previously called `store.load(...)` per layer — and per
+*position* for norms, so a 325-token prompt on a 40-layer model loaded
+norm weights ~39,000 times. It now reads the same prepared layers the
+decode session does, which is what makes "prepared once" true rather
+than "prepared twice, in two places".
+
+**Slicing is in the type from the start.** `PreparedOperands::load`
+takes an `ExecutionSlice` (`Full`, or `LayerRange { start, end }`) and
+lowers only that slice's operands; a slice the plan cannot satisfy is
+refused rather than truncated. A sliced image carries no embedding
+table or head, and executing token ids against one is refused — it
+consumes hidden states. This is the seam the decoupled surfaces grow
+from (ROADMAP §V3-DECOUPLE), placed now so residency does not have to
+be rebuilt around it later.
+
+**Measured, gpt-oss-20b (20 B MoE, 24 layers), same container and
+backend, both arms in one process:**
+
+| | load per call | prepared |
+|---|---|---|
+| `prefill_into` | 17.79 s | 0.61 s |
+| `session_with_kv` | 13.82 s | **0.000 s** |
+| decode | 0.33 s | 0.14 s |
+| **warm request** | **31.93 s** | **0.75 s** |
+
+**42.7x**, with a one-off 13.5 s preparation at boot. Over HTTP a warm
+5-token / 1-token request is now **0.543 s** (decode 7.77 tok/s) — the
+multi-second construction floor is gone.
+
+**Gates** (`opplan/exec/tests/residency.rs`, 9 tests): preparation
+once, asserted through a new `OperandStore::load_count` rather than a
+stopwatch — serving 5 requests over a prepared image moves the counter
+by zero — plus the counterfactual that the unprepared entry point loads
+on *every* call, so the gate cannot pass against an inert store.
+Request parity (logits, final hidden, and every layer's KV rows
+identical between paths), continuation parity (chunked prefill ≡ whole
+prefill), session isolation (interleaved sessions over one image do not
+disturb each other), batch-traversal parity plane by plane, and the
+slice refusals.
+
+**Also fixed:** yesterday's V3 template resolution read the container
+family through a second `Vindex3Container::open` and silently defaulted
+to `""` when that failed — so `gpt-oss-20b`, which declares
+`family: "gpt_oss"`, was still being served with the Plain fallback.
+The family now comes from the inspection the runtime already performs.
+Caught by running against a real container, not by a fixture.
+
 ## [2026-08-22] — V3 serve: reality check against real containers
 
 Ran the V3 serve path against **real** VINDEX3 containers

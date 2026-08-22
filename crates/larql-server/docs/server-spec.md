@@ -853,10 +853,21 @@ inference. V2 cache knobs (`--hnsw`, gate/q4k cache sizes,
 `--release-mmap-after-request`) are accepted and simply have nothing to
 tune.
 
+**Operand residency.** A container's operands are lowered into the
+backend's execution form **once, at bind time**
+(`Vindex3Runtime::prepare` → `PreparedVindex3`), and every request reads
+that one image; a request contributes only continuation state. Batch
+prefill and the decode session read the *same* prepared operands — they
+used to materialise the model separately, so a warm request paid for
+the model twice (measured 31.9 s → 0.75 s on a 20 B container once that
+stopped). Preparation takes an `ExecutionSlice`, so a future shard
+prepares only the operands its slice executes; a slice the plan cannot
+satisfy is refused rather than truncated.
+
 **Chat template.** A V3 container has no architecture-registry entry, so
 the template is resolved from the **container's own declared family**
-(`index.json`), falling back to the model-id heuristic and then to
-`Plain`. Landing on `Plain` is warned about at bind time, because it is
+(read from the inspection the runtime already performs), falling back
+to the model-id heuristic and then to `Plain`. Landing on `Plain` is warned about at bind time, because it is
 not cosmetic: `Plain` ends an assistant turn with a bare newline, so the
 turn's last token re-tokenises differently once the next turn follows —
 which breaks N1's exact-ids-prefix rule at the seam and costs every

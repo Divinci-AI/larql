@@ -15,8 +15,11 @@
 //! session.step(token) x N            <- decode
 //! ```
 //!
-//! and then re-times them with the runtime already warm, so
-//! first-touch page faults are separated from repeated work.
+//! It runs the **same requests twice** on one container in one process:
+//! once through the load-per-call entry points (`Vindex3Runtime`) and
+//! once over a prepared image (`PreparedVindex3`). Same tokens, same
+//! backend, same warm page cache — the only difference is where the
+//! operands come from.
 //!
 //! Usage:
 //!   cargo run --release -p larql-server --example v3_request_phase_profile \
@@ -50,11 +53,52 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let prompt: Vec<u32> = (0..prompt_len).map(|i| (i % 2000 + 100) as u32).collect();
 
     let t = Instant::now();
-    let runtime = Vindex3Runtime::open(&container, COMPONENT, ProductionBackend::new())?;
+    let unprepared = Vindex3Runtime::open(&container, COMPONENT, ProductionBackend::new())?;
     println!("startup: open runtime           {:8.3} s", secs(t));
-    println!("         (plan + operand store — paid ONCE at server boot)\n");
 
-    println!("per-request phases, as the serve path calls them:");
+    // ── Arm A: load-per-call, as the serve path worked before ──────────
+    println!("\nARM A — load per call (Vindex3Runtime):");
+    println!(
+        "{:>4}  {:>12}  {:>12}  {:>12}  {:>12}",
+        "req", "prefill_into", "session_open", "decode", "total"
+    );
+    let mut arm_a = f64::MAX;
+    for r in 0..requests {
+        let mut kv = CanonicalKvState::new();
+        let t = Instant::now();
+        let _ = unprepared.prefill_into(&prompt, &mut kv)?;
+        let t_prefill = secs(t);
+        let t = Instant::now();
+        let mut session = unprepared.session_with_kv(&mut kv)?;
+        let t_session = secs(t);
+        let t = Instant::now();
+        {
+            use larql_inference::vindex3::LogitsSession;
+            let mut token = 1u32;
+            for _ in 0..decode_len {
+                token = argmax(&session.step(token)?);
+            }
+        }
+        let t_decode = secs(t);
+        let total = t_prefill + t_session + t_decode;
+        arm_a = arm_a.min(total);
+        println!(
+            "{:>4}  {:>12.3}  {:>12.3}  {:>12.3}  {:>12.3}",
+            r + 1,
+            t_prefill,
+            t_session,
+            t_decode,
+            total
+        );
+    }
+
+    // ── Arm B: prepared once, as it works now ──────────────────────────
+    let t = Instant::now();
+    let runtime = unprepared.prepare()?;
+    let prepare_cost = secs(t);
+    println!("\nprepare operands (ONCE, at server boot)  {prepare_cost:8.3} s\n");
+
+    println!("ARM B — over the prepared image (PreparedVindex3):");
     println!(
         "{:>4}  {:>12}  {:>12}  {:>12}  {:>12}",
         "req", "prefill_into", "session_open", "decode", "total"
@@ -105,56 +149,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  decode         {d:8.3} s   {:5.1}%", 100.0 * d / total);
     println!("  total          {total:8.3} s");
 
-    // The counterfactual: what a request would cost if the decode
-    // session's operands were already resident (opened once, reused).
-    println!("\ncounterfactual — one session opened once, reused for {requests} decodes:");
-    let mut kv = CanonicalKvState::new();
-    runtime.prefill_into(&prompt, &mut kv)?;
-    let t = Instant::now();
-    let mut session = runtime.session_with_kv(&mut kv)?;
-    let open_once = secs(t);
-    let t = Instant::now();
-    {
-        use larql_inference::vindex3::LogitsSession;
-        let mut token = 1u32;
-        for _ in 0..requests * decode_len {
-            let logits = session.step(token)?;
-            token = argmax(&logits);
-        }
-    }
-    let steps = secs(t);
-    println!("  session_open (once)  {open_once:8.3} s");
-    println!(
-        "  {} decode steps      {steps:8.3} s   ({:.2} tok/s)",
-        requests * decode_len,
-        (requests * decode_len) as f64 / steps
-    );
-    // What a request would cost with operands already resident: open one
-    // session, then pay only the arithmetic per "request". This is the
-    // size of the prize for hoisting operand materialisation to server
-    // lifetime.
-    println!("\nresident-operand request cost (session opened once, arithmetic only):");
-    {
-        use larql_inference::vindex3::LogitsSession;
-        let t = Instant::now();
-        let mut warm = runtime.session()?;
-        println!("  session_open (once)  {:8.3} s", secs(t));
-        let mut best = f64::MAX;
-        for _ in 0..requests {
-            let t = Instant::now();
-            let logits = warm.prefill(&prompt)?;
-            let mut token = argmax(&logits);
-            for _ in 0..decode_len {
-                let l = warm.step(token)?;
-                token = argmax(&l);
-            }
-            best = best.min(secs(t));
-        }
-        println!(
-            "  min request          {best:8.3} s   ({prompt_len} prefill + {decode_len} decode, \
-             operands already loaded)"
-        );
-    }
+    let arm_b = totals.iter().sum::<f64>() / n;
+    println!("\n── gate 5 ───────────────────────────────────────────────");
+    println!("  arm A, load per call (best)  {arm_a:8.3} s");
+    println!("  arm B, prepared (mean)       {arm_b:8.3} s");
+    println!("  speedup                      {:8.2}x", arm_a / arm_b);
+    println!("  one-off preparation          {prepare_cost:8.3} s");
+
     Ok(())
 }
 

@@ -17,17 +17,19 @@
 //! [`crate::state::AppState::served`]); generation code below the
 //! binding never asks which format it is running.
 //!
-//! Per-request cost note: every request opens a fresh session, which
-//! loads the plan's operands (`DecodeSession::new` keeps weights
-//! resident per session, not per server). Fine for the semantic gate
-//! this rung is; a shared resident session/operand pool is later,
-//! perf-shaped work.
+//! Operand residency: the container's operands are lowered into the
+//! backend's execution form **once, at bind time**
+//! ([`Vindex3Runtime::prepare`]), and every request reads that one
+//! image. Before that, batch prefill and the decode session each
+//! materialised the whole model for themselves — 3.8 s + 3.3 s against
+//! 0.13 s of actual decode on a 3 B container, i.e. ~94% of a warm
+//! request spent loading a model the server already had.
 
 use std::path::{Path, PathBuf};
 
 use larql_inference::layer_graph::generate::detok::Detokenizer;
 use larql_inference::vindex3::{
-    continue_session, continue_session_masked, LogitsMask, Vindex3Runtime,
+    continue_session, continue_session_masked, LogitsMask, PreparedVindex3, Vindex3Runtime,
 };
 use larql_inference::{EosConfig, SamplingConfig};
 use larql_kv::CanonicalKvState;
@@ -48,8 +50,10 @@ pub struct V3Model {
     pub id: String,
     /// Container directory on disk.
     pub path: PathBuf,
-    /// The opened executable program + operand store + backend.
-    pub runtime: Vindex3Runtime<ProductionBackend>,
+    /// The program with its operands already lowered into the
+    /// backend's execution form — model lifetime, shared by every
+    /// request. Requests contribute only continuation state.
+    pub runtime: PreparedVindex3<ProductionBackend>,
     /// Tokenizer for the text-facing API (`tokenizer.json` in the
     /// container directory).
     pub tokenizer: tokenizers::Tokenizer,
@@ -96,11 +100,15 @@ pub fn resolve_chat_template(family: &str, id: &str) -> larql_inference::prompt:
 /// container's tokenizer — the text API cannot serve ids-only.
 pub fn load_v3_model(path: &Path) -> Result<V3Model, Box<dyn std::error::Error + Send + Sync>> {
     let runtime = Vindex3Runtime::open(path, SERVED_COMPONENT, ProductionBackend::new())
-        .map_err(|e| format!("open VINDEX3 container: {e}"))?;
+        .map_err(|e| format!("open VINDEX3 container: {e}"))?
+        .prepare()
+        .map_err(|e| format!("prepare VINDEX3 operands: {e}"))?;
     let tokenizer = larql_vindex::load_vindex_tokenizer(path)
         .map_err(|e| format!("VINDEX3 container has no servable tokenizer.json: {e}"))?;
     // The container names itself (`index.model`); the directory name is
     // only the last-resort fallback for a container encoded nameless.
+    // The family comes from the same inspection — never a second open
+    // whose failure would silently default to "no family".
     let name = match runtime.model_name() {
         "" => path
             .file_name()
@@ -108,9 +116,7 @@ pub fn load_v3_model(path: &Path) -> Result<V3Model, Box<dyn std::error::Error +
             .unwrap_or_else(|| "vindex3".to_string()),
         named => named.to_string(),
     };
-    let family = larql_vindex::format::vindex3::Vindex3Container::open(path)
-        .map(|c| c.index().family.clone())
-        .unwrap_or_default();
+    let family = runtime.family().to_string();
     let model = V3Model {
         id: model_id_from_name(&name),
         path: path.to_path_buf(),

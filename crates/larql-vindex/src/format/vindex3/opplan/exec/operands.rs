@@ -31,6 +31,14 @@ struct SegmentMap {
 /// Operand store over one container.
 pub struct OperandStore {
     segments: BTreeMap<String, SegmentMap>,
+    /// How many operands have been read out of this store.
+    ///
+    /// Residency is an architectural claim ("a served model's operands
+    /// are lowered once"), and a claim that can only be checked by
+    /// stopwatch is a claim that regresses quietly. This counter lets a
+    /// test assert the shape directly: prepare, then serve N requests,
+    /// then assert the count did not move.
+    loads: std::sync::atomic::AtomicU64,
 }
 
 impl OperandStore {
@@ -63,7 +71,10 @@ impl OperandStore {
                 },
             );
         }
-        Ok(Self { segments })
+        Ok(Self {
+            segments,
+            loads: std::sync::atomic::AtomicU64::new(0),
+        })
     }
 
     /// Load one operand as f32 values.
@@ -72,10 +83,18 @@ impl OperandStore {
         widen(&raw.dtype, &raw.bytes, &operand.tensor)
     }
 
+    /// How many operands have been read out of this store since it was
+    /// opened. The residency gate reads this.
+    pub fn load_count(&self) -> u64 {
+        self.loads.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// Load one operand's stored bytes and dtype, unwidened — for a
     /// caller that converts to a representation other than f32 (and for
     /// [`Self::load`] itself, so there is exactly one resolution path).
     pub fn load_raw(&self, operand: &OperandRef) -> Result<RawOperand, VindexError> {
+        self.loads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let segment = self.segments.get(&operand.object).ok_or_else(|| {
             VindexError::Parse(format!("no segment for object `{}`", operand.object))
         })?;

@@ -4,6 +4,7 @@ use larql_vindex::format::vindex3::opplan::exec::backend::PlanBackend;
 use larql_vindex::format::vindex3::opplan::exec::decode::DecodeSession;
 use larql_vindex::format::vindex3::opplan::exec::kv::KvState;
 use larql_vindex::format::vindex3::opplan::exec::operands::OperandSource;
+use larql_vindex::format::vindex3::opplan::exec::prepared::PreparedOperands;
 use larql_vindex::format::vindex3::opplan::ComponentOpPlan;
 
 use crate::error::InferenceError;
@@ -94,6 +95,25 @@ impl<'a, B: PlanBackend> Vindex3Session<'a, B> {
         }
         Ok(Self {
             inner: DecodeSession::with_kv_state(plan, store, backend, kv)?,
+        })
+    }
+}
+
+impl<'a, B: PlanBackend> Vindex3Session<'a, B> {
+    /// Open a session over operands the caller already prepared — the
+    /// resident-model path. Nothing is loaded here; the session is
+    /// per-request state over a per-model image.
+    pub fn over_prepared(
+        plan: &'a ComponentOpPlan,
+        operands: &'a PreparedOperands,
+        backend: &'a B,
+        kv: &'a mut dyn KvState,
+    ) -> Result<Self, InferenceError> {
+        if plan.output.is_none() {
+            return Err(headless_plan_error(&plan.component));
+        }
+        Ok(Self {
+            inner: DecodeSession::over_prepared(plan, operands, backend, kv)?,
         })
     }
 }

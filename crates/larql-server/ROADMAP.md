@@ -146,38 +146,33 @@ store are already hoisted. **94% of a warm request is operand
 materialisation, not arithmetic**, and the same work with operands
 already resident measures **0.84 s against 7.44 s (~8.8×)**.
 
-**V3-SERVE-1. Hoist operand residency to server lifetime.** The server
-materialises the whole model *twice per request*: once inside
-`prefill_plan` → `traverse`, which calls `store.load(...)` per layer,
-and again in `DecodeSession::build`, which loads every operand of every
-layer into the backend's declared weight format. Both are as-documented
-— the cost was known, never priced.
+**V3-SERVE-1. Hoist operand residency to server lifetime — DONE.**
+Shipped 2026-08-22: `PreparedOperands` / `PreparedVindex3` lower a
+container's operands once at bind time, and both traversals read that
+image. Measured 42.7x on a warm request (gpt-oss-20b, 31.93 s → 0.75 s;
+`session_with_kv` 13.82 s → 0.000 s), with preparation taking `ExecutionSlice`
+so residency is slice-shaped from the start. See
+[`CHANGELOG.md`](CHANGELOG.md).
 
-The shape to aim for is resident immutable execution state plus a cheap
-per-request context:
-
-```text
-server lifetime   plan + operand store + LOADED operands + backend
-request lifetime  tokens + KV/continuation + sampling + mask + scratch
-```
-
-`with_kv_state` already separates continuation state from the session,
-so the loaded operands are the piece that needs lifting out of
-`DecodeSession` into something `V3Model` owns and hands borrows of.
-Cross-crate: `larql-vindex` (the executor split), `larql-inference`
-(the session constructors), `larql-server` (holding it). Gate: warm
-in-process request ≈ arithmetic only; then HTTP within milliseconds of
-that.
-
-**V3-SERVE-2. Batch the KV-filling prefill.** Server prefill runs at
+**V3-SERVE-2. Batch the KV-filling prefill.** The remaining half of the
+original gap, and now the dominant per-request cost: with operands
+resident, prefill is 81.5% of a warm request. Server prefill runs at
 ~10 tok/s where `larql vindex3 exec` on the same container and backend
 gets ~21. That is not overhead — `traverse`'s `kv` argument *switches
 the attention realisation*: `None` runs batched attention, `Some` runs
 the decode step's per-position arithmetic, and the server must pass
 `Some` to fill the provider. Measured slopes: batched 28.5 tok/s
 (1→64) and 21.4 (64→256); per-position 16.0 (5→64) and 7.7 (64→325),
-degrading faster with length. Wanted: a batched realisation that also
-emits the KV rows.
+degrading faster with length.
+
+Wanted: a batched realisation that **emits the KV rows as an output of
+the same forward**, not a batched pass followed by a replay to build
+the cache — that would be the double-work defect again in a new place:
+
+```text
+batched Q/K/V → attention ├── output
+                          └── append K/V for positions [0..N)
+```
 
 **V3-SERVE-3. Backend injection.** The server hardcodes
 `ProductionBackend::new()`, so serving cannot use the Metal backend
@@ -202,12 +197,108 @@ failing closed rather than silently: a V3 binding refuses `--layers` /
 this after the perf rungs — sharding a runtime that pays 6.7 s per
 request just buys several copies of the problem.
 
+**Distributed state, when it comes.** Three tiers, and the boundary
+matters: process-local and hot (prepared operands, backend-native
+weights, live KV, scratch) stays on the worker; distributed control
+state (session → owning worker, response id → continuation owner, patch
+generations, TTL/leases, routing and admission) is what a Redis-class
+service should hold; durable/cold (containers, `.vlp` patches,
+persisted conversations) stays on disk or object storage. Redis answers
+"where does session `abc` live", never "give me layer 17's gate/up/down
+tensors" — shipping weights or KV over a socket per request would be
+this rung's defect wearing a distributed hat. Worth building when the
+router does real multi-worker inference and `X-Session-Id` /
+`previous_response_id` need affinity, so a continuation returns to the
+worker that physically holds its KV and degrades to a cold prefill when
+that worker is gone. Not before.
+
 **Do not re-tune N1 first.** Cache on vs off measured 41.14 s against
 41.75 s on a 4-turn chain — 1.5%, inside the e2e noise floor — because
 the fixed tax dwarfs the 1–2 s of prefill it saves. The mechanism is
 correct and observable (`cached_tokens`, `resumptions`). Re-measure it
 after V3-SERVE-1; a longest-common-prefix resume is worth considering
 only once the saving is visible.
+
+---
+
+### V3-DECOUPLE. Execution slicing as VINDEX3 semantics
+
+**Why this is not optional.** V2's decoupled surfaces — `/v1/walk-ffn`,
+`/v1/expert/*`, `/v1/embed`, `/v1/shard` — are one of larql's
+distinguishing properties, and they are the whole basis of the expert
+grid. A V3 that can only do monolithic `generate()`, however fast, has
+*lost* that. These surfaces currently 404 on a V3 server (see
+V3-SERVE-5), and the fix is not to reimplement each of them against V3.
+
+**The shape.** Every granularity should be a projection of the same
+`ComponentOpPlan`, not a separately engineered API:
+
+```text
+ComponentOpPlan
+      ↓  select
+ExecutionSlice
+      ├── Full
+      ├── LayerRange(10..20)
+      ├── Attention(layer)
+      ├── Ffn(layer)
+      ├── Experts(layer, [3, 7, 19])
+      ├── Embedding
+      └── Head
+      ↓  validate closure
+prepared execution state       ← only the slice's operands
+      ↓
+execute
+```
+
+`ExecutionSlice` and slice-shaped preparation landed with V3-SERVE-1
+(`Full` and `LayerRange` today, refusing what the plan cannot satisfy).
+What remains is the rest of the vocabulary and the execution entry
+points that consume them.
+
+**Attention as a unit** must mean the plan identifies and runs the
+attention subgraph — norm → Q/K/V → rope → attention → output
+projection → residual — with explicit inputs, outputs and KV side
+effects. Not "run the layer and discard the FFN result". That is what
+buys attention-only nodes, separate attention/FFN residency, KV
+research, and alternate attention implementations — and V3-SERVE-2's
+batched KV-filling prefill is naturally a property of that unit rather
+than something buried inside a full forward.
+
+**FFN as a unit** likewise: norm → router → expert selection → gate/up
+→ activation → down → reduction → residual, with a further level for
+MoE (route only / select / execute selected experts / combine). That
+level is where an expert server becomes a first-class VINDEX3 citizen
+rather than a bespoke endpoint.
+
+**Sharding is then a consequence, not an implementation.** A shard is an
+executable submodel — select slice, validate closure, prepare that
+slice's operands, serve it — so `--layers 0-9` stops being a filter in
+a loop somewhere in `larql-server`:
+
+```text
+node A   layers 0–9, attention + FFN
+node B   layers 10–19, attention only
+node C   layer 10–19 FFN, experts 0–31
+node D   layer 10–19 FFN, experts 32–63
+```
+
+**Then the server routes become thin mappings** onto capabilities the
+plan already describes:
+
+```text
+/v1/infer      → full or specified slice      /v1/embed   → embedding slice
+/v1/walk-ffn   → FFN slice                    /v1/logits  → head slice
+/v1/expert/…   → expert slice                 /v1/shard   → advertised prepared slice
+OpenAI APIs    → full-model slice
+```
+
+**Ordering.** After V3-SERVE-2 — the attention/FFN unit boundaries and
+the batched-KV work are the same seam, and doing them in the wrong
+order means cutting that seam twice. This is also the point at which
+distributed coordination becomes worth having: a router/Redis control
+plane knows *where* each execution capability lives, while VINDEX3
+defines *what* each node can execute. Explicitly not before a single
+worker is fast — see the note under V3-SERVE.
 
 ---
 
