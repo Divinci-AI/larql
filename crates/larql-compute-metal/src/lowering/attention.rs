@@ -366,7 +366,11 @@ impl MetalBackend {
             _ => None,
         };
         match fused_out {
-            Some(seg) => self.encode_nvfp4_matvec_residual(
+            // `_sliced` carries the segment's byte offsets: under the
+            // packed attention layout `o` is a row slice of the shared
+            // allocation, and binding it at offset 0 would silently
+            // compute the Q projection's rows instead.
+            Some(seg) => self.encode_nvfp4_matvec_residual_sliced(
                 enc,
                 &MatvecOperands {
                     packed: seg.packed,
@@ -379,6 +383,8 @@ impl MetalBackend {
                 },
                 seg.tensor_scale,
                 h_in,
+                seg.packed_offset,
+                seg.scales_offset,
             ),
             None => {
                 self.encode_matvec(

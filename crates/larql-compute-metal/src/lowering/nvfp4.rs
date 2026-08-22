@@ -465,6 +465,70 @@ impl MetalBackend {
         self.encode_nvfp4_with(&self.quant.nvfp4_matvec_v2_pipeline, enc, op, tensor_scale);
     }
 
+    /// As [`Self::encode_nvfp4_matvec`], with the weight streams bound at
+    /// byte offsets — the matrix is a row slice of a shared allocation.
+    ///
+    /// This binds the SAME kernel the unsliced call uses: the body reads
+    /// `Wp + row * groups * NVFP4_GROUP_BYTES`, so moving the base is
+    /// exactly equivalent to handing it a smaller buffer. Routing a
+    /// sliced matrix through the segmented kernel instead would change
+    /// which code shape runs, and Metal's fast-math means two code shapes
+    /// of one kernel are not bit-identical — a layout change must not
+    /// smuggle in an arithmetic one.
+    pub fn encode_nvfp4_matvec_sliced(
+        &self,
+        enc: &ComputeCommandEncoderRef,
+        op: &MatvecOperands<'_>,
+        tensor_scale: f32,
+        packed_offset: u64,
+        scales_offset: u64,
+    ) {
+        let q = &self.quant;
+        let kernel = match nvfp4_kernel_choice() {
+            Nvfp4Kernel::V1 => &q.nvfp4_matvec_pipeline,
+            Nvfp4Kernel::V2 => &q.nvfp4_matvec_v2_pipeline,
+            Nvfp4Kernel::G2R4 => &q.nvfp4_sweep_pipelines[0],
+            Nvfp4Kernel::G4R4 => &q.nvfp4_sweep_pipelines[1],
+            Nvfp4Kernel::G1R2 => &q.nvfp4_sweep_pipelines[2],
+            Nvfp4Kernel::G1R8 => &q.nvfp4_sweep_pipelines[3],
+            Nvfp4Kernel::G2R2 => &q.nvfp4_sweep_pipelines[4],
+            Nvfp4Kernel::G2R8 => &q.nvfp4_sweep_pipelines[5],
+            Nvfp4Kernel::X2 => &q.nvfp4_sweep_pipelines[6],
+            Nvfp4Kernel::X4 => &q.nvfp4_sweep_pipelines[7],
+            Nvfp4Kernel::X1B => &q.nvfp4_sweep_pipelines[8],
+            Nvfp4Kernel::X2B => &q.nvfp4_sweep_pipelines[9],
+            Nvfp4Kernel::X4B => &q.nvfp4_sweep_pipelines[10],
+        };
+        self.encode_nvfp4_at(kernel, enc, op, tensor_scale, packed_offset, scales_offset);
+    }
+
+    /// As [`Self::encode_nvfp4_matvec_residual`], weights bound at byte
+    /// offsets (a sliced matrix under rung 2a's folded residual).
+    pub fn encode_nvfp4_matvec_residual_sliced(
+        &self,
+        enc: &ComputeCommandEncoderRef,
+        op: &MatvecOperands<'_>,
+        tensor_scale: f32,
+        residual: &Buffer,
+        packed_offset: u64,
+        scales_offset: u64,
+    ) {
+        let kernel = &self.quant.nvfp4_matvec_x2r_pipeline;
+        enc.set_compute_pipeline_state(&kernel.state);
+        enc.set_buffer(0, Some(op.packed), packed_offset);
+        enc.set_buffer(1, Some(op.scales), scales_offset);
+        enc.set_buffer(2, Some(op.x), 0);
+        enc.set_buffer(3, Some(op.out), op.out_offset);
+        set_u32(enc, 4, op.n as u32);
+        set_u32(enc, 5, op.k as u32);
+        set_f32(enc, 6, tensor_scale);
+        enc.set_buffer(7, Some(residual), 0);
+        enc.dispatch_thread_groups(
+            metal::MTLSize::new((op.n as u64).div_ceil(kernel.rows_per_tg), 1, 1),
+            metal::MTLSize::new(kernel.threads_per_tg, 1, 1),
+        );
+    }
+
     fn encode_nvfp4_with(
         &self,
         kernel: &crate::kernels::KernelHandle,
@@ -472,9 +536,21 @@ impl MetalBackend {
         op: &MatvecOperands<'_>,
         tensor_scale: f32,
     ) {
+        self.encode_nvfp4_at(kernel, enc, op, tensor_scale, 0, 0);
+    }
+
+    fn encode_nvfp4_at(
+        &self,
+        kernel: &crate::kernels::KernelHandle,
+        enc: &ComputeCommandEncoderRef,
+        op: &MatvecOperands<'_>,
+        tensor_scale: f32,
+        packed_offset: u64,
+        scales_offset: u64,
+    ) {
         enc.set_compute_pipeline_state(&kernel.state);
-        enc.set_buffer(0, Some(op.packed), 0);
-        enc.set_buffer(1, Some(op.scales), 0);
+        enc.set_buffer(0, Some(op.packed), packed_offset);
+        enc.set_buffer(1, Some(op.scales), scales_offset);
         enc.set_buffer(2, Some(op.x), 0);
         enc.set_buffer(3, Some(op.out), op.out_offset);
         set_u32(enc, 4, op.n as u32);

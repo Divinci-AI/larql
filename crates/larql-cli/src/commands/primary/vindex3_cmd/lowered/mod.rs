@@ -49,7 +49,7 @@ pub(super) use run::run_lowered;
 
 use profile::{StageBytes, StageLedger};
 use resident::{
-    resident_matrix, resident_norm, resident_qkv, resident_vector, rope_inv_freq_table,
+    resident_attn, resident_matrix, resident_norm, resident_vector, rope_inv_freq_table,
     rope_table_key, Ablation,
 };
 use routed::{build_ffn, FfnResident};
@@ -293,16 +293,21 @@ impl<'a> LoweredSession<'a> {
             // bytes load through the same cache, so the V projection
             // binds the K matrix — the raw K projection lands in the V
             // slot before the key's own norm and rotation.
-            // QKV as slices of one allocation where the format and
-            // alignment admit it (the seg3t follow-up rung); otherwise
-            // three separate residents, unchanged.
-            let (q_m, k_m, v_m) =
-                resident_qkv(gpu, store, &a.q, &a.k, &a.v, formats.attention, keep)?;
+            // Q, K, V and O as slices of one allocation, in touch order,
+            // where format and alignment admit it; otherwise four
+            // separate residents, unchanged.
+            let [q_m, k_m, v_m, o_m] = resident_attn(
+                gpu,
+                store,
+                [&a.q, &a.k, &a.v, &a.o],
+                formats.attention,
+                keep,
+            )?;
             layers.push(LayerResident {
                 q: q_m,
                 k: k_m,
                 v: v_m,
-                o: resident_matrix(gpu, store, &a.o, formats.attention, keep)?,
+                o: o_m,
                 qk_norm: match &a.qk_norm {
                     Some(qk) => {
                         let q = resident_vector(gpu, store, Some(&qk.q))?.expect("q norm weight");

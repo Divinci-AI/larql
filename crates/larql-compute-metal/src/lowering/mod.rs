@@ -181,30 +181,31 @@ impl MetalBackend {
                 },
                 *tensor_scale,
             ),
-            // A sliced matrix (shared allocation, non-zero offsets): the
-            // flat kernels bind at offset 0, so it goes through the
-            // segmented form as one segment — same per-row walk,
-            // bit-identical, offsets honoured at bind time.
+            // A sliced matrix (a row slice of a shared allocation): the
+            // same kernel, bound at the slice's byte offsets. Not the
+            // segmented kernel — that is a different code shape, and
+            // under fast-math a different code shape is a different
+            // arithmetic, which a layout change must not introduce.
             LoweredMatrix::Nvfp4 {
                 packed,
                 packed_offset,
                 scales,
                 scales_offset,
                 tensor_scale,
-            } => self.encode_nvfp4_matvec_segments(
+            } => self.encode_nvfp4_matvec_sliced(
                 enc,
-                at.x,
-                at.k,
-                &[Nvfp4Segment {
+                &MatvecOperands {
                     packed,
-                    packed_offset: *packed_offset,
                     scales,
-                    scales_offset: *scales_offset,
-                    tensor_scale: *tensor_scale,
+                    x: at.x,
                     out: at.out,
                     out_offset: at.out_offset,
                     n: at.n,
-                }],
+                    k: at.k,
+                },
+                *tensor_scale,
+                *packed_offset,
+                *scales_offset,
             ),
             LoweredMatrix::Mxfp4 { packed, scales } => self.encode_mxfp4_matvec(
                 enc,
