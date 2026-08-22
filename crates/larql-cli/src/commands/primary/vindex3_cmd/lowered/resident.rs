@@ -214,7 +214,7 @@ pub(super) fn resident_attn(
     let n_packed = arity.packed();
     let mut loaded = Vec::with_capacity(n_packed);
     for op in ops.iter().take(n_packed) {
-        loaded.push(load_weight(store, op, format)?);
+        loaded.push(load_weight(store.into(), op, format)?);
     }
     let parts: Vec<(&AlignedBytes, &AlignedBytes, f32)> = loaded
         .iter()
