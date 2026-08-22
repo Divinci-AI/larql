@@ -245,6 +245,13 @@ impl Session {
                             if a.gated { "  gated" } else { "" },
                             if a.qk_norm { "  qk_norm" } else { "" },
                         ));
+                        if a.sinks || a.biased {
+                            out.push(format!(
+                                "      extras      {}{}",
+                                if a.sinks { " sinks" } else { "" },
+                                if a.biased { " qkvo_bias" } else { "" },
+                            ));
+                        }
                         for operand in &a.operands {
                             out.push(format!(
                                 "      {:12} {}::{} @{}",

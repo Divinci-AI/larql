@@ -69,6 +69,10 @@ pub struct ExplainAttention {
     pub head_dim: usize,
     pub gated: bool,
     pub qk_norm: bool,
+    /// Per-head sink logits participate in the softmax.
+    pub sinks: bool,
+    /// Q/K/V/O projection biases are applied.
+    pub biased: bool,
     /// Q/K/V/O (and gate, when present) bindings.
     pub operands: Vec<ExplainOperand>,
 }
@@ -219,6 +223,8 @@ fn explain_layer(
             head_dim: attention_op.head_dim,
             gated: attention_op.output_gate.is_some(),
             qk_norm: attention_op.qk_norm.is_some(),
+            sinks: attention_op.sinks.is_some(),
+            biased: attention_op.q_bias.is_some(),
             operands: attention_operands,
         },
         ffn: ExplainFfn {
