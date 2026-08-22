@@ -862,17 +862,17 @@ family metadata.
 
 | Statement | Vindex | Direct Weights | VINDEX3 |
 |---|---|---|---|
-| WALK (feature scan) | ✅ KNN (0.98ms/layer) | ✅ Dense matmul (~6ms/layer) | ❌ capability refusal |
-| DESCRIBE | ✅ Pre-computed edges + labels | ✅ On-the-fly per entity | ❌ capability refusal |
-| SELECT | ✅ Index lookup | ✅ Live gate×embedding scan | ❌ capability refusal |
-| EXPLAIN WALK | ✅ Walk trace from index | ✅ Walk trace from matmul | ❌ capability refusal |
+| WALK (feature scan) | ✅ KNN (0.98ms/layer) | ✅ Dense matmul (~6ms/layer) | ✅ role `feature_gate` scan |
+| DESCRIBE | ✅ Pre-computed edges + labels | ✅ On-the-fly per entity | ✅ via semantic roles |
+| SELECT | ✅ Index lookup | ✅ Live gate×embedding scan | ✅ via semantic roles |
+| EXPLAIN WALK | ✅ Walk trace from index | ✅ Walk trace from matmul | ✅ via semantic roles |
 | INFER | ✅ With `--include-weights` | ✅ Full forward pass | ✅ Batch-prefill logits, top-k |
 | INFER … GENERATE n | ❌ | ❌ | ✅ Greedy continuation (runtime seam) |
 | EXPLAIN INFER | ✅ With `--include-weights` | ✅ Full forward pass + trace | ✅ Static plan explanation (§4.4) |
 | TRACE | ✅ Residual decomposition | ✅ | ✅ Observational (plain form only) |
-| SHOW RELATIONS | ✅ From label cache | ✅ Cluster on-the-fly (slow) | ❌ capability refusal |
+| SHOW RELATIONS | ✅ From label cache | ✅ Cluster on-the-fly (slow) | ✅ raw tokens (no labels yet) |
 | SHOW LAYERS | ✅ From metadata | ✅ Computed from weights | ✅ Per-layer plan facts |
-| SHOW FEATURES | ✅ Index lookup | ✅ Dense scan per layer | ❌ capability refusal |
+| SHOW FEATURES | ✅ Index lookup | ✅ Dense scan per layer | ✅ via semantic roles |
 | STATS | ✅ Instant | ✅ Computed | ✅ Container's own authority |
 | INSERT | ✅ | ❌ Error: "requires vindex" | ❌ capability refusal |
 | DELETE | ✅ | ❌ Error: "requires vindex" | ❌ capability refusal |
@@ -885,9 +885,11 @@ family metadata.
 | COMPACT | ✅ LSM compaction | ❌ | ❌ capability refusal |
 
 A VINDEX3 refusal is a *capability* statement, not a format apology:
-the error names what the binding supports
-(`INFER [TOP n] [GENERATE n], EXPLAIN INFER, TRACE, STATS, SHOW
-LAYERS, USE`). The whole-language sweep test
+the error names what the binding supports. Since V3-LQL-3A the browse
+surface (SELECT / DESCRIBE / WALK / EXPLAIN WALK / SHOW …) executes on
+V3 through the container's own semantic roles; mutation and patches
+are the remaining refusals (V3-LQL-3B/3C). The whole-language sweep
+test
 (`tests/vindex3_lql.rs::every_statement_is_sensible_on_a_v3_binding`)
 pins that every statement either executes or refuses this way — never
 a panic, never a misleading "no backend loaded".
@@ -925,6 +927,19 @@ Statement semantics on a V3 binding:
   geometry, output head, tokenizer capability, supported statements.
 - `SHOW LAYERS` — per-layer attention facts off the plan (mode,
   window, Q/KV heads, head dim).
+- **Browse (V3-LQL-3A)** — `SELECT` / `DESCRIBE` / `WALK` /
+  `EXPLAIN WALK` / `SHOW RELATIONS/FEATURES/ENTITIES` run against the
+  container's **query surface**
+  (`format::vindex3::knowledge::KnowledgeView`): semantic roles
+  (`feature_gate`, `feature_down`, `embedding`) bound to the
+  executable plan's operands and loaded through the same operand
+  store execution uses. No `VectorIndex` is manufactured and no V2
+  loader runs. Annotation semantics match the V2 extractor's
+  user-visible contract (`embed · feature_down`, top logit as
+  `c_score`), pinned by the V2↔V3 whole-language parity harness
+  (`tests/vindex3_v2_parity.rs`): one checkpoint realised as both
+  formats must report the same logical feature space and walk
+  results.
 - `INFER "…" [TOP n]` — single-step top-k next-token prediction from
   batch-prefill logits. `INFER "…" GENERATE n` — greedy continuation
   through the proven runtime seam (batch prefill into caller-owned

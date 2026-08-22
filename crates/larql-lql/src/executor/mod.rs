@@ -7,6 +7,7 @@ mod backend;
 mod compact;
 mod helpers;
 mod introspection;
+mod knowledge;
 mod lifecycle;
 mod memit_persist;
 mod mutation;

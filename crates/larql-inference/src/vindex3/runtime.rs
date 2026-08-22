@@ -80,6 +80,23 @@ impl<B: PlanBackend> Vindex3Runtime<B> {
         })
     }
 
+    /// The container's browse view (V3-LQL-3A): the query surface's
+    /// semantic roles bound to this runtime's own plan and operand
+    /// store, so the queryable view and the executed program cannot
+    /// name different bytes. `tokenizer` decodes feature annotations.
+    pub fn knowledge_view(
+        &self,
+        tokenizer: &larql_vindex::tokenizers::Tokenizer,
+    ) -> Result<larql_vindex::format::vindex3::knowledge::KnowledgeView, InferenceError> {
+        Ok(
+            larql_vindex::format::vindex3::knowledge::KnowledgeView::from_plan(
+                &self.plan,
+                &self.store,
+                tokenizer,
+            )?,
+        )
+    }
+
     /// The container's self-declared model name (`index.model`) — the
     /// identity authority; callers must not fall back to directory
     /// names when this is non-empty.

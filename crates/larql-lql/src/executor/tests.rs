@@ -5029,3 +5029,24 @@ fn compact_major_skips_inserts_with_no_relation() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn browse_on_a_weight_backend_points_at_extraction() {
+    let session = weight_session();
+    let err = match session.browse() {
+        Ok(_) => panic!("weight backend must not browse"),
+        Err(e) => e.to_string(),
+    };
+    assert!(err.contains("requires a vindex"), "{err}");
+    assert!(err.contains("EXTRACT"), "{err}");
+}
+
+#[test]
+fn browse_without_any_backend_is_no_backend() {
+    let session = Session::new();
+    let err = match session.browse() {
+        Ok(_) => panic!("empty session must not browse"),
+        Err(e) => e.to_string(),
+    };
+    assert!(err.contains("No backend"), "{err}");
+}

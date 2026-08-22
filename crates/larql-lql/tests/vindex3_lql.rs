@@ -213,7 +213,7 @@ fn the_v2_path_refuses_the_container_lql_serves() {
 fn browse_and_mutation_statements_refuse_with_capabilities() {
     let container = v3_container();
     let mut session = bound_session(container.path());
-    for stmt in ["SHOW RELATIONS;", "WALK \"[3]\";"] {
+    for stmt in ["COMPACT MINOR;", r#"DELETE FROM EDGES WHERE layer = 0;"#] {
         let parsed = parse(stmt).unwrap();
         let err = session.execute(&parsed).unwrap_err().to_string();
         assert!(
@@ -398,16 +398,17 @@ fn every_statement_is_sensible_on_a_v3_binding() {
         (r#"SHOW MODELS;"#, Ok),             // registry listing, backend-free
         (r#"SHOW COMPACT STATUS;"#, Refuse), // LSM state is a vindex concept
         (r#"SHOW PATCHES;"#, Refuse),
-        // ── Browse: refuses with capabilities ──
-        (r#"WALK "[3]";"#, Refuse),
-        (r#"DESCRIBE "x";"#, Refuse),
-        (r#"SELECT * FROM EDGES LIMIT 5;"#, Refuse),
-        (r#"SELECT * FROM FEATURES WHERE layer = 0;"#, Refuse),
-        (r#"SELECT * FROM ENTITIES;"#, Refuse),
-        (r#"EXPLAIN WALK "[3]";"#, Refuse),
-        (r#"SHOW RELATIONS;"#, Refuse),
-        (r#"SHOW FEATURES 0;"#, Refuse),
-        (r#"SHOW ENTITIES;"#, Refuse),
+        // ── Browse (V3-LQL-3A): executes over the container's own
+        // semantic roles ──
+        (r#"WALK "[3]";"#, Ok),
+        (r#"DESCRIBE "[3]";"#, Ok),
+        (r#"SELECT * FROM EDGES LIMIT 5;"#, Ok),
+        (r#"SELECT * FROM FEATURES WHERE layer = 0;"#, Ok),
+        (r#"SELECT * FROM ENTITIES;"#, Ok),
+        (r#"EXPLAIN WALK "[3]";"#, Ok),
+        (r#"SHOW RELATIONS;"#, Ok),
+        (r#"SHOW FEATURES 0;"#, Ok),
+        (r#"SHOW ENTITIES;"#, Ok),
         // ── Mutation: refuses with capabilities ──
         (
             r#"INSERT INTO EDGES (entity, relation, target) VALUES ("a", "b", "c");"#,
@@ -470,4 +471,37 @@ fn every_statement_is_sensible_on_a_v3_binding() {
             }
         }
     }
+}
+
+/// Browse needs the tokenizer capability (annotations decode token
+/// ids); a tokenizer-less container binds, INFERs by refusal, and
+/// browses by refusal — each naming the missing fact.
+#[test]
+fn a_tokenizerless_container_refuses_browse_naming_the_capability() {
+    let checkpoint = tempfile::tempdir().unwrap();
+    let container = tempfile::tempdir().unwrap();
+    encode_fixture_container(
+        miniature_glimmer,
+        checkpoint.path(),
+        container.path(),
+        "ids-only-browse",
+    );
+    let mut session = Session::new();
+    run(
+        &mut session,
+        &format!("USE \"{}\";", container.path().display()),
+    );
+    let parsed = parse(r#"WALK "[3]";"#).unwrap();
+    let err = session.execute(&parsed).unwrap_err().to_string();
+    assert!(err.contains("tokenizer"), "{err}");
+}
+
+/// The raw-encode path refuses an empty prompt before any scan runs.
+#[test]
+fn browse_refuses_an_empty_prompt_on_v3() {
+    let container = v3_container();
+    let mut session = bound_session(container.path());
+    let parsed = parse(r#"WALK "";"#).unwrap();
+    let err = session.execute(&parsed).unwrap_err().to_string();
+    assert!(err.contains("empty"), "{err}");
 }

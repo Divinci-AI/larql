@@ -14,6 +14,7 @@
 //! INFER … GENERATE   greedy continuation through the runtime seam
 //! EXPLAIN INFER      the executable plan, statically
 //! TRACE        observe the canonical executor while it runs
+//! WALK / SELECT / DESCRIBE   browse via semantic roles (V3-LQL-3A)
 //! ```
 //!
 //! Run: cargo run -p larql-demos --example vindex3_demo
@@ -81,8 +82,12 @@ fn main() {
     run(&mut session, r#"EXPLAIN INFER "[3]";"#);
     run(&mut session, r#"TRACE "[3]";"#);
 
-    // ── Refusals are capability statements ──
-    run(&mut session, r#"WALK "[3]";"#);
+    // ── Browse: the model as a database, via semantic roles ──
+    run(&mut session, r#"WALK "[3]" TOP 3;"#);
+    run(&mut session, r#"SELECT * FROM FEATURES WHERE layer = 0 LIMIT 5;"#);
+    run(&mut session, r#"DESCRIBE "[3]";"#);
+
+    // ── Refusals are capability statements (mutation is V3-LQL-3B) ──
     run(
         &mut session,
         r#"INSERT INTO EDGES (entity, relation, target) VALUES ("a", "b", "c");"#,

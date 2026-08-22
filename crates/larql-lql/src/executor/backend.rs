@@ -60,6 +60,10 @@ pub(crate) enum Backend {
         /// The container's tokenizer, when it carries one — the text
         /// capability. INFER requires it; USE/STATS/SHOW do not.
         tokenizer: Option<larql_inference::tokenizers::Tokenizer>,
+        /// The browse view (V3-LQL-3A): semantic roles bound to the
+        /// plan's operands. `Some` iff the tokenizer capability is
+        /// present (annotations decode token ids); built at USE.
+        knowledge: Option<larql_vindex::format::vindex3::knowledge::KnowledgeView>,
     },
     /// Remote server backend — queries forwarded via HTTP.
     /// Local patches can be applied for client-side overlay.

@@ -37,7 +37,7 @@ impl Session {
                     larql_vindex::format::generation::detect_generation(&path),
                     Ok(larql_vindex::format::generation::ContainerGeneration::V3)
                 ) {
-                    let (runtime, tokenizer) = crate::executor::vindex3::bind(&path)?;
+                    let (runtime, tokenizer, knowledge) = crate::executor::vindex3::bind(&path)?;
                     let plan_layers = runtime.plan().layers.len();
                     let out = vec![
                         format!(
@@ -62,6 +62,7 @@ impl Session {
                         path,
                         runtime,
                         tokenizer,
+                        knowledge,
                     };
                     self.patch_recording = None;
                     self.auto_patch = false;

@@ -21,8 +21,9 @@ use crate::executor::{Backend, Session};
 
 /// The statements a VINDEX3 binding serves today. Everything else gets
 /// [`unsupported`] — a capability refusal, not a format apology.
-pub(crate) const SUPPORTED: &str =
-    "INFER [TOP n] [GENERATE n], EXPLAIN INFER, TRACE, STATS, SHOW LAYERS, USE";
+pub(crate) const SUPPORTED: &str = "SELECT, DESCRIBE, WALK, EXPLAIN WALK, \
+     SHOW RELATIONS/LAYERS/FEATURES/ENTITIES, INFER [TOP n] [GENERATE n], \
+     EXPLAIN INFER, TRACE, STATS, USE";
 
 /// Component id a container's text stack is bound under.
 pub(crate) const V3_COMPONENT: &str = "target";
@@ -128,6 +129,7 @@ impl Session {
             path,
             runtime,
             tokenizer,
+            ..
         } = &self.backend
         else {
             unreachable!("caller matched the backend");
@@ -357,11 +359,25 @@ impl Session {
 
 /// Open a container as a V3 binding: runtime (refusing closure
 /// defects) plus the optional tokenizer capability.
-pub(crate) fn bind(path: &std::path::Path) -> Result<(V3Runtime, Option<Tokenizer>), LqlError> {
+pub(crate) type V3Knowledge = larql_vindex::format::vindex3::knowledge::KnowledgeView;
+
+pub(crate) fn bind(
+    path: &std::path::Path,
+) -> Result<(V3Runtime, Option<Tokenizer>, Option<V3Knowledge>), LqlError> {
     let runtime = Vindex3Runtime::open(path, V3_COMPONENT, ProductionBackend::new())
         .map_err(|e| LqlError::exec("failed to open VINDEX3 container", e))?;
     let tokenizer = larql_vindex::load_vindex_tokenizer(path).ok();
-    Ok((runtime, tokenizer))
+    // The browse view needs the tokenizer (feature annotations decode
+    // token ids); a tokenizer-less container binds without it.
+    let knowledge = match &tokenizer {
+        Some(tok) => Some(
+            runtime
+                .knowledge_view(tok)
+                .map_err(|e| LqlError::exec("failed to bind the V3 query surface", e))?,
+        ),
+        None => None,
+    };
+    Ok((runtime, tokenizer, knowledge))
 }
 
 fn encode_v3_prompt(tokenizer: &Tokenizer, prompt: &str) -> Result<Vec<u32>, LqlError> {

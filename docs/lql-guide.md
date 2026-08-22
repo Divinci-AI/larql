@@ -298,6 +298,9 @@ Using: gpt-oss-20b.v3 (VINDEX3, model: gpt-oss-20b, component target, 24 layers,
 Supported: INFER [TOP n] [GENERATE n], STATS, SHOW LAYERS. Tokenizer: present.
 
 larql> STATS;                      -- the container's own authority
+larql> SELECT * FROM FEATURES WHERE layer = 0 LIMIT 8;
+larql> WALK "France" TOP 5;        -- role feature_gate scan
+larql> DESCRIBE "France";
 larql> SHOW LAYERS;                -- per-layer facts off the plan
 larql> INFER "The capital of France is" TOP 5;
 larql> INFER "The capital of France is" GENERATE 16;   -- greedy continuation
@@ -305,7 +308,7 @@ larql> EXPLAIN INFER "x";          -- the executable plan, statically
 larql> TRACE "x";                  -- observe the executor while it runs
 ```
 
-Everything else (browse, mutation, patches) refuses with a message
+Mutation and patches (V3-LQL-3B/3C, in progress) refuse with a message
 naming the supported statements — a capability boundary, not a
 missing feature apology. See the spec's §4.4 for the full contract.
 

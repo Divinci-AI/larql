@@ -52,3 +52,6 @@ harness = false
 [[bench]]
 name = "compile"
 harness = false
+
+[lints]
+workspace = true

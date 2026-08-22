@@ -46,6 +46,9 @@ pub mod graph;
 pub mod import;
 pub mod index;
 pub mod inspect;
+/// The V3 query surface: browse-facing semantic roles bound to the
+/// executable plan's operands (V3-LQL-3A).
+pub mod knowledge;
 pub mod opplan;
 pub mod plan;
 pub mod profile;
