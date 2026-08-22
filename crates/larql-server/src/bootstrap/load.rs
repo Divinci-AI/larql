@@ -95,6 +95,40 @@ pub enum LoadedArtifact {
 /// program ([`crate::vindex3::load_v3_model`]) — it structurally
 /// cannot take the V2 path, whose `load_vindex_config` refuses
 /// non-V2 generations.
+/// Options a VINDEX3 binding cannot honour, named for the refusal.
+///
+/// The V3 branch of [`load_artifact`] takes only a path — slicing,
+/// service modes, and cache knobs have no V3 implementation. Accepting
+/// the flag and ignoring it is the dangerous failure: a `--layers 0-9`
+/// shard silently loads the *whole* model and answers complete
+/// requests, and `--no-infer` does not disable inference. Fail closed
+/// until V3 sharding exists (ROADMAP §N1 / V3 sharding).
+fn unsupported_v3_options(opts: &LoadVindexOptions) -> Vec<&'static str> {
+    let mut named = Vec::new();
+    if opts.no_infer {
+        named.push("--no-infer");
+    }
+    if opts.ffn_only {
+        named.push("--ffn-only");
+    }
+    if opts.embed_only {
+        named.push("--embed-only");
+    }
+    if opts.layer_range.is_some() {
+        named.push("--layers");
+    }
+    if opts.expert_filter.is_some() {
+        named.push("--experts");
+    }
+    if opts.unit_filter.is_some() {
+        named.push("--units");
+    }
+    if opts.moe_remote.is_some() {
+        named.push("--moe-remote");
+    }
+    named
+}
+
 pub fn load_artifact(path_str: &str, opts: LoadVindexOptions) -> Result<LoadedArtifact, BoxError> {
     let path = if larql_vindex::is_hf_path(path_str) {
         larql_vindex::resolve_hf_vindex(path_str)?
@@ -103,6 +137,22 @@ pub fn load_artifact(path_str: &str, opts: LoadVindexOptions) -> Result<LoadedAr
     };
     match larql_vindex::format::generation::detect_generation(&path)? {
         larql_vindex::format::generation::ContainerGeneration::V3 => {
+            let unsupported = unsupported_v3_options(&opts);
+            if !unsupported.is_empty() {
+                return Err(format!(
+                    "VINDEX3 containers do not support {} — a V3 binding serves the whole \
+                     model, so accepting these would silently ignore them (a `--layers` shard \
+                     would load the full model and answer complete requests). Remove them, or \
+                     serve a VINDEX2 container: {}",
+                    if unsupported.len() == 1 {
+                        "this option"
+                    } else {
+                        "these options"
+                    },
+                    unsupported.join(", "),
+                )
+                .into());
+            }
             info!("Loading VINDEX3 container: {}", path.display());
             Ok(LoadedArtifact::V3(Box::new(crate::vindex3::load_v3_model(
                 &path,
@@ -357,4 +407,92 @@ pub fn discover_vindexes(dir: &Path) -> Vec<PathBuf> {
     }
     paths.sort();
     paths
+}
+
+#[cfg(test)]
+mod v3_option_tests {
+    use super::*;
+    use larql_inference::prompt::ChatTemplate;
+
+    #[test]
+    fn default_options_are_all_supported() {
+        assert!(unsupported_v3_options(&LoadVindexOptions::default()).is_empty());
+    }
+
+    #[test]
+    fn cache_knobs_do_not_block_a_v3_binding() {
+        // These are V2 tuning that a V3 binding simply has no use for —
+        // refusing them would reject a perfectly serveable container.
+        let opts = LoadVindexOptions {
+            max_gate_cache_layers: 8,
+            max_q4k_cache_layers: 8,
+            hnsw: Some(64),
+            warmup_hnsw: true,
+            release_mmap_after_request: true,
+            ..LoadVindexOptions::default()
+        };
+        assert!(unsupported_v3_options(&opts).is_empty());
+    }
+
+    #[test]
+    fn every_slicing_and_mode_option_is_named() {
+        let opts = LoadVindexOptions {
+            no_infer: true,
+            ffn_only: true,
+            embed_only: true,
+            layer_range: Some((0, 10)),
+            expert_filter: Some((0, 31)),
+            unit_filter: Some(std::sync::Arc::new(std::collections::HashSet::new())),
+            ..LoadVindexOptions::default()
+        };
+        let named = unsupported_v3_options(&opts);
+        for flag in [
+            "--no-infer",
+            "--ffn-only",
+            "--embed-only",
+            "--layers",
+            "--experts",
+            "--units",
+        ] {
+            assert!(named.contains(&flag), "{flag} must be named in the refusal");
+        }
+    }
+
+    #[test]
+    fn no_infer_alone_is_refused() {
+        // The dangerous one: silently ignoring it served inference from a
+        // server the operator had told not to.
+        let opts = LoadVindexOptions {
+            no_infer: true,
+            ..LoadVindexOptions::default()
+        };
+        assert_eq!(unsupported_v3_options(&opts), vec!["--no-infer"]);
+    }
+
+    #[test]
+    fn family_beats_the_id_heuristic() {
+        // The container declares what it is; the id is just a folder name.
+        assert!(matches!(
+            crate::vindex3::resolve_chat_template("gemma3", "some-container"),
+            ChatTemplate::Gemma
+        ));
+    }
+
+    #[test]
+    fn id_heuristic_still_applies_when_the_family_is_unknown() {
+        assert!(matches!(
+            crate::vindex3::resolve_chat_template("", "gemma-2-2b.vindex3"),
+            ChatTemplate::Gemma
+        ));
+    }
+
+    #[test]
+    fn an_unmapped_family_and_id_falls_back_to_plain() {
+        // Granite: declared by the container, but no renderer maps to it.
+        // The fallback is legitimate — the bind path warns about it.
+        assert!(matches!(
+            crate::vindex3::resolve_chat_template("granite", "granite-4.1-3b.vindex3"),
+            ChatTemplate::Plain
+        ));
+    }
 }

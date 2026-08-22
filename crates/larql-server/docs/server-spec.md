@@ -842,6 +842,27 @@ Other constraints:
 
 #### VINDEX3 runtimes (VI3-SERVE-1)
 
+**What a V3 binding refuses.** `load_artifact`'s V3 branch takes a path
+and nothing else — slicing and service modes have no V3 implementation
+— so `--no-infer`, `--ffn-only`, `--embed-only`, `--layers`,
+`--experts`, `--units` and `--moe-remote` are **refused at load** rather
+than accepted and ignored. They used to be silently dropped, which is
+the dangerous shape: a `--layers 0-9` "shard" loaded the whole model
+and answered complete requests, and `--no-infer` did not disable
+inference. V2 cache knobs (`--hnsw`, gate/q4k cache sizes,
+`--release-mmap-after-request`) are accepted and simply have nothing to
+tune.
+
+**Chat template.** A V3 container has no architecture-registry entry, so
+the template is resolved from the **container's own declared family**
+(`index.json`), falling back to the model-id heuristic and then to
+`Plain`. Landing on `Plain` is warned about at bind time, because it is
+not cosmetic: `Plain` ends an assistant turn with a bare newline, so the
+turn's last token re-tokenises differently once the next turn follows —
+which breaks N1's exact-ids-prefix rule at the seam and costs every
+chained request its resumption.
+
+
 `larql serve` binds each artifact through `bootstrap::load_artifact`
 (`src/bootstrap/load.rs`), which dispatches on the container's generation
 marker: a VINDEX3 container binds as `LoadedArtifact::V3` carrying a
@@ -869,6 +890,13 @@ Served surface for a V3 model:
 - `POST /v1/responses` — buffered and streaming, including tools /
   structured output and `previous_response_id` chaining with KV
   continuation (see N1 above).
+
+`/v1/stats` answers on a V3 binding with the program's own shape read
+from the opened plan (component, layer count, hidden and vocab size,
+whether it carries an output head) plus the server-level block — which
+is the only surface carrying the N1 continuation counters, so it has to
+work where V3 runs. It does not fake the V2 vocabulary (features,
+bands, extract level, q4k caches) onto a V3 binding.
 
 `/v1/embeddings` and the browse endpoints resolve V2 models only — a
 V3 container is an executable program, not a feature index, and has no

@@ -138,9 +138,10 @@ pub(super) async fn respond(
 
 /// Render + tokenise the conversation for the V3 runtime. No
 /// `ModelWeights` exists on this path, so template choice falls to the
-/// id heuristic (`ChatTemplate::for_model_id`).
+/// container's declared family, then the id heuristic
+/// (`V3Model::chat_template`).
 fn encode_chat_prompt(model: &V3Model, messages: &[ChatMessage]) -> Result<Vec<u32>, ServerError> {
-    let template = larql_inference::prompt::ChatTemplate::for_model_id(&model.id);
+    let template = model.chat_template();
     let prompt = render(template, messages);
     let encoding = model
         .tokenizer

@@ -107,6 +107,10 @@ generation.
 
 **Still open:**
 
+- **The payoff is currently invisible.** Measured on a real chain,
+  cache on vs off is 41.14 s vs 41.75 s — the V3 serve path's fixed
+  per-request cost dwarfs what resumption saves. See **V3-SERVE** below;
+  re-measure N1 after that lands, not before.
 - **V2-runtime KV residency.** Only the V3 arm keeps state resident;
   a V2 chain still re-prefills.
 - **Bound the session *count*.** The map is TTL-bounded but not
@@ -121,6 +125,89 @@ generation.
   preserves the id prefix under conversation growth is per-family
   empirical.
 - Pairs with **N3 (LoRA hot-load)** — sessions can pin an adapter.
+
+---
+
+### V3-SERVE. Make the server invoke VINDEX3 at the runtime's own speed
+
+**The measurement.** Profiled below HTTP against a real
+`granite-4.1-3b` container (`examples/v3_request_phase_profile.rs`); a
+warm 5-token / 1-token request costs 7.23 s in-process against 7.28 s
+over HTTP, so HTTP is ~50 ms and not the subject:
+
+| phase | time | share |
+|---|---|---|
+| `prefill_into` | 3.83 s | 53.0% |
+| `session_with_kv` | 3.27 s | 45.2% |
+| decode | 0.13 s | 1.8% |
+
+Opening the runtime at startup costs **1 ms** — the plan and operand
+store are already hoisted. **94% of a warm request is operand
+materialisation, not arithmetic**, and the same work with operands
+already resident measures **0.84 s against 7.44 s (~8.8×)**.
+
+**V3-SERVE-1. Hoist operand residency to server lifetime.** The server
+materialises the whole model *twice per request*: once inside
+`prefill_plan` → `traverse`, which calls `store.load(...)` per layer,
+and again in `DecodeSession::build`, which loads every operand of every
+layer into the backend's declared weight format. Both are as-documented
+— the cost was known, never priced.
+
+The shape to aim for is resident immutable execution state plus a cheap
+per-request context:
+
+```text
+server lifetime   plan + operand store + LOADED operands + backend
+request lifetime  tokens + KV/continuation + sampling + mask + scratch
+```
+
+`with_kv_state` already separates continuation state from the session,
+so the loaded operands are the piece that needs lifting out of
+`DecodeSession` into something `V3Model` owns and hands borrows of.
+Cross-crate: `larql-vindex` (the executor split), `larql-inference`
+(the session constructors), `larql-server` (holding it). Gate: warm
+in-process request ≈ arithmetic only; then HTTP within milliseconds of
+that.
+
+**V3-SERVE-2. Batch the KV-filling prefill.** Server prefill runs at
+~10 tok/s where `larql vindex3 exec` on the same container and backend
+gets ~21. That is not overhead — `traverse`'s `kv` argument *switches
+the attention realisation*: `None` runs batched attention, `Some` runs
+the decode step's per-position arithmetic, and the server must pass
+`Some` to fill the provider. Measured slopes: batched 28.5 tok/s
+(1→64) and 21.4 (64→256); per-position 16.0 (5→64) and 7.7 (64→325),
+degrading faster with length. Wanted: a batched realisation that also
+emits the KV rows.
+
+**V3-SERVE-3. Backend injection.** The server hardcodes
+`ProductionBackend::new()`, so serving cannot use the Metal backend
+that `vindex3 exec` already offers. Architecturally wrong regardless,
+but *not* the performance lever here: at these sizes metal rung-1
+measured 20.4 against production's 21.4 tok/s prefill. Do it after
+V3-SERVE-1 and 2, and re-measure rather than assuming.
+
+**V3-SERVE-4. Ship a servable container.** No real V3 container is
+servable as shipped — `load_v3_model` needs `<container>/tokenizer.json`
+and the encoder never writes one. The serve tests all write a synthetic
+tokenizer into their fixture, so this class of defect is invisible to
+them. Needs the encoder to carry the tokenizer *and* a gate that serves
+a container the encoder actually produced.
+
+**V3-SERVE-5. Sharding, decoupling, grid.** Not started, and now
+failing closed rather than silently: a V3 binding refuses `--layers` /
+`--experts` / `--ffn-only` / `--embed-only` / `--no-infer` / `--units`.
+`/v1/walk-ffn`, `/v1/expert/*`, `/v1/infer`, `/v1/embed` and
+`/v1/shard` resolve V2 only, and a V3 server does not join the grid
+(it warns; the router answers 503 `no OpenAI-capable server`). Order
+this after the perf rungs — sharding a runtime that pays 6.7 s per
+request just buys several copies of the problem.
+
+**Do not re-tune N1 first.** Cache on vs off measured 41.14 s against
+41.75 s on a 4-turn chain — 1.5%, inside the e2e noise floor — because
+the fixed tax dwarfs the 1–2 s of prefill it saves. The mechanism is
+correct and observable (`cached_tokens`, `resumptions`). Re-measure it
+after V3-SERVE-1; a longest-common-prefix resume is worth considering
+only once the saving is visible.
 
 ---
 

@@ -6,6 +6,60 @@ The format follows the conventions of [Keep a Changelog](https://keepachangelog.
 with dated entries (`YYYY-MM-DD`) instead of semantic versions during the
 pre-1.0 phase. Forward-looking work lives in [`ROADMAP.md`](ROADMAP.md).
 
+## [2026-08-22] — V3 serve: reality check against real containers
+
+Ran the V3 serve path against **real** VINDEX3 containers
+(`granite-4.1-3b`, `gemma-2-2b`) rather than synthetic fixtures. What
+follows is what that found and what was fixed; the perf rung it
+identified is in [`ROADMAP.md`](ROADMAP.md).
+
+**Confirmed working.** V3 inference over `/v1/completions`,
+`/v1/chat/completions` and `/v1/responses` on a real 3B model, with
+conversation chaining. N1 KV resumption engages for real on a
+properly-templated model: a gemma chain served 26/41 then 52/67 prompt
+tokens from resident KV (`resumptions: 2`).
+
+**Found: no real V3 container is servable as shipped.**
+`load_v3_model` requires `<container>/tokenizer.json`, and the V3
+encoder never writes one — the V3 CLI is deliberately id-level, so
+nothing needed it before. Every V3 serve test writes a *synthetic*
+tokenizer into its fixture, which is exactly why the gate could not
+catch this. Not fixed here; it needs the encoder to carry the
+tokenizer, and a gate that serves a container the encoder produced.
+
+**Fixed: `/v1/stats` 404'd on a V3-only server.** The handler resolved
+V2 only, so the `server` block — the sole surface carrying the N1
+continuation counters — was unreachable on exactly the deployments N1
+runs on. It now answers with the program's own shape read from the
+opened plan, and does not fake the V2 vocabulary onto a V3 binding.
+
+**Fixed: V3 load options were silently ignored.** `--layers 0-9` on a
+40-layer container started fine and served the *whole* model with
+complete answers; `--ffn-only`, `--embed-only` and `--no-infer` did the
+same — `--no-infer` did not disable inference. `load_artifact`'s V3
+branch now **fails closed** on every option it cannot honour, naming
+the option and why. V2 cache knobs still pass.
+
+**Fixed: V3 chat-template resolution ignored the container.** The model
+id is just the directory basename, so `for_model_id` answered `Plain`
+for any container not named after its family — Granite among them.
+Resolution now reads the container's declared `family` first, then the
+id, then `Plain`, and **warns at bind time** when it lands on `Plain`.
+This is not cosmetic: `Plain` ends an assistant turn with a bare
+newline, so its last token re-tokenises differently once the next turn
+follows, which breaks N1's exact-ids-prefix rule at the seam. Measured
+on the real tokenizers: granite/Plain kept 20 of 21 ids and lost the
+resumption to **one** seam token, while gemma under its own template
+resumed at 100%.
+
+**Not shipped, measured:** V3 has no sharding, no FFN/attention
+decoupling, and does not join the grid (the server warns and the router
+answers 503). `/v1/walk-ffn`, `/v1/expert/*`, `/v1/infer`, `/v1/embed`,
+`/v1/shard` are V2-only.
+
+New `examples/v3_request_phase_profile.rs` times the serve path's phases
+below HTTP against a real container.
+
 ## [2026-08-22] — `/v1/sessions`: session observability and eviction
 
 - **New surface.** `GET /v1/sessions`, `GET /v1/sessions/{id}`,

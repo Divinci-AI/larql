@@ -201,8 +201,8 @@ fn generate_on_v3(
 ) -> Result<GenerationOutcome, ServerError> {
     // No `ModelWeights` on the V3 path — the container binds as an
     // executable program — so template choice falls to the id
-    // heuristic (`ChatTemplate::for_model_id`).
-    let template = larql_inference::prompt::ChatTemplate::for_model_id(&model.id);
+    // container's declared family, then the id heuristic.
+    let template = model.chat_template();
     let prompt = render(template, messages);
     let prompt_ids = encode(&model.tokenizer, &prompt)?;
 

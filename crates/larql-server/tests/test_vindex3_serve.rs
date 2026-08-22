@@ -35,6 +35,10 @@ use larql_vindex::format::vindex3::fixtures::{
 };
 use larql_vindex::format::vindex3::opplan::exec::production::ProductionBackend;
 
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
+use tower::ServiceExt;
+
 const NEW_TOKENS: usize = 16;
 const PROMPT: &str = "[3]";
 const COMPONENT: &str = "target";
@@ -438,4 +442,101 @@ fn a_v2_vindex_binds_as_v2_through_the_same_artifact_loader() {
         matches!(artifact, LoadedArtifact::V2(_)),
         "a V2 vindex must bind as V2"
     );
+}
+
+/// `/v1/stats` must answer on a V3-only server.
+///
+/// It used to 404: the handler resolved V2 only, so the `server` block
+/// — the sole surface carrying the N1 continuation counters — was
+/// unreachable on exactly the deployments N1 runs on. Found by serving
+/// a real container, not by a fixture.
+#[tokio::test]
+async fn stats_answers_on_a_v3_only_server_and_carries_the_server_block() {
+    let container = v3_container();
+    let app = larql_server::routes::single_model_router(v3_state(container.path()));
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/stats")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "V3-only /v1/stats must not 404"
+    );
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+    // The program's own shape, read from the opened plan.
+    assert_eq!(json["generation"], 3);
+    assert_eq!(json["component"], "target");
+    assert!(json["layers"].as_u64().expect("layers") > 0);
+    assert!(json["has_output_head"].as_bool().expect("head"));
+    // The V2 vocabulary must not be faked onto a V3 binding.
+    assert!(json.get("features").is_none());
+    assert!(json.get("extract_level").is_none());
+
+    // The reason this endpoint matters on V3 at all.
+    let kv = &json["server"]["v3_kv"];
+    assert!(kv["enabled"].as_bool().expect("enabled"));
+    for counter in ["hits", "misses", "resumptions", "reused_tokens_total"] {
+        assert!(kv[counter].is_number(), "missing v3_kv.{counter}");
+    }
+    assert!(json["server"]["sessions"]["active"].is_number());
+}
+
+/// A V3 container must refuse the slicing / service-mode options rather
+/// than accept and ignore them. Accepting `--layers 0-9` silently
+/// loaded the *whole* model and answered complete requests; `--no-infer`
+/// did not disable inference.
+#[test]
+fn a_v3_container_refuses_options_it_cannot_honour() {
+    let container = v3_container();
+    let path = container.path().to_string_lossy().to_string();
+
+    for (label, opts) in [
+        (
+            "--no-infer",
+            LoadVindexOptions {
+                no_infer: true,
+                ..LoadVindexOptions::default()
+            },
+        ),
+        (
+            "--layers",
+            LoadVindexOptions {
+                layer_range: Some((0, 1)),
+                ..LoadVindexOptions::default()
+            },
+        ),
+        (
+            "--ffn-only",
+            LoadVindexOptions {
+                ffn_only: true,
+                ..LoadVindexOptions::default()
+            },
+        ),
+    ] {
+        let msg = match load_artifact(&path, opts) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("{label} must be refused, not silently ignored"),
+        };
+        assert!(
+            msg.contains("do not support") && msg.contains(label),
+            "{label}: refusal must name the option — got {msg}"
+        );
+    }
+
+    // And the same container binds cleanly with no such options.
+    let ok = load_artifact(&path, LoadVindexOptions::default())
+        .map_err(|e| e.to_string())
+        .expect("a V3 container with no unsupported options binds");
+    assert!(matches!(ok, LoadedArtifact::V3(_)));
 }

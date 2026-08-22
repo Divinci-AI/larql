@@ -53,6 +53,42 @@ pub struct V3Model {
     /// Tokenizer for the text-facing API (`tokenizer.json` in the
     /// container directory).
     pub tokenizer: tokenizers::Tokenizer,
+    /// The model family the container itself declares (`index.json`).
+    ///
+    /// The *container* is the only authority here — a V3 binding has no
+    /// architecture registry entry, and the model id is just the
+    /// directory basename, so id-substring matching answers "plain" for
+    /// any container whose folder is not named after its family.
+    pub family: String,
+}
+
+impl V3Model {
+    /// The chat template to render conversations with.
+    ///
+    /// Family first (the container's own declaration), model id second
+    /// (the historical heuristic, kept so a renamed container still
+    /// resolves), `Plain` last.
+    ///
+    /// This is not cosmetic. `Plain` ends an assistant turn with a bare
+    /// newline, so the last emitted token can merge with the text of
+    /// the following turn when the conversation is re-rendered — which
+    /// breaks N1's exact-ids-prefix rule at the seam and costs every
+    /// chained request its KV resumption. A template that terminates
+    /// the turn with an atomic special token does not have that
+    /// failure mode.
+    pub fn chat_template(&self) -> larql_inference::prompt::ChatTemplate {
+        resolve_chat_template(&self.family, &self.id)
+    }
+}
+
+/// [`V3Model::chat_template`]'s rule, as a free function so it is
+/// testable without opening a container.
+pub fn resolve_chat_template(family: &str, id: &str) -> larql_inference::prompt::ChatTemplate {
+    use larql_inference::prompt::ChatTemplate;
+    match ChatTemplate::for_family(family) {
+        ChatTemplate::Plain => ChatTemplate::for_model_id(id),
+        resolved => resolved,
+    }
 }
 
 /// Bind a VINDEX3 container for serving: open the component's plan
@@ -72,12 +108,30 @@ pub fn load_v3_model(path: &Path) -> Result<V3Model, Box<dyn std::error::Error +
             .unwrap_or_else(|| "vindex3".to_string()),
         named => named.to_string(),
     };
-    Ok(V3Model {
+    let family = larql_vindex::format::vindex3::Vindex3Container::open(path)
+        .map(|c| c.index().family.clone())
+        .unwrap_or_default();
+    let model = V3Model {
         id: model_id_from_name(&name),
         path: path.to_path_buf(),
         runtime,
         tokenizer,
-    })
+        family,
+    };
+    if matches!(
+        model.chat_template(),
+        larql_inference::prompt::ChatTemplate::Plain
+    ) {
+        tracing::warn!(
+            model = %model.id,
+            family = %model.family,
+            "no chat template matches this container: serving with the Plain fallback. \
+             Conversations get no chat scaffolding, and N1 KV resumption will usually \
+             miss — Plain ends an assistant turn with a bare newline, so its last token \
+             re-tokenises differently once the next turn follows."
+        );
+    }
+    Ok(model)
 }
 
 /// What one V3 generation produced, shaped for the OpenAI routes:

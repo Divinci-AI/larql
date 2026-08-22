@@ -6,7 +6,41 @@ use axum::extract::{Path, State};
 use axum::Json;
 
 use crate::error::ServerError;
-use crate::state::{AppState, LoadedModel};
+use crate::state::{AppState, LoadedModel, ServedModel};
+
+/// `/v1/stats` for a VINDEX3 binding.
+///
+/// A V3 container is an executable program, not a feature index, so the
+/// V2 block's vocabulary (features, bands, extract level, q4k caches)
+/// has nothing to report. What it *can* state is the program's own
+/// shape, read from the opened plan — which is also the only authority
+/// that could answer, since a V3 container carries no architecture
+/// registry entry.
+///
+/// The `server` block matters more here than the model block: it is the
+/// only surface carrying the N1 continuation counters, and before this
+/// existed a V3-only server answered `/v1/stats` with 404 — the
+/// instrumentation was unreachable exactly where V3 runs.
+fn build_v3_stats(model: &crate::vindex3::V3Model) -> serde_json::Value {
+    let plan = model.runtime.plan();
+    serde_json::json!({
+        "model": model.id,
+        "generation": 3,
+        "mode": "full",
+        "component": plan.component,
+        "layers": plan.layers.len(),
+        "hidden_size": plan.embedding.as_ref().map(|e| e.table.shape[1]),
+        "vocab_size": plan.embedding.as_ref().map(|e| e.table.shape[0]),
+        "has_output_head": plan.output.is_some(),
+        "path": model.path.display().to_string(),
+        "loaded": {
+            "browse": false,
+            "inference": true,
+            "ffn_service": false,
+            "embed_service": false,
+        },
+    })
+}
 
 fn build_stats(model: &LoadedModel) -> serde_json::Value {
     let config = &model.config;
@@ -212,9 +246,10 @@ pub async fn handle_stats(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<serde_json::Value>, ServerError> {
     state.bump_requests();
-    let model = state.model_or_err(None)?;
-    let stats = build_stats(model);
-    let stats = add_q4k_ffn(model, stats).await;
+    let stats = match state.served_or_err(None)? {
+        ServedModel::V2(model) => add_q4k_ffn(model, build_stats(model)).await,
+        ServedModel::V3(model) => build_v3_stats(model),
+    };
     Ok(Json(add_server_block(&state, stats).await))
 }
 
@@ -233,8 +268,9 @@ pub async fn handle_stats_multi(
     Path(model_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ServerError> {
     state.bump_requests();
-    let model = state.model_or_err(Some(&model_id))?;
-    let stats = build_stats(model);
-    let stats = add_q4k_ffn(model, stats).await;
+    let stats = match state.served_or_err(Some(&model_id))? {
+        ServedModel::V2(model) => add_q4k_ffn(model, build_stats(model)).await,
+        ServedModel::V3(model) => build_v3_stats(model),
+    };
     Ok(Json(add_server_block(&state, stats).await))
 }
