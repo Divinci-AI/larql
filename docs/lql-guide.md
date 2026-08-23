@@ -29,9 +29,19 @@ EXTRACT MODEL "google/gemma-3-4b-it" INTO "gemma3-4b.vindex" WITH INFERENCE;
 
 -- Full (~10 GB f16 / ~18 GB f32, enables COMPILE for recompilation)
 EXTRACT MODEL "google/gemma-3-4b-it" INTO "gemma3-4b.vindex" WITH ALL;
+
+-- Pick the container generation explicitly. Omitted = no preference,
+-- resolved by the extraction-generation policy (docs/vindex-generation-policy.md).
+EXTRACT MODEL "google/gemma-3-4b-it" INTO "gemma3-4b.vindex" FORMAT VINDEX3;
 ```
 
+A `FORMAT VINDEX3` extraction encodes the checkpoint's own bytes into a
+VINDEX3 container (HF checkpoint artifacts only — GGUF sources refuse by
+name rather than transcoding on the way in), carries the tokenizer and
+HF metadata in beside it, and leaves the session bound: no `USE` needed.
+
 CLI equivalent: `larql extract-index google/gemma-3-4b-it -o gemma3-4b.vindex --level inference --f16`
+(add `--generation v3` for a VINDEX3 container).
 
 ### 2. Connect
 

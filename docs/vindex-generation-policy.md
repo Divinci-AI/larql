@@ -45,10 +45,40 @@ surface that cannot produce the requested generation refuses by name.
 
 | Surface | Request spelling | Today (`Auto` → V2) |
 |---|---|---|
-| LQL | `EXTRACT MODEL "m" INTO "o" [FORMAT VINDEX2\|VINDEX3]` | `FORMAT VINDEX3` refuses by name (producer not wired); `FORMAT VINDEX2` explicit; absent = policy |
-| CLI | `larql extract --generation {v2\|v3}` | `--generation v3` refuses by name; omitted = policy |
+| LQL | `EXTRACT MODEL "m" INTO "o" [FORMAT VINDEX2\|VINDEX3]` | `FORMAT VINDEX3` encodes + auto-binds; `FORMAT VINDEX2` explicit; absent = policy |
+| CLI | `larql extract --generation {v2\|v3}` | `--generation v3` encodes; omitted = policy |
 | Factory | `extractor.options.generation: "v2"\|"v3"` → forwarded as `--generation` | absent = tool policy; a pin participates in `build_id` |
-| V3 producer | `larql vindex3 encode <hf-artifacts>` | the only VINDEX3 producer today |
+| V3 producer | `larql vindex3 encode <hf-artifacts>` | the multi-artifact system encoder |
+
+### What a V3 request produces
+
+Both extraction surfaces run one shared pipeline —
+`larql_vindex::format::vindex3::encode::checkpoint::encode_checkpoint`:
+
+```text
+checkpoint dir (config.json + *.safetensors)
+  → build_inventory     interpretation, once
+  → plan_system         admissibility, blocking findings ITEMISED in the refusal
+  → encode_system       segments + system_graph + index
+  → capability snapshot tokenizer.json + tokenizer_config/special_tokens_map/
+                        generation_config/chat_template
+```
+
+The capability snapshot is what keeps a V3-produced container servable:
+the encoder proper writes only what execution needs, so without it a
+fresh container binds with token-id capability only and refuses `INFER`.
+`larql vindex3 encode` places the same files, so all three producers
+agree.
+
+Sources the encoder cannot consume refuse **by name**, never by
+downgrade: GGUF (a container may not transcode on the way in — use
+`FORMAT VINDEX2`), non-checkpoint directories, and V2-only transcoding
+flags (`--quant`, `--expert-banks`, `--compact`, …) passed alongside
+`--generation v3`.
+
+After a V3 extraction the LQL session is **already bound**, through the
+same `bind_v3_session` block `USE` uses — gated by an equality test, so
+`EXTRACT` cannot grow a second binding path that drifts.
 
 Binding needs no policy: `detect_generation` (`index.json` schema
 version, the sole discriminator — no filename or shape sniffing) already
@@ -57,14 +87,14 @@ closed on unknown schemas.
 
 ## Rungs to the flip
 
-- **M1 (this document + the seam)** — policy type, pinned default,
+- **M1 — the seam. DONE** (PR #290): policy type, pinned default,
   explicit request spellings on every surface, refusals instead of
   downgrades. No behaviour change.
-- **M2 — V3 production reachable from the extraction surfaces.** Wire
-  `FORMAT VINDEX3` / `--generation v3` to the V3 encoder for admissible
-  sources; the V3 path must reach parity on the extraction side channels
-  (tokenizer.json, HF metadata snapshot) so a default-produced container
-  binds with full capability; post-extract auto-bind takes the V3 arm.
+- **M2 — V3 production reachable from the extraction surfaces. DONE**:
+  one shared `encode_checkpoint` pipeline behind `FORMAT VINDEX3` /
+  `--generation v3`, capability snapshot closing the tokenizer/HF
+  metadata gap on all three producers, post-extract auto-bind through
+  `USE`'s own binding block.
 - **M3 — consumer readiness.** V2-only consumers either route by
   detection or refuse by name: `SHOW MODELS` must list V3 containers,
   `run`/`walk`/`describe`/`stats`, Vindexfile `FROM`, slice/publish/link,

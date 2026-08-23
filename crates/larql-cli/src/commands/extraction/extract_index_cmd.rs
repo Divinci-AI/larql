@@ -266,11 +266,81 @@ impl IndexBuildCallbacks for CliBuildCallbacks {
     }
 }
 
+/// The V3 arm: HF checkpoint artifacts → `encode_checkpoint` (plan gate
+/// with itemised blocking findings, segments, capability snapshot).
+///
+/// The V2 route's knobs shape a *transcoding* extraction; none of them
+/// applies to a verbatim encode, so any that was explicitly set refuses
+/// by name rather than being silently ignored.
+fn run_v3(args: &ExtractIndexArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let refused: &[(&str, bool)] = &[
+        ("--from-vectors", args.from_vectors.is_some()),
+        ("--quant", args.quant != larql_vindex::QuantFormat::None),
+        (
+            "--expert-banks",
+            args.expert_banks != larql_vindex::ExtractionRequest::Legacy,
+        ),
+        ("--include-weights", args.include_weights),
+        ("--compact", args.compact),
+        ("--drop-gate-vectors", args.drop_gate_vectors),
+        ("--down-q4k", args.down_q4k),
+        ("--feature-major-down", args.feature_major_down),
+        (
+            "--summary-features-per-expert",
+            args.summary_features_per_expert != 0,
+        ),
+    ];
+    if let Some((flag, _)) = refused.iter().find(|(_, set)| *set) {
+        return Err(format!(
+            "{flag} shapes the V2 transcoding route and does not apply to a VINDEX3 \
+             encode; drop it or use --generation v2"
+        )
+        .into());
+    }
+
+    let model = args
+        .model
+        .as_deref()
+        .ok_or("a model path or HF id is required for --generation v3")?;
+    let model_path = larql_models::resolve_model_path(model)?;
+    if model_path.is_file() {
+        return Err(format!(
+            "{} is a GGUF file; the VINDEX3 encoder consumes HF checkpoint artifacts \
+             (config.json + safetensors) and a container may not transcode on the way \
+             in. Use --generation v2 for GGUF sources.",
+            model_path.display()
+        )
+        .into());
+    }
+
+    let encoded = larql_vindex::format::vindex3::encode::checkpoint::encode_checkpoint(
+        &model_path,
+        &args.output,
+    )?;
+    if encoded.capabilities.is_empty() {
+        eprintln!(
+            "note: no tokenizer.json beside the checkpoint — the container will bind \
+             with token-id capability only"
+        );
+    } else {
+        eprintln!("capabilities: {}", encoded.capabilities.join(", "));
+    }
+    eprintln!(
+        "encoded {} ({} representation(s), {:.2} GB payload) → {}",
+        encoded.artifact,
+        encoded.outcome.representations,
+        encoded.outcome.total_payload_bytes as f64 / 1e9,
+        encoded.outcome.container.display(),
+    );
+    Ok(())
+}
+
 pub fn run(args: ExtractIndexArgs) -> Result<(), Box<dyn std::error::Error>> {
     // Resolve the container generation before any bytes move. Omitted =
     // Auto, decided by the one policy site in larql-vindex (the
-    // default-flip gate). An explicit `v3` refuses by name on this
-    // surface — it is never downgraded to a V2 extraction.
+    // default-flip gate). An admitted V3 takes the encode pipeline; a V3
+    // request this surface cannot honour refuses by name — it is never
+    // downgraded to a V2 extraction.
     {
         use larql_vindex::format::generation::{
             admit_extraction_generation, ContainerGeneration, GenerationRequest,
@@ -280,13 +350,7 @@ pub fn run(args: ExtractIndexArgs) -> Result<(), Box<dyn std::error::Error>> {
             Some(generation) => GenerationRequest::Explicit(generation),
         };
         if admit_extraction_generation(request) == ContainerGeneration::V3 {
-            return Err(
-                "`larql extract` cannot write a VINDEX3 container yet: VINDEX3 \
-                 containers are produced by `larql vindex3 encode` from HF checkpoint \
-                 artifacts. `--generation v2` remains available and must be selected \
-                 explicitly rather than fallen back to."
-                    .into(),
-            );
+            return run_v3(&args);
         }
     }
 

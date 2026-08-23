@@ -638,3 +638,105 @@ fn a_segment_claiming_a_different_representation_than_the_directory_is_a_defect(
         "{defects:?}"
     );
 }
+
+// ── checkpoint.rs: the shared one-checkpoint pipeline (rung M2) ──
+
+/// The full pipeline on the miniature checkpoint: encode succeeds, the
+/// container detects as V3, and the capability files present in the
+/// checkpoint (tokenizer.json here) are placed beside the segments.
+#[test]
+fn encode_checkpoint_produces_a_v3_container_with_capabilities() {
+    use crate::format::vindex3::encode::checkpoint::encode_checkpoint;
+    use crate::format::vindex3::fixtures::miniature_glimmer;
+
+    let checkpoint = tempfile::tempdir().unwrap();
+    miniature_glimmer(checkpoint.path());
+    std::fs::write(checkpoint.path().join("tokenizer.json"), "{}").unwrap();
+    std::fs::write(checkpoint.path().join("generation_config.json"), "{}").unwrap();
+
+    let out = tempfile::tempdir().unwrap();
+    let encoded = encode_checkpoint(checkpoint.path(), out.path()).unwrap();
+
+    assert!(encoded.outcome.representations > 0);
+    assert_eq!(
+        crate::format::generation::detect_generation(out.path()).unwrap(),
+        crate::format::generation::ContainerGeneration::V3,
+    );
+    assert_eq!(
+        encoded.capabilities,
+        vec![
+            "tokenizer.json".to_string(),
+            "generation_config.json".to_string()
+        ],
+        "present capability files copy, in declaration order"
+    );
+    assert!(out.path().join("tokenizer.json").exists());
+    assert!(out.path().join("generation_config.json").exists());
+    assert!(!out.path().join("chat_template.jinja").exists());
+}
+
+/// A tokenizer-less checkpoint still encodes — absence narrows
+/// capability, it is not an error.
+#[test]
+fn encode_checkpoint_tolerates_absent_capability_files() {
+    use crate::format::vindex3::encode::checkpoint::encode_checkpoint;
+    use crate::format::vindex3::fixtures::miniature_glimmer;
+
+    let checkpoint = tempfile::tempdir().unwrap();
+    miniature_glimmer(checkpoint.path());
+    let out = tempfile::tempdir().unwrap();
+    let encoded = encode_checkpoint(checkpoint.path(), out.path()).unwrap();
+    assert!(encoded.capabilities.is_empty());
+    assert!(!out.path().join("tokenizer.json").exists());
+}
+
+/// A directory that is not an HF checkpoint refuses by name — the
+/// message says what the encoder consumes.
+#[test]
+fn encode_checkpoint_refuses_a_non_checkpoint_dir() {
+    use crate::format::vindex3::encode::checkpoint::encode_checkpoint;
+
+    let not_a_checkpoint = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let err = encode_checkpoint(not_a_checkpoint.path(), out.path()).unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("config.json + safetensors"), "{msg}");
+}
+
+/// The artifact name is the checkpoint directory's stem — the same rule
+/// `larql vindex3 encode` applies.
+#[test]
+fn encode_checkpoint_names_the_artifact_by_directory_stem() {
+    use crate::format::vindex3::encode::checkpoint::encode_checkpoint;
+    use crate::format::vindex3::fixtures::miniature_glimmer;
+
+    let base = tempfile::tempdir().unwrap();
+    let checkpoint = base.path().join("mini-glimmer");
+    std::fs::create_dir(&checkpoint).unwrap();
+    miniature_glimmer(&checkpoint);
+    let out = tempfile::tempdir().unwrap();
+    let encoded = encode_checkpoint(&checkpoint, out.path()).unwrap();
+    assert_eq!(encoded.artifact, "mini-glimmer");
+}
+
+/// An inadmissible plan refuses with the blocking findings ITEMISED —
+/// `encode_system`'s own gate discards them and points at `vindex3
+/// plan`; the shared pipeline must not make two surfaces do that dance.
+#[test]
+fn encode_checkpoint_renders_blocking_findings_into_the_refusal() {
+    use crate::format::vindex3::encode::checkpoint::encode_checkpoint;
+
+    // A drafter checkpoint alone is inadmissible: its producer
+    // interface cannot resolve without the target artifact.
+    let checkpoint = tempfile::tempdir().unwrap();
+    drafter_shaped(checkpoint.path());
+
+    let out = tempfile::tempdir().unwrap();
+    let err = encode_checkpoint(checkpoint.path(), out.path()).unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("blocking finding"), "{msg}");
+    assert!(
+        msg.lines().count() > 1,
+        "findings must be itemised, not counted: {msg}"
+    );
+}
