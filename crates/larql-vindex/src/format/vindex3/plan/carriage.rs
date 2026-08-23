@@ -387,13 +387,15 @@ pub const CARRIAGE_RULES: &[CarriageRule] = &[
     CarriageRule {
         leaf: "logits_scaling",
         reaches: Carriage::Lowered,
-        // Granite's spelling of `output_multiplier` — algebraically the
-        // same operation (scaling commutes through the linear head, so
-        // "before the vocab projection" and "on the logits" are the same
-        // number), resolved by `ModelArchitecture::output_multiplier`'s
-        // default the same way `attention_multiplier` resolves above.
-        site: "ExecutionSurface.head.output_multiplier → OutputOp.multiplier",
-        probe: Some(probe_output_multiplier),
+        // Granite's spelling, and NOT a synonym: `logits_scaling` is a
+        // divisor (`logits / d`) where `output_multiplier` is a multiplier.
+        // Scaling does commute through the linear head, so the two describe
+        // the same operation — but only once the divisor is inverted, which
+        // `ModelArchitecture::logit_scale` does. The container therefore
+        // carries `1/d`, and this probe inverts it back to compare against
+        // the declared leaf.
+        site: "ExecutionSurface.head.output_multiplier → OutputOp.multiplier (as 1/d)",
+        probe: Some(probe_logits_scaling),
     },
     CarriageRule {
         leaf: "residual_multiplier",
@@ -1017,6 +1019,27 @@ fn probe_output_multiplier(component: &Component, _ctx: &ProbeContext<'_>) -> Op
             .as_ref()?
             .output_multiplier?
     ))
+}
+
+/// The carried multiplier, expressed back in the divisor's units so it can
+/// be compared against a declared `logits_scaling`.
+///
+/// The container stores the resolved *multiplicative* factor, and this leaf
+/// declares a divisor — so carrying the fact faithfully means storing
+/// `1/d`, and a probe that compared the two directly would report every
+/// correct conversion as a dropped fact. Inverting here states the
+/// relationship the carriage rule actually asserts.
+fn probe_logits_scaling(component: &Component, _ctx: &ProbeContext<'_>) -> Option<Value> {
+    let carried = component
+        .execution
+        .as_ref()?
+        .head
+        .as_ref()?
+        .output_multiplier?;
+    if !carried.is_finite() || carried == 0.0 {
+        return None;
+    }
+    Some(json!(1.0 / carried))
 }
 
 fn probe_embed_scale(component: &Component, _ctx: &ProbeContext<'_>) -> Option<Value> {

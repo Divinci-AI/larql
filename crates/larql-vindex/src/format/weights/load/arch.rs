@@ -384,7 +384,7 @@ mod tests {
         let v = build_arch_json(&config, &model_cfg);
         let arch = larql_models::detect_from_json(&v);
         assert_eq!(arch.qk_scale_factor(), Some(3.87));
-        assert_eq!(arch.output_multiplier(), Some(0.196));
+        assert_eq!(arch.logit_scale(), Some(0.196));
         assert_eq!(
             arch.post_norm_eps(),
             Some(larql_models::config::PostNormEps::Value(1e-8))

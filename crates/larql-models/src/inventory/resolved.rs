@@ -161,7 +161,7 @@ pub fn resolve(config: &Value, identity: &Identity) -> (Detection, ResolvedTopol
         embedding_norm: arch.embedding_norm(),
         post_norms: arch.has_post_norms(),
         embed_scale: arch.embed_scale(),
-        output_multiplier: arch.output_multiplier(),
+        output_multiplier: arch.logit_scale(),
         final_logit_softcapping: arch.final_logit_softcapping(),
         residual_scale: arch.residual_scale(),
         head_reuses_embedding: arch.output_head_reuses_embedding(),
