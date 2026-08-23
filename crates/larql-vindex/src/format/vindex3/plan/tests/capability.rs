@@ -213,7 +213,12 @@ fn renaming_a_component_changes_nothing() {
 #[test]
 fn an_unknown_component_fails_closed_rather_than_guessing() {
     let g = gemma_like();
-    for (component, subject) in [("", "mtp.fc"), ("vision_ghost", "vision_ghost.thing")] {
+    // `mtp.fc` used to stand here as the componentless-unknown example.
+    // QW-3.5D gave the MTP namespace a real classification, so it is no
+    // longer unclassified and no longer belongs in this test — see
+    // `the_mtp_head_is_required_by_drafting_alone`. Replaced with a
+    // namespace nothing has judged, which is what this gate is about.
+    for (component, subject) in [("", "adapter.fc"), ("vision_ghost", "vision_ghost.thing")] {
         let f = blocking(component, subject);
         for capability in Capability::ALL {
             assert!(
@@ -387,4 +392,83 @@ fn present_and_supported_is_still_not_runnable_while_semantics_are_open() {
     assert!(!text.admissible);
     assert!(text.available && text.supported);
     assert!(!text.runnable());
+}
+
+// ── QW-3.5D: capability relevance as a separate judgement ────────────
+
+fn declared_bool(component: &str, subject: &str, value: bool) -> Finding {
+    Finding {
+        declared: Some(serde_json::json!(value)),
+        ..blocking(component, subject)
+    }
+}
+
+/// **D1.** The draft head is required by `Drafting` and by nothing else.
+///
+/// Both of its spellings: the `text_config.mtp_*` config keys and the
+/// `mtp.*` tensor namespace, which carries no component at all.
+#[test]
+fn the_mtp_head_is_required_by_drafting_alone() {
+    let g = graph(vec![language()], Vec::new());
+    for subject in [
+        "text_config.mtp_num_hidden_layers",
+        "text_config.mtp_use_dedicated_embeddings",
+        "mtp.fc",
+        "mtp.layers",
+        "mtp.pre_fc_norm_embedding",
+    ] {
+        let component = if subject.starts_with("mtp.") {
+            ""
+        } else {
+            "text"
+        };
+        let f = blocking(component, subject);
+        assert!(requires(Capability::Drafting, &f, &g), "{subject}");
+        for other in [
+            Capability::TextGeneration,
+            Capability::ImageConditioned,
+            Capability::AudioConditioned,
+        ] {
+            assert!(
+                !requires(other, &f, &g),
+                "{subject} must not gate {other:?} — an optional draft head is not a \
+                 prerequisite for base decode"
+            );
+        }
+    }
+}
+
+/// **D2.** `language_model_only` is excluded only while the graph
+/// corroborates it as a composition statement.
+///
+/// `false` beside a real perception component agrees. A checkpoint
+/// claiming `true` while shipping one is contradicting itself, and keeps
+/// blocking.
+#[test]
+fn language_model_only_is_excluded_only_when_the_graph_agrees() {
+    let multimodal = gemma_like();
+    let text_only = graph(vec![language()], Vec::new());
+
+    let says_multimodal = declared_bool("root", "language_model_only", false);
+    let says_text_only = declared_bool("root", "language_model_only", true);
+
+    assert!(!requires(
+        Capability::TextGeneration,
+        &says_multimodal,
+        &multimodal
+    ));
+    assert!(!requires(
+        Capability::TextGeneration,
+        &says_text_only,
+        &text_only
+    ));
+    // Contradictions both ways.
+    assert!(
+        requires(Capability::TextGeneration, &says_text_only, &multimodal),
+        "`true` beside a perception component is a contradiction, not a disposition"
+    );
+    assert!(
+        requires(Capability::TextGeneration, &says_multimodal, &text_only),
+        "`false` with nothing to be multimodal about is a contradiction too"
+    );
 }

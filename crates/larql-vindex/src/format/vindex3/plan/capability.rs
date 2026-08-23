@@ -60,14 +60,23 @@ pub enum Capability {
     ImageConditioned,
     /// Text generation additionally conditioned on audio input.
     AudioConditioned,
+    /// Speculative drafting with a multi-token-prediction head — an
+    /// OPTIONAL acceleration path, not a prerequisite for base decode.
+    ///
+    /// Its own capability because the alternative is worse in both
+    /// directions: folding MTP into [`Self::TextGeneration`] makes
+    /// ordinary decode wait on a draft head it never runs, and dropping
+    /// MTP from the census would hide seven real findings.
+    Drafting,
 }
 
 impl Capability {
     /// Every capability this build can be asked about.
-    pub const ALL: [Self; 3] = [
+    pub const ALL: [Self; 4] = [
         Self::TextGeneration,
         Self::ImageConditioned,
         Self::AudioConditioned,
+        Self::Drafting,
     ];
 
     /// The modality this capability conditions on, if any.
@@ -76,6 +85,7 @@ impl Capability {
             Self::TextGeneration => None,
             Self::ImageConditioned => Some(Modality::Image),
             Self::AudioConditioned => Some(Modality::Audio),
+            Self::Drafting => None,
         }
     }
 }
@@ -91,6 +101,9 @@ enum SubjectKind {
     /// The edge that splices a modality into the token stream. Lives at
     /// the root of the config, belongs to the modality.
     Binding(Modality),
+    /// The multi-token-prediction draft head: its own sub-model, reached
+    /// only by [`Capability::Drafting`].
+    Drafting,
     /// Not classified. Required by everything (see the module contract).
     Unclassified,
 }
@@ -139,6 +152,15 @@ fn component_modality(graph: &SystemGraph, component: &str) -> Option<Modality> 
         .map(|p| p.modality)
 }
 
+/// Config-key prefix and tensor-namespace prefix of the MTP draft head.
+///
+/// Two spellings because the head declares itself twice: config keys
+/// under `text_config.mtp_*`, and a tensor namespace `mtp.*` that sits
+/// beside the primary text model's own weights (see
+/// `graph::build::COMPONENT_EXTERNAL_NAMESPACES`).
+const MTP_CONFIG_PREFIX: &str = "mtp_";
+const MTP_TENSOR_PREFIX: &str = "mtp.";
+
 fn classify(finding: &Finding, graph: &SystemGraph) -> SubjectKind {
     let subject = finding.subject.as_str();
     // Binding first: these live at root, so any component-based test would
@@ -149,6 +171,12 @@ fn classify(finding: &Finding, graph: &SystemGraph) -> SubjectKind {
     }
     if AUDIO_BINDING_KEYS.contains(&leaf) {
         return SubjectKind::Binding(Modality::Audio);
+    }
+    // The draft head, by either of its two spellings. Placed with the
+    // binding keys and before any component test for the same reason:
+    // `mtp.fc` and friends carry no component at all.
+    if leaf.starts_with(MTP_CONFIG_PREFIX) || subject.starts_with(MTP_TENSOR_PREFIX) {
+        return SubjectKind::Drafting;
     }
     // The owning component's own declaration outranks the subject's
     // spelling: a component knows what it perceives.
@@ -174,12 +202,87 @@ fn classify(finding: &Finding, graph: &SystemGraph) -> SubjectKind {
 
 /// Whether `capability`'s execution depends on this finding's subject.
 pub fn requires(capability: Capability, finding: &Finding, graph: &SystemGraph) -> bool {
+    if outside_closure(capability, finding, graph) {
+        return false;
+    }
     match classify(finding, graph) {
         SubjectKind::Language | SubjectKind::Unclassified => true,
+        SubjectKind::Drafting => capability == Capability::Drafting,
         SubjectKind::Transform(modality) | SubjectKind::Binding(modality) => {
             capability.modality() == Some(modality)
         }
     }
+}
+
+/// A subject whose SEMANTICS are unresolved but which this container's own
+/// structure proves cannot reach `capability`'s execution.
+///
+/// **This is not "unknown keys stop mattering".** The default is unchanged
+/// and fail-closed: an unclassified subject is required by every
+/// capability, and `an_undisposed_unknown_text_key_still_blocks_text`
+/// holds that line. An entry here is a narrow claim carrying its own
+/// falsifier — a predicate over the BUILT GRAPH, so the exclusion is
+/// conditional on the evidence actually being present in the container in
+/// front of us rather than on the architecture's name.
+///
+/// The finding itself is untouched: it keeps its class, its
+/// `Unrepresented` carriage and its place in the whole-model census. Only
+/// capability relevance is decided here, which is why whole-model
+/// admissibility can stay false while text generation runs.
+fn outside_closure(capability: Capability, finding: &Finding, graph: &SystemGraph) -> bool {
+    // Every disposition below is scoped to text generation; a capability
+    // whose closure genuinely includes these has no entry.
+    if capability != Capability::TextGeneration {
+        return false;
+    }
+    let leaf = finding
+        .subject
+        .rsplit('.')
+        .next()
+        .unwrap_or(&finding.subject);
+    match leaf {
+        // The gate this key might describe is determined by executable
+        // structure, not by the key: a double-width `q_proj`, a per-head
+        // interleave, `sigmoid`, and a placement — all judged from the
+        // reference implementation and mutation-proven on the shipped
+        // path (`opplan::exec::tests::output_gate_fused`). HF reads this
+        // key nowhere. So whatever it names, the text operator we execute
+        // is already fully determined without it.
+        //
+        // The evidence is required, not assumed: a container whose text
+        // component carries NO represented gate gets no exclusion, and
+        // the key blocks as before.
+        "output_gate_type" => text_component(graph)
+            .and_then(|c| c.execution.as_ref())
+            .is_some_and(|e| e.attention.output_gate.is_some()),
+        // A packaging statement, not an operator one — and unlike the
+        // gate key it is not even an HF key: zero references across all
+        // of transformers. What makes it excludable is that the graph
+        // CORROBORATES it as a composition fact: `false` beside a real
+        // perception component says the package is not text-only, which
+        // is a claim about what the checkpoint contains, not about what
+        // the text stack computes.
+        //
+        // A checkpoint asserting `true` while shipping a perception
+        // component is contradicting itself and keeps blocking.
+        "language_model_only" => {
+            let declares_text_only = finding.declared.as_ref().and_then(|v| v.as_bool());
+            let has_perception = graph
+                .components
+                .iter()
+                .any(|c| c.role == ComponentRole::Perception);
+            declares_text_only == Some(!has_perception)
+        }
+        _ => false,
+    }
+}
+
+/// The primary text component, when the graph has one.
+fn text_component(graph: &SystemGraph) -> Option<&Component> {
+    graph
+        .components
+        .iter()
+        .find(|c| c.role == ComponentRole::PrimaryText)
 }
 
 /// Admissibility of one capability: does anything it depends on block?
@@ -230,6 +333,22 @@ pub fn admissible_for<'a>(
 /// object of that component is backed by real tensors. A component built
 /// from a config block that ships no weights answers `false`.
 pub fn available_for(capability: Capability, graph: &SystemGraph) -> bool {
+    if capability == Capability::Drafting {
+        // Fail-closed, and for a reason worth stating: availability is an
+        // OPERAND question asked of the graph, and the builder places no
+        // `mtp.*` group at all — there is no `ObjectKind` for a draft
+        // head yet, so every one of them surfaces as unplaced. The
+        // tensors are in the checkpoint; the graph cannot say so. This
+        // answers `false` because "the graph holds no draft-head object"
+        // is what it can honestly check, and it becomes a real question
+        // when the head gets a placement rule.
+        //
+        // Deliberately NOT an invented `ObjectKind::DraftHead` with no
+        // builder behind it: that would make the graph assert a placement
+        // rule this build does not have.
+        let _ = graph;
+        return false;
+    }
     let Some(modality) = capability.modality() else {
         // Text generation needs the language model itself.
         return graph
@@ -270,6 +389,10 @@ pub fn supported(capability: Capability) -> bool {
         // nothing else — there is no image or audio input surface to feed
         // one.
         Capability::ImageConditioned | Capability::AudioConditioned => false,
+        // No draft head executor: the op plan has no `ObjectKind` for an
+        // MTP head, so `mtp.*` surfaces as unplaced and nothing consumes
+        // it. Speculative decode is a separate rung.
+        Capability::Drafting => false,
     }
 }
 
