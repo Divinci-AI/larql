@@ -99,9 +99,9 @@ pub use format::load::{
 pub use format::huggingface::{
     dataset_repo_exists, download_hf_weights, ensure_collection, fetch_collection_items,
     is_hf_path, publish_vindex, publish_vindex_with_opts, repo_exists,
-    resolve_hf_model_with_progress, resolve_hf_vindex, resolve_hf_vindex_with_progress,
-    set_repo_visibility, CollectionItem, DownloadProgress, PublishCallbacks, PublishOptions,
-    SilentPublishCallbacks,
+    resolve_hf_model_with_progress, resolve_hf_vindex, resolve_hf_vindex_complete,
+    resolve_hf_vindex_with_progress, set_repo_visibility, CollectionItem, DownloadProgress,
+    PublishCallbacks, PublishOptions, SilentPublishCallbacks,
 };
 pub use format::weights::{
     arch_from_vindex_config, load_model_weights, load_model_weights_kquant,

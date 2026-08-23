@@ -79,7 +79,7 @@ pub use discovery::{
 };
 pub use download::{
     download_hf_weights, resolve_hf_model_with_progress, resolve_hf_vindex,
-    resolve_hf_vindex_with_progress, DownloadProgress,
+    resolve_hf_vindex_complete, resolve_hf_vindex_with_progress, DownloadProgress,
 };
 pub use publish::{
     publish_vindex, publish_vindex_with_opts, set_repo_visibility, PublishCallbacks,

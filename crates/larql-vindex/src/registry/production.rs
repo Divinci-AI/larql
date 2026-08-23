@@ -43,19 +43,55 @@ pub fn production_registry() -> RegistryManifest {
     }
 }
 
+/// The claimed half of [`resolve_claimed`]/[`resolve_claimed_with`],
+/// without fetching: `Ok(None)` — not a claimed reference (see there for
+/// what that covers); `Ok(Some(hf_ref))` — the claimed model/variant's
+/// pinned `hf://repo@revision` reference; `Err` — claimed but resolution
+/// failed (unknown variant, incompatible ABI).
+///
+/// Exists for callers that want their own download mechanism —
+/// `pull`'s progress-bar-driven UX is the reason this rung split it out
+/// of `resolve_claimed_with` — rather than the silent fetch
+/// [`resolve_claimed`] performs.
+///
+/// `RegistryArtifactRef` is a plain `{repo, revision}` struct, not the
+/// `ArtifactRef` enum `resolve_registry` wraps it into for the public
+/// `resolve()` API — reusing the shared lookup directly means no enum
+/// variant this caller can't reach needs to be matched (and defended
+/// against) here.
+pub fn resolve_claimed_hf_reference(
+    raw: &str,
+    registry: &RegistryManifest,
+) -> Result<Option<String>, RegistryError> {
+    let Ok(ModelReference::Registry { name, variant }) = ModelReference::parse(raw) else {
+        return Ok(None);
+    };
+    if !registry.models.contains_key(name.as_str()) {
+        return Ok(None);
+    }
+    let (entry, _variant_name) = lookup_claimed_variant(&name, variant.as_ref(), registry)?;
+    Ok(Some(format!(
+        "hf://{}@{}",
+        entry.artifact.repo, entry.artifact.revision
+    )))
+}
+
 /// The claimed/unclaimed boundary every convergence caller dispatches on:
 /// `Ok(None)` — `raw` is not a name `registry` has claimed (not a bare
 /// registry-shaped reference at all, or a bare name the registry has
 /// never heard of) — the caller should fall through to its own existing
 /// resolution. `Ok(Some(path))` — `raw` names a claimed model/variant,
-/// resolved and materialised (its pinned Hugging Face artifact
-/// downloaded via [`crate::format::huggingface::resolve_hf_vindex`] if
-/// not already cached). `Err` — `raw` names a **claimed** model, but
-/// resolution failed (unknown variant, incompatible ABI, a malformed
-/// manifest): a real refusal. **The caller must never turn this into a
-/// fallback to its own legacy resolution** — that would silently
-/// downgrade a real registry failure into a guess, exactly the pattern
-/// the convergence rung forbids (design doc §10.1).
+/// resolved, materialised (its pinned Hugging Face artifact downloaded
+/// in full via [`crate::format::huggingface::resolve_hf_vindex_complete`]
+/// if not already cached), and validated as a complete VINDEX3 container
+/// (design doc §10.5's "download → validate" pipeline stages, both
+/// performed here so `serve`/`load_artifact` get the same completeness
+/// guarantee `pull` does). `Err` — `raw` names a **claimed** model, but
+/// resolution, download, or validation failed: a real refusal. **The
+/// caller must never turn this into a fallback to its own legacy
+/// resolution** — that would silently downgrade a real registry failure
+/// into a guess, exactly the pattern the convergence rung forbids
+/// (design doc §10.1).
 ///
 /// Checked as registry membership (`registry.models.contains_key`), not
 /// by pattern-matching [`RegistryError::UnknownModel`] out of the
@@ -71,7 +107,11 @@ pub fn resolve_claimed(
     // actually runs in a unit test — that would mean touching HF for
     // real), which a plain fn-item reference has no separate body to
     // measure at all.
-    resolve_claimed_with(raw, registry, crate::format::huggingface::resolve_hf_vindex)
+    resolve_claimed_with(
+        raw,
+        registry,
+        crate::format::huggingface::resolve_hf_vindex_complete,
+    )
 }
 
 /// Testable core of [`resolve_claimed`]. `fetch_hf` is injected so
@@ -82,20 +122,10 @@ pub fn resolve_claimed_with(
     registry: &RegistryManifest,
     fetch_hf: impl FnOnce(&str) -> Result<PathBuf, VindexError>,
 ) -> Result<Option<PathBuf>, RegistryError> {
-    let Ok(ModelReference::Registry { name, variant }) = ModelReference::parse(raw) else {
+    let Some(hf_ref) = resolve_claimed_hf_reference(raw, registry)? else {
         return Ok(None);
     };
-    if !registry.models.contains_key(name.as_str()) {
-        return Ok(None);
-    }
-    // `RegistryArtifactRef` is a plain `{repo, revision}` struct, not the
-    // `ArtifactRef` enum `resolve_registry` wraps it into for the public
-    // API — reusing the shared lookup directly means no enum variant this
-    // caller can't reach needs to be matched (and defended against) here.
-    let (entry, _variant_name) = lookup_claimed_variant(&name, variant.as_ref(), registry)?;
-    let path = fetch_hf(&format!(
-        "hf://{}@{}",
-        entry.artifact.repo, entry.artifact.revision
-    ))?;
+    let path = fetch_hf(&hf_ref)?;
+    crate::format::vindex3::validate_downloaded_container(&path)?;
     Ok(Some(path))
 }

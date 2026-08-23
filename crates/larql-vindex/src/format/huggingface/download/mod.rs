@@ -13,6 +13,7 @@ use std::path::PathBuf;
 
 use crate::error::VindexError;
 use crate::format::filenames::*;
+use crate::format::generation::{detect_generation, ContainerGeneration};
 
 use super::publish::get_hf_token;
 use super::{vindex_core_files, VINDEX_METADATA_FILES, VINDEX_WEIGHT_FILES};
@@ -339,6 +340,30 @@ fn head_etag_and_size(
 /// `progress` is a factory: called once per file with the filename.
 /// Return a fresh `DownloadProgress` — typically an
 /// `indicatif::ProgressBar` fetched from a `MultiProgress`.
+///
+/// # Generation-aware since the vindex3-registry initiative's 2C rung
+///
+/// `index.json` is downloaded first regardless of generation — it is
+/// the minimal control metadata every container declares itself with.
+/// What happens next branches on what it says:
+///
+/// - **VINDEX2** — unchanged: [`vindex_core_files()`]'s fixed metadata
+///   + big-tensor-file list, optional entries skipped silently (most
+///   candidate files genuinely don't exist in most repos; that's the
+///   list's whole design).
+/// - **VINDEX3** — the repo's own file listing (`repo.info().siblings`)
+///   *is* the required payload, downloaded in full. VINDEX3 has no
+///   metadata/weight split the way VINDEX2 does — its payload IS its
+///   structure (segments, representations, manifests, the M2 migration
+///   rung's capability-snapshot side-channel) — so a hand-enumerated
+///   "which `index.json` fields name a file" list would just be the
+///   fixed-list bug this rung exists to fix, one layer removed: it
+///   would silently miss whatever the format grows next, exactly like
+///   the old list silently missed VINDEX3 entirely. A repo dedicated to
+///   one vindex has no meaningful unrelated bulk to over-fetch (see
+///   `docs/vindex3-registry-design.md` §10.5). Every listed file is
+///   therefore required, not optional: a failed fetch is a hard error
+///   naming the file, not a silently-skipped candidate.
 pub fn resolve_hf_vindex_with_progress<F, P>(
     hf_path: &str,
     mut progress: F,
@@ -401,12 +426,32 @@ where
             .ok_or_else(|| VindexError::Parse("cannot determine vindex directory".into()))?
             .to_path_buf();
 
-        for filename in vindex_core_files() {
-            if filename == INDEX_JSON {
-                continue;
+        match detect_generation(&vindex_dir)? {
+            ContainerGeneration::V3 => {
+                let info = repo.info().map_err(|e| {
+                    VindexError::Parse(format!("HF info failed for hf://{repo_id}: {e}"))
+                })?;
+                for sibling in &info.siblings {
+                    if sibling.rfilename == INDEX_JSON {
+                        continue;
+                    }
+                    fetch(&sibling.rfilename, &sibling.rfilename).ok_or_else(|| {
+                        VindexError::Parse(format!(
+                            "failed to download required VINDEX3 file '{}' from hf://{repo_id}",
+                            sibling.rfilename
+                        ))
+                    })?;
+                }
             }
-            // Optional files — ignore failures (missing from repo is fine).
-            let _ = fetch(filename, filename);
+            ContainerGeneration::V2 => {
+                for filename in vindex_core_files() {
+                    if filename == INDEX_JSON {
+                        continue;
+                    }
+                    // Optional files — ignore failures (missing from repo is fine).
+                    let _ = fetch(filename, filename);
+                }
+            }
         }
         return Ok(vindex_dir);
     }
@@ -414,6 +459,30 @@ where
     Err(VindexError::Parse(format!(
         "failed to fetch index.json from hf://{repo_id}"
     )))
+}
+
+/// A `DownloadProgress` that reports nothing — for callers that need
+/// [`resolve_hf_vindex_with_progress`]'s generation-aware completeness
+/// but have no UI to drive (a background `serve`/server-side load, not
+/// an interactive `pull`). Mirrors this crate's `SilentLoadCallbacks` /
+/// `SilentPublishCallbacks` / `SilentBuildCallbacks` convention.
+struct NoDownloadProgress;
+impl DownloadProgress for NoDownloadProgress {
+    fn init(&mut self, _size: usize, _filename: &str) {}
+    fn update(&mut self, _size: usize) {}
+    fn finish(&mut self) {}
+}
+
+/// [`resolve_hf_vindex_with_progress`] with no progress reporting.
+///
+/// Not [`resolve_hf_vindex`] — that function is deliberately
+/// metadata-only for VINDEX2 (small files, cheap for `larql show`-style
+/// callers). This one always fetches the complete, generation-aware
+/// payload; use it wherever the caller actually needs a working
+/// container, not just a peek at its metadata — the VINDEX3 registry's
+/// `resolve_claimed` is the first such caller.
+pub fn resolve_hf_vindex_complete(hf_path: &str) -> Result<PathBuf, VindexError> {
+    resolve_hf_vindex_with_progress(hf_path, |_| NoDownloadProgress)
 }
 
 /// Resolve an `hf://` model repo path to a local snapshot directory,

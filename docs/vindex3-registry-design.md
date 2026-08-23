@@ -550,17 +550,153 @@ reruns with `--test-threads=1` to match) followed by
 reading its workflow, not assumed) — its own coverage-policy.json scopes
 only `bench/`/`dec_bench/`.
 
-### 10.4 What's left in the "resolver convergence" rung
+### 10.4 2C scope, as reframed by the user: "VINDEX3 pull semantics," not a filename-list swap
 
-**2C — VINDEX3 HF pull/download correctness** (last, per the confirmed
-sequencing): the inventory's §5 finding that `download_hf_weights`
-fetches a hardcoded VINDEX2 filename list omitting VINDEX3's actual
-payload (`moe_manifest.json`, `routed/layer_NNN.lyrw`) — a
-distribution/download-semantics fix, not a resolver dispatch change.
-Not started.
+The frozen rule going in: **never replace the VINDEX2 hardcoded
+download list with a new VINDEX3 hardcoded download list** — that
+would recreate the exact failure mode one generation later. 2C does two
+things together: (1) kill `pull_cmd`'s independent HF/name heuristic,
+routing it through the same claimed/unclaimed dispatch 2A/2B share; (2)
+make the actual HF downloader generation-aware, deriving VINDEX3
+completeness from the container's own structure rather than a second
+guessed list.
 
-`pull_cmd`'s own HF heuristic (`looks_like_hf_repo`) was not touched in
-2A/2B — it was in the original three-resolver inventory (§1) but the
-confirmed 2A/2B scope only covered `cache::resolve_model`'s `serve`
-call site and `load_artifact`; `larql pull`'s own name resolution is
-2C's territory, entangled with the download-correctness fix above.
+### 10.5 2C — VINDEX3 pull semantics (2026-08-24)
+
+**Why "download the complete repo snapshot," not "enumerate from
+`index.json`'s fields."** `Vindex3Index.segments` + `representations` +
+`moe_manifest`/`system_graph` looked at first like enough information to
+enumerate every required file exactly — cheaper on bandwidth than a full
+snapshot. Rejected: the M2 migration rung's own capability-snapshot
+side-channel (`tokenizer.json` and siblings) is copied onto a container
+without ever being named in `index.json` at all. Hand-enumerating "which
+index.json fields count as a file" would just be the fixed-list bug
+this rung exists to fix, one layer of indirection removed — correct
+today, silently wrong the next time the format grows a file class this
+code doesn't know about. A repo dedicated to one vindex has no
+meaningful unrelated bulk to over-fetch, so the repo's own file listing
+(`repo.info().siblings`, the same enumeration
+`resolve_hf_model_with_progress` already uses for upstream checkpoints)
+*is* the required payload for VINDEX3 — downloaded in full, every listed
+file required (a failed fetch is now a hard error naming the file, not
+a silently-skipped candidate the way VINDEX2's optional metadata files
+are).
+
+**`resolve_hf_vindex_with_progress` is now generation-aware** — the one
+shared transport function every VINDEX3 pull path routes through:
+fetch `index.json` (minimal control metadata) → `detect_generation` →
+VINDEX2 unchanged (`vindex_core_files()`, optional-skip, exactly as
+before — no behaviour change for the shipped generation) → VINDEX3:
+`repo.info()` lists every sibling, each one downloaded through the same
+cache-aware `fetch` closure V2 already used, any failure a hard error
+naming the file. `resolve_hf_vindex_complete` (new, no-op-progress
+wrapper, mirrors this crate's `SilentXCallbacks` convention) gives
+non-interactive callers (the registry) the same completeness without a
+progress bar.
+
+**Identity resolution, transport, and validation are three separate
+phases**, per the user's explicit instruction — not one function that
+guesses all of it:
+- **Identity**: `registry::resolve_claimed_hf_reference` (new) —
+  claimed-name lookup only, no fetch, returns the pinned
+  `hf://repo@revision` string. Split out of `resolve_claimed_with` so
+  `pull`'s own progress-bar UX keeps driving the actual download
+  (`resolve_claimed_with` still exists, now built on top of this plus
+  `fetch_hf`, for `serve`/`load_artifact`'s silent-fetch use).
+  `pull_cmd::resolve_pull_hf_path` calls it first; `Ok(None)` (not
+  claimed) falls through to the *existing* `normalise_hf_path`/
+  `looks_like_hf_repo` heuristic — now purely the *unclaimed* path, not
+  `pull`'s only identity concept. A claimed name's failure (unknown
+  variant, incompatible ABI) is a real refusal, exactly the 10.1
+  contract, never rescued by the legacy heuristic.
+- **Transport**: `resolve_hf_vindex_with_progress` (§ above) — a fetched
+  reference's bytes, complete, generation-aware.
+- **Validation**: `format::vindex3::validate_downloaded_container` (new)
+  — "is this on-disk directory actually a complete VINDEX3 container."
+  The container's own `index.json` decides which of the two existing
+  structural loaders applies (never guessed): `moe_manifest` present →
+  routed-MoE → `Vindex3Container::open`; absent → system-graph →
+  `inspect_container(dir, true)` (payload-verifying). Discovering these
+  are genuinely two different container shapes with two different
+  "real" loaders (`Vindex3Container::open` refuses a system-graph
+  container by name, directing to the other) was itself a finding —
+  there is no single existing "open any VINDEX3 container" function to
+  reuse, so this one is a thin, deliberately-obvious dispatcher over the
+  two that already exist, adding no new structural checks of its own.
+  Called from both `pull_cmd::pull_one` (after every V3 download,
+  claimed or explicit) and `registry::resolve_claimed_with` (so
+  `serve`/`load_artifact` get the identical completeness guarantee
+  `pull` does — not a separate, weaker one).
+
+**Registry entries can gate ABI before download; explicit `hf://`
+references cannot** (the user's explicit caution) — respected by
+construction, not by a special case: ABI is a *registry manifest* fact
+(`Vindex3Abi` lives on `RegistryVariant`, checked inside
+`lookup_claimed_variant` before any network call), never a container
+fact. An explicit `hf://` reference has no registry entry to declare an
+ABI at all, so no ABI check applies to it — completeness (validation, §
+above) is the only guarantee it gets, which is exactly what's honestly
+available before a container's own bytes are local.
+
+**The acceptance test**, per the user's explicit framing ("not these
+expected filenames were requested — the pulled result actually opens"):
+a real, self-encoded VINDEX3 fixture (`encode_fixture_container` +
+`miniature_glimmer`) served over a mocked HF endpoint (`mockito`,
+`HF_ENDPOINT`, this crate's existing `HfTestEnv` pattern), every file it
+holds discovered dynamically by walking the fixture on disk — never
+hardcoded in the test — then `resolve_hf_vindex_with_progress`'s result
+opened through `inspect_container` (the real loader for this fixture's
+shape). A sibling test claims a file in `repo.info()` the mock never
+actually serves and asserts a hard failure naming it. Both pass.
+`validate_downloaded_container` gets its own gates too: a complete
+routed-MoE fixture validates, a complete system-graph fixture validates,
+a routed-MoE fixture missing one segment file fails naming that segment,
+and a directory with no `index.json` fails.
+
+**Controls pinned** (the user's list, verified): claimed registry V3 →
+complete pull succeeds (`a_claimed_name_fetches_and_validates_its_pinned_artifact`,
+`a_claimed_name_resolves_to_its_pinned_hf_reference`); claimed with
+pinned revision → exact revision used (asserted in the same tests via
+the exact `hf://repo@revision` string); explicit `hf://` V3 → complete
+pull succeeds (the download-layer acceptance test, generation-agnostic
+— it doesn't know or care whether its caller was a claimed or explicit
+resolution); explicit local path → pull is not involved (`pull_cmd` has
+no local-path branch at all, unchanged); V2 repo → existing behaviour
+unchanged (the `ContainerGeneration::V2` arm is byte-for-byte the
+pre-2C code, gated by the existing test suite); V3 repo missing required
+payload → hard failure (both at the transport layer — the mocked-missing-file
+test — and the validation layer — the missing-segment test); claimed-name
+registry failure → never falls into `pull_cmd`'s heuristic
+(`a_claimed_name_with_an_unknown_variant_never_falls_through_to_the_heuristic`,
+`..._incompatible_abi_never_falls_through...`).
+
+Gates: full suites green post-change — `larql-vindex` 2728 lib tests +
+every integration binary (up from 2723), `larql-cli` 766 (up from 761),
+`larql-server` 575 unchanged (not touched this rung, re-verified against
+the updated `larql-vindex`); clippy `--all-targets -D warnings` and
+`cargo fmt --check` clean on all three crates; `larql-cli
+--no-default-features` (its exact CI build) clean. Coverage verified
+against the real CI gate exactly as in 2B: `larql-vindex` passes except
+the same pre-existing, unrelated `quant/convert.rs` baseline miss (not
+touched this rung either); every new/changed file individually clears
+its bar (`registry/production.rs` 97.5%, `format/vindex3/verify.rs`
+93.7%, `format/huggingface/download/mod.rs` 78.5% against its existing
+64.0% debt baseline — ratcheted up, not down).
+
+### 10.6 Resolver convergence: done for the product path
+
+`serve qwen3.8`, `larql-server` invoked directly or via
+`/v1/runtime/model`, and `pull qwen3.8` now all share one definition of
+"what model did the user ask for" — the same claimed/unclaimed boundary,
+the same registry data, the same completeness guarantee. Per the user's
+own framing, this is the point resolver convergence is "complete enough
+for the product path"; the next architectural gap is not `--profile`
+CLI wiring but **the first real production registry entries / a
+publishing pipeline** — the static test registry is what's actually
+stopping this from being useful outside tests. Also still open,
+explicitly deferred rather than forgotten: consolidating `run`/`chat`/
+`show`/`slice`'s own use of `cache::resolve_model` (2A deliberately left
+these untouched — no VINDEX3 execution path exists for them yet, per
+the rung-1 inventory); widening explicit `hf://`/local-path forms into
+the new resolver's stricter arms; `--profile` CLI wiring once a real
+registry entry exists to select a variant of.

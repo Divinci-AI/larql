@@ -4,6 +4,7 @@
 use std::collections::BTreeMap;
 
 use super::abi::{Vindex3Abi, CURRENT_VINDEX3_ABI};
+use super::error::RegistryError;
 use super::manifest::{
     Provenance, RegistryArtifactRef, RegistryManifest, RegistryModel, RegistryVariant,
     REGISTRY_MANIFEST_SCHEMA_VERSION,
@@ -87,19 +88,39 @@ fn a_malformed_reference_is_none() {
     );
 }
 
-#[test]
-fn a_claimed_name_fetches_its_pinned_artifact() {
-    let registry = registry_claiming_qwen38(CURRENT_VINDEX3_ABI);
-    let out = resolve_claimed_with("qwen3.8", &registry, |hf| {
-        assert_eq!(hf, "hf://larql/qwen3.8-27b-nvfp4@abc123f0");
-        Ok(std::path::PathBuf::from("/resolved/hf/path"))
-    })
-    .unwrap();
-    assert_eq!(out, Some(std::path::PathBuf::from("/resolved/hf/path")));
+/// A real, self-encoded VINDEX3 fixture — since [`resolve_claimed_with`]
+/// now validates whatever `fetch_hf` returns
+/// ([`crate::format::vindex3::validate_downloaded_container`]), the
+/// injected fetch closure has to hand back something that actually
+/// validates, not a fabricated path. Callers assert the `hf://...`
+/// reference string themselves before returning this fixture's path.
+fn real_v3_fixture() -> tempfile::TempDir {
+    let checkpoint = tempfile::tempdir().unwrap();
+    let container = tempfile::tempdir().unwrap();
+    crate::format::vindex3::fixtures::encode_fixture_container(
+        crate::format::vindex3::fixtures::miniature_glimmer,
+        checkpoint.path(),
+        container.path(),
+        "production-fixture",
+    );
+    container
 }
 
 #[test]
-fn a_claimed_name_with_an_explicit_variant_fetches_that_variant() {
+fn a_claimed_name_fetches_and_validates_its_pinned_artifact() {
+    let registry = registry_claiming_qwen38(CURRENT_VINDEX3_ABI);
+    let fixture = real_v3_fixture();
+    let fixture_path = fixture.path().to_path_buf();
+    let out = resolve_claimed_with("qwen3.8", &registry, |hf| {
+        assert_eq!(hf, "hf://larql/qwen3.8-27b-nvfp4@abc123f0");
+        Ok(fixture_path.clone())
+    })
+    .unwrap();
+    assert_eq!(out, Some(fixture_path));
+}
+
+#[test]
+fn a_claimed_name_with_an_explicit_variant_fetches_and_validates_that_variant() {
     let mut registry = registry_claiming_qwen38(CURRENT_VINDEX3_ABI);
     registry.models.get_mut("qwen3.8").unwrap().variants.insert(
         "27b-bf16".to_string(),
@@ -115,12 +136,27 @@ fn a_claimed_name_with_an_explicit_variant_fetches_that_variant() {
             },
         },
     );
+    let fixture = real_v3_fixture();
+    let fixture_path = fixture.path().to_path_buf();
     let out = resolve_claimed_with("qwen3.8:27b-bf16", &registry, |hf| {
         assert_eq!(hf, "hf://larql/qwen3.8-27b-bf16@def456a1");
-        Ok(std::path::PathBuf::from("/resolved/bf16/path"))
+        Ok(fixture_path.clone())
     })
     .unwrap();
-    assert_eq!(out, Some(std::path::PathBuf::from("/resolved/bf16/path")));
+    assert_eq!(out, Some(fixture_path));
+}
+
+#[test]
+fn a_claimed_name_whose_fetch_returns_an_incomplete_container_hard_fails() {
+    // The download succeeded (fetch_hf returned Ok), but what it
+    // returned doesn't validate — an empty directory. Must still be a
+    // hard failure, not a silently-accepted "resolved" path.
+    let registry = registry_claiming_qwen38(CURRENT_VINDEX3_ABI);
+    let empty_dir = tempfile::tempdir().unwrap();
+    let empty_path = empty_dir.path().to_path_buf();
+    let err =
+        resolve_claimed_with("qwen3.8", &registry, move |_| Ok(empty_path.clone())).unwrap_err();
+    assert!(matches!(err, RegistryError::Underlying(_)), "{err:?}");
 }
 
 #[test]

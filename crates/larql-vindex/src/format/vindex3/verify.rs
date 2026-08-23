@@ -23,8 +23,39 @@
 //! and a kernel, and folding it in would make routine verification cost a
 //! forward pass. It belongs in a deeper mode.
 
+use std::path::Path;
+
+use super::index::Vindex3Index;
 use super::read::Vindex3Container;
+use crate::error::VindexError;
+use crate::format::filenames::INDEX_JSON;
 use crate::format::lyrw2::region_role::RegionRole;
+
+/// Validate that an on-disk directory is a **complete** VINDEX3
+/// container — the "validate as VINDEX3" stage of the pull/registry
+/// convergence pipeline (`docs/vindex3-registry-design.md` §10.5),
+/// deliberately kept separate from identity resolution and the download
+/// itself.
+///
+/// The container's own `index.json` decides which structural loader
+/// applies — never guessed: `moe_manifest` present means a routed-MoE
+/// container, opened (and thereby structurally validated) via
+/// [`Vindex3Container::open`]; absent means a system-graph container,
+/// validated via [`super::inspect::inspect_container`] with payload
+/// verification. Both loaders already fail closed on anything
+/// incomplete or malformed — this function adds no new checks, it only
+/// picks the one the container itself says it needs.
+pub fn validate_downloaded_container(dir: &Path) -> Result<(), VindexError> {
+    let index_text = std::fs::read_to_string(dir.join(INDEX_JSON))?;
+    let index: Vindex3Index = serde_json::from_str(&index_text)
+        .map_err(|e| VindexError::Parse(format!("parse {INDEX_JSON}: {e}")))?;
+    if index.moe_manifest.is_some() {
+        Vindex3Container::open(dir)?;
+    } else {
+        super::inspect::inspect_container(dir, true)?;
+    }
+    Ok(())
+}
 
 /// A structural defect that would stop this container binding.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -174,6 +205,63 @@ impl Vindex3Container {
     /// Whether the container is structurally bindable.
     pub fn is_bindable(&self) -> bool {
         self.verify().is_empty()
+    }
+}
+
+#[cfg(test)]
+mod validate_downloaded_container_tests {
+    use super::validate_downloaded_container;
+    use crate::format::vindex3::fixtures::{encode_fixture_container, miniature_glimmer};
+    use crate::format::vindex3::test_support::fixture_a_spec;
+    use crate::format::vindex3::write::write_container;
+
+    #[test]
+    fn a_complete_routed_moe_container_validates() {
+        let dir = tempfile::tempdir().unwrap();
+        write_container(dir.path(), &fixture_a_spec()).expect("write");
+        validate_downloaded_container(dir.path()).expect("a well-formed MoE container validates");
+    }
+
+    #[test]
+    fn a_complete_system_graph_container_validates() {
+        let checkpoint = tempfile::tempdir().unwrap();
+        let container = tempfile::tempdir().unwrap();
+        encode_fixture_container(
+            miniature_glimmer,
+            checkpoint.path(),
+            container.path(),
+            "validate-fixture",
+        );
+        validate_downloaded_container(container.path())
+            .expect("a well-formed system-graph container validates");
+    }
+
+    #[test]
+    fn a_routed_moe_container_missing_a_segment_file_fails_validation() {
+        // The completeness contract this function exists for: an
+        // incomplete download (or a truncated/corrupt upload) must not
+        // silently pass as "downloaded fine."
+        let dir = tempfile::tempdir().unwrap();
+        let spec = fixture_a_spec();
+        write_container(dir.path(), &spec).expect("write");
+        let segment_key = spec.segments[0].key.clone();
+        std::fs::remove_file(crate::format::vindex3::segment_path(
+            dir.path(),
+            &segment_key,
+        ))
+        .expect("remove segment");
+
+        let err = validate_downloaded_container(dir.path())
+            .expect_err("a container missing a declared segment must fail validation");
+        assert!(err.to_string().contains(&segment_key), "{err}");
+    }
+
+    #[test]
+    fn a_directory_with_no_index_json_fails_validation() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = validate_downloaded_container(dir.path())
+            .expect_err("a directory with no index.json cannot validate");
+        assert!(matches!(err, super::VindexError::Io(_)));
     }
 }
 

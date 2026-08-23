@@ -51,6 +51,8 @@ pub use manifest::{
     Provenance, RegistryArtifactRef, RegistryManifest, RegistryModel, RegistryVariant,
     REGISTRY_MANIFEST_SCHEMA_VERSION,
 };
-pub use production::{production_registry, resolve_claimed, resolve_claimed_with};
+pub use production::{
+    production_registry, resolve_claimed, resolve_claimed_hf_reference, resolve_claimed_with,
+};
 pub use reference::{ExplicitReference, ModelName, ModelReference, VariantName};
 pub use resolver::{resolve, ArtifactRef, ResolvedVindex3, Vindex3Resolution};

@@ -70,5 +70,5 @@ pub use index::{Vindex3Index, PROFILE_EXACT};
 pub use profile::{Profile, ProfileSelectionError, ResolvedProfile};
 pub use read::Vindex3Container;
 pub use variants::{RegionSetVariants, StoredVariant, VariantCatalogue, VariantDefect};
-pub use verify::ContainerDefect;
+pub use verify::{validate_downloaded_container, ContainerDefect};
 pub use write::{segment_path, write_container, ContainerSpec, SegmentSource, MOE_MANIFEST_JSON};
