@@ -160,6 +160,7 @@ pub fn encode_graph(
                 compiled_from: None,
                 codec: None,
                 source_representation_digest: None,
+                encoder: None,
             },
         );
     }

@@ -61,6 +61,15 @@ pub struct RepresentationEntry {
     /// is copied out of the container that holds them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_representation_digest: Option<String>,
+    /// Which compilation algorithm chose these values.
+    ///
+    /// Separate from [`Self::codec`] on purpose: the codec is the decode
+    /// contract, this is the encode recipe. Nearest-rounding and a
+    /// Hessian-aware encoder emit the same ABI and different numbers, so
+    /// only this field decides whether a pack is byte-reproducible by the
+    /// build reading it. A mismatch is never a refusal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoder: Option<crate::format::vindex3::represent::nvfp4_pack::EncoderRecipe>,
 }
 
 pub use super::profile::PROFILE_EXACT;

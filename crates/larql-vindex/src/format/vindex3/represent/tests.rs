@@ -64,6 +64,22 @@ fn compiled_bytes_equal_what_the_loader_would_have_quantised() {
             .expect("the source representation survives compilation");
         let (src_header, _) = read_segment_header(&src.join(&source_entry.segment)).unwrap();
 
+        // Byte-equality is only claimable against the encoder that wrote
+        // the pack. This build wrote it, so the claim holds here — but the
+        // precondition is asserted rather than assumed, so a future encoder
+        // change turns this into a clear message instead of a diff.
+        let recipe = entry
+            .encoder
+            .as_ref()
+            .expect("a compiled pack names its encoder");
+        assert!(
+            recipe.is_reproducible_by_this_build(),
+            "pack was compiled by {}; this build compiles with {} — compare \
+             behaviour, not bytes",
+            recipe.name(),
+            nvfp4_pack::EncoderRecipe::current().name()
+        );
+
         for t in &header.tensors {
             if t.dtype != DTYPE_NVFP4 {
                 continue;
@@ -525,4 +541,49 @@ fn a_future_abi_revision_is_refused_rather_than_decoded() {
     bad.group_elems = 32;
     let err = bad.admit().unwrap_err().to_string();
     assert!(err.contains("disagrees with its own revision"), "{err}");
+}
+
+#[test]
+fn the_encoder_recipe_is_recorded_apart_from_the_codec_abi() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (_, out, report) = compiled_pair(&tmp);
+    let index = index_of(&out);
+
+    for c in &report.compiled_objects {
+        let e = index.representations.get(&c.representation_id).unwrap();
+        let codec = e.codec.as_ref().unwrap();
+        let encoder = e.encoder.as_ref().expect("a pack names its encoder");
+        assert_eq!(encoder.name(), "nvfp4-nearest-v1");
+        assert!(encoder.is_reproducible_by_this_build());
+        // Two separate identities, not one: same decode contract, and a
+        // recipe that may change under it.
+        assert_eq!(codec.family, "nvfp4");
+        assert_ne!(codec.family, encoder.algorithm);
+    }
+}
+
+#[test]
+fn a_different_encoder_is_not_a_refusal_only_a_weaker_claim() {
+    // A GPTQ pack decodes through the same kernel and is entirely valid;
+    // it simply is not byte-reproducible by a nearest-rounding build.
+    // Treating that as corruption would make every encoder improvement a
+    // breaking change.
+    let gptq = nvfp4_pack::EncoderRecipe {
+        algorithm: "nvfp4-gptq".into(),
+        revision: 1,
+    };
+    assert!(!gptq.is_reproducible_by_this_build());
+    assert_eq!(gptq.name(), "nvfp4-gptq-v1");
+
+    // The decode contract is unaffected — that is the whole point of
+    // keeping the two identities apart.
+    nvfp4_pack::CodecIdentity::nvfp4_v1()
+        .admit()
+        .expect("codec admission does not depend on the encoder recipe");
+
+    let newer = nvfp4_pack::EncoderRecipe {
+        algorithm: "nvfp4-nearest".into(),
+        revision: 2,
+    };
+    assert!(!newer.is_reproducible_by_this_build());
 }

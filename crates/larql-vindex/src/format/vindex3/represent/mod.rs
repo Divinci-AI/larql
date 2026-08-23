@@ -63,7 +63,7 @@ use super::opplan::exec::weights::{quantize_nvfp4, LoadedWeight};
 use super::opplan::OperandRef;
 use crate::error::VindexError;
 use crate::format::filenames::INDEX_JSON;
-use nvfp4_pack::{CodecIdentity, PackLayout, DTYPE_NVFP4};
+use nvfp4_pack::{CodecIdentity, EncoderRecipe, PackLayout, DTYPE_NVFP4};
 use policy::{classify, Role, RolePolicy};
 /// Filename of the system graph, carried beside the index.
 const SYSTEM_GRAPH_JSON: &str = "system_graph.json";
@@ -407,6 +407,7 @@ pub fn compile_representation(
                 // copied out of the container that holds them — which is
                 // precisely what a deployment artifact does.
                 source_representation_digest: Some(entry.payload_sha256.clone()),
+                encoder: Some(EncoderRecipe::current()),
             },
         ));
     }

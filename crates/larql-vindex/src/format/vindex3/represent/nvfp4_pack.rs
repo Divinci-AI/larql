@@ -329,3 +329,63 @@ impl CodecIdentity {
         Ok(())
     }
 }
+
+/// Which compilation algorithm chose the encoded values.
+///
+/// [`CodecIdentity`] says how to *decode* a pack. This says how its numbers
+/// were *chosen*, and the two are independent: nearest-rounding, a better
+/// scale search and a GPTQ-style Hessian-aware encoder all emit the same
+/// NVFP4 ABI, decode through the same kernel, and pick different values.
+///
+/// The distinction is load-bearing for one specific claim. "Persisted bytes
+/// equal what the runtime would produce transiently" is only true against
+/// the encoder that produced the artifact. Improve the encoder and an older
+/// pack stays perfectly valid and perfectly decodable while no longer being
+/// byte-reproducible by this build — which is a fact the parity gate has to
+/// know rather than discover as a failure.
+///
+/// So, unlike a codec mismatch, an encoder mismatch is **not** a refusal.
+/// Nothing is wrong with those bytes. Only the reproducibility claim
+/// weakens.
+///
+/// Identities are stable recipe names, never build ids or git hashes: a
+/// materially different algorithm earns a new name, and a bug fix that
+/// changes no chosen value does not.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct EncoderRecipe {
+    /// Algorithm family — `nvfp4-nearest`, later `nvfp4-gptq`.
+    pub algorithm: String,
+    /// Revision within that family.
+    pub revision: u32,
+}
+
+impl EncoderRecipe {
+    /// Round each element to the nearest E2M1 grid point under the amax
+    /// scale rule, element-independently. The encoder LARQL has today.
+    pub fn nearest_v1() -> Self {
+        Self {
+            algorithm: "nvfp4-nearest".into(),
+            revision: 1,
+        }
+    }
+
+    /// The recipe this build compiles with.
+    pub fn current() -> Self {
+        Self::nearest_v1()
+    }
+
+    /// `nvfp4-nearest-v1`, for reports and CLI output.
+    pub fn name(&self) -> String {
+        format!("{}-v{}", self.algorithm, self.revision)
+    }
+
+    /// Whether this build would reproduce a pack compiled by `self`
+    /// byte-for-byte.
+    ///
+    /// The parity gate's precondition. `false` is not a defect — it means
+    /// the artifact predates an encoder change and must be compared by
+    /// behaviour rather than by bytes.
+    pub fn is_reproducible_by_this_build(&self) -> bool {
+        *self == Self::current()
+    }
+}
