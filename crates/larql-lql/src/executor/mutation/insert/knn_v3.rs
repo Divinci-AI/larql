@@ -29,6 +29,7 @@ impl Session {
         layer_hint: Option<u32>,
         confidence: Option<f32>,
     ) -> Result<Vec<String>, LqlError> {
+        let bos = self.v3_bos_token();
         let (install_layer, key, target_id);
         {
             let Backend::Vindex3 {
@@ -76,6 +77,7 @@ impl Session {
                 prompt.as_str(),
                 install_layer,
                 overrides.as_ref(),
+                bos,
             )?;
         }
 

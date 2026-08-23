@@ -40,6 +40,16 @@ pub(crate) fn unsupported(what: &str) -> LqlError {
 }
 
 impl Session {
+    /// The BOS token id the bound V3 container declares, resolved once
+    /// at bind. `None` on any other backend — callers are already in a
+    /// V3 arm when they ask.
+    pub(crate) fn v3_bos_token(&self) -> Option<u32> {
+        match &self.backend {
+            Backend::Vindex3 { bos_token, .. } => *bos_token,
+            _ => None,
+        }
+    }
+
     /// `INFER` on a V3 binding. Without `GENERATE`: classic single-step
     /// top-k next-token prediction, priced from the batch-prefill
     /// logits. With `GENERATE n`: greedy autoregressive continuation
@@ -54,6 +64,7 @@ impl Session {
             runtime,
             tokenizer,
             overlay,
+            bos_token,
             ..
         } = &self.backend
         else {
@@ -66,7 +77,7 @@ impl Session {
                     .into(),
             )
         })?;
-        let prompt_ids = encode_v3_prompt(tokenizer, prompt)?;
+        let prompt_ids = encode_v3_prompt(tokenizer, prompt, *bos_token)?;
 
         let start = std::time::Instant::now();
 
@@ -424,6 +435,7 @@ impl Session {
             runtime,
             tokenizer,
             overlay,
+            bos_token,
             ..
         } = &self.backend
         else {
@@ -432,7 +444,7 @@ impl Session {
         let tokenizer = tokenizer.as_ref().ok_or_else(|| {
             LqlError::Execution("TRACE needs a tokenizer — this container carries none".into())
         })?;
-        let prompt_ids = encode_v3_prompt(tokenizer, prompt)?;
+        let prompt_ids = encode_v3_prompt(tokenizer, prompt, *bos_token)?;
 
         // TRACE observes the same effective program INFER runs — a
         // compose edit must not fork the two.
@@ -524,8 +536,9 @@ pub(crate) fn capture_layer_residual(
     prompt: &str,
     layer: usize,
     overrides: Option<&larql_inference::vindex3::OperandOverrides>,
+    bos: Option<u32>,
 ) -> Result<Vec<f32>, LqlError> {
-    let prompt_ids = encode_v3_prompt(tokenizer, prompt)?;
+    let prompt_ids = encode_v3_prompt(tokenizer, prompt, bos)?;
     let mut captured: Option<Vec<f32>> = None;
     let mut sink = |event: larql_inference::vindex3::PlaneEvent| {
         if let larql_inference::vindex3::PlaneEvent::Layer { index, trace } = event {
@@ -545,7 +558,49 @@ pub(crate) fn capture_layer_residual(
     captured.ok_or_else(|| LqlError::Execution(format!("no residual captured at layer {layer}")))
 }
 
-pub(crate) fn encode_v3_prompt(tokenizer: &Tokenizer, prompt: &str) -> Result<Vec<u32>, LqlError> {
+/// HF configs a container carries that declare the BOS token id, most
+/// authoritative first. Both arrive with the M2 capability snapshot.
+const BOS_DECLARING_FILES: [&str; 2] = ["generation_config.json", "tokenizer_config.json"];
+
+/// The BOS token id this container **declares**, or `None` when it
+/// declares none.
+///
+/// The V2 surface gets this fact from a reconstructed
+/// `ModelArchitecture` (`arch.bos_token_id()`); V3 must not rediscover
+/// architecture, so it reads the checkpoint's own declaration, carried
+/// into the container by the capability snapshot. For Gemma 4 — the
+/// architecture that needs BOS *and* omits it from the tokenizer's
+/// `TemplateProcessing.single` template — both sources say 2, which is
+/// what `v2_and_v3_prompt_encoders_agree_on_a_bos_requiring_model`
+/// pins.
+///
+/// A container predating the capability snapshot carries neither file
+/// and declares nothing; it encodes exactly as it did before.
+pub(crate) fn declared_bos_token(container: &std::path::Path) -> Option<u32> {
+    for name in BOS_DECLARING_FILES {
+        let Ok(text) = std::fs::read_to_string(container.join(name)) else {
+            continue;
+        };
+        let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        if let Some(id) = json.get("bos_token_id").and_then(|v| v.as_u64()) {
+            return u32::try_from(id).ok();
+        }
+    }
+    None
+}
+
+/// Encode a prompt for the V3 program, prepending the container's
+/// declared BOS when the tokenizer's own post-processor did not.
+///
+/// Shares `maybe_prepend_bos` with the V2 path (`encode_prompt`), so
+/// the "prepend only if missing" contract has one implementation.
+pub(crate) fn encode_v3_prompt(
+    tokenizer: &Tokenizer,
+    prompt: &str,
+    bos: Option<u32>,
+) -> Result<Vec<u32>, LqlError> {
     let encoding = tokenizer
         .encode(prompt, true)
         .map_err(|e| LqlError::Execution(format!("tokenize: {e}")))?;
@@ -553,7 +608,7 @@ pub(crate) fn encode_v3_prompt(tokenizer: &Tokenizer, prompt: &str) -> Result<Ve
     if ids.is_empty() {
         return Err(LqlError::Execution("prompt tokenises to empty".into()));
     }
-    Ok(ids)
+    Ok(larql_inference::maybe_prepend_bos(ids, bos))
 }
 
 /// Softmax over the logits, then the top-k `(token_id, probability)`
@@ -570,4 +625,65 @@ pub(crate) fn top_k_probs(logits: &[f32], k: usize) -> Vec<(u32, f32)> {
     scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     scored.truncate(k);
     scored
+}
+
+#[cfg(test)]
+mod tests {
+    use super::declared_bos_token;
+
+    fn container_with(name: &str, body: serde_json::Value) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(name), body.to_string()).unwrap();
+        dir
+    }
+
+    /// The primary declaration: HF's `generation_config.json`.
+    #[test]
+    fn generation_config_declares_the_bos_token() {
+        let dir = container_with(
+            "generation_config.json",
+            serde_json::json!({"bos_token_id": 2}),
+        );
+        assert_eq!(declared_bos_token(dir.path()), Some(2));
+    }
+
+    /// `tokenizer_config.json` answers when the generation config does
+    /// not — both arrive with the capability snapshot, and older
+    /// checkpoints carry only the latter.
+    #[test]
+    fn tokenizer_config_answers_when_generation_config_is_silent() {
+        let dir = container_with(
+            "tokenizer_config.json",
+            serde_json::json!({"bos_token_id": 7, "tokenizer_class": "GPT2Tokenizer"}),
+        );
+        assert_eq!(declared_bos_token(dir.path()), Some(7));
+
+        // …and the generation config wins when both speak.
+        std::fs::write(
+            dir.path().join("generation_config.json"),
+            serde_json::json!({"bos_token_id": 2}).to_string(),
+        )
+        .unwrap();
+        assert_eq!(declared_bos_token(dir.path()), Some(2));
+    }
+
+    /// A container that declares nothing — including one predating the
+    /// capability snapshot — encodes exactly as it did before.
+    #[test]
+    fn a_container_declaring_nothing_yields_no_bos() {
+        let empty = tempfile::tempdir().unwrap();
+        assert_eq!(declared_bos_token(empty.path()), None);
+
+        let silent = container_with("generation_config.json", serde_json::json!({"top_k": 64}));
+        assert_eq!(declared_bos_token(silent.path()), None);
+    }
+
+    /// Malformed carried config is not a hard failure: the fact is
+    /// absent, the container still binds.
+    #[test]
+    fn malformed_config_is_treated_as_no_declaration() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("generation_config.json"), "{not json").unwrap();
+        assert_eq!(declared_bos_token(dir.path()), None);
+    }
 }

@@ -114,6 +114,7 @@ impl Session {
         confidence: Option<f32>,
         alpha_override: Option<f32>,
     ) -> Result<Vec<String>, LqlError> {
+        let bos = self.v3_bos_token();
         let alpha_mul = alpha_override.unwrap_or(DEFAULT_INSERT_ALPHA_MUL);
         let c_score = confidence.unwrap_or(DEFAULT_INSERT_CONFIDENCE);
 
@@ -176,6 +177,7 @@ impl Session {
                 prompt.as_str(),
                 layer,
                 None,
+                bos,
             )?;
             pending_decoys = capture::capture_layer_decoys(
                 self,

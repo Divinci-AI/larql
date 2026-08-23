@@ -85,6 +85,35 @@ version, the sole discriminator — no filename or shape sniffing) already
 dispatches `USE`, the server bootstrap, and `DIFF` operands, and fails
 closed on unknown schemas.
 
+## Cross-generation contract: prompt encoding
+
+A user prompt must reach both generations as the **same token sequence**.
+
+The two surfaces learn the BOS fact from different places, and that is
+deliberate:
+
+| | Source of the BOS fact |
+|---|---|
+| V2 | the reconstructed `ModelArchitecture` — `arch.bos_token_id()` |
+| V3 | the container's own carried `generation_config.json` → `tokenizer_config.json` |
+
+V3 must not reconstruct architecture, so it reads the checkpoint's own
+declaration, carried into the container by the M2 capability snapshot.
+Both then prepend through one shared contract
+(`larql_inference::maybe_prepend_bos`: prepend only when the tokenizer's
+post-processor did not already).
+
+This matters for exactly the models where the tokenizer's
+`TemplateProcessing.single` template omits BOS while the model requires
+it — Gemma 4 is the live case: architecture and `generation_config.json`
+both say id 2. Gated by
+`v2_and_v3_prompt_encoders_agree_on_a_bos_requiring_model`, whose control
+(passing no declared BOS) reproduces the pre-fix divergence `[2,3]` vs
+`[3]`.
+
+A container that declares nothing — including any predating the
+capability snapshot — encodes exactly as before.
+
 ## Rungs to the flip
 
 - **M1 — the seam. DONE** (PR #290): policy type, pinned default,

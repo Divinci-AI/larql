@@ -91,9 +91,8 @@ mod tests {
         .expect("tokenizer")
     }
 
-    #[test]
-    fn encode_vindex_prompt_prepends_gemma4_bos() {
-        let config = larql_vindex::VindexConfig {
+    fn gemma4_config() -> larql_vindex::VindexConfig {
+        larql_vindex::VindexConfig {
             family: "gemma4".into(),
             num_layers: 2,
             hidden_size: 8,
@@ -108,12 +107,54 @@ mod tests {
                 ..Default::default()
             }),
             ..Default::default()
-        };
+        }
+    }
+
+    #[test]
+    fn encode_vindex_prompt_prepends_gemma4_bos() {
         let tokenizer = tokenizer_without_bos_postprocessor();
 
-        let ids = encode_vindex_prompt(&config, &tokenizer, "hello").expect("encode");
+        let ids = encode_vindex_prompt(&gemma4_config(), &tokenizer, "hello").expect("encode");
 
         assert_eq!(ids, vec![2, 3]);
+    }
+
+    /// **The BOS blind spot.** `encode_vindex_prompt` (V2) consults the
+    /// architecture and prepends BOS where the tokenizer's
+    /// post-processor does not; `encode_v3_prompt` does a bare encode.
+    /// On a BOS-requiring model whose tokenizer.json carries no BOS
+    /// post-processor — Gemma 4 is exactly that — the two surfaces feed
+    /// the model DIFFERENT token sequences for the same user prompt.
+    ///
+    /// The compose/parity fixtures cannot see this: their synthetic
+    /// tokenizers and non-BOS architectures make both arms agree by
+    /// accident. This pins the difference directly.
+    #[test]
+    fn v2_and_v3_prompt_encoders_agree_on_a_bos_requiring_model() {
+        let tokenizer = tokenizer_without_bos_postprocessor();
+        let config = gemma4_config();
+
+        // The V3 side reads the fact the container CARRIES — the
+        // checkpoint's own generation_config.json, placed beside the
+        // segments by the M2 capability snapshot. A real Gemma 4
+        // checkpoint declares bos_token_id 2 there, which is the same
+        // id gemma4.rs's architecture hardcodes for the V2 side.
+        let container = tempfile::tempdir().unwrap();
+        std::fs::write(
+            container.path().join("generation_config.json"),
+            serde_json::json!({"bos_token_id": 2}).to_string(),
+        )
+        .unwrap();
+
+        let v2 = encode_vindex_prompt(&config, &tokenizer, "hello").expect("v2 encode");
+        let bos = crate::executor::vindex3::declared_bos_token(container.path());
+        let v3 = crate::executor::vindex3::encode_v3_prompt(&tokenizer, "hello", bos)
+            .expect("v3 encode");
+
+        assert_eq!(
+            v2, v3,
+            "the same prompt must reach both generations as the same tokens"
+        );
     }
 
     #[test]

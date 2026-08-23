@@ -169,6 +169,7 @@ impl Session {
         floor: f64,
         ceiling: f64,
     ) -> Result<Vec<String>, LqlError> {
+        let bos = self.v3_bos_token();
         use crate::executor::mutation::insert::probe_target_prob;
         use crate::executor::vindex3::encode_v3_prompt;
         use crate::executor::Backend;
@@ -194,7 +195,7 @@ impl Session {
                         unreachable!("dispatch matched the backend");
                     };
                     let tokenizer = tokenizer.as_ref().expect("compose install had a tokenizer");
-                    let ids = encode_v3_prompt(tokenizer, fact.canonical_prompt.as_str())?;
+                    let ids = encode_v3_prompt(tokenizer, fact.canonical_prompt.as_str(), bos)?;
                     probe_target_prob(runtime, tokenizer, overlay, &ids, &fact.target)?
                 };
                 final_probs[i] = prob;

@@ -189,12 +189,14 @@ impl Session {
                 }
             }
         }
+        let bos_token = crate::executor::vindex3::declared_bos_token(&path);
         self.backend = Backend::Vindex3 {
             path,
             runtime,
             tokenizer,
             knowledge,
             overlay,
+            bos_token,
         };
         self.patch_recording = None;
         self.auto_patch = false;
