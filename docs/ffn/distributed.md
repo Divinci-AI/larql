@@ -37,7 +37,7 @@ layers are decoded; out-of-range layers leave a zero `GateLayerSlice` and are
 never touched.
 
 **Demand-paged files (gate_vectors.bin, interleaved_kquant.bin / legacy
-interleaved_q4k.bin, etc.):** These are mmap'd as a whole — the virtual address
+interleaved_kquant.bin, etc.):** These are mmap'd as a whole — the virtual address
 range covers the full file — but the OS only faults in pages that are read.
 Because `is_layer_owned(layer)` guards every accessor before any byte is read,
 out-of-range pages never enter physical RAM.

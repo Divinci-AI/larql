@@ -1,6 +1,21 @@
 # Metal kernel capability table (Phase B ground truth)
 
-Status: **audit complete, dispatcher not yet changed.** 2026-08-09.
+Status: **audit complete; 20 of 22 findings SINCE FIXED.** Audited
+2026-08-09, status corrected 2026-08-23.
+
+> **Read this before citing anything below.** This file froze on the day
+> the audit finished and was never updated as the work landed. The
+> authoritative checklist is `crates/larql-compute/ROADMAP.md` §F1–F22,
+> which names *this document* as its source of truth and records **F1–F16
+> and F18–F22 as fixed, with commits** — only **F17 and F21 remain open**.
+> Three findings here still carry a "VERIFIED" badge, so re-citing them
+> reads as re-confirmation of a live bug when the opposite is true.
+>
+> §5's claim that MoE routing never reaches the GPU is the most
+> load-bearing error and is corrected in place below. The kernel
+> capability tables (§1–§6) are still accurate — all 76 kernel names
+> resolve — so the *reference* half of this document remains usable; it
+> is the *findings* half that is stale.
 
 This document is the authority the Phase B dispatcher work will consume. It
 records, per kernel entry point: the formats it decodes, its reduction unit,
@@ -110,16 +125,36 @@ in tests. `GeluExact`/`ReLU` panic loudly at both encoders (good).
 
 ## 5. MoE / experts family
 
-Production MoE experts do **not** use the grouped kernels: the live path is
+> **Corrected 2026-08-23 — the paragraph below is false, and was the
+> single most misleading claim in this file.** GPU-resident MoE routing
+> shipped: `shaders/moe_router.rs`, `moe_router_select.rs`,
+> `moe_descriptor.rs` and `moe_weighted_combine.rs`, driven by whole
+> modules `src/moe_gpu_route/`, `src/moe_zero_copy/` and
+> `src/route_witness.rs`. `moe_gpu_route`'s own module header states the
+> opposite contract explicitly. Softmax, deterministic top-K and the
+> weighted combine all run on device; expert identity is GPU **data**
+> (a descriptor index), not host control flow. Enabled with
+> `LARQL_GPU_ROUTE=1`.
+>
+> The grouped kernels are production too: `q4k_grouped_experts` and
+> `q6k_grouped_experts` dispatch from `moe_zero_copy.rs`, and of the
+> MXFP4 arms — 13 now, not 7 — `mxfp4g_split_lut16_vec_x2` is the
+> **default** in the descriptor path. `mxfp4_matvec` has three production
+> callers, not none.
+>
+> Anyone planning MoE work from the original text would conclude the GPU
+> routing programme had not started, when it is the shipped default path.
+
+~~Production MoE experts do **not** use the grouped kernels: the live path is
 `q4k_ffn_gate_up` (all K experts as one tall matrix) → `geglu_gelu_tanh`
 per expert → **per-expert `q4k_matvec` loop** for down. Routing (softmax,
 top-K, weighted sum) is entirely CPU; expert selection is materialized as
-weight-byte memcpys. No routing data reaches the GPU.
+weight-byte memcpys. No routing data reaches the GPU.~~
 
 | kernel | status |
 |---|---|
-| `q4k_grouped_experts`, `q6k_grouped_experts` | pipelines built; **test/diag only** — the per-expert loop they were written to replace still runs |
-| `mxfp4g_*` (7 arms) | diag tournament only; `_affine`/`_nox` are ceiling probes that **deliberately compute wrong answers** |
+| `q4k_grouped_experts`, `q6k_grouped_experts` | ~~test/diag only~~ → **production**, dispatched from `moe_zero_copy.rs` |
+| `mxfp4g_*` (**13** arms, not 7) | ~~diag tournament only~~ → `mxfp4g_split_lut16_vec_x2` is the **production default** in the descriptor path. `_affine`/`_nox` remain ceiling probes that **deliberately compute wrong answers** |
 | `gate_knn_score`, `gate_knn_score_q8` | **fully dead**; q8 variant has a latent unaligned load |
 | `turboquant_encode/decode_4bit` | **fully dead**; divergent-barrier UB + unset threadgroup binding + device-byte race if ever wired |
 

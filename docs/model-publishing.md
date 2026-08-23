@@ -69,7 +69,7 @@ A vindex is affected **iff both** hold:
   actually being present.
 - **Two filename generations exist** — current `*_kquant.bin` and legacy
   `*_q4k.bin`. An audit globbing only the first reported `qwen3-0.6b-q4k` as
-  carrying no quantised weights; it carries `interleaved_q4k.bin` and was
+  carrying no quantised weights; it carries `interleaved_kquant.bin` and was
   fully broken. Match both, or list the directory.
 
 `interleaved_*.bin` written in `q4k` mode always carries Q6_K — the layout is

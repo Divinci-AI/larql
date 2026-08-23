@@ -495,7 +495,7 @@ so a feature's down vector is a strided *column*, not a gatherable row. The
 gather microbench read the transposed down with row striding: **the timing is
 representative (work magnitude is right) but the down *values* are wrong.**
 Realising it correctly needs the **feature-major down sidecar**
-(`down_features_q4k.bin`) — *absent* on current vindexes — exposed on
+(`down_features_kquant.bin`) — *absent* on current vindexes — exposed on
 `GateIndex`. So the wiring is reverted (the method `gather_q4k_accumulate` is
 retained, unwired, with the caveat); `walk_ffn_sparse` stays on the correct
 scalar paths. **This does not affect the #22/#23 results** — those loaded native

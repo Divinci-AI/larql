@@ -544,7 +544,6 @@ const LEGACY_DEV_NAMES: &[&str] = &[
     "residuals",
     "predict",
     "index-gates",
-    "extract-routes",
     "walk",
     "attention-capture",
     "qk-templates",
@@ -553,11 +552,9 @@ const LEGACY_DEV_NAMES: &[&str] = &[
     "ov-gate",
     "circuit-discover",
     "attn-bottleneck",
-    "ffn-bench",
     "ffn-bottleneck",
     "ffn-overlap",
     "kg-bench",
-    "ffn-throughput",
     "trajectory-trace",
     "projection-test",
     "fingerprint-extract",
@@ -899,6 +896,37 @@ mod trampoline_tests {
                 "hi",
                 "--predict"
             ])
+        );
+    }
+
+    /// Every legacy name must rewrite to a subcommand that ACTUALLY
+    /// EXISTS.
+    ///
+    /// `legacy_research_flag_names_all_rewrite` below only asserts that
+    /// the rewrite happens — it passes just as happily when the target
+    /// is gone, and three dead entries (`extract-routes`, `ffn-bench`,
+    /// `ffn-throughput`) survived behind it until 2026-08-22. The
+    /// failure mode is user-visible and confusing: `larql ffn-bench`
+    /// was rewritten to `larql dev ffn-bench`, which clap then rejected
+    /// with a "did you mean" for a *different* command.
+    #[test]
+    fn every_legacy_name_maps_to_a_real_dev_subcommand() {
+        use clap::CommandFactory;
+        let cli = Cli::command();
+        let dev = cli
+            .get_subcommands()
+            .find(|c| c.get_name() == "dev")
+            .expect("`dev` subcommand exists");
+        let live: Vec<&str> = dev.get_subcommands().map(|c| c.get_name()).collect();
+        let dead: Vec<&&str> = LEGACY_DEV_NAMES
+            .iter()
+            .filter(|n| !live.contains(&**n))
+            .collect();
+        assert!(
+            dead.is_empty(),
+            "LEGACY_DEV_NAMES rewrites these to `larql dev <name>`, but no such \
+             subcommand exists — the rewrite turns a clean top-level error into a \
+             misleading one: {dead:?}"
         );
     }
 

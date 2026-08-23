@@ -1363,7 +1363,7 @@ Source layout reflects the 2026-05-01 Q1 cleanup pass — see
 tree. Highlights for spec readers:
 
 - `main.rs` is a thin entry point (~26 LOC). All boot orchestration
-  lives in `bootstrap.rs::serve(cli)` so the same code path can be
+  lives in `bootstrap/::serve(cli)` so the same code path can be
   driven from integration tests without going through clap.
 - `env_flags.rs` is the single source of truth for `LARQL_*` knobs;
   every read goes through a cached accessor (`OnceLock`) and the
@@ -1533,7 +1533,7 @@ Out-of-range layers are never loaded into physical RAM:
 
 - For Q4K vindexes (`synthesize_gate_from_q4k`): the anonymous mmap is sized only
   for owned layers. Unowned layers are skipped entirely during dequantisation.
-- For demand-paged files (`gate_vectors.bin`, `interleaved_q4k.bin`): the OS-level
+- For demand-paged files (`gate_vectors.bin`, `interleaved_kquant.bin`): the OS-level
   mmap covers the full file (cheap — virtual address space only). `is_layer_owned()`
   guards every accessor before any byte is read, so out-of-range pages never fault in.
 

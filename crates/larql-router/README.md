@@ -158,7 +158,7 @@ still drive moves manually via the admin RPCs).
 End-to-end walkthrough: [`docs/hot-shard-demo.md`](./docs/hot-shard-demo.md)
 (spins up a 2-serving-shard + 1-spare topology, drives load, and
 prints the rebalancer's elevation/cool-down log lines). The
-companion script is `scripts/demo-hot-shard.sh`.
+companion script `scripts/demo-hot-shard.sh` **was never committed** — `docs/hot-shard-demo.md` builds its whole reproducible path on it, so that runbook cannot be followed as written.
 
 For a real multi-host LAN deployment (router + two shards across
 three boxes, with `--grid-key`, firewall rules, and an optional

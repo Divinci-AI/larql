@@ -223,3 +223,6 @@ impl MetalBackend {
         Some(per)
     }
 }
+
+#[cfg(test)]
+mod tests;

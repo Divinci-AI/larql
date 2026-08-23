@@ -243,6 +243,91 @@ fn packed_allocation_segments_match_bit_for_bit() {
     );
 }
 
+/// The folded-residual o-proj on a SLICED matrix must read the slice's
+/// own rows too.
+///
+/// This is the path the packed attention layout actually exposed a bug
+/// on: `encode_nvfp4_matvec_residual` takes `MatvecOperands`, which has
+/// no offset fields, so under packing it bound o-proj at offset 0 and
+/// computed the Q projection's rows — with the residual added on top, so
+/// the output stayed finite and plausible. It is invisible on gpt-oss
+/// (an o_bias sends that layer down the unfused branch) and live on any
+/// two-norm layer without one, which is why it needs its own gate rather
+/// than inheriting the plain sliced test's.
+#[test]
+fn residual_fused_matvec_honours_a_sliced_matrix_offset() {
+    let Some(gpu) = MetalBackend::new() else {
+        eprintln!("no Metal device; skipping");
+        return;
+    };
+    let k = 2880;
+    let (rows_a, rows_b) = (512, 512);
+    let a = mat(rows_a, k, 21);
+    let b = mat(rows_b, k, 22);
+    let row_p = k / 16 * 8;
+    let row_s = k / 16;
+    let mut packed_all = a.m.packed[..rows_a * row_p].to_vec();
+    let mut scales_all = a.m.scales[..rows_a * row_s].to_vec();
+    let (b_off_p, b_off_s) = (packed_all.len() as u64, scales_all.len() as u64);
+    packed_all.extend_from_slice(&b.m.packed[..rows_b * row_p]);
+    scales_all.extend_from_slice(&b.m.scales[..rows_b * row_s]);
+
+    let x: Vec<f32> = (0..k).map(|i| (i % 7) as f32 * 0.03 - 0.1).collect();
+    let xb = gpu.lowering_upload(&x).expect("x");
+    // A row-DEPENDENT residual: a constant would be added to every row
+    // equally and could not distinguish one slice from another.
+    let resid: Vec<f32> = (0..rows_b).map(|i| i as f32 * 0.5 - 64.0).collect();
+    let rb = gpu.lowering_upload(&resid).expect("residual");
+    let packed_buf = gpu.lowering_weight(&packed_all);
+    let scales_buf = gpu.lowering_weight(&scales_all);
+    let own_p = gpu.lowering_weight(&b.m.packed);
+    let own_s = gpu.lowering_weight(&b.m.scales);
+
+    let run = |po: u64, so: u64, own: bool| -> Vec<f32> {
+        let out = gpu.lowering_scratch(rows_b);
+        let cmd = gpu.new_lowering_command_buffer();
+        let enc = cmd.new_compute_command_encoder();
+        let op = MatvecOperands {
+            packed: if own { &own_p } else { &packed_buf },
+            scales: if own { &own_s } else { &scales_buf },
+            x: &xb,
+            out: &out,
+            out_offset: 0,
+            n: rows_b,
+            k,
+        };
+        gpu.encode_nvfp4_matvec_residual_sliced(enc, &op, b.m.tensor_scale, &rb, po, so);
+        enc.end_encoding();
+        cmd.commit();
+        cmd.wait_until_completed();
+        let v = gpu.lowering_readback(&out, rows_b).expect("readback");
+        gpu.recycle_lowering_scratch(out);
+        v
+    };
+
+    let control = run(0, 0, true);
+    let sliced = run(b_off_p, b_off_s, false);
+    let trap = run(0, 0, false);
+    gpu.recycle_lowering_scratch(xb);
+    gpu.recycle_lowering_scratch(rb);
+
+    assert_eq!(
+        control, sliced,
+        "residual-fused sliced matvec != own-buffer control"
+    );
+    assert_ne!(
+        control, trap,
+        "offset-0 bind agreed with the slice — this fixture cannot detect \
+         a dropped offset, so the parity assertion above is vacuous"
+    );
+    // The residual really is folded in, not silently dropped: with the
+    // residual removed the result must differ.
+    assert!(control
+        .iter()
+        .zip(&resid)
+        .any(|(o, r)| (o - r).abs() > 1e-6));
+}
+
 /// `encode_matvec` on a SLICED matrix (non-zero offsets) must read the
 /// slice's own rows, not the allocation's front. The flat kernels bind at
 /// offset 0, so the lowering routes a sliced matrix through the segmented

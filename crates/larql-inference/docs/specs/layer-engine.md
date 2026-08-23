@@ -312,7 +312,7 @@ these are different engines from their standalone counterparts; see
 | `StandardEngine`         | `uniform(Standard, Dense, DenseGraph)`          | `exact_logits`                 |
 | `NoCacheEngine`          | `uniform(NoCache, Dense, DenseGraph)`           | `exact_logits`                 |
 | `MarkovResidualEngine`   | `uniform(MarkovResidual, Dense, DenseGraph)`    | `exact_logits` (cond.)         |
-| `UnlimitedContextEngine` | `uniform(Unlimited, Dense, DenseGraph)`         | `exact_logits` (in-window)     |
+| `WindowedCheckpointEngine` | `uniform(Unlimited, Dense, DenseGraph)`         | `exact_logits` (in-window)     |
 | `TurboQuantEngine`       | `uniform(TurboQuant, Dense, DenseGraph)`        | `codec_bounded_state`          |
 | `Apollo`                 | `uniform(Apollo, Dense, DenseGraph)`            | `task_level_retrieval`         |
 

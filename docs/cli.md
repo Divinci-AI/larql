@@ -1247,7 +1247,7 @@ larql extract-index [MODEL] --output <OUTPUT> [OPTIONS]
 | `--f32` | Opt out of f16 on side-channel tensors. Rarely wanted — doubles file sizes. | off (f16) |
 | `--quant <FORMAT>` | Inline-quantise forward-pass weights: `none`, `q4k`, or `kquant` (alias). The k-quant family emits Q4_K/Q6_K Ollama-compatible blocks; implies `--level all` + f16 side-channels. | `none` |
 | `--compact` | Skip `up_weights.bin` + `down_weights.bin`; FFN weights live only in feature-major files. `WalkFfn`-only. | off |
-| `--drop-gate-vectors` | Skip `gate_vectors.bin` entirely; loader rebuilds gate from `interleaved_kquant.bin` (or legacy `interleaved_q4k.bin`) at load. Only with `--quant q4k` / `kquant`. | off |
+| `--drop-gate-vectors` | Skip `gate_vectors.bin` entirely; loader rebuilds gate from `interleaved_kquant.bin` (or legacy `interleaved_kquant.bin`) at load. Only with `--quant q4k` / `kquant`. | off |
 | `--down-q4k` | Quantise FFN down-proj as Q4_K instead of Q6_K. Saves ~1.8 GB on 31B, cuts down-matmul cost ~1.5–1.7× at decode. Introduces ~2.5× more probability-redistribution noise (top-1 + top-5 preserved). Validated by `walk_correctness`, which auto-relaxes its prob-delta gate from 0.02 to 0.035 when it detects Q4_K down. Only with `--quant q4k` / `kquant`. | off |
 | `--from-vectors <PATH>` | Build from already-extracted NDJSON vector files instead of model weights | — |
 | `--down-top-k <N>` | Top-K tokens per feature in down metadata | 10 |
@@ -1403,7 +1403,7 @@ larql convert quantize q4k \
 
 Supported GGUF quantization types for reading: F32, F16, BF16, Q4_0, Q4_1, Q8_0. All tensors are dequantized to f32 during conversion.
 
-**`quantize` family** — see [`docs/specs/quantize-cli-spec.md`](../crates/larql-cli/docs/quantize-spec.md) for the full surface (flags, exit codes, output layout, atomic-rename semantics). Both subcommands require the source vindex to carry full model weights (`--level inference` or `--level all`); browse-only sources are rejected with a clear error.
+**`quantize` family** — see [`crates/larql-cli/docs/quantize-spec.md`](../crates/larql-cli/docs/quantize-spec.md) for the full surface (flags, exit codes, output layout, atomic-rename semantics). Both subcommands require the source vindex to carry full model weights (`--level inference` or `--level all`); browse-only sources are rejected with a clear error.
 
 ### `larql hf`
 
@@ -2035,7 +2035,7 @@ rewrite — no re-extract.
 | `expert-server` | MoE | — | — | 14.1 GB | `larql serve --experts START-END` |
 | `full` | — | 1.3 GB | 32 GB | 16 GB | everything |
 
-`expert-server` includes embed, norms, dense FFN (`interleaved_q4k.bin`),
+`expert-server` includes embed, norms, dense FFN (`interleaved_kquant.bin`),
 and the per-layer expert weights (`layers/`). Everything `larql serve` needs
 to boot and serve `POST /v1/expert/batch` calls on a CPU-only machine.
 

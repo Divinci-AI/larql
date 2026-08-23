@@ -1,5 +1,33 @@
 # Performance — larql-kv
 
+> **Retracted 2026-08-22 — every per-engine tok/s figure below is inflated.**
+> The harness that produced them was not measuring a token: it stopped its
+> timer before `pick_next`, while the reference rows included lm_head, and
+> both landed in the same tok/s column. `CHANGELOG.md` (2026-08-04, §"the
+> bench was not measuring a token") puts the inflation at **2–3× for every
+> engine**. An earlier `total/n` conflation in this same table was already
+> flagged by `docs/diagnoses/remote-moe-bottlenecks.md:49`, so these rows
+> have now survived two independent instrument corrections.
+>
+> **Do not choose an engine on these numbers.** The *ordering* between
+> engines may survive — both arms shared the defect — but no absolute here,
+> and no comparison against a non-larql baseline, is usable until the table
+> is re-run through a harness that times a whole token.
+>
+> Three further hazards, established 2026-08-21/22 against the VINDEX3
+> lowered path and applicable to any re-run:
+> - **AC only.** On battery the same probe roughly halves; one runbook
+>   recorded llama.cpp itself falling 34 → 1.05 tok/s at 31% battery.
+> - **~±6% cross-session floor.** Identical code read 8.14 ms and 8.62 ms
+>   in two sessions, so no sub-6% claim survives a single block however
+>   clean its internal brackets. A textbook interleaved A/B/A/B with a
+>   0.48% control bracket still produced a false +2.4%.
+> - **Warm the GPU.** Short or unwarmed sampling reads a fake speedup —
+>   an unwarmed micro-probe read 3.8× slow, and this repo already caught
+>   the same class once (`larql-compute/CHANGELOG.md:89`: 58.5 GiB/s under
+>   default criterion sampling against a consistent 33 at
+>   `--measurement-time 20`).
+
 Machine: M3 Max, macOS. Numbers carried from the engine-level audits that
 preceded the crate extraction (2026-04-23 onward), with the source bench
 identified for each row. The extraction itself was a code move — no
@@ -177,7 +205,9 @@ profiler data after W7:
 | ~~Per-layer commit overhead~~ | ~~~1.7 ms~~ | **Closed by W7** (single commit per token) |
 | CPU glue (state Vec→Array2, append, etc.) | ~3 ms | In-place state updates / pre-allocated buffers |
 
-## W10 — engine state on GPU (opt-in via `LARQL_W10_HONLY=1`)
+## W10 — engine state on GPU (**default ON**; opt out with `LARQL_W10_DISABLE=1`)
+
+> **Corrected 2026-08-23.** This heading said "opt-in via `LARQL_W10_HONLY=1`". W10 has been **default-on** since 2026-05-21 (`w10_enabled()` reads only `LARQL_W10_DISABLE`), and `LARQL_W10_HONLY` is accepted but **inert** — setting it does nothing. Anything below that reads as "turn this on to get X" is describing behaviour you already have.
 
 W10 lets engines that treat K/V (and optionally h_in) as derivative
 state declare so at the API boundary; the Metal kernel then skips
@@ -409,7 +439,7 @@ the table above.
 - **O(N²) by design.** Apollo's decode_step pushes the new token onto
   `self.context_tokens` and calls `forward_from_layer(weights,
   &self.context_tokens, ...)` — which builds a fresh HashMap KV cache
-  per call (`compute/src/forward/predict/raw.rs:190`) and re-runs
+  per call (`crates/larql-compute/src/forward/predict/raw.rs:190`) and re-runs
   `from_layer..num_layers` over the **entire growing context** every
   step. There is no cross-step KV persistence: each decode is O(N)
   attention work, total O(N²). This is inherent to the "retrieval-style,

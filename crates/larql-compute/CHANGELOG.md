@@ -301,6 +301,8 @@ generate both use top_k=5).
 
 Down + gate+up = **~6ms/tok** of the ~11ms GPU fwd. Both big FFN kernels are bandwidth-bound near LPDDR5X peak. The earlier "compute-bound at 103 GB/s" diagnosis on q4k_ffn_gate_up was a profiler bug — see PROFILER NOTE.
 
+> **Corrected 2026-08-22 — these are ISOLATED rates; the same kernels run 22–27% slower inside a real decode.** Measured through the VINDEX3 stage profiler: attention projections ~205–209 GB/s against ~283 isolated (**73%**), routed FFN experts ~250–251 against ~322 (**78%**), lm_head ~363–368 against ~377 (**97%**). Reproduces across sessions to 0.4–1.9% while tok/s wobbles ~±6%, so score levers in per-stage ratios rather than wall-clock. The head is the control: once per token, one long sequential stream, at its isolated rate — everything repeated 24× is short. Read "84% of peak" as a ceiling the kernel reaches alone, not as headroom that is already spent. Not explained by repetition (~4% step, then flat), command-buffer structure (splitting does not recover it), or operand co-location (measured null); same-matrix vs distinct-matrix is ~10%. Mechanism open. See `PERFORMANCE.md`'s corrected note for the full table.
+
 **PROFILER NOTE (2026-04-28)**: `metal/diag/kernel_profile.rs::measure_batched` was creating a fresh cmd buffer per call (with commit+wait per call) instead of running n_layers dispatches in ONE cmd buffer. The per-call dispatch overhead dominated the measurement, undercounting kernel throughput 2-4×. Fixed via `measure_single_cmdbuf_batched`. Old measurements showed q6k_matvec at 74 GB/s, q4k_ffn_gate_up at 103 GB/s; corrected numbers are 311 GB/s and 274 GB/s respectively.
 
 The "117 tok/s" historical number was synthetic-weight Q4_KF without

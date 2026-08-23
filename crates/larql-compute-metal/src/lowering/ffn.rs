@@ -111,7 +111,16 @@ impl MetalBackend {
         match fused_down {
             Some(seg) => {
                 self.encode_gated_ffn_gate_up_act(enc, h_in, w, s, shape);
-                self.encode_nvfp4_matvec_residual(
+                // `_sliced` carries the segment's byte offsets. `down`
+                // is a whole-buffer resident today, so both forms agree
+                // — but the plain call silently DISCARDS the offsets
+                // (MatvecOperands has no field for them), so the moment
+                // dense FFN operands are co-located the way attention's
+                // now are, this would bind at offset 0 and compute a
+                // different matrix's rows with the residual added on
+                // top: finite, plausible, wrong. Same defect that was
+                // live on the o-proj path.
+                self.encode_nvfp4_matvec_residual_sliced(
                     enc,
                     &MatvecOperands {
                         packed: seg.packed,
@@ -124,6 +133,8 @@ impl MetalBackend {
                     },
                     seg.tensor_scale,
                     h_in,
+                    seg.packed_offset,
+                    seg.scales_offset,
                 );
             }
             None => {

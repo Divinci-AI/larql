@@ -167,7 +167,7 @@ declared.
 ## 5. Serving — binding fork, `V3Model`, `/v1/completions`
 
 The V2/V3 distinction is decided **once**, at model binding.
-`bootstrap::load_artifact` (`crates/larql-server/src/bootstrap.rs`)
+`bootstrap::load_artifact` (`crates/larql-server/src/bootstrap/`)
 detects the artifact's container generation
 (`larql_vindex::format::generation::detect_generation`) and binds with
 the matching loader, returning a `LoadedArtifact`:

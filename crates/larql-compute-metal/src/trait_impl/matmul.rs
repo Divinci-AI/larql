@@ -885,6 +885,72 @@ mod tests {
     ///
     /// The Q4/f16 integration tests cover the typical "full TGs" path; this
     /// pins the boundary cases that those don't reach.
+    /// `wire_resident` is the residency bootstrap that fixed the wired-
+    /// collector wall (a >45 GB working set decoding ~10x slow). It had
+    /// no test anywhere in the crate despite being load-bearing at
+    /// startup, and it is all refusal paths and side effects — it
+    /// returns nothing, so the only observable contract is that it
+    /// refuses the degenerate inputs without panicking and survives a
+    /// real one.
+    #[test]
+    fn wire_resident_refuses_degenerate_input_and_survives_a_real_one() {
+        let Some(metal) = MetalBackend::new() else {
+            return; // not on Metal-capable hardware
+        };
+        // No buffers at all: nothing to wire, must not touch the queue.
+        metal.wire_resident(&[]);
+        // A first buffer too short for the 1x1 gemv's two bytes. The
+        // guard exists because the encoder needs real work to trigger
+        // residency, and a sub-2-byte read would be out of bounds.
+        metal.wire_resident(&[&[7u8]]);
+        metal.wire_resident(&[&[]]);
+        // A real call: several page-sized buffers, as the bootstrap sees
+        // them. Passing is "did not panic and did not hang" — there is
+        // no return value, and asserting on timing here would be
+        // asserting on the machine rather than the code.
+        let a = vec![0u8; 4096];
+        let b = vec![1u8; 8192];
+        let c = vec![2u8; 4096];
+        metal.wire_resident(&[&a, &b, &c]);
+    }
+
+    /// The multi-matrix gemv paths share one command buffer across
+    /// several weight matrices, and their tail — collecting each output,
+    /// then recycling every buffer after the wait — is distinct from the
+    /// single-matrix wrappers the other tests exercise. A wrong output
+    /// order here would be invisible to a single-matrix test.
+    #[test]
+    fn f16_gemv_multi_returns_each_matrix_in_order() {
+        let Some(metal) = MetalBackend::new() else {
+            return;
+        };
+        let k = 64usize;
+        let x: Vec<f32> = (0..k).map(|i| (i % 5) as f32 - 2.0).collect();
+        // Two matrices with deliberately DIFFERENT row counts and
+        // different content, so a swapped or duplicated result cannot
+        // pass: matrix 0 is all ones (dot = sum of x), matrix 1 is all
+        // twos (dot = 2 * sum of x).
+        let f16_ones = larql_models::quant::half::encode_f16(&vec![1.0f32; 2 * k]);
+        let f16_twos = larql_models::quant::half::encode_f16(&vec![2.0f32; 3 * k]);
+        let Some(out) = metal.f16_gemv_multi(&[(&f16_ones, 2, k), (&f16_twos, 3, k)], &x) else {
+            return; // shape refused on this device
+        };
+        assert_eq!(out.len(), 2, "one result per matrix");
+        assert_eq!(out[0].len(), 2);
+        assert_eq!(out[1].len(), 3);
+        let sum: f32 = x.iter().sum();
+        for v in &out[0] {
+            assert!((v - sum).abs() < 1e-2, "matrix 0 row {v} vs {sum}");
+        }
+        for v in &out[1] {
+            assert!(
+                (v - 2.0 * sum).abs() < 1e-2,
+                "matrix 1 row {v} vs {}",
+                2.0 * sum
+            );
+        }
+    }
+
     #[test]
     fn topk_partial_handles_partial_last_tg() {
         let metal = match MetalBackend::new() {
