@@ -44,6 +44,20 @@ pub struct SensitivityArgs {
     /// Write per-tensor scores here as JSON.
     #[arg(long)]
     pub output: PathBuf,
+
+    /// SENSITIVITY-1B: capture per-feature activation second moments over
+    /// a calibration set instead of scoring weight error alone.
+    ///
+    /// The file is JSON lines of `{"id": ..., "ids": [...]}`. 1A needs no
+    /// forward pass; 1B needs one per calibration prompt, which is still
+    /// far cheaper than a Q-BANK run per candidate.
+    #[arg(long, value_name = "JSONL")]
+    pub calibration: Option<PathBuf>,
+
+    /// Where `--calibration` writes the captured moments and the
+    /// reconstruction control.
+    #[arg(long, value_name = "JSON")]
+    pub moments: Option<PathBuf>,
 }
 
 #[derive(serde::Serialize)]
@@ -162,4 +176,57 @@ pub fn run(args: SensitivityArgs) -> Result<(), Box<dyn std::error::Error>> {
         args.output.display()
     );
     Ok(())
+}
+
+/// Accumulates per-feature second moments per (layer, site), plus one
+/// sample of the FFN output for the reconstruction control.
+#[derive(Default)]
+pub struct MomentCollector {
+    /// (layer, site) -> running sum of x_j^2, and the count.
+    pub sums: std::collections::BTreeMap<(usize, u8), (Vec<f64>, u64)>,
+    /// One captured (ffn input, ffn output) pair, for the control.
+    pub control: Option<(usize, Vec<f32>, Vec<f32>)>,
+    pending_ffn_input: Option<(usize, Vec<f32>)>,
+}
+
+impl larql_vindex::format::vindex3::opplan::exec::observe::StepObserver for MomentCollector {
+    fn event(&mut self, _e: larql_vindex::format::vindex3::opplan::exec::observe::StepEvent) {}
+
+    fn operand_input(
+        &mut self,
+        layer: usize,
+        site: larql_vindex::format::vindex3::opplan::exec::observe::InputSite,
+        values: &[f32],
+    ) {
+        use larql_vindex::format::vindex3::opplan::exec::observe::InputSite;
+        let code = match site {
+            InputSite::Attention => 0u8,
+            InputSite::Ffn => 1,
+            InputSite::FfnOutput => 2,
+        };
+        if site == InputSite::Ffn {
+            self.pending_ffn_input = Some((layer, values.to_vec()));
+        }
+        if site == InputSite::FfnOutput {
+            // Keep exactly one pair: the control needs a single position
+            // where both sides are known, not a corpus.
+            if self.control.is_none() {
+                if let Some((l, input)) = self.pending_ffn_input.take() {
+                    if l == layer {
+                        self.control = Some((layer, input, values.to_vec()));
+                    }
+                }
+            }
+            // The FFN output is not an input site; it carries no moments.
+            return;
+        }
+        let entry = self
+            .sums
+            .entry((layer, code))
+            .or_insert_with(|| (vec![0.0; values.len()], 0));
+        for (acc, v) in entry.0.iter_mut().zip(values) {
+            *acc += (*v as f64) * (*v as f64);
+        }
+        entry.1 += 1;
+    }
 }

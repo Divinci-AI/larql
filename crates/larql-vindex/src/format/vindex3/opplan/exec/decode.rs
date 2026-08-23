@@ -270,6 +270,11 @@ impl<'a, B: PlanBackend> DecodeSession<'a, B> {
                 state
                     .ffn
                     .apply_from_residual(&layer.ffn, self.backend, &h, &normed, hidden)?;
+            observer.operand_input(
+                index,
+                super::observe::InputSite::FfnOutput,
+                ffn_out.as_slice(),
+            );
             let mut ffn_out = match &state.post_ffn {
                 Some(norm) => norm.apply(self.backend, &ffn_out),
                 None => ffn_out,

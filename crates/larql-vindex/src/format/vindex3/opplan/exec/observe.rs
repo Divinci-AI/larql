@@ -29,24 +29,6 @@ pub enum StepEvent {
     FfnDone { layer: usize },
     /// The output head priced the vocabulary for this position.
     Logits { vocab: usize },
-    /// An operand's *input* activation, at the moment the executor hands
-    /// it over.
-    ///
-    /// The finer tap this module's header anticipated, arriving the way it
-    /// said it must: another event on the one executor, not a second
-    /// traversal. It exists because SENSITIVITY-1A established that weight
-    /// geometry alone cannot predict quantisation sensitivity — the
-    /// missing factor is how much the activations amplify a weight
-    /// perturbation, and that cannot be recovered from the weights.
-    ///
-    /// Carries a borrowed slice: an observer that wants the values copies
-    /// them, and one that does not pays nothing. `step` uses the noop
-    /// observer, so the unobserved path is unaffected.
-    OperandInput {
-        layer: usize,
-        /// Which input site — see [`InputSite`].
-        site: InputSite,
-    },
 }
 
 /// Where in a layer an activation was taken.
@@ -66,6 +48,15 @@ pub enum InputSite {
     Attention,
     /// Normalised residual entering the FFN — input to gate and up.
     Ffn,
+    /// The FFN sublayer's own output, before any post-norm or residual
+    /// scaling.
+    ///
+    /// Not an input, and present for one reason: it is the control that
+    /// proves `down_proj`'s reconstructed input is the executor's. A
+    /// screen that reconstructs `act(gate(x)) ⊙ up(x)` can check itself by
+    /// multiplying through `down_proj` and comparing here — so the
+    /// reconstruction is verified rather than believed.
+    FfnOutput,
 }
 
 /// A subscriber to the canonical step's observation points.

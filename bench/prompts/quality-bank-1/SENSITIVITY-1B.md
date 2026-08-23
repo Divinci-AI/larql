@@ -48,6 +48,25 @@ badly wrong in its own terms and barely move the model.
 5. **Aggregate a candidate region** as the sum over the tensors it
    protects, and a per-MiB variant, exactly as 1A did.
 
+## Calibration provenance — 1B-a then 1B-b
+
+The 12 calibration prompts are drawn from Q-BANK-1 itself. That is
+acceptable for the *first* falsification and not for a claim of
+generality, so the distinction is banked before the result rather than
+after:
+
+| rung | calibration | claim it can support |
+|---|---|---|
+| **1B-a** | 12 frozen Q-BANK prompts | can activation weighting recover the known signal *at all* |
+| **1B-b** | independent prompts, disjoint from the bank | the proxy generalises beyond the distribution that defined the verdicts |
+
+1B-a is legitimate because the formula was frozen before any activation
+existed, no coefficients are fitted, and the verdicts were frozen earlier
+still. But a proxy could in principle score well because its activations
+were sampled from the same prompt distribution that produced the ranking
+it is being judged against. **A 1B-a pass does not license proposing maps.
+Only a 1B-b pass does.**
+
 ## The bar — unchanged
 
 Both halves, judged on the primary score:
@@ -57,6 +76,19 @@ Both halves, judged on the primary score:
 
 No relaxation if Spearman looks encouraging. An aggregate correlation with
 the negatives still ranked highly is a failure, as it was for 1A.
+
+## Reconstruction control — pinned, not assumed
+
+`down_proj`'s input is reconstructed offline as `act(gate(x)) ⊙ up(x)`
+rather than tapped. A mathematically equivalent reconstruction can still
+be numerically different — wrong activation, wrong operand order, a
+scaling the executor applies and the screen does not — and it would
+silently corrupt exactly one of the three frozen negatives.
+
+So it is checked, not asserted: the executor's FFN output is tapped, the
+screen recomputes `reconstructed_input · down_proj`, and the two are
+compared. If they disagree the reconstruction is wrong regardless of how
+plausible the algebra looks.
 
 ## If 1B fails
 
