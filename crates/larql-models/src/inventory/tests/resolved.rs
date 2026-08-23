@@ -148,6 +148,50 @@ fn layer_table_reflects_declared_layer_types() {
     assert_eq!(topology.num_kv_heads, 2);
     assert_eq!(topology.head_dim, 128);
     assert_eq!(topology.vocab_size, Some(202048));
+
+    // Every layer's own declared spelling is carried alongside the
+    // boolean split, verbatim.
+    assert_eq!(
+        topology.layers[0].declared_span.as_deref(),
+        Some("sliding_attention")
+    );
+    assert_eq!(
+        topology.layers[3].declared_span.as_deref(),
+        Some("full_attention")
+    );
+}
+
+/// A hybrid interleave outside the sliding/full vocabulary (a
+/// linear-attention layer): `attention` still resolves to the boolean
+/// split `is_sliding_window_layer` answers (`false`, since it is not
+/// literally `"sliding_attention"`), but `declared_span` preserves the
+/// checkpoint's own spelling verbatim — the fact `attention` alone
+/// cannot express and that a consumer needs in order to tell a genuine
+/// full-attention layer from a defaulted one.
+#[test]
+fn a_hybrid_linear_attention_layer_keeps_its_own_declared_spelling() {
+    let config = serde_json::json!({
+        "model_type": "qwen3_5_text",
+        "hidden_size": 64,
+        "num_hidden_layers": 4,
+        "intermediate_size": 256,
+        "num_attention_heads": 8,
+        "num_key_value_heads": 2,
+        "layer_types": ["linear_attention", "linear_attention", "linear_attention", "full_attention"]
+    });
+    let identity = read_identity(&config);
+    let (_, topology) = resolve(&config, &identity);
+
+    assert_eq!(topology.layers[0].attention, "full");
+    assert_eq!(
+        topology.layers[0].declared_span.as_deref(),
+        Some("linear_attention")
+    );
+    assert_eq!(topology.layers[3].attention, "full");
+    assert_eq!(
+        topology.layers[3].declared_span.as_deref(),
+        Some("full_attention")
+    );
 }
 
 /// A config with no `layer_types` and no override resolves all-full — that

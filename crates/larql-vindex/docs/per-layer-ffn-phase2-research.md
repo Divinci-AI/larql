@@ -62,7 +62,7 @@ The only assignment is the shape-mismatch reallocation; no `.take()` or
 
 ### Server: `AppState::moe_scratches`
 
-`crates/larql-server/src/state.rs:106-108` declares
+`crates/larql-server/src/state/loaded_model.rs:120-122` declares
 
 ```rust
 pub moe_scratches: std::sync::Mutex<

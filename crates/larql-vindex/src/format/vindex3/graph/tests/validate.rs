@@ -22,6 +22,7 @@ fn component(id: &str, role: ComponentRole, layers: usize) -> Component {
                 position: PositionPolicy::Rope { theta: 10000.0 },
                 geometry: None,
                 v_from_k: false,
+                declared_span: None,
             };
             layers
         ]),
@@ -142,6 +143,7 @@ fn graph_round_trips_through_json_with_nope_policies() {
         position: PositionPolicy::None,
         geometry: None,
         v_from_k: false,
+        declared_span: None,
     };
     let json = serde_json::to_string_pretty(&graph).unwrap();
     let back: SystemGraph = serde_json::from_str(&json).unwrap();

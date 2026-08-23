@@ -169,6 +169,7 @@ pub async fn handle_chat_completions(
             req.logprobs.unwrap_or(false),
             model_id,
             state.infer_timeout,
+            Arc::clone(&state.runtime),
         )
         .await;
     }
@@ -188,6 +189,7 @@ pub async fn handle_chat_completions(
             constrained_schema,
             tools_active,
             model_id,
+            Arc::clone(&state.runtime),
         )
         .into_response());
     }
@@ -201,18 +203,22 @@ pub async fn handle_chat_completions(
     // doesn't) in the background, same tradeoff /v1/infer already accepts.
     let logprobs_requested = req.logprobs.unwrap_or(false);
     let started = std::time::Instant::now();
+    let _gen_guard = Arc::clone(&state.runtime).enter_generation();
     let handle = tokio::task::spawn_blocking(move || -> Result<_, ServerError> {
-        run_chat_completion(
+        let mut tally = crate::runtime_stats::GenerationTally::new();
+        let out = run_chat_completion(
             &model_arc,
             &messages,
             max_tokens,
             sampling_params,
             &stop_strings,
             constrained_schema,
-        )
+            &mut tally,
+        )?;
+        Ok((out, tally))
     });
     let timeout = state.infer_timeout;
-    let output = if timeout.is_zero() {
+    let (output, tally) = if timeout.is_zero() {
         handle
             .await
             .map_err(|e| ServerError::Internal(e.to_string()))??
@@ -233,6 +239,9 @@ pub async fn handle_chat_completions(
             }
         }
     };
+    state
+        .runtime
+        .record(tally.into_sample(crate::state::elapsed_ms(started)));
 
     let logprobs = if logprobs_requested && !tools_active {
         Some(build_chat_logprobs(&output.tokens))
@@ -319,6 +328,7 @@ pub(in crate::routes::openai) fn run_chat_completion(
     sampling_params: util::SamplingParams,
     stop_strings: &[String],
     constrained_schema: Option<Schema>,
+    tally: &mut crate::runtime_stats::GenerationTally,
 ) -> Result<ChatGenerationOutput, ServerError> {
     // Take an exclusive write guard on the weights for the duration
     // of generation. `larql_inference::layer_graph::generate` mutates
@@ -385,6 +395,7 @@ pub(in crate::routes::openai) fn run_chat_completion(
             &eos,
         )
     };
+    tally.add_v2(&result, prompt_token_count);
 
     let mut completion_text = String::new();
     let mut completion_tokens: Vec<(String, f64)> = Vec::new();

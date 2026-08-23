@@ -148,13 +148,13 @@ async fn apply_patch_to_model(
     let (mut patch, name) = resolve_patch(&req)?;
 
     // Enrich INSERT ops with gate vectors if missing
-    enrich_patch_ops(model, &mut patch);
+    enrich_patch_ops(&model, &mut patch);
 
     let op_count = patch.operations.len();
 
     // Session-scoped or global?
     if let Some(sid) = extract_session_id(headers) {
-        let (ops, active) = state.sessions.apply_patch(&sid, model, patch).await;
+        let (ops, active) = state.sessions.apply_patch(&sid, &model, patch).await;
         Ok(Json(serde_json::json!({
             "applied": name,
             "operations": ops,

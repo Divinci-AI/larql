@@ -21,13 +21,14 @@ use larql_models::config::{FfnType, MoeRouterKind};
 use super::super::encode::segment::{read_segment_header, SegmentTensor};
 use super::super::encode::REPRESENTATION_ID_SEP;
 use super::super::graph::roles::classify_stack_tensor;
+use super::super::graph::surface::LinearAttentionSurface;
 use super::super::graph::surface::MoeSurface;
 use super::super::graph::{LogicalObject, NormPlacement, ObjectKind, OperandRole};
 use super::super::inspect::SystemInspection;
 use super::{
-    AttentionOp, ClosureDefect, ComponentOpPlan, EmbeddingOp, FfnOp, GateOp, HybridFfnOp, LayerFfn,
-    LayerPlan, NormOp, OpPlanOutcome, OperandRef, OutputOp, PackedProjection, QkNormOp,
-    RoutedFfnOp, SinkOp,
+    AttentionOp, ClosureDefect, ComponentOpPlan, EmbeddingOp, FfnOp, GateOp, GatedDeltaOp,
+    HybridFfnOp, LayerAttention, LayerFfn, LayerPlan, NormOp, OpPlanOutcome, OperandRef, OutputOp,
+    PackedProjection, QkNormOp, RoutedFfnOp, SinkOp,
 };
 use crate::error::VindexError;
 use larql_models::config::ExpertFormat;
@@ -153,6 +154,7 @@ pub fn plan_component_ops(
             num_q_heads: attn.num_q_heads,
             num_kv_heads,
             qk_scope: attn.qk_norm_scope,
+            linear: surface.linear_attention,
         }
     };
 
@@ -513,46 +515,78 @@ pub fn plan_component_ops(
                 &stack_id,
                 get(OperandRole::PreAttentionNorm),
             ),
-            attention: AttentionOp {
-                num_q_heads: geometry.num_q_heads,
-                num_kv_heads: geometry.num_kv_heads,
-                head_dim: geometry.head_dim,
-                query_scale: attn.query_scale,
-                score_scale: attn.score_scale,
-                logit_softcapping: attn.logit_softcapping,
-                span: policy.span,
-                window: policy.window,
-                position: policy.position,
-                qk_norm,
-                parameter_free_qk_norm: attn.parameter_free_qk_norm,
-                q: operand(&stack_id, get(OperandRole::AttnQ)),
-                k: operand(&stack_id, get(OperandRole::AttnK)),
-                // On a K≡V layer the value operand IS the key operand:
-                // the op reads one matrix twice, and says so.
-                v: operand(
-                    &stack_id,
-                    get(if policy.v_from_k {
-                        OperandRole::AttnK
-                    } else {
-                        OperandRole::AttnV
+            // Which attention-class operator this layer runs, decided on
+            // OPERAND EVIDENCE: a layer holding the fused q|k|v projection
+            // of a recurrence is a DeltaNet layer, whatever else is
+            // declared. Roles arrive only through exact ROLE_TABLE
+            // suffixes, so nothing reaches here by lexical fallback.
+            attention: if slot.contains_key(&OperandRole::LinearAttnInProjQkv) {
+                let l = surface.linear_attention.unwrap_or_else(|| {
+                    panic!(
+                        "layer {layer} ships a Gated DeltaNet operand while the component \
+                         declares no linear-attention geometry; closure should have refused \
+                         this before the plan was built"
+                    )
+                });
+                LayerAttention::GatedDelta(Box::new(GatedDeltaOp {
+                    num_key_heads: l.key_heads,
+                    num_value_heads: l.value_heads,
+                    key_head_dim: l.key_head_dim,
+                    value_head_dim: l.value_head_dim,
+                    conv_kernel: l.conv_kernel,
+                    state_dtype: l.state_dtype,
+                    in_proj_qkv: operand(&stack_id, get(OperandRole::LinearAttnInProjQkv)),
+                    in_proj_a: operand(&stack_id, get(OperandRole::LinearAttnInProjA)),
+                    in_proj_b: operand(&stack_id, get(OperandRole::LinearAttnInProjB)),
+                    in_proj_z: operand(&stack_id, get(OperandRole::LinearAttnInProjZ)),
+                    conv1d: operand(&stack_id, get(OperandRole::LinearAttnConv1d)),
+                    a_log: operand(&stack_id, get(OperandRole::LinearAttnALog)),
+                    dt_bias: operand(&stack_id, get(OperandRole::LinearAttnDtBias)),
+                    norm: operand(&stack_id, get(OperandRole::LinearAttnNorm)),
+                    out_proj: operand(&stack_id, get(OperandRole::LinearAttnOutProj)),
+                }))
+            } else {
+                LayerAttention::Softmax(Box::new(AttentionOp {
+                    num_q_heads: geometry.num_q_heads,
+                    num_kv_heads: geometry.num_kv_heads,
+                    head_dim: geometry.head_dim,
+                    query_scale: attn.query_scale,
+                    score_scale: attn.score_scale,
+                    logit_softcapping: attn.logit_softcapping,
+                    span: policy.span,
+                    window: policy.window,
+                    position: policy.position,
+                    qk_norm,
+                    parameter_free_qk_norm: attn.parameter_free_qk_norm,
+                    q: operand(&stack_id, get(OperandRole::AttnQ)),
+                    k: operand(&stack_id, get(OperandRole::AttnK)),
+                    // On a K≡V layer the value operand IS the key operand:
+                    // the op reads one matrix twice, and says so.
+                    v: operand(
+                        &stack_id,
+                        get(if policy.v_from_k {
+                            OperandRole::AttnK
+                        } else {
+                            OperandRole::AttnV
+                        }),
+                    ),
+                    v_from_k: policy.v_from_k,
+                    o: operand(&stack_id, get(OperandRole::AttnO)),
+                    output_gate: attn.output_gate.map(|spec| GateOp {
+                        spec,
+                        projection: operand(&stack_id, get(OperandRole::AttnOutputGate)),
                     }),
-                ),
-                v_from_k: policy.v_from_k,
-                o: operand(&stack_id, get(OperandRole::AttnO)),
-                output_gate: attn.output_gate.map(|spec| GateOp {
-                    spec,
-                    projection: operand(&stack_id, get(OperandRole::AttnOutputGate)),
-                }),
-                // Closure held, so `Some(true)` means all four are here
-                // and anything else means none is.
-                q_bias: bias(OperandRole::AttnQBias),
-                k_bias: bias(OperandRole::AttnKBias),
-                v_bias: bias(OperandRole::AttnVBias),
-                o_bias: bias(OperandRole::AttnOBias),
-                sinks: attn.sinks.map(|spec| SinkOp {
-                    spec,
-                    logits: operand(&stack_id, get(OperandRole::AttnSinks)),
-                }),
+                    // Closure held, so `Some(true)` means all four are here
+                    // and anything else means none is.
+                    q_bias: bias(OperandRole::AttnQBias),
+                    k_bias: bias(OperandRole::AttnKBias),
+                    v_bias: bias(OperandRole::AttnVBias),
+                    o_bias: bias(OperandRole::AttnOBias),
+                    sinks: attn.sinks.map(|spec| SinkOp {
+                        spec,
+                        logits: operand(&stack_id, get(OperandRole::AttnSinks)),
+                    }),
+                }))
             },
             post_attention_norm,
             pre_ffn_norm: norm_op(surface.norm.pre, &stack_id, get(pre_ffn_role)),
@@ -786,6 +820,11 @@ struct StackGeometry {
     num_q_heads: usize,
     num_kv_heads: usize,
     qk_scope: larql_models::config::QkNormScope,
+    /// The recurrence's geometry, on a component that declares one. Kept
+    /// beside the softmax fields rather than folded into them: the key and
+    /// value sides carry different head counts, so `num_q_heads`/`head_dim`
+    /// cannot describe this operator.
+    linear: Option<LinearAttentionSurface>,
 }
 
 /// Expected stored shape per role, from the surface's geometry. `None`
@@ -805,6 +844,7 @@ fn expected_shape(
         num_q_heads,
         num_kv_heads: _,
         qk_scope,
+        linear,
     } = *g;
     match role {
         OperandRole::AttnQ => Some(vec![q_rows, hidden]),
@@ -826,6 +866,33 @@ fn expected_shape(
             // instance is judged.
             QkNormScope::FullProjection => None,
         },
+        // Gated DeltaNet. Every shape follows from the recurrence's own
+        // geometry, and none from the softmax fields above — the key and
+        // value sides carry different head counts (16 and 48 on Qwen3.8),
+        // so nothing there stands in for them.
+        //
+        // `linear` absent while such an operand exists is a refusal, not a
+        // waiver: the stack ships a recurrence whose geometry the component
+        // never declared, and closure must not accept an operand it cannot
+        // state a contract for.
+        OperandRole::LinearAttnInProjQkv => Some(vec![linear?.qkv_channels(), hidden]),
+        OperandRole::LinearAttnInProjA | OperandRole::LinearAttnInProjB => {
+            Some(vec![linear?.value_heads, hidden])
+        }
+        OperandRole::LinearAttnInProjZ => Some(vec![linear?.value_width(), hidden]),
+        // Depthwise over the fused channels: one kernel per channel.
+        OperandRole::LinearAttnConv1d => {
+            let l = linear?;
+            Some(vec![l.qkv_channels(), 1, l.conv_kernel])
+        }
+        // Per-value-head scalars.
+        OperandRole::LinearAttnALog | OperandRole::LinearAttnDtBias => {
+            Some(vec![linear?.value_heads])
+        }
+        // Gated RMSNorm over ONE value head's width, not the full value
+        // side — the norm is applied per head.
+        OperandRole::LinearAttnNorm => Some(vec![linear?.value_head_dim]),
+        OperandRole::LinearAttnOutProj => Some(vec![hidden, linear?.value_width()]),
         OperandRole::FfnGate | OperandRole::FfnUp => Some(vec![intermediate, hidden]),
         OperandRole::FfnDown => Some(vec![hidden, intermediate]),
         // Linear(hidden -> q_heads*head_dim), per the judged spec.

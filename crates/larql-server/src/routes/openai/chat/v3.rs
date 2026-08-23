@@ -64,6 +64,7 @@ pub(super) async fn respond(
     logprobs_requested: bool,
     model_id: String,
     timeout: std::time::Duration,
+    runtime: Arc<crate::runtime_stats::RuntimeRecorder>,
 ) -> Result<Response, OpenAIError> {
     if stream {
         return Ok(stream_v3_chat(
@@ -75,21 +76,29 @@ pub(super) async fn respond(
             constrained_schema,
             tools_active,
             model_id,
+            runtime,
         )
         .into_response());
     }
 
+    let started = std::time::Instant::now();
+    let _gen_guard = Arc::clone(&runtime).enter_generation();
     let handle = tokio::task::spawn_blocking(move || -> Result<_, ServerError> {
-        run_v3_chat(
+        let mut tally = crate::runtime_stats::GenerationTally::new();
+        let out = run_v3_chat(
             &model,
             &messages,
             max_tokens,
             sampling_params,
             &stop_strings,
             constrained_schema,
-        )
+            &mut tally,
+        )?;
+        Ok((out, tally))
     });
-    let (text, tokens, finish_reason, prompt_tokens) = join_generation(handle, timeout).await?;
+    let ((text, tokens, finish_reason, prompt_tokens), tally) =
+        join_generation(handle, timeout).await?;
+    runtime.record(tally.into_sample(crate::state::elapsed_ms(started)));
 
     // Tool shaping mirrors the V2 handler: the constrained output
     // parses into `tool_calls`, and an unparseable output is a 400
@@ -169,6 +178,7 @@ fn run_v3_chat(
     sampling_params: SamplingParams,
     stop_strings: &[String],
     constrained_schema: Option<Schema>,
+    tally: &mut crate::runtime_stats::GenerationTally,
 ) -> Result<BufferedChat, ServerError> {
     let prompt_ids = encode_chat_prompt(model, messages)?;
     let (sampling, eos) = build_sampling_eos(sampling_params, stop_strings);
@@ -181,6 +191,12 @@ fn run_v3_chat(
         constrained_schema,
         |_, _| {},
     )?;
+    tally.add_v3(
+        generation.prompt_tokens,
+        generation.texts.len(),
+        generation.prefill_ms,
+        generation.decode_ms_total,
+    );
 
     let mut text: String = generation.texts.concat();
     let mut tokens: Vec<(String, f64)> =
@@ -249,11 +265,14 @@ fn stream_v3_chat(
     constrained_schema: Option<Schema>,
     tools_active: bool,
     model_id: String,
+    runtime: Arc<crate::runtime_stats::RuntimeRecorder>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let (tx, rx) = tokio::sync::mpsc::channel::<String>(SSE_CHANNEL_DEPTH);
     let chat_id = format!("chatcmpl-{}", new_id_suffix());
+    let call_started = std::time::Instant::now();
 
     tokio::task::spawn_blocking(move || {
+        let _gen_guard = runtime.clone().enter_generation();
         let prompt_ids = match encode_chat_prompt(&model, &messages) {
             Ok(ids) => ids,
             Err(e) => {
@@ -290,7 +309,7 @@ fn stream_v3_chat(
                 });
             },
         );
-        let finish_reason: &'static str = match result {
+        let finish_reason: &'static str = match &result {
             Ok(_) if tools_active => super::super::util::FINISH_REASON_TOOL_CALLS,
             Ok(generation)
                 if tap.halted()
@@ -305,6 +324,16 @@ fn stream_v3_chat(
                 return;
             }
         };
+        if let Ok(generation) = &result {
+            let mut tally = crate::runtime_stats::GenerationTally::new();
+            tally.add_v3(
+                generation.prompt_tokens,
+                generation.texts.len(),
+                generation.prefill_ms,
+                generation.decode_ms_total,
+            );
+            runtime.record(tally.into_sample(crate::state::elapsed_ms(call_started)));
+        }
         if tools_active {
             // One chunk carrying the whole parsed tool_calls payload —
             // the V2 stream's contract.

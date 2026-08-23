@@ -266,8 +266,12 @@ mod continuation {
             LoadedArtifact::V2(_) => panic!("a VINDEX3 container must bind as V3"),
         };
         Arc::new(AppState {
-            models: Vec::new(),
-            v3_models: vec![v3],
+            model_set: std::sync::RwLock::new(larql_server::state::ModelSet {
+                models: Vec::new(),
+                v3_models: vec![v3],
+            }),
+            router_topology: larql_server::state::RouterTopology::SingleModel,
+            lifecycle: std::sync::Mutex::new(larql_server::state::LifecycleState::Idle),
             started_at: std::time::Instant::now(),
             requests_served: std::sync::atomic::AtomicU64::new(0),
             api_key: None,
@@ -279,6 +283,7 @@ mod continuation {
                 kv_entries,
                 larql_server::response_kv::DEFAULT_TTL_SECS,
             ),
+            runtime: Arc::new(larql_server::runtime_stats::RuntimeRecorder::new()),
         })
     }
 

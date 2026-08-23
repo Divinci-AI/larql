@@ -26,6 +26,8 @@
 //! request spent loading a model the server already had.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 
 use larql_inference::layer_graph::generate::detok::Detokenizer;
 use larql_inference::vindex3::{
@@ -64,9 +66,31 @@ pub struct V3Model {
     /// directory basename, so id-substring matching answers "plain" for
     /// any container whose folder is not named after its family.
     pub family: String,
+    /// Count of in-flight generations on this container — the V3
+    /// counterpart of `LoadedModel.requests_in_flight`, which V3 had
+    /// none of before this (no walk-ffn/grid participation to have
+    /// borrowed one from). Private: the only way to change it is
+    /// [`V3GenerationGuard`], entered once at the
+    /// [`generate_v3_request`] choke point every V3 route funnels
+    /// through — never a raw field a caller could increment without
+    /// the matching decrement. Read it via
+    /// [`V3Model::requests_in_flight`].
+    requests_in_flight: Arc<AtomicU32>,
 }
 
 impl V3Model {
+    /// Current count of in-flight generations on this model. One
+    /// relaxed atomic load — cheap enough to call from a status
+    /// endpoint on every request, no lock. Exact count of what's
+    /// genuinely running: the guard that maintains this lives inside
+    /// [`generate_v3_request`], so it covers a streaming request's
+    /// real decode-loop lifetime, not just however long the async
+    /// route handler took to return its (immediate, for a stream) HTTP
+    /// response.
+    pub fn requests_in_flight(&self) -> u32 {
+        self.requests_in_flight.load(Ordering::Relaxed)
+    }
+
     /// The chat template to render conversations with.
     ///
     /// Family first (the container's own declaration), model id second
@@ -123,6 +147,7 @@ pub fn load_v3_model(path: &Path) -> Result<V3Model, Box<dyn std::error::Error +
         runtime,
         tokenizer,
         family,
+        requests_in_flight: Arc::new(AtomicU32::new(0)),
     };
     if matches!(
         model.chat_template(),
@@ -152,6 +177,16 @@ pub struct V3Generation {
     /// How many of the run's prompt tokens were served from a resumed
     /// KV state instead of being re-prefilled (0 on a fresh run).
     pub reused_prompt_tokens: usize,
+    /// Wall-clock time of the `prefill_into` call below, in ms. The V3
+    /// driver ([`larql_inference::vindex3::generate`]) carries no
+    /// timing of its own, so this is measured here, around the two
+    /// calls the server already makes — a real number, not one
+    /// invented by an observability endpoint after the fact. Feeds
+    /// `GET /v1/runtime` via [`crate::runtime_stats::GenerationTally::add_v3`].
+    pub prefill_ms: f64,
+    /// Wall-clock time of the `continue_session[_masked]` call below,
+    /// in ms — the decode-loop counterpart of `prefill_ms`.
+    pub decode_ms_total: f64,
 }
 
 /// A generation's continuation state, detached from any session so it
@@ -232,6 +267,31 @@ pub fn generate_v3_resumable(
     )
 }
 
+/// RAII marker for one in-flight V3 generation. Entered once, as the
+/// first statement of [`generate_v3_request`] — the single choke
+/// point every V3 route (completions, chat, responses; buffered and
+/// streaming) funnels through — and dropped on every exit from that
+/// function: the normal `Ok` return, any of its `?` early-returns on
+/// prefill/session/decode failure, and (were the function to ever
+/// panic) unwind too. Nothing at any call site has to remember to
+/// decrement — there's exactly one place the counter changes.
+struct V3GenerationGuard {
+    counter: Arc<AtomicU32>,
+}
+
+impl V3GenerationGuard {
+    fn enter(counter: Arc<AtomicU32>) -> Self {
+        counter.fetch_add(1, Ordering::AcqRel);
+        Self { counter }
+    }
+}
+
+impl Drop for V3GenerationGuard {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 /// The one V3 generation body behind the free, resumable, and
 /// constrained entry points — and the direct entry for callers that
 /// need BOTH knobs (a chained Responses request under a
@@ -248,6 +308,12 @@ pub fn generate_v3_request(
     mask_fn: Option<LogitsMask<'_>>,
     mut on_token: impl FnMut(u32, &str),
 ) -> Result<(V3Generation, V3KvHandoff), ServerError> {
+    // Covers this call's entire body, success or failure — see
+    // `V3GenerationGuard`'s doc comment for why entering here (rather
+    // than in each route handler) is load-bearing for streaming
+    // callers.
+    let _gen_guard = V3GenerationGuard::enter(Arc::clone(&model.requests_in_flight));
+
     // A handoff is resumable only when the new prompt extends exactly
     // what the KV already absorbed.
     let resumed = resume.filter(|h| {
@@ -260,10 +326,12 @@ pub fn generate_v3_request(
         None => (CanonicalKvState::new(), 0),
     };
 
+    let prefill_start = std::time::Instant::now();
     let prefill_logits = model
         .runtime
         .prefill_into(&prompt_ids[reused_prompt_tokens..], &mut kv)
         .map_err(|e| ServerError::Internal(format!("v3 prefill: {e}")))?;
+    let prefill_ms = crate::state::elapsed_ms(prefill_start);
     let mut session = model
         .runtime
         .session_with_kv(&mut kv)
@@ -277,6 +345,7 @@ pub fn generate_v3_request(
         on_token(id, &text);
         texts.push(text);
     };
+    let decode_start = std::time::Instant::now();
     let result = match mask_fn {
         Some(mask_fn) => continue_session_masked(
             &mut session,
@@ -297,6 +366,7 @@ pub fn generate_v3_request(
         ),
     }
     .map_err(|e| ServerError::Internal(format!("v3 decode: {e}")))?;
+    let decode_ms_total = crate::state::elapsed_ms(decode_start);
     drop(session);
 
     // The KV's logical position says exactly how many of
@@ -316,6 +386,8 @@ pub fn generate_v3_request(
             prompt_tokens: prompt_ids.len(),
             stopped_early,
             reused_prompt_tokens,
+            prefill_ms,
+            decode_ms_total,
         },
         V3KvHandoff { kv, absorbed_ids },
     ))

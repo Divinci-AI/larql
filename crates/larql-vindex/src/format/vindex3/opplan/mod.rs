@@ -25,6 +25,7 @@
 
 pub mod build;
 pub mod exec;
+pub mod gated_delta;
 
 #[cfg(test)]
 mod tests;
@@ -39,6 +40,7 @@ use super::graph::policy::AttentionSpan;
 use super::graph::{ObjectKind, OperandRole};
 
 pub use build::plan_component_ops;
+pub use gated_delta::GatedDeltaOp;
 
 /// One kernel argument: a logical object plus its segment-relative tensor.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -236,6 +238,61 @@ pub struct HybridFfnOp {
     pub post_experts_norm: NormOp,
 }
 
+/// One layer's attention-class operator: softmax attention, or a Gated
+/// DeltaNet recurrence.
+///
+/// Untagged for the same reason [`LayerFfn`] is: a softmax layer
+/// serialises exactly as its [`AttentionOp`] always has, so every plan
+/// written before linear attention existed is byte-identical afterwards.
+///
+/// Boxed on both arms because the two ops differ several-fold in size and
+/// a plan holds one per layer.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum LayerAttention {
+    Softmax(Box<AttentionOp>),
+    GatedDelta(Box<GatedDeltaOp>),
+}
+
+impl LayerAttention {
+    /// The softmax op, when this layer attends by softmax. `None` on a
+    /// DeltaNet layer — which is the point: a consumer that needs a span,
+    /// a KV shape or a head geometry must handle the absence rather than
+    /// receive a fabricated one.
+    pub fn softmax(&self) -> Option<&AttentionOp> {
+        match self {
+            Self::Softmax(op) => Some(op.as_ref()),
+            Self::GatedDelta(_) => None,
+        }
+    }
+
+    /// [`Self::softmax`], mutably.
+    pub fn softmax_mut(&mut self) -> Option<&mut AttentionOp> {
+        match self {
+            Self::Softmax(op) => Some(op.as_mut()),
+            Self::GatedDelta(_) => None,
+        }
+    }
+
+    /// The Gated DeltaNet op, when this layer is a linear-attention layer.
+    pub fn gated_delta(&self) -> Option<&GatedDeltaOp> {
+        match self {
+            Self::GatedDelta(op) => Some(op.as_ref()),
+            Self::Softmax(_) => None,
+        }
+    }
+
+    /// The `layer_types` spelling this operator corresponds to, for
+    /// comparing what the plan carries against what the checkpoint
+    /// declared.
+    pub fn declared_name(&self) -> &'static str {
+        match self {
+            Self::Softmax(op) => op.span.declared_name(),
+            Self::GatedDelta(_) => larql_models::config::LAYER_TYPE_LINEAR_ATTENTION,
+        }
+    }
+}
+
 /// One layer's FFN: dense, routed, or both. Untagged, so a dense layer
 /// serialises exactly as its [`FfnOp`] always has — a dense plan is
 /// byte-identical before and after routed and hybrid FFNs existed.
@@ -288,7 +345,10 @@ impl LayerFfn {
 pub struct LayerPlan {
     pub layer: usize,
     pub pre_attention_norm: NormOp,
-    pub attention: AttentionOp,
+    /// This layer's attention-class operator. Not every layer attends by
+    /// softmax: a hybrid checkpoint interleaves DeltaNet recurrences with
+    /// full-attention layers, so the op is a choice, not a shape.
+    pub attention: LayerAttention,
     /// Normalises attention output before its residual add (four-norm
     /// placement only).
     #[serde(skip_serializing_if = "Option::is_none")]

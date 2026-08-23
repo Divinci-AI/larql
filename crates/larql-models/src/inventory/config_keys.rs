@@ -118,6 +118,20 @@ pub const CONSUMED_LEAF_KEYS: &[&str] = &[
     "target_layer_ids",
     "block_size",
     "mask_token_id",
+    // hybrid linear-attention + multi-token-prediction (declared,
+    // R2/Kimi-Linear-rung prep — see `docs/k3-funnel.md`)
+    "linear_conv_kernel_dim",
+    "linear_key_head_dim",
+    "linear_value_head_dim",
+    "linear_num_key_heads",
+    "linear_num_value_heads",
+    "mamba_ssm_dtype",
+    "attn_output_gate",
+    "output_gate_type",
+    "mtp_num_hidden_layers",
+    "mtp_use_dedicated_embeddings",
+    "mrope_interleaved",
+    "mrope_section",
 ];
 
 /// Containers the parser recurses into: leaves inside keep consumed-leaf

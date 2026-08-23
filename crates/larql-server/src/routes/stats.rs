@@ -247,8 +247,8 @@ pub async fn handle_stats(
 ) -> Result<Json<serde_json::Value>, ServerError> {
     state.bump_requests();
     let stats = match state.served_or_err(None)? {
-        ServedModel::V2(model) => add_q4k_ffn(model, build_stats(model)).await,
-        ServedModel::V3(model) => build_v3_stats(model),
+        ServedModel::V2(model) => add_q4k_ffn(&model, build_stats(&model)).await,
+        ServedModel::V3(model) => build_v3_stats(&model),
     };
     Ok(Json(add_server_block(&state, stats).await))
 }
@@ -269,8 +269,8 @@ pub async fn handle_stats_multi(
 ) -> Result<Json<serde_json::Value>, ServerError> {
     state.bump_requests();
     let stats = match state.served_or_err(Some(&model_id))? {
-        ServedModel::V2(model) => add_q4k_ffn(model, build_stats(model)).await,
-        ServedModel::V3(model) => build_v3_stats(model),
+        ServedModel::V2(model) => add_q4k_ffn(&model, build_stats(&model)).await,
+        ServedModel::V3(model) => build_v3_stats(&model),
     };
     Ok(Json(add_server_block(&state, stats).await))
 }

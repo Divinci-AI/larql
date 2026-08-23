@@ -119,6 +119,18 @@ impl TestMoeArch {
                 mask_token_id: None,
                 use_double_wide_mlp: None,
                 vocab_size_per_layer_input: None,
+                linear_conv_kernel_dim: None,
+                linear_key_head_dim: None,
+                linear_value_head_dim: None,
+                linear_num_key_heads: None,
+                linear_num_value_heads: None,
+                mamba_ssm_dtype: None,
+                attn_output_gate: None,
+                output_gate_type: None,
+                mtp_num_hidden_layers: None,
+                mtp_use_dedicated_embeddings: None,
+                mrope_interleaved: None,
+                mrope_section: None,
             },
         }
     }
@@ -327,8 +339,12 @@ fn make_loaded_model(
 
 async fn spawn_server_with_model(model: LoadedModel) -> String {
     let state = Arc::new(AppState {
-        models: vec![Arc::new(model)],
-        v3_models: Vec::new(),
+        model_set: std::sync::RwLock::new(larql_server::state::ModelSet {
+            models: vec![Arc::new(model)],
+            v3_models: Vec::new(),
+        }),
+        router_topology: larql_server::state::RouterTopology::SingleModel,
+        lifecycle: std::sync::Mutex::new(larql_server::state::LifecycleState::Idle),
         started_at: std::time::Instant::now(),
         requests_served: std::sync::atomic::AtomicU64::new(0),
         api_key: None,
@@ -340,6 +356,7 @@ async fn spawn_server_with_model(model: LoadedModel) -> String {
             larql_server::response_kv::DEFAULT_MAX_ENTRIES,
             larql_server::response_kv::DEFAULT_TTL_SECS,
         ),
+        runtime: Arc::new(larql_server::runtime_stats::RuntimeRecorder::new()),
     });
 
     let router = single_model_router(state);

@@ -122,6 +122,37 @@ const GROUP_PATTERNS: &[(GroupClass, &[&str])] = &[
     (GroupClass::Stack, &["layers", "blocks"]),
 ];
 
+/// Top-level path segments that name a tensor namespace declared *outside*
+/// any component this builder places — evidence the checkpoint carries a
+/// distinct sub-model the placement vocabulary has no `GroupClass`/
+/// `ObjectKind` for yet. Qwen3.5's multi-token-prediction draft head is the
+/// first observed case: `mtp.fc`, `mtp.layers.*`, `mtp.norm`,
+/// `mtp.pre_fc_norm_hidden`, `mtp.pre_fc_norm_embedding` all live under a
+/// `mtp.` prefix that sits beside — not inside — the primary text model's
+/// own `model.language_model.*` tensors.
+///
+/// This check must run *before* the substring [`GROUP_PATTERNS`] scan, not
+/// after: `mtp.layers` contains `"layers"`, `mtp.norm` and
+/// `mtp.pre_fc_norm_hidden` contain `"norm"`, and `mtp.pre_fc_norm_embedding`
+/// contains `"embedding"`, so each would otherwise silently name-classify as
+/// `Stack`/`Norm`/`Embedding` and merge into the primary text component's
+/// own `DecoderStack`/`FinalNorm`/`Embedding` object — corrupting that
+/// object's tensor accounting with a different sub-model's weights. Only
+/// `mtp.fc` matches no existing pattern and already surfaced honestly; every
+/// other `mtp.*` group was being lost to this shadowing. A namespace here
+/// classifies as [`GroupClass::Unknown`] and surfaces in `unplaced` with the
+/// same "no placement rule" reason a truly-unrecognised prefix gets — there
+/// is no `ObjectKind` for an MTP draft head yet, so honestly refusing to
+/// place it is the correct behaviour, not a stand-in for one.
+const COMPONENT_EXTERNAL_NAMESPACES: &[&str] = &["mtp"];
+
+/// Whether `prefix`'s first `.`-separated path segment names a
+/// [`COMPONENT_EXTERNAL_NAMESPACES`] entry.
+fn is_component_external_namespace(prefix: &str) -> bool {
+    let first_segment = prefix.split('.').next().unwrap_or(prefix);
+    COMPONENT_EXTERNAL_NAMESPACES.contains(&first_segment)
+}
+
 /// Intermediate classification of one tensor-group prefix.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GroupClass {
@@ -196,6 +227,9 @@ fn perception_component_for(
 }
 
 fn classify_group(prefix: &str) -> GroupClass {
+    if is_component_external_namespace(prefix) {
+        return GroupClass::Unknown;
+    }
     for (class, patterns) in GROUP_PATTERNS {
         if patterns.iter().any(|p| prefix.contains(p)) {
             return *class;
@@ -522,6 +556,13 @@ fn attention_table(inventory: &ArchitectureInventory) -> Vec<AttentionLayerPolic
                 num_kv_heads: layer.num_kv_heads,
             }),
             v_from_k: layer.v_from_k,
+            // Carried alongside the boolean-derived `span` verbatim, so a
+            // declared spelling the vocabulary cannot express (a hybrid
+            // linear-attention interleave) is recorded rather than
+            // silently lost behind whatever `span` defaulted to. See
+            // `AttentionLayerPolicy::declared_span` and
+            // `plan::carriage::probe_layer_types`.
+            declared_span: layer.declared_span.clone(),
         })
         .collect()
 }
@@ -576,6 +617,7 @@ fn nested_attention_table(
                 // whole tower; the surface carries it.
                 geometry: None,
                 v_from_k: false,
+                declared_span: Some(entry.clone()),
             })
         })
         .collect()

@@ -10,12 +10,19 @@
 //! placement, RoPE convention, residual order — not shared arithmetic.
 
 mod attention_kv_parity;
+mod continuation;
 mod controls;
 mod coverage_backend_decode;
 mod coverage_device;
 mod coverage_experts_production;
 mod decode;
 mod device;
+mod gated_delta_parity;
+mod gated_delta_tiny;
+mod plan_fixtures;
+#[rustfmt::skip]
+mod qw2_tiny_fixture;
+mod gated_delta_refusal;
 mod gemma4;
 mod gemma4_refusals;
 mod golden;

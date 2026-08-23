@@ -279,7 +279,10 @@ fn a_sink_operand_without_a_judgment_refuses() {
     let outcome = closure(container.path());
     assert!(outcome.closed(), "{:?}", outcome.defects);
     let plan = outcome.plan.unwrap();
-    assert!(plan.layers.iter().all(|l| l.attention.sinks.is_some()));
+    assert!(plan
+        .layers
+        .iter()
+        .all(|l| l.attention.softmax().unwrap().sinks.is_some()));
 }
 
 #[test]

@@ -12,6 +12,7 @@ mod gemma4;
 mod gpt2_aliases;
 mod kv_recompute;
 mod norm_eps;
+mod qwen35_hybrid;
 mod real_configs;
 mod rope_scaling;
 mod routing;

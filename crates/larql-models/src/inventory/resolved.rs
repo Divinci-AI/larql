@@ -96,6 +96,11 @@ pub fn resolve(config: &Value, identity: &Identity) -> (Detection, ResolvedTopol
                     ATTENTION_FULL
                 }
                 .to_string(),
+                declared_span: cfg
+                    .layer_types
+                    .as_ref()
+                    .and_then(|types| types.get(layer))
+                    .cloned(),
                 window: if sliding {
                     arch.sliding_window_size()
                 } else {
@@ -176,6 +181,10 @@ pub fn resolve(config: &Value, identity: &Identity) -> (Detection, ResolvedTopol
         },
         layers,
         execution: Some(execution),
+        // Present only when the model declares a complete recurrence.
+        // A partial declaration resolves to `None` rather than being
+        // completed with defaults — see `LinearAttentionTopology::from_config`.
+        linear_attention: crate::inventory::report::LinearAttentionTopology::from_config(cfg),
     };
     (detection, topology)
 }

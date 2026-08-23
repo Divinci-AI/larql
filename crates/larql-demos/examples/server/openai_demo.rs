@@ -117,8 +117,12 @@ async fn post_json(app: &Router, path: &str, body: &Value) -> (StatusCode, Value
 
 fn make_app_state(model: LoadedModel) -> Arc<AppState> {
     Arc::new(AppState {
-        models: vec![Arc::new(model)],
-        v3_models: Vec::new(),
+        model_set: std::sync::RwLock::new(larql_server::state::ModelSet {
+            models: vec![Arc::new(model)],
+            v3_models: Vec::new(),
+        }),
+        router_topology: larql_server::state::RouterTopology::SingleModel,
+        lifecycle: std::sync::Mutex::new(larql_server::state::LifecycleState::Idle),
         started_at: Instant::now(),
         requests_served: AtomicU64::new(0),
         api_key: None,
@@ -130,6 +134,7 @@ fn make_app_state(model: LoadedModel) -> Arc<AppState> {
             larql_server::response_kv::DEFAULT_MAX_ENTRIES,
             larql_server::response_kv::DEFAULT_TTL_SECS,
         ),
+        runtime: Arc::new(larql_server::runtime_stats::RuntimeRecorder::new()),
     })
 }
 

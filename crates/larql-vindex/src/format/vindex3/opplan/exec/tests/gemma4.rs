@@ -374,10 +374,13 @@ fn a_hybrid_gemma4_plan_closes_and_executes_at_parity_on_every_backend() {
         assert!(hybrid.routed.router_per_expert_scale.is_some());
         assert!(hybrid.routed.router_norm_eps.is_some());
         assert!(layer.layer_scale.is_some(), "layer {} scalar", layer.layer);
-        assert_eq!(layer.attention.v_from_k, layer.layer == FULL_LAYER);
-        assert!(layer.attention.parameter_free_qk_norm.v);
+        assert_eq!(
+            layer.attention.softmax().unwrap().v_from_k,
+            layer.layer == FULL_LAYER
+        );
+        assert!(layer.attention.softmax().unwrap().parameter_free_qk_norm.v);
     }
-    let full = &plan.layers[FULL_LAYER].attention;
+    let full = plan.layers[FULL_LAYER].attention.softmax().unwrap();
     assert_eq!(
         (full.head_dim, full.num_kv_heads),
         (GLOBAL_HEAD_DIM, GLOBAL_KV_HEADS)

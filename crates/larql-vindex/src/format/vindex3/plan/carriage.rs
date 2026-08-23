@@ -540,6 +540,90 @@ pub const CARRIAGE_RULES: &[CarriageRule] = &[
         site: "no schema field — a KV-allocation bound, read by no generic op",
         probe: None,
     },
+    // ── Hybrid linear-attention + multi-token-prediction (declared, not
+    //    yet executed — R2/Kimi-Linear rung, see docs/k3-funnel.md) ──
+    //
+    // No `AttentionOp` variant computes a linear-attention layer and no
+    // MTP-head object exists in the schema, so every one of these always
+    // refuses via the shared `probe_unrepresented` — the same idiom
+    // `norm_topk_prob`/`high_freq_factor` above use for "no schema field
+    // yet". Each still gets its own rule (rather than falling through
+    // `carriage_finding`'s generic no-rule message) so
+    // `every_execution_semantic_leaf_has_a_carriage_rule` covers it: a
+    // future field added to the registry without a rule fails there
+    // before it fails on a checkpoint.
+    CarriageRule {
+        leaf: "linear_conv_kernel_dim",
+        reaches: Carriage::Lowered,
+        site: "ExecutionSurface.linear_attention.conv_kernel → GatedDeltaOp.conv_kernel",
+        probe: Some(probe_linear_conv_kernel),
+    },
+    CarriageRule {
+        leaf: "linear_key_head_dim",
+        reaches: Carriage::Lowered,
+        site: "ExecutionSurface.linear_attention.key_head_dim → GatedDeltaOp.key_head_dim",
+        probe: Some(probe_linear_key_head_dim),
+    },
+    CarriageRule {
+        leaf: "linear_value_head_dim",
+        reaches: Carriage::Lowered,
+        site: "ExecutionSurface.linear_attention.value_head_dim → GatedDeltaOp.value_head_dim",
+        probe: Some(probe_linear_value_head_dim),
+    },
+    CarriageRule {
+        leaf: "linear_num_key_heads",
+        reaches: Carriage::Lowered,
+        site: "ExecutionSurface.linear_attention.key_heads → GatedDeltaOp.num_key_heads",
+        probe: Some(probe_linear_key_heads),
+    },
+    CarriageRule {
+        leaf: "linear_num_value_heads",
+        reaches: Carriage::Lowered,
+        site: "ExecutionSurface.linear_attention.value_heads → GatedDeltaOp.num_value_heads",
+        probe: Some(probe_linear_value_heads),
+    },
+    CarriageRule {
+        leaf: "mamba_ssm_dtype",
+        reaches: Carriage::Lowered,
+        site: "ExecutionSurface.linear_attention.state_dtype → GatedDeltaState precision",
+        probe: Some(probe_linear_state_dtype),
+    },
+    CarriageRule {
+        leaf: "attn_output_gate",
+        reaches: Carriage::Represented,
+        site: "no schema field — the attention output gate is not represented yet",
+        probe: Some(probe_unrepresented),
+    },
+    CarriageRule {
+        leaf: "output_gate_type",
+        reaches: Carriage::Represented,
+        site: "no schema field — the attention output gate is not represented yet",
+        probe: Some(probe_unrepresented),
+    },
+    CarriageRule {
+        leaf: "mtp_num_hidden_layers",
+        reaches: Carriage::Represented,
+        site: "no schema field — the multi-token-prediction head is not represented yet",
+        probe: Some(probe_unrepresented),
+    },
+    CarriageRule {
+        leaf: "mtp_use_dedicated_embeddings",
+        reaches: Carriage::Represented,
+        site: "no schema field — the multi-token-prediction head is not represented yet",
+        probe: Some(probe_unrepresented),
+    },
+    CarriageRule {
+        leaf: "mrope_interleaved",
+        reaches: Carriage::Represented,
+        site: "no schema field — mRoPE multi-axis sectioning is not represented yet",
+        probe: Some(probe_unrepresented),
+    },
+    CarriageRule {
+        leaf: "mrope_section",
+        reaches: Carriage::Represented,
+        site: "no schema field — mRoPE multi-axis sectioning is not represented yet",
+        probe: Some(probe_unrepresented),
+    },
 ];
 
 /// The rule governing a config leaf, if any.
@@ -764,14 +848,92 @@ fn probe_yarn_original_max(component: &Component, _ctx: &ProbeContext<'_>) -> Op
 /// Per-layer span kinds in the checkpoint's own vocabulary, so the
 /// comparison is against the declared spelling rather than a rendering
 /// this probe invents.
+///
+/// Refuses (returns `None`) rather than vouching for the interleave when
+/// any layer's own [`declared_span`](super::super::graph::policy::AttentionLayerPolicy::declared_span)
+/// disagrees with what `span` resolved to. `AttentionLayerPolicy::span`
+/// is built off a boolean sliding/full split that silently defaults any
+/// spelling outside its three-way vocabulary (a hybrid linear-attention
+/// layer, e.g.) to `Full` — echoing `span.declared_name()` back in that
+/// state would report the declared interleave as carried when the graph
+/// actually dropped it. See `docs/k3-funnel.md` §4.7.8.
 fn probe_layer_types(component: &Component, _ctx: &ProbeContext<'_>) -> Option<Value> {
     let table = component.attention.as_ref()?;
+    let all_faithful = table.iter().all(|l| match l.declared_span.as_deref() {
+        Some(raw) => AttentionSpan::from_declared(raw) == Some(l.span),
+        None => true,
+    });
+    if !all_faithful {
+        return None;
+    }
     Some(Value::Array(
         table
             .iter()
             .map(|l| json!(l.span.declared_name()))
             .collect(),
     ))
+}
+
+/// The Gated DeltaNet geometry the surface carries, read back per field.
+///
+/// Each answers only if the component actually built a linear-attention
+/// block. A component with no recurrence answers `None`, and the gate then
+/// reports carriage without a value comparison rather than inventing a
+/// disagreement — the same contract every probe here has.
+///
+/// These are `Lowered` rather than `Represented` because each value
+/// terminates in a real operand contract: the five together derive
+/// `qkv_channels` and `value_width`, which the nine `LinearAttn*` shape
+/// checks close against the stored tensors.
+fn probe_linear_key_heads(component: &Component, _ctx: &ProbeContext<'_>) -> Option<Value> {
+    Some(json!(
+        component.execution.as_ref()?.linear_attention?.key_heads
+    ))
+}
+
+fn probe_linear_key_head_dim(component: &Component, _ctx: &ProbeContext<'_>) -> Option<Value> {
+    Some(json!(
+        component.execution.as_ref()?.linear_attention?.key_head_dim
+    ))
+}
+
+fn probe_linear_value_heads(component: &Component, _ctx: &ProbeContext<'_>) -> Option<Value> {
+    Some(json!(
+        component.execution.as_ref()?.linear_attention?.value_heads
+    ))
+}
+
+fn probe_linear_value_head_dim(component: &Component, _ctx: &ProbeContext<'_>) -> Option<Value> {
+    Some(json!(
+        component
+            .execution
+            .as_ref()?
+            .linear_attention?
+            .value_head_dim
+    ))
+}
+
+fn probe_linear_conv_kernel(component: &Component, _ctx: &ProbeContext<'_>) -> Option<Value> {
+    Some(json!(
+        component.execution.as_ref()?.linear_attention?.conv_kernel
+    ))
+}
+
+/// The recurrence's state precision, echoed in the checkpoint's own
+/// spelling.
+///
+/// `Lowered` rather than `Represented` because it has a consumer: the
+/// reference operator allocates and accumulates `GatedDeltaState` at this
+/// precision. Until that executor existed this rule refused, because
+/// claiming carriage into a runtime surface that could not use the value
+/// would have asserted something untrue.
+fn probe_linear_state_dtype(component: &Component, _ctx: &ProbeContext<'_>) -> Option<Value> {
+    Some(json!(component
+        .execution
+        .as_ref()?
+        .linear_attention?
+        .state_dtype?
+        .declared_name()))
 }
 
 /// The uniform sliding window across sliding layers, when there is one.

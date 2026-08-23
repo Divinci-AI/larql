@@ -1,4 +1,7 @@
-//! AppState: loaded vindex + config, shared across all handlers.
+//! `LoadedModel`: one bound VINDEX2 model, its lazy-loaded weights,
+//! and the per-model counters/caches route handlers touch directly.
+//! Split out of the top-level `state` module (see `mod.rs`) purely
+//! for file size — nothing here changed behavior.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -7,15 +10,10 @@ use std::sync::Arc;
 use crate::embed_store::EmbedStoreF16;
 
 use larql_models::ModelWeights;
-use larql_vindex::{
-    format::filenames::FEATURE_LABELS_JSON, ndarray::Array2, tokenizers, PatchedVindex,
-    VindexConfig,
-};
+use larql_vindex::{ndarray::Array2, tokenizers, PatchedVindex, VindexConfig};
 use tokio::sync::RwLock;
 
-use crate::cache::DescribeCache;
 use crate::ffn_l2_cache::FfnL2Cache;
-use crate::session::SessionManager;
 
 /// A single loaded model.
 pub struct LoadedModel {
@@ -263,179 +261,6 @@ impl LoadedModel {
         let _ = self.weights.set(std::sync::RwLock::new(weights));
         Ok(self.weights.get().unwrap())
     }
-}
-
-/// Shared application state.
-pub struct AppState {
-    /// Loaded models, keyed by model ID.
-    pub models: Vec<Arc<LoadedModel>>,
-    /// Loaded VINDEX3 runtimes (VI3-SERVE-1), keyed by model ID.
-    /// A separate registry, deliberately: a V3 container binds as an
-    /// executable program ([`crate::vindex3::V3Model`]), never as a
-    /// reconstituted `ModelWeights`, and the two shapes share nothing
-    /// below the serving surface.
-    pub v3_models: Vec<Arc<crate::vindex3::V3Model>>,
-    /// Server start time for uptime reporting.
-    pub started_at: std::time::Instant,
-    /// Request counter.
-    pub requests_served: std::sync::atomic::AtomicU64,
-    /// Optional API key for authentication.
-    pub api_key: Option<String>,
-    /// Per-session PatchedVindex manager.
-    pub sessions: SessionManager,
-    /// Stored Responses-API envelopes + conversations, backing
-    /// `store` / `previous_response_id` and `GET /v1/responses/{id}`.
-    pub responses: crate::response_store::ResponseStore,
-    /// N1 — resident KV continuation states for chained V3 responses
-    /// (`previous_response_id`); see [`crate::response_kv`].
-    pub v3_kv: crate::response_kv::ResponseKvCache,
-    /// DESCRIBE result cache.
-    pub describe_cache: DescribeCache,
-    /// Server-side hard timeout for `/v1/infer` and friends.  When
-    /// the wall-time of the spawn_blocking future exceeds this, the
-    /// handler responds 504 and drops the JoinHandle.  The blocking
-    /// thread is *not* killed (we don't have cooperative cancel on
-    /// the inference path) — it runs to completion in the
-    /// background and its result is discarded.  Default: 60s; set
-    /// to 0 to disable.  See BUG-infer-deadlock §5.6.
-    pub infer_timeout: std::time::Duration,
-}
-
-/// One request's resolved model binding: which runtime serves it.
-/// Produced only by [`AppState::served`]; the enum exists so the
-/// version distinction lives at model resolution, not inside
-/// generation code.
-pub enum ServedModel<'a> {
-    V2(&'a Arc<LoadedModel>),
-    V3(&'a Arc<crate::vindex3::V3Model>),
-}
-
-impl AppState {
-    /// Get model by ID, or the only model if single-model serving.
-    pub fn model(&self, id: Option<&str>) -> Option<&Arc<LoadedModel>> {
-        match id {
-            Some(id) => self.models.iter().find(|m| m.id == id),
-            None if self.models.len() == 1 => self.models.first(),
-            None => None,
-        }
-    }
-
-    /// Whether this is multi-model serving.
-    pub fn is_multi_model(&self) -> bool {
-        self.models.len() + self.v3_models.len() > 1
-    }
-
-    /// Resolve a request's model across BOTH registries. This is the
-    /// single place the V2/V3 distinction is decided — routes match
-    /// the returned binding once, at the top, and no version check
-    /// leaks below it.
-    pub fn served(&self, id: Option<&str>) -> Option<ServedModel<'_>> {
-        match id {
-            Some(id) => self
-                .models
-                .iter()
-                .find(|m| m.id == id)
-                .map(ServedModel::V2)
-                .or_else(|| {
-                    self.v3_models
-                        .iter()
-                        .find(|m| m.id == id)
-                        .map(ServedModel::V3)
-                }),
-            None if self.models.len() + self.v3_models.len() == 1 => self
-                .models
-                .first()
-                .map(ServedModel::V2)
-                .or_else(|| self.v3_models.first().map(ServedModel::V3)),
-            None => None,
-        }
-    }
-
-    /// [`served`](Self::served), or a `NotFound` error.
-    pub fn served_or_err(
-        &self,
-        id: Option<&str>,
-    ) -> Result<ServedModel<'_>, crate::error::ServerError> {
-        self.served(id).ok_or_else(|| {
-            let msg = match id {
-                Some(mid) => format!("model '{}' not found", mid),
-                None => "no model loaded".into(),
-            };
-            crate::error::ServerError::NotFound(msg)
-        })
-    }
-
-    pub fn bump_requests(&self) {
-        self.requests_served
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    /// Get a model by ID, or return a `NotFound` error.
-    ///
-    /// Consolidates the 23+ identical `state.model(...).ok_or_else(|| ...)` call
-    /// sites scattered across the route handlers.
-    pub fn model_or_err(
-        &self,
-        id: Option<&str>,
-    ) -> Result<&Arc<LoadedModel>, crate::error::ServerError> {
-        self.model(id).ok_or_else(|| {
-            let msg = match id {
-                Some(mid) => format!("model '{}' not found", mid),
-                None => "no model loaded".into(),
-            };
-            crate::error::ServerError::NotFound(msg)
-        })
-    }
-}
-
-/// Compute elapsed milliseconds from `start`, rounded to one decimal place.
-pub fn elapsed_ms(start: std::time::Instant) -> f64 {
-    let ms = start.elapsed().as_secs_f64() * 1000.0;
-    (ms * 10.0).round() / 10.0
-}
-
-/// Load probe-confirmed feature labels from feature_labels.json.
-/// Format: {"L{layer}_F{feature}": "relation_name", ...}
-pub fn load_probe_labels(vindex_path: &std::path::Path) -> HashMap<(usize, usize), String> {
-    let path = vindex_path.join(FEATURE_LABELS_JSON);
-    let text = match std::fs::read_to_string(&path) {
-        Ok(t) => t,
-        Err(_) => return HashMap::new(),
-    };
-    let obj: serde_json::Value = match serde_json::from_str(&text) {
-        Ok(v) => v,
-        Err(_) => return HashMap::new(),
-    };
-    let map = match obj.as_object() {
-        Some(m) => m,
-        None => return HashMap::new(),
-    };
-
-    let mut labels = HashMap::new();
-    for (key, value) in map {
-        if let Some(rel) = value.as_str() {
-            let parts: Vec<&str> = key.split('_').collect();
-            if parts.len() == 2 {
-                if let (Some(layer), Some(feat)) = (
-                    parts[0]
-                        .strip_prefix('L')
-                        .and_then(|s| s.parse::<usize>().ok()),
-                    parts[1]
-                        .strip_prefix('F')
-                        .and_then(|s| s.parse::<usize>().ok()),
-                ) {
-                    labels.insert((layer, feat), rel.to_string());
-                }
-            }
-        }
-    }
-    labels
-}
-
-/// Derive a short model ID from the full model name.
-/// "google/gemma-3-4b-it" → "gemma-3-4b-it"
-pub fn model_id_from_name(name: &str) -> String {
-    name.rsplit('/').next().unwrap_or(name).to_string()
 }
 
 #[cfg(test)]
