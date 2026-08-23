@@ -362,12 +362,12 @@ pub fn run(cmd: Vindex3Command) -> Result<(), Box<dyn std::error::Error>> {
 
 mod bank;
 mod exec;
-mod sensitivity;
 mod generate;
 #[cfg(all(feature = "gpu", target_os = "macos"))]
 mod lowered;
 mod ops;
 mod optional_op;
+mod sensitivity;
 mod teacher_force;
 use exec::run_exec;
 use ops::run_ops;

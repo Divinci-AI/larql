@@ -29,11 +29,55 @@ pub enum StepEvent {
     FfnDone { layer: usize },
     /// The output head priced the vocabulary for this position.
     Logits { vocab: usize },
+    /// An operand's *input* activation, at the moment the executor hands
+    /// it over.
+    ///
+    /// The finer tap this module's header anticipated, arriving the way it
+    /// said it must: another event on the one executor, not a second
+    /// traversal. It exists because SENSITIVITY-1A established that weight
+    /// geometry alone cannot predict quantisation sensitivity — the
+    /// missing factor is how much the activations amplify a weight
+    /// perturbation, and that cannot be recovered from the weights.
+    ///
+    /// Carries a borrowed slice: an observer that wants the values copies
+    /// them, and one that does not pays nothing. `step` uses the noop
+    /// observer, so the unobserved path is unaffected.
+    OperandInput {
+        layer: usize,
+        /// Which input site — see [`InputSite`].
+        site: InputSite,
+    },
+}
+
+/// Where in a layer an activation was taken.
+///
+/// Two sites, because two suffice: everything else is derivable from them
+/// offline. `q/k/v` read the attention input; `gate/up` read the FFN
+/// input; and `down`'s input is `act(gate(x)) * up(x)`, which a screen can
+/// reconstruct from the FFN input and those two operands rather than
+/// needing its own tap.
+///
+/// `o_proj` is the exception and is *not* covered: its input is the
+/// attention core's output, which never surfaces at this boundary. A
+/// consumer must exclude `o_proj` rather than approximate it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputSite {
+    /// Normalised residual entering attention — input to q, k and v.
+    Attention,
+    /// Normalised residual entering the FFN — input to gate and up.
+    Ffn,
 }
 
 /// A subscriber to the canonical step's observation points.
 pub trait StepObserver {
     fn event(&mut self, event: StepEvent);
+
+    /// Observe an operand input's values. Separate from [`event`] so the
+    /// values are borrowed rather than cloned into an event: capturing
+    /// second moments needs to read the vector, not own it.
+    ///
+    /// [`event`]: Self::event
+    fn operand_input(&mut self, _layer: usize, _site: InputSite, _values: &[f32]) {}
 }
 
 /// The default subscriber: observes nothing. [`DecodeSession::step`]

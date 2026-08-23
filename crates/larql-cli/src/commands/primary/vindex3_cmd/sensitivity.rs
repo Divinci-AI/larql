@@ -102,7 +102,12 @@ pub fn run(args: SensitivityArgs) -> Result<(), Box<dyn std::error::Error>> {
             &args.container.join(&entry.segment),
         )?;
         for t in &header.tensors {
-            let role = classify_in(primary.contains(&entry.object), &entry.object, &t.name, &t.shape);
+            let role = classify_in(
+                primary.contains(&entry.object),
+                &entry.object,
+                &t.name,
+                &t.shape,
+            );
             // Only tensors an encoding could apply to are worth scoring;
             // a norm has no candidate map to appear in.
             if !matches!(role, Role::DecoderLinear | Role::ExpertWeight) {
@@ -138,7 +143,11 @@ pub fn run(args: SensitivityArgs) -> Result<(), Box<dyn std::error::Error>> {
                 energy: den,
             });
             if scores.len() % 40 == 0 {
-                println!("  scored {} tensors ({:.0}s)", scores.len(), started.elapsed().as_secs_f64());
+                println!(
+                    "  scored {} tensors ({:.0}s)",
+                    scores.len(),
+                    started.elapsed().as_secs_f64()
+                );
             }
         }
     }
