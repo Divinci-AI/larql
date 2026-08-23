@@ -47,9 +47,9 @@ use larql_compute::backend::MatMul;
 use larql_models::config::{Activation, GateActivation, GateCombine, GatePlacement, GateSource};
 
 use super::backend::{
-    AttentionCall, AttentionStepCall, AttentionStepOut, DispatchStats, FfnCall, GateCall,
-    MatrixClass, NormCall, PlanBackend, ProjectCall, ProjectedQkv, RoutedFfnCall, WeightFormat,
-    WeightFormats, WeightSlice,
+    AttentionCall, AttentionOut, AttentionStepCall, AttentionStepOut, DispatchStats, FfnCall,
+    GateCall, MatrixClass, NormCall, PlanBackend, ProjectCall, ProjectedQkv, RoutedFfnCall,
+    WeightFormat, WeightFormats, WeightSlice,
 };
 use super::production::{
     add_expert_bias, add_output_bias, add_projection_biases, aggregate_heads,
@@ -367,7 +367,7 @@ impl<M: MatMul + Send> PlanBackend for DevicePlanBackend<M> {
         self.gemv(call.weight, call.out_dim, call.in_dim, call.x)
     }
 
-    fn attention(&self, call: AttentionCall<'_>) -> Result<Vec<Vec<f32>>, VindexError> {
+    fn attention(&self, call: AttentionCall<'_>) -> Result<AttentionOut, VindexError> {
         // Same structure as the production backend's attention; the only
         // substitution is which arithmetic performs each projection.
         // Projections stay serial over positions here — the GPU queue is
@@ -424,7 +424,11 @@ impl<M: MatMul + Send> PlanBackend for DevicePlanBackend<M> {
             add_output_bias(&call, &mut projected);
             out.push(projected);
         }
-        Ok(out)
+        Ok(AttentionOut {
+            outputs: out,
+            keys,
+            values,
+        })
     }
 
     fn attention_step(&self, step: AttentionStepCall<'_>) -> Result<AttentionStepOut, VindexError> {

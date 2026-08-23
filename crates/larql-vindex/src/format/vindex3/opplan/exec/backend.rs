@@ -202,6 +202,24 @@ pub struct BiasCall<'a> {
 /// interpreter — because the judged gate reads that same vector, and
 /// handing the backend one operand for both uses removes any chance of
 /// the two drifting apart.
+/// What a whole-sequence attention pass produces.
+///
+/// `outputs[p]` is position `p`'s attention output post
+/// output-projection; `keys[p]` / `values[p]` are the conditioned rows
+/// for that position — the rows a [`KvState`](super::kv::KvState)
+/// provider caches, in the same form [`PlanBackend::attention_step`]
+/// returns.
+///
+/// Positions are the sequence's own, starting at zero: a batched pass
+/// conditions position `p` as the `p`-th token, so it cannot express a
+/// prefill resuming part-way through a sequence. That is why the
+/// executor still steps when extending a populated provider.
+pub struct AttentionOut {
+    pub outputs: Vec<Vec<f32>>,
+    pub keys: Vec<Vec<f32>>,
+    pub values: Vec<Vec<f32>>,
+}
+
 pub struct AttentionCall<'a> {
     pub inputs: &'a [Vec<f32>],
     pub hidden: usize,
@@ -395,9 +413,20 @@ pub trait PlanBackend: Sync {
     /// rather than borrow another backend's arithmetic.
     fn project(&self, call: ProjectCall<'_>) -> Result<Vec<f32>, VindexError>;
 
-    /// Attention over the whole sequence, returning one output vector per
-    /// position (post output-projection).
-    fn attention(&self, call: AttentionCall<'_>) -> Result<Vec<Vec<f32>>, VindexError>;
+    /// Attention over the whole sequence.
+    ///
+    /// Returns the conditioned K/V rows alongside the outputs because
+    /// the realisation already computes them: it must, to attend at
+    /// all. Discarding them is what forced a caller that wanted a
+    /// populated K/V cache down [`Self::attention_step`] instead —
+    /// coupling "I want KV" to "run attention one position at a time"
+    /// (V3-SERVE-2).
+    ///
+    /// The rows must be the same rows [`Self::attention_step`] would
+    /// produce for the same position and input; both realisations of a
+    /// backend answer for one program, and the attention-parity gates
+    /// pin them together.
+    fn attention(&self, call: AttentionCall<'_>) -> Result<AttentionOut, VindexError>;
 
     /// One position's attention against cached K/V — the decode step.
     ///

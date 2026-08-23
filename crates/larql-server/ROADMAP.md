@@ -157,82 +157,56 @@ it. Confirmed on two real models — gpt-oss-20b 31.93 s → 0.75 s
 `session_with_kv` collapsing to 0.000 s on both. See
 [`CHANGELOG.md`](CHANGELOG.md).
 
-**V3-SERVE-2. Batched prefill that also populates KV, with no second
-replay.** The only remaining server-side performance problem, and now
-an isolated one: with operands resident, prefill is **99.6%** of a
-325-token request and time-to-first-token is entirely prefill-bound.
+**V3-SERVE-2. Batched prefill that also populates KV — DONE, and it
+exposed the next cost.** `PlanBackend::attention` now returns
+`AttentionOut { outputs, keys, values }`: the batched realisation always
+computed the conditioned rows and discarded them, which is what forced a
+caller wanting a populated cache down the per-position path. The two
+axes are now independent, and a fresh prefill takes the batched
+realisation and populates the provider from the one traversal it
+already performs.
 
-V3-SERVE-1 removed a constant and deliberately left this alone, which
-is what makes it independently measurable (Granite 4.1 3B, both arms in
-one process):
+Proven before the trait moved: the batched and per-position
+realisations agree **bit-for-bit** on K, V and outputs — reference and
+production backends, every layer, and all 40 layers of a real Granite
+container (`exec/tests/attention_kv_parity.rs`, with a control that
+fires on a perturbed input so the zeros are agreement rather than an
+inert harness).
 
-```text
-prefill rate      before    after       fixed prefill term
-  5 ->  64        19.61     16.16       3.897 s -> 0.139 s
- 64 -> 325         9.07      8.56
-```
-
-The slope did not move — residency does not touch per-token arithmetic —
-and it still halves with prompt length.
-
-**The defect is a coupling, not a slow kernel.** `traverse`'s `kv`
-argument silently *switches the attention realisation*: `None` runs
-batched attention (the `larql vindex3 exec` path, ~21 tok/s class),
-`Some` runs the decode step's per-position arithmetic — because that is
-the only realisation which happens to fill the provider. So "I want the
-KV populated" currently implies "run attention one position at a time",
-and that implication is the bug.
-
-The API should express two **independent** dimensions:
+Measured on Granite 4.1 3B, battery, prefill_into:
 
 ```text
-attention realization        KV behaviour
-  Batched                      None
-  DecodeStep                   Populate(&mut kv)
-                               Continue(&mut kv)
+prompt      post-2B    post-2C    gain
+     5      0.448 s    0.442 s    1.01x
+    64      4.099 s    3.428 s    1.20x
+   325     34.587 s   25.024 s    1.38x
+
+prefill rate    post-2B   post-2C
+  5 ->  64       16.16     19.76  tok/s
+ 64 -> 325        8.56     12.09  tok/s
 ```
 
-so a prefill reads as `{ realization: Batched, kv: Populate(..) }`
-rather than as today's accidental `kv.is_some() ⇒ per-position`. That
-separation is also what V3-DECOUPLE needs: an attention slice with an
-explicit KV contract is only expressible once the two axes are
-independent.
+No change at n=5 and a gain that grows with n is the signature of
+fixing a per-position realisation — a thermal or power drift would have
+moved all three points.
 
-Wanted — the KV rows as an **output of the same forward**, never a
-batched pass plus a replay to build the cache, which would be the
-double-work defect again in a new place:
+**The remaining gap is no longer attention.** Measured in the same
+session and power state, `larql vindex3 exec`'s batched path runs
+19.50 tok/s over 64 → 256 where the server's prefill runs 11.37 — still
+**1.72x**. (An earlier 21.4 tok/s figure for the CLI was taken on AC;
+re-measuring it on battery is what makes this comparison honest.) Both
+now run the same batched attention, so the difference is what the
+server does *around* it: populating the provider — `kv.append` per
+position per layer, and whatever `CanonicalKvState` does to store a
+row. That is the next thing to measure, and it was invisible while
+per-position attention dominated.
 
-```text
-prepared operands
-        ↓
-batched prefill
-        ├── hidden / output
-        └── KV population for positions [0..N)
-        ↓
-decode
-```
-
-Frozen gates:
-
-- exact logits / generated-token parity with the present KV-filling
-  prefill;
-- KV parity for continuation — the rows a resumed session reads must be
-  the rows it would have read;
-- N1 continuation still resumes, bit-identically;
-- **one traversal of the prompt, one attention realisation, KV
-  populated during that traversal** — no batched pass plus a replay to
-  build the cache, which would be the double-work defect again in a new
-  place. Assert it structurally, the way residency is asserted through
-  `OperandStore::load_count`, not with a stopwatch: a timing-only check
-  passes a batch-then-replay implementation that happens to be fast;
-- prompt-length slope improves materially toward the direct
-  `vindex3 exec` batched class;
-- V3-SERVE-1's fixed-cost win intact — re-run the phase profiler and
-  show `session_open` still 0.000 s and the fixed prefill term still
-  ~0.1 s.
-
-Do not touch 2B while doing it. The two wins are cleanly separated
-right now; combining them would forfeit the ability to attribute either.
+Not done, and deliberately: a **resumed** prefill still steps. A
+batched pass conditions position `p` as the `p`-th token of the
+sequence it is handed, so it cannot express a prefill that starts
+part-way through one. Giving `AttentionCall` an absolute-position base
+would lift that, and would matter for long-history N1 resumes; it is
+its own rung.
 
 **V3-SERVE-3. Backend injection.** The server hardcodes
 `ProductionBackend::new()`, so serving cannot use the Metal backend
@@ -299,14 +273,18 @@ the end, because each rung changes what the previous measurement meant:
 | pre-2B (gemma-2-2b) | 41.75 s | 41.14 s | 1.5% — inside noise |
 | post-2B (gpt-oss-20b) | 45.02 s | 18.77 s | **2.40x** |
 | post-2B (granite-4.1-3b) | 15.94 s | 7.69 s | **2.07x** |
-| post-2C | — | — | to measure |
+| post-2C (granite-4.1-3b) | 20.75 s | 8.63 s | **2.40x** |
 
 N1 was never broken; it was masked by ~7 s of per-request model
-materialisation. The post-2C row matters because 2C may *reduce* N1's
-absolute saving — if prefill gets 2–3x faster, skipping 100 cached
-tokens buys less wall time — while leaving it valuable for long
-histories and TTFT. Taking the middle row now is what keeps those two
-effects separable.
+materialisation. The post-2C row was expected to *shrink* N1's absolute
+saving — faster prefill means less to skip — and on the ratio it did
+not (2.07x → 2.40x). Read it cautiously: the cache-off arm's first turn
+was an outlier (6.63 s against ~2 s in every other run of it), which
+inflates that arm's total, and the runs are minutes apart on battery.
+What is solid is the shape, which is what the row was taken for: with
+the cache, turn time stays near new-turn cost; without it, it grows
+with history. N1 survives 2C as a structural win rather than a
+workaround for slow prefill.
 
 A longest-common-prefix resume is worth reconsidering after 2C, on the
 post-2C numbers, not before.

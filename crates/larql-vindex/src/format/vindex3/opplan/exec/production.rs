@@ -35,8 +35,8 @@ use larql_compute::MoeGateRule;
 
 use super::super::super::graph::policy::AttentionSpan;
 use super::backend::{
-    AttentionCall, AttentionStepCall, AttentionStepOut, FfnCall, GateCall, NormCall, PlanBackend,
-    ProjectCall, ProjectedQkv, QkNormCall, RoutedFfnCall,
+    AttentionCall, AttentionOut, AttentionStepCall, AttentionStepOut, FfnCall, GateCall, NormCall,
+    PlanBackend, ProjectCall, ProjectedQkv, QkNormCall, RoutedFfnCall,
 };
 use super::kernels::{rope_rotate, rope_rotate_scaled};
 use larql_compute::attention::rope::{
@@ -546,7 +546,7 @@ impl PlanBackend for ProductionBackend {
         ))
     }
 
-    fn attention(&self, call: AttentionCall<'_>) -> Result<Vec<Vec<f32>>, VindexError> {
+    fn attention(&self, call: AttentionCall<'_>) -> Result<AttentionOut, VindexError> {
         // Positions are independent, so projection runs in parallel with
         // each position's arithmetic untouched — bit-identical to the
         // serial order.
@@ -567,7 +567,7 @@ impl PlanBackend for ProductionBackend {
 
         // Each query position reads every position's K/V but writes only
         // its own output row — parallel over queries, arithmetic intact.
-        queries
+        let outputs: Vec<Vec<f32>> = queries
             .par_iter()
             .enumerate()
             .map(|(position, query)| {
@@ -580,7 +580,12 @@ impl PlanBackend for ProductionBackend {
                     &call.inputs[position],
                 )
             })
-            .collect()
+            .collect::<Result<_, VindexError>>()?;
+        Ok(AttentionOut {
+            outputs,
+            keys,
+            values,
+        })
     }
 
     fn attention_step(&self, step: AttentionStepCall<'_>) -> Result<AttentionStepOut, VindexError> {

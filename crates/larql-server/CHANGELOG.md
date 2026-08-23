@@ -6,6 +6,53 @@ The format follows the conventions of [Keep a Changelog](https://keepachangelog.
 with dated entries (`YYYY-MM-DD`) instead of semantic versions during the
 pre-1.0 phase. Forward-looking work lives in [`ROADMAP.md`](ROADMAP.md).
 
+## [2026-08-23] — V3-SERVE-2: batched prefill populates KV; the next cost is now visible
+
+`PlanBackend::attention` returns `AttentionOut { outputs, keys, values }`.
+The batched realisation always computed the conditioned K/V rows — it
+must, to attend at all — and then discarded them, which is what forced a
+caller wanting a populated cache down the per-position path. "I want KV"
+no longer implies "run attention one position at a time".
+
+**Proven before the trait moved.** `exec/tests/attention_kv_parity.rs`
+showed the two realisations agree **bit-for-bit** on K, V and outputs —
+reference (the semantic anchor, sharing no arithmetic with
+`larql-compute`) and production, every layer, and all 40 layers of a
+real Granite container. With a control that fires on a perturbed input,
+because `max_abs = 0` everywhere looks the same as an inert harness.
+
+**Measured** (Granite 4.1 3B, battery, `prefill_into`):
+
+| prompt | post-2B | post-2C | gain |
+|---|---|---|---|
+| 5 | 0.448 s | 0.442 s | 1.01x |
+| 64 | 4.099 s | 3.428 s | 1.20x |
+| 325 | 34.587 s | 25.024 s | **1.38x** |
+
+Prefill rate 8.56 → **12.09 tok/s** (64 → 325). No change at n=5 with a
+gain that grows in n is the signature of fixing a per-position
+realisation; drift would have moved all three points.
+
+**What this exposed.** Same session, same power state, the CLI's
+batched path runs 19.50 tok/s over 64 → 256 where the server's prefill
+runs 11.37 — **1.72x** still outstanding. (The 21.4 tok/s CLI figure
+quoted earlier was taken on AC; re-measuring it on battery is what makes
+the comparison honest.) Both now run the same batched attention, so the
+remainder is what the server does *around* it — `kv.append` per position
+per layer and whatever `CanonicalKvState` costs to store a row. That was
+invisible while per-position attention dominated, and it is the next
+thing to measure.
+
+**Deliberately not done.** A *resumed* prefill still steps: a batched
+pass conditions position `p` as the `p`-th token of the sequence it is
+handed, so it cannot express a prefill starting part-way through one.
+The continuation-parity gate now straddles both branches — the
+whole-prompt arm takes the batched path, the split arm's second chunk
+takes the stepped one, and they must agree bit-for-bit.
+
+N1 post-2C: 20.75 s → 8.63 s (**2.40x**) on the frozen ledger, with the
+cached prefix still resuming (25 / 50 / 71 tokens).
+
 ## [2026-08-23] — N1 measured post-2B: 2.4x, and a claim of mine corrected
 
 Taken **before** 2C, because 2B has created an intermediate state that
