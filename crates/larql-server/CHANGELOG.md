@@ -37,6 +37,15 @@ materialisation. Note the rows use different models — gemma-2-2b is no
 longer on disk — so the cross-row comparison is qualitative; the
 within-row A/B and the flat-vs-linear shape are not.
 
+The workload is now checked in as
+`examples/n1_continuation_ledger.rs`, which runs both arms in-process
+through the real router. Its value is comparability across rungs, so
+the turns, output budget and protocol are frozen — a future rung must
+re-run *this*, not a re-invented equivalent. It reproduces the numbers
+above from the ad-hoc script within ~2% (2.44x / 2.03x) with
+`cached_tokens` matching exactly, which is what says the frozen version
+measures the same thing.
+
 **Correction.** This run falsified something recorded here twice
 yesterday: that Granite "gets 0% because it falls to the Plain
 template". Granite resumed cleanly here (cached 25 / 50 / 71). The
