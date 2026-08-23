@@ -57,9 +57,14 @@ pub struct Vindex3Index {
     pub hidden_size: usize,
     pub num_layers: usize,
     /// Filename of the MoE programme manifest, relative to the root.
-    /// `None` on a system container with no routed programme — a dense
-    /// system has nothing for a MoE manifest to describe, and inventing an
-    /// empty one would be a fabricated authority.
+    /// `None` when no routed programme is declared; inventing an empty one
+    /// would be a fabricated authority.
+    ///
+    /// Absence is **not** evidence the model is dense. This manifest is an
+    /// artifact of the import path; a graph-encoded container carries none
+    /// whether or not it routes — `gpt-oss-20b.vindex3` is a routed MoE with a
+    /// `target.expert_bank` representation and `moe_manifest: None`. Read
+    /// [`Self::representations`] to learn what a container actually holds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub moe_manifest: Option<String>,
     /// Filename of the system-graph manifest

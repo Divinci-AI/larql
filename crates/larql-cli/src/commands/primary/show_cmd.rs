@@ -80,13 +80,22 @@ fn show_v3(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
     println!("Hidden:     {}", index.hidden_size);
     println!("Family:     {}", index.family);
     println!("Profiles:   {}", index.profile_names().join(", "));
-    println!(
-        "Manifest:   {}",
-        index
-            .moe_manifest
-            .as_deref()
-            .unwrap_or("(no MoE programme — system container)")
-    );
+
+    // Report the authorities this container carries; print no negative for the
+    // ones it doesn't.
+    //
+    // `moe_manifest` is the *routed-MoE programme* manifest, an artifact of the
+    // import path. A graph-encoded container carries none whether or not it
+    // routes — gpt-oss-20b is a routed MoE, expert bank and all, with
+    // `moe_manifest: None`. An absence line here would say nothing true about
+    // the model's shape while strongly implying "dense", so there isn't one.
+    // What the model contains is the representations table's job.
+    if let Some(graph) = index.system_graph.as_deref() {
+        println!("Graph:      {graph}");
+    }
+    if let Some(manifest) = index.moe_manifest.as_deref() {
+        println!("Manifest:   {manifest}  (routed-MoE programme)");
+    }
 
     show_v3_representations(&index);
 
