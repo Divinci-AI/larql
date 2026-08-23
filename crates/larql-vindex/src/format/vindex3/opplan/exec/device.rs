@@ -404,7 +404,20 @@ impl<M: MatMul + Send> PlanBackend for DevicePlanBackend<M> {
         for (position, mut concat) in aggregated.into_iter().enumerate() {
             if let Some(GateCall { spec, weight }) = &call.gate {
                 // Exhaustive on the judged semantics (see attend_position).
-                let GateSource::AttentionInput = spec.source;
+                // A fused query/gate projection needs the device
+                // projection to emit `2 · head_dim` per head and gather
+                // the halves; that is a kernel change, and this rung does
+                // not touch Metal. Refused rather than silently gated
+                // from the wrong rows.
+                match spec.source {
+                    GateSource::AttentionInput => {}
+                    GateSource::FusedQueryProjection => {
+                        return Err(VindexError::Parse(
+                            "a fused query/gate projection has no device kernel; refusing"
+                                .to_string(),
+                        ))
+                    }
+                }
                 let GateActivation::Sigmoid = spec.activation;
                 let GateCombine::ElementwiseMultiply = spec.combine;
                 let GatePlacement::AfterAggregationBeforeOutputProjection = spec.placement;
@@ -482,7 +495,14 @@ impl<M: MatMul + Send> PlanBackend for DevicePlanBackend<M> {
             // Exhaustive on the judged semantics, like both CPU
             // backends: a new variant must be implemented here before
             // it can execute on the device.
-            let GateSource::AttentionInput = spec.source;
+            match spec.source {
+                GateSource::AttentionInput => {}
+                GateSource::FusedQueryProjection => {
+                    return Err(VindexError::Parse(
+                        "a fused query/gate projection has no device kernel; refusing".to_string(),
+                    ))
+                }
+            }
             let GateActivation::Sigmoid = spec.activation;
             let GateCombine::ElementwiseMultiply = spec.combine;
             let GatePlacement::AfterAggregationBeforeOutputProjection = spec.placement;

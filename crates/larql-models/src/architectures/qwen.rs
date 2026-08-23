@@ -5,7 +5,10 @@
 //! - Qwen3: QK norms (no bias), optional MoE FFN
 //! - Qwen3 MoE: router at `mlp.gate.weight`, per-expert `mlp.experts.{E}.{gate,up,down}_proj.weight`
 
-use crate::config::{ModelArchitecture, ModelConfig};
+use crate::config::{
+    AttentionGateSpec, GateActivation, GateCombine, GatePlacement, GateSource, ModelArchitecture,
+    ModelConfig,
+};
 use crate::tensor_keys::{attn_bias, moe_experts, qk_norm};
 
 pub struct QwenArch {
@@ -25,6 +28,38 @@ impl ModelArchitecture for QwenArch {
 
     fn config(&self) -> &ModelConfig {
         &self.config
+    }
+
+    /// Qwen3.5/3.8's fused attention output gate.
+    ///
+    /// Judged from HF `Qwen3_5Attention.forward`, not from the config's
+    /// own description of itself: HF reads neither `attn_output_gate` nor
+    /// `output_gate_type` (zero references across every `qwen3_5` source
+    /// file), so the gate is unconditional in the reference
+    /// implementation and its real witness is the tensor geometry —
+    /// `q_proj` carries `2 · num_heads · head_dim` rows.
+    ///
+    /// `attn_output_gate` is still what this reads, because a container
+    /// must be able to state the fact without shipping weights, and the
+    /// operand closure check cross-examines it against the actual rows.
+    ///
+    /// The activation is `sigmoid`. The config says `output_gate_type:
+    /// "swish"`, which would be `x · silu(g)` and is NOT what HF computes
+    /// (`x · sigmoid(g)`). That key is deliberately NOT consulted here:
+    /// its semantic owner is unresolved — there is a genuine silu gate
+    /// elsewhere in this model, in DeltaNet's gated RMSNorm — and
+    /// resolving it on resemblance is the ownership error the plan's
+    /// `Unrepresented` verdict exists to keep visible.
+    fn attention_output_gate(&self) -> Option<AttentionGateSpec> {
+        self.config
+            .attn_output_gate
+            .filter(|on| *on)
+            .map(|_| AttentionGateSpec {
+                source: GateSource::FusedQueryProjection,
+                activation: GateActivation::Sigmoid,
+                combine: GateCombine::ElementwiseMultiply,
+                placement: GatePlacement::AfterAggregationBeforeOutputProjection,
+            })
     }
 
     // ── MoE (Qwen3-MoE, Qwen2-MoE) ──

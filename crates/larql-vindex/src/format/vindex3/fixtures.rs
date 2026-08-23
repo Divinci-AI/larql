@@ -409,3 +409,201 @@ pub fn encode_fixture_container(
     let inventory = build_inventory(checkpoint_dir).unwrap();
     encode_system(&[(name.to_string(), inventory)], container_dir).unwrap();
 }
+
+/// A dense model whose query projection is **fused with an attention
+/// output gate** — `2 · num_heads · head_dim` rows, query and gate
+/// interleaved per head.
+///
+/// Built for one job: proving the fused gate's layout and ordering
+/// semantics. It is deliberately not a general small attention model.
+/// The properties that matter are:
+///
+/// * **more than one query head** (8) — a single-head fixture cannot
+///   distinguish a per-head interleave from contiguous halves at all,
+///   because with one head the two layouts are the same bytes;
+/// * `q_proj` rows `2 · 8 · 8 = 128` against an ungated 64, so the shape
+///   contract has something to witness;
+/// * real `q_norm`/`k_norm` weights, so `GateGetsQNorm` is a mutation
+///   that can actually change a number rather than a no-op.
+///
+/// `model_type: "qwen3_5"` because the fused gate is judged on the Qwen
+/// family; nothing else about the fixture is Qwen-specific.
+pub fn gated_q_f32_model(dir: &Path) {
+    std::fs::write(
+        dir.join("config.json"),
+        serde_json::json!({
+            "architectures": ["Qwen3_5ForCausalLM"],
+            "torch_dtype": "float32",
+            "model_type": "qwen3_5",
+            "hidden_size": DENSE_HIDDEN,
+            "num_hidden_layers": DENSE_LAYERS,
+            "intermediate_size": DENSE_INTERMEDIATE,
+            "num_attention_heads": DENSE_Q_HEADS,
+            "num_key_value_heads": DENSE_KV_HEADS,
+            "head_dim": DENSE_HEAD_DIM,
+            "vocab_size": DENSE_VOCAB,
+            "rms_norm_eps": 1e-5,
+            "rope_theta": 10000.0,
+            "attn_output_gate": true
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let q_rows = DENSE_Q_HEADS * DENSE_HEAD_DIM;
+    let kv_rows = DENSE_KV_HEADS * DENSE_HEAD_DIM;
+    let mut shard = ShardBuilder::new();
+    shard.push(
+        "model.embed_tokens.weight",
+        &[DENSE_VOCAB, DENSE_HIDDEN],
+        &lcg_values(DENSE_VOCAB * DENSE_HIDDEN, 1),
+    );
+    shard.push(
+        "model.norm.weight",
+        &[DENSE_HIDDEN],
+        &norm_values(DENSE_HIDDEN, 2),
+    );
+    shard.push(
+        "lm_head.weight",
+        &[DENSE_VOCAB, DENSE_HIDDEN],
+        &lcg_values(DENSE_VOCAB * DENSE_HIDDEN, 3),
+    );
+    for layer in 0..DENSE_LAYERS {
+        let seed = 100 + layer as u64 * 10;
+        let prefix = format!("model.layers.{layer}");
+        // The fused projection: DOUBLE width.
+        shard.push(
+            &format!("{prefix}.self_attn.q_proj.weight"),
+            &[q_rows * 2, DENSE_HIDDEN],
+            &lcg_values(q_rows * 2 * DENSE_HIDDEN, seed),
+        );
+        shard.push(
+            &format!("{prefix}.self_attn.k_proj.weight"),
+            &[kv_rows, DENSE_HIDDEN],
+            &lcg_values(kv_rows * DENSE_HIDDEN, seed + 1),
+        );
+        shard.push(
+            &format!("{prefix}.self_attn.v_proj.weight"),
+            &[kv_rows, DENSE_HIDDEN],
+            &lcg_values(kv_rows * DENSE_HIDDEN, seed + 2),
+        );
+        // `o_proj` is sized by the ATTENTION width, not the projection's.
+        shard.push(
+            &format!("{prefix}.self_attn.o_proj.weight"),
+            &[DENSE_HIDDEN, q_rows],
+            &lcg_values(DENSE_HIDDEN * q_rows, seed + 3),
+        );
+        shard.push(
+            &format!("{prefix}.self_attn.q_norm.weight"),
+            &[DENSE_HEAD_DIM],
+            &norm_values(DENSE_HEAD_DIM, seed + 9),
+        );
+        shard.push(
+            &format!("{prefix}.self_attn.k_norm.weight"),
+            &[DENSE_HEAD_DIM],
+            &norm_values(DENSE_HEAD_DIM, seed + 10),
+        );
+        shard.push(
+            &format!("{prefix}.input_layernorm.weight"),
+            &[DENSE_HIDDEN],
+            &norm_values(DENSE_HIDDEN, seed + 4),
+        );
+        shard.push(
+            &format!("{prefix}.post_attention_layernorm.weight"),
+            &[DENSE_HIDDEN],
+            &norm_values(DENSE_HIDDEN, seed + 5),
+        );
+        shard.push(
+            &format!("{prefix}.mlp.gate_proj.weight"),
+            &[DENSE_INTERMEDIATE, DENSE_HIDDEN],
+            &lcg_values(DENSE_INTERMEDIATE * DENSE_HIDDEN, seed + 6),
+        );
+        shard.push(
+            &format!("{prefix}.mlp.up_proj.weight"),
+            &[DENSE_INTERMEDIATE, DENSE_HIDDEN],
+            &lcg_values(DENSE_INTERMEDIATE * DENSE_HIDDEN, seed + 7),
+        );
+        shard.push(
+            &format!("{prefix}.mlp.down_proj.weight"),
+            &[DENSE_HIDDEN, DENSE_INTERMEDIATE],
+            &lcg_values(DENSE_HIDDEN * DENSE_INTERMEDIATE, seed + 8),
+        );
+    }
+    shard.write(dir);
+}
+
+/// Rewrite [`gated_q_f32_model`]'s shards with an ORDINARY-width query
+/// projection, leaving `attn_output_gate: true` declared.
+///
+/// The negative control for the gate's shape contract: a checkpoint that
+/// claims a fused gate but ships no rows to hold it.
+pub fn shrink_q_proj_to_ungated_width(dir: &Path) {
+    let q_rows = DENSE_Q_HEADS * DENSE_HEAD_DIM;
+    let kv_rows = DENSE_KV_HEADS * DENSE_HEAD_DIM;
+    let mut shard = ShardBuilder::new();
+    shard.push(
+        "model.embed_tokens.weight",
+        &[DENSE_VOCAB, DENSE_HIDDEN],
+        &lcg_values(DENSE_VOCAB * DENSE_HIDDEN, 1),
+    );
+    shard.push(
+        "model.norm.weight",
+        &[DENSE_HIDDEN],
+        &norm_values(DENSE_HIDDEN, 2),
+    );
+    shard.push(
+        "lm_head.weight",
+        &[DENSE_VOCAB, DENSE_HIDDEN],
+        &lcg_values(DENSE_VOCAB * DENSE_HIDDEN, 3),
+    );
+    for layer in 0..DENSE_LAYERS {
+        let seed = 100 + layer as u64 * 10;
+        let prefix = format!("model.layers.{layer}");
+        shard.push(
+            &format!("{prefix}.self_attn.q_proj.weight"),
+            &[q_rows, DENSE_HIDDEN],
+            &lcg_values(q_rows * DENSE_HIDDEN, seed),
+        );
+        for (name, rows, s) in [("k_proj", kv_rows, seed + 1), ("v_proj", kv_rows, seed + 2)] {
+            shard.push(
+                &format!("{prefix}.self_attn.{name}.weight"),
+                &[rows, DENSE_HIDDEN],
+                &lcg_values(rows * DENSE_HIDDEN, s),
+            );
+        }
+        shard.push(
+            &format!("{prefix}.self_attn.o_proj.weight"),
+            &[DENSE_HIDDEN, q_rows],
+            &lcg_values(DENSE_HIDDEN * q_rows, seed + 3),
+        );
+        for (name, s) in [("q_norm", seed + 9), ("k_norm", seed + 10)] {
+            shard.push(
+                &format!("{prefix}.self_attn.{name}.weight"),
+                &[DENSE_HEAD_DIM],
+                &norm_values(DENSE_HEAD_DIM, s),
+            );
+        }
+        for (name, s) in [
+            ("input_layernorm", seed + 4),
+            ("post_attention_layernorm", seed + 5),
+        ] {
+            shard.push(
+                &format!("{prefix}.{name}.weight"),
+                &[DENSE_HIDDEN],
+                &norm_values(DENSE_HIDDEN, s),
+            );
+        }
+        for (name, rows, cols, s) in [
+            ("gate_proj", DENSE_INTERMEDIATE, DENSE_HIDDEN, seed + 6),
+            ("up_proj", DENSE_INTERMEDIATE, DENSE_HIDDEN, seed + 7),
+            ("down_proj", DENSE_HIDDEN, DENSE_INTERMEDIATE, seed + 8),
+        ] {
+            shard.push(
+                &format!("{prefix}.mlp.{name}.weight"),
+                &[rows, cols],
+                &lcg_values(rows * cols, s),
+            );
+        }
+    }
+    shard.write(dir);
+}

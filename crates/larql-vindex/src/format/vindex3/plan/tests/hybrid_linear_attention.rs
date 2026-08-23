@@ -310,16 +310,17 @@ fn unrelated_per_layer_facts_still_carry_with_a_hybrid_interleave() {
 /// one — see
 /// [`the_linear_geometry_is_carried_into_the_operator`] and
 /// [`the_state_precision_moves_with_its_executor`]. What remains here has
-/// none: MTP has no head object and the attention output gate has no
-/// judged semantics. mRoPE left this list at QW-3.5B, when
-/// `PositionPolicy::MRope` gave it one. Each stays
+/// none: MTP has no head object, and `output_gate_type` has no
+/// attributable OWNER — the gate itself is judged and executed since
+/// QW-3.5C, but HF reads this key nowhere and there is a second, genuine
+/// silu gate in DeltaNet, so which operator it describes is unknown.
+/// mRoPE left this list at QW-3.5B and `attn_output_gate` at QW-3.5C. Each stays
 /// honestly `unrepresented` rather than claiming a home that does not
 /// exist.
 #[test]
 fn declared_hybrid_fields_without_a_destination_stay_unrepresented() {
     let findings = hybrid_findings();
     for subject in [
-        "text_config.attn_output_gate",
         "text_config.output_gate_type",
         "text_config.mtp_num_hidden_layers",
         "text_config.mtp_use_dedicated_embeddings",
@@ -562,4 +563,37 @@ fn a_section_that_does_not_close_the_arithmetic_blocks() {
             "a section whose arithmetic does not close must refuse: {finding:?}"
         );
     }
+}
+
+/// QW-3.5C: the gate's EXISTENCE is carried; its declared TYPE is not.
+///
+/// These two keys sit side by side in the config and receive opposite
+/// verdicts, which is the whole point. `attn_output_gate` is
+/// corroborated by the stored projection carrying `2 · heads · head_dim`
+/// rows, so it has both a consumer and an independent witness.
+/// `output_gate_type: "swish"` has neither: HF reads it nowhere, and
+/// swish gating (`x · silu(g)`) is not what the reference implementation
+/// computes (`x · sigmoid(g)`). Resolving it on the resemblance to
+/// DeltaNet's genuine silu gate would be a semantic-ownership guess.
+#[test]
+fn the_gate_exists_is_carried_but_its_declared_type_is_not() {
+    let findings = hybrid_findings();
+    let exists = finding_for(&findings, "text_config.attn_output_gate");
+    assert_eq!(
+        exists.category,
+        FindingCategory::Representable,
+        "{}",
+        exists.detail
+    );
+    assert!(!exists.blocks());
+
+    let kind = finding_for(&findings, "text_config.output_gate_type");
+    assert_eq!(
+        kind.category,
+        FindingCategory::Unrepresented,
+        "ownership unresolved is `Unrepresented`, never `Mismatched` — the latter would \
+         assert the two authorities describe the same subject: {}",
+        kind.detail
+    );
+    assert!(kind.blocks());
 }

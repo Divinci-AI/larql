@@ -34,8 +34,29 @@ pub struct AttentionGateSpec {
 #[serde(rename_all = "snake_case")]
 pub enum GateSource {
     /// The attention block's input hidden state — already normalised,
-    /// because the decoder layer norms before calling attention.
+    /// because the decoder layer norms before calling attention. The gate
+    /// has its own projection operand.
     AttentionInput,
+    /// The **second half of each head's query projection**. No separate
+    /// gate operand exists: `q_proj` emits `2 · head_dim` rows per head
+    /// and the op reads one matrix for both roles, the same way a K≡V
+    /// layer reads one matrix for key and value.
+    ///
+    /// The layout is per-head interleaved, and that is the whole reason
+    /// this is a variant rather than a flag:
+    ///
+    /// ```text
+    /// [ q_h0 | gate_h0 | q_h1 | gate_h1 | … ]      <- Qwen3.8
+    /// [ q_h0 | q_h1 | … | gate_h0 | gate_h1 | … ]  <- NOT this
+    /// ```
+    ///
+    /// Both readings have identical dimensions, so nothing about the
+    /// tensor shape distinguishes them; only the reference implementation
+    /// does. Transcribed from HF `Qwen3_5Attention.forward`, which views
+    /// the projection as `(…, heads, 2 · head_dim)` and chunks the LAST
+    /// axis. The gate half bypasses `q_norm` and the rotary — both apply
+    /// to the query half alone.
+    FusedQueryProjection,
 }
 
 /// The gate nonlinearity.

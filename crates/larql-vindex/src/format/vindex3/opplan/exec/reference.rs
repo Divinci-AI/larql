@@ -22,9 +22,9 @@ use super::backend::{
     PlanBackend, ProjectCall, ProjectedQkv, QkNormCall, RoutedFfnCall,
 };
 use super::kernels::{
-    activate, matvec, mrope_rotate, norm, partial_rotary_frequencies, partial_rotary_slice,
-    rope_rotate, rope_rotate_scaled, sigmoid, softcap, softmax, softmax_with_sink,
-    yarn_frequencies,
+    activate, gather_fused_half_mutated, matvec, mrope_rotate, norm, partial_rotary_frequencies,
+    partial_rotary_slice, rope_rotate, rope_rotate_scaled, sigmoid, softcap, softmax,
+    softmax_with_sink, yarn_frequencies, FusedHalf, GateMutation,
 };
 use crate::error::VindexError;
 use larql_models::config::NormType;
@@ -96,15 +96,53 @@ impl ReferenceBackend {
     /// scale and position encoding applied in the judged order — the
     /// arithmetic both the batch path and the decode step share, so the
     /// two cannot disagree about a single position.
+    /// Whether this layer's gate is sourced from the query projection —
+    /// the one case where `w_q` is wider than the attention width.
+    fn fused_query_gate(call: &AttentionCall<'_>) -> bool {
+        matches!(
+            call.gate.as_ref().map(|g| g.spec.source),
+            Some(GateSource::FusedQueryProjection)
+        )
+    }
+
     fn project_position(
         call: &AttentionCall<'_>,
         position: usize,
         pre: &[f32],
     ) -> Result<ProjectedQkv, VindexError> {
+        Self::project_position_inner(call, position, pre, GateMutation::None)
+    }
+
+    /// [`Self::project_position`] with a deliberate defect in the fused
+    /// query/gate split. The public path above always passes
+    /// [`GateMutation::None`]; the mutation table drives THIS function,
+    /// so the table exercises the shipped implementation.
+    pub(super) fn project_position_inner(
+        call: &AttentionCall<'_>,
+        position: usize,
+        pre: &[f32],
+        gate_mutation: GateMutation,
+    ) -> Result<ProjectedQkv, VindexError> {
         let head_dim = call.head_dim;
         let q_rows = call.num_q_heads * head_dim;
         let kv_rows = call.num_kv_heads * head_dim;
-        let mut q = matvec(call.w_q.as_f32()?, q_rows, call.hidden, pre);
+        // A fused query projection carries `2 · head_dim` rows per head,
+        // query and gate INTERLEAVED. Taking the first `q_rows` would
+        // read the query of head 0, the gate of head 0, the query of
+        // head 1 … and call the result "the queries" — right shape,
+        // wrong tensor. The halves are gathered per head instead.
+        let mut q = if Self::fused_query_gate(call) {
+            let full = matvec(call.w_q.as_f32()?, q_rows * 2, call.hidden, pre);
+            gather_fused_half_mutated(
+                &full,
+                call.num_q_heads,
+                head_dim,
+                FusedHalf::Query,
+                gate_mutation,
+            )
+        } else {
+            matvec(call.w_q.as_f32()?, q_rows, call.hidden, pre)
+        };
         let mut k = matvec(call.w_k.as_f32()?, kv_rows, call.hidden, pre);
         let mut v = matvec(call.w_v.as_f32()?, kv_rows, call.hidden, pre);
         // Biases belong to the projections: added before anything reads
@@ -221,6 +259,7 @@ impl ReferenceBackend {
     /// gate, and output projection. `key_of`/`value_of` abstract where
     /// K/V rows live (the batch path's local vectors, or the decode
     /// step's interpreter-owned cache plus the fresh row).
+    #[allow(clippy::too_many_arguments)]
     fn attend_position<'k>(
         call: &AttentionCall<'_>,
         position: usize,
@@ -228,6 +267,29 @@ impl ReferenceBackend {
         key_of: impl Fn(usize) -> &'k [f32],
         value_of: impl Fn(usize) -> &'k [f32],
         gate_input: &[f32],
+    ) -> Result<Vec<f32>, VindexError> {
+        Self::attend_position_inner(
+            call,
+            position,
+            query,
+            key_of,
+            value_of,
+            gate_input,
+            GateMutation::None,
+        )
+    }
+
+    /// [`Self::attend_position`] with a deliberate defect in the gate
+    /// stage. See [`Self::project_position_inner`].
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn attend_position_inner<'k>(
+        call: &AttentionCall<'_>,
+        position: usize,
+        query: &[f32],
+        key_of: impl Fn(usize) -> &'k [f32],
+        value_of: impl Fn(usize) -> &'k [f32],
+        gate_input: &[f32],
+        gate_mutation: GateMutation,
     ) -> Result<Vec<f32>, VindexError> {
         let head_dim = call.head_dim;
         let q_rows = call.num_q_heads * head_dim;
@@ -283,13 +345,80 @@ impl ReferenceBackend {
         if let Some(GateCall { spec, weight }) = &call.gate {
             // Exhaustive on the judged semantics: a new variant must
             // be implemented here before it can execute.
-            let GateSource::AttentionInput = spec.source;
             let GateActivation::Sigmoid = spec.activation;
             let GateCombine::ElementwiseMultiply = spec.combine;
             let GatePlacement::AfterAggregationBeforeOutputProjection = spec.placement;
-            let gate_values = matvec(weight.as_f32()?, q_rows, call.hidden, gate_input);
-            for (c, g) in concat.iter_mut().zip(&gate_values) {
-                *c *= sigmoid(*g);
+            let gate_values = match spec.source {
+                GateSource::AttentionInput => {
+                    matvec(weight.as_f32()?, q_rows, call.hidden, gate_input)
+                }
+                // The gate rows live inside the query projection, so the
+                // "gate weight" IS that projection and the gate is its
+                // per-head second half. Recomputed from the same input
+                // the query half was projected from — the reference
+                // backend pays a second matvec rather than threading a
+                // value through the call, which keeps this readable
+                // beside the HF source it transcribes.
+                GateSource::FusedQueryProjection => {
+                    let full = matvec(weight.as_f32()?, q_rows * 2, call.hidden, gate_input);
+                    let mut gate = gather_fused_half_mutated(
+                        &full,
+                        call.num_q_heads,
+                        head_dim,
+                        FusedHalf::Gate,
+                        gate_mutation,
+                    );
+                    // The gate slice sees NEITHER the query norm nor the
+                    // rotary — it is not a query. Both are mutations here
+                    // rather than absent code, so a refactor that starts
+                    // feeding the gate through either is caught by a
+                    // number instead of by review.
+                    if gate_mutation == GateMutation::GateGetsQNorm {
+                        if let Some(qk) = &call.qk_norm {
+                            for head in gate.chunks_exact_mut(head_dim) {
+                                let normed = norm(
+                                    NormType::RmsNorm,
+                                    head,
+                                    qk.q_weight,
+                                    qk.weight_offset,
+                                    call.qk_norm_eps,
+                                );
+                                head.copy_from_slice(&normed);
+                            }
+                        }
+                    }
+                    if gate_mutation == GateMutation::GateGetsRoPe {
+                        for head in gate.chunks_exact_mut(head_dim) {
+                            if let Some(theta) = call.position.rope_theta() {
+                                rope_rotate(head, position, theta);
+                            }
+                        }
+                    }
+                    gate
+                }
+            };
+            let activate_gate = |g: f32| match gate_mutation {
+                // `silu(g)` is what `output_gate_type: "swish"` would mean
+                // if it owned this gate. HF computes `sigmoid(g)`.
+                GateMutation::SiluGate => g * sigmoid(g),
+                _ => sigmoid(g),
+            };
+            if gate_mutation != GateMutation::NoGate
+                && gate_mutation != GateMutation::GateAfterOProj
+            {
+                for (c, g) in concat.iter_mut().zip(&gate_values) {
+                    *c *= activate_gate(*g);
+                }
+            }
+            if gate_mutation == GateMutation::GateAfterOProj {
+                let mut out = matvec(call.w_o.as_f32()?, call.hidden, q_rows, &concat);
+                for (o, g) in out.iter_mut().zip(&gate_values) {
+                    *o *= activate_gate(*g);
+                }
+                if let Some(bias) = &call.bias {
+                    add_in_place(&mut out, bias.o);
+                }
+                return Ok(out);
             }
         }
 
@@ -448,46 +577,7 @@ impl PlanBackend for ReferenceBackend {
     }
 
     fn attention(&self, call: AttentionCall<'_>) -> Result<AttentionOut, VindexError> {
-        // Projections per position, with QK normalisation, query scale
-        // and position encoding applied in the judged order. Positions
-        // are independent, so they run in parallel with each position's
-        // arithmetic untouched — bit-identical to the serial order.
-        let projected: Vec<(Vec<f32>, Vec<f32>, Vec<f32>)> = call
-            .inputs
-            .par_iter()
-            .enumerate()
-            .map(|(position, pre)| Self::project_position(&call, position, pre))
-            .collect::<Result<_, VindexError>>()?;
-        let mut queries = Vec::with_capacity(projected.len());
-        let mut keys = Vec::with_capacity(projected.len());
-        let mut values = Vec::with_capacity(projected.len());
-        for (q, k, v) in projected {
-            queries.push(q);
-            keys.push(k);
-            values.push(v);
-        }
-
-        // Each query position reads every position's K/V but writes only
-        // its own output row — parallel over queries, arithmetic intact.
-        let outputs: Vec<Vec<f32>> = queries
-            .par_iter()
-            .enumerate()
-            .map(|(position, query)| {
-                Self::attend_position(
-                    &call,
-                    position,
-                    query,
-                    |p| keys[p].as_slice(),
-                    |p| values[p].as_slice(),
-                    &call.inputs[position],
-                )
-            })
-            .collect::<Result<_, VindexError>>()?;
-        Ok(AttentionOut {
-            outputs,
-            keys,
-            values,
-        })
+        self.attention_mutated(call, GateMutation::None)
     }
 
     fn attention_step(&self, step: AttentionStepCall<'_>) -> Result<AttentionStepOut, VindexError> {
@@ -629,5 +719,63 @@ impl PlanBackend for ReferenceBackend {
         for (a, b) in acc.iter_mut().zip(delta) {
             *a += b;
         }
+    }
+}
+
+impl ReferenceBackend {
+    /// [`PlanBackend::attention`] with a deliberate defect in the fused
+    /// query/gate path.
+    ///
+    /// The trait method is the only production caller and always passes
+    /// [`GateMutation::None`], so QW-3.5C's mutation table drives the
+    /// SHIPPED implementation rather than a transcription of it.
+    pub(super) fn attention_mutated(
+        &self,
+        call: AttentionCall<'_>,
+        gate_mutation: GateMutation,
+    ) -> Result<AttentionOut, VindexError> {
+        // Projections per position, with QK normalisation, query scale
+        // and position encoding applied in the judged order. Positions
+        // are independent, so they run in parallel with each position's
+        // arithmetic untouched — bit-identical to the serial order.
+        let projected: Vec<(Vec<f32>, Vec<f32>, Vec<f32>)> = call
+            .inputs
+            .par_iter()
+            .enumerate()
+            .map(|(position, pre)| {
+                Self::project_position_inner(&call, position, pre, gate_mutation)
+            })
+            .collect::<Result<_, VindexError>>()?;
+        let mut queries = Vec::with_capacity(projected.len());
+        let mut keys = Vec::with_capacity(projected.len());
+        let mut values = Vec::with_capacity(projected.len());
+        for (q, k, v) in projected {
+            queries.push(q);
+            keys.push(k);
+            values.push(v);
+        }
+
+        // Each query position reads every position's K/V but writes only
+        // its own output row — parallel over queries, arithmetic intact.
+        let outputs: Vec<Vec<f32>> = queries
+            .par_iter()
+            .enumerate()
+            .map(|(position, query)| {
+                Self::attend_position_inner(
+                    &call,
+                    position,
+                    query,
+                    |p| keys[p].as_slice(),
+                    |p| values[p].as_slice(),
+                    &call.inputs[position],
+                    gate_mutation,
+                )
+            })
+            .collect::<Result<_, VindexError>>()?;
+        Ok(AttentionOut {
+            outputs,
+            keys,
+            values,
+        })
     }
 }

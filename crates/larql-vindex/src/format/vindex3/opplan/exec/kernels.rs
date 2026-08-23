@@ -313,3 +313,113 @@ pub fn yarn_frequencies(
 pub fn softcap(x: f32, cap: f32) -> f32 {
     cap * (x / cap).tanh()
 }
+
+/// Which half of a fused query/gate projection to gather.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FusedHalf {
+    Query,
+    Gate,
+}
+
+/// Gather one half of a fused query/gate projection.
+///
+/// The projection emits `2 · head_dim` rows per head, laid out
+/// `[q_h0 | gate_h0 | q_h1 | gate_h1 | …]` — transcribed from HF
+/// `Qwen3_5Attention.forward`, which views the projection as
+/// `(…, heads, 2 · head_dim)` and chunks the LAST axis.
+///
+/// The contiguous reading — all queries then all gates — has identical
+/// dimensions and is wrong, so nothing downstream can detect the mistake
+/// from shapes. `mutation_table` in `tests::output_gate_parity` carries
+/// `ContiguousHalves` as the falsifier for exactly this.
+pub fn gather_fused_half(
+    full: &[f32],
+    num_heads: usize,
+    head_dim: usize,
+    half: FusedHalf,
+) -> Vec<f32> {
+    let stride = head_dim * 2;
+    let offset = match half {
+        FusedHalf::Query => 0,
+        FusedHalf::Gate => head_dim,
+    };
+    let mut out = Vec::with_capacity(num_heads * head_dim);
+    for head in 0..num_heads {
+        let start = head * stride + offset;
+        out.extend_from_slice(&full[start..start + head_dim]);
+    }
+    out
+}
+
+/// A deliberate defect in the fused query/gate path, for QW-3.5C's
+/// mutation table.
+///
+/// Lives in production code and is threaded through the SHIPPED
+/// implementation — the public entry points always pass
+/// [`GateMutation::None`] — following the same contract as the Gated
+/// DeltaNet `Mutation`. A table that mutated a copy of the operator would
+/// only prove the copy was detectable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GateMutation {
+    /// The shipped semantics.
+    None,
+    /// Read the projection as `[all queries | all gates]` instead of
+    /// per-head `[q_h0 | gate_h0 | …]`. **The headline falsifier**: every
+    /// dimension stays valid, closure still passes, and only the values
+    /// move.
+    ContiguousHalves,
+    /// Correct per-head stride, halves exchanged.
+    SwapPerHeadQGate,
+    /// `silu(g)` rather than `sigmoid(g)` — the reading the config's
+    /// `output_gate_type: "swish"` would imply if it owned this gate.
+    SiluGate,
+    /// Skip the gate entirely.
+    NoGate,
+    /// Send the gate slice through the query norm, which it must not see.
+    GateGetsQNorm,
+    /// Rotate the gate slice, which it must not see either.
+    GateGetsRoPe,
+    /// Gate after the output projection instead of before it.
+    GateAfterOProj,
+}
+
+impl GateMutation {
+    /// Which fused half a given logical role reads under this mutation.
+    pub fn half_for(self, role: FusedHalf) -> FusedHalf {
+        match (self, role) {
+            (Self::SwapPerHeadQGate, FusedHalf::Query) => FusedHalf::Gate,
+            (Self::SwapPerHeadQGate, FusedHalf::Gate) => FusedHalf::Query,
+            (_, role) => role,
+        }
+    }
+
+    /// Whether the halves are read as contiguous blocks rather than
+    /// per-head interleaved.
+    pub fn contiguous(self) -> bool {
+        matches!(self, Self::ContiguousHalves)
+    }
+}
+
+/// [`gather_fused_half`] under a mutation.
+///
+/// The contiguous reading is what a plausible-but-wrong implementation
+/// does: `full[..q_rows]` as the queries and `full[q_rows..]` as the
+/// gates. Same lengths, same downstream shapes, different tensors.
+pub fn gather_fused_half_mutated(
+    full: &[f32],
+    num_heads: usize,
+    head_dim: usize,
+    half: FusedHalf,
+    mutation: GateMutation,
+) -> Vec<f32> {
+    let half = mutation.half_for(half);
+    if mutation.contiguous() {
+        let rows = num_heads * head_dim;
+        let start = match half {
+            FusedHalf::Query => 0,
+            FusedHalf::Gate => rows,
+        };
+        return full[start..start + rows].to_vec();
+    }
+    gather_fused_half(full, num_heads, head_dim, half)
+}

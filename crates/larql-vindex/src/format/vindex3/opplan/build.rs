@@ -148,6 +148,21 @@ pub fn plan_component_ops(
         StackGeometry {
             hidden,
             q_rows: attn.num_q_heads * head_dim,
+            // The independent witness for the gate. The config says
+            // `attn_output_gate: true`; the stored projection says
+            // `2 · 24 · 256 = 12288` against an ungated 6144, and this
+            // contract is what makes the two cross-examine each other
+            // instead of the config being believed on its own.
+            q_proj_rows: attn.num_q_heads
+                * head_dim
+                * if matches!(
+                    attn.output_gate.map(|g| g.source),
+                    Some(larql_models::config::GateSource::FusedQueryProjection)
+                ) {
+                    2
+                } else {
+                    1
+                },
             kv_rows: num_kv_heads * head_dim,
             intermediate: inter,
             head_dim,
@@ -243,7 +258,13 @@ pub fn plan_component_ops(
             let ops = LayerOps {
                 placement,
                 gated_ffn,
-                output_gate: attn.output_gate.is_some(),
+                // A fused gate ships no operand of its own — demanding
+                // one would make every Qwen3.8 layer a closure defect for
+                // a tensor that correctly does not exist.
+                output_gate: matches!(
+                    attn.output_gate.map(|g| g.source),
+                    Some(larql_models::config::GateSource::AttentionInput)
+                ),
                 attention_bias: attn.attention_bias == Some(true),
                 sinks: attn.sinks.is_some(),
                 routed,
@@ -585,9 +606,24 @@ pub fn plan_component_ops(
                     ),
                     v_from_k: policy.v_from_k,
                     o: operand(&stack_id, get(OperandRole::AttnO)),
+                    // On a fused source the gate has NO operand of its
+                    // own: it is the per-head second half of the query
+                    // projection, so the op names `q_proj` and reads one
+                    // matrix for both roles — the same "one matrix, two
+                    // roles" statement `v_from_k` makes for K≡V layers.
                     output_gate: attn.output_gate.map(|spec| GateOp {
                         spec,
-                        projection: operand(&stack_id, get(OperandRole::AttnOutputGate)),
+                        projection: operand(
+                            &stack_id,
+                            get(match spec.source {
+                                larql_models::config::GateSource::AttentionInput => {
+                                    OperandRole::AttnOutputGate
+                                }
+                                larql_models::config::GateSource::FusedQueryProjection => {
+                                    OperandRole::AttnQ
+                                }
+                            }),
+                        ),
                     }),
                     // Closure held, so `Some(true)` means all four are here
                     // and anything else means none is.
@@ -826,7 +862,19 @@ fn absent_op(role: OperandRole, ops: &LayerOps) -> Option<&'static str> {
 /// layer's own head geometry under the component's query-head count.
 struct StackGeometry {
     hidden: usize,
+    /// `num_q_heads · head_dim` — the ATTENTION width. What `o_proj`
+    /// consumes, and what the query half occupies.
     q_rows: usize,
+    /// Rows the stored query projection actually carries.
+    ///
+    /// Equal to [`Self::q_rows`] on an ordinary stack, and **twice** it
+    /// when the component's output gate is sourced from the query
+    /// projection: that projection emits `2 · head_dim` per head, query
+    /// and gate interleaved. Kept as its own field rather than doubling
+    /// `q_rows`, because `o_proj` and the query-bias contract are still
+    /// sized by the attention width — conflating the two would silently
+    /// demand a 12288-wide `o_proj` on Qwen3.8, which carries 6144.
+    q_proj_rows: usize,
     kv_rows: usize,
     intermediate: usize,
     head_dim: usize,
@@ -851,6 +899,7 @@ fn expected_shape(
     let StackGeometry {
         hidden,
         q_rows,
+        q_proj_rows,
         kv_rows,
         intermediate,
         head_dim,
@@ -860,7 +909,7 @@ fn expected_shape(
         linear,
     } = *g;
     match role {
-        OperandRole::AttnQ => Some(vec![q_rows, hidden]),
+        OperandRole::AttnQ => Some(vec![q_proj_rows, hidden]),
         OperandRole::AttnK | OperandRole::AttnV => Some(vec![kv_rows, hidden]),
         OperandRole::AttnO => Some(vec![hidden, q_rows]),
         OperandRole::PreAttentionNorm

@@ -39,7 +39,9 @@ use super::backend::{
     AttentionCall, AttentionOut, AttentionStepCall, AttentionStepOut, FfnCall, GateCall, NormCall,
     PlanBackend, ProjectCall, ProjectedQkv, QkNormCall, RoutedFfnCall,
 };
-use super::kernels::{mrope_rotate_scaled, rope_rotate, rope_rotate_scaled};
+use super::kernels::{
+    gather_fused_half, mrope_rotate_scaled, rope_rotate, rope_rotate_scaled, FusedHalf,
+};
 use larql_compute::attention::rope::{
     rope_freq_plan, rope_freq_plan_proportional, RopeFreqScaling,
 };
@@ -505,7 +507,19 @@ impl ProductionBackend {
         let head_dim = call.head_dim;
         let q_rows = call.num_q_heads * head_dim;
         let kv_rows = call.num_kv_heads * head_dim;
-        let mut q = matmul_vec(pre, call.w_q.as_f32()?, q_rows, call.hidden);
+        // A fused query/gate projection is `2 · head_dim` per head with
+        // the halves INTERLEAVED; the first `q_rows` rows are not the
+        // queries. See `gather_fused_half`.
+        let fused_gate = matches!(
+            call.gate.as_ref().map(|g| g.spec.source),
+            Some(GateSource::FusedQueryProjection)
+        );
+        let mut q = if fused_gate {
+            let full = matmul_vec(pre, call.w_q.as_f32()?, q_rows * 2, call.hidden);
+            gather_fused_half(&full, call.num_q_heads, head_dim, FusedHalf::Query)
+        } else {
+            matmul_vec(pre, call.w_q.as_f32()?, q_rows, call.hidden)
+        };
         let mut k = matmul_vec(pre, call.w_k.as_f32()?, kv_rows, call.hidden);
         let mut v = matmul_vec(pre, call.w_v.as_f32()?, kv_rows, call.hidden);
         add_projection_biases(call, &mut q, &mut k, &mut v);
@@ -530,11 +544,18 @@ impl ProductionBackend {
             // Exhaustive on the judged semantics, same as the
             // reference: a new variant must be implemented before it
             // can execute on this backend either.
-            let GateSource::AttentionInput = spec.source;
             let GateActivation::Sigmoid = spec.activation;
             let GateCombine::ElementwiseMultiply = spec.combine;
             let GatePlacement::AfterAggregationBeforeOutputProjection = spec.placement;
-            let gate_values = matmul_vec(gate_input, weight.as_f32()?, q_rows, call.hidden);
+            let gate_values = match spec.source {
+                GateSource::AttentionInput => {
+                    matmul_vec(gate_input, weight.as_f32()?, q_rows, call.hidden)
+                }
+                GateSource::FusedQueryProjection => {
+                    let full = matmul_vec(gate_input, weight.as_f32()?, q_rows * 2, call.hidden);
+                    gather_fused_half(&full, call.num_q_heads, call.head_dim, FusedHalf::Gate)
+                }
+            };
             for (c, g) in concat.iter_mut().zip(&gate_values) {
                 *c *= 1.0 / (1.0 + (-g).exp());
             }

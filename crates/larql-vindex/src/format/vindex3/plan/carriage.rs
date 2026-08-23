@@ -590,14 +590,15 @@ pub const CARRIAGE_RULES: &[CarriageRule] = &[
     },
     CarriageRule {
         leaf: "attn_output_gate",
-        reaches: Carriage::Represented,
-        site: "no schema field — the attention output gate is not represented yet",
-        probe: Some(probe_unrepresented),
+        reaches: Carriage::Lowered,
+        site: "ExecutionSurface.attention.output_gate → GateOp → the gated attention op",
+        probe: Some(probe_attn_output_gate),
     },
     CarriageRule {
         leaf: "output_gate_type",
         reaches: Carriage::Represented,
-        site: "no schema field — the attention output gate is not represented yet",
+        site: "no schema field — the gate IS represented (see attn_output_gate); \
+               what is unresolved is whether THIS key describes it",
         probe: Some(probe_unrepresented),
     },
     CarriageRule {
@@ -809,6 +810,29 @@ fn probe_partial_rotary_factor(component: &Component, ctx: &ProbeContext<'_>) ->
         layers_in_scope(component, ctx)?.filter_map(|l| l.position.rotary_fraction());
     let first = fractions.next()?;
     fractions.all(|f| f == first).then(|| json!(first))
+}
+
+/// Whether the component carries judged attention-output-gate semantics.
+///
+/// Answers the DECLARED boolean rather than echoing it: `true` only when
+/// a spec was actually judged for this family and reached the surface. A
+/// checkpoint declaring `attn_output_gate: false` is answered `false` by
+/// a surface with no spec, so the two agree without the probe ever
+/// asserting a gate that is not there.
+///
+/// Note what is NOT claimed here. HF reads this key nowhere — the gate is
+/// unconditional in the reference implementation, and its real witness is
+/// the stored projection carrying `2 · num_heads · head_dim` rows. That
+/// cross-examination happens in operand closure (`expected_shape`'s
+/// `q_proj_rows`), which is why the config being believed here is safe:
+/// a checkpoint claiming a gate it has no rows for fails there.
+fn probe_attn_output_gate(component: &Component, _ctx: &ProbeContext<'_>) -> Option<Value> {
+    Some(json!(component
+        .execution
+        .as_ref()?
+        .attention
+        .output_gate
+        .is_some()))
 }
 
 /// The multi-axis sectioning the layers in scope carry, when every
