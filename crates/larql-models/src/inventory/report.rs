@@ -138,6 +138,63 @@ pub struct ResolvedTopology {
     /// licence to default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution: Option<ResolvedExecution>,
+    /// Geometry of the model's linear-attention layers, when it declares
+    /// any. `None` on a model whose every layer attends by softmax.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linear_attention: Option<LinearAttentionTopology>,
+}
+
+/// Gated DeltaNet geometry — an architectural fact, like the head counts
+/// beside it.
+///
+/// The key and value sides are separate facts and stay separate: Qwen3.8
+/// declares 16 key heads and 48 value heads, so no single `num_heads`
+/// describes this operator. Anything that folded them would have to pick
+/// one, and picking either is wrong.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinearAttentionTopology {
+    /// `linear_num_key_heads` — Hk (16 on Qwen3.8).
+    pub key_heads: usize,
+    /// `linear_key_head_dim` — Dk (128).
+    pub key_head_dim: usize,
+    /// `linear_num_value_heads` — Hv (48). Larger than [`Self::key_heads`]
+    /// by design, not a GQA sharing ratio: the value side is the axis the
+    /// recurrent state is blocked along.
+    pub value_heads: usize,
+    /// `linear_value_head_dim` — Dv (128).
+    pub value_head_dim: usize,
+    /// `linear_conv_kernel_dim` — the depthwise causal convolution width
+    /// over the fused q|k|v channels (4).
+    pub conv_kernel: usize,
+}
+
+impl LinearAttentionTopology {
+    /// Channels the fused q|k|v projection emits: query and key at the key
+    /// geometry, value at the value geometry.
+    ///
+    /// Derived, never stored, so it cannot drift from the head counts it
+    /// is computed from. On Qwen3.8 this closes exactly:
+    /// `2·16·128 + 48·128 = 10240`, the observed `in_proj_qkv` row count.
+    pub fn qkv_channels(self) -> usize {
+        self.key_heads * self.key_head_dim * 2 + self.value_heads * self.value_head_dim
+    }
+
+    /// Width of the value/gate side: `Hv·Dv` (6144 on Qwen3.8).
+    pub fn value_width(self) -> usize {
+        self.value_heads * self.value_head_dim
+    }
+
+    /// Every declared dimension present, or `None` — a partially declared
+    /// recurrence is refused rather than completed with defaults.
+    pub fn from_config(cfg: &crate::config::ModelConfig) -> Option<Self> {
+        Some(Self {
+            key_heads: cfg.linear_num_key_heads?,
+            key_head_dim: cfg.linear_key_head_dim?,
+            value_heads: cfg.linear_num_value_heads?,
+            value_head_dim: cfg.linear_value_head_dim?,
+            conv_kernel: cfg.linear_conv_kernel_dim?,
+        })
+    }
 }
 
 /// The execution-scalar surface resolution produces: everything a generic

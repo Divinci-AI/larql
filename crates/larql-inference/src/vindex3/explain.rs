@@ -17,7 +17,9 @@
 //! the execution chain cannot name different bytes.
 
 use larql_vindex::format::vindex3::opplan::exec::backend::PlanBackend;
-use larql_vindex::format::vindex3::opplan::{ComponentOpPlan, LayerFfn, OperandRef};
+use larql_vindex::format::vindex3::opplan::{
+    ComponentOpPlan, LayerAttention, LayerFfn, OperandRef,
+};
 use serde::Serialize;
 
 use super::runtime::Vindex3Runtime;
@@ -61,12 +63,25 @@ pub struct ExplainLayer {
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ExplainAttention {
-    /// `"sliding"` or `"full"`, from the plan's window declaration.
+    /// The layer's `layer_types` spelling: `"sliding"`, `"full"`, or
+    /// `"linear_attention"`.
     pub mode: String,
     pub window: Option<usize>,
-    pub q_heads: usize,
-    pub kv_heads: usize,
-    pub head_dim: usize,
+    /// Softmax head geometry. Absent on a linear-attention layer — which
+    /// is a statement, not a gap: reporting a DeltaNet layer's 48 value
+    /// heads as `kv_heads` would tell a reader it retains 48 heads of KV
+    /// when it retains none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub q_heads: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kv_heads: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub head_dim: Option<usize>,
+    /// Elements in one linear-attention layer's recurrent state, constant
+    /// in sequence length. Absent on a softmax layer, whose continuation
+    /// state grows per position instead.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state_elements: Option<usize>,
     pub gated: bool,
     pub qk_norm: bool,
     /// Per-head sink logits participate in the softmax.
@@ -164,7 +179,6 @@ fn explain_layer(
     index: usize,
     layer: &larql_vindex::format::vindex3::opplan::LayerPlan,
 ) -> ExplainLayer {
-    let attention_op = &layer.attention;
     let mut ops = vec!["pre_attention_norm".to_string(), "attention".to_string()];
     if layer.post_attention_norm.is_some() {
         ops.push("post_attention_norm".into());
@@ -180,15 +194,62 @@ fn explain_layer(
         ops.push("layer_scale".into());
     }
 
-    let mut attention_operands = vec![
-        operand("q", &attention_op.q),
-        operand("k", &attention_op.k),
-        operand("v", &attention_op.v),
-        operand("o", &attention_op.o),
-    ];
-    if let Some(gate) = &attention_op.output_gate {
-        attention_operands.push(operand("output_gate", &gate.projection));
-    }
+    let attention = match &layer.attention {
+        LayerAttention::Softmax(op) => {
+            let mut operands = vec![
+                operand("q", &op.q),
+                operand("k", &op.k),
+                operand("v", &op.v),
+                operand("o", &op.o),
+            ];
+            if let Some(gate) = &op.output_gate {
+                operands.push(operand("output_gate", &gate.projection));
+            }
+            ExplainAttention {
+                mode: if op.window.is_some() {
+                    "sliding".into()
+                } else {
+                    "full".into()
+                },
+                window: op.window,
+                q_heads: Some(op.num_q_heads),
+                kv_heads: Some(op.num_kv_heads),
+                head_dim: Some(op.head_dim),
+                state_elements: None,
+                gated: op.output_gate.is_some(),
+                qk_norm: op.qk_norm.is_some(),
+                sinks: op.sinks.is_some(),
+                biased: op.q_bias.is_some(),
+                operands,
+            }
+        }
+        LayerAttention::GatedDelta(op) => ExplainAttention {
+            mode: layer.attention.declared_name().into(),
+            window: None,
+            q_heads: None,
+            kv_heads: None,
+            head_dim: None,
+            state_elements: Some(op.state_elements()),
+            // The z projection gates this operator's output the way an
+            // attention output gate does; the rest are softmax-only
+            // features a recurrence has no analogue for.
+            gated: true,
+            qk_norm: false,
+            sinks: false,
+            biased: false,
+            operands: vec![
+                operand("in_proj_qkv", &op.in_proj_qkv),
+                operand("in_proj_a", &op.in_proj_a),
+                operand("in_proj_b", &op.in_proj_b),
+                operand("in_proj_z", &op.in_proj_z),
+                operand("conv1d", &op.conv1d),
+                operand("a_log", &op.a_log),
+                operand("dt_bias", &op.dt_bias),
+                operand("norm", &op.norm),
+                operand("out_proj", &op.out_proj),
+            ],
+        },
+    };
 
     let (kind, experts, ffn_operands) = match &layer.ffn {
         LayerFfn::Dense(op) => {
@@ -211,22 +272,7 @@ fn explain_layer(
     ExplainLayer {
         layer: index,
         ops,
-        attention: ExplainAttention {
-            mode: if attention_op.window.is_some() {
-                "sliding".into()
-            } else {
-                "full".into()
-            },
-            window: attention_op.window,
-            q_heads: attention_op.num_q_heads,
-            kv_heads: attention_op.num_kv_heads,
-            head_dim: attention_op.head_dim,
-            gated: attention_op.output_gate.is_some(),
-            qk_norm: attention_op.qk_norm.is_some(),
-            sinks: attention_op.sinks.is_some(),
-            biased: attention_op.q_bias.is_some(),
-            operands: attention_operands,
-        },
+        attention,
         ffn: ExplainFfn {
             kind: kind.into(),
             experts,

@@ -58,7 +58,10 @@ fn drop_text_key(config: &mut serde_json::Value, key: &str) {
 fn the_intact_fixture_declares_all_three_operations() {
     let outcome = plan_without(|_| {});
     let plan = outcome.plan.expect("intact fixture plans");
-    assert_eq!(plan.layers[0].attention.query_scale, Some(3.87));
+    assert_eq!(
+        plan.layers[0].attention.softmax().unwrap().query_scale,
+        Some(3.87)
+    );
     assert_eq!(plan.output.as_ref().unwrap().multiplier, Some(0.196));
     // The fixture's family declares no embedding-scale operation, so the
     // embedding control below asserts a state this baseline pins as
@@ -77,7 +80,8 @@ fn a_withdrawn_query_scale_is_absent_not_identity() {
     let plan = outcome.plan.expect("withdrawing a scale must not block");
     for layer in &plan.layers {
         assert_eq!(
-            layer.attention.query_scale, None,
+            layer.attention.softmax().unwrap().query_scale,
+            None,
             "layer {}: withdrawn query scale came back as a value",
             layer.layer
         );

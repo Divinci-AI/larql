@@ -669,7 +669,7 @@ fn explain_changes_when_the_plan_changes() {
     let baseline = super::ExplainPlan::from_plan(&plan, "m");
 
     let mut widened = plan.clone();
-    widened.layers[0].attention.window = None;
+    widened.layers[0].attention.softmax_mut().unwrap().window = None;
     let explained = super::ExplainPlan::from_plan(&widened, "m");
     assert_ne!(baseline, explained);
     assert_eq!(explained.layers[0].attention.mode, "full");
@@ -705,7 +705,7 @@ fn explain_operand_coordinates_resolve_to_the_executed_bytes() {
         .find(|o| o.role == "up")
         .unwrap();
     for (quoted, executed) in [
-        (q, &plan.layers[0].attention.q),
+        (q, &plan.layers[0].attention.softmax().unwrap().q),
         (ffn_up, &plan.layers[0].ffn.dense().unwrap().up),
     ] {
         let rebuilt = OperandRef {

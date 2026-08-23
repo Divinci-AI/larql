@@ -431,10 +431,11 @@ fn execute_layer<B: PlanBackend + ?Sized, K: KvState + ?Sized>(
     // sequence it is given, so it cannot serve a prefill that resumes
     // part-way through one. Extending a populated provider therefore
     // still steps.
+    let attention_op = softmax_or_refuse(layer)?;
     let attn_out = match kv {
         Some((kv, layer_index)) if kv.position() == 0 => {
             let out = backend.attention(prepared.attention.call(
-                &layer.attention,
+                attention_op,
                 &inputs,
                 layer.pre_attention_norm.eps,
                 hidden,
@@ -445,7 +446,7 @@ fn execute_layer<B: PlanBackend + ?Sized, K: KvState + ?Sized>(
             out.outputs
         }
         Some((kv, layer_index)) => attention_into_kv(
-            &layer.attention,
+            attention_op,
             &prepared.attention,
             &inputs,
             layer.pre_attention_norm.eps,
@@ -457,7 +458,7 @@ fn execute_layer<B: PlanBackend + ?Sized, K: KvState + ?Sized>(
         None => {
             backend
                 .attention(prepared.attention.call(
-                    &layer.attention,
+                    attention_op,
                     &inputs,
                     layer.pre_attention_norm.eps,
                     hidden,
@@ -731,5 +732,26 @@ fn project<B: PlanBackend + ?Sized>(
         out_dim,
         in_dim,
         x,
+    })
+}
+
+/// This layer's softmax attention op, or a refusal naming what it carries
+/// instead.
+///
+/// Support or refuse, never invisibility (rung M3). A Gated DeltaNet layer
+/// has no per-position keys or values to hand a softmax backend and keeps
+/// no KV row, so there is nothing here to execute *as attention* — and on
+/// a hybrid checkpoint that is not an edge case: Qwen3.8-27B declares 48
+/// of its 64 layers that way. Running the plan anyway would execute a
+/// different model and report a number for it, which is the one outcome
+/// this engine refuses.
+pub(crate) fn softmax_or_refuse(layer: &LayerPlan) -> Result<&AttentionOp, VindexError> {
+    layer.attention.softmax().ok_or_else(|| {
+        VindexError::Parse(format!(
+            "layer {} carries `{}`, which this executor cannot run: it has \
+             no softmax attention and keeps no KV row",
+            layer.layer,
+            layer.attention.declared_name(),
+        ))
     })
 }

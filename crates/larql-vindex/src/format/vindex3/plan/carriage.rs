@@ -554,33 +554,33 @@ pub const CARRIAGE_RULES: &[CarriageRule] = &[
     // before it fails on a checkpoint.
     CarriageRule {
         leaf: "linear_conv_kernel_dim",
-        reaches: Carriage::Represented,
-        site: "no schema field — the linear-attention block's short-conv geometry is not represented yet",
-        probe: Some(probe_unrepresented),
+        reaches: Carriage::Lowered,
+        site: "ExecutionSurface.linear_attention.conv_kernel → GatedDeltaOp.conv_kernel",
+        probe: Some(probe_linear_conv_kernel),
     },
     CarriageRule {
         leaf: "linear_key_head_dim",
-        reaches: Carriage::Represented,
-        site: "no schema field — the linear-attention block's head geometry is not represented yet",
-        probe: Some(probe_unrepresented),
+        reaches: Carriage::Lowered,
+        site: "ExecutionSurface.linear_attention.key_head_dim → GatedDeltaOp.key_head_dim",
+        probe: Some(probe_linear_key_head_dim),
     },
     CarriageRule {
         leaf: "linear_value_head_dim",
-        reaches: Carriage::Represented,
-        site: "no schema field — the linear-attention block's head geometry is not represented yet",
-        probe: Some(probe_unrepresented),
+        reaches: Carriage::Lowered,
+        site: "ExecutionSurface.linear_attention.value_head_dim → GatedDeltaOp.value_head_dim",
+        probe: Some(probe_linear_value_head_dim),
     },
     CarriageRule {
         leaf: "linear_num_key_heads",
-        reaches: Carriage::Represented,
-        site: "no schema field — the linear-attention block's head geometry is not represented yet",
-        probe: Some(probe_unrepresented),
+        reaches: Carriage::Lowered,
+        site: "ExecutionSurface.linear_attention.key_heads → GatedDeltaOp.num_key_heads",
+        probe: Some(probe_linear_key_heads),
     },
     CarriageRule {
         leaf: "linear_num_value_heads",
-        reaches: Carriage::Represented,
-        site: "no schema field — the linear-attention block's head geometry is not represented yet",
-        probe: Some(probe_unrepresented),
+        reaches: Carriage::Lowered,
+        site: "ExecutionSurface.linear_attention.value_heads → GatedDeltaOp.num_value_heads",
+        probe: Some(probe_linear_value_heads),
     },
     CarriageRule {
         leaf: "mamba_ssm_dtype",
@@ -871,6 +871,51 @@ fn probe_layer_types(component: &Component, _ctx: &ProbeContext<'_>) -> Option<V
             .iter()
             .map(|l| json!(l.span.declared_name()))
             .collect(),
+    ))
+}
+
+/// The Gated DeltaNet geometry the surface carries, read back per field.
+///
+/// Each answers only if the component actually built a linear-attention
+/// block. A component with no recurrence answers `None`, and the gate then
+/// reports carriage without a value comparison rather than inventing a
+/// disagreement — the same contract every probe here has.
+///
+/// These are `Lowered` rather than `Represented` because each value
+/// terminates in a real operand contract: the five together derive
+/// `qkv_channels` and `value_width`, which the nine `LinearAttn*` shape
+/// checks close against the stored tensors.
+fn probe_linear_key_heads(component: &Component, _ctx: &ProbeContext<'_>) -> Option<Value> {
+    Some(json!(
+        component.execution.as_ref()?.linear_attention?.key_heads
+    ))
+}
+
+fn probe_linear_key_head_dim(component: &Component, _ctx: &ProbeContext<'_>) -> Option<Value> {
+    Some(json!(
+        component.execution.as_ref()?.linear_attention?.key_head_dim
+    ))
+}
+
+fn probe_linear_value_heads(component: &Component, _ctx: &ProbeContext<'_>) -> Option<Value> {
+    Some(json!(
+        component.execution.as_ref()?.linear_attention?.value_heads
+    ))
+}
+
+fn probe_linear_value_head_dim(component: &Component, _ctx: &ProbeContext<'_>) -> Option<Value> {
+    Some(json!(
+        component
+            .execution
+            .as_ref()?
+            .linear_attention?
+            .value_head_dim
+    ))
+}
+
+fn probe_linear_conv_kernel(component: &Component, _ctx: &ProbeContext<'_>) -> Option<Value> {
+    Some(json!(
+        component.execution.as_ref()?.linear_attention?.conv_kernel
     ))
 }
 

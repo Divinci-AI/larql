@@ -201,7 +201,7 @@ impl PreparedOperands {
             layers.push(PreparedLayer {
                 pre_attention: PreparedNorm::load(&layer.pre_attention_norm, store)?,
                 attention: AttentionOperands::load(
-                    &layer.attention,
+                    super::softmax_or_refuse(layer)?,
                     store,
                     backend.weight_format(MatrixClass::AttentionProjection),
                 )?,

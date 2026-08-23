@@ -239,7 +239,7 @@ impl<'a, B: PlanBackend> DecodeSession<'a, B> {
             // judged gate reads the same vector (same as the batch path).
             let inputs = [state.pre_attention.apply(self.backend, &h)];
             let call = state.attention.call(
-                &layer.attention,
+                super::softmax_or_refuse(layer)?,
                 &inputs,
                 layer.pre_attention_norm.eps,
                 hidden,

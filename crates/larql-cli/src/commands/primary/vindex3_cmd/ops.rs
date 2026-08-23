@@ -1,6 +1,8 @@
 //! `larql vindex3 ops` — print the generic operation plan (G5b-1).
 
-use larql_vindex::format::vindex3::opplan::{plan_component_ops, LayerPlan, NormOp};
+use larql_vindex::format::vindex3::opplan::{
+    plan_component_ops, AttentionOp, GatedDeltaOp, LayerAttention, LayerPlan, NormOp,
+};
 
 use super::optional_op::scalar;
 use super::OpsArgs;
@@ -27,19 +29,30 @@ pub(super) fn run_ops(args: OpsArgs) -> Result<(), Box<dyn std::error::Error>> {
             },
             None => {
                 for layer_plan in &plan.layers {
-                    let attention = &layer_plan.attention;
-                    println!(
-                        "layer {:3}: {:?}{} position {:?}  {}/{} operands accounted",
-                        layer_plan.layer,
-                        attention.span,
-                        attention
-                            .window
-                            .map(|w| format!("({w})"))
-                            .unwrap_or_default(),
-                        attention.position,
-                        layer_plan.operands_accounted,
-                        layer_plan.operands_present,
-                    );
+                    match &layer_plan.attention {
+                        LayerAttention::Softmax(attention) => println!(
+                            "layer {:3}: {:?}{} position {:?}  {}/{} operands accounted",
+                            layer_plan.layer,
+                            attention.span,
+                            attention
+                                .window
+                                .map(|w| format!("({w})"))
+                                .unwrap_or_default(),
+                            attention.position,
+                            layer_plan.operands_accounted,
+                            layer_plan.operands_present,
+                        ),
+                        LayerAttention::GatedDelta(op) => println!(
+                            "layer {:3}: GatedDelta({}k/{}v heads) state {} elems  \
+                             {}/{} operands accounted",
+                            layer_plan.layer,
+                            op.num_key_heads,
+                            op.num_value_heads,
+                            op.state_elements(),
+                            layer_plan.operands_accounted,
+                            layer_plan.operands_present,
+                        ),
+                    }
                 }
             }
         }
@@ -74,56 +87,14 @@ pub(super) fn run_ops(args: OpsArgs) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn print_layer(component: &str, layer: &LayerPlan) {
-    let attention = &layer.attention;
     println!("{component}.layer[{}]", layer.layer);
     let norm = |op: &NormOp, site: &str| {
         println!("  {:?}({site}, eps {:e})", op.kind, op.eps);
     };
     norm(&layer.pre_attention_norm, "pre_attention");
-    println!("  Attention");
-    println!(
-        "    geometry: {}q / {}kv, head_dim {}",
-        attention.num_q_heads, attention.num_kv_heads, attention.head_dim
-    );
-    println!(
-        "    query_scale {} score_scale {}",
-        scalar(attention.query_scale),
-        attention.score_scale
-    );
-    if attention.parameter_free_qk_norm.q || attention.parameter_free_qk_norm.k {
-        println!(
-            "    parameter_free_qk_norm q={} k={}",
-            attention.parameter_free_qk_norm.q, attention.parameter_free_qk_norm.k
-        );
-    }
-    println!(
-        "    span {:?}{}",
-        attention.span,
-        attention
-            .window
-            .map(|w| format!("({w})"))
-            .unwrap_or_default()
-    );
-    println!("    position {:?}", attention.position);
-    if let Some(qk) = &attention.qk_norm {
-        println!("    qk_norm {:?}", qk.scope);
-    }
-    for (name, operand) in [
-        ("q", &attention.q),
-        ("k", &attention.k),
-        ("v", &attention.v),
-        ("o", &attention.o),
-    ] {
-        println!(
-            "    {name} = {}/{} {:?}",
-            operand.object, operand.tensor, operand.shape
-        );
-    }
-    if let Some(gate) = &attention.output_gate {
-        println!(
-            "    output_gate {:?} = {}/{}",
-            gate.spec.activation, gate.projection.object, gate.projection.tensor
-        );
+    match &layer.attention {
+        LayerAttention::Softmax(op) => print_softmax(op),
+        LayerAttention::GatedDelta(op) => print_gated_delta(op),
     }
     println!("  residual");
     if let Some(op) = &layer.post_attention_norm {
@@ -189,5 +160,93 @@ fn print_layer(component: &str, layer: &LayerPlan) {
     println!("  residual");
     if let Some(scale) = &layer.layer_scale {
         println!("  × layer_scale {}/{}", scale.object, scale.tensor);
+    }
+}
+
+/// The softmax attention section of one layer.
+fn print_softmax(attention: &AttentionOp) {
+    println!("  Attention");
+    println!(
+        "    geometry: {}q / {}kv, head_dim {}",
+        attention.num_q_heads, attention.num_kv_heads, attention.head_dim
+    );
+    println!(
+        "    query_scale {} score_scale {}",
+        scalar(attention.query_scale),
+        attention.score_scale
+    );
+    if attention.parameter_free_qk_norm.q || attention.parameter_free_qk_norm.k {
+        println!(
+            "    parameter_free_qk_norm q={} k={}",
+            attention.parameter_free_qk_norm.q, attention.parameter_free_qk_norm.k
+        );
+    }
+    println!(
+        "    span {:?}{}",
+        attention.span,
+        attention
+            .window
+            .map(|w| format!("({w})"))
+            .unwrap_or_default()
+    );
+    println!("    position {:?}", attention.position);
+    if let Some(qk) = &attention.qk_norm {
+        println!("    qk_norm {:?}", qk.scope);
+    }
+    for (name, operand) in [
+        ("q", &attention.q),
+        ("k", &attention.k),
+        ("v", &attention.v),
+        ("o", &attention.o),
+    ] {
+        println!(
+            "    {name} = {}/{} {:?}",
+            operand.object, operand.tensor, operand.shape
+        );
+    }
+    if let Some(gate) = &attention.output_gate {
+        println!(
+            "    output_gate {:?} = {}/{}",
+            gate.spec.activation, gate.projection.object, gate.projection.tensor
+        );
+    }
+}
+
+/// The Gated DeltaNet section of one layer.
+///
+/// Deliberately does NOT reuse the softmax vocabulary: there is no span,
+/// no window and no KV head count to print, and the one number a reader
+/// most needs — the recurrent state's size — has no softmax counterpart.
+fn print_gated_delta(op: &GatedDeltaOp) {
+    println!("  GatedDeltaNet");
+    println!(
+        "    geometry: {}k/{}v heads, key_head_dim {}, value_head_dim {}",
+        op.num_key_heads, op.num_value_heads, op.key_head_dim, op.value_head_dim
+    );
+    println!(
+        "    conv kernel {}  qkv channels {}",
+        op.conv_kernel,
+        op.qkv_channels()
+    );
+    println!(
+        "    state: {} elements/layer at {} — constant in sequence length",
+        op.state_elements(),
+        op.state_dtype.as_deref().unwrap_or("dtype not carried")
+    );
+    for (name, operand) in [
+        ("in_proj_qkv", &op.in_proj_qkv),
+        ("in_proj_a", &op.in_proj_a),
+        ("in_proj_b", &op.in_proj_b),
+        ("in_proj_z", &op.in_proj_z),
+        ("conv1d", &op.conv1d),
+        ("a_log", &op.a_log),
+        ("dt_bias", &op.dt_bias),
+        ("norm", &op.norm),
+        ("out_proj", &op.out_proj),
+    ] {
+        println!(
+            "    {name} = {}/{} {:?}",
+            operand.object, operand.tensor, operand.shape
+        );
     }
 }

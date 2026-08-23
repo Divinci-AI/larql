@@ -46,9 +46,24 @@ pub struct LayerKvGeometry {
 pub fn plan_kv_geometry(plan: &ComponentOpPlan) -> Vec<LayerKvGeometry> {
     plan.layers
         .iter()
-        .map(|layer| LayerKvGeometry {
-            kv_dim: layer.attention.num_kv_heads * layer.attention.head_dim,
-            window: layer.attention.window,
+        .map(|layer| {
+            // A layer whose attention is not softmax keeps no KV row, so it
+            // has no geometry to state. Reaching here with one means an
+            // executor ran a plan the entry points should have refused
+            // (see `refuse_unexecutable_attention`) — a fabricated row
+            // width here would silently mis-size every later layer's store.
+            let attention = layer.attention.softmax().unwrap_or_else(|| {
+                panic!(
+                    "layer {} carries {}, which keeps no KV row; \
+                     execution should have refused this plan",
+                    layer.layer,
+                    layer.attention.declared_name(),
+                )
+            });
+            LayerKvGeometry {
+                kv_dim: attention.num_kv_heads * attention.head_dim,
+                window: attention.window,
+            }
         })
         .collect()
 }

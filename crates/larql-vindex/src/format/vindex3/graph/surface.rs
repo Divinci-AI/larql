@@ -234,6 +234,48 @@ pub struct ExecutionSurface {
     /// field here, applied at every layer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub residual_scale: Option<f32>,
+    /// Geometry the Gated DeltaNet operator consumes, on a component whose
+    /// layers include linear attention. `None` on a wholly-softmax stack.
+    ///
+    /// Deliberately NOT every `linear_*` config field: the surface carries
+    /// the subset an operator reads, not a second copy of `ModelConfig`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linear_attention: Option<LinearAttentionSurface>,
+}
+
+/// What the Gated DeltaNet operator reads.
+///
+/// Mirrors [`LinearAttentionTopology`](larql_models::inventory::report::LinearAttentionTopology)
+/// rather than reusing it, for the same reason [`AttentionSurface`] does not
+/// reuse the resolved topology: the surface is the executor's contract and
+/// may diverge from the architectural record. It does not, today.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinearAttentionSurface {
+    /// Hk — query/key-side head count (16 on Qwen3.8).
+    pub key_heads: usize,
+    /// Dk (128).
+    pub key_head_dim: usize,
+    /// Hv — value-side head count (48). Distinct from [`Self::key_heads`]
+    /// on purpose; no single head count describes this operator.
+    pub value_heads: usize,
+    /// Dv (128).
+    pub value_head_dim: usize,
+    /// Depthwise causal convolution width over the fused q|k|v channels (4).
+    pub conv_kernel: usize,
+}
+
+impl LinearAttentionSurface {
+    /// `2·Hk·Dk + Hv·Dv` — the fused projection's row count, and the
+    /// channel count the depthwise convolution runs over. Derived so it
+    /// cannot drift from the head counts.
+    pub fn qkv_channels(self) -> usize {
+        self.key_heads * self.key_head_dim * 2 + self.value_heads * self.value_head_dim
+    }
+
+    /// `Hv·Dv` — the value/gate width.
+    pub fn value_width(self) -> usize {
+        self.value_heads * self.value_head_dim
+    }
 }
 
 /// Build the surface for a text-path component (target/drafter) from its
@@ -254,6 +296,16 @@ pub fn surface_from_resolved(
     // each layer's geometry on its `AttentionLayerPolicy`, and the op
     // plan reads the layer's, so nothing here is averaged away.
     Ok(ExecutionSurface {
+        // Carried from the architectural record, not re-derived. `None`
+        // when the model declares no recurrence — every layer attends by
+        // softmax and the operator is never reached.
+        linear_attention: resolved.linear_attention.map(|t| LinearAttentionSurface {
+            key_heads: t.key_heads,
+            key_head_dim: t.key_head_dim,
+            value_heads: t.value_heads,
+            value_head_dim: t.value_head_dim,
+            conv_kernel: t.conv_kernel,
+        }),
         attention: AttentionSurface {
             num_q_heads: resolved.num_q_heads,
             num_kv_heads: resolved.num_kv_heads,
@@ -421,6 +473,8 @@ pub fn surface_from_nested(
         return Err(missing);
     }
     Ok(ExecutionSurface {
+        // No judged perception tower declares a linear-attention recurrence.
+        linear_attention: None,
         attention: AttentionSurface {
             num_q_heads: heads,
             num_kv_heads: nested.num_key_value_heads.unwrap_or(heads),
