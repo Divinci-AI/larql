@@ -16,8 +16,9 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::format::vindex3::opplan::exec::continuation::RecurrentState;
 use crate::format::vindex3::opplan::exec::gated_delta::{
-    layer_forward, recurrence_step, recurrence_step_mutated, GatedDeltaState, GatedDeltaWeights,
+    layer_forward, recurrence_step, recurrence_step_mutated, state_geometry, GatedDeltaWeights,
     Mutation, RecurrenceStep,
 };
 use crate::format::vindex3::opplan::{GatedDeltaOp, OperandRef};
@@ -171,7 +172,9 @@ fn the_recurrence_and_its_state_match_hf_on_real_weights() {
         let tokens = g.len() / VALUE_HEADS;
         assert!(tokens >= 2, "the state chain needs at least two positions");
 
-        let mut state = GatedDeltaState::zeros(&op);
+        let mut state = RecurrentState::zeros(
+            &state_geometry(&op).expect("the fixture declares a state precision"),
+        );
         for t in 0..tokens {
             let qk = t * per_token_qk..(t + 1) * per_token_qk;
             let hv = t * VALUE_HEADS..(t + 1) * VALUE_HEADS;
@@ -278,7 +281,9 @@ fn every_deliberate_defect_is_detected() {
         Mutation::NoBeta,
         Mutation::RawGate,
     ] {
-        let mut state = GatedDeltaState::zeros(&op);
+        let mut state = RecurrentState::zeros(
+            &state_geometry(&op).expect("the fixture declares a state precision"),
+        );
         let mut last_out = Vec::new();
         for t in 0..tokens {
             let qk = t * per_token_qk..(t + 1) * per_token_qk;
@@ -316,7 +321,9 @@ fn every_deliberate_defect_is_detected() {
     }
 
     // And the unmutated path, for contrast on the same table.
-    let mut state = GatedDeltaState::zeros(&op);
+    let mut state = RecurrentState::zeros(
+        &state_geometry(&op).expect("the fixture declares a state precision"),
+    );
     let mut last_out = Vec::new();
     for t in 0..tokens {
         let qk = t * per_token_qk..(t + 1) * per_token_qk;
@@ -405,7 +412,9 @@ fn the_whole_operator_matches_hf_stage_by_stage() {
             .map(|t| input[t * HIDDEN..(t + 1) * HIDDEN].to_vec())
             .collect();
 
-        let mut state = GatedDeltaState::zeros(&op);
+        let mut state = RecurrentState::zeros(
+            &state_geometry(&op).expect("the fixture declares a state precision"),
+        );
         let planes = layer_forward(&op, &w, &hidden, &mut state, Mutation::None);
 
         // Boundaries HF captured for the whole sequence at once.
@@ -507,7 +516,9 @@ fn outer_path_defects_are_caught_at_their_own_stage() {
         Mutation::TiledHeadExpansion,
         Mutation::None,
     ] {
-        let mut state = GatedDeltaState::zeros(&op);
+        let mut state = RecurrentState::zeros(
+            &state_geometry(&op).expect("the fixture declares a state precision"),
+        );
         let planes = layer_forward(&op, &w, &hidden, &mut state, mutation);
         let flat: Vec<f32> = planes.query.iter().flatten().copied().collect();
         let q = agreement(&flat, &ref_q);

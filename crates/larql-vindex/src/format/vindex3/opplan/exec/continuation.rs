@@ -158,3 +158,187 @@ pub fn plan_continuation_geometry(
         })
         .collect()
 }
+
+/// One layer's durable state, mirroring [`LayerContinuationGeometry`].
+///
+/// Storage only. There is deliberately no update method, no callback and no
+/// operator handle on any variant: the state owns what survives between
+/// steps, and the operator owns how it changes. A state that knew how a
+/// Gated DeltaNet updates itself would have to learn KDA's rule too, and
+/// then every future recurrence's — which is how a storage type becomes a
+/// dispatch table.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LayerContinuationState {
+    /// Sequence-indexed rows, appended per position.
+    Kv(LayerKvRows),
+    /// A fixed-size buffer the operator reads and rewrites in place.
+    Recurrent(RecurrentState),
+    Stateless,
+}
+
+/// One softmax layer's retained rows.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LayerKvRows {
+    keys: Vec<Vec<f32>>,
+    values: Vec<Vec<f32>>,
+}
+
+impl LayerKvRows {
+    pub fn append(&mut self, key: Vec<f32>, value: Vec<f32>) {
+        self.keys.push(key);
+        self.values.push(value);
+    }
+
+    pub fn keys(&self) -> &[Vec<f32>] {
+        &self.keys
+    }
+
+    pub fn values(&self) -> &[Vec<f32>] {
+        &self.values
+    }
+}
+
+/// A recurrence's durable buffer.
+///
+/// Carries its shape so a consumer can index it, and nothing else. It does
+/// not know which operator owns it: the same type serves Gated DeltaNet
+/// today and is meant to serve KDA unchanged.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecurrentState {
+    shape: Vec<usize>,
+    cells: Vec<f32>,
+}
+
+impl RecurrentState {
+    /// The zero start a sequence begins from.
+    pub fn zeros(geometry: &RecurrentGeometry) -> Self {
+        match geometry.initialization {
+            StateInitialization::Zeros => Self {
+                shape: geometry.shape.clone(),
+                cells: vec![0.0; geometry.elements()],
+            },
+        }
+    }
+
+    /// Adopt existing cells — a captured state, or one being resumed.
+    pub fn from_cells(geometry: &RecurrentGeometry, cells: Vec<f32>) -> Result<Self, String> {
+        if cells.len() != geometry.elements() {
+            return Err(format!(
+                "state has {} cells, this geometry needs {}",
+                cells.len(),
+                geometry.elements()
+            ));
+        }
+        Ok(Self {
+            shape: geometry.shape.clone(),
+            cells,
+        })
+    }
+
+    pub fn shape(&self) -> &[usize] {
+        &self.shape
+    }
+
+    pub fn cells(&self) -> &[f32] {
+        &self.cells
+    }
+
+    pub fn cells_mut(&mut self) -> &mut [f32] {
+        &mut self.cells
+    }
+}
+
+/// A component's whole continuation state, one entry per layer.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ContinuationState {
+    layers: Vec<LayerContinuationState>,
+    position: usize,
+}
+
+impl ContinuationState {
+    /// Allocate exactly what each layer's geometry asks for — and nothing
+    /// for the layers that ask for nothing.
+    pub fn prepare(geometry: &[LayerContinuationGeometry]) -> Self {
+        Self {
+            layers: geometry
+                .iter()
+                .map(|g| match g {
+                    LayerContinuationGeometry::Kv(_) => {
+                        LayerContinuationState::Kv(LayerKvRows::default())
+                    }
+                    LayerContinuationGeometry::Recurrent(r) => {
+                        LayerContinuationState::Recurrent(RecurrentState::zeros(r))
+                    }
+                    LayerContinuationGeometry::Stateless => LayerContinuationState::Stateless,
+                })
+                .collect(),
+            position: 0,
+        }
+    }
+
+    pub fn layer(&self, index: usize) -> &LayerContinuationState {
+        &self.layers[index]
+    }
+
+    pub fn layer_mut(&mut self, index: usize) -> &mut LayerContinuationState {
+        &mut self.layers[index]
+    }
+
+    pub fn len(&self) -> usize {
+        self.layers.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.layers.is_empty()
+    }
+
+    /// The logical position this state continues from. Owned explicitly,
+    /// never derived from a row count — the same contract
+    /// [`KvState`](super::kv::KvState) states, and for the same reason: a
+    /// recurrent layer retains no rows at all, so a count could not answer
+    /// it even in principle.
+    pub fn position(&self) -> usize {
+        self.position
+    }
+
+    pub fn set_position(&mut self, position: usize) {
+        self.position = position;
+    }
+
+    /// Total elements retained after `positions` steps.
+    pub fn elements_at(&self, positions: usize) -> usize {
+        self.layers
+            .iter()
+            .map(|l| match l {
+                LayerContinuationState::Kv(rows) => {
+                    rows.keys.first().map_or(0, |r| r.len()) * 2 * positions
+                }
+                LayerContinuationState::Recurrent(r) => r.cells.len(),
+                LayerContinuationState::Stateless => 0,
+            })
+            .sum()
+    }
+}
+
+impl LayerContinuationState {
+    pub fn kv_mut(&mut self) -> Option<&mut LayerKvRows> {
+        match self {
+            Self::Kv(rows) => Some(rows),
+            _ => None,
+        }
+    }
+
+    pub fn recurrent_mut(&mut self) -> Option<&mut RecurrentState> {
+        match self {
+            Self::Recurrent(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    pub fn recurrent(&self) -> Option<&RecurrentState> {
+        match self {
+            Self::Recurrent(state) => Some(state),
+            _ => None,
+        }
+    }
+}

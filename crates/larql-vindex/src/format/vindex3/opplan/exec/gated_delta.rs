@@ -20,62 +20,43 @@
 // verified against — and verification is the entire point of the file.
 #![allow(clippy::needless_range_loop)]
 
+use super::super::gated_delta::StateDtype;
 use super::super::GatedDeltaOp;
+use super::continuation::{RecurrentGeometry, RecurrentState, StateInitialization};
 
 /// L2-normalisation epsilon, from the reference kernel's own default.
 const L2NORM_EPS: f32 = 1e-6;
 
-/// One layer's recurrent state: `[value_heads][key_head_dim][value_head_dim]`.
+/// This operator's state, expressed in the engine's generic terms.
 ///
-/// Held in f32 regardless of the weights' storage dtype. That is the
-/// checkpoint's own instruction — Qwen3.8 declares `mamba_ssm_dtype:
-/// float32` against a bf16 model — and it is not decoration: the state
-/// feeds itself forward, so rounding compounds across the whole sequence
-/// in a way a one-shot weight rounding does not.
-#[derive(Debug, Clone, PartialEq)]
-pub struct GatedDeltaState {
-    value_heads: usize,
-    key_head_dim: usize,
-    value_head_dim: usize,
-    /// Row-major `[head][k][v]`.
-    cells: Vec<f32>,
+/// A Gated DeltaNet layer keeps one `Dk × Dv` matrix per value head. That
+/// is a [`RecurrentGeometry`] like any other — the shape is the operator's
+/// business, and the storage is not. There is deliberately no
+/// `GatedDeltaState` type: a state named after one operator is exactly what
+/// KDA would have had to work around.
+///
+/// `None` when the checkpoint declared no state precision this build
+/// represents. It does NOT fall back to a default, for the same reason
+/// [`plan_continuation_geometry`](super::continuation::plan_continuation_geometry)
+/// does not: a default that happens to be right for one checkpoint lets
+/// every test pass while the architecture is wrong, and the next operator
+/// inherits the accident.
+pub fn state_geometry(op: &GatedDeltaOp) -> Option<RecurrentGeometry> {
+    Some(RecurrentGeometry {
+        shape: vec![op.num_value_heads, op.key_head_dim, op.value_head_dim],
+        dtype: op.state_dtype?,
+        initialization: StateInitialization::Zeros,
+    })
 }
 
-impl GatedDeltaState {
-    /// The zero state a sequence starts from.
-    pub fn zeros(op: &GatedDeltaOp) -> Self {
-        Self {
-            value_heads: op.num_value_heads,
-            key_head_dim: op.key_head_dim,
-            value_head_dim: op.value_head_dim,
-            cells: vec![0.0; op.state_elements()],
-        }
-    }
+/// Compile-time reminder that the two dtype spellings are one type.
+const _: fn() = || {
+    let _: Option<StateDtype> = None::<StateDtype>;
+};
 
-    /// Adopt an existing state (a captured one, or a session's).
-    pub fn from_cells(op: &GatedDeltaOp, cells: Vec<f32>) -> Result<Self, String> {
-        if cells.len() != op.state_elements() {
-            return Err(format!(
-                "state has {} elements, this layer's geometry needs {}",
-                cells.len(),
-                op.state_elements()
-            ));
-        }
-        Ok(Self {
-            value_heads: op.num_value_heads,
-            key_head_dim: op.key_head_dim,
-            value_head_dim: op.value_head_dim,
-            cells,
-        })
-    }
-
-    pub fn cells(&self) -> &[f32] {
-        &self.cells
-    }
-
-    fn at(&self, head: usize, k: usize, v: usize) -> usize {
-        (head * self.key_head_dim + k) * self.value_head_dim + v
-    }
+/// Index of one state cell in the flat buffer, `[head][k][v]` row-major.
+fn cell(op: &GatedDeltaOp, head: usize, k: usize, v: usize) -> usize {
+    (head * op.key_head_dim + k) * op.value_head_dim + v
 }
 
 /// One position's inputs to the recurrence, per value head, already split
@@ -129,7 +110,7 @@ fn l2_normalise(row: &mut [f32]) {
 pub fn recurrence_step(
     op: &GatedDeltaOp,
     step: &RecurrenceStep<'_>,
-    state: &mut GatedDeltaState,
+    state: &mut RecurrentState,
 ) -> Vec<f32> {
     step_inner(op, step, state, Mutation::None)
 }
@@ -166,7 +147,7 @@ pub enum Mutation {
 fn step_inner(
     op: &GatedDeltaOp,
     step: &RecurrenceStep<'_>,
-    state: &mut GatedDeltaState,
+    state: &mut RecurrentState,
     mutation: Mutation,
 ) -> Vec<f32> {
     let (hv, dk, dv) = (op.num_value_heads, op.key_head_dim, op.value_head_dim);
@@ -205,8 +186,8 @@ fn step_inner(
 
         for kk in 0..dk {
             for vv in 0..dv {
-                let idx = state.at(h, kk, vv);
-                state.cells[idx] *= decay;
+                let idx = cell(op, h, kk, vv);
+                state.cells_mut()[idx] *= decay;
             }
         }
         // kv = sum over the KEY axis, weighted by k.
@@ -214,15 +195,15 @@ fn step_inner(
         for kk in 0..dk {
             let kw = k[kk];
             for vv in 0..dv {
-                kv[vv] += state.cells[state.at(h, kk, vv)] * kw;
+                kv[vv] += state.cells_mut()[cell(op, h, kk, vv)] * kw;
             }
         }
         let delta: Vec<f32> = (0..dv).map(|vv| (v[vv] - kv[vv]) * beta).collect();
-        let mut read = |state: &GatedDeltaState| {
+        let mut read = |state: &RecurrentState| {
             for kk in 0..dk {
                 let qw = q[kk];
                 for vv in 0..dv {
-                    out[h * dv + vv] += state.cells[state.at(h, kk, vv)] * qw;
+                    out[h * dv + vv] += state.cells()[cell(op, h, kk, vv)] * qw;
                 }
             }
         };
@@ -232,8 +213,8 @@ fn step_inner(
         for kk in 0..dk {
             let kw = k[kk];
             for vv in 0..dv {
-                let idx = state.at(h, kk, vv);
-                state.cells[idx] += kw * delta[vv];
+                let idx = cell(op, h, kk, vv);
+                state.cells_mut()[idx] += kw * delta[vv];
             }
         }
         if mutation != Mutation::ReadBeforeWrite {
@@ -247,7 +228,7 @@ fn step_inner(
 pub fn recurrence_step_mutated(
     op: &GatedDeltaOp,
     step: &RecurrenceStep<'_>,
-    state: &mut GatedDeltaState,
+    state: &mut RecurrentState,
     mutation: Mutation,
 ) -> Vec<f32> {
     step_inner(op, step, state, mutation)
@@ -326,7 +307,7 @@ pub fn layer_forward(
     op: &GatedDeltaOp,
     w: &GatedDeltaWeights<'_>,
     hidden: &[Vec<f32>],
-    state: &mut GatedDeltaState,
+    state: &mut RecurrentState,
     mutation: Mutation,
 ) -> LayerPlanes {
     let (hk, hv) = (op.num_key_heads, op.num_value_heads);

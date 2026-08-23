@@ -12,7 +12,8 @@
 //! object, not the architecture it describes.
 
 use super::super::continuation::{
-    plan_continuation_geometry, LayerContinuationGeometry, StateInitialization,
+    plan_continuation_geometry, ContinuationState, LayerContinuationGeometry,
+    LayerContinuationState, StateInitialization,
 };
 use super::super::kv::try_plan_kv_geometry;
 use crate::format::vindex3::opplan::{ComponentOpPlan, GatedDeltaOp, LayerAttention};
@@ -246,4 +247,94 @@ fn an_undeclared_state_precision_refuses_rather_than_defaulting() {
         err.contains("layer 0") && err.contains("precision"),
         "the refusal must name the layer and the missing fact: {err}"
     );
+}
+
+/// The runtime mirror allocates exactly what the geometry asked for.
+///
+/// The geometry gates proved the PLAN is honest. This proves the
+/// allocation follows it — a planner that described 48 recurrent layers and
+/// a runtime that then allocated 64 KV stores would pass every earlier test
+/// in this file.
+#[test]
+fn the_runtime_state_allocates_what_the_geometry_asked_for() {
+    let plan = qwen_like_plan();
+    let geometry = plan_continuation_geometry(&plan).unwrap();
+    let state = ContinuationState::prepare(&geometry);
+    assert_eq!(state.len(), LAYERS);
+    assert_eq!(state.position(), 0, "a fresh state continues from 0");
+
+    let mut recurrent = 0;
+    let mut kv = 0;
+    for index in 0..LAYERS {
+        match state.layer(index) {
+            LayerContinuationState::Recurrent(r) => {
+                recurrent += 1;
+                assert_eq!(r.shape(), [VALUE_HEADS, HEAD_DIM, HEAD_DIM]);
+                assert_eq!(r.cells().len(), STATE_ELEMENTS_PER_LAYER);
+                assert!(
+                    r.cells().iter().all(|c| *c == 0.0),
+                    "layer {index} did not start from zeros"
+                );
+            }
+            LayerContinuationState::Kv(rows) => {
+                kv += 1;
+                assert!(
+                    rows.keys().is_empty() && rows.values().is_empty(),
+                    "layer {index} preallocated KV rows before any position"
+                );
+            }
+            LayerContinuationState::Stateless => panic!("layer {index} is stateless"),
+        }
+    }
+    assert_eq!((recurrent, kv), (48, 16));
+}
+
+/// The same asymmetry the geometry proved, now in the allocated state: a
+/// recurrent layer holds a buffer from step zero, a KV layer holds nothing
+/// until positions arrive.
+#[test]
+fn the_two_kinds_of_state_grow_differently() {
+    let plan = qwen_like_plan();
+    let geometry = plan_continuation_geometry(&plan).unwrap();
+    let mut state = ContinuationState::prepare(&geometry);
+
+    // Nothing has been appended, so only the recurrent buffers exist.
+    let resident: usize = (0..LAYERS)
+        .filter_map(|i| state.layer(i).recurrent().map(|r| r.cells().len()))
+        .sum();
+    assert_eq!(resident, 48 * STATE_ELEMENTS_PER_LAYER);
+
+    // Append one position to every KV layer; the recurrent buffers must not
+    // move.
+    let width = geometry
+        .iter()
+        .find_map(|g| g.kv().map(|kv| kv.kv_dim))
+        .unwrap();
+    for index in 0..LAYERS {
+        if let Some(rows) = state.layer_mut(index).kv_mut() {
+            rows.append(vec![0.0; width], vec![0.0; width]);
+        }
+    }
+    let after: usize = (0..LAYERS)
+        .filter_map(|i| state.layer(i).recurrent().map(|r| r.cells().len()))
+        .sum();
+    assert_eq!(after, resident, "a KV append resized a recurrent buffer");
+    assert_eq!(state.elements_at(1), resident + 16 * width * 2);
+
+    state.set_position(1);
+    assert_eq!(state.position(), 1, "position is owned, not derived");
+}
+
+/// A recurrent buffer only accepts cells its geometry can hold.
+#[test]
+fn a_recurrent_state_refuses_the_wrong_number_of_cells() {
+    use super::super::continuation::{RecurrentGeometry, RecurrentState};
+    let g = RecurrentGeometry {
+        shape: vec![4, 5],
+        dtype: RecurrentStateDtype::Float32,
+        initialization: StateInitialization::Zeros,
+    };
+    assert!(RecurrentState::from_cells(&g, vec![0.0; 20]).is_ok());
+    let err = RecurrentState::from_cells(&g, vec![0.0; 19]).expect_err("19 != 4*5");
+    assert!(err.contains("19") && err.contains("20"), "{err}");
 }

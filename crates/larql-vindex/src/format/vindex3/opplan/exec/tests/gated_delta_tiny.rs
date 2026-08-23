@@ -18,7 +18,8 @@
 //! And both `rel_rms` and `cosine`, because `ScaleBeforeNorm` is a pure
 //! magnitude error that leaves cosine at exactly 1.0.
 
-use super::super::gated_delta::{layer_forward, GatedDeltaState, GatedDeltaWeights, Mutation};
+use super::super::continuation::RecurrentState;
+use super::super::gated_delta::{layer_forward, state_geometry, GatedDeltaWeights, Mutation};
 use super::qw2_tiny_fixture as fx;
 use crate::format::vindex3::fixtures::lcg_values;
 use crate::format::vindex3::opplan::{GatedDeltaOp, OperandRef};
@@ -146,7 +147,9 @@ fn the_generator_still_produces_the_values_this_fixture_was_built_from() {
 fn the_tiny_operator_matches_the_reference_at_every_plane() {
     let op = op();
     let s = store();
-    let mut state = GatedDeltaState::zeros(&op);
+    let mut state = RecurrentState::zeros(
+        &state_geometry(&op).expect("the fixture declares a state precision"),
+    );
     let planes = layer_forward(&op, &weights(&s), &hidden(), &mut state, Mutation::None);
 
     let flat = |v: &Vec<Vec<f32>>| -> Vec<f32> { v.iter().flatten().copied().collect() };
@@ -176,7 +179,9 @@ fn every_defect_is_still_caught_by_the_compact_fixture() {
         Mutation::CentredConv,
         Mutation::TiledHeadExpansion,
     ] {
-        let mut state = GatedDeltaState::zeros(&op);
+        let mut state = RecurrentState::zeros(
+            &state_geometry(&op).expect("the fixture declares a state precision"),
+        );
         let planes = layer_forward(&op, &weights(&s), &h, &mut state, mutation);
         let (q_rel, _) = metrics(&flat(&planes.query), &fx::EXPECTED_Q);
         let (core_rel, core_cos) = metrics(&flat(&planes.core), &fx::EXPECTED_CORE);
