@@ -40,6 +40,7 @@ def container_identity(container):
         "model": idx.get("model"),
         "authority": idx.get("authority", "canonical"),
         "representations": digests,
+        "payload_bytes": sum(v.get("payload_bytes", 0) for v in idx.get("representations", {}).values()),
     }
 
 
@@ -120,7 +121,10 @@ def cmd_compare(container, outdir, backend, source, label):
         print(f"  cmp {i+1}/{len(meta['entries'])} {e['id']}", flush=True)
     if os.path.exists(tmp):
         os.remove(tmp)
+    ref_bytes = meta["container"].get("payload_bytes", 0)
+    cand_bytes = container_identity(container).get("payload_bytes", 0)
     out = {"label": label, "backend": backend, "source": source,
+           "payload_bytes": cand_bytes,
            "runtime_compiled_total": compiled_total,
            "container": container_identity(container),
            "reference": meta["container"], "rows": rows}

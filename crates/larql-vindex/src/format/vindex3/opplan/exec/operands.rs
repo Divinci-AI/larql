@@ -48,6 +48,9 @@ pub struct OperandStore {
     /// Tensors quantised at load in this session — see
     /// [`Self::runtime_quantised`].
     runtime_quantised: std::sync::atomic::AtomicU64,
+    /// Tensors bound at their stored precision rather than the format the
+    /// backend asked for — see [`Self::bound_at_stored_precision`].
+    stored_precision: std::sync::atomic::AtomicU64,
 }
 
 /// Where an execution representation is allowed to come from.
@@ -172,6 +175,7 @@ impl OperandStore {
             id: next_identity(),
             loads: std::sync::atomic::AtomicU64::new(0),
             runtime_quantised: std::sync::atomic::AtomicU64::new(0),
+            stored_precision: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -196,6 +200,29 @@ impl OperandStore {
     /// Where this store was allowed to source representations from.
     pub fn representation_source(&self) -> RepresentationSource {
         self.source
+    }
+
+    /// How many tensors ran at their stored precision instead of the
+    /// format the backend asked for.
+    ///
+    /// A compiled pack is a precision map: it may store `gate_proj` as
+    /// NVFP4 and `q_proj` as BF16 because a policy decided to spend bytes
+    /// there. Backend arms declare a format per *class* — attention, FFN,
+    /// head — which is a coarser instrument than the map, so under
+    /// [`RepresentationSource::Stored`] the stored encoding wins and the
+    /// arm's request acts as a ceiling rather than a demand.
+    ///
+    /// This is never a silent downgrade: honouring the map means running
+    /// *higher* precision than asked, and the count says how often.
+    pub fn bound_at_stored_precision(&self) -> u64 {
+        self.stored_precision
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Record one such binding.
+    pub fn note_stored_precision(&self) {
+        self.stored_precision
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Record that a tensor is about to be quantised at load, and refuse

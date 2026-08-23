@@ -17,7 +17,7 @@
 //! the f32 backends and the upstream trace are its judge.
 
 use super::backend::{WeightFormat, WeightSlice};
-use super::operands::OperandSource;
+use super::operands::{OperandSource, RepresentationSource};
 use crate::error::VindexError;
 use crate::format::vindex3::opplan::OperandRef;
 use crate::format::vindex3::represent::nvfp4_pack::DTYPE_NVFP4;
@@ -183,6 +183,15 @@ pub fn load_weight(
             if raw.dtype == DTYPE_NVFP4 {
                 return nvfp4_from_stored(&raw.bytes, rows, k, &operand.tensor);
             }
+            // A compiled pack is a precision map, and a backend arm names a
+            // format per class — attention, FFN, head — which cannot express
+            // one. Under `stored` the map wins: a tensor its policy held at
+            // source precision runs at source precision, which is higher
+            // than the arm asked for and manufactures nothing.
+            if store.store().representation_source() == RepresentationSource::Stored {
+                store.store().note_stored_precision();
+                return narrow_to_f16(&raw, &operand.tensor);
+            }
             store.store().note_runtime_quantisation(&operand.tensor)?;
             let values = widen_raw(&raw, &operand.tensor)?;
             quantize_nvfp4(&values, rows, k, &operand.tensor)
@@ -234,6 +243,21 @@ fn nvfp4_from_stored(
         scales,
         tensor_scale,
     })
+}
+
+/// Bind an already-read float operand as f16, the narrowing the F16 arm
+/// performs. Shared so the stored-precision path cannot drift from it.
+fn narrow_to_f16(
+    raw: &super::operands::RawOperand,
+    name: &str,
+) -> Result<LoadedWeight, VindexError> {
+    match raw.dtype.as_str() {
+        DTYPE_BF16 => Ok(LoadedWeight::F16(bf16_bytes_to_f16(&raw.bytes, name)?)),
+        DTYPE_F32 => Ok(LoadedWeight::F16(f32_bytes_to_f16(&raw.bytes, name)?)),
+        other => Err(VindexError::Parse(format!(
+            "tensor `{name}`: no judged f16 narrowing for stored dtype `{other}`"
+        ))),
+    }
 }
 
 /// Widen an already-read raw operand, so the NVFP4 path can inspect the

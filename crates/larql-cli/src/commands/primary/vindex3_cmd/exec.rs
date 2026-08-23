@@ -313,6 +313,16 @@ fn report_representation_work(store: &OperandStore, want: Option<&str>, ok: bool
             ""
         }
     );
+    let held = store.bound_at_stored_precision();
+    if held > 0 {
+        // Honouring a precision map means running higher precision than the
+        // arm asked for. Never silent: a size that does not match the arm's
+        // name should be explicable from the run's own output.
+        println!(
+            "stored precision: {held} tensor(s) ran above the requested format \
+             (the pack's precision map)"
+        );
+    }
 }
 
 /// One monomorphised run: the backend is chosen exactly once, above.

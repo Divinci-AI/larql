@@ -733,9 +733,16 @@ fn transient_ignores_a_present_pack_and_still_encodes() {
 }
 
 #[test]
-fn stored_forbids_manufacturing_and_names_the_tensor() {
-    // The invariant is about work, not coverage. Opening a container with
-    // no pack is fine; being asked to quantise one of its tensors is not.
+fn stored_binds_a_float_tensor_at_its_own_precision_and_manufactures_nothing() {
+    // A compiled pack is a precision map, and a backend arm names a format
+    // per class, which cannot express one. Under `stored` the map wins: a
+    // tensor held at source precision runs there — higher than the arm
+    // asked for — and nothing is manufactured.
+    //
+    // This replaces an earlier refusal. Refusing made a per-projection
+    // precision map unrunnable: protecting `q_proj` while the arm demanded
+    // NVFP4 attention could never execute, so the map could be compiled and
+    // never measured.
     let tmp = tempfile::tempdir().unwrap();
     let (src, _, _) = compiled_pair(&tmp);
     let (object, tensor, dtype, shape) = a_compiled_tensor(&src);
@@ -747,28 +754,29 @@ fn stored_forbids_manufacturing_and_names_the_tensor() {
         Some(DTYPE_NVFP4),
         RepresentationSource::Stored,
     )
-    .expect("opening a container without packs is not itself a violation");
+    .unwrap();
 
-    let err = match load_weight(
+    let loaded = load_weight(
         (&store).into(),
         &OperandRef {
             object,
-            tensor: tensor.clone(),
+            tensor,
             dtype,
             shape,
         },
         WeightFormat::Nvfp4,
-    ) {
-        Ok(_) => panic!("stored mode quantised at load"),
-        Err(e) => e.to_string(),
-    };
-    assert!(err.contains(&tensor), "the refusal names the tensor: {err}");
-    assert!(err.contains("forbids manufacturing"), "{err}");
-    assert!(err.contains("represent"), "and says how to fix it: {err}");
+    )
+    .expect("stored precision is a binding, not a refusal");
+
+    assert!(
+        matches!(loaded, LoadedWeight::F16(_)),
+        "a BF16 tensor binds as f16, not as a fresh quantisation"
+    );
+    assert_eq!(store.runtime_quantised(), 0, "nothing was manufactured");
     assert_eq!(
-        store.runtime_quantised(),
-        0,
-        "a refused load is not a count"
+        store.bound_at_stored_precision(),
+        1,
+        "and the run says it ran above the requested format"
     );
 }
 
