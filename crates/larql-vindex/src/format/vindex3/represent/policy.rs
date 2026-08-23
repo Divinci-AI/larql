@@ -373,3 +373,131 @@ mod tests {
         assert_eq!(Role::parse("not-a-role"), None);
     }
 }
+
+/// Finer-grained protection than a role: individual projections, and
+/// ranges of layer depth.
+///
+/// Role eligibility answers "is this the kind of weight the encoding
+/// applies to". This answers "and should *this one* be spent", which is a
+/// different question and the one a precision map is made of. Q-BANK-1
+/// showed why it is needed: Granite at uniform NVFP4 moves the argmax on
+/// one position in six, and most of those flips are not near-ties — so the
+/// interesting work is finding which bytes cause them.
+///
+/// Empty means protect nothing extra, which is R0.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Protections {
+    projections: Vec<String>,
+    layers: Vec<(u32, u32)>,
+}
+
+impl Protections {
+    /// Protect every tensor whose projection matches, e.g. `v_proj`.
+    pub fn projection(mut self, name: impl Into<String>) -> Self {
+        self.projections.push(name.into());
+        self
+    }
+
+    /// Protect an inclusive range of layer depths.
+    pub fn layers(mut self, lo: u32, hi: u32) -> Self {
+        self.layers.push((lo, hi));
+        self
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.projections.is_empty() && self.layers.is_empty()
+    }
+
+    /// Whether this tensor is held at source precision despite its role
+    /// being eligible.
+    pub fn protects(&self, tensor: &str) -> bool {
+        if let Some(p) = projection_of(tensor) {
+            if self.projections.iter().any(|w| w == p) {
+                return true;
+            }
+        }
+        if let Some(l) = layer_of(tensor) {
+            if self.layers.iter().any(|(lo, hi)| l >= *lo && l <= *hi) {
+                return true;
+            }
+        }
+        false
+    }
+
+    pub fn describe(&self) -> String {
+        let mut parts: Vec<String> = self.projections.clone();
+        parts.extend(self.layers.iter().map(|(a, b)| format!("layers {a}-{b}")));
+        if parts.is_empty() {
+            "none".into()
+        } else {
+            parts.join(", ")
+        }
+    }
+}
+
+/// `0.self_attn.q_proj.weight` -> `q_proj`.
+pub fn projection_of(tensor: &str) -> Option<&str> {
+    let parts: Vec<&str> = tensor.split('.').collect();
+    (parts.len() >= 2).then(|| parts[parts.len() - 2])
+}
+
+/// Leading layer index of an object-relative tensor name, when it has one.
+///
+/// Object-relative names start at the layer (`0.self_attn...`) because the
+/// object *is* the stack; a tensor without a leading index belongs to no
+/// particular depth and no depth range can protect it.
+pub fn layer_of(tensor: &str) -> Option<u32> {
+    tensor.split('.').next()?.parse().ok()
+}
+
+#[cfg(test)]
+mod protection_tests {
+    use super::*;
+
+    #[test]
+    fn a_projection_is_protected_at_every_depth() {
+        let p = Protections::default().projection("v_proj");
+        assert!(p.protects("0.self_attn.v_proj.weight"));
+        assert!(p.protects("39.self_attn.v_proj.weight"));
+        assert!(!p.protects("0.self_attn.q_proj.weight"));
+        assert!(!p.protects("0.mlp.down_proj.weight"));
+    }
+
+    #[test]
+    fn a_depth_range_is_inclusive_at_both_ends() {
+        let p = Protections::default().layers(0, 3);
+        for l in 0..=3 {
+            assert!(p.protects(&format!("{l}.mlp.up_proj.weight")), "layer {l}");
+        }
+        assert!(!p.protects("4.mlp.up_proj.weight"));
+    }
+
+    #[test]
+    fn protections_compose_as_a_union() {
+        // Two independent reasons to hold a tensor back; either suffices.
+        let p = Protections::default()
+            .projection("down_proj")
+            .layers(30, 39);
+        assert!(p.protects("5.mlp.down_proj.weight"), "by projection");
+        assert!(p.protects("31.self_attn.q_proj.weight"), "by depth");
+        assert!(!p.protects("5.self_attn.q_proj.weight"), "neither");
+    }
+
+    #[test]
+    fn a_tensor_with_no_leading_depth_is_not_caught_by_a_range() {
+        // The embedding's tensor is just `weight`; a layer range says
+        // nothing about it, and must not silently claim it.
+        let p = Protections::default().layers(0, 100);
+        assert!(!p.protects("weight"));
+        assert_eq!(layer_of("weight"), None);
+        assert_eq!(projection_of("0.self_attn.q_proj.weight"), Some("q_proj"));
+    }
+
+    #[test]
+    fn empty_protections_are_r0() {
+        let p = Protections::default();
+        assert!(p.is_empty());
+        assert!(!p.protects("0.self_attn.v_proj.weight"));
+        assert_eq!(p.describe(), "none");
+    }
+}

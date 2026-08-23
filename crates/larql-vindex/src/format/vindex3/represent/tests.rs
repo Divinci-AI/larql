@@ -290,6 +290,7 @@ fn an_unknown_encoding_is_refused_before_anything_is_written() {
         objects: Vec::new(),
         roles: policy::RolePolicy::default(),
         deployment: false,
+        protect: policy::Protections::default(),
     };
     let err = compile_representation(&src, &out, &spec)
         .unwrap_err()
@@ -340,6 +341,7 @@ fn an_object_filter_compiles_only_what_it_names() {
         objects: vec![target.clone()],
         roles: policy::RolePolicy::default(),
         deployment: false,
+        protect: policy::Protections::default(),
     };
     let report = compile_representation(&src, &out, &spec).unwrap();
     assert_eq!(report.compiled_objects.len(), 1);
@@ -986,4 +988,75 @@ fn an_archival_container_is_unaffected_by_the_deployment_switch() {
         assert!(index.representations.contains_key(id), "{id} was dropped");
         assert!(out.join(&e.segment).is_file());
     }
+}
+
+#[test]
+fn a_protected_projection_is_carried_not_compiled() {
+    // The R1 mechanism: an eligible role, held back anyway, so a precision
+    // map can be expressed and then measured.
+    let tmp = tempfile::tempdir().unwrap();
+    let checkpoint = tmp.path().join("ckpt");
+    std::fs::create_dir_all(&checkpoint).unwrap();
+    let src = tmp.path().join("src.vindex3");
+    let out = tmp.path().join("protected.vindex3");
+    encode_fixture_container(dense_f32_model, &checkpoint, &src, "target");
+
+    let mut spec = RepresentSpec::nvfp4();
+    spec.protect = policy::Protections::default().projection("v_proj");
+    let report = compile_representation(&src, &out, &spec).unwrap();
+
+    let index = index_of(&out);
+    let entry = index
+        .representations
+        .values()
+        .find(|e| e.encoding == DTYPE_NVFP4)
+        .unwrap();
+    let (header, _) = read_segment_header(&out.join(&entry.segment)).unwrap();
+    for t in &header.tensors {
+        if t.name.contains("v_proj") {
+            assert_ne!(t.dtype, DTYPE_NVFP4, "{} was compiled anyway", t.name);
+        }
+    }
+    assert!(header.tensors.iter().any(|t| t.dtype == DTYPE_NVFP4));
+
+    // A protected tensor is bigger than a compiled one, so the pack must
+    // grow relative to R0 — the byte cost of the protection is the thing
+    // being traded against fidelity.
+    let r0_out = tmp.path().join("r0.vindex3");
+    let r0 = compile_representation(&src, &r0_out, &RepresentSpec::nvfp4()).unwrap();
+    assert!(
+        report.compiled_objects[0].compiled_bytes > r0.compiled_objects[0].compiled_bytes,
+        "protection costs bytes"
+    );
+}
+
+#[test]
+fn a_protected_depth_range_is_carried_not_compiled() {
+    let tmp = tempfile::tempdir().unwrap();
+    let checkpoint = tmp.path().join("ckpt");
+    std::fs::create_dir_all(&checkpoint).unwrap();
+    let src = tmp.path().join("src.vindex3");
+    let out = tmp.path().join("early.vindex3");
+    encode_fixture_container(dense_f32_model, &checkpoint, &src, "target");
+
+    let mut spec = RepresentSpec::nvfp4();
+    spec.protect = policy::Protections::default().layers(0, 0);
+    compile_representation(&src, &out, &spec).unwrap();
+
+    let index = index_of(&out);
+    let entry = index
+        .representations
+        .values()
+        .find(|e| e.encoding == DTYPE_NVFP4)
+        .unwrap();
+    let (header, _) = read_segment_header(&out.join(&entry.segment)).unwrap();
+    for t in &header.tensors {
+        if t.name.starts_with("0.") {
+            assert_ne!(t.dtype, DTYPE_NVFP4, "{} is in a protected range", t.name);
+        }
+    }
+    assert!(
+        header.tensors.iter().any(|t| t.dtype == DTYPE_NVFP4),
+        "later layers still compile"
+    );
 }

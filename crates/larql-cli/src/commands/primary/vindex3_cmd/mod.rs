@@ -276,6 +276,20 @@ pub struct RepresentArgs {
     /// untouched.
     #[arg(long)]
     pub deployment: bool,
+
+    /// Hold a projection at source precision despite its role being
+    /// eligible, e.g. `--protect v_proj`. Repeat to name several.
+    ///
+    /// This is how a precision map is expressed: role eligibility says the
+    /// encoding applies to a kind of weight, and this says which of them to
+    /// actually spend it on.
+    #[arg(long = "protect")]
+    pub protect: Vec<String>,
+
+    /// Hold an inclusive range of layer depths at source precision, e.g.
+    /// `--protect-layers 0-7`. Repeat to name several.
+    #[arg(long = "protect-layers", value_name = "LO-HI")]
+    pub protect_layers: Vec<String>,
 }
 
 #[derive(Args)]
@@ -433,11 +447,28 @@ fn run_represent(args: RepresentArgs) -> Result<(), Box<dyn std::error::Error>> 
             .ok_or_else(|| format!("unknown role `{name}`"))?;
         roles = roles.including(role);
     }
+    let mut protect = larql_vindex::format::vindex3::represent::policy::Protections::default();
+    for p in &args.protect {
+        protect = protect.projection(p);
+    }
+    for r in &args.protect_layers {
+        let (lo, hi) = r
+            .split_once('-')
+            .ok_or_else(|| format!("--protect-layers expects LO-HI, got `{r}`"))?;
+        protect = protect.layers(
+            lo.trim().parse::<u32>().map_err(|e| format!("{r}: {e}"))?,
+            hi.trim().parse::<u32>().map_err(|e| format!("{r}: {e}"))?,
+        );
+    }
+    if !protect.is_empty() {
+        println!("  protect: {}", protect.describe());
+    }
     let spec = RepresentSpec {
         encoding: args.encoding.clone(),
         objects: args.objects.clone(),
         roles,
         deployment: args.deployment,
+        protect,
     };
     println!(
         "== represent {} ({}) ==",

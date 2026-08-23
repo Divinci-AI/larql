@@ -64,7 +64,7 @@ use super::opplan::OperandRef;
 use crate::error::VindexError;
 use crate::format::filenames::INDEX_JSON;
 use nvfp4_pack::{CodecIdentity, EncoderRecipe, PackLayout, DTYPE_NVFP4};
-use policy::{classify_in, Role, RolePolicy};
+use policy::{classify_in, Protections, Role, RolePolicy};
 /// Filename of the system graph, carried beside the index.
 const SYSTEM_GRAPH_JSON: &str = "system_graph.json";
 
@@ -144,6 +144,9 @@ pub struct RepresentSpec {
     /// This is a different artifact, not a smaller one. It is executable
     /// and not re-compilable, and [`ContainerAuthority::Derived`] says so.
     pub deployment: bool,
+    /// Tensors held at source precision despite an eligible role — the
+    /// material a precision map is made of. Empty is R0.
+    pub protect: Protections,
 }
 
 impl RepresentSpec {
@@ -153,6 +156,7 @@ impl RepresentSpec {
             objects: Vec::new(),
             roles: RolePolicy::default(),
             deployment: false,
+            protect: Protections::default(),
         }
     }
 
@@ -263,7 +267,11 @@ pub fn compile_representation(
                 &t.name,
                 &t.shape,
             );
-            let eligible = spec.roles.compiles(role);
+            // Role says the encoding applies; protection says whether to
+            // spend it here. A protected tensor is carried, and counted as
+            // preserved under its own role so the report says what the map
+            // actually held back.
+            let eligible = spec.roles.compiles(role) && !spec.protect.protects(&t.name);
             match PackLayout::derive(&t.shape, &t.name) {
                 Ok(layout) if eligible => {
                     source_bytes += t.len;
