@@ -241,8 +241,19 @@ fn read_component(root_key: &str, object: &Value) -> ComponentReading {
         model_type: cursor.string_at("model_type"),
         hidden_size: cursor.usize_at("hidden_size"),
         intermediate_size: cursor.usize_at("intermediate_size"),
-        num_layers: cursor.usize_at("num_hidden_layers"),
-        num_attention_heads: cursor.usize_at("num_attention_heads"),
+        // Alias spellings of the SAME fact, read canonical-first. Qwen3-VL
+        // towers say `depth` and `num_heads` where the canonical vocabulary
+        // says `num_hidden_layers` and `num_attention_heads`; the tower is
+        // the same 27-layer, 16-head, 1152-wide object either way. This is
+        // vocabulary, not a family branch — nothing downstream learns the
+        // word "qwen", and a checkpoint using the canonical spelling never
+        // reaches the fallback.
+        num_layers: cursor
+            .usize_at("num_hidden_layers")
+            .or_else(|| cursor.usize_at("depth")),
+        num_attention_heads: cursor
+            .usize_at("num_attention_heads")
+            .or_else(|| cursor.usize_at("num_heads")),
         num_key_value_heads: cursor.usize_at("num_key_value_heads"),
         head_dim: cursor.usize_at("head_dim"),
         layer_types,
@@ -265,12 +276,18 @@ fn read_component(root_key: &str, object: &Value) -> ComponentReading {
         max_position_embeddings: cursor.usize_at("max_position_embeddings"),
         patch: PatchGeometry {
             patch_size: cursor.usize_at("patch_size"),
-            patch_temporal: cursor.usize_at("patch_temporal"),
-            merge_size: cursor.usize_at("merge_size"),
+            patch_temporal: cursor
+                .usize_at("patch_temporal")
+                .or_else(|| cursor.usize_at("temporal_patch_size")),
+            merge_size: cursor
+                .usize_at("merge_size")
+                .or_else(|| cursor.usize_at("spatial_merge_size")),
             pos_emb_height: cursor.usize_at("pos_emb_height"),
             pos_emb_width: cursor.usize_at("pos_emb_width"),
             image_size: cursor.usize_at("image_size"),
-            num_channels: cursor.usize_at("num_channels"),
+            num_channels: cursor
+                .usize_at("num_channels")
+                .or_else(|| cursor.usize_at("in_channels")),
         },
         tower: TowerExecution {
             attention_bias: cursor.bool_at("attention_bias"),
