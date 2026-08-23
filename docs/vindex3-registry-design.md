@@ -439,13 +439,128 @@ change for any caller today, and the claimed/unclaimed split activates
 itself correctly the moment a real entry is added — no second
 migration required.
 
-Gates: 10 unit tests (`serve_resolve::tests`) via dependency-injected
+Gates (at landing): 10 unit tests via dependency-injected
 `legacy`/`fetch_hf` closures pinning every control in 10.1, plus one
 hermetic test of the real (non-injected) `resolve_serve_target` against
-a tempdir; full `larql-cli` suite (763 tests) green; clippy
-`--all-targets -D warnings` clean; `cargo fmt --check` clean; 92.5% line
-coverage on the new file (the residual gap is two structurally-`
-unreachable!()` defensive arms plus the untested thin real-wiring body
-of `resolve_serve_target` itself — the same "test the injected core, not
-the env-touching wrapper" pattern `cache.rs`'s own `resolve_shorthand`
-vs `resolve_shorthand_from` already uses in this crate).
+a tempdir; full `larql-cli` suite (763 tests) green; clippy/fmt clean.
+Superseded by 10.3's refactor — see there for the current shape.
+
+### 10.3 2B: `load_artifact` convergence, and hoisting the dispatch into `larql-vindex`
+
+Grounding 2B in `larql-server`'s actual code (rather than assuming
+"server artifact convergence" meant an ABI gate — a raw V3 container has
+no ABI field to check against; that would need a container-format
+change, out of scope) found `load_artifact` called from **three**
+places, none going through the CLI trampoline at all: the server
+binary's own CLI arg (`bootstrap/mod.rs`), `--dir` bulk discovery (same
+file), and the `/v1/runtime/model` HTTP lifecycle endpoint
+(`routes/runtime_lifecycle.rs`, landed in PR #300). None of the three do
+shorthand resolution — `load_artifact` itself only ever understood
+`hf://` or a literal path. `larql-server qwen3.8` invoked directly, or a
+`POST /v1/runtime/model {"path": "qwen3.8"}`, would fail today exactly
+like `larql serve qwen3.8` did before 2A.
+
+**The dispatch moved into `larql-vindex::registry` (new `production`
+module)**, rather than growing a second, independently-maintained copy
+inside `larql-server`: two copies of "is this name claimed" is exactly
+the divergence the initiative exists to remove — `qwen3.8` must mean
+the same VINDEX3 identity whether reached via `larql serve`, the server
+binary invoked directly, or the HTTP endpoint. `registry::production`
+now owns:
+
+- `production_registry()` — moved verbatim from `serve_resolve.rs`
+  (still empty; the real-data-source question is still separate and
+  still open).
+- `resolve_claimed(raw, registry) -> Result<Option<PathBuf>, RegistryError>`
+  — `Ok(None)` = not a claimed name, caller does its own thing; `Ok(Some(path))`
+  = claimed, resolved, and materialised (fetched via
+  `resolve_hf_vindex` if not already cached); `Err` = claimed but
+  failed — the hard-refusal contract from 10.1, now enforced in one
+  place for every caller.
+- `resolve_claimed_with(raw, registry, fetch_hf)` — the injectable core,
+  `pub` so every caller's own tests can prove the claimed/unclaimed
+  wiring hermetically, matching this codebase's own
+  `resolve_shorthand`/`resolve_shorthand_from` convention.
+
+`resolver.rs` gained `lookup_claimed_variant` (`pub(super)`): the
+model/variant/ABI lookup `resolve_registry` already did, factored out so
+`production::resolve_claimed_with` can read a claimed variant's
+`{repo, revision}` directly — a `RegistryArtifactRef` plain struct, not
+the `ArtifactRef` enum `resolve_registry` wraps it into for the public
+API. Consuming the concrete struct instead of the wider enum removed a
+whole `match ArtifactRef::HuggingFace {..} else { unreachable!() }`
+arm this file no longer needs to defend against (that arm was real
+coverage debt: `RegistryArtifactRef` has no local form by schema, so the
+`Local` arm was permanently dead code the 90% floor still had to count
+against). `resolve_claimed`'s default `fetch_hf` is the bare
+`resolve_hf_vindex` function item, not a closure literal wrapping it —
+a closure creates its own never-covered region (the fetch only runs on
+a real, successful claim; a unit test can't exercise that without
+touching HF for real), a function-item reference has no separate body
+to measure at all. Both changes were necessary, not cosmetic: without
+them `production.rs` measured 78.79% lines against a new-file 90% floor
+under the *actual* `scripts/check_coverage_policy.py` gate (verified
+directly, not assumed) — after, 93.10%.
+
+**`load_artifact` itself**: `resolve_artifact_path` (a new private
+helper) tries `resolve_claimed` first; `Ok(None)` falls through to
+exactly the prior `is_hf_path`/literal-`PathBuf` logic, so an `hf://`
+reference or an existing local directory is untouched (both are
+structurally never a bare `ModelReference::Registry` form, so
+`resolve_claimed` always answers `None` for them — proven, not assumed,
+by a dedicated `hf://` test). **One correctness fix landed alongside**:
+the VINDEX2 branch used to call `load_single_vindex(path_str, ...)`
+with the *original*, unresolved string — for an `hf://` input this just
+meant re-resolving it a second time (wasteful, not wrong); for a claimed
+registry name it would have been a real bug, since `load_single_vindex`
+has no idea how to resolve a bare registry name and would have tried
+`PathBuf::from("qwen3.8")` as a literal (nonexistent) relative path.
+`load_artifact` now passes the already-resolved directory string to
+both branches.
+
+**Known accepted edge case**: a bare relative directory name with no
+path separator at all (e.g. `larql-server myvindexdir` from a cwd
+containing `myvindexdir/`) is syntactically a `ModelName` too. Today
+this is inert — the production registry is empty, so `resolve_claimed`
+always answers `None` and the existing literal-path behaviour applies
+unchanged. Once a real name is registered, a local directory happening
+to share that exact name would be shadowed by the registry claim — the
+same namespace-collision tradeoff any claimed-name system accepts (npm,
+pip, …), not something this rung needs to solve.
+
+Gates: full crate suites green after the change — `larql-vindex` 74 registry
+unit tests + 7 integration tests (up from 64/7 pre-2B), `larql-cli` 761
+tests (down from 763: two success-path network tests were retired as
+redundant with `production_tests.rs`'s own hermetic coverage of the
+same contract), `larql-server` 575+ tests including 5 new
+`resolve_artifact_path_tests`; clippy `--all-targets -D warnings` and
+`cargo fmt --check` clean on all three crates; `--no-default-features`
+build of `larql-cli` (matches its CI invocation exactly) still clean.
+**Coverage verified against the actual CI gate script**, not just a raw
+percentage: `cargo llvm-cov --package <crate> --summary-only` (full
+suite, matching each crate's CI workflow exactly — `larql-server` even
+reruns with `--test-threads=1` to match) followed by
+`cargo llvm-cov report --json` piped into
+`scripts/check_coverage_policy.py` against each crate's own
+`coverage-policy.json`. Result: `larql-vindex` passes except a
+**pre-existing, unrelated** `quant/convert.rs` baseline miss (81.54% vs
+81.90%, a file this rung never touched); `larql-server` passes cleanly,
+`bootstrap/load.rs` ratcheted 66.0% baseline → 79.74% actual;
+`larql-cli` has no per-file policy gate in CI at all (confirmed by
+reading its workflow, not assumed) — its own coverage-policy.json scopes
+only `bench/`/`dec_bench/`.
+
+### 10.4 What's left in the "resolver convergence" rung
+
+**2C — VINDEX3 HF pull/download correctness** (last, per the confirmed
+sequencing): the inventory's §5 finding that `download_hf_weights`
+fetches a hardcoded VINDEX2 filename list omitting VINDEX3's actual
+payload (`moe_manifest.json`, `routed/layer_NNN.lyrw`) — a
+distribution/download-semantics fix, not a resolver dispatch change.
+Not started.
+
+`pull_cmd`'s own HF heuristic (`looks_like_hf_repo`) was not touched in
+2A/2B — it was in the original three-resolver inventory (§1) but the
+confirmed 2A/2B scope only covered `cache::resolve_model`'s `serve`
+call site and `load_artifact`; `larql pull`'s own name resolution is
+2C's territory, entangled with the download-correctness fix above.

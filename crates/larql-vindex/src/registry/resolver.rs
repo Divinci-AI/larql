@@ -23,7 +23,9 @@ use std::path::{Path, PathBuf};
 
 use super::abi::{Vindex3Abi, CURRENT_VINDEX3_ABI};
 use super::error::RegistryError;
-use super::manifest::{known_models, known_variants, Provenance, RegistryManifest};
+use super::manifest::{
+    known_models, known_variants, Provenance, RegistryManifest, RegistryVariant,
+};
 use super::reference::{ExplicitReference, ModelName, ModelReference, VariantName};
 use crate::format::generation::{detect_generation, unsupported_generation, ContainerGeneration};
 
@@ -82,11 +84,19 @@ pub fn resolve(raw: &str, registry: &RegistryManifest) -> Result<Vindex3Resoluti
     }
 }
 
-fn resolve_registry(
+/// Look up and ABI-check a registry variant — the part of resolution
+/// that's shared by [`resolve_registry`] (which wraps the result into
+/// the public [`ResolvedVindex3`]/[`ArtifactRef`] shape) and
+/// [`super::production::resolve_claimed_with`] (which only needs the
+/// concrete `{repo, revision}` pair, never the `ArtifactRef` enum a
+/// registry entry can't actually vary over — see [`RegistryArtifactRef`
+/// docs](super::manifest::RegistryArtifactRef)). `pub(super)`: internal
+/// to the registry module, not part of the public API.
+pub(super) fn lookup_claimed_variant<'a>(
     name: &ModelName,
     variant: Option<&VariantName>,
-    registry: &RegistryManifest,
-) -> Result<ResolvedVindex3, RegistryError> {
+    registry: &'a RegistryManifest,
+) -> Result<(&'a RegistryVariant, String), RegistryError> {
     let model = registry
         .models
         .get(name.as_str())
@@ -113,9 +123,18 @@ fn resolve_registry(
             supported: CURRENT_VINDEX3_ABI.get(),
         });
     }
+    Ok((entry, variant_name.to_string()))
+}
+
+fn resolve_registry(
+    name: &ModelName,
+    variant: Option<&VariantName>,
+    registry: &RegistryManifest,
+) -> Result<ResolvedVindex3, RegistryError> {
+    let (entry, variant_name) = lookup_claimed_variant(name, variant, registry)?;
     Ok(ResolvedVindex3 {
         name: name.to_string(),
-        variant: variant_name.to_string(),
+        variant: variant_name,
         artifact: ArtifactRef::HuggingFace {
             repo: entry.artifact.repo.clone(),
             revision: entry.artifact.revision.clone(),

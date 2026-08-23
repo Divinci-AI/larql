@@ -129,12 +129,21 @@ fn unsupported_v3_options(opts: &LoadVindexOptions) -> Vec<&'static str> {
     named
 }
 
+/// The single choke point that decides V2 vs V3 for serving — every
+/// `load_artifact` caller (this binary's own CLI arg, `--dir` bulk
+/// discovery, and the `/v1/runtime/model` HTTP lifecycle endpoint) goes
+/// through here, so a resolution improvement made once benefits all
+/// three (`docs/vindex3-registry-design.md` §10, rung 2B).
 pub fn load_artifact(path_str: &str, opts: LoadVindexOptions) -> Result<LoadedArtifact, BoxError> {
-    let path = if larql_vindex::is_hf_path(path_str) {
-        larql_vindex::resolve_hf_vindex(path_str)?
-    } else {
-        PathBuf::from(path_str)
-    };
+    let path = resolve_artifact_path(path_str)?;
+    // The V2 loader re-derives its own path from the string it's given
+    // (it has to run standalone from `larql vindex3 cmd` call sites too)
+    // — passing it the ALREADY-resolved directory, not the original
+    // `path_str`, means a claimed registry name or an `hf://` reference
+    // is fetched exactly once, not re-resolved a second time under a
+    // string `load_single_vindex`'s own (narrower) resolution has no way
+    // to understand.
+    let resolved_path_str = path.to_string_lossy().into_owned();
     match larql_vindex::format::generation::detect_generation(&path)? {
         larql_vindex::format::generation::ContainerGeneration::V3 => {
             let unsupported = unsupported_v3_options(&opts);
@@ -159,8 +168,44 @@ pub fn load_artifact(path_str: &str, opts: LoadVindexOptions) -> Result<LoadedAr
             )?)))
         }
         larql_vindex::format::generation::ContainerGeneration::V2 => Ok(LoadedArtifact::V2(
-            Box::new(load_single_vindex(path_str, opts)?),
+            Box::new(load_single_vindex(&resolved_path_str, opts)?),
         )),
+    }
+}
+
+/// Resolve a `load_artifact` argument to a literal local directory.
+///
+/// A bare name (`qwen3.8`, optionally `:variant`) the VINDEX3 registry
+/// has claimed resolves through it **exclusively** — any failure
+/// (unknown variant, incompatible ABI) is a real refusal, never rescued
+/// by falling through to the plain `hf://`/literal-path handling below.
+/// The dispatch (`larql_vindex::registry::resolve_claimed`) is shared
+/// with `larql-cli`'s `serve` trampoline (rung 2A) — the same claimed
+/// name must mean the same thing whether reached via `larql serve`, this
+/// binary invoked directly, or the `/v1/runtime/model` HTTP endpoint.
+///
+/// An `hf://` reference or an existing local path is untouched: neither
+/// is a bare registry-shaped name (`resolve_claimed` returns `Ok(None)`
+/// for both, structurally — see the reference grammar), so they fall
+/// through to exactly today's behaviour.
+fn resolve_artifact_path(path_str: &str) -> Result<PathBuf, BoxError> {
+    resolve_artifact_path_with(path_str, &larql_vindex::registry::production_registry())
+}
+
+/// Testable core of [`resolve_artifact_path`]. Takes `registry`
+/// explicitly so the claimed/unclaimed dispatch can be proven without
+/// depending on the (currently empty) production registry.
+fn resolve_artifact_path_with(
+    path_str: &str,
+    registry: &larql_vindex::registry::RegistryManifest,
+) -> Result<PathBuf, BoxError> {
+    if let Some(resolved) = larql_vindex::registry::resolve_claimed(path_str, registry)? {
+        return Ok(resolved);
+    }
+    if larql_vindex::is_hf_path(path_str) {
+        Ok(larql_vindex::resolve_hf_vindex(path_str)?)
+    } else {
+        Ok(PathBuf::from(path_str))
     }
 }
 
@@ -494,5 +539,113 @@ mod v3_option_tests {
             crate::vindex3::resolve_chat_template("granite", "granite-4.1-3b.vindex3"),
             ChatTemplate::Plain
         ));
+    }
+}
+
+/// Rung 2B of the vindex3-registry initiative's "resolver convergence"
+/// step (`docs/vindex3-registry-design.md` §10): `load_artifact`'s
+/// claimed/unclaimed dispatch, shared with `larql-cli`'s `serve`
+/// trampoline via `larql_vindex::registry::resolve_claimed`.
+#[cfg(test)]
+mod resolve_artifact_path_tests {
+    use std::collections::BTreeMap;
+
+    use larql_vindex::registry::{
+        Provenance, RegistryArtifactRef, RegistryManifest, RegistryModel, RegistryVariant,
+        Vindex3Abi, CURRENT_VINDEX3_ABI, REGISTRY_MANIFEST_SCHEMA_VERSION,
+    };
+
+    use super::resolve_artifact_path_with;
+
+    fn registry_claiming_qwen38(abi: Vindex3Abi) -> RegistryManifest {
+        let mut variants = BTreeMap::new();
+        variants.insert(
+            "27b-nvfp4".to_string(),
+            RegistryVariant {
+                artifact: RegistryArtifactRef {
+                    repo: "larql/qwen3.8-27b-nvfp4".to_string(),
+                    revision: "abc123f0".to_string(),
+                },
+                abi,
+                source: Provenance {
+                    repo: "Qwen/Qwen3.8-27B".to_string(),
+                    revision: "8c4fdeadbeef".to_string(),
+                },
+            },
+        );
+        let mut models = BTreeMap::new();
+        models.insert(
+            "qwen3.8".to_string(),
+            RegistryModel {
+                default_variant: "27b-nvfp4".to_string(),
+                variants,
+            },
+        );
+        RegistryManifest {
+            schema_version: REGISTRY_MANIFEST_SCHEMA_VERSION,
+            models,
+        }
+    }
+
+    fn empty_registry() -> RegistryManifest {
+        RegistryManifest {
+            schema_version: REGISTRY_MANIFEST_SCHEMA_VERSION,
+            models: BTreeMap::new(),
+        }
+    }
+
+    // ── Unclaimed forms: today's behaviour, unchanged ───────────────────
+
+    #[test]
+    fn an_existing_local_directory_passes_through_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = empty_registry();
+        let out = resolve_artifact_path_with(dir.path().to_str().unwrap(), &registry).unwrap();
+        assert_eq!(out, dir.path());
+    }
+
+    #[test]
+    fn a_bare_name_the_registry_has_never_claimed_passes_through_as_a_literal_path() {
+        // Matches today's `load_artifact` behaviour exactly: an unclaimed
+        // bare name becomes `PathBuf::from(path_str)`, not an error here —
+        // `detect_generation` (called by `load_artifact`, not this helper)
+        // is what actually refuses a nonexistent directory.
+        let registry = empty_registry();
+        let out = resolve_artifact_path_with("not-a-registered-name", &registry).unwrap();
+        assert_eq!(out, std::path::PathBuf::from("not-a-registered-name"));
+    }
+
+    // ── Claimed names: registry-exclusive, no fallback on any failure ──
+
+    #[test]
+    fn a_claimed_name_with_an_unknown_variant_hard_errors() {
+        let registry = registry_claiming_qwen38(CURRENT_VINDEX3_ABI);
+        let err = resolve_artifact_path_with("qwen3.8:does-not-exist", &registry).unwrap_err();
+        assert!(err.to_string().contains("does-not-exist"), "{err}");
+    }
+
+    #[test]
+    fn a_claimed_name_with_an_incompatible_abi_hard_errors() {
+        let incompatible = Vindex3Abi(CURRENT_VINDEX3_ABI.get() + 1);
+        let registry = registry_claiming_qwen38(incompatible);
+        let err = resolve_artifact_path_with("qwen3.8", &registry).unwrap_err();
+        assert!(err.to_string().contains("ABI"), "{err}");
+    }
+
+    // ── Explicit hf:// bypasses the claim check structurally ───────────
+
+    #[test]
+    fn an_hf_reference_is_not_treated_as_a_registry_name_even_if_claimed() {
+        // `resolve_claimed` returns `Ok(None)` for any `hf://`-prefixed
+        // string — it is never a bare `ModelReference::Registry` form —
+        // so this falls through to the existing `is_hf_path` branch
+        // untouched. Proven here via a malformed hf:// (would error
+        // before ever attempting a real network fetch) rather than a
+        // real repo, keeping this hermetic.
+        let registry = registry_claiming_qwen38(CURRENT_VINDEX3_ABI);
+        let err = resolve_artifact_path_with("hf://", &registry).unwrap_err();
+        // Not the registry's "unknown model"/"incompatible ABI" wording —
+        // proves the claim check never engaged.
+        assert!(!err.to_string().contains("ABI"), "{err}");
     }
 }

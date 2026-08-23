@@ -16,20 +16,21 @@
 //! local VINDEX3 container                 (a later rung fetches this)
 //! ```
 //!
-//! Scope for this rung (`docs/vindex3-registry-design.md`, architecture
+//! Scope for rung 1 (`docs/vindex3-registry-design.md`, architecture
 //! confirmed 2026-08-23): the manifest schema, the name/variant grammar,
-//! this resolver, and a tiny static test registry ([`fixtures`]). **Not**
-//! wired into `larql run`/`serve`/`pull`, and not consolidated with the
-//! three existing resolvers yet (design doc §1/§8) — that is the
-//! follow-up "resolver convergence" rung, once this contract is proven.
-//! Not a generic model registry, and VINDEX2 has no representation in
-//! this schema at all — see [`manifest`] and [`resolver`] for where that
-//! is enforced structurally rather than by convention.
+//! this resolver, and a tiny static test registry ([`fixtures`]).
+//! Rung 2 ("resolver convergence", §10) added [`production`] — the
+//! shared claimed/unclaimed dispatch `larql-cli` and `larql-server` both
+//! call, and the (still empty) production registry. Not a generic model
+//! registry, and VINDEX2 has no representation in this schema at all —
+//! see [`manifest`] and [`resolver`] for where that is enforced
+//! structurally rather than by convention.
 
 mod abi;
 mod error;
 pub mod fixtures;
 mod manifest;
+mod production;
 mod reference;
 mod resolver;
 
@@ -37,6 +38,8 @@ mod resolver;
 mod abi_tests;
 #[cfg(test)]
 mod manifest_tests;
+#[cfg(test)]
+mod production_tests;
 #[cfg(test)]
 mod reference_tests;
 #[cfg(test)]
@@ -48,5 +51,6 @@ pub use manifest::{
     Provenance, RegistryArtifactRef, RegistryManifest, RegistryModel, RegistryVariant,
     REGISTRY_MANIFEST_SCHEMA_VERSION,
 };
+pub use production::{production_registry, resolve_claimed, resolve_claimed_with};
 pub use reference::{ExplicitReference, ModelName, ModelReference, VariantName};
 pub use resolver::{resolve, ArtifactRef, ResolvedVindex3, Vindex3Resolution};
