@@ -335,6 +335,11 @@ async fn spawn_server_with_model(model: LoadedModel) -> String {
         sessions: SessionManager::new(3600),
         describe_cache: DescribeCache::new(60),
         infer_timeout: std::time::Duration::from_secs(60),
+        responses: larql_server::response_store::ResponseStore::new(),
+        v3_kv: larql_server::response_kv::ResponseKvCache::new(
+            larql_server::response_kv::DEFAULT_MAX_ENTRIES,
+            larql_server::response_kv::DEFAULT_TTL_SECS,
+        ),
     });
 
     let router = single_model_router(state);
@@ -367,7 +372,7 @@ fn local_output(
             fused_row_layout: larql_compute::MoeFusedRowLayout::ContiguousHalves,
             experts_gate_up,
             experts_down,
-            routing_policy: larql_compute::MoeRoutingPolicy::default(),
+            routing_policy: larql_compute::MoeRoutingPolicy::gemma4_hybrid(),
             weight_layout: larql_compute::MoeWeightLayout::default(),
             expert_data_format: larql_compute::QuantFormat::BF16,
             router_proj,

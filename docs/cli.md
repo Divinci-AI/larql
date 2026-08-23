@@ -25,6 +25,7 @@ a local directory path — see [Model resolution](#model-resolution) below.
 | `bench <model>` | Benchmark decode throughput on a real vindex (Metal / CPU / Ollama). |
 | `accuracy <model>` | Split-axis accuracy suite for KV engines — parametric vs in-context vs conflict, scored by top-1 match and Shannon bits/token. |
 | `dec-bench <subcmd>` | DEC residual-replay loadgen — `capture` a residual pool, `replay` batch × wire × dispatch sweeps, `drift` the C6 wire-fidelity gate. |
+| `k3-ledger <subcmd>` | K3 serving ledger — miss budget, weight touch, dense-precision frontier and speculative block economics, derived from the checkpoint's own tensor table. |
 | `shannon <subcmd>` | Next-token bit scoring, slot probes, repetition probes, layer lens, demo arithmetic coding. |
 | `serve <model>` | Serve a vindex over HTTP + gRPC. |
 
@@ -41,12 +42,14 @@ a local directory path — see [Model resolution](#model-resolution) below.
 | `verify` | Verify vindex file integrity (SHA256 checksums). |
 | `diag` | Engine diagnostic — print which kernel paths fire for a vindex, validate Q4_K/Q6_K strides, optional `--probe` runs a real forward pass. |
 | `parity` | Cross-backend numerical diff (`reference` / `cpu` / `metal`) at well-known checkpoints. |
+| `moe-locality <trace>` | Expert-selection locality over a routing trace — does speculative decoding amortise the expert bank, and can a hot cache work? |
 
 ## Factory
 
 Vindex Factory tooling ([docs/vindex-factory.md](vindex-factory.md)) —
 recipe validation, `build_id`, capability reporting, card generation,
-and the PREFLIGHT→RELEASE build driver.
+the PREFLIGHT→RELEASE build driver, checkpoint inventory, and the
+VINDEX3 container verbs.
 
 | Command | Description |
 |---|---|
@@ -56,6 +59,8 @@ and the PREFLIGHT→RELEASE build driver.
 | `recipe build <FILE> [--scratch-dir DIR]` | Run PREFLIGHT→RELEASE: fetch the pinned revision, extract, slice, verify checksums, publish private, then flip public. Prints a `BuildRecord` as JSON; exits non-zero on a stage failure. |
 | `capabilities` | Print this release's capability manifest — recognised architectures and what each supports. |
 | `card render` | Render a Hub model card from a recipe, manifest, and verification report. |
+| `inspect-hf <dir>` | Machine-readable architecture inventory of an HF checkpoint dir — identity, per-layer attention policy, tensors, and every config key this build does not consume. |
+| `vindex3 <subcmd>` | VINDEX3 container programme verbs — `plan` / `encode` / `inspect` / `verify` / `ops` / `exec`. |
 
 ## LQL
 
@@ -630,6 +635,26 @@ larql serve --dir <DIR> [OPTIONS]
 | `--tls-key <PATH>` | TLS private key for HTTPS | — |
 | `--log-level <LEVEL>` | Logging level | info |
 
+`larql serve` execs the `larql-server` binary and forwards the flags
+above. The flags below exist on `larql-server` itself and are not yet
+forwarded by the wrapper — run `larql-server` directly to use them.
+
+| Flag | Description | Default |
+|---|---|---|
+| `--lazy-weights` | Defer model-weight loading until the first inference request instead of loading at startup. Also skips the startup memory pre-flight check | false |
+| `--no-memcheck` | Skip the startup cgroup memory pre-flight check (`memory.max` vs the vindex's estimated resident size + headroom) | false |
+| `--memcheck-headroom-mib <MIB>` | Headroom (MiB) to reserve below `memory.max` for the OS, allocator overhead, and the request-handling working set. Ignored when `--no-memcheck` is set | 512 |
+| `--infer-timeout-secs <N>` | Per-request hard timeout for `/v1/infer` and other inference endpoints. On expiry the handler responds 504; 0 disables | 60 |
+| `--no-docs` | Disable the built-in Swagger UI and `/v1/openapi.json` endpoint | false |
+| `--hnsw` | Use HNSW for gate KNN instead of brute-force matmul. Indexes are built lazily per layer; approximate (recall 80–95% depending on `--hnsw-ef-search`). Wins for high-feature MoE; break-even or net loss for dense ≤ 10K-feature models | false |
+| `--hnsw-ef-search <N>` | HNSW beam width. Higher = better recall, slower search. 50 is the floor; 400 is the practical ceiling | 200 |
+| `--max-q4k-cache-layers <N>` | Cap the number of layers held in the Q4_K/Q6_K FFN dequant cache (0 = unlimited). Only fires on the CPU per-position fallback in walk-ffn | 0 |
+| `--shard-query-tau <TAU>` | Cosine threshold for the gRPC `ShardService.Query` KNN cache. When set, the gRPC server registers a `ShardService` backed by an in-memory cache | — |
+| `--http3-port <PORT>` | Enable an HTTP/3 listener on this port for the h3 shard transport (ADR-0019). Requires building with `--features http3`; coexists with the HTTP/1.1 listener on `--port` | — |
+| `--available-ram <SIZE>` | Mode B: advertise available RAM to the router (no vindex preloaded); the router assigns a shard. Requires `--join` and `--vindex-store` | — |
+| `--vindex-store <PATH>` | Mode B: directory where router-assigned shards are downloaded | — |
+| `--quic-cert-fingerprint <HEX>` | SHA-256 fingerprint of the router's QUIC server cert. Required only when `--join` uses the `quic://` scheme; without it the QUIC client skips certificate verification (LAN / dev only) | — |
+
 **Endpoints:**
 
 | Method | Path | Description |
@@ -644,9 +669,34 @@ larql serve --dir <DIR> [OPTIONS]
 | GET | `/v1/patches` | List active patches |
 | DELETE | `/v1/patches/{name}` | Remove a patch |
 | POST | `/v1/walk-ffn` | Decoupled inference. Two modes — see below. |
+| POST | `/v1/walk-ffn-q8k` | walk-ffn with Q8_K-quantised wire payloads |
+| POST | `/v1/explain-infer` | Predictions with per-layer feature traces |
+| POST | `/v1/insert` | Constellation insert |
+| GET | `/v1/expert/topology` | Expert ownership range for this shard |
+| POST | `/v1/expert/{layer}/{expert_id}` | Single expert forward |
+| POST | `/v1/expert/batch` | Legacy multi-expert batch (one residual per item) |
+| POST | `/v1/experts/layer-batch` | Current MoE wire: one residual + K (expert_id, weight) pairs → router-weighted sum (binary) |
+| POST | `/v1/experts/layer-batch-f16` | layer-batch with f16 wire payloads |
+| POST | `/v1/experts/multi-layer-batch` | N packed layer tasks in one call, run in parallel |
+| POST | `/v1/experts/multi-layer-batch-q8k` | multi-layer-batch with Q8_K wire payloads |
+| POST | `/v1/warmup` | Pre-load inference weights / prefetch mmap pages without a restart |
+| POST | `/v1/embed` | Token-id → embedding lookup (JSON or binary) |
+| GET | `/v1/embed/{token_id}` | Single-token embedding |
+| POST | `/v1/logits` | Residual → top-K tokens from lm_head |
+| GET | `/v1/token/encode` | Tokenize text |
+| GET | `/v1/token/decode` | Decode token ids to text |
+| GET | `/v1/shard/{model_id}/{range}` | Mode B shard handoff: donor streams its on-disk vindex as a tar |
 | WS | `/v1/stream` | WebSocket streaming (layer-by-layer DESCRIBE) |
 | GET | `/v1/health` | Health check (auth exempt) |
-| GET | `/v1/models` | List loaded models |
+| GET | `/v1/models` | List loaded models (OpenAI-compatible shape) |
+| POST | `/v1/completions` | OpenAI-compatible text completions (SSE streaming with `stream: true`) |
+| POST | `/v1/chat/completions` | OpenAI-compatible chat completions (SSE streaming with `stream: true`) |
+| POST | `/v1/embeddings` | OpenAI-compatible embeddings (mean-pooled lookup; not contrastively trained) |
+| GET | `/v1/openapi.json` | OpenAPI spec (with `/swagger-ui`; disabled by `--no-docs`) |
+| POST | `/v1/responses` | (landing — OpenAI Responses API workstream) |
+| GET | `/v1/responses/{response_id}` | (landing — OpenAI Responses API workstream) |
+| DELETE | `/v1/responses/{response_id}` | (landing — OpenAI Responses API workstream) |
+| GET | `/v1/models/{model}` | (landing — OpenAI Responses API workstream) |
 
 **`POST /v1/walk-ffn`** has two modes:
 
@@ -1149,7 +1199,8 @@ larql dev bfs \
 The following research subcommands exist and respond to `--help` but are
 not documented in detail above. They are stable enough to use but are
 mostly driven by the comments in their args structs and the experiment
-write-ups in `experiments/`.
+write-ups in `chris-experiments/larql_probes` (see
+[crates/larql-demos/README.md](../crates/larql-demos/README.md)).
 
 | Subcommand | One-line summary |
 |---|---|
@@ -1522,6 +1573,30 @@ larql parity gemma3-4b-q4k.vindex --component lm-head
 larql parity gemma4-31b.vindex --component layer --prompt "The capital of France is"
 ```
 
+### `larql moe-locality`
+
+Expert-selection locality over a routing trace. Answers two questions
+that gate whether a disk-resident MoE can be served faster than its
+routed bytes suggest: does speculative decoding amortise the expert bank
+(union of experts across `K` drafted tokens vs `K`), and can a hot cache
+work (LRU hit-rate curve for a resident expert subset)? Both are
+reported against a uniform baseline and a skew-preserving shuffle,
+because those two extrapolate differently to a load-balanced model.
+
+Collect the trace with `LARQL_MOE_ROUTE_TRACE=<path> larql shannon score`.
+
+```
+larql moe-locality <TRACE> [OPTIONS]
+```
+
+| Flag | Description | Default |
+|---|---|---|
+| `<TRACE>` | JSONL routing trace, as written by `LARQL_MOE_ROUTE_TRACE=<path>` | — |
+| `--num-experts <N>` | Expert count for the uniform baseline. Defaults to the largest expert id in the trace plus one, which under-counts if an expert never fired | from trace |
+| `--blocks <LIST>` | Block sizes for the union curve | 2,4,8,16,32 |
+| `--per-layer-block <N>` | Block size for the per-layer breakdown | 8 |
+| `--seed <N>` | Seed for the skew-preserving shuffle control | 20260730 |
+
 ## Factory commands
 
 Vindex Factory tooling — [docs/vindex-factory.md](vindex-factory.md) is
@@ -1687,7 +1762,7 @@ larql capabilities
 ```bash
 larql capabilities
 # {
-#   "larql_version": "0.1.0",
+#   "larql_version": "0.2.0",
 #   "architectures": [
 #     { "model_type": "gemma3", "attention_kind": "standard", "quant_formats": ["none", "q4k"] },
 #     { "model_type": "deepseek", "attention_kind": "mla", "quant_formats": ["none"] },
@@ -1727,6 +1802,58 @@ larql card render \
   --verification verification.json \
   --slices slices.json
 ```
+
+### `larql inspect-hf`
+
+Machine-readable architecture inventory of an HF checkpoint directory:
+identity, per-layer attention policy, tensors, and every config key this
+build does not consume. Reads `config.json` and the safetensors shard
+headers only (no tensor data) and prints the inventory as JSON. The
+resulting JSON can be passed to `larql vindex3` verbs in place of the
+checkpoint directory.
+
+```
+larql inspect-hf <PATH> [OPTIONS]
+```
+
+| Flag | Description | Default |
+|---|---|---|
+| `<PATH>` | HF checkpoint directory (`config.json` + `*.safetensors`) | — |
+| `--output <PATH>` | Write the inventory JSON here instead of stdout | stdout |
+| `--no-tensor-list` | Omit the per-tensor list (keep totals and per-prefix groups) for a compact report on large checkpoints | false |
+
+### `larql vindex3`
+
+VINDEX3 container programme verbs. Each artifact argument is either an
+HF checkpoint directory or a saved `inspect-hf` inventory JSON; multiple
+artifacts are treated together as one model system.
+
+```
+larql vindex3 <SUBCOMMAND> [OPTIONS]
+```
+
+| Subcommand | Description |
+|---|---|
+| `plan <artifacts...>` | Semantic representability plan over HF checkpoint dirs and/or saved `inspect-hf` inventory JSONs. Prints the plan as JSON; exits non-zero when the plan is inadmissible, so scripts can gate on it. |
+| `encode <artifacts...> --output <DIR>` | Encode the system into a self-contained container. Refuses an inadmissible plan; consumes the built graph, never re-interprets the checkpoint. |
+| `inspect <container>` | Reconstruct and check a container solely from its own contents — no source checkpoint, no architecture registry. `--verify` re-hashes every segment; `--execution-complete` additionally requires every component with executable objects to carry the surface those operations read. |
+| `verify <artifacts...> --container <DIR>` | Prove source ≡ encoded: four-authority semantic comparison plus per-representation byte equivalence, both ends re-hashed now. Exits non-zero on any disagreement. |
+| `ops <container>` | Emit the generic operation plan of one component, solely from the container. Operand closure is the gate: every stack tensor must classify into a role a declared op consumes, with the geometry the surface states. Exits non-zero on any closure defect. |
+| `exec <container> --tokens <IDS>` | Execute one component's own program from the container alone. `--dump-layers` writes per-layer hidden states in the `shannon layer-dump` format so `layer-diff` can compare against an upstream trace. |
+
+**`larql vindex3 exec`** flags:
+
+| Flag | Description | Default |
+|---|---|---|
+| `<CONTAINER>` | Container directory | — |
+| `--component <ID>` | Component to execute | target |
+| `--tokens <IDS>` | Comma-separated token ids. Given, never tokenised here: a tokenizer is part of the fixture and only one side may choose it | — |
+| `--backend <B>` | Numerical realisation: `reference` (naive f32), `production` (`larql-compute` kernels), plus Metal arms on macOS with the `gpu` feature (`metal`, `metal-mxfp4`, `metal-nvfp4`, `metal-lowered`, …) — same program, same interpreter, only the arithmetic differs | reference |
+| `--dump-layers <DIR>` | Write per-layer planes + manifest here instead of a summary. Planes are written as each layer completes, so an interrupted run leaves everything it finished | — |
+| `--resume` | Continue an interrupted `--dump-layers` run from its last complete plane. The recorded fixture (tokens, container, engine) must match | false |
+| `--generate <N>` | Greedy-decode N new tokens after the prompt, printing per-step timing and a decode report. Every step re-runs the full forward — the interpreter has no KV cache | — |
+| `--logit-dump <PATH>` | Step the tokens through one position at a time and write every position's logits as `[positions, vocab]` f32 (teacher forcing — what a KL/NLL gate needs; `--generate` cannot supply it) | — |
+| `--profile` | Lowered backends only, requires `--generate`: attribute each decode token's GPU time to its stage classes and print the ledger against the bytes each class reads | false |
 
 ## Graph-file commands
 

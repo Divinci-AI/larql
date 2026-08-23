@@ -8,8 +8,9 @@ use larql_vindex::format::vindex3::opplan::exec::kv::KvState;
 use larql_vindex::format::vindex3::opplan::exec::operands::{
     OperandOverrides, OperandSource, OperandStore,
 };
+use larql_vindex::format::vindex3::opplan::exec::prepared::{ExecutionSlice, PreparedOperands};
 use larql_vindex::format::vindex3::opplan::exec::{
-    execute_plan_streaming, prefill_plan, FinalOutput, PlaneEvent,
+    execute_plan_streaming, prefill_plan, prefill_prepared, FinalOutput, PlaneEvent,
 };
 use larql_vindex::format::vindex3::opplan::{plan_component_ops, ClosureDefect, ComponentOpPlan};
 
@@ -21,10 +22,16 @@ use super::session::Vindex3Session;
 /// operand store — solely from the container's own contents. Kept
 /// outside the generic impl so the whole opening path (and its
 /// refusals) is one instantiation regardless of backend.
-fn open_component(
-    container: &Path,
-    component: &str,
-) -> Result<(ComponentOpPlan, OperandStore, String), InferenceError> {
+/// What opening a component yields: the executable plan, its operand
+/// store, and the two identities the container declares about itself.
+struct OpenedComponent {
+    plan: ComponentOpPlan,
+    store: OperandStore,
+    model_name: String,
+    family: String,
+}
+
+fn open_component(container: &Path, component: &str) -> Result<OpenedComponent, InferenceError> {
     let inspection = inspect_container(container, false)?;
     let outcome = plan_component_ops(&inspection, container, component)?;
     if !outcome.closed() {
@@ -35,8 +42,15 @@ fn open_component(
     })?;
     let store = OperandStore::open(container, &inspection)?;
     // The container names itself (`index.model`) — identity travels
-    // with the artifact, never a sidecar or a directory name.
-    Ok((plan, store, inspection.index.model.clone()))
+    // with the artifact, never a sidecar or a directory name — and
+    // declares its own family, which is the only authority a V3
+    // binding has (there is no architecture registry entry to ask).
+    Ok(OpenedComponent {
+        plan,
+        store,
+        model_name: inspection.index.model.clone(),
+        family: inspection.index.family.clone(),
+    })
 }
 
 /// Built outside the generic impl so the refusal exists (and is
@@ -69,18 +83,25 @@ pub struct Vindex3Runtime<B: PlanBackend> {
     store: OperandStore,
     backend: B,
     model_name: String,
+    family: String,
 }
 
 impl<B: PlanBackend> Vindex3Runtime<B> {
     /// Open `component` from the container, refusing any closure
     /// defect (see [`unclosed_component`]'s doc).
     pub fn open(container: &Path, component: &str, backend: B) -> Result<Self, InferenceError> {
-        let (plan, store, model_name) = open_component(container, component)?;
+        let OpenedComponent {
+            plan,
+            store,
+            model_name,
+            family,
+        } = open_component(container, component)?;
         Ok(Self {
             plan,
             store,
             backend,
             model_name,
+            family,
         })
     }
 
@@ -106,6 +127,15 @@ impl<B: PlanBackend> Vindex3Runtime<B> {
     /// names when this is non-empty.
     pub fn model_name(&self) -> &str {
         &self.model_name
+    }
+
+    /// The model family the container declares.
+    ///
+    /// Read from the same inspection that produced the plan — a V3
+    /// binding has no architecture registry to ask, so the container's
+    /// own declaration is the authority.
+    pub fn family(&self) -> &str {
+        &self.family
     }
 
     /// Open an incremental session at position zero. Each call loads
@@ -249,5 +279,128 @@ impl<B: PlanBackend> Vindex3Runtime<B> {
     /// The arithmetic backend this runtime executes with.
     pub fn backend(&self) -> &B {
         &self.backend
+    }
+
+    /// Lower this component's operands into the backend's execution
+    /// form, once, and hand back the prepared model.
+    ///
+    /// This is the boundary between model lifetime and request
+    /// lifetime. Opening a runtime plans the component and maps its
+    /// store — cheap, milliseconds. *Preparing* it converts every
+    /// operand into the arithmetic the backend will actually run and
+    /// gives the backend its chance to place them on a device — the
+    /// expensive step, and the one that must happen once per served
+    /// model rather than once per request.
+    ///
+    /// Consumes the runtime so there is one answer to "is this model
+    /// prepared", but *keeps* the operand store: it is only mmap
+    /// handles, and holding it leaves the browse view
+    /// ([`knowledge_view`](PreparedVindex3::knowledge_view)) and future
+    /// slice preparations available on a prepared model.
+    pub fn prepare(self) -> Result<PreparedVindex3<B>, InferenceError> {
+        self.prepare_slice(ExecutionSlice::Full)
+    }
+
+    /// [`prepare`](Self::prepare) for part of the component: only the
+    /// slice's operands are lowered. A layer-range shard pays for its
+    /// own layers and nothing else.
+    pub fn prepare_slice(
+        self,
+        slice: ExecutionSlice,
+    ) -> Result<PreparedVindex3<B>, InferenceError> {
+        let operands = PreparedOperands::load(&self.plan, &self.store, &self.backend, slice)?;
+        Ok(PreparedVindex3 {
+            plan: self.plan,
+            store: self.store,
+            backend: self.backend,
+            operands,
+            model_name: self.model_name,
+            family: self.family,
+        })
+    }
+}
+
+/// A component whose operands are already in the backend's execution
+/// form: the model as a server holds it.
+///
+/// Sessions and batch prefill both read these operands; neither loads
+/// anything. That is the whole point — before this existed, a serve
+/// path that batch-prefilled and then decoded materialised the model
+/// twice per request.
+///
+/// Immutable, and therefore shareable: every concurrent request on a
+/// model reads one image. Per-request state (continuation K/V,
+/// sampling, masks, and eventually patch overlays) lives on the session
+/// instead, so nothing a request does can disturb another's weights.
+pub struct PreparedVindex3<B: PlanBackend> {
+    plan: ComponentOpPlan,
+    store: OperandStore,
+    backend: B,
+    operands: PreparedOperands,
+    model_name: String,
+    family: String,
+}
+
+impl<B: PlanBackend> PreparedVindex3<B> {
+    /// Open an incremental session over the resident operands, with the
+    /// caller's continuation state. Cheap: no operand touches disk.
+    pub fn session_with_kv<'a>(
+        &'a self,
+        kv: &'a mut dyn KvState,
+    ) -> Result<Vindex3Session<'a, B>, InferenceError> {
+        Vindex3Session::over_prepared(&self.plan, &self.operands, &self.backend, kv)
+    }
+
+    /// Batch-prefill `tokens` into the caller's provider over the
+    /// resident operands, returning the last position's logits.
+    pub fn prefill_into(
+        &self,
+        tokens: &[u32],
+        kv: &mut dyn KvState,
+    ) -> Result<Vec<f32>, InferenceError> {
+        let out = prefill_prepared(&self.plan, &self.operands, tokens, &self.backend, kv)?;
+        out.logits.ok_or_else(headless_prefill_error)
+    }
+
+    /// The component's executable plan — the model-meaning authority.
+    pub fn plan(&self) -> &ComponentOpPlan {
+        &self.plan
+    }
+
+    /// The container's self-declared model name (`index.model`).
+    pub fn model_name(&self) -> &str {
+        &self.model_name
+    }
+
+    /// The model family the container declares.
+    pub fn family(&self) -> &str {
+        &self.family
+    }
+
+    /// The container's browse view, bound to this model's own plan and
+    /// operand store — the same surface an unprepared runtime offers,
+    /// so preparing a model does not cost it its queryability.
+    pub fn knowledge_view(
+        &self,
+        tokenizer: &larql_vindex::tokenizers::Tokenizer,
+    ) -> Result<larql_vindex::format::vindex3::knowledge::KnowledgeView, InferenceError> {
+        Ok(
+            larql_vindex::format::vindex3::knowledge::KnowledgeView::from_plan(
+                &self.plan,
+                &self.store,
+                tokenizer,
+            )?,
+        )
+    }
+
+    /// The arithmetic backend these operands were lowered for.
+    pub fn backend(&self) -> &B {
+        &self.backend
+    }
+
+    /// The prepared operands themselves — slice, layer count, whether a
+    /// head is present.
+    pub fn operands(&self) -> &PreparedOperands {
+        &self.operands
     }
 }

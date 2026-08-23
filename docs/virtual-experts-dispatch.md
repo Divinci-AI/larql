@@ -71,7 +71,7 @@ analogous, even though the expert implementation is not: neural experts
 are weight shards selected by a learned router, while WASM experts are
 host-executed programs selected by op name. Both are forms of routing
 decisions to specialised callable units. The fact that
-`crates/larql-inference/src/ffn/moe_remote.rs` (MoE weight sharding) and
+`crates/larql-inference/src/ffn/moe_remote/` (MoE weight sharding) and
 `crates/larql-inference/src/experts/` (WASM compute experts) now coexist
 cleanly under disambiguated names — Phase 3 of this work — makes that
 parallel structurally explicit.
@@ -649,10 +649,10 @@ crates/larql-experts/expert-interface/src/lib.rs       # ABI: OpSpec
 crates/larql-experts/experts/*/src/lib.rs              # 19 files: ops = [(name, args)]
 crates/larql-inference/src/experts/{caller,registry,parser,session,mask,mod}.rs
 crates/larql-inference/src/prompt.rs                   # ChatTemplate
-crates/larql-inference/src/trie/mod.rs                 # find_with_env
-crates/larql-inference/src/vindex/{q4k_forward,mod}.rs # generate_q4k_cpu + _constrained
-crates/larql-inference/src/ffn/{moe_remote,mod}.rs     # rename + new fields
-crates/larql-inference/src/layer_graph/{generate,grid,mod}.rs # generate_constrained
+crates/larql-vindex/src/trie/mod.rs                    # find_with_env (moved from larql-inference)
+crates/larql-inference/src/vindex/{kquant_forward/generation.rs,mod.rs} # generate_kquant_cpu + _constrained (was q4k_forward.rs / generate_q4k_cpu)
+crates/larql-inference/src/ffn/{moe_remote/,mod.rs}    # rename + new fields (moe_remote.rs is now a module dir)
+crates/larql-inference/src/layer_graph/{generate/,grid.rs,mod.rs} # generate_constrained
 crates/larql-inference/src/lib.rs                      # re-exports
 crates/larql-inference/tests/{data/,test_generate_q4k_cpu,test_*_dispatch}.rs
 chris-experiments/larql_probes/examples/misc/moe_grid_generate.rs   # renamed

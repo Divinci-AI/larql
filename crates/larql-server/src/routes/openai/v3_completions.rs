@@ -31,7 +31,10 @@ use super::completions::{
     CompletionsUsage, TEXT_COMPLETION_OBJECT,
 };
 use super::error::OpenAIError;
-use super::util::{build_sampling_eos, contains_any, error_chunk, new_id_suffix, unix_now};
+use super::util::{
+    build_sampling_eos, contains_any, error_chunk, join_generation, new_id_suffix, unix_now,
+    FINISH_REASON_LENGTH, FINISH_REASON_STOP, SSE_CHANNEL_DEPTH, SSE_DONE,
+};
 
 /// Serve one already-validated completions request on a V3 runtime.
 /// The caller (the shared `/v1/completions` handler) has done all
@@ -90,36 +93,6 @@ pub(super) async fn respond(
     .into_response())
 }
 
-/// Await a blocking generation task under the server-side timeout —
-/// the same 504-and-detach contract the V2 buffered path applies
-/// (BUG-infer-deadlock §5.6): on timeout the JoinHandle is dropped,
-/// the blocking thread finishes in the background, and the client
-/// gets 504 rather than an indefinitely held connection.
-async fn join_generation<T>(
-    handle: tokio::task::JoinHandle<Result<T, ServerError>>,
-    timeout: std::time::Duration,
-) -> Result<T, OpenAIError> {
-    if timeout.is_zero() {
-        return Ok(handle
-            .await
-            .map_err(|e| ServerError::Internal(e.to_string()))??);
-    }
-    match tokio::time::timeout(timeout, handle).await {
-        Ok(join_result) => Ok(join_result.map_err(|e| ServerError::Internal(e.to_string()))??),
-        Err(_elapsed) => {
-            tracing::warn!(
-                target: "larql_server::openai::completions",
-                "v3 completion timed out after {}s; responding 504",
-                timeout.as_secs(),
-            );
-            Err(OpenAIError::from(ServerError::Timeout(format!(
-                "completion exceeded server-side timeout of {}s",
-                timeout.as_secs(),
-            ))))
-        }
-    }
-}
-
 /// Buffered generation over every prompt; returns
 /// `(choices, prompt_tokens_sum, completion_tokens_sum)` — the same
 /// shape the V2 loop feeds the shared response struct.
@@ -146,7 +119,7 @@ fn run_v3_completions_loop(
             generation.texts.iter().map(|t| (t.clone(), 1.0)).collect();
         let (mut text, kept, mut finish_reason) = finalize_completion(&scored, stop_strings);
         if generation.stopped_early {
-            finish_reason = "stop";
+            finish_reason = FINISH_REASON_STOP;
         }
         if echo {
             text = format!("{prompt}{text}");
@@ -173,7 +146,7 @@ fn stream_v3_completions(
     stop_strings: Vec<String>,
     model_id: String,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    let (tx, rx) = tokio::sync::mpsc::channel::<String>(64);
+    let (tx, rx) = tokio::sync::mpsc::channel::<String>(SSE_CHANNEL_DEPTH);
     let cmpl_id = format!("cmpl-{}", new_id_suffix());
 
     tokio::task::spawn_blocking(move || {
@@ -215,8 +188,8 @@ fn stream_v3_completions(
             },
         );
         let finish_reason: &'static str = match result {
-            Ok(generation) if early_stop || generation.stopped_early => "stop",
-            Ok(_) => "length",
+            Ok(generation) if early_stop || generation.stopped_early => FINISH_REASON_STOP,
+            Ok(_) => FINISH_REASON_LENGTH,
             Err(e) => {
                 let _ = tx.blocking_send(error_chunk(&e.to_string()));
                 return;
@@ -229,7 +202,7 @@ fn stream_v3_completions(
 
     let stream = ReceiverStream::new(rx)
         .map(|data| Event::default().data(data))
-        .chain(tokio_stream::once(Event::default().data("[DONE]")))
+        .chain(tokio_stream::once(Event::default().data(SSE_DONE)))
         .map(Ok::<_, Infallible>);
 
     Sse::new(stream).keep_alive(KeepAlive::default())
@@ -249,48 +222,6 @@ fn encode_prompt(model: &V3Model, prompt: &str) -> Result<Vec<u32>, ServerError>
     Ok(ids)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn join_generation_awaits_with_timeout_disabled() {
-        let handle = tokio::task::spawn_blocking(|| Ok::<_, ServerError>(7usize));
-        let value = join_generation(handle, std::time::Duration::ZERO)
-            .await
-            .unwrap();
-        assert_eq!(value, 7);
-    }
-
-    #[tokio::test]
-    async fn join_generation_returns_within_the_timeout() {
-        let handle = tokio::task::spawn_blocking(|| Ok::<_, ServerError>("done"));
-        let value = join_generation(handle, std::time::Duration::from_secs(30))
-            .await
-            .unwrap();
-        assert_eq!(value, "done");
-    }
-
-    #[tokio::test]
-    async fn join_generation_responds_504_when_the_task_overruns() {
-        let handle = tokio::task::spawn_blocking(|| {
-            std::thread::sleep(std::time::Duration::from_millis(300));
-            Ok::<_, ServerError>(())
-        });
-        let err = join_generation(handle, std::time::Duration::from_millis(5))
-            .await
-            .unwrap_err();
-        let body = format!("{err:?}");
-        assert!(body.contains("timeout"), "{body}");
-    }
-
-    #[tokio::test]
-    async fn join_generation_surfaces_the_task_error() {
-        let handle =
-            tokio::task::spawn_blocking(|| Err::<(), _>(ServerError::Internal("boom".to_string())));
-        let err = join_generation(handle, std::time::Duration::from_secs(30))
-            .await
-            .unwrap_err();
-        assert!(format!("{err:?}").contains("boom"));
-    }
-}
+// `join_generation` (formerly here) moved to `super::util` so the
+// chat, completions, and responses endpoints share one timeout
+// contract; its tests moved with it.

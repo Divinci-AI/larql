@@ -351,7 +351,7 @@ mod tests {
                 fused_row_layout: larql_compute::MoeFusedRowLayout::ContiguousHalves,
                 experts_gate_up: vec![&self.gate_up, &self.gate_up],
                 experts_down: vec![&self.down, &self.down],
-                routing_policy: larql_compute::MoeRoutingPolicy::default(),
+                routing_policy: larql_compute::MoeRoutingPolicy::gemma4_hybrid(),
                 weight_layout: larql_compute::MoeWeightLayout::default(),
                 expert_data_format: QuantFormat::Q4_K,
                 router_proj: &self.router,

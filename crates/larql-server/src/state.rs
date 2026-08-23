@@ -283,6 +283,12 @@ pub struct AppState {
     pub api_key: Option<String>,
     /// Per-session PatchedVindex manager.
     pub sessions: SessionManager,
+    /// Stored Responses-API envelopes + conversations, backing
+    /// `store` / `previous_response_id` and `GET /v1/responses/{id}`.
+    pub responses: crate::response_store::ResponseStore,
+    /// N1 — resident KV continuation states for chained V3 responses
+    /// (`previous_response_id`); see [`crate::response_kv`].
+    pub v3_kv: crate::response_kv::ResponseKvCache,
     /// DESCRIBE result cache.
     pub describe_cache: DescribeCache,
     /// Server-side hard timeout for `/v1/infer` and friends.  When

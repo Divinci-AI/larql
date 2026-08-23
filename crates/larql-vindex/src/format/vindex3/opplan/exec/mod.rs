@@ -26,6 +26,7 @@ pub mod kernels;
 pub mod kv;
 pub mod observe;
 pub mod operands;
+pub mod prepared;
 pub mod production;
 pub mod reference;
 pub mod weights;
@@ -33,14 +34,15 @@ pub mod weights;
 #[cfg(test)]
 mod tests;
 
-use super::{AttentionOp, ComponentOpPlan, LayerPlan, NormOp};
+use super::{AttentionOp, ComponentOpPlan, LayerPlan};
 use crate::error::VindexError;
 use backend::{
-    AttentionCall, AttentionStepCall, BiasCall, GateCall, MatrixClass, NormCall, PlanBackend,
-    ProjectCall, QkNormCall, SinkCall, WeightFormat,
+    AttentionCall, AttentionStepCall, BiasCall, GateCall, NormCall, PlanBackend, ProjectCall,
+    QkNormCall, SinkCall, WeightFormat,
 };
 use kv::KvState;
 use operands::OperandSource;
+use prepared::{ExecutionSlice, PreparedLayer, PreparedOperands};
 use rayon::prelude::*;
 use reference::ReferenceBackend;
 use weights::{load_weight, LoadedWeight};
@@ -170,10 +172,24 @@ pub fn execute_plan_streaming<'s, B: PlanBackend + ?Sized>(
     resume: Option<ResumePoint>,
     sink: &mut dyn FnMut(PlaneEvent) -> Result<(), VindexError>,
 ) -> Result<FinalOutput, VindexError> {
-    let store = store.into();
+    let ops = PreparedOperands::load(plan, store, backend, ExecutionSlice::Full)?;
+    execute_prepared_streaming(plan, &ops, tokens, backend, resume, sink)
+}
+
+/// [`execute_plan_streaming`] over operands the caller already
+/// prepared. One-shot callers keep the source-taking form above, which
+/// prepares and discards; a server prepares once and calls this.
+pub fn execute_prepared_streaming<B: PlanBackend + ?Sized>(
+    plan: &ComponentOpPlan,
+    ops: &PreparedOperands,
+    tokens: &[u32],
+    backend: &B,
+    resume: Option<ResumePoint>,
+    sink: &mut dyn FnMut(PlaneEvent) -> Result<(), VindexError>,
+) -> Result<FinalOutput, VindexError> {
     traverse(
         plan,
-        store,
+        ops,
         tokens,
         backend,
         resume,
@@ -208,12 +224,28 @@ pub fn prefill_plan<'s, B: PlanBackend + ?Sized>(
     backend: &B,
     kv: &mut dyn KvState,
 ) -> Result<FinalOutput, VindexError> {
-    let store = store.into();
+    let ops = PreparedOperands::load(plan, store, backend, ExecutionSlice::Full)?;
+    prefill_prepared(plan, &ops, tokens, backend, kv)
+}
+
+/// [`prefill_plan`] over operands the caller already prepared.
+///
+/// This is the serve path's prefill: the point of preparing a model
+/// once is that batch prefill and the decode session that follows it
+/// read the *same* resident operands, instead of each materialising the
+/// model for itself.
+pub fn prefill_prepared<B: PlanBackend + ?Sized>(
+    plan: &ComponentOpPlan,
+    ops: &PreparedOperands,
+    tokens: &[u32],
+    backend: &B,
+    kv: &mut dyn KvState,
+) -> Result<FinalOutput, VindexError> {
     kv.prepare(&kv::plan_kv_geometry(plan));
     let base = kv.position();
     let out = traverse(
         plan,
-        store,
+        ops,
         tokens,
         backend,
         None,
@@ -233,7 +265,7 @@ pub fn prefill_plan<'s, B: PlanBackend + ?Sized>(
 /// layers whose rows a provider would need.
 fn traverse<B: PlanBackend + ?Sized, K: KvState + ?Sized>(
     plan: &ComponentOpPlan,
-    store: OperandSource<'_>,
+    ops: &PreparedOperands,
     tokens: &[u32],
     backend: &B,
     resume: Option<ResumePoint>,
@@ -272,10 +304,16 @@ fn traverse<B: PlanBackend + ?Sized, K: KvState + ?Sized>(
             (point.next_layer, point.hidden)
         }
         None => {
-            let table = store.load(&embedding.table)?;
+            let table = ops.embed_table().ok_or_else(|| {
+                VindexError::Parse(
+                    "this prepared image carries no embedding table — a layer-range slice \
+                     consumes hidden states, not token ids"
+                        .to_string(),
+                )
+            })?;
             let mut h: Vec<Vec<f32>> = tokens
                 .iter()
-                .map(|&t| backend.embed(&table, hidden, t, embedding.scale))
+                .map(|&t| backend.embed(table, hidden, t, embedding.scale))
                 .collect();
             // The judged embedding normalisation, when the plan carries
             // one. It is weightless — no operand, hence the empty weight
@@ -298,26 +336,33 @@ fn traverse<B: PlanBackend + ?Sized, K: KvState + ?Sized>(
         }
     };
 
-    for (index, layer) in plan.layers.iter().enumerate().skip(start_layer) {
+    let first = ops.first_layer();
+    for (offset, prepared_layer) in ops.layers().iter().enumerate() {
+        let index = first + offset;
+        if index < start_layer {
+            continue;
+        }
         let capture = kv.as_mut().map(|state| (&mut **state, index));
-        let trace = execute_layer(layer, store, &mut h, hidden, backend, capture)?;
+        let trace = execute_layer(
+            &plan.layers[index],
+            prepared_layer,
+            &mut h,
+            hidden,
+            backend,
+            capture,
+        )?;
         sink(PlaneEvent::Layer { index, trace })?;
     }
 
     let last = h.last().ok_or_else(|| {
         VindexError::Parse("cannot execute over an empty token sequence".to_string())
     })?;
-    let final_hidden = match &plan.final_norm {
-        Some(op) => apply_norm_op(op, store, last, backend)?,
+    let final_hidden = match ops.final_norm() {
+        Some(norm) => norm.apply(backend, last),
         None => last.clone(),
     };
-    let logits = match &plan.output {
-        Some(output) => {
-            let weight = load_weight(
-                store,
-                &output.projection,
-                backend.weight_format(MatrixClass::OutputHead),
-            )?;
+    let logits = match ops.output() {
+        Some((output, weight)) => {
             let vocab = output.projection.shape[0];
             Some(backend.output_head(
                 weight.slice(),
@@ -357,7 +402,7 @@ pub(super) fn scale_residual_delta(scale: Option<f32>, delta: &mut [f32]) {
 /// them — placement is data, not code structure.
 fn execute_layer<B: PlanBackend + ?Sized, K: KvState + ?Sized>(
     layer: &LayerPlan,
-    store: OperandSource<'_>,
+    prepared: &PreparedLayer,
     h: &mut [Vec<f32>],
     hidden: usize,
     backend: &B,
@@ -373,33 +418,31 @@ fn execute_layer<B: PlanBackend + ?Sized, K: KvState + ?Sized>(
     // never a reassociation.
     let inputs: Vec<Vec<f32>> = h
         .par_iter()
-        .map(|row| apply_norm_op(&layer.pre_attention_norm, store, row, backend))
-        .collect::<Result<_, _>>()?;
+        .map(|row| prepared.pre_attention.apply(backend, row))
+        .collect();
     let attn_out = match kv {
         Some((kv, layer_index)) => attention_into_kv(
             &layer.attention,
+            &prepared.attention,
             &inputs,
             layer.pre_attention_norm.eps,
-            store,
             hidden,
             backend,
             kv,
             layer_index,
         )?,
-        None => attention(
+        None => backend.attention(prepared.attention.call(
             &layer.attention,
             &inputs,
             layer.pre_attention_norm.eps,
-            store,
             hidden,
-            backend,
-        )?,
+        ))?,
     };
     h.par_iter_mut()
         .zip(attn_out.par_iter())
         .try_for_each(|(row, out)| {
-            let mut out = match &layer.post_attention_norm {
-                Some(op) => apply_norm_op(op, store, out, backend)?,
+            let mut out = match &prepared.post_attention {
+                Some(norm) => norm.apply(backend, out),
                 None => out.clone(),
             };
             scale_residual_delta(layer.residual_scale, &mut out);
@@ -408,37 +451,29 @@ fn execute_layer<B: PlanBackend + ?Sized, K: KvState + ?Sized>(
         })?;
     let post_attention = h.to_vec();
 
-    // FFN operands load once per layer, not once per position. They are
-    // the bulk of a decoder layer's weight, and `OperandStore::load`
-    // allocates a fresh copy per call — re-reading them for every
-    // token would dominate the run on a real model without changing a
-    // single number.
-    let format = backend.weight_format(MatrixClass::FfnProjection);
-    let ffn = experts::FfnOperands::load(&layer.ffn, store, format)?;
-    let layer_scale = layer
-        .layer_scale
-        .as_ref()
-        .map(|op| store.load(op))
-        .transpose()?;
+    // FFN operands are resident on the prepared image — the bulk of a
+    // decoder layer's weight, lowered once for the model rather than
+    // once per layer per traversal.
+    let ffn = &prepared.ffn;
     // The normed FFN inputs are computed once here (same values the
     // in-loop computation produced — one deterministic norm per row)
     // so the trace can carry the tap without a second norm pass.
     let ffn_inputs: Vec<Vec<f32>> = h
         .par_iter()
-        .map(|row| apply_norm_op(&layer.pre_ffn_norm, store, row, backend))
-        .collect::<Result<_, _>>()?;
+        .map(|row| prepared.pre_ffn.apply(backend, row))
+        .collect();
     h.par_iter_mut()
         .zip(&ffn_inputs)
         .try_for_each(|(row, normed)| {
             let ffn_out = ffn.apply_from_residual(&layer.ffn, backend, row, normed, hidden)?;
-            let mut ffn_out = match &layer.post_ffn_norm {
-                Some(op) => apply_norm_op(op, store, &ffn_out, backend)?,
+            let mut ffn_out = match &prepared.post_ffn {
+                Some(norm) => norm.apply(backend, &ffn_out),
                 None => ffn_out,
             };
             scale_residual_delta(layer.residual_scale, &mut ffn_out);
             backend.residual_add(row, &ffn_out);
-            if let Some(scale) = &layer_scale {
-                backend.scale_row(row, layer_scalar_of(scale)?);
+            if let Some(scale) = prepared.layer_scale {
+                backend.scale_row(row, scale);
             }
             Ok::<(), VindexError>(())
         })?;
@@ -615,19 +650,14 @@ impl AttentionOperands {
 #[allow(clippy::too_many_arguments)]
 fn attention_into_kv<B: PlanBackend + ?Sized, K: KvState + ?Sized>(
     op: &AttentionOp,
+    operands: &AttentionOperands,
     inputs: &[Vec<f32>],
     qk_norm_eps: f64,
-    store: OperandSource<'_>,
     hidden: usize,
     backend: &B,
     kv: &mut K,
     layer_index: usize,
 ) -> Result<Vec<Vec<f32>>, VindexError> {
-    let operands = AttentionOperands::load(
-        op,
-        store,
-        backend.weight_format(MatrixClass::AttentionProjection),
-    )?;
     let base = kv.position();
     let mut outputs = Vec::with_capacity(inputs.len());
     for offset in 0..inputs.len() {
@@ -642,41 +672,6 @@ fn attention_into_kv<B: PlanBackend + ?Sized, K: KvState + ?Sized>(
         outputs.push(out.output);
     }
     Ok(outputs)
-}
-
-/// Load the attention operands and hand the backend a fully resolved
-/// call.
-fn attention<B: PlanBackend + ?Sized>(
-    op: &AttentionOp,
-    inputs: &[Vec<f32>],
-    qk_norm_eps: f64,
-    store: OperandSource<'_>,
-    hidden: usize,
-    backend: &B,
-) -> Result<Vec<Vec<f32>>, VindexError> {
-    let operands = AttentionOperands::load(
-        op,
-        store,
-        backend.weight_format(MatrixClass::AttentionProjection),
-    )?;
-    backend.attention(operands.call(op, inputs, qk_norm_eps, hidden))
-}
-
-/// Apply one norm op to one vector.
-fn apply_norm_op<B: PlanBackend + ?Sized>(
-    op: &NormOp,
-    store: OperandSource<'_>,
-    x: &[f32],
-    backend: &B,
-) -> Result<Vec<f32>, VindexError> {
-    let weight = store.load(&op.weight)?;
-    Ok(backend.norm(NormCall {
-        kind: op.kind,
-        x,
-        weight: &weight,
-        weight_offset: op.weight_offset,
-        eps: op.eps,
-    }))
 }
 
 /// The one value of a `[1]` layer-scale operand — refused if the operand

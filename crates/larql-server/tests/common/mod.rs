@@ -475,6 +475,35 @@ pub fn state(models: Vec<Arc<LoadedModel>>) -> Arc<AppState> {
         sessions: SessionManager::new(3600),
         describe_cache: DescribeCache::new(0),
         infer_timeout: std::time::Duration::from_secs(60),
+        responses: larql_server::response_store::ResponseStore::new(),
+        v3_kv: larql_server::response_kv::ResponseKvCache::new(
+            larql_server::response_kv::DEFAULT_MAX_ENTRIES,
+            larql_server::response_kv::DEFAULT_TTL_SECS,
+        ),
+    })
+}
+
+/// State whose inference timeout is `timeout` — for driving the
+/// server-side timeout arms without a slow model.
+#[allow(dead_code)]
+pub fn state_with_timeout(
+    models: Vec<Arc<LoadedModel>>,
+    timeout: std::time::Duration,
+) -> Arc<AppState> {
+    Arc::new(AppState {
+        models,
+        v3_models: Vec::new(),
+        started_at: std::time::Instant::now(),
+        requests_served: AtomicU64::new(0),
+        api_key: None,
+        sessions: SessionManager::new(3600),
+        describe_cache: DescribeCache::new(0),
+        infer_timeout: timeout,
+        responses: larql_server::response_store::ResponseStore::new(),
+        v3_kv: larql_server::response_kv::ResponseKvCache::new(
+            larql_server::response_kv::DEFAULT_MAX_ENTRIES,
+            larql_server::response_kv::DEFAULT_TTL_SECS,
+        ),
     })
 }
 
@@ -488,6 +517,11 @@ pub fn state_with_key(models: Vec<Arc<LoadedModel>>, key: &str) -> Arc<AppState>
         sessions: SessionManager::new(3600),
         describe_cache: DescribeCache::new(0),
         infer_timeout: std::time::Duration::from_secs(60),
+        responses: larql_server::response_store::ResponseStore::new(),
+        v3_kv: larql_server::response_kv::ResponseKvCache::new(
+            larql_server::response_kv::DEFAULT_MAX_ENTRIES,
+            larql_server::response_kv::DEFAULT_TTL_SECS,
+        ),
     })
 }
 
@@ -501,6 +535,11 @@ pub fn state_with_cache(models: Vec<Arc<LoadedModel>>, cache_size: u64) -> Arc<A
         sessions: SessionManager::new(3600),
         describe_cache: DescribeCache::new(cache_size),
         infer_timeout: std::time::Duration::from_secs(60),
+        responses: larql_server::response_store::ResponseStore::new(),
+        v3_kv: larql_server::response_kv::ResponseKvCache::new(
+            larql_server::response_kv::DEFAULT_MAX_ENTRIES,
+            larql_server::response_kv::DEFAULT_TTL_SECS,
+        ),
     })
 }
 

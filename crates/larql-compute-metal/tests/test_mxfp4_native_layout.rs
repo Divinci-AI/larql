@@ -263,7 +263,7 @@ fn run(
                 .collect(),
         },
         fused_row_layout: layout,
-        routing_policy: MoeRoutingPolicy::default(),
+        routing_policy: MoeRoutingPolicy::gemma4_hybrid(),
         weight_layout: MoeWeightLayout::default(),
         expert_data_format: QuantFormat::MXFP4,
         router_proj: router,

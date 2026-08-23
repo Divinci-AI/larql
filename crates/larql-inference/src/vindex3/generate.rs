@@ -14,6 +14,11 @@ use crate::layer_graph::generate::sampling::{Sampler, SamplingConfig};
 
 use super::session::LogitsSession;
 
+/// A logits mask: receives the generated-so-far ids and the mutable
+/// logits, carrying any grammar state in its closure — the V2
+/// constrained driver's contract.
+pub type LogitsMask<'a> = &'a mut dyn FnMut(&[u32], &mut Vec<f32>);
+
 /// Built outside the generic driver so the refusal exists (and is
 /// counted) once, not once per session instantiation.
 fn sampler_exhausted_error() -> InferenceError {
@@ -61,19 +66,83 @@ pub fn generate_session<S: LogitsSession + ?Sized>(
 /// positions the continuation stands on, however they were consumed.
 pub fn continue_session<S: LogitsSession + ?Sized>(
     session: &mut S,
+    logits: Vec<f32>,
+    max_new_tokens: usize,
+    sampling: SamplingConfig,
+    eos: &EosConfig,
+    on_token: impl FnMut(u32),
+) -> Result<SessionGeneration, InferenceError> {
+    drive_session(
+        session,
+        logits,
+        max_new_tokens,
+        sampling,
+        eos,
+        None,
+        on_token,
+    )
+}
+
+/// [`continue_session`] with a logits mask applied before every sample
+/// (N0.6 — constrained decoding on the V3 runtime). `mask_fn` receives
+/// the generated-so-far ids and the mutable logits, exactly the V2
+/// constrained driver's contract, and carries any grammar state in its
+/// closure. Both public drivers are one loop ([`drive_session`]), so
+/// the constrained and free paths cannot drift.
+///
+/// Mask-exhaustion semantics mirror the V2 constrained driver: every
+/// candidate masked out before the FIRST emission is an error (the
+/// grammar admits nothing — a broken constraint); exhaustion after at
+/// least one emission is a natural stop (the grammar completed).
+pub fn continue_session_masked<S: LogitsSession + ?Sized>(
+    session: &mut S,
+    logits: Vec<f32>,
+    max_new_tokens: usize,
+    sampling: SamplingConfig,
+    eos: &EosConfig,
+    mask_fn: LogitsMask<'_>,
+    on_token: impl FnMut(u32),
+) -> Result<SessionGeneration, InferenceError> {
+    drive_session(
+        session,
+        logits,
+        max_new_tokens,
+        sampling,
+        eos,
+        Some(mask_fn),
+        on_token,
+    )
+}
+
+/// The one generation loop behind both public drivers. `mask` decides
+/// the sampler-exhaustion policy: with no mask, exhaustion is always
+/// an error (finite logits should always yield a token — anything else
+/// is broken state); with a mask, exhaustion after the first emission
+/// is the grammar completing.
+fn drive_session<S: LogitsSession + ?Sized>(
+    session: &mut S,
     mut logits: Vec<f32>,
     max_new_tokens: usize,
     sampling: SamplingConfig,
     eos: &EosConfig,
+    mut mask: Option<LogitsMask<'_>>,
     mut on_token: impl FnMut(u32),
 ) -> Result<SessionGeneration, InferenceError> {
     let prompt_len = session.position();
     let mut sampler = Sampler::new(sampling);
     let mut tokens = Vec::new();
     while tokens.len() < max_new_tokens {
-        let id = sampler
-            .sample_with_history(&logits, &tokens)
-            .ok_or_else(sampler_exhausted_error)?;
+        if let Some(mask_fn) = mask.as_deref_mut() {
+            mask_fn(&tokens, &mut logits);
+        }
+        let Some(id) = sampler.sample_with_history(&logits, &tokens) else {
+            if mask.is_some() && !tokens.is_empty() {
+                // The mask admitted nothing after emission began: the
+                // grammar completed — a natural stop, like EOS.
+                break;
+            }
+            return Err(sampler_exhausted_error());
+        };
         if eos.is_eos(id, "") {
             break;
         }

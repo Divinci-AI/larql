@@ -360,7 +360,7 @@ larql-compute-test-fast:
 # ── Iteration loops for refactor work (no test execution, just type-check) ──
 #
 # These shave 1–3 minutes off the inner refactor loop versus
-# `cargo test --tests --features metal` by skipping codegen and execution.
+# `cargo test --tests -p larql-compute-metal` by skipping codegen and execution.
 # Use the smallest one that catches the change you're making, then promote
 # to `larql-compute-test-metal-decode` (executes the synthetic decode
 # integration suite) only when ready to validate runtime behaviour.
@@ -370,36 +370,36 @@ larql-compute-test-fast:
 # that don't change test signatures (registry sweeps, env-flag plumbing,
 # struct rearrangements that keep field names).
 larql-compute-check-fast:
-	cargo check -p larql-compute --features metal --lib
+	cargo check -p larql-compute-metal --lib
 
 # Type-check `lib` + every integration-test binary under `tests/` with
 # the `metal` feature. ~30 s – 3 min depending on warm cache. Use when a
 # refactor renames or moves something that integration tests reach into
 # (e.g. `MetalBackend`'s public fields).
 larql-compute-check-tests:
-	cargo check -p larql-compute --features metal --tests
+	cargo check -p larql-compute-metal --tests
 
 # Same but also walks examples + benches — the most thorough type check
 # short of building everything. Catches breakage in `examples/diag_*`
 # and `benches/quant_matvec` etc that the `--tests` form misses.
 larql-compute-check-all:
-	cargo check -p larql-compute --features metal --tests --benches --examples
+	cargo check -p larql-compute-metal --tests --benches --examples
 
 # Run JUST the synthetic-decode integration test under `metal`. Smallest
 # end-to-end runtime validation — ~1–2 min cold, faster warm. Use after
 # `larql-compute-check-tests` passes, before declaring a refactor done.
 larql-compute-test-metal-decode:
-	cargo test -p larql-compute --features metal --test test_metal_decode_synthetic
+	cargo test -p larql-compute-metal --test test_metal_decode_synthetic
 
-# Lib-test execution under `metal`. Adds the unit tests inside
-# `src/metal/**` to what `larql-compute-test-fast` covers.
+# Metal lib-test execution (the kernels live in the sibling crate
+# per ADR-019).
 larql-compute-test-metal-lib:
-	cargo test -p larql-compute --features metal --lib
+	cargo test -p larql-compute-metal --lib
 
 # Full integration suite — turns on `heavy_tests` for the slow non-Metal
 # correctness/parity suites and walks every integration binary under
-# crates/larql-compute/tests. Add `--features metal` to also build the
-# Metal kernel tests on macOS.
+# crates/larql-compute/tests. The Metal kernel tests live in the
+# larql-compute-metal sibling crate (ADR-019).
 larql-compute-test-integration:
 	cargo test -p larql-compute --features heavy_tests --tests
 
@@ -846,7 +846,7 @@ larql-inference-coverage:
 		echo "  cargo install cargo-llvm-cov"; \
 		exit 1; \
 	fi
-	cargo llvm-cov --package larql-inference --features metal --fail-under-lines $(LARQL_INFERENCE_COVERAGE_MIN)
+	cargo llvm-cov --package larql-inference --features gpu --fail-under-lines $(LARQL_INFERENCE_COVERAGE_MIN)
 	@mkdir -p coverage/larql-inference
 	cargo llvm-cov report --package larql-inference --json --summary-only --output-path $(LARQL_INFERENCE_COVERAGE_REPORT)
 	$(MAKE) larql-inference-coverage-policy
@@ -857,7 +857,7 @@ larql-inference-coverage-summary:
 		echo "  cargo install cargo-llvm-cov"; \
 		exit 1; \
 	fi
-	cargo llvm-cov --package larql-inference --features metal --summary-only --fail-under-lines $(LARQL_INFERENCE_COVERAGE_MIN)
+	cargo llvm-cov --package larql-inference --features gpu --summary-only --fail-under-lines $(LARQL_INFERENCE_COVERAGE_MIN)
 	@mkdir -p coverage/larql-inference
 	cargo llvm-cov report --package larql-inference --json --summary-only --output-path $(LARQL_INFERENCE_COVERAGE_REPORT)
 	$(MAKE) larql-inference-coverage-policy
@@ -866,7 +866,7 @@ larql-inference-coverage-html:
 	@if ! command -v cargo-llvm-cov >/dev/null 2>&1; then \
 		echo "cargo-llvm-cov not installed."; exit 1; \
 	fi
-	cargo llvm-cov --package larql-inference --features metal --html --output-dir coverage/larql-inference
+	cargo llvm-cov --package larql-inference --features gpu --html --output-dir coverage/larql-inference
 	@echo "Report: coverage/larql-inference/html/index.html"
 
 larql-inference-ci: larql-inference-fmt-check larql-inference-lint larql-inference-test larql-inference-bench-test larql-inference-coverage-summary
@@ -906,9 +906,10 @@ bench-core:
 bench-inference:
 	cargo run --release -p larql-inference --example bench_inference
 
-# Compute kernel criterion bench (quant_matvec — Metal GPU).
+# Compute kernel criterion bench (quant_matvec — Metal GPU, lives in
+# the larql-compute-metal sibling crate per ADR-019).
 bench-compute:
-	cargo bench -p larql-compute --bench quant_matvec --features metal
+	cargo bench -p larql-compute-metal --bench quant_matvec
 
 # Wire codec criterion bench (encode/decode f32/f16/i8 throughput).
 bench-wire:

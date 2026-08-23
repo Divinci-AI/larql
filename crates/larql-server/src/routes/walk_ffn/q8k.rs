@@ -36,20 +36,22 @@ fn q8k_activation_to_f32(q8k: &Q8KActivation, hidden: usize) -> Vec<f32> {
     out
 }
 
-/// Content-type for the Q8K dense-FFN batch protocol.
-pub(crate) const Q8K_BATCH_CT: &str = "application/x-larql-ffn-q8k-batch";
+/// Content-type for the Q8K dense-FFN batch protocol — single-sourced in
+/// the shared walk-ffn codec (`larql_inference::ffn::remote`), same pattern
+/// as `crate::http::BINARY_FFN_CONTENT_TYPE`.
+pub(crate) use larql_inference::ffn::remote::Q8K_BATCH_CT;
 
 #[utoipa::path(
     post,
     path = "/v1/walk-ffn-q8k",
     tag = "expert",
     request_body(
-        content_type = "application/x-larql-ffn-q8k-batch",
+        content_type = Q8K_BATCH_CT,
         description = "Q8K-prenormed dense-FFN batch: client has applied FFN input norm + Q8 quantisation. \
                        404 if the vindex lacks interleaved Q4K data.",
     ),
     responses(
-        (status = 200, content_type = "application/x-larql-ffn-q8k-batch",
+        (status = 200, content_type = Q8K_BATCH_CT,
          description = "Per-layer FFN delta as f32", body = Vec<u8>),
         (status = 400, body = crate::error::ErrorBody),
         (status = 404, body = crate::error::ErrorBody),
@@ -76,7 +78,7 @@ pub async fn handle_walk_ffn_q8k(
             .and_then(|v| v.to_str().ok()),
     );
 
-    let body = axum::body::to_bytes(request.into_body(), 64 * 1024 * 1024)
+    let body = axum::body::to_bytes(request.into_body(), crate::http::REQUEST_BODY_LIMIT_BYTES)
         .await
         .map_err(|e| crate::error::ServerError::BadRequest(format!("read body: {e}")))?;
 

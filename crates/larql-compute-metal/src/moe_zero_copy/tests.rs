@@ -44,7 +44,7 @@ fn layer<'a>(scales: MoeExpertScales<'a>, payload: &'a [&'a [u8]]) -> MoeLayerWe
         experts_down: payload.to_vec(),
         expert_scales: scales,
         fused_row_layout: MoeFusedRowLayout::Interleaved,
-        routing_policy: MoeRoutingPolicy::default(),
+        routing_policy: MoeRoutingPolicy::gemma4_hybrid(),
         weight_layout: MoeWeightLayout::default(),
         expert_data_format: QuantFormat::MXFP4,
         router_proj: &[],

@@ -233,6 +233,7 @@ larql-vindex/src/
 │   │       └── q4k.rs          load_model_weights_q4k_shard (Q4_K path)
 │   ├── checksums.rs            SHA256 computation + verification
 │   ├── fp4_codec.rs            FP4 / FP8 codec (extraction-side)
+│   ├── vindex3/                The VINDEX3 container — writing one, and opening one
 │   ├── huggingface/            HuggingFace Hub download/publish
 │   ├── spec.rs                 Translation: VindexConfig → public v1
 │   │                           manifest (`larql-vindex-spec::VindexManifest`).
@@ -367,7 +368,6 @@ pipeline), use `larql-inference::forward::memit`.
 | Mistral | Mistral 7B | Gated (SiLU) | Sliding window |
 | Mixtral | Mixtral 8x7B/8x22B | MoE (8 experts) | PerExpert format |
 | Qwen | Qwen 2/2.5/3 | Gated (SiLU) | Attention bias, QK-norm |
-| Phi | Phi 2/3 | Gated | |
 | DeepSeek | DeepSeek V2/V3 | MoE (shared + routed) | MLA, YaRN |
 | Granite | Granite | Gated (SiLU) | Scaling multipliers |
 | StarCoder2 | StarCoder2 | Standard (GELU) | LayerNorm, bias, non-gated FFN |
@@ -940,7 +940,7 @@ Tests:      457 passing (306 unit + 151 integration; clippy clean as of 2026-04-
 Coverage:   61% lines / 57% functions (cargo-llvm-cov; W2 files 95–100%)
 Warnings:   0 (build), 0 (clippy --all-targets)
 Formats:    f32, Q8_0, Q4_K, Q6_K, Q4_0, FP4, FP8
-Models:     Gemma 2/3/4, Llama, Mistral, Mixtral, Qwen, Phi, DeepSeek, Granite, StarCoder2, GPT-OSS, GPT-2
+Models:     Gemma 2/3/4, Llama, Mistral, Mixtral, Qwen, DeepSeek, Granite, StarCoder2, GPT-OSS, GPT-2 (others fall back to GenericArch)
 ```
 
 ## License

@@ -33,6 +33,9 @@ const WS_CMD_GENERATE: &str = "generate";
 const WS_CMD_CANCEL: &str = "cancel";
 const WS_TYPE_TOKEN: &str = "token";
 
+/// Default `max_tokens` for a WebSocket `generate` command that omits it.
+const DEFAULT_STREAM_MAX_TOKENS: u64 = 256;
+
 fn ws_error(message: impl Into<String>) -> serde_json::Value {
     serde_json::json!({"type": WS_TYPE_ERROR, "message": message.into()})
 }
@@ -400,7 +403,9 @@ async fn handle_stream_generate(
             return;
         }
     };
-    let max_tokens = request["max_tokens"].as_u64().unwrap_or(256) as usize;
+    let max_tokens = request["max_tokens"]
+        .as_u64()
+        .unwrap_or(DEFAULT_STREAM_MAX_TOKENS) as usize;
 
     let model = match state.model(None) {
         Some(m) => Arc::clone(m),
@@ -727,6 +732,11 @@ mod tests {
             sessions: SessionManager::new(3600),
             describe_cache: DescribeCache::new(0),
             infer_timeout: std::time::Duration::from_secs(60),
+            responses: crate::response_store::ResponseStore::new(),
+            v3_kv: crate::response_kv::ResponseKvCache::new(
+                crate::response_kv::DEFAULT_MAX_ENTRIES,
+                crate::response_kv::DEFAULT_TTL_SECS,
+            ),
         })
     }
 

@@ -352,11 +352,11 @@ impl MoeRoutingPolicy {
     }
 }
 
-impl Default for MoeRoutingPolicy {
-    fn default() -> Self {
-        Self::gemma4_hybrid()
-    }
-}
+// NOTE: deliberately no `Default` impl. A default here is a silent
+// family choice made in the substrate crate — the failure class this
+// project has hit repeatedly (`norm_topk_prob`, `rope_type: yarn`,
+// `layer_types`). The policy must arrive explicitly, derived from the
+// model's typed `larql_models::MoeRouterKind`.
 
 pub struct MoeLayerWeights<'a> {
     /// Per-expert gate+up weight bytes (`experts_gate_up[e]` is expert `e`'s

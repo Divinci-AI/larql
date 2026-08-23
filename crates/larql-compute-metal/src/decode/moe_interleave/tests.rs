@@ -732,7 +732,7 @@ impl PreconditionFixture {
             // identity-combine class this path serves.
             routing_policy: MoeRoutingPolicy {
                 post_expert_norm: larql_compute::MoePostExpertNormPolicy::None,
-                ..MoeRoutingPolicy::default()
+                ..MoeRoutingPolicy::gemma4_hybrid()
             },
             weight_layout: MoeWeightLayout::default(),
             expert_data_format: QuantFormat::Q4_K,

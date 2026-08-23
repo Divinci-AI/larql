@@ -135,8 +135,8 @@ to an unreachable shard will return HTTP 502 with the upstream error.
 
 | Location | What it does |
 |---|---|
-| `crates/larql-router/src/main.rs` | CLI, HTTP handler, static shard dispatch, `resolve_all` |
-| `crates/larql-router/src/grid.rs` | `GridState` (O(1) route cache), `GridServiceImpl` (gRPC) |
+| `crates/larql-router/src/main.rs` | CLI entry point (HTTP handler + `resolve_all` now in `src/http.rs`; shard-spec parsing in `src/shards.rs`) |
+| `crates/larql-router/src/grid/` | `GridState` (O(1) route cache, `grid/mod.rs`), `GridServiceImpl` (gRPC, `grid/service.rs`) |
 | `crates/larql-router-protocol/` | Shared proto types (`grid.proto`) and tonic stubs |
 | `crates/larql-server/src/announce.rs` | Background announce task; reconnect with backoff |
 | `parse_shards("0-16=http://...")` | Parses `--shards` spec; inclusive→exclusive end |

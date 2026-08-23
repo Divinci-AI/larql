@@ -64,7 +64,7 @@ pub async fn handle_walk_ffn(
     let in_format = crate::wire::request_wire_format(headers);
     let accept = crate::wire::accept_header(headers).map(str::to_owned);
 
-    let body = axum::body::to_bytes(request.into_body(), 64 * 1024 * 1024)
+    let body = axum::body::to_bytes(request.into_body(), crate::http::REQUEST_BODY_LIMIT_BYTES)
         .await
         .map_err(|e| ServerError::BadRequest(format!("read body: {e}")))?;
 

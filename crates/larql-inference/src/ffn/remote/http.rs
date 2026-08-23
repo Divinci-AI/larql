@@ -29,6 +29,10 @@ pub const WALK_FFN_PATH: &str = "/v1/walk-ffn";
 pub const WALK_FFN_Q8K_PATH: &str = "/v1/walk-ffn-q8k";
 const HIDDEN_SIZE_KEY: &str = "hidden_size";
 
+/// Default per-request timeout (connect + read) for remote-FFN calls: 60 s,
+/// overridable via [`RemoteFfnConfig::with_timeout`].
+const DEFAULT_REMOTE_FFN_TIMEOUT: Duration = Duration::from_secs(60);
+
 // ── Config ───────────────────────────────────────────────────────────────────
 
 /// Wire format preference for a `RemoteWalkBackend` connection.
@@ -104,7 +108,7 @@ impl RemoteFfnConfig {
     pub fn new(base_url: impl Into<String>) -> Self {
         Self {
             base_url: base_url.into().trim_end_matches('/').to_string(),
-            timeout: Duration::from_secs(60),
+            timeout: DEFAULT_REMOTE_FFN_TIMEOUT,
             wire: WirePreference::BestAvailable,
             wire_in: WireFormat::F32,
         }

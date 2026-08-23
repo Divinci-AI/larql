@@ -6,7 +6,41 @@ use axum::extract::{Path, State};
 use axum::Json;
 
 use crate::error::ServerError;
-use crate::state::{AppState, LoadedModel};
+use crate::state::{AppState, LoadedModel, ServedModel};
+
+/// `/v1/stats` for a VINDEX3 binding.
+///
+/// A V3 container is an executable program, not a feature index, so the
+/// V2 block's vocabulary (features, bands, extract level, q4k caches)
+/// has nothing to report. What it *can* state is the program's own
+/// shape, read from the opened plan — which is also the only authority
+/// that could answer, since a V3 container carries no architecture
+/// registry entry.
+///
+/// The `server` block matters more here than the model block: it is the
+/// only surface carrying the N1 continuation counters, and before this
+/// existed a V3-only server answered `/v1/stats` with 404 — the
+/// instrumentation was unreachable exactly where V3 runs.
+fn build_v3_stats(model: &crate::vindex3::V3Model) -> serde_json::Value {
+    let plan = model.runtime.plan();
+    serde_json::json!({
+        "model": model.id,
+        "generation": 3,
+        "mode": "full",
+        "component": plan.component,
+        "layers": plan.layers.len(),
+        "hidden_size": plan.embedding.as_ref().map(|e| e.table.shape[1]),
+        "vocab_size": plan.embedding.as_ref().map(|e| e.table.shape[0]),
+        "has_output_head": plan.output.is_some(),
+        "path": model.path.display().to_string(),
+        "loaded": {
+            "browse": false,
+            "inference": true,
+            "ffn_service": false,
+            "embed_service": false,
+        },
+    })
+}
 
 fn build_stats(model: &LoadedModel) -> serde_json::Value {
     let config = &model.config;
@@ -157,6 +191,48 @@ async fn add_q4k_ffn(model: &LoadedModel, mut stats: serde_json::Value) -> serde
     stats
 }
 
+/// The server-level block: process counters plus every bounded
+/// per-client store the maintenance sweeper keeps in check — the
+/// operational counterpart of the P1 eviction fix and the N1 KV cache.
+async fn server_block(state: &AppState) -> serde_json::Value {
+    serde_json::json!({
+        "uptime_secs": state.started_at.elapsed().as_secs(),
+        "requests_served": state
+            .requests_served
+            .load(std::sync::atomic::Ordering::Relaxed),
+        "sessions": {
+            "active": state.sessions.session_count().await,
+            "ttl_secs": state.sessions.ttl().as_secs(),
+        },
+        "responses_stored": {
+            "entries": state.responses.len(),
+            "capacity": crate::response_store::MAX_STORED_RESPONSES,
+        },
+        "v3_kv": {
+            "enabled": state.v3_kv.enabled(),
+            "entries": state.v3_kv.len(),
+            "capacity": state.v3_kv.max_entries(),
+            "ttl_secs": state.v3_kv.ttl().as_secs(),
+            // `hits` = a resident state was found; `resumptions` = the
+            // state also passed the exact ids-prefix check and prefill
+            // work was skipped. The difference is the prefix-stability
+            // gap under real request construction.
+            "hits": state.v3_kv.hits(),
+            "misses": state.v3_kv.misses(),
+            "resumptions": state.v3_kv.resumptions(),
+            "reused_tokens_total": state.v3_kv.reused_tokens_total(),
+        },
+    })
+}
+
+/// Merge the server-level block into a per-model stats payload.
+async fn add_server_block(state: &AppState, mut stats: serde_json::Value) -> serde_json::Value {
+    if let Some(obj) = stats.as_object_mut() {
+        obj.insert("server".into(), server_block(state).await);
+    }
+    stats
+}
+
 #[utoipa::path(
     get,
     path = "/v1/stats",
@@ -170,9 +246,11 @@ pub async fn handle_stats(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<serde_json::Value>, ServerError> {
     state.bump_requests();
-    let model = state.model_or_err(None)?;
-    let stats = build_stats(model);
-    Ok(Json(add_q4k_ffn(model, stats).await))
+    let stats = match state.served_or_err(None)? {
+        ServedModel::V2(model) => add_q4k_ffn(model, build_stats(model)).await,
+        ServedModel::V3(model) => build_v3_stats(model),
+    };
+    Ok(Json(add_server_block(&state, stats).await))
 }
 
 #[utoipa::path(
@@ -190,7 +268,9 @@ pub async fn handle_stats_multi(
     Path(model_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ServerError> {
     state.bump_requests();
-    let model = state.model_or_err(Some(&model_id))?;
-    let stats = build_stats(model);
-    Ok(Json(add_q4k_ffn(model, stats).await))
+    let stats = match state.served_or_err(Some(&model_id))? {
+        ServedModel::V2(model) => add_q4k_ffn(model, build_stats(model)).await,
+        ServedModel::V3(model) => build_v3_stats(model),
+    };
+    Ok(Json(add_server_block(&state, stats).await))
 }

@@ -23,51 +23,37 @@
 //! [`step`]: DecodeSession::step
 //! [`attention_step`]: super::backend::PlanBackend::attention_step
 
-use super::backend::{AttentionStepCall, MatrixClass, NormCall, PlanBackend};
+use super::backend::{AttentionStepCall, NormCall, PlanBackend};
 use super::kv::{plan_kv_geometry, KvState, RowKvState};
 use super::observe::{NoopObserver, StepEvent, StepObserver};
 use super::operands::OperandSource;
-use super::weights::{load_weight, LoadedWeight};
-use super::AttentionOperands;
+use super::prepared::{ExecutionSlice, PreparedOperands};
 use crate::error::VindexError;
 
-use super::super::{ComponentOpPlan, NormOp, OutputOp};
+use super::super::ComponentOpPlan;
 
-/// One norm site's operation with its weight held resident.
-struct LoadedNorm {
-    op: NormOp,
-    weight: Vec<f32>,
+/// Who holds the session's operands: an image the caller prepared —
+/// typically at model lifetime, shared by every request on that model —
+/// or one this session lowered for itself.
+///
+/// The borrowed arm is the point of operand residency; the owned arm
+/// keeps the `new(plan, source, backend)` constructors working for
+/// callers that legitimately want a one-shot session.
+enum OperandsSlot<'a> {
+    /// Boxed so the slot stays pointer-sized: the borrowed arm is the
+    /// hot one (a request over a model-lifetime image), and the owned
+    /// arm is a one-shot session that can afford the indirection.
+    Owned(Box<PreparedOperands>),
+    Borrowed(&'a PreparedOperands),
 }
 
-impl LoadedNorm {
-    fn load(op: &NormOp, store: OperandSource<'_>) -> Result<Self, VindexError> {
-        Ok(Self {
-            op: op.clone(),
-            weight: store.load(&op.weight)?,
-        })
+impl OperandsSlot<'_> {
+    fn get(&self) -> &PreparedOperands {
+        match self {
+            OperandsSlot::Owned(ops) => ops,
+            OperandsSlot::Borrowed(ops) => ops,
+        }
     }
-
-    fn apply<B: PlanBackend + ?Sized>(&self, backend: &B, x: &[f32]) -> Vec<f32> {
-        backend.norm(NormCall {
-            kind: self.op.kind,
-            x,
-            weight: &self.weight,
-            weight_offset: self.op.weight_offset,
-            eps: self.op.eps,
-        })
-    }
-}
-
-/// One layer's resident operands and its K/V cache.
-struct LayerState {
-    pre_attention: LoadedNorm,
-    attention: AttentionOperands,
-    post_attention: Option<LoadedNorm>,
-    pre_ffn: LoadedNorm,
-    ffn: super::experts::FfnOperands,
-    post_ffn: Option<LoadedNorm>,
-    /// The layer's output scalar, when the plan carries one.
-    layer_scale: Option<f32>,
 }
 
 /// Who holds the session's continuation state (VI3-INF-2): the default
@@ -105,11 +91,7 @@ pub struct StepOutput {
 pub struct DecodeSession<'a, B: PlanBackend> {
     plan: &'a ComponentOpPlan,
     backend: &'a B,
-    hidden: usize,
-    embed_table: Vec<f32>,
-    layers: Vec<LayerState>,
-    final_norm: Option<LoadedNorm>,
-    output: Option<(OutputOp, LoadedWeight)>,
+    ops: OperandsSlot<'a>,
     kv: KvSlot<'a>,
 }
 
@@ -149,94 +131,46 @@ impl<'a, B: PlanBackend> DecodeSession<'a, B> {
         Self::build(plan, store.into(), backend, KvSlot::Borrowed(kv))
     }
 
+    /// Open a session over operands the caller already prepared —
+    /// typically once, at model lifetime, and shared by every request
+    /// on that model. Nothing is loaded here.
+    pub fn over_prepared(
+        plan: &'a ComponentOpPlan,
+        ops: &'a PreparedOperands,
+        backend: &'a B,
+        kv: &'a mut dyn KvState,
+    ) -> Result<Self, VindexError> {
+        Self::assemble(
+            plan,
+            OperandsSlot::Borrowed(ops),
+            backend,
+            KvSlot::Borrowed(kv),
+        )
+    }
+
     fn build(
         plan: &'a ComponentOpPlan,
         store: OperandSource<'_>,
         backend: &'a B,
+        kv: KvSlot<'a>,
+    ) -> Result<Self, VindexError> {
+        let ops = PreparedOperands::load(plan, store, backend, ExecutionSlice::Full)?;
+        Self::assemble(plan, OperandsSlot::Owned(Box::new(ops)), backend, kv)
+    }
+
+    fn assemble(
+        plan: &'a ComponentOpPlan,
+        ops: OperandsSlot<'a>,
+        backend: &'a B,
         mut kv: KvSlot<'a>,
     ) -> Result<Self, VindexError> {
         kv.state_mut().prepare(&plan_kv_geometry(plan));
-        let embedding = plan.embedding.as_ref().ok_or_else(|| {
-            VindexError::Parse(format!(
-                "component `{}` has no embedding op — external hidden-state input is a later rung",
-                plan.component
-            ))
-        })?;
-        let hidden = embedding.table.shape[1];
-
-        let embed_table = store.load(&embedding.table)?;
-        let mut layers = Vec::with_capacity(plan.layers.len());
-        for layer in &plan.layers {
-            layers.push(LayerState {
-                pre_attention: LoadedNorm::load(&layer.pre_attention_norm, store)?,
-                attention: AttentionOperands::load(
-                    &layer.attention,
-                    store,
-                    backend.weight_format(MatrixClass::AttentionProjection),
-                )?,
-                post_attention: layer
-                    .post_attention_norm
-                    .as_ref()
-                    .map(|op| LoadedNorm::load(op, store))
-                    .transpose()?,
-                pre_ffn: LoadedNorm::load(&layer.pre_ffn_norm, store)?,
-                ffn: super::experts::FfnOperands::load(
-                    &layer.ffn,
-                    store,
-                    backend.weight_format(MatrixClass::FfnProjection),
-                )?,
-                post_ffn: layer
-                    .post_ffn_norm
-                    .as_ref()
-                    .map(|op| LoadedNorm::load(op, store))
-                    .transpose()?,
-                layer_scale: layer
-                    .layer_scale
-                    .as_ref()
-                    .map(|op| store.load(op).and_then(|v| super::layer_scalar_of(&v)))
-                    .transpose()?,
-            });
-        }
-        let final_norm = plan
-            .final_norm
-            .as_ref()
-            .map(|op| LoadedNorm::load(op, store))
-            .transpose()?;
-        let output = plan
-            .output
-            .as_ref()
-            .map(|op| {
-                Ok::<_, VindexError>((
-                    op.clone(),
-                    load_weight(
-                        store,
-                        &op.projection,
-                        backend.weight_format(MatrixClass::OutputHead),
-                    )?,
-                ))
-            })
-            .transpose()?;
-
-        let session = Self {
+        Ok(Self {
             plan,
             backend,
-            hidden,
-            embed_table,
-            layers,
-            final_norm,
-            output,
+            ops,
             kv,
-        };
-        let mut weights: Vec<super::backend::WeightSlice<'_>> = Vec::new();
-        for state in &session.layers {
-            weights.extend(state.attention.weight_slices());
-            weights.extend(state.ffn.weight_slices());
-        }
-        if let Some((_, projection)) = &session.output {
-            weights.push(projection.slice());
-        }
-        backend.prepare(&weights);
-        Ok(session)
+        })
     }
 
     /// Positions consumed so far — read from the continuation state,
@@ -263,19 +197,28 @@ impl<'a, B: PlanBackend> DecodeSession<'a, B> {
         token: u32,
         observer: &mut dyn StepObserver,
     ) -> Result<StepOutput, VindexError> {
+        let ops = self.ops.get();
+        let hidden = ops.hidden();
         let embedding = self
             .plan
             .embedding
             .as_ref()
             .expect("session construction required an embedding op");
-        if (token as usize + 1) * self.hidden > self.embed_table.len() {
+        let embed_table = ops.embed_table().ok_or_else(|| {
+            VindexError::Parse(
+                "this prepared image carries no embedding table — a layer-range slice consumes \
+                 hidden states, not token ids"
+                    .to_string(),
+            )
+        })?;
+        if (token as usize + 1) * hidden > embed_table.len() {
             return Err(VindexError::Parse(format!(
                 "token id {token} is outside the embedding table",
             )));
         }
         let mut h = self
             .backend
-            .embed(&self.embed_table, self.hidden, token, embedding.scale);
+            .embed(embed_table, hidden, token, embedding.scale);
         if let Some(norm) = embedding.norm {
             h = self.backend.norm(NormCall {
                 kind: norm.kind,
@@ -288,7 +231,10 @@ impl<'a, B: PlanBackend> DecodeSession<'a, B> {
 
         let position = self.kv.state().position();
         observer.event(StepEvent::Embedded { position });
-        for (index, (state, layer)) in self.layers.iter_mut().zip(&self.plan.layers).enumerate() {
+        let first = ops.first_layer();
+        for (offset, state) in ops.layers().iter().enumerate() {
+            let index = first + offset;
+            let layer = &self.plan.layers[index];
             // Attention input is normalised once and handed over; the
             // judged gate reads the same vector (same as the batch path).
             let inputs = [state.pre_attention.apply(self.backend, &h)];
@@ -296,7 +242,7 @@ impl<'a, B: PlanBackend> DecodeSession<'a, B> {
                 &layer.attention,
                 &inputs,
                 layer.pre_attention_norm.eps,
-                self.hidden,
+                hidden,
             );
             let out = self.backend.attention_step(AttentionStepCall {
                 op: call,
@@ -314,13 +260,10 @@ impl<'a, B: PlanBackend> DecodeSession<'a, B> {
             observer.event(StepEvent::AttentionDone { layer: index });
 
             let normed = state.pre_ffn.apply(self.backend, &h);
-            let ffn_out = state.ffn.apply_from_residual(
-                &layer.ffn,
-                self.backend,
-                &h,
-                &normed,
-                self.hidden,
-            )?;
+            let ffn_out =
+                state
+                    .ffn
+                    .apply_from_residual(&layer.ffn, self.backend, &h, &normed, hidden)?;
             let mut ffn_out = match &state.post_ffn {
                 Some(norm) => norm.apply(self.backend, &ffn_out),
                 None => ffn_out,
@@ -333,15 +276,15 @@ impl<'a, B: PlanBackend> DecodeSession<'a, B> {
             observer.event(StepEvent::FfnDone { layer: index });
         }
 
-        let final_hidden = match &self.final_norm {
+        let final_hidden = match ops.final_norm() {
             Some(norm) => norm.apply(self.backend, &h),
             None => h,
         };
-        let logits = match &self.output {
+        let logits = match ops.output() {
             Some((op, weight)) => Some(self.backend.output_head(
                 weight.slice(),
                 op.projection.shape[0],
-                self.hidden,
+                hidden,
                 &final_hidden,
                 op.multiplier,
                 op.softcapping,

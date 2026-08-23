@@ -36,6 +36,9 @@ pub const MOE_BATCH_MODE: &str = "LARQL_MOE_BATCH_MODE";
 pub const F16_WIRE_DISABLE: &str = "LARQL_F16_WIRE_DISABLE";
 /// Opt-in to i8 symmetric quantised residuals on the wire.
 pub const I8_WIRE: &str = "LARQL_I8_WIRE";
+/// Override the auto-detected core count used to throttle concurrent
+/// `run_experts_cpu_batch` calls (see `routes::expert::layer_batch`).
+pub const COMPUTE_CONCURRENCY: &str = "LARQL_COMPUTE_CONCURRENCY";
 
 // ── Cached presence ────────────────────────────────────────────────────────────
 //
@@ -109,6 +112,17 @@ fn moe_batch_mode_uncached() -> Option<String> {
 pub fn moe_batch_mode() -> Option<&'static str> {
     static CACHE: OnceLock<Option<String>> = OnceLock::new();
     CACHE.get_or_init(moe_batch_mode_uncached).as_deref()
+}
+
+/// `LARQL_COMPUTE_CONCURRENCY=N` — override the auto-detected core count
+/// used to size the expert compute semaphore. Returns `None` when unset or
+/// unparseable; the caller supplies the auto-detected default. Uncached —
+/// the single call site memoises the derived semaphore in a `OnceLock`, so
+/// this is read once per process anyway.
+pub fn compute_concurrency() -> Option<usize> {
+    std::env::var(COMPUTE_CONCURRENCY)
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
 }
 
 #[cfg(test)]
@@ -187,6 +201,7 @@ mod tests {
             MOE_BATCH_MODE,
             F16_WIRE_DISABLE,
             I8_WIRE,
+            COMPUTE_CONCURRENCY,
         ];
         for n in names {
             assert!(n.starts_with("LARQL_"), "{n} must be LARQL_-prefixed");

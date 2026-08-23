@@ -59,7 +59,10 @@ use crate::error::ServerError;
 use crate::routes::openai::OpenAIError;
 use crate::state::{AppState, LoadedModel};
 
-use super::util::{contains_any, error_chunk, new_id_suffix, trim_at_stop, unix_now, StopSpec};
+use super::util::{
+    contains_any, error_chunk, new_id_suffix, trim_at_stop, unix_now, StopSpec,
+    FINISH_REASON_LENGTH, FINISH_REASON_STOP, SSE_CHANNEL_DEPTH, SSE_DONE,
+};
 
 pub(super) const TEXT_COMPLETION_OBJECT: &str = "text_completion";
 pub(super) const DEFAULT_MAX_TOKENS: usize = 16;
@@ -353,7 +356,7 @@ fn stream_completions(
     stop_strings: Vec<String>,
     model_id: String,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    let (tx, rx) = tokio::sync::mpsc::channel::<String>(64);
+    let (tx, rx) = tokio::sync::mpsc::channel::<String>(SSE_CHANNEL_DEPTH);
     let cmpl_id = format!("cmpl-{}", new_id_suffix());
 
     tokio::task::spawn_blocking(move || {
@@ -422,9 +425,9 @@ fn stream_completions(
         );
 
         let finish_reason: &'static str = if early_stop || result.tokens.len() < max_tokens {
-            "stop"
+            FINISH_REASON_STOP
         } else {
-            "length"
+            FINISH_REASON_LENGTH
         };
         let final_chunk =
             build_text_completion_chunk(&cmpl_id, &model_id, None, Some(finish_reason));
@@ -433,7 +436,7 @@ fn stream_completions(
 
     let stream = ReceiverStream::new(rx)
         .map(|data| Event::default().data(data))
-        .chain(tokio_stream::once(Event::default().data("[DONE]")))
+        .chain(tokio_stream::once(Event::default().data(SSE_DONE)))
         .map(Ok::<_, Infallible>);
 
     Sse::new(stream).keep_alive(KeepAlive::default())
@@ -480,18 +483,18 @@ pub(super) fn finalize_completion(
 ) -> (String, Vec<(String, f64)>, &'static str) {
     let mut completion_text = String::new();
     let mut completion_tokens: Vec<(String, f64)> = Vec::new();
-    let mut finish_reason = "length";
+    let mut finish_reason = FINISH_REASON_LENGTH;
     for (text, prob) in tokens {
         completion_text.push_str(text);
         completion_tokens.push((text.clone(), *prob));
         if larql_inference::vindex::is_end_of_turn(text) {
-            finish_reason = "stop";
+            finish_reason = FINISH_REASON_STOP;
             break;
         }
     }
     if !stop_strings.is_empty() && contains_any(&completion_text, stop_strings) {
         completion_text = trim_at_stop(&completion_text, stop_strings);
-        finish_reason = "stop";
+        finish_reason = FINISH_REASON_STOP;
         // Drop tokens past the byte boundary so logprobs and text stay
         // length-aligned.
         let target = completion_text.len();
@@ -663,7 +666,8 @@ mod tests {
         assert!(v["choices"][0]["logprobs"].is_null());
 
         // Final chunk: no text (defaults to ""), finish_reason set.
-        let last = build_text_completion_chunk("cmpl-1", "synthetic", None, Some("stop"));
+        let last =
+            build_text_completion_chunk("cmpl-1", "synthetic", None, Some(FINISH_REASON_STOP));
         let v: serde_json::Value = serde_json::from_str(&last).unwrap();
         assert_eq!(v["choices"][0]["text"], "");
         assert_eq!(v["choices"][0]["finish_reason"], "stop");

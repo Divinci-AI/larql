@@ -31,6 +31,16 @@ struct SegmentMap {
 /// Operand store over one container.
 pub struct OperandStore {
     segments: BTreeMap<String, SegmentMap>,
+    /// Process-unique identity — see [`SourceStamp`].
+    id: u64,
+    /// How many operands have been read out of this store.
+    ///
+    /// Residency is an architectural claim ("a served model's operands
+    /// are lowered once"), and a claim that can only be checked by
+    /// stopwatch is a claim that regresses quietly. This counter lets a
+    /// test assert the shape directly: prepare, then serve N requests,
+    /// then assert the count did not move.
+    loads: std::sync::atomic::AtomicU64,
 }
 
 impl OperandStore {
@@ -63,7 +73,11 @@ impl OperandStore {
                 },
             );
         }
-        Ok(Self { segments })
+        Ok(Self {
+            segments,
+            id: next_identity(),
+            loads: std::sync::atomic::AtomicU64::new(0),
+        })
     }
 
     /// Load one operand as f32 values.
@@ -72,10 +86,23 @@ impl OperandStore {
         widen(&raw.dtype, &raw.bytes, &operand.tensor)
     }
 
+    /// This store's process-unique identity.
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// How many operands have been read out of this store since it was
+    /// opened. The residency gate reads this.
+    pub fn load_count(&self) -> u64 {
+        self.loads.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// Load one operand's stored bytes and dtype, unwidened — for a
     /// caller that converts to a representation other than f32 (and for
     /// [`Self::load`] itself, so there is exactly one resolution path).
     pub fn load_raw(&self, operand: &OperandRef) -> Result<RawOperand, VindexError> {
+        self.loads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let segment = self.segments.get(&operand.object).ok_or_else(|| {
             VindexError::Parse(format!("no segment for object `{}`", operand.object))
         })?;
@@ -135,14 +162,58 @@ pub enum OperandEdit {
 /// widening to f32, before any backend requantization — so **every
 /// weight format observes the same effective values** (`load_weight`
 /// quantizes from the widened f32 buffer).
-#[derive(Debug, Default, Clone)]
+#[derive(Debug)]
 pub struct OperandOverrides {
     edits: BTreeMap<(String, String), Vec<OperandEdit>>,
+    /// Process-unique identity, so two override sets are never
+    /// mistaken for each other.
+    id: u64,
+    /// Bumped on every mutation. Together with `id` this is what lets a
+    /// derived artefact — a [`PreparedOperands`](super::prepared::PreparedOperands)
+    /// image — say whether it still describes these edits.
+    generation: u64,
+}
+
+/// Hands out process-unique identities for override sets and stores.
+fn next_identity() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+impl Default for OperandOverrides {
+    fn default() -> Self {
+        Self {
+            edits: BTreeMap::new(),
+            id: next_identity(),
+            generation: 0,
+        }
+    }
+}
+
+impl Clone for OperandOverrides {
+    /// A clone takes a **fresh** identity. The two sets are equal now
+    /// but diverge independently, and an artefact prepared from one
+    /// must not silently pass as current for the other. Conservative by
+    /// construction: the cost of a false "stale" is one re-preparation;
+    /// the cost of a false "current" is executing the wrong model.
+    fn clone(&self) -> Self {
+        Self {
+            edits: self.edits.clone(),
+            id: next_identity(),
+            generation: self.generation,
+        }
+    }
 }
 
 impl OperandOverrides {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// This set's identity and mutation count — what a derived image
+    /// stamps itself with.
+    pub fn version(&self) -> (u64, u64) {
+        (self.id, self.generation)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -151,6 +222,7 @@ impl OperandOverrides {
 
     /// Record one edit for an operand; edits apply in insertion order.
     pub fn push(&mut self, operand: &OperandRef, edit: OperandEdit) {
+        self.generation += 1;
         self.edits
             .entry((operand.object.clone(), operand.tensor.clone()))
             .or_default()
@@ -217,6 +289,28 @@ impl OperandOverrides {
 /// store directly, so a mutation can alter what execution computes
 /// without touching the container's bytes — and a source with no
 /// overrides resolves bit-identically to the bare store.
+/// The identity of one *effective* operand source: which store, and
+/// which version of which overlay.
+///
+/// Preparation turns an effective source into a compiled artefact
+/// ([`PreparedOperands`](super::prepared::PreparedOperands)), so that
+/// artefact needs to be able to say which source it describes. Without
+/// this, a prepared image outlives an overlay mutation and quietly
+/// keeps executing the pre-edit model — the derived state becoming a
+/// second authority for what the model means, which is exactly what the
+/// operand seam exists to prevent.
+///
+/// Equality is deliberately conservative: reverting an edit produces a
+/// new generation and therefore a different stamp, so a valid image can
+/// be judged stale (costing one re-preparation) but a stale one can
+/// never be judged valid.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SourceStamp {
+    store: u64,
+    /// `None` when the source is the bare store.
+    overlay: Option<(u64, u64)>,
+}
+
 #[derive(Clone, Copy)]
 pub struct OperandSource<'a> {
     base: &'a OperandStore,
@@ -230,6 +324,14 @@ impl<'a> OperandSource<'a> {
         Self {
             base,
             overrides: (!overrides.is_empty()).then_some(overrides),
+        }
+    }
+
+    /// This source's identity, for stamping derived artefacts.
+    pub fn stamp(&self) -> SourceStamp {
+        SourceStamp {
+            store: self.base.id(),
+            overlay: self.overrides.map(OperandOverrides::version),
         }
     }
 

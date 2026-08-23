@@ -23,6 +23,7 @@ mod kv;
 mod observe;
 mod overrides;
 mod parity;
+mod residency;
 mod routed;
 mod seam;
 mod sinks_bias;

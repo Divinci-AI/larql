@@ -50,7 +50,7 @@ for the dep-graph rationale.
 
 | Trait | For | Per-step contract |
 |---|---|---|
-| `KvEngine` | per-token K/V cache engines (`standard`, `no-cache`, `markov-rs`, `markov-rs-codec`, `windowed-checkpoint`, `turbo-quant`, `boundary-kv`, `boundary-per-layer`) | append K/V per layer; dispatches FFN through `&dyn FfnBackend`; state reconstructible to K/V tensors |
+| `KvEngine` | per-token K/V cache engines (`standard`, `no-cache`, `markov-rs`, `markov-rs-codec`, `windowed-checkpoint`, `turbo-quant`, `boundary-kv`, `boundary-per-layer`, plus the `semantic-promotion` wrapper over any of them) | append K/V per layer; dispatches FFN through `&dyn FfnBackend`; state reconstructible to K/V tensors |
 | `RetrievalEngine` | retrieval-injection engines (`apollo`, future Mode 5) | no per-token K/V append; no `FfnBackend` dispatch; state is residual delta + token list |
 
 Both return `Result<Array2<f32>, EngineError>` from `prefill` /
@@ -63,7 +63,7 @@ historical `Option<T>` that collapsed all five into a silent
 
 ## Full engine catalog
 
-Nine engines total. `Standard` and `NoCache` wrap today's production
+Ten engines total. `Standard` and `NoCache` wrap today's production
 behaviour; the others are research engines that trade accuracy or
 memory for different state-policy properties (compressed cold tier,
 windowed checkpoints, retrieval injection, etc.).
@@ -79,6 +79,7 @@ windowed checkpoints, retrieval injection, etc.).
 | [`windowed_checkpoint`](src/engines/windowed_checkpoint) | Per-window K/V checkpoint + token archive; supports replay | 15.7 MB → **0 MB** | 86.1 | **95.0** (HOnly, +10%) | exact within window | [windowed-checkpoint-engine.md](../larql-inference/docs/specs/windowed-checkpoint-engine.md) |
 | [`turbo_quant`](src/engines/turbo_quant) | WHT + Lloyd-Max 3/4-bit K/V codec, in-place compression | 0.7 MB | **37.7** (10-tok) | n/a (canonical K/V) | cos ≈ 0.991 | [turbo-quant-engine.md](../larql-inference/docs/specs/turbo-quant-engine.md) |
 | [`apollo`](src/engines/apollo) | Constellation map + boundary-residual injection (retrieval) | scales w/ store | requires store | n/a | task-level | [apollo-engine.md](../larql-inference/docs/specs/apollo-engine.md) |
+| [`semantic_promotion`](src/engines/semantic_promotion) | Long-context state as semantic authorities rather than a token-age-ordered K/V cache — a policy wrapper over an exact base engine (authority, visibility, promotion lifecycle); the base engine keeps prefill/decode/attention/FFN dispatch | base engine's | base engine's | n/a (delegates) | base engine's contract | [semantic-promotion-engine.md](docs/specs/semantic-promotion-engine.md) |
 
 **Numbers are post W2 (hot K/V cache), W1-GPU (per-layer state-dump
 dispatch), W7 (blit-encoder fusion), and W10 (state-bridge mask
@@ -280,13 +281,26 @@ larql-kv/
 │   │   └── measurement.rs — KL/JS/softmax/top_k_overlap helpers
 │   ├── cache.rs        — legacy `KvCache` shape used by StandardEngine
 │   ├── generation.rs   — `generate_with_engine`, `generate_cached_*` parity oracle
+│   ├── generation/     — `kv_run`: per-layer prefill/decode building blocks + the
+│   │                     `dispatch_parity` oracle every engine is measured against
+│   ├── model_walk/     — model-walk layer: the graph decides which semantic path
+│   │                     is valid; the KV engine materialises it (peer of engines/)
+│   ├── vindex3/        — canonical KvCache behind the VINDEX3 `KvState` contract (VI3-KV-1)
 │   ├── vindex_compare.rs — A/B comparison of two vindexes on the same model
 │   ├── profiler.rs     — per-stage decode timing accumulators
 │   └── engines/
 │       ├── standard.rs           — production K/V tensor cache (default)
 │       ├── no_cache.rs           — full re-forward per step (debug fallback)
+│       ├── no_expert_route.rs    — typed refusal for a MoE arch the forward path
+│       │                           structurally cannot serve (no expert-dispatch seam)
+│       ├── layer_ffn.rs          — the shared per-layer FFN step between attention
+│       │                           and the next layer + its refusal channel
 │       ├── apollo/               — boundary-residual injection, ~4,000× compression
+│       ├── boundary_kv/          — `standard` + larql-boundary chunk frames (cross-session resume)
+│       ├── boundary_per_layer/   — `markov_residual` + per-layer codec policy on the cold tier
 │       ├── markov_residual/      — residual-stream KV replacement, KL = 0
+│       ├── markov_residual_codec/ — `markov_residual` + codec layer on the cold residual tier
+│       ├── semantic_promotion/   — semantic-authority policy wrapper over an exact base engine
 │       ├── turbo_quant/          — WHT + Lloyd-Max K/V codec (3- or 4-bit)
 │       └── windowed_checkpoint/    — windowed re-prefill from checkpoints
 ├── benches/            — criterion microbenchmarks

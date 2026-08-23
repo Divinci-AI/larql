@@ -19,8 +19,11 @@ shards. Two sharding shapes are supported in a single router:
   parameter MoE models (DeepSeek-V3/V4, Kimi K2 / K2.6) where a
   host typically loads one layer's slice of experts.
 
-The router is intentionally narrow — it exposes only the endpoints
-needed for the fan-out, not a full transparent reverse proxy:
+The router exposes two things: the fan-out endpoints, and — since
+N0-router (2026-08-22) — the **OpenAI surface**, so an unmodified
+`openai` SDK can point at the grid's front door and get one endpoint.
+
+Fan-out and operations:
 
 - `POST /v1/walk-ffn` — single-layer or multi-layer fan-out across
   the shard map. Multi-layer requests are dispatched in parallel
@@ -32,10 +35,38 @@ needed for the fan-out, not a full transparent reverse proxy:
   and a histogram for `walk-ffn` end-to-end latency. Bounded
   cardinality — no `model_id` / `server_id` / `layer_id` labels.
 
-Other endpoints (`/v1/stats`, `/v1/walk`, `/v1/models`, etc.) live on
-the individual shards — clients can call them directly on a shard's
-HTTP port. The router exists to coordinate the fan-out, not to be
-a full server.
+OpenAI-compatible proxy (grid mode only — a static `--shards` map
+carries no capability signal, so it answers 503):
+
+- `GET /v1/models` — distinct model ids aggregated across the servers
+  that announced `serves_openai`, in the OpenAI list shape.
+- `POST /v1/chat/completions`, `/v1/completions`, `/v1/embeddings` —
+  proxied verbatim to the least-loaded capable server matching the
+  request's `model` (absent `model` = any capable server), streamed
+  back unbuffered so SSE passes through chunk-by-chunk. The client's
+  `Authorization` header is forwarded, so a backend `--api-key` still
+  applies.
+- `POST /v1/responses`, `GET`/`DELETE /v1/responses/{id}` — proxied
+  with **sticky routing**: the router learns each response id from the
+  proxied bytes and keeps a bounded FIFO id → backend map, so a
+  follow-up carrying `previous_response_id` returns to the server that
+  holds the conversation (and its resident KV state) regardless of
+  load ordering.
+
+Errors use the OpenAI envelope: 404 `model_not_found`, 503 when no
+capable server is registered, 502 for an unreachable backend.
+
+A server announces `serves_openai` only when it can answer a complete
+request by itself — full layer coverage, inference enabled, no
+`--layers` / `--experts` / `--units` filter, not `--no-infer` /
+`--ffn-only` / `--embed-only`. Mode B gap-fill replicas are layer
+slices and always announce `false`.
+
+Everything else (`/v1/stats`, `/v1/walk`, `/v1/patches`,
+`/v1/sessions`, …) stays on the individual shards — session and patch
+state is per-server, and clients call a shard's HTTP port directly for
+it. The router coordinates the fan-out and fronts the OpenAI surface;
+it is not a full transparent reverse proxy.
 
 ## Two topologies
 
@@ -350,6 +381,9 @@ src/
 ├── lib.rs                       # module declarations + public surface
 ├── main.rs                      # CLI entry, admin dispatch, server startup
 ├── http.rs                      # axum handlers (/v1/walk-ffn, /v1/health, /v1/stats, /metrics)
+├── openai/                      # N0-router OpenAI proxy
+│   ├── mod.rs                   # /v1/models aggregation + chat/completions/embeddings proxy
+│   └── responses.rs             # /v1/responses sticky routing (IdCapture, ResponseRouteStore)
 ├── metrics.rs                   # ADR-0017 Prometheus registry + RouterMetrics struct
 ├── dispatch.rs                  # multi-layer fan-out + response merge
 ├── shards.rs                    # static `--shards` parser + binary peek

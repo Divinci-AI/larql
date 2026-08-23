@@ -30,8 +30,8 @@ use larql_vindex::format::vindex3::opplan::exec::reference::ReferenceBackend;
 use larql_vindex::format::vindex3::opplan::plan_component_ops;
 
 use super::{
-    generate_session, plan_kv_geometry, KvState, LogitsSession, RecordingObserver, RowKvState,
-    StepEvent, Vindex3Runtime, Vindex3Session,
+    continue_session_masked, generate_session, plan_kv_geometry, KvState, LogitsSession,
+    RecordingObserver, RowKvState, StepEvent, Vindex3Runtime, Vindex3Session,
 };
 use crate::error::InferenceError;
 use crate::layer_graph::generate::eos::EosConfig;
@@ -135,6 +135,86 @@ fn a_stop_token_ends_generation_before_being_emitted() {
     .unwrap();
     // Token 1 emitted; the stop token 3 ended the run without appearing.
     assert_eq!(result.tokens, vec![1]);
+}
+
+// ── the masked driver (N0.6) ────────────────────────────────────────
+
+#[test]
+fn the_masked_driver_obeys_the_mask_over_greedy_preference() {
+    // Every scripted row peaks at id 2, but the mask only ever admits
+    // id 1 — the mask must win, and it must see the generated-so-far
+    // history grow.
+    let mut session = ScriptedSession::new(vec![row_peaking_at(2), row_peaking_at(2)]);
+    let logits = session.prefill(&[7]).unwrap();
+    let mut histories = Vec::new();
+    let mut mask = |generated: &[u32], logits: &mut Vec<f32>| {
+        histories.push(generated.to_vec());
+        for (id, logit) in logits.iter_mut().enumerate() {
+            if id != 1 {
+                *logit = f32::NEG_INFINITY;
+            }
+        }
+    };
+    let result = continue_session_masked(
+        &mut session,
+        logits,
+        2,
+        SamplingConfig::greedy(),
+        &EosConfig::empty(),
+        &mut mask,
+        |_| {},
+    )
+    .unwrap();
+    assert_eq!(result.tokens, vec![1, 1]);
+    assert_eq!(histories, vec![vec![], vec![1]]);
+}
+
+#[test]
+fn mask_exhaustion_before_first_emission_is_an_error() {
+    let mut session = ScriptedSession::new(vec![row_peaking_at(0)]);
+    let logits = session.prefill(&[7]).unwrap();
+    let mut mask =
+        |_: &[u32], logits: &mut Vec<f32>| logits.iter_mut().for_each(|l| *l = f32::NEG_INFINITY);
+    let err = continue_session_masked(
+        &mut session,
+        logits,
+        2,
+        SamplingConfig::greedy(),
+        &EosConfig::empty(),
+        &mut mask,
+        |_| {},
+    )
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("sampler produced no token"),
+        "{err}"
+    );
+}
+
+#[test]
+fn mask_exhaustion_after_emission_is_a_natural_stop() {
+    // The grammar completing (nothing admissible any more) mirrors the
+    // V2 constrained driver: a clean stop, not an error.
+    let mut session = ScriptedSession::new(vec![row_peaking_at(0), row_peaking_at(0)]);
+    let logits = session.prefill(&[7]).unwrap();
+    let mut calls = 0usize;
+    let mut mask = |_: &[u32], logits: &mut Vec<f32>| {
+        calls += 1;
+        if calls > 1 {
+            logits.iter_mut().for_each(|l| *l = f32::NEG_INFINITY);
+        }
+    };
+    let result = continue_session_masked(
+        &mut session,
+        logits,
+        4,
+        SamplingConfig::greedy(),
+        &EosConfig::empty(),
+        &mut mask,
+        |_| {},
+    )
+    .unwrap();
+    assert_eq!(result.tokens, vec![0], "one emission, then a clean stop");
 }
 
 #[test]

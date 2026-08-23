@@ -11,6 +11,45 @@ Entries were migrated from `ROADMAP.md` on 2026-08-04 and preserve the date and
 voice they were originally written in. Each retains its original `### GTn` /
 `### Phase n` heading so cross-references from ADRs and specs still resolve.
 
+## [2026-08-22] — N0-router: OpenAI surface on the grid front door
+
+Clients can now point an unmodified `openai` SDK at the **router** and the
+grid answers as a single endpoint:
+
+- **`AnnounceMsg.serves_openai`** (grid.proto field 9, backward-compatible):
+  a server sets it when it can serve complete OpenAI requests by itself —
+  full layer coverage, inference enabled, no `--layers` / `--experts` /
+  `--units` filter and not `--no-infer` / `--ffn-only` / `--embed-only`.
+  Mode B gap-fill replicas always register as `false` (layer slices).
+- **`GET /v1/models`** aggregates distinct model ids across
+  OpenAI-capable servers into the OpenAI list shape (`owned_by: "larql"`).
+- **`POST /v1/chat/completions` / `/v1/completions` / `/v1/embeddings`**
+  proxy verbatim to the least-loaded capable server matching the request's
+  `model` field (absent `model` = any capable server), stream the response
+  back unbuffered (SSE passes through chunk-by-chunk), and forward the
+  client's `Authorization` header so backend `--api-key` still applies.
+- Errors are emitted in the OpenAI envelope: 404 `model_not_found` for an
+  unknown model, 503 when no capable server is registered (including the
+  gridless / static-`--shards` case — static maps carry no capability
+  signal), 502 for an unreachable backend.
+
+Implementation: `src/openai/` (mod 96.5% / responses 95.0% line
+coverage); e2e tests in `tests/test_openai_proxy.rs` drive real HTTP
+against stub backends.
+
+**Responses API (same day):** `/v1/responses` + `GET`/`DELETE
+/v1/responses/{id}` are proxied with *sticky routing*
+(`src/openai/responses.rs`): the router learns each response's id by
+observing the proxied bytes (the envelope and the streaming
+`response.created` event lead with `"id":"resp_..."`) and keeps a
+bounded FIFO id → backend map (`AppState.openai_responses`). A `POST`
+carrying a known `previous_response_id` goes back to the producing
+server regardless of load ordering; by-id retrieval routes via the map,
+falls through to the only capable server on a single-server grid
+(surviving a router restart), and otherwise answers 404
+`not_found_error` — the router cannot know which server holds an
+unrecorded id. `DELETE` drops the route once the backend confirms.
+
 ## [2026-05-28] — Hardening findings from the whole-codebase review
 
 From the whole-codebase review ([`docs/audits/codebase-review-2026-05-28.md`](../../docs/audits/codebase-review-2026-05-28.md)):

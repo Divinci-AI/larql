@@ -561,6 +561,13 @@ fn assemble_predictions(
     }
 }
 
+/// Env var: top-k candidates the KNN verifier considers (defaults to
+/// [`KNN_VERIFY_TOPK`]).
+const ENV_KNN_TOPK: &str = "LARQL_KNN_TOPK";
+/// Env var: cosine floor for KNN verification (defaults to
+/// [`KNN_COSINE_THRESHOLD`]).
+const ENV_KNN_MIN_COS: &str = "LARQL_KNN_MIN_COS";
+
 /// Resolved opt-in router config from the environment.
 struct KnnRouteConfig {
     /// Top-k candidates the verifier considers (`LARQL_KNN_TOPK`).
@@ -575,12 +582,12 @@ struct KnnRouteConfig {
 /// `LARQL_KNN_FALLBACK`), else `None` (legacy top-1 + fixed-gate, byte-identical).
 fn knn_verify_config() -> Option<KnnRouteConfig> {
     std::env::var_os("LARQL_KNN_VERIFY")?;
-    let k_candidates = std::env::var("LARQL_KNN_TOPK")
+    let k_candidates = std::env::var(ENV_KNN_TOPK)
         .ok()
         .and_then(|s| s.parse().ok())
         .filter(|&k| k > 0)
         .unwrap_or(KNN_VERIFY_TOPK);
-    let threshold = std::env::var("LARQL_KNN_MIN_COS")
+    let threshold = std::env::var(ENV_KNN_MIN_COS)
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(KNN_COSINE_THRESHOLD);
