@@ -400,6 +400,42 @@ pub(super) fn parse_model_config(config: &serde_json::Value) -> ModelConfig {
         .and_then(|_| text_config["block_size"].as_u64().map(|v| v as usize));
     let mask_token_id = text_config["mask_token_id"].as_u64();
 
+    // Hybrid linear-attention + multi-token-prediction (declared,
+    // R2/Kimi-Linear-rung prep). Read verbatim — no semantics judged here.
+    let linear_conv_kernel_dim = text_config["linear_conv_kernel_dim"]
+        .as_u64()
+        .map(|v| v as usize);
+    let linear_key_head_dim = text_config["linear_key_head_dim"]
+        .as_u64()
+        .map(|v| v as usize);
+    let linear_value_head_dim = text_config["linear_value_head_dim"]
+        .as_u64()
+        .map(|v| v as usize);
+    let linear_num_key_heads = text_config["linear_num_key_heads"]
+        .as_u64()
+        .map(|v| v as usize);
+    let linear_num_value_heads = text_config["linear_num_value_heads"]
+        .as_u64()
+        .map(|v| v as usize);
+    let mamba_ssm_dtype = text_config["mamba_ssm_dtype"].as_str().map(str::to_string);
+    let attn_output_gate = text_config["attn_output_gate"].as_bool();
+    let output_gate_type = text_config["output_gate_type"].as_str().map(str::to_string);
+    let mtp_num_hidden_layers = text_config["mtp_num_hidden_layers"]
+        .as_u64()
+        .map(|v| v as usize);
+    let mtp_use_dedicated_embeddings = text_config["mtp_use_dedicated_embeddings"].as_bool();
+    // mRoPE sectioning (Qwen-VL-style multi-axis position encoding),
+    // declared under the same `rope_parameters` block the flat-form
+    // rope_theta/rope_type/partial_rotary_factor already read.
+    let mrope_interleaved = rope_params.and_then(|rp| rp["mrope_interleaved"].as_bool());
+    let mrope_section = rope_params.and_then(|rp| {
+        rp["mrope_section"].as_array().map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_u64().map(|n| n as usize))
+                .collect()
+        })
+    });
+
     ModelConfig {
         model_type,
         norm_eps,
@@ -462,5 +498,17 @@ pub(super) fn parse_model_config(config: &serde_json::Value) -> ModelConfig {
         mask_token_id,
         use_double_wide_mlp,
         vocab_size_per_layer_input,
+        linear_conv_kernel_dim,
+        linear_key_head_dim,
+        linear_value_head_dim,
+        linear_num_key_heads,
+        linear_num_value_heads,
+        mamba_ssm_dtype,
+        attn_output_gate,
+        output_gate_type,
+        mtp_num_hidden_layers,
+        mtp_use_dedicated_embeddings,
+        mrope_interleaved,
+        mrope_section,
     }
 }

@@ -104,6 +104,38 @@ pub const EXECUTION_SEMANTIC_KEYS: &[&str] = &[
     "hidden_size_per_layer_input",
     "use_double_wide_mlp",
     "use_clipped_linears",
+    // Hybrid linear-attention block geometry (Qwen3.5/Kimi-Linear-style):
+    // changes what the linear-attention layers compute, even though no
+    // `AttentionOp` variant executes them yet — see
+    // `crate::format::vindex3::graph::policy::AttentionSpan` and
+    // `docs/k3-funnel.md`'s R2/Kimi-Linear rung. Deliberately
+    // execution-semantic, not tensor-semantic: a consumed tensor-semantic
+    // key is reported representable unconditionally (proven by the graph
+    // holding the operand), which would be false here — nothing places
+    // these tensors.
+    "linear_conv_kernel_dim",
+    "linear_key_head_dim",
+    "linear_value_head_dim",
+    "linear_num_key_heads",
+    "linear_num_value_heads",
+    // Precision the linear-attention block's recurrent/SSM-adjacent state
+    // is computed in — an execution-relevant fact distinct from the
+    // checkpoint's overall storage `dtype`.
+    "mamba_ssm_dtype",
+    // Attention output gate: whether one exists, and its nonlinearity.
+    // Distinct from the judged `AttentionGateSpec` a family may one day
+    // return from `attention_output_gate()` — these are the checkpoint's
+    // raw declaration.
+    "attn_output_gate",
+    "output_gate_type",
+    // Multi-token-prediction head shape. No MTP-head object exists in the
+    // VINDEX3 schema yet (`mtp.fc` has no placement rule either).
+    "mtp_num_hidden_layers",
+    "mtp_use_dedicated_embeddings",
+    // mRoPE sectioning (Qwen-VL-style multi-axis position encoding).
+    // `PositionPolicy` expresses unscaled single-axis rope only.
+    "mrope_interleaved",
+    "mrope_section",
 ];
 
 /// Keys that describe stored operands: widths, depths, head geometry,
@@ -245,6 +277,13 @@ pub const ALIAS_KEYS: &[(&str, &str)] = &[
         "initial_context_length",
         "rope_scaling.original_max_position_embeddings",
     ),
+    // The regular-interval spelling of a hybrid interleave ("every Nth
+    // layer is full attention"): a compressed encoding of exactly the
+    // fact the explicit `layer_types` array states per layer. Qwen3.5
+    // declares both; the parser reads the array. Benign only while
+    // `layer_types` is genuinely present and consumed in the same
+    // config — the gate verifies that, same as every other alias.
+    ("full_attention_interval", "layer_types"),
 ];
 
 /// Reviewed-and-safe-to-drop keys. Empty by design until a key has actually

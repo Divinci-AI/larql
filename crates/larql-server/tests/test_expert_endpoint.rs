@@ -119,6 +119,18 @@ impl TestMoeArch {
                 mask_token_id: None,
                 use_double_wide_mlp: None,
                 vocab_size_per_layer_input: None,
+                linear_conv_kernel_dim: None,
+                linear_key_head_dim: None,
+                linear_value_head_dim: None,
+                linear_num_key_heads: None,
+                linear_num_value_heads: None,
+                mamba_ssm_dtype: None,
+                attn_output_gate: None,
+                output_gate_type: None,
+                mtp_num_hidden_layers: None,
+                mtp_use_dedicated_embeddings: None,
+                mrope_interleaved: None,
+                mrope_section: None,
             },
         }
     }

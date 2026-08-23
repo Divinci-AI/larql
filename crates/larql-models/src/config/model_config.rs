@@ -171,4 +171,57 @@ pub struct ModelConfig {
     /// — the width of a table that exists only when `per_layer_embed_dim`
     /// is set. Read verbatim, judged against that width.
     pub vocab_size_per_layer_input: Option<u64>,
+
+    // ── Hybrid linear-attention + multi-token-prediction (declared,
+    //    R2/Kimi-Linear-rung prep — see `docs/k3-funnel.md`) ──
+    //
+    // Qwen3.5-style hybrid architectures interleave full-attention layers
+    // with linear-attention (gated recurrent / short-conv, SSM-adjacent)
+    // layers and add a multi-token-prediction head. None of this is
+    // executable yet: there is no `AttentionOp`/component variant for a
+    // linear-attention layer and no MTP-head object in the VINDEX3 schema.
+    // These fields are read and retained verbatim — not judged, not
+    // guessed at — so a future R2 pass has the declared values in hand
+    // instead of the parser having silently dropped them.
+    /// Convolution kernel width in the linear-attention block's short conv
+    /// (`linear_conv_kernel_dim`).
+    pub linear_conv_kernel_dim: Option<usize>,
+    /// Per-head key dimension in the linear-attention block
+    /// (`linear_key_head_dim`) — distinct from the full-attention `head_dim`.
+    pub linear_key_head_dim: Option<usize>,
+    /// Per-head value dimension in the linear-attention block
+    /// (`linear_value_head_dim`).
+    pub linear_value_head_dim: Option<usize>,
+    /// Number of key heads in the linear-attention block
+    /// (`linear_num_key_heads`).
+    pub linear_num_key_heads: Option<usize>,
+    /// Number of value heads in the linear-attention block
+    /// (`linear_num_value_heads`).
+    pub linear_num_value_heads: Option<usize>,
+    /// Dtype the linear-attention block's SSM/recurrent state is computed
+    /// in (`mamba_ssm_dtype`), verbatim.
+    pub mamba_ssm_dtype: Option<String>,
+    /// Whether attention output is gated before `o_proj` (`attn_output_gate`).
+    /// Distinct from the judged [`AttentionGateSpec`](super::AttentionGateSpec)
+    /// an architecture returns from `attention_output_gate()` — this is the
+    /// checkpoint's raw declaration, carried through even where no family
+    /// has judged what the gate computes yet.
+    pub attn_output_gate: Option<bool>,
+    /// Attention output gate nonlinearity, verbatim (`output_gate_type`,
+    /// e.g. `"swish"`).
+    pub output_gate_type: Option<String>,
+    /// Number of hidden layers in the multi-token-prediction head
+    /// (`mtp_num_hidden_layers`). `None`/absent = no MTP head declared.
+    pub mtp_num_hidden_layers: Option<usize>,
+    /// Whether the MTP head uses its own embedding table rather than
+    /// sharing the backbone's (`mtp_use_dedicated_embeddings`).
+    pub mtp_use_dedicated_embeddings: Option<bool>,
+    /// Whether mRoPE sections interleave across the `mrope_section` split
+    /// (`rope_parameters.mrope_interleaved`) — Qwen-VL-style multi-axis
+    /// position encoding [`PositionPolicy`](super::PositionPolicy) does
+    /// not express.
+    pub mrope_interleaved: Option<bool>,
+    /// mRoPE per-axis section widths (`rope_parameters.mrope_section`),
+    /// verbatim.
+    pub mrope_section: Option<Vec<usize>>,
 }
