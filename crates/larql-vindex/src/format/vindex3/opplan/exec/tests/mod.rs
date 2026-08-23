@@ -9,6 +9,7 @@
 //! about *semantics* — plan interpretation, operand binding, norm
 //! placement, RoPE convention, residual order — not shared arithmetic.
 
+mod attention_kv_parity;
 mod controls;
 mod coverage_backend_decode;
 mod coverage_device;
