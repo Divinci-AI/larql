@@ -37,7 +37,7 @@ verify wrapper.
 to consume the result; the human-readable output is unchanged.
 
 All three implement the same sliding-window scoring used by
-`score_token_range` in `shannon_cmd.rs`: `context`-sized chunks, `stride`
+`score_token_range` in `shannon_cmd/`: `context`-sized chunks, `stride`
 newly-scored targets per chunk, summing `-log2(p[target])`.
 
 ## Gotchas — these will silently corrupt cross-engine comparisons

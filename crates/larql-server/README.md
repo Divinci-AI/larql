@@ -684,7 +684,7 @@ cargo run --release -p larql-cli --example convert_moe_to_per_layer -- \
 # Then strip `packed_bf16` rows from weight_manifest.json and rm experts_packed.bin.
 ```
 
-The loader (`format/weights/load.rs:614`) auto-detects the layout via
+The loader (`format/weights/load/`) auto-detects the layout via
 `index.json`'s `"ffn_layout": "per_layer"`. Both old and new vindexes are
 supported through the same code path.
 

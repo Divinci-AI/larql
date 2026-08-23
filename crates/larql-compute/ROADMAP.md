@@ -437,7 +437,7 @@ without `simdgroup_matrix`.
 | **D-PREFILL-MM** | Wire `q4k_matmul` into FFN gate/up/down + QKV (prefill only) | Was estimated 3–4× prefill speedup. **FALSIFIED twice end-to-end.** | **CLOSED 2026-05-09.** Wiring tried at O-proj (2026-04-28: −10% on long prompts), at FFN gate+up (2026-04-28: 2933 → 3268 ms on 340 tokens), and re-validated FFN gate+up under post-defuse state (2026-05-09: 5–7% regression at 10/50/150-token prompts). Diagnosis: the `q4k_matmul` kernel is bandwidth-bound; the [seq_len × hidden] X working set thrashes GPU L1 on long prompts and the dequant amortisation gain is paid back in DRAM↔L1 traffic. See **D-PREFILL-MM2** below for the kernel-rewrite track. The current `q4k_matmul` shader + `MetalBackend::q4k_matmul` method + parity tests stay shipped for re-validation on future hardware; production prefill stays per-position matvec. | (closed) |
 | **D-PREFILL-MM2** | Rewrite `q4k_matmul` using Apple `simdgroup_matrix` intrinsics (mirrors llama.cpp's `kernel_mul_mm_*`) | Closes the 4–14× prefill gap to ollama (per [llama-cpp-comparison.md](docs/llama-cpp-comparison.md) §2). | **Open.** Confirmed via dylib-symbol diff that llama.cpp's prefill matmul uses `simdgroup_matrix` 8×8 register-tile fused-multiply-add — the same hardware feature that's load-bearing for their flash-attn. Our scalar-accumulator `q4k_matmul` can't hold the working set in registers on long prompts. M3 Max satisfies the `MTLGPUFamilyMetal3` device-family check; this is purely a kernel-implementation gap. **Multi-day kernel research project.** | New shader `metal/shaders/q4k_matmul_simdgroup.rs`; gated on `LARQL_PREFILL_MATMUL2=1` until verified; existing `q4k_matmul` retained as fallback |
 | **D-RMS-FUSE** | RMS-norm pre-fusion with surrounding scalar mul/add (mirrors llama.cpp's `kernel_rms_norm_mul_f32` / `kernel_rms_norm_mul_add_f32`) | Predicted ~0.1-0.2 ms decode on non-Gemma. **Measured null end-to-end** (within drift). | **IMPLEMENTED + FALSIFIED 2026-05-09 (Phase 1).** Most of `_mul_f32` / `_mul_add_f32` was already shipped: our `rms_norm` shader already does norm + scalar mul, and `residual_norm_store` / `post_attn_residual_norm_store` / `post_ffn_norm_residual_add` already fuse norm + residual add at all the load-bearing boundaries except the post-FFN→next-layer-input step on non-Gemma archs. Phase 1 implemented that last gap via `LARQL_FUSED_PRELAYER_NORM=1` opt-in (Llama 2 7B / Mistral 7B). Parity preserved (bit-identical output across 3 archs). End-to-end A/B: Llama 2 7B `+0.0 tok/s within drift`, Mistral 7B `−0.3 tok/s within drift`. The dispatch-overhead saving from skipping rms_norm in layer N+1 is offset by the heavier `residual_norm_store` (does the RMS reduction inline) replacing the lighter `residual_add` in layer N. Per ADR-015 magnitude-compression at the extreme. | `metal/decode/encode_post_ffn.rs` (`PreLayerNormFusion` struct + branch), `metal/decode/encode_qkv.rs` (`input_already_normed` skip flag), `metal/decode/mod.rs` (call sites + `prelayer_norm_active` plumbing). Kept opt-in per ADR-017 retention rules; revival scenario: different K dimensions or future hardware where the rms_norm dispatch overhead vs `residual_norm_store` extra reduction balance shifts. |
-| **D-GEMMA4-E2B** | Investigate Gemma 4 E2B decode 30× pathology surfaced by 2026-05-09 cross-arch bench | (diagnosed) | **DIAGNOSED 2026-05-09.** Cross-arch bench captured `gemma4-e2b-q4k` at 4205 ms/tok GPU fwd vs Gemma 3 4B at 140 ms/tok. **Root cause**: E2B has Per-Layer Embeddings (PLE, `hidden_size_per_layer_input: 256`) which **the Metal pipeline does not implement**. `larql-inference/src/layer_graph/generate/gpu.rs:372-374` explicitly checks `weights.arch.has_per_layer_embeddings()` and routes to `generate_via_cpu_q4k` when true — the entire decode path falls back to CPU. The `LARQL_GPU_TIMING=1` line never fires for E2B because Metal's `decode_token_with_moe_split_fn` is never called. Documented in `gpu.rs` comment: "Without this routing the model produces multilingual gibberish." Diagnosis confirmed by reading the dispatch code and checking E2B's vindex `index.json` (`per_layer_embed_dim: 256`). Llama 2 / Mistral / Gemma 4 31B don't have PLE so route through Metal normally. | Closes the bug as "expected behaviour given PLE-not-in-Metal limitation". The actual perf fix is **D-METAL-PLE** (next row) which implements PLE on Metal. |
+| **D-GEMMA4-E2B** | Investigate Gemma 4 E2B decode 30× pathology surfaced by 2026-05-09 cross-arch bench | (diagnosed) | **DIAGNOSED 2026-05-09.** Cross-arch bench captured `gemma4-e2b-q4k` at 4205 ms/tok GPU fwd vs Gemma 3 4B at 140 ms/tok. **Root cause**: E2B has Per-Layer Embeddings (PLE, `hidden_size_per_layer_input: 256`) which **the Metal pipeline does not implement**. `larql-inference/src/layer_graph/generate/gpu/` explicitly checks `weights.arch.has_per_layer_embeddings()` and routes to `generate_via_cpu_q4k` when true — the entire decode path falls back to CPU. The `LARQL_GPU_TIMING=1` line never fires for E2B because Metal's `decode_token_with_moe_split_fn` is never called. Documented in `gpu.rs` comment: "Without this routing the model produces multilingual gibberish." Diagnosis confirmed by reading the dispatch code and checking E2B's vindex `index.json` (`per_layer_embed_dim: 256`). Llama 2 / Mistral / Gemma 4 31B don't have PLE so route through Metal normally. | Closes the bug as "expected behaviour given PLE-not-in-Metal limitation". The actual perf fix is **D-METAL-PLE** (next row) which implements PLE on Metal. |
 | **D-METAL-PLE** | Implement Per-Layer Embeddings in the Metal decode path | Brings Gemma 4 E2B / future-PLE-models from CPU fallback (~1670 ms/tok) onto Metal (target: ~10-20 ms/tok at E2B's compute scale = **80-150× speedup for E2B**). | **IMPLEMENTED 2026-05-10, but E2B end-to-end blocked on a SECOND missing feature (D-METAL-KV-SHARED below).** Wired per-layer PLE block as 4 dispatches: f32_gemv (gate proj) → new `ple_gate_apply` shader (fused gelu_tanh + multiply against precomputed per-layer-input) → f32_gemv (output proj) → reuses `post_ffn_norm_residual_add` (in-place via `h_post_attn`/`new_h` aliasing) for the closing rms_norm + residual add. Precompute stays on CPU (`precompute_per_layer_inputs`); inference uploads the `[num_layers × ple_dim]` table once per generation step via new `MetalBackend::prepare_ple_inputs`. PLE block fires inside `decode_token_with_moe_split_fn` after `encode_post_ffn_residual` and reuses `gate_out_scratch` / `down_out` (dead by post-FFN) for scratch, so no new persistent buffers. Routing: when `LARQL_METAL_PLE=1`, gpu.rs runs prefill via per-token `decode_token` calls and per-step decode with PLE upload before each call (batched-prefill via `dispatch_full_pipeline` is a follow-up after parity passes). Kernel-level parity for `ple_gate_apply` passes 5/5 against CPU reference (`tests/test_kernel_per_layer_embed.rs`, max abs diff < 1e-5). **End-to-end E2B output is still gibberish with `LARQL_METAL_PLE=1`** because Metal also lacks KV-cache sharing — see D-METAL-KV-SHARED below. PLE wiring is complete and correct in isolation; will deliver the predicted speedup once KV sharing lands. | Files: `metal/shaders/per_layer_embed.rs`, `metal/decode/encode_ple.rs`, `metal/decode/mod.rs` (call site), `metal/mod.rs` (`PleInputBuffer` + `prepare_ple_inputs` / `clear_ple_inputs` / `ple_inputs_snapshot`), `metal/ffn_kernels.rs` (`ple_gate_apply_pipeline`), `pipeline.rs` (`PleSpec` + 3 PLE fields on `FullPipelineLayer`), `larql-inference/src/layer_graph/pipeline_layer.rs` (populate from arch keys), `larql-inference/src/layer_graph/generate/gpu/mod.rs` (per-token PLE upload + routing). E2B fixture added to `scripts/bench-cross-arch.sh`. Gated on `LARQL_METAL_PLE=1`; flip the default once D-METAL-KV-SHARED also lands and end-to-end parity passes. |
 | **D-METAL-KV-SHARED** | Implement cross-layer KV cache sharing in the Metal decode path | E2B's last 20 of 35 layers reuse K/V from earlier "source" layers (last non-shared sliding / global layer of the same type). Without this, layers 15-34 compute their own (wrong) K/V → attention is broken from L15 → garbage output. Same mechanism likely needed for any future KV-shared model. | **PARTIALLY IMPLEMENTED 2026-05-10 — routing correct, source-cache contents byte-identical to CPU, but L15+ shared-layer dispatch chain still produces wrong residuals.** See "D-METAL-KV-SHARED bisection 2026-05-10" section below for the bisection record and remaining diagnostic plan. | (see section below) |
 | **D-CROSS-PARITY** | Cross-architecture decode bench (Gemma 3 4B, Gemma 4 31B dense, Gemma 4 26B A4B MoE, Llama 2 7B, Mistral 7B) | Operationalises ADR-017 model-agnosticity check; surfaces thermal artifacts (every-arch-regresses-simultaneously signature). | **SHIPPED 2026-05-09 (Phase 1).** `scripts/bench-cross-arch.sh` + `bench/baselines/cross-arch/` + `make bench-cross-arch[ ARGS=--save-baseline\|--compare]`. Captured first under-load run; cool-machine baseline pending. **Phase 2 (per-shader)** still open — current sweep is end-to-end-only; per-shader parity tests (e.g. dispatching `q4k_ffn_gate_up_8sg` against synthetic input on multiple K dimensions to surface kernel-specific arch sensitivities) would catch deeper regressions earlier. | `scripts/bench-cross-arch.sh`, `bench/baselines/cross-arch/README.md`. Phase 2: parametrised tests in `crates/larql-compute/tests/`. |
@@ -641,7 +641,7 @@ regardless of Q.
   - `build_arch_params_leaves_ple_and_kv_shared_fields_none_for_tinymodel`
     pins the negative case: non-PLE / non-shared archs leave
     every new field as None.  Prevents spurious population.
-- `crates/larql-compute/tests/test_kernel_per_layer_embed.rs`
+- `crates/larql-compute-metal/tests/test_kernel_per_layer_embed.rs`
   (5 tests, all green): `ple_gate_apply` shader vs CPU
   reference at <1e-5 abs diff — smooth inputs, zero inputs,
   large negatives, E2B production shape.
@@ -1348,7 +1348,7 @@ dispatch; the callback applies it correctly after combining dense + MoE.
 
 ### GPU expert dispatch — Phase 2: pre-allocated staging buffers (DONE; baseline corrected 2026-05-02)
 
-**Status**: SHIPPED. `MoeScratch::new` (in `metal/moe_dispatch.rs`)
+**Status**: SHIPPED. `MoeScratch::new` (in `metal/moe_dispatch/`)
 pre-allocates all expert staging buffers once per model shape and caches
 by `(top_k, hidden, intermediate_size)` on the backend. Per-layer
 `gpu_moe_dispatch_with_scratch` only memcpys expert bytes into existing
@@ -1356,7 +1356,7 @@ buffer contents — no `bufs.output(...)` calls in the hot path.
 
 **Measured 2026-05-02 (post Phase 2 + dispatch-geometry fix)**:
 - 26B A4B Metal: **19.4 tok/s** (was 5.1 pre-2026-05-02 — bug-locked under
-  the dispatch-geometry mismatch in the same `moe_dispatch.rs` sites; the
+  the dispatch-geometry mismatch in the same `moe_dispatch/` sites; the
   "Phase 1 shipped 5.1 tok/s" baseline was attributing the bug-locked
   number to Phase 1, which was wrong).
 - GPU-only ceiling (`LARQL_SKIP_MOE=1`): **56.8 tok/s**.
@@ -1375,7 +1375,7 @@ land.
 **Scope (single landing):**
 
 1. **Pre-allocate persistent staging buffers** in `decode_token_q4k_moe`
-   (`metal/moe_dispatch.rs`). Sizes are constants of `(top_k, inter_padded,
+   (`metal/moe_dispatch/`). Sizes are constants of `(top_k, inter_padded,
    hidden, row_bytes, down_row_bytes)` — known once per decode, not per layer.
    Buffers to pre-allocate (all `StorageModeShared` so CPU writes via
    `buffer.contents()`):
@@ -1445,7 +1445,7 @@ borrowed mmap slices (`&[u8]`) through the closure and copy exactly once
 into reusable Metal buffers.
 
 **Fix.** Pre-allocate all staging buffers once before the layer loop in
-`decode_token_q4k_moe` (in `metal/moe_dispatch.rs`), identical to the pattern that
+`decode_token_q4k_moe` (in `metal/moe_dispatch/`), identical to the pattern that
 eliminated 550→20 allocations in `decode_token_with_moe_fn` (see ship log below):
 
 ```
@@ -1474,7 +1474,7 @@ delta. Correct formula: `h_post_attn + scalar * ffn_delta`.
 
 Fix: pass `(scale_pipeline, scalar)` into
 `residual::encode_post_ffn`, apply scalar to the normed FFN buffer
-before the residual add. Call sites: `full_pipeline.rs:844`,
+before the residual add. Call sites: `ops/full_pipeline/`,
 `tests/test_metal_shaders.rs:2696,2748` — add `None` for non-scaling.
 
 Not urgent: Gemma 3 4B has `layer_scalar = 0.0` (no scaling); Gemma 4

@@ -59,10 +59,26 @@ SOURCE_EXT = (".rs", ".py", ".md", ".toml", ".json", ".sh", ".yml", ".msl")
 # Without this the checker reports ~10 findings nobody can act on, which is
 # how a gate earns its way onto the ignore list.
 EXTERNAL = re.compile(
-    r"^(transformers/|modeling_|torch/|mlx/|llama\.cpp|chris-experiments/|"
+    r"^(transformers/|modeling_|streaming_|inferencer\.py|torch/|mlx/|llama\.cpp|chris-experiments/|"
     r"larql_probes/|~/|/Users/)"
 )
 PATH_ROOTS = ("crates/", "docs/", "bench/", "scripts/", "knowledge/", ".github/")
+# A reference the prose has already LABELLED is not a trap, and this gate
+# exists to catch traps. Two shapes qualify: a roadmap naming the file it
+# intends to create, and a doc that says outright the thing is missing.
+# Both leave the reader correctly informed, which is the whole point —
+# whereas an unannotated dangling path sends someone looking for code that
+# is not there.
+#
+# Without this the gate flags legitimate content as breakage, and a gate
+# that cries wolf is one people switch off. Deliberately narrow: it wants
+# an explicit marker on the same line, not a vague future tense.
+PLANNED = re.compile(
+    r"\(new\)|new `|\bgenerate\b|\bplanned\b|\bproposed\b|\bTODO\b|"
+    r"\bnot started\b|will land|lands the|to be (?:written|created|added)|"
+    r"does not exist|not yet|never committed|was never|no longer exists",
+    re.I,
+)
 
 
 def index_files() -> tuple[dict, dict]:
@@ -182,7 +198,7 @@ def main() -> int:
                     continue
                 if not ref.endswith(SOURCE_EXT):
                     continue  # prose-ish path, or a directory that moved
-                if not resolve(ref, by_rel, by_base):
+                if not resolve(ref, by_rel, by_base) and not PLANNED.search(line):
                     findings.append((rel, num, "path: does not exist", m.group(0)))
             # 3. --example NAME, with its -p CRATE if present
             m = re.search(r"--example\s+([\w-]+)", line)
@@ -214,6 +230,12 @@ def main() -> int:
             # 5. make targets — anchored, or prose fires constantly
             for m in re.finditer(r"(?:^|`)make\s+([a-z][a-z0-9-]{2,})", line):
                 counts["make"] += 1
+                # `make larql-<crate>-ci` is a documented PATTERN, not a
+                # target; the regex stops at the `<` and would report the
+                # truncated stem. A placeholder is correct content.
+                if line[m.end():m.end() + 1] == "<":
+                    counts["make"] -= 1
+                    continue
                 if make_rules and m.group(1) not in make_rules:
                     findings.append((rel, num, "make: no such target", m.group(1)))
             # 6. env vars

@@ -164,6 +164,19 @@ jobs:
       - name: Check relative documentation links
         run: python3 scripts/check_doc_links.py
 
+      # The link checker above reports every markdown link resolving -- and
+      # is right -- while a 2026-08-22 audit of 311 documents found ~90
+      # broken references, NOT ONE of them a markdown link. They were inline
+      # paths, file.rs:LINE coordinates, --example and --bench names, make
+      # targets and env vars, every class structurally invisible to that
+      # gate. That is how the drift accumulated for months with CI green.
+      #
+      # References the prose already labels ("(new)", "does not exist") are
+      # not findings: the reader is correctly informed, and a gate that
+      # cries wolf on legitimate content gets switched off.
+      - name: Check documentation code references
+        run: python3 scripts/check_doc_references.py --strict
+
   proto-lint:
     name: buf lint
     runs-on: ubuntu-latest

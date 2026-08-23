@@ -153,7 +153,7 @@ independent reads:
 confirms this spec's framing.** 17.7 GiB/s ↔ 144 B / (144/17.7e9) = 8.1
 ns/super-block ↔ ~33 cycles at 4.05 GHz — exactly the spec's "intrinsics
 produce ~33 cycles/super-block". The 2-row variant's "BW-bound, kept for
-future hardware" note (`q4k_q8k_dot.rs:604-609`) was based on the same
+future hardware" note (`cpu/ops/q4k_q8k_dot/`) was based on the same
 wrong model and should be re-evaluated under compute-bound.
 
 **Instruction mix per super-block** (`otool -tv` on the release rlib):
@@ -187,7 +187,7 @@ stay in Rust → parity reduces to "does the asm produce the same integer
 
 ### Landed 2026-06-02 — single-super-block asm, 4 accumulators, opt-in
 
-`q4k_q8k_matvec_asm` / `q4k_sb_sum1_asm` in `q4k_q8k_dot.rs`: the whole
+`q4k_q8k_matvec_asm` / `q4k_sb_sum1_asm` in `cpu/ops/q4k_q8k_dot/`: the whole
 super-block dot in one `asm!` block, the 8 6-bit scales arriving as two
 i32x4 vectors with `mul (by element)` instead of 8 scalar `ldrb` +
 broadcast, and **4 independent group accumulators** (each written once,

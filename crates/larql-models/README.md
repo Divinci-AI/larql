@@ -177,7 +177,7 @@ src/
 
   loading/
     mod.rs            Format routing (safetensors vs GGUF)
-    safetensors.rs    mmap + dtype conversion + HF cache resolution
+    loading/safetensors/    mmap + dtype conversion + HF cache resolution
     gguf.rs           GGUF parser + dequantization
 
   quant/

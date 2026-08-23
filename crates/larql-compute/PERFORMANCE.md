@@ -154,7 +154,7 @@ pipeline. `LARQL_QKV_FUSED=1` opts back in.
 
 The dispatch-geometry fix (2026-05-02) cuts lm_head from 2.95 → 1.85 ms
 (−1.14 ms/tok, +7.7 tok/s end-to-end) by making `MetalBackend::q4k_matvec`
-and the three sibling sites in `moe_dispatch.rs` + `decode/encode_ffn.rs`
+and the three sibling sites in `moe_dispatch/` + `decode/encode_ffn.rs`
 use `pipeline.rows_per_tg` / `pipeline.threads_per_tg` instead of hardcoding
 `shaders::q4k_matvec::ROWS_PER_TG`. Production has bound the 8sg pipeline
 since 2026-04-28; the hardcoded 4sg constants left simdgroups 4..7 of
@@ -191,7 +191,7 @@ backend on a Q4_K vindex with tied embeddings (`gemma3-4b-q4k-v2`)?
 Earlier write-up (preserved in git history) attributed the argmax drift
 to `q4k_matvec`'s 32-lane simdgroup reduction tree. **Wrong root cause.**
 The actual bug: `MetalBackend::q4k_matvec` (and three sibling sites in
-`moe_dispatch.rs` + the non-gated FFN path) hardcoded the 4sg shader's
+`moe_dispatch/` + the non-gated FFN path) hardcoded the 4sg shader's
 `THREADS_PER_TG=128` while dispatching the 8sg `q4k_matvec_pipeline`
 (production default since 2026-04-28). With only 128 threads dispatched,
 simdgroups 4..7 of each 8sg TG never executed — half the rows in each
@@ -395,7 +395,7 @@ Vindex: `gemma-4-26B-A4B-it.vindex` (30 layers, 128 experts/layer, top-K=8, inte
 ### What the 2026-05-02 moe_dispatch fix changed
 
 Same root cause as the Gemma 3 4B lm_head fix: three sites in
-`metal/moe_dispatch.rs` (per-expert down projection) hardcoded the legacy
+`metal/moe_dispatch/` (per-expert down projection) hardcoded the legacy
 4sg `q4k_matvec` shader's `THREADS_PER_TG=128` while dispatching the
 `q4k_matvec_pipeline` (bound to the 8sg variant since 2026-04-28).
 Per token, that meant:
@@ -428,7 +428,7 @@ per-expert down × top_k, activation, output) once per model shape and
 caches by `(top_k, hidden, intermediate_size)` on the backend. Per-layer
 `gpu_moe_dispatch_with_scratch` calls only memcpy expert bytes into the
 existing buffer contents — no `bufs.output(...)` calls in the hot path.
-Confirmed by audit: every `bufs.output(...)` in `moe_dispatch.rs` is in
+Confirmed by audit: every `bufs.output(...)` in `moe_dispatch/` is in
 `MoeScratch::new` (one-shot), never per-layer.
 
 The 19.4 tok/s baseline measured 2026-05-02 includes both Phase 2 AND

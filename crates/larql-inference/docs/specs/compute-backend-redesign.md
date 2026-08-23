@@ -723,7 +723,7 @@ For reviewers, the existing code this spec touches:
 - The KvEngine trait (post-unification):
   `crates/larql-inference/src/kv_engine/`
 - The engine dispatch entry point:
-  `crates/larql-inference/src/forward/kv_generate.rs` (`generate_with_engine`)
+  `crates/larql-kv/src/generation.rs` (`generate_with_engine`)
 - The forward-pass helpers engines currently call directly (and will
   call via the trait post-migration):
   `crates/larql-inference/src/{attention,ffn,forward,residual}/`

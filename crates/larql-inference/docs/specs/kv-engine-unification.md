@@ -36,7 +36,7 @@ Today the repo has two implementations of the same idea:
 | Concern | Live decode path | Research engine path |
 |---|---|---|
 | Trait | `FfnBackend` + raw functions | `KvEngine` (in `larql-kv`) |
-| Entry point | `generate_cached_bounded` (`larql-inference/src/forward/kv_generate.rs:125`) | `EngineKind::build(...).prefill / decode_step` |
+| Entry point | `generate_cached_bounded` (`crates/larql-kv/src/generation.rs:125`) | `EngineKind::build(...).prefill / decode_step` |
 | Cache shape | Sliding window K/V tensors, optional unbounded growth | Residual-stream + recompute-K/V, or per-engine alternative |
 | Reachable from | `larql run`, `larql walk`, server, router | `larql bench --engine` only |
 | Tuning surface | `--kv-cache standard\|markov-bounded\|none` + `--context-window` | `--engine markov-rs[:window=N]\|unlimited-context\|turbo-quant\|apollo` |
@@ -59,7 +59,7 @@ The duplication has three concrete costs:
    (tokenisation edge cases, long-tail vocabulary, multi-turn chat) is
    invisible until someone re-runs bench at the right moment.
 
-The dead-weight `larql-kv` dep on `larql-inference` (`Cargo.toml:104`
+The dead-weight `larql-kv` dep on `larql-inference` (`crates/larql-kv/Cargo.toml`
 with zero `use larql_kv` in `src/`) is a symptom of the same problem:
 the dep was added in anticipation of unification, then stranded.
 
@@ -232,7 +232,7 @@ grid-ready: the `PerLayerDecodeState` fields hold
 ### 4.5 What does *not* go on the trait
 
 - `LayerHook` integration. Hooks (`generate_cached_hooked`,
-  `kv_generate.rs:174`) are a research-only path; the production decode
+  `crates/larql-kv/src/generation.rs:174`) are a research-only path; the production decode
   doesn't fire them. Hook-aware decode remains its own entry point,
   parallel to engine dispatch. Mixing the two would force every engine
   to thread per-layer hook callbacks through their internal forward
@@ -343,7 +343,7 @@ so the default user experience is byte-identical until §8.5.
 ### 8.1 Step 1 — move trait surface into `larql-inference` ✅ landed
 
 Move the **trait surface** out of `larql-kv/src/lib.rs` into
-`larql-inference` (new module, e.g. `larql-inference/src/kv_engine.rs`):
+`larql-inference` (new module, e.g. `larql-inference/src/kv_engine/`):
 
 - `KvEngine` trait
 - `EngineInfo` struct
@@ -465,7 +465,7 @@ byte-for-byte.
   standard|markov-bounded|none` continues to parse and resolve to
   `EngineKind` via the table in §6.1.
 - **`generate_cached_backend` retained as parity oracle**
-  (`larql-inference/src/forward/kv_generate.rs:69`). Step 4's
+  (`crates/larql-kv/src/generation.rs:69`). Step 4's
   bit-parity gate (`larql-kv/src/engines/standard.rs:264`) and the
   legacy arm of `engine_decode.rs` bench measure new engine dispatch
   against it. Deleting the wrapper would erase the reference
@@ -479,7 +479,7 @@ byte-for-byte.
   `larql-inference` (calls `generate_with_engine`), so
   `larql-inference` core code never names `larql-kv`. The only
   remaining consumer in `larql-inference/` is
-  `crates/larql-demos/examples/inference/apollo_rd_backend.rs`, which justifies the dev-dep.
+  `chris-experiments/larql_probes/examples/boundary_rd/apollo_rd_backend.rs`, which justifies the dev-dep.
 
 ### 8.8 Rollback
 
@@ -626,7 +626,7 @@ eventually lands: the "first-token factual, not bit-exact" property
 
 For reviewers, the concrete file pointers this spec is built on:
 
-- Live cache entry point: `larql-inference/src/forward/kv_generate.rs:125` (`generate_cached_bounded`)
+- Live cache entry point: `crates/larql-kv/src/generation.rs:125` (`generate_cached_bounded`)
 - Live cache dispatch from CLI: `larql-cli/src/commands/extraction/walk_cmd.rs:1049-1075`
 - Live cache flag enum: `larql-cli/src/commands/primary/run_cmd.rs:33-44` (`KvCacheKind`)
 - Engine trait: `larql-kv/src/lib.rs:60-126` (`KvEngine`)

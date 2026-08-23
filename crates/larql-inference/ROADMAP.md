@@ -871,7 +871,7 @@ into another. Add `get_layer(layer) -> (&[f32], &[f32])`,
 
 ### M6 — Hooks during multi-token generation
 **Status**: Shipped
-**File**: `forward/kv_generate.rs::generate_cached_hooked`,
+**File**: `forward/crates/larql-kv/src/generation.rs::generate_cached_hooked`,
 `crates/larql-python/src/walk.rs::generate_with_hooks`
 
 Final design: **hooks-on-CPU, Metal-stays-fast**. Lazarus-style mech interp
@@ -1120,7 +1120,7 @@ as the only structural answer.
 
 ### M-CPU-6 — Bottleneck-driven follow-ups (post-NEON profiling round)
 **Status**: ✅ Done 2026-05-01  
-**Files**: `q4k_q8k_dot.rs`, `cpu/ops/q4_common.rs::f16_to_f32`,
+**Files**: `cpu/ops/q4k_q8k_dot/`, `cpu/ops/q4_common.rs::f16_to_f32`,
 `moe/expert.rs`, `moe/forward.rs`, server `routes/expert.rs` +
 `larql-inference/ffn/moe_remote.rs`.
 

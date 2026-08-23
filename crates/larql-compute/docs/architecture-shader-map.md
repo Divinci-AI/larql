@@ -60,7 +60,7 @@ Largely the same shaders as Gemma 3, with these differences:
 | QKV input norm offset | `0.0` (Gemma 4 vs Gemma 3's `1.0` for HF-saved weights) | Same `q4k_q6k_qkv_proj` kernel, different config |
 | FFN intermediate size | E2B: 6144, 31B: 21504 | Same `q4k_ffn_gate_up_8sg` + `q6k_matvec` |
 
-**Diagnosed anomaly (2026-05-09)**: gemma4-e2b decode runs at **~1670 ms/tok on CPU**, not Metal. Root cause: **Per-Layer Embeddings (PLE, `hidden_size_per_layer_input: 256`) are not implemented in the Metal pipeline.** `larql-inference/src/layer_graph/generate/gpu.rs:372-374` explicitly checks `weights.arch.has_per_layer_embeddings()` and routes the entire generate path to `generate_via_cpu_q4k`. The Metal `decode_token_with_moe_split_fn` is never called — `[gpu-timing]` lines never fire for E2B, while they do for Gemma 3 4B and Gemma 4 31B (which don't have PLE). The CPU fallback is documented in the source comment as deliberate: "Without this routing the model produces multilingual gibberish."
+**Diagnosed anomaly (2026-05-09)**: gemma4-e2b decode runs at **~1670 ms/tok on CPU**, not Metal. Root cause: **Per-Layer Embeddings (PLE, `hidden_size_per_layer_input: 256`) are not implemented in the Metal pipeline.** `larql-inference/src/layer_graph/generate/gpu/` explicitly checks `weights.arch.has_per_layer_embeddings()` and routes the entire generate path to `generate_via_cpu_q4k`. The Metal `decode_token_with_moe_split_fn` is never called — `[gpu-timing]` lines never fire for E2B, while they do for Gemma 3 4B and Gemma 4 31B (which don't have PLE). The CPU fallback is documented in the source comment as deliberate: "Without this routing the model produces multilingual gibberish."
 
 **To restore E2B to Metal**: implement Per-Layer Embeddings in the Metal pipeline (ROADMAP **D-METAL-PLE**). The PLE math is in `larql-inference/src/forward/ple.rs`:
 - Precompute (once at prefill): `projected = main_embeds @ per_layer_model_projection.T * 1/sqrt(hidden)`, then per-layer RMSNorm + add `embed_tokens_per_layer[token_ids] * sqrt(ple_dim)`, scaled by `1/sqrt(2)`.
@@ -75,7 +75,7 @@ Most kernels needed already exist (matvec, geglu element-wise, rms_norm, residua
 | Stage | Shader(s) | Notes |
 |---|---|---|
 | MoE gate scoring | `f32_gemv` (production, Metal gate scoring landed 2026-04-19) | Picks top-K experts per token. |
-| Expert FFN | `q4k_ffn_gate_up` + `q4k_geglu_down` (per expert, dispatched via `moe_dispatch.rs`) | Geometry fix landed 2026-05-02; pre-fix was 5.1 tok/s (broken dispatch), post-fix 19.4 tok/s. |
+| Expert FFN | `q4k_ffn_gate_up` + `q4k_geglu_down` (per expert, dispatched via `moe_dispatch/`) | Geometry fix landed 2026-05-02; pre-fix was 5.1 tok/s (broken dispatch), post-fix 19.4 tok/s. |
 | Expert combine | Custom Metal/CPU outer-combine helper (`outer_combine.rs`) | Resolved 4 silent CPU/Metal divergences 2026-04-26. |
 
 ### Llama 1/2/3 — `larql-models/architectures/llama.rs`
@@ -105,7 +105,7 @@ Otherwise identical shader path to Llama.
 
 ### DeepSeek (V2 / V3) — `larql-models/architectures/deepseek.rs`
 
-**Architecture supported, compute path partially exercised.** DeepSeek uses MLA (Multi-Latent-Attention) and a different MoE expert pattern than Gemma 4 26B-A4B. The current MoE dispatch (`moe_dispatch.rs`) handles Gemma 4 a4b's pattern but DeepSeek-V3's 256-expert + 8-shared-expert pattern needs verification.
+**Architecture supported, compute path partially exercised.** DeepSeek uses MLA (Multi-Latent-Attention) and a different MoE expert pattern than Gemma 4 26B-A4B. The current MoE dispatch (`moe_dispatch/`) handles Gemma 4 a4b's pattern but DeepSeek-V3's 256-expert + 8-shared-expert pattern needs verification.
 
 ⚠️ **gap**: no DeepSeek vindex tested in this audit. Architecture trait exists (137 LOC in `deepseek.rs`); compute path not validated.
 

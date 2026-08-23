@@ -689,7 +689,7 @@ item, not just a competitive-parity item.
 - **ADR-019 resolved** (2026-05-09): substrate-primary is **Gemma 4 31B dense + vindex**; MoE coverage retained at single-machine scale (Gemma 4 26B-A4B for cross-arch validation, virtual-expert work). Multi-machine MoE grid (C9 productionisation, critical-path items 5–10) demoted from P0 to P2 — substantial production-engineering work with no current experiment requiring "model spans 4 consumer machines" beyond what single-machine sharding already demonstrates. C1 (CPU MoE forward pass) stays P0 because V1/V2 cross-arch sweep on 26B-A4B requires it. See full resolution in "ADR-019" section below.
 - **Engine ↔ Backend unification PR shippable** (2026-05-16): three specs landed in `crates/larql-inference/docs/specs/` — (1) [`kv-engine-unification.md`](crates/larql-inference/docs/specs/kv-engine-unification.md) (Steps 1-7 implemented, all parity tests green); (2) [`compute-backend-redesign.md`](crates/larql-inference/docs/specs/compute-backend-redesign.md) (Steps 1-4 implemented — `KvDispatch` sibling trait in larql-inference, `EngineBackend` umbrella, `CpuBackend`/`MetalBackend` scaffolding, `StandardEngine` migrated to dispatch through trait); (3) [`async-compute-backend.md`](crates/larql-inference/docs/specs/async-compute-backend.md) (trait surface locked, 6 open questions resolved; A1 trait + handles, A2 `CpuBackend`, A3 `MetalBackend` scaffold, and A5 `StandardEngine` opt-in landed 2026-05-16 — A3's Metal-feature validation gate is blocked on a parallel `larql-compute-metal` extraction). Honest finding from Step 5 discovery: per-layer Metal kernels at the sync trait's granularity are *slower* than today's fused decode path because each per-layer call forces a separate GPU command-buffer commit — `AsyncComputeBackend` (intent-collector pattern, deferred dispatch) is the prerequisite for any tok/s win. That work is 6-12 months end-to-end (see new "P0 — Engine ↔ Backend unification" section below). The unification PR ships the foundation; tok/s wins land in A4 (real Metal deferred dispatch) and the multi-step Metal kernel work that compounds on top.
 - **Cross-engine forward-pass correctness gate** (2026-05-16): `larql shannon verify` orchestrates LARQL Rust forward against HF/PyTorch + MLX reference scorers (subprocesses) on a shared corpus and prints a bits/char delta table. First serious application surfaced **four config-loading bugs in larql-models** — all closed in the loader (no env-var workarounds in production): (1) `rms_norm_eps` from config.json was never read by the trait default; (2) Gemma 3's per-layer-type `rope_scaling` structured form (`{full_attention: {rope_type: linear, factor: 8}, sliding_attention: {rope_type: default}}`) wasn't honoured; (3) `rope_scaling = llama3` (wavelength-dependent per-channel `inv_freq` adjustment) wasn't implemented; (4) `norm_epsilon` alias (StarCoder2's name for `rms_norm_eps`) wasn't recognised. Post-fix, all four affected models match HF F32 to <0.06% bits/char with zero env vars. `scripts/diagnose_models.py` (multi-arch sweep) reports 7/9 PASS. CI gate at `.github/workflows/shannon-verify.yml` runs SmolLM2-135M verify on every PR. Diagnostic doc: [`docs/diagnoses/shannon-cross-engine-divergence.md`](docs/diagnoses/shannon-cross-engine-divergence.md). Plus GPT-2 legacy config-key aliases (`n_embd`/`n_layer`/`n_head`/`n_inner`) parsed via new alias-list machinery in `detect/config_io.rs`.
-- **larql-compute-metal coverage push closed** (2026-05-16): post-ADR-019 split, the Metal backend now lives in its own crate with **97.28% line coverage, 59/59 files at the 90% per-file floor, zero debt baselines**. Up from 75.69% (50/59 files clearing 90%, 9 debt baselines) at session start. Key techniques: (1) `MetalBackend::with_options` to bypass the env-snapshot caching that silently no-op'd flag-toggling tests on `decode_one_token_with_env`, opening the `fused_attn` / `fused_qk_norm_rope` / `fused_kv_append_attend` / `fused_post_attn_norm` branches in `decode/encode_attn.rs` (68.78% → 99.53%); (2) per-format prefill split-phase tests (Q4_K / Q4_KF / Q4_0 × gated / non-gated, `LARQL_PROFILE_SPLIT=1`) for `decode/encode_ffn.rs` (61.43% → 92.86%); (3) direct calls to the public `run_experts_prestaged_metal` / `run_experts_preselected_metal` / `run_dense_ffn_q4k` paths plus a real-MoE-layer `decode_token_q4k_moe` end-to-end test for `moe_dispatch.rs` (38.91% → 95.25%); (4) `decode_attention_layer` integration tests covering V-norm, post-norms, and `wo.format` Q4_KF/Q6_K branches for `decode_hybrid.rs` (0% baseline → 94.41%); (5) dead-code deletion of `MetalBackend::full_pipeline` (108 lines, no callers, doc said "old benchmark entry point") to clear `pipeline.rs` to 100%; (6) `Config::from_args` + JSON helper + Smoke-profile end-to-end coverage for `diag/shader_bench.rs` (4.25% → 99.36%) and `diag/kernel_profile.rs` (0% → 97.12%) — the diag scripts now smoke-run real GPU dispatches in unit tests; (7) a dedicated `tests/test_decode_diag.rs` integration binary (fresh process, fresh `CALL_COUNT`) that hits the previously-believed-structural cap on `decode/diag.rs` (85.23% → 93.75%). Coverage-policy file now an empty-baseline gate: any regression on any file breaks CI.
+- **larql-compute-metal coverage push closed** (2026-05-16): post-ADR-019 split, the Metal backend now lives in its own crate with **97.28% line coverage, 59/59 files at the 90% per-file floor, zero debt baselines**. Up from 75.69% (50/59 files clearing 90%, 9 debt baselines) at session start. Key techniques: (1) `MetalBackend::with_options` to bypass the env-snapshot caching that silently no-op'd flag-toggling tests on `decode_one_token_with_env`, opening the `fused_attn` / `fused_qk_norm_rope` / `fused_kv_append_attend` / `fused_post_attn_norm` branches in `decode/encode_attn.rs` (68.78% → 99.53%); (2) per-format prefill split-phase tests (Q4_K / Q4_KF / Q4_0 × gated / non-gated, `LARQL_PROFILE_SPLIT=1`) for `decode/encode_ffn.rs` (61.43% → 92.86%); (3) direct calls to the public `run_experts_prestaged_metal` / `run_experts_preselected_metal` / `run_dense_ffn_q4k` paths plus a real-MoE-layer `decode_token_q4k_moe` end-to-end test for `moe_dispatch/` (38.91% → 95.25%); (4) `decode_attention_layer` integration tests covering V-norm, post-norms, and `wo.format` Q4_KF/Q6_K branches for `decode_hybrid.rs` (0% baseline → 94.41%); (5) dead-code deletion of `MetalBackend::full_pipeline` (108 lines, no callers, doc said "old benchmark entry point") to clear `pipeline.rs` to 100%; (6) `Config::from_args` + JSON helper + Smoke-profile end-to-end coverage for `diag/shader_bench.rs` (4.25% → 99.36%) and `diag/kernel_profile.rs` (0% → 97.12%) — the diag scripts now smoke-run real GPU dispatches in unit tests; (7) a dedicated `tests/test_decode_diag.rs` integration binary (fresh process, fresh `CALL_COUNT`) that hits the previously-believed-structural cap on `decode/diag.rs` (85.23% → 93.75%). Coverage-policy file now an empty-baseline gate: any regression on any file breaks CI.
 - **larql-router self-healing + HTTP/3 + hedged-dispatch phase** (2026-05-16): MoE expert routing (ADR-0018, per-(layer, expert-range) replication keys), Prometheus `/metrics` (ADR-0017), Phase 4 HTTP/3 shard transport behind `--http3-shards` / `--http3-port` (ADR-0019, h3 0.0.8 + h3-quinn 0.0.10 + h3-axum 0.2), hot-shard hysteresis (ADR-0014 amendment, `--hot-shard-demote-ratio` default 0.8), backpressure tier (ADR-0020 — `--saturation-ceiling N` filter in `route()` / `route_expert()`, dispatcher distinguishes 503 saturation from 400 no-owner via `has_owners_for()`, emits `Retry-After: 0.5`, bumps `larql_router_route_saturation_total`), long-running chaos test (`tests/test_grid_chaos.rs`, 5,000 random ticks × 2 variants, asserts ledger consistency + coverage floor + no `route()` panic), hedged dispatch (ADR-0021 — opt-in via `--hedge-after-ms M`, new `route_with_rank` / `route_expert_with_rank` grid APIs, `hedged_post_json` racing helper, dense + MoE fan-outs wired, `route_hedge_fires_total` / `route_hedge_wins_total` counters; supersedes the original "speculative next-layer prefetch" P1 framing — an audit falsified that framing since the router sees one batched call per token against a single input residual, so hedge-the-slow-primary is the legitimate router-layer optimisation). Concurrent-route bench (`bench_route_concurrent`, 2026-05-16) surfaced lock-contention plateau: pre-swap 1 = 5.6 → 4 = 8.7 → 8 = **4.0** → 16 = 3.6 Melem/s (8 workers *worse* than 1 — pathological). **Lock primitive swap** (2026-05-16): `tokio::sync::RwLock<GridState>` → `parking_lot::RwLock<GridState>` across larql-router and tests. Every grid critical section is short and sync (no `await` held under the lock), so synchronous is semantically correct and the compiler enforces it (parking_lot guards are `!Send`). Post-swap: 1 = 6.4 / 4 = 11.1 / 8 = 7.2 / 16 = 6.1 Melem/s — **+14% / +28% / +80% / +70%**, pathological 8-worker collapse eliminated. 220 tests still pass. Saturation-filter cost on the happy path: ~108 ns vs ~113 ns baseline (in noise); all-saturated short-circuit ~57 ns. Router test surface: 169 lib + 50 integration = **219 tests** (220 with `--features http3`). Coverage **~93%**. Five examples (`embed_grid`, `static_shards_server`, `admin_client`, `fanout_dispatch`, `saturation_backpressure`); criterion benches cover dense + MoE + saturation + concurrent-route. Multi-host deployment runbook at [`crates/larql-router/docs/multi-host-demo.md`](crates/larql-router/docs/multi-host-demo.md). Server-side `GET /v1/shard/{model}/{start}-{end}` audited + documented in [`crates/larql-server/docs/router-spec.md`](crates/larql-server/docs/router-spec.md) §4. ADRs: [0017](docs/adr/0017-router-metrics.md), [0018](docs/adr/0018-moe-expert-routing.md), [0019](docs/adr/0019-http3-shard-transport.md), [0020](docs/adr/0020-route-backpressure-tier.md), [0021](docs/adr/0021-hedged-dispatch.md).
 - **Whole-codebase review** (2026-05-28): multi-agent deep review (17 crates, ~415K LOC; per-crate reader + adversarial verification). Clippy clean (2 trivial nits); exposure concentrated and thematic. ~7 verified high/medium items now tracked under "Codebase hardening (review 2026-05-28)" below and mirrored into crate-local roadmaps. Top two confirmed by hand: infallible `FfnBackend::forward` aborts serving on remote-shard blips; Metal KV append has no `pos<max_seq` clamp (GPU OOB past 4096 rows). Record: [`docs/audits/codebase-review-2026-05-28.md`](docs/audits/codebase-review-2026-05-28.md).
 - **Follow-up codebase review** (2026-06-12): working-tree diff review (C10 residency + FR3) plus fresh whole-workspace sweep with adversarial verification. Numeric core verified clean (asm kernels, int8 attention, GGUF loader overflow claims all refuted); verified exposure at the edges: `model_id` path traversal in shard loader, zero GPU-error checking across 77 Metal `wait_until_completed` sites, dispatch-geometry duplication back at 2 sites despite `KernelHandle`, corrupt-vindex panics (2026-05-28 item 1 still open), GIL never released in larql-python, 145 env flags / ~18 documented. Tracked under "Follow-up review (2026-06-12)" below; maintenance-debt recommendations under "Cleanup / consolidation track (added 2026-06-12)". Record: [`docs/audits/codebase-review-2026-06-12.md`](docs/audits/codebase-review-2026-06-12.md).
@@ -730,7 +730,7 @@ Ordered actions (✅ = also confirmed by hand):
 4. **Validate router layer ranges + wire server eviction** (P1) — `larql-router`
    `routing.rs:237` builds an unbounded route table from gRPC-announced ranges
    (clamp to model depth before `rebuild_route_table`); `larql-server`
-   `session.rs:184` + `ratelimit.rs:83` never evict (dead eviction logic).
+   `session.rs:184` + `crates/larql-server/src/ratelimit/` never evict (dead eviction logic).
    Memory/DoS class. [larql-router, larql-server]
 5. **Shared NaN-safe top-K/sort helper** (P1) — route the ~10
    `partial_cmp().unwrap()` sites (vindex router:107/lm_head:322/gate_store:330,
@@ -738,7 +738,7 @@ Ordered actions (✅ = also confirmed by hand):
    and `larql-lql`'s four `embed.row()` callers through bounds-checked helpers.
    [larql-vindex, larql-core, larql-cli, larql-lql]
 6. **SQL expert UTF-8 offset bug + typed cross-crate contracts** (P2) —
-   `larql-experts/sql/src/lib.rs:161` slices the original string with offsets
+   `crates/larql-experts/experts/sql/src/lib.rs:161` slices the original string with offsets
    from an uppercased copy (panic on non-ASCII SQL); use `char_indices`. Then
    consider typing the `*const f32` reinterpret, positional-QKVO
    (`attn_data[1]/[2]`), and `per_layer_ffn_key` conventions to stop silent
@@ -763,7 +763,7 @@ Items 1 and 5 of the 2026-05-28 list were re-confirmed still open
 Ordered actions:
 
 1. **Sanitize `model_id` in shard loader** (P0, security) —
-   `larql-server/shard_loader.rs:30` joins router-supplied `model_id`
+   `crates/larql-server/src/shard_loader.rs:30` joins router-supplied `model_id`
    (`announce.rs:544`) into the store path unvalidated; `../` escapes the
    shard dir (tar unpack itself is safe, tar 0.4.45). Reject path
    separators / `..`. Follow-on (P2): grid non-join RPCs (`drain_server`,
@@ -788,7 +788,7 @@ Ordered actions:
    `load.rs:317` defaults missing manifest `offset`/`length` to 0,
    masking the real error. [larql-vindex]
 5. **Validate Q4K lm_head buffer size** (P1, from the diff review) —
-   `larql-kv/generation.rs:657` + `larql-inference
+   `crates/larql-kv/src/generation.rs:657` + `larql-inference
    forward/predict/dense.rs:189` never check buffer len vs
    `vocab_size × bytes_per_row`; truncated weights panic mid-decode,
    padded ones decode garbage logits. One length check → clean f32
@@ -806,7 +806,7 @@ Ordered actions:
    [workspace]
 8. **Diff-review cleanups before/with the C10 commit** (P2) — fold
    `hidden == 0` into the padded-down guard (`larql-compute
-   kquant_forward/cached.rs:861` + twin); extract the duplicated ~35-line
+   kquant_forward/cached/` + twin); extract the duplicated ~35-line
    padded-down block into one `larql-compute` helper with a reusable
    scratch buffer (kills the lockstep-comment hazard + ~69 KB/token alloc
    on 26B); drop the unnecessary `relations.clone()`
@@ -828,7 +828,7 @@ Ordered actions:
 11. **Serving posture** (P2, plausible-not-verified) — document or fix:
     streaming completions serialize on the weights guard
     (`completions.rs:302`) with no per-request timeout (`:366`); no
-    graceful drain on shutdown (`bootstrap.rs:1255`); grid join stream has
+    graceful drain on shutdown (`bootstrap/`); grid join stream has
     no malformed-message rate limit (`grid/service.rs:121`). [larql-server,
     larql-router]
 
@@ -890,7 +890,7 @@ f32/f16/i8 serving path is well-built; only the Q8K path — the wire DEC prefer
    branch; the serving-path doc-comments falsely claimed "NEON/AVX2". Building
    the AVX2 kernels remains **C-ladder** work (not done here). Fixed: added
    `larql_compute::cpu::ops::q4k_q8k_dot::kernel_class_summary()`, logged once
-   at server startup (`larql-server/bootstrap.rs`), and corrected the false doc
+   at server startup (`larql-server/bootstrap/`), and corrected the false doc
    comments on `q4k_q8k_gate_up_into` and the `q8k.rs` module doc — so no DEC
    number is ever recorded on an unlogged scalar path. [larql-compute, larql-server]
 
@@ -898,7 +898,7 @@ f32/f16/i8 serving path is well-built; only the Q8K path — the wire DEC prefer
 
 6. **`127.0.0.1` announce on `--join`** (P1, breaks multi-host grid) — refuse a
    wildcard host without `--public-url`, or detect the outbound IP
-   (`bootstrap.rs:1222`). [larql-server]
+   (`bootstrap/`). [larql-server]
 7. ✅ **Backend factory + capability dispatch** (P1, unblocks x86 + pre-work for
    G-ladder) — DONE 2026-07-22 (except the capture-portability doc note, folded
    into #8's script work). `larql_compute::backend::factory` adds
@@ -907,7 +907,7 @@ f32/f16/i8 serving path is well-built; only the Q8K path — the wire DEC prefer
    trait crate names no backend crate); `larql-cli/src/backend_select.rs` builds
    the registry once, and all 7 `if metal` cfg copy-paste sites collapse onto it
    (`run_cmd.rs` ×2, `bench/remote_ffn_runtime.rs`, `bench/local_runtime.rs`,
-   `dec_bench/capture_runtime.rs`, `shannon_cmd.rs`, `walk_cmd.rs`). Semantics
+   `dec_bench/capture_runtime.rs`, `shannon_cmd/`, `walk_cmd.rs`). Semantics
    tightened: an explicit `--metal` with no usable device now errors loudly
    instead of silently benching on CPU. Dispatch de-`bool`ed: the remote-MoE
    fork probes `supports(Capability::DecodeMoe)` on the constructed instance,
@@ -1458,7 +1458,7 @@ what's exact, approximate, observed, reconstructed):**
     integration suites, larql-inference 1423 lib tests, larql-models /
     larql-compute / larql-lql all green; clippy + fmt clean on changed
     files; changed/new files ≥90% line coverage except
-    `larql-models/src/config.rs` (63% file-wide pre-existing
+    `larql-models/src/config/` (63% file-wide pre-existing
     trait-default debt; the added helper's lines are 100% covered))
     — file splits (`walk_ffn/mod.rs` 926 → timings/ladder/
     builders; `sparse.rs` 842 → gemv/route/parallel/gather;
@@ -2644,10 +2644,10 @@ one**, and the one real hardcoding leak is a stringly-typed protocol.
 |---|---|---|---|
 | H1 | **`moe_router_type()` was a `&str` protocol between models and compute.** `pipeline_layer::moe_routing_policy` matched the literal `"gemma4_top_k_softmax"` and fell through to a default for everything else — so `gpt_oss`'s `"gpt_oss_topk_then_softmax"`, a genuinely different rule, **silently took the ordinary policy**. That is the mechanism behind §4.7.10's open quantised-MoE defect, not merely a style issue. **FIXED**: typed `MoeRouterKind` with the string kept as the vindex wire form (`as_str`/`from_wire`); compute now matches exhaustively, so a new variant fails to compile rather than defaulting. The predecessor test called the function twice and asserted nothing — replaced with one that pins each kind to a distinct policy. | `larql-compute`, `larql-models` | **done** |
 | H2 | **`diag/shader_bench.rs` — 1 759 non-test lines**, and it hardcodes `"gemma3"` profiles and `"gemma3-4b"` labels. Diagnostics may name models, but not at this size in one file. **Attempted and reverted:** a line-based carve into config / shapes / measure / benches kept cutting across item boundaries (a trailing `#[derive]`, a truncated function body, the `mod tests {` wrapper). It wants an AST-aware split or a careful manual one, not a `sed` pass — and it is the lowest-value item here, so it was not worth finishing badly. | `larql-compute-metal` | low (was medium) |
-| H3 | **`kquant_forward/cached.rs` — tests. DONE (2026-08-06).** "Zero tests" was half right: the sibling `kquant_forward/mod.rs` suite already drove most of the public surface, but **every one of those tests asserts a shape, not a value** (`h.shape() == [1, hidden]`, "must complete without panic"). That is exactly the hole §4.10 fell through — a RoPE defect keeps the shapes correct. 16 new tests in `cached/tests.rs` built on *agreement*: prefill-vs-decode on the rope-scaled Q4_K fixture (CPU analogue of M5), the padded-intermediate refusal in `layer_supports_direct_matvec`, and the guard clauses of `matvec_q4k_or_q6k_q8k`. Also replaced mod.rs's `let _: bool = supports_direct_matvec_decode(...)` — a test that asserted nothing — with a real assertion. | `larql-compute` | **done** |
+| H3 | **`kquant_forward/cached/` — tests. DONE (2026-08-06).** "Zero tests" was half right: the sibling `kquant_forward/mod.rs` suite already drove most of the public surface, but **every one of those tests asserts a shape, not a value** (`h.shape() == [1, hidden]`, "must complete without panic"). That is exactly the hole §4.10 fell through — a RoPE defect keeps the shapes correct. 16 new tests in `cached/tests.rs` built on *agreement*: prefill-vs-decode on the rope-scaled Q4_K fixture (CPU analogue of M5), the padded-intermediate refusal in `layer_supports_direct_matvec`, and the guard clauses of `matvec_q4k_or_q6k_q8k`. Also replaced mod.rs's `let _: bool = supports_direct_matvec_decode(...)` — a test that asserted nothing — with a real assertion. | `larql-compute` | **done** |
 | H4 | **`decode/mod.rs` — tests. DONE (2026-08-06), and it found a bug.** "Zero tests" again described coverage, not correctness: `tests/test_metal_decode_synthetic.rs` already drives `decode_token` end to end and says so in its own header ("smoke tests, not numerical-parity tests"). What nothing touched was the **KV cache geometry** layer — `kv_shapes_for_layers` / `ensure_kv_cache_for_{layers,shapes}` — where every failure mode is silent: decode still runs, still returns finite numbers of the right shape, and is simply wrong past some position. Six tests in `decode/tests.rs` on the Gemma-4 sliding(16×256)/global(4×512) pair, GPU-guarded. **`grow_to_shapes` ignored its `max_seq` argument** — see below. | `larql-compute-metal` | **done** |
 | H5a | **`lm_head` silently tied to the embedding matrix.** `unwrap_or_else(\|\| embed.clone())` fired whenever `lm_head.weight` was absent, and **`tie_word_embeddings` was never parsed at all** despite appearing in every checkpoint config and several fixtures. A model declaring `false` (GPT-OSS, OLMoE) that lost the tensor to a key mismatch or skip filter would have served a wrong output projection and still produced fluent text. **FIXED**: field parsed (outer *and* `text_config`), and untied-but-missing is now a `MissingTensor` error naming the conflict. Absent stays `None` — not a claim either way — so tie-on-absence is unchanged for models that really are tied. | `larql-models` | **done** |
-| H5b | **Split `loading/safetensors.rs`. DONE (2026-08-06).** 1 205 lines → `safetensors/{mod,mxfp4,dtype,paths}.rs`, largest 491. Moved whole functions with the compiler as the check (the H2 lesson), then moved each concern's tests and helpers to sit with it. Seams: MXFP4 packed-expert expansion (+ the seven `MXFP4_*` name constants, which now live with the layout they describe), raw-dtype/FP8 decode, model-path resolution; the shard walk and key normalisation stay in `mod.rs`. 649 `larql-models` tests green, clippy clean. | `larql-models` | **done** |
+| H5b | **Split `loading/loading/safetensors/`. DONE (2026-08-06).** 1 205 lines → `safetensors/{mod,mxfp4,dtype,paths}.rs`, largest 491. Moved whole functions with the compiler as the check (the H2 lesson), then moved each concern's tests and helpers to sit with it. Seams: MXFP4 packed-expert expansion (+ the seven `MXFP4_*` name constants, which now live with the layout they describe), raw-dtype/FP8 decode, model-path resolution; the shard walk and key normalisation stay in `mod.rs`. 649 `larql-models` tests green, clippy clean. | `larql-models` | **done** |
 | H6 | `attention/gqa.rs` was 1 308 lines but **377 non-test** — the bulk was its (good) test suite. **FIXED**: split to `gqa/mod.rs` (379) + `gqa/tests.rs` (934), the same pattern `rope/` uses. | `larql-compute` | **done** |
 
 **What is already right, and worth not regressing.** Architecture behaviour is
@@ -2871,7 +2871,7 @@ Per-crate status:
   the right discipline. The earlier doc inaccuracy (header implied the path
   already routes through `FormatRoute`) is **reconciled**: `QuantFormat`
   (`pipeline.rs:25-34`) still has no ternary variant, `from_registry_tag`
-  (`pipeline.rs:104-116`) maps no ternary tag, and the `QuantMatVec` dispatch
+  (`crates/larql-compute/src/pipeline/quant_format/mod.rs`) maps no ternary tag **[stale 2026-08-23: it does — `QuantFormat` carries the BitNet I2_S ternary variant and `QuantMatVec` has a ternary arm]**, and the `QuantMatVec` dispatch
   trait has no ternary arm — `BitLinearWeight` is reachable only by direct
   call, and the docstring now says so plainly (dispatch integration is the
   open structural item, not done).
@@ -3182,7 +3182,7 @@ stages, smallest-blast first:
     Remaining (the stash is mid-sweep, ~29 errors): the **other 7 engines**
     (no_cache, boundary×2, markov×2, turbo, unlimited, apollo) each need the
     same field + view-thread + `&mut`-drop, plus their forward helpers
-    (`kv_prefill_run` + the `generate_cached_*` loops in larql-kv/generation.rs,
+    (`kv_prefill_run` + the `generate_cached_*` loops in crates/larql-kv/src/generation.rs,
     apollo's `forward_raw_logits`) converted to `WeightsView`, then the dev
     drivers (ov_rd/lql/vision/examples) + delete the `*_resident` shims. The
     pattern is mechanical but keeps surfacing forward helpers on contact (the
@@ -3712,7 +3712,7 @@ long-context. C11 prevents architectural drift.
 Two instruments measure the kernel-bound nature of CPU decode and let you isolate which sub-kernel the asm should target first:
 
 - `LARQL_INSTRUMENT_UNLIMITED=1` — prints `embed / attention / ffn` per `extend_q4k` call from `larql_kv::engines::windowed_checkpoint::rs_extend_from_checkpoint_q4k`. Captures the per-token, per-layer-aggregated breakdown. Source: `crates/larql-kv/src/engines/windowed_checkpoint/extend.rs`.
-- `LARQL_INSTRUMENT_MARKOV=1` — same shape for `markov-residual`, kept for cross-engine sanity that both substrate paths agree. Source: `crates/larql-kv/src/engines/markov_residual/q4k.rs`.
+- `LARQL_INSTRUMENT_MARKOV=1` — same shape for `markov-residual`, kept for cross-engine sanity that both substrate paths agree. Source: `crates/larql-kv/src/engines/markov_residual/walk.rs`.
 
 Reproducer (Gemma 3 4B Q4K, M3 Max, default 8 threads):
 
@@ -4334,7 +4334,7 @@ vendor stacks wait for codec + ring + device integration.
 
 ## P2 — Film checklist
 
-- [ ] Confirm Gemma 4 26B A4B public config (expert count, top-K, active-param figure, GQA ratio). Replace every `~` in `docs/demo-script-gemma4-moe.md`.
+- [ ] Confirm Gemma 4 26B A4B public config (expert count, top-K, active-param figure, GQA ratio). Replace every `~` in `docs/replay/demo-script-gemma4-moe.md`.
 - [ ] Measure real footprint + latency on `google/gemma-4-31b-it` for Act 1.
 - [ ] Reliability pass on `RemoteWalkBackend` (timeouts, retries, partial shard outage). **(P2 per ADR-019.)**
 - [ ] `RemoteExpertBackend` same reliability pass. **(P2 per ADR-019.)**

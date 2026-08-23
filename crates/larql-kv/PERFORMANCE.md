@@ -439,7 +439,7 @@ the table above.
 - **O(N²) by design.** Apollo's decode_step pushes the new token onto
   `self.context_tokens` and calls `forward_from_layer(weights,
   &self.context_tokens, ...)` — which builds a fresh HashMap KV cache
-  per call (`compute/src/forward/predict/raw.rs:190`) and re-runs
+  per call (`crates/larql-compute/src/forward/predict/raw.rs:190`) and re-runs
   `from_layer..num_layers` over the **entire growing context** every
   step. There is no cross-step KV persistence: each decode is O(N)
   attention work, total O(N²). This is inherent to the "retrieval-style,

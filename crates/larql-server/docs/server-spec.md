@@ -1363,7 +1363,7 @@ Source layout reflects the 2026-05-01 Q1 cleanup pass — see
 tree. Highlights for spec readers:
 
 - `main.rs` is a thin entry point (~26 LOC). All boot orchestration
-  lives in `bootstrap.rs::serve(cli)` so the same code path can be
+  lives in `bootstrap/::serve(cli)` so the same code path can be
   driven from integration tests without going through clap.
 - `env_flags.rs` is the single source of truth for `LARQL_*` knobs;
   every read goes through a cached accessor (`OnceLock`) and the

@@ -639,7 +639,7 @@ tells us whether the in-room engineering translates to a deployable grid.
   Phase 1).
 
 ### F1. Router-side expert-shard fan-out
-**Files**: `crates/larql-router/src/main.rs`, `crates/larql-router/src/grid.rs`,
+**Files**: `crates/larql-router/src/main.rs`, `crates/larql-router/src/grid/`,
 `crates/larql-router-protocol/proto/*.proto`.
 The grid router fans out `walk-ffn` by layer ranges only. For MoE, the
 remote-expert client (`RemoteMoeBackend` in `larql-inference`) carries the
@@ -696,7 +696,7 @@ two should share infrastructure. Effort estimate: ~3 hours when picked up.
 ---
 
 ### F6. Replica round-robin + retry on shard failure
-**Files**: `crates/larql-router/src/grid.rs`.
+**Files**: `crates/larql-router/src/grid/`.
 Router picks first owning shard; no load-balancing across replicas, no retry
 on 5xx. `--shards "0-15=A,0-15=B"` doesn't fan evenly today.
 
@@ -718,8 +718,8 @@ prefill.
 model swap is a process restart.
 
 ### F9. Binary wire format for `expert/batch`
-**Files**: `crates/larql-server/src/routes/expert.rs`,
-`crates/larql-inference/src/ffn/moe_remote.rs`.
+**Files**: `crates/larql-server/src/routes/expert/`,
+`crates/larql-inference/src/ffn/moe_remote/`.
 A K=8 batch on Gemma 4 26B-A4B is ~90 KB JSON per call. The
 `application/x-larql-ffn` binary format already exists for `walk-ffn`; mirror
 it for `expert/batch`. Expected 3–5× wire reduction.
@@ -872,7 +872,7 @@ hot/cold (resident vs paged-out) so operators can see what `--release-mmap-after
 actually buys them.
 
 ### F22. Persistent patches
-**Files**: `crates/larql-server/src/session.rs`,
+**Files**: `crates/larql-server/src/session/`,
 `crates/larql-server/src/routes/patches.rs`.
 Patches are session-scoped today; no on-disk overlay. Add a durable
 `POST /v1/patches/save` + auto-apply on boot. Pairs with **F8** (hot-swap)

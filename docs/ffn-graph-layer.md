@@ -296,6 +296,6 @@ let model = InferenceModel::load_walk_only("google/gemma-3-4b-it")?;
 | `larql-vindex/examples/build_down_features.rs` | Feature-major down vector builder |
 | `larql-vindex/examples/build_up_features.rs` | Feature-major up vector builder |
 | `larql-inference/examples/bench_walk_inference.rs` | Walk benchmark (dense vs walk vs HNSW) |
-| `larql-inference/chris-experiments/larql_probes/examples/misc/walk_boundary_sweep.rs` | Correctness sweep (all 34 layers) |
+| `chris-experiments/larql_probes/examples/misc/walk_boundary_sweep.rs` | Correctness sweep (all 34 layers) |
 | `larql-inference/examples/profile_overhead.rs` | Forward pass bottleneck profiler |
 | `larql-inference/examples/memory_analysis.rs` | Memory profiling (RSS, mmap, walk-only) |

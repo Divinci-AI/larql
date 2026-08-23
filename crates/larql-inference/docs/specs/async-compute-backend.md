@@ -538,7 +538,7 @@ CPU-delegation pattern as `kv_dispatch_metal.rs`). Validates the trait
 shape against actual `MetalBackend` ownership patterns without writing
 new shaders. No tok/s win yet — every call has CpuBackend's cost.
 
-File `crates/larql-inference/src/async_compute_backend/metal.rs` is
+File `crates/larql-inference/src/async_compute_backend/metal.rs` **does not exist** (the module is `mod.rs` + `cpu.rs`; the Metal impl lives in `larql-compute-metal`). As specified it
 behind `#[cfg(feature = "gpu")]` and includes a compile-time
 `assert_async::<MetalBackend>()` test plus bit-parity tests vs
 `CpuBackend` that auto-skip when `MetalBackend::new()` returns `None`.

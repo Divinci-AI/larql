@@ -60,7 +60,7 @@ Each rung executes the same five-phase spine, plus a sixth phase that only matte
 
 | Gate | Name | Criterion | Falsifier |
 |---|---|---|---|
-| **G0** | Trait absorption | every feature lands behind an existing trait with **no change to an existing method signature**. New default-impl'd methods paired with a capability flag are allowed and expected — that is the established convention in these traits, not a workaround (see §4.1). Surface: `ModelArchitecture` (`larql-models/src/config.rs:166`), `FfnBackend` (`larql-compute/src/ffn.rs:27`), `KvEngine` (`larql-inference/src/kv_engine.rs:243`), `GateIndex` (`larql-vindex/src/index/types/ffn_row/mod.rs:274`, blanket-impl over `GateLookup + PatchOverrides + FfnRowAccess`), plus the execution seams `LayerExecutor` (`larql-inference/src/layer_executor/mod.rs:70`) and `LayerGraph` (`larql-inference/src/layer_graph/mod.rs:62`) | an existing method's signature has to change, or a caller's invariant has to be silently redefined to avoid changing one → the abstraction was wrong for this model class; fix the abstraction before the rung proceeds, don't special-case the model |
+| **G0** | Trait absorption | every feature lands behind an existing trait with **no change to an existing method signature**. New default-impl'd methods paired with a capability flag are allowed and expected — that is the established convention in these traits, not a workaround (see §4.1). Surface: `ModelArchitecture` (`larql-models/src/config/`), `FfnBackend` (`larql-compute/src/ffn.rs:27`), `KvEngine` (`larql-inference/src/kv_engine/`), `GateIndex` (`larql-vindex/src/index/types/ffn_row/mod.rs:274`, blanket-impl over `GateLookup + PatchOverrides + FfnRowAccess`), plus the execution seams `LayerExecutor` (`larql-inference/src/layer_executor/mod.rs:70`) and `LayerGraph` (`larql-inference/src/layer_graph/mod.rs:62`) | an existing method's signature has to change, or a caller's invariant has to be silently redefined to avoid changing one → the abstraction was wrong for this model class; fix the abstraction before the rung proceeds, don't special-case the model |
 | **GA** | Format fidelity | extraction round-trips: sha256 per extent, source-shard byte-range provenance map, dequantised tensors match the reference decoder on a fixed sample | any extent fails round-trip, or the dequant differs beyond fp tolerance |
 | **GB** | Numerical parity | **R1/R2:** layer-by-layer f32 diff against the local reference implementation, then `larql shannon verify` ≤ 0.5 % bits/char (the repo's existing CI threshold). **R3:** top-k agreement at temperature 0 against the Kimi endpoint, preserved-thinking-mode aware | divergence outside tolerance at any layer, or bits/char gate failure |
 | **GC** | Carve fidelity | the coverage curve — resident-expert fraction vs measured drift — stays inside the **C6** gate ([`dec-funnel.md` §DEC-1A](dec-funnel.md), shipped as `larql dec-bench drift`, `crates/larql-cli/src/commands/primary/dec_bench/drift.rs`), including skip-mode gate-weight renormalisation on slice misses | no resident fraction achieves the target size inside the drift gate → the demo tier does not exist at that size, and the carve is renegotiated, not the gate |
@@ -80,7 +80,7 @@ Read-only pass over the trait surface. **Result: three pass, one was never on th
 | `KvEngine` | **pass, but the gate needed sharpening** | see below. |
 | `GateIndex` | **open decision** | see below. |
 
-**`KvEngine` — the pre-registered risk was misplaced.** The concern on record was that KDA's fixed-size recurrent state with checkpoint/restore would break the trait. It does not, because **there is no rollback, truncate, or checkpoint method on the trait at all** — `truncate_kv_cache` exists only on a test double (`larql-inference/src/test_utils.rs:1064`), and `reset_and_preallocate_kv_cache` is a free function in the layer-graph setup path. Speculative rollback therefore needs a *new* method whether or not KDA is involved: it is the M-ladder's problem (M1) before it is R2's.
+**`KvEngine` — the pre-registered risk was misplaced.** The concern on record was that KDA's fixed-size recurrent state with checkpoint/restore would break the trait. It does not, because **there is no rollback, truncate, or checkpoint method on the trait at all** — `truncate_kv_cache` exists only on a test double (`larql-inference/src/test_utils/`), and `reset_and_preallocate_kv_cache` is a free function in the layer-graph setup path. Speculative rollback therefore needs a *new* method whether or not KDA is involved: it is the M-ladder's problem (M1) before it is R2's.
 
 Seven of the trait's fourteen methods are already default-impl'd fallbacks (`prefill_quant`, `prefill_resident`, the four `*_via_executor` variants, `prefill_from_hidden`), and `supports_multimodal` + `prefill_from_hidden` is exactly the "capability flag guards an optional method" pair a KDA state-checkpoint method would follow. **G0 as originally written would have failed here for a boring reason** — hence the sharpened wording above: existing signatures are frozen; new default-impl'd methods are the sanctioned extension point.
 
@@ -300,7 +300,7 @@ The `--level attention` run finished and made the scope precise. Per layer, the 
 1. **`gpt_oss.rs` declares neither.** The word "bias" appears in that file exactly once, in the same doc comment as "sinks" (`architectures/gpt_oss.rs:8`). The `ModelArchitecture` trait *has* `attn_{q,k,v,o}_bias_key` accessors defaulting to `None` (`config.rs:244-258`), and `starcoder2.rs`, `gpt2.rs` and `qwen.rs` all override them — so the pattern exists and GPT-OSS simply doesn't follow it.
 2. **Extraction never asks for attention biases, for any architecture.** No `*_bias_key` call appears anywhere in `larql-vindex` except the router bias (`router_weights.rs:38`).
 
-**The compute side already expects them.** `attn_q_bias_key` is consumed in `larql-compute/src/attention/block.rs:355`, `attention/gpu.rs:55,226`, `attention/decode/dispatch.rs:51`, `decode/q4k_direct.rs:163` and `kquant_forward/cached.rs:638`. So the consumer is built and keyed off the architecture accessor; for GPT-OSS it asks, gets `None`, and applies nothing.
+**The compute side already expects them.** `attn_q_bias_key` is consumed in `larql-compute/src/attention/block.rs:355`, `attention/gpu.rs:55,226`, `attention/decode/dispatch.rs:51`, `decode/q4k_direct.rs:163` and `kquant_forward/cached/`. So the consumer is built and keyed off the architecture accessor; for GPT-OSS it asks, gets `None`, and applies nothing.
 
 **That splits the fix cleanly.** The bias half is four accessor overrides in `gpt_oss.rs` plus writing them at extraction — the qwen.rs pattern, no new math. The sinks half needs the concat-softmax-truncate in both backends. Only the second is genuinely new work.
 
@@ -323,7 +323,7 @@ Three changes, addressing both causes:
 
 `sinks` lands as `{"kind": "vector", "shape": [64], "length": 128}` — one f16 per head — and `q_proj.bias` as `shape [4096]`. Tests: `larql-models` 446 pass (6 added to a file that previously had none), `larql-vindex` 1137 pass; fmt and clippy clean.
 
-**Still outstanding — the compute half.** Biases already have a consumer (`attention/block.rs:355`, `gpu.rs:55,226`, `decode/dispatch.rs:51`, `q4k_direct.rs:163`, `kquant_forward/cached.rs:638` all resolve `attn_q_bias_key`), so with the key declared and the tensor stored, that path closes. **Sinks have no consumer at all** — the concat-softmax-truncate does not exist in either the CPU or Metal kernel. The tensor now survives extraction, which is a precondition, not the fix. Until the kernel applies it, GPT-OSS attention remains numerically wrong, and GB is the gate that will say by how much.
+**Still outstanding — the compute half.** Biases already have a consumer (`attention/block.rs:355`, `gpu.rs:55,226`, `decode/dispatch.rs:51`, `q4k_direct.rs:163`, `kquant_forward/cached/` all resolve `attn_q_bias_key`), so with the key declared and the tensor stored, that path closes. **Sinks have no consumer at all** — the concat-softmax-truncate does not exist in either the CPU or Metal kernel. The tensor now survives extraction, which is a precondition, not the fix. Until the kernel applies it, GPT-OSS attention remains numerically wrong, and GB is the gate that will say by how much.
 
 #### 4.6.3 CPU softmax now supports sinks — primitive landed, data not yet flowing
 
@@ -360,7 +360,7 @@ pub fn resolve(sinks_key: Option<String>, vectors: &HashMap<String, Vec<f32>>,
 
 Its contract is deliberately asymmetric. A **missing key** (architecture has no sinks) or a **missing tensor** (vindex extracted before sinks were written) both degrade quietly to an ordinary softmax — old artifacts must keep loading. A **length mismatch panics**, naming the layer and both counts: a sink vector that doesn't match the head count means the tensor doesn't describe this model, and truncating or zero-padding would give a plausible-looking wrong forward pass, which is the precise failure this whole area was fixed to remove.
 
-Wired at all four call sites — prefill (`block.rs`), and the three decode paths (`decode/dispatch.rs`, `decode/q4k_direct.rs`, `kquant_forward/cached.rs`).
+Wired at all four call sites — prefill (`block.rs`), and the three decode paths (`decode/dispatch.rs`, `decode/q4k_direct.rs`, `kquant_forward/cached/`).
 
 **A fourth softmax copy turned up while doing it.** `decode/gqa_step.rs` — the single-token path that actually runs during generation — had its own twelfth-line duplicate, separate from `gqa.rs`'s three. It now calls the shared `softmax_in_place` too, so prefill and decode cannot drift.
 
@@ -436,7 +436,7 @@ panicked at larql-compute/src/ffn/weight.rs:333:
   FFN weight tensor missing … (key: layers.0.mlp.up_proj.weight)
 ```
 
-**`larql shannon score` hardcodes `WeightFfn`** (`shannon_cmd.rs:1412` and `:1447`), which resolves the *dense* `ffn_up_key`/`ffn_down_key`/`ffn_gate_key`. GPT-OSS has no dense FFN — its experts are `mlp.experts.gate_up_proj_blocks`. The panic's suggested remedy ("this is a `--compact` vindex") is a misdiagnosis: the tensors are not missing, they never existed for this architecture.
+**`larql shannon score` hardcodes `WeightFfn`** (`shannon_cmd/` and `:1447`), which resolves the *dense* `ffn_up_key`/`ffn_down_key`/`ffn_gate_key`. GPT-OSS has no dense FFN — its experts are `mlp.experts.gate_up_proj_blocks`. The panic's suggested remedy ("this is a `--compact` vindex") is a misdiagnosis: the tensors are not missing, they never existed for this architecture.
 
 **This is broader than GPT-OSS.** `WeightFfn` is dense-only, so the Shannon scorer cannot score *any* mixture-of-experts model. GB — the gate this ladder leans on hardest, and the one that degrades to an API oracle at R3 — currently has no instrument for the model class R1, R2 and R3 are all built on. R1 is MoE, Kimi Linear is MoE, K3 is MoE.
 
@@ -641,7 +641,7 @@ It recurred a third time, and the shape is the point: the config read lived on `
 
 **Three recurrences is a structural problem, not three bugs.** The mechanism is: a behaviour that is a config fact, read on one architecture, with a trait default that silently answers for everyone else. Patching the affected architecture leaves the mechanism intact.
 
-The read now lives in the trait default (`larql-models/src/config.rs`), which already had `config()` in scope, and `OlmoeArch`'s override is deleted rather than duplicated. GPT-OSS keeps an explicit override because its order is fixed by the architecture rather than by config — that is the legitimate use of an override.
+The read now lives in the trait default (`larql-models/src/config/`), which already had `config()` in scope, and `OlmoeArch`'s override is deleted rather than duplicated. GPT-OSS keeps an explicit override because its order is fixed by the architecture rather than by config — that is the legitimate use of an override.
 
 **The test fixture was the second half of the failure.** `test_detect_qwen3_moe_30b` omitted `norm_topk_prob` entirely, so it could not distinguish the two routing orders and passed under both. Same failure as §4.5's timestamp assertions and §4.7.3's `out_features = 2` — **now three instances in unrelated subsystems.** The fixture is corrected to the real config's `true`, with the policy asserted, plus a table test over `{true, false, absent}` and one pinning GPT-OSS's override against a contradicting config.
 
@@ -815,7 +815,7 @@ That verdict was an artifact of **scoring a causal chain as independent draws.**
 | `llama3` | `meta-llama/Llama-3.2-1B` | **live** |
 | `yarn` | `openai/gpt-oss-20b` | **live** — Metal-served since 2026-08-10 (§4.11) |
 
-**This is a known bug class, fixed once already, in the other engine.** `kquant_forward/cached.rs` carries the comment: *"The unscaled `apply_rope_partial_at` here was the direct-path divergence on gemma3-4b (global-layer K/Q rope'd at 8× the position the prefill cache used)."* That is this defect, on the CPU direct path, found and fixed — and the identical defect sat untouched in the Metal kernels because the fix was applied where the bug was seen rather than to every path that ropes.
+**This is a known bug class, fixed once already, in the other engine.** `kquant_forward/cached/` carries the comment: *"The unscaled `apply_rope_partial_at` here was the direct-path divergence on gemma3-4b (global-layer K/Q rope'd at 8× the position the prefill cache used)."* That is this defect, on the CPU direct path, found and fixed — and the identical defect sat untouched in the Metal kernels because the fix was applied where the bug was seen rather than to every path that ropes.
 
 **And the harness could not see it.** `examples/residual_diff.rs` is the CPU-vs-Metal instrument, and its own header says it triggers "a single prefill pass — no KV cache involvement". Prefill is the half that routes through the host and is correct. **A parity harness that exercises only the correct path returns green forever** — [R14 gate–claim congruence](dec-funnel.md) at the harness level, and the fourth instrument-shaped defect in this document.
 

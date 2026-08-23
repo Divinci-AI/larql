@@ -185,7 +185,7 @@ larql-vindex/src/
 │       │   ├── up.rs           up_features.bin (feature-major f32) + has_full_mmap_ffn
 │       │   ├── interleaved.rs  interleaved.bin (f32 [gate|up|down])
 │       │   ├── interleaved_q4.rs   interleaved_q4.bin (Q4_0)
-│       │   ├── interleaved_q4k.rs  interleaved_kquant.bin + manifests +
+│       │   ├── interleaved_kquant_native.rs  interleaved_kquant.bin + manifests +
 │       │   │                       down_features_kquant.bin (Q4_K/Q6_K)
 │       │   ├── gate_q4.rs      Q4_0 gate-vector mmap (KNN side-channel)
 │       │   ├── fp4.rs          FP4 / FP8 FFN storage (exp 26)

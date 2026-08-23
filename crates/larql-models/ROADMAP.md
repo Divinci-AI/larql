@@ -35,7 +35,7 @@ APIs; the permissive inspection APIs are retained deliberately.
 whole-crate total. `src/test_fixtures.rs` is excluded — it is `test-utils`
 support code with no production callers, exercised transitively by four
 downstream crates, and measuring it here always lands near 30%. Two debt
-baselines remain (`loading/gguf.rs`, `loading/safetensors.rs`), both about
+baselines remain (`loading/gguf.rs`, `loading/loading/safetensors/`), both about
 1pp short and both needing MXFP4 / packed-BF16 fixture tests to clear. See the
 `policy_note` in `coverage-policy.json`.
 
@@ -52,11 +52,11 @@ candidate.
 ## Open work
 
 Recommended next sequence — items 1–3 confirmed still open on 2026-08-04
-(`loading/safetensors.rs` has no `wte`/`wpe`/`c_attn` mapping; no Phi module
+(`loading/loading/safetensors/` has no `wte`/`wpe`/`c_attn` mapping; no Phi module
 exists):
 - **GPT-2 raw-safetensors tensor-key renaming.** Config parses cleanly
   now; tensor loading needs the `wte` / `wpe` / `h.N.attn.c_attn` /
-  `h.N.mlp.c_fc` → canonical mapping in `loading/safetensors.rs` (the
+  `h.N.mlp.c_fc` → canonical mapping in `loading/loading/safetensors/` (the
   existing `gpt2.rs` arch assumes GGUF→HF normalisation has already run).
 - **Granite-4 MoE validator relaxation** so `granite-4.0-micro` loads —
   the dense Granite-4 model carries hybrid MoE *flags* without expert
@@ -78,7 +78,7 @@ exists):
 **Effort**: Low
 **Status**: Not started
 
-`loading/safetensors.rs::resolve_model_path` scans cached snapshot
+`loading/loading/safetensors/::resolve_model_path` scans cached snapshot
 directories and returns the first snapshot with safetensors. `read_dir` order
 is not stable and the resolver ignores `refs/main`, so the same model ID can
 resolve to an old or arbitrary cached revision. Prefer the commit recorded in

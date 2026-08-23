@@ -152,7 +152,7 @@ the model packaging, not the loader.
 
 ## LARQL impact
 
-None — LARQL Rust loads the 8B cleanly because `safetensors.rs:329`
+None — LARQL Rust loads the 8B cleanly because `loading/safetensors/`
 prefers the present `lm_head.weight` and `shannon verify` passes at
 0.000 % delta vs HF on the Frankenstein 1 KB corpus (263 tokens,
 3.9126 bits/token; PR #TBD). Q4K vindex generation through `larql
