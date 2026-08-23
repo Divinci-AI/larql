@@ -168,6 +168,21 @@ pub struct ExecArgs {
     #[arg(long, conflicts_with_all = ["dump_layers", "resume"])]
     pub generate: Option<usize>,
 
+    /// Teacher-force a whole quality bank through ONE resident model,
+    /// writing `<--dump-dir>/<id>.f32` per entry.
+    ///
+    /// The file is JSON lines: `{"id": "...", "ids": [1,2,3]}`. Each entry
+    /// gets a brand-new continuation state, and the run fails if a session
+    /// does not start at position 0 or does not end at the entry's length
+    /// — a leak between entries would silently score later prompts against
+    /// a context no reference ever saw.
+    #[arg(long, value_name = "JSONL")]
+    pub bank: Option<PathBuf>,
+
+    /// Where `--bank` writes its per-entry logit dumps.
+    #[arg(long, value_name = "DIR")]
+    pub dump_dir: Option<PathBuf>,
+
     /// Step the given tokens through the plan one position at a time and
     /// write every position's logits here as `[positions, vocab]` f32.
     ///
@@ -340,6 +355,7 @@ pub fn run(cmd: Vindex3Command) -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
+mod bank;
 mod exec;
 mod generate;
 #[cfg(all(feature = "gpu", target_os = "macos"))]

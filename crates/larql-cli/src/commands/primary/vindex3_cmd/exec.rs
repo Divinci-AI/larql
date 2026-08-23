@@ -334,6 +334,19 @@ fn run_on<B: PlanBackend>(
     store: &OperandStore,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let engine = format!("{ENGINE_PREFIX}-{}", backend.name());
+    // A whole bank through one resident model. Checked before the
+    // single-prompt paths because `--bank` supplies its own ids and the
+    // `--tokens` argument is unused by it.
+    if let Some(path) = &args.bank {
+        let dump = args.dump_dir.clone().ok_or("--bank requires --dump-dir")?;
+        let text = std::fs::read_to_string(path)?;
+        let entries: Vec<super::bank::BankEntry> = text
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(serde_json::from_str)
+            .collect::<Result<_, _>>()?;
+        return super::bank::run_bank(backend, &engine, plan, store, &entries, &dump);
+    }
     if let Some(out) = &args.logit_dump {
         return super::teacher_force::run_teacher_force(backend, &engine, tokens, plan, store, out);
     }
