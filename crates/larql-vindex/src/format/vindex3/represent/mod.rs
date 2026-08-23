@@ -46,8 +46,9 @@
 //! at all: a profile cannot turn one encoding's bytes into another's.
 
 pub mod nvfp4_pack;
+pub mod policy;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
@@ -63,7 +64,7 @@ use super::opplan::OperandRef;
 use crate::error::VindexError;
 use crate::format::filenames::INDEX_JSON;
 use nvfp4_pack::{PackLayout, DTYPE_NVFP4};
-
+use policy::{classify, Role, RolePolicy};
 /// Filename of the system graph, carried beside the index.
 const SYSTEM_GRAPH_JSON: &str = "system_graph.json";
 
@@ -74,6 +75,21 @@ pub struct RepresentReport {
     pub compiled_objects: Vec<CompiledObject>,
     /// Segments carried across untouched.
     pub linked_segments: usize,
+    /// Objects the policy protected entirely — no tensor in them was
+    /// eligible, so they have no compiled pack and execute at source
+    /// precision. Naming them is the difference between a policy and a
+    /// silent omission.
+    pub preserved_objects: Vec<PreservedObject>,
+}
+
+/// An object left wholly at source precision, and why.
+#[derive(Debug, Clone)]
+pub struct PreservedObject {
+    pub object: String,
+    pub encoding: String,
+    pub bytes: u64,
+    /// The roles its tensors classified as.
+    pub roles: BTreeMap<Role, usize>,
 }
 
 /// One object's compiled pack.
@@ -88,6 +104,9 @@ pub struct CompiledObject {
     pub carried_tensors: usize,
     pub source_bytes: u64,
     pub compiled_bytes: u64,
+    /// Roles left at source precision, and how many tensors each covers —
+    /// what a conservative policy actually protected.
+    pub preserved: BTreeMap<Role, usize>,
 }
 
 impl CompiledObject {
@@ -107,9 +126,12 @@ pub struct RepresentSpec {
     /// Target encoding. Only [`DTYPE_NVFP4`] today; the match below is the
     /// single place a second encoding is added.
     pub encoding: String,
-    /// Objects to compile. Empty means every object carrying a matrix the
-    /// encoding applies to.
+    /// Objects to compile. Empty means every object carrying a tensor the
+    /// policy admits.
     pub objects: Vec<String>,
+    /// Which tensor roles are eligible. Conservative by default — see
+    /// [`policy`] for what that means and why.
+    pub roles: RolePolicy,
 }
 
 impl RepresentSpec {
@@ -117,6 +139,7 @@ impl RepresentSpec {
         Self {
             encoding: DTYPE_NVFP4.to_string(),
             objects: Vec::new(),
+            roles: RolePolicy::default(),
         }
     }
 
@@ -157,6 +180,7 @@ pub fn compile_representation(
     let mut report = RepresentReport {
         compiled_objects: Vec::new(),
         linked_segments: 0,
+        preserved_objects: Vec::new(),
     };
 
     // Every existing representation travels unchanged: compiling an
@@ -207,12 +231,19 @@ pub fn compile_representation(
         let mut compiled_tensors = 0usize;
         let mut carried_tensors = 0usize;
         let mut source_bytes = 0u64;
+        let mut preserved_roles: BTreeMap<Role, usize> = BTreeMap::new();
 
         for t in &header.tensors {
+            // Role first, shape second. A tensor the policy preserves is
+            // carried whatever its shape; a tensor the policy admits is
+            // still refused by the layout if its `k` cannot be grouped.
+            let role = classify(&entry.object, &t.name, &t.shape);
+            let eligible = spec.roles.compiles(role);
             match PackLayout::derive(&t.shape, &t.name) {
-                Ok(layout) => {
+                Ok(layout) if eligible => {
                     source_bytes += t.len;
                     compiled_tensors += 1;
+                    *preserved_roles.entry(role).or_insert(0) += 0;
                     planned.push(PlannedTensor {
                         relative_name: t.name.clone(),
                         source_name: t.name.clone(),
@@ -222,12 +253,13 @@ pub fn compile_representation(
                     });
                     layouts.push((t.name.clone(), Some(layout)));
                 }
-                Err(_) => {
-                    // Not a matrix this encoding applies to — a norm, a
-                    // bias, a 1-D vector. Carried verbatim so the pack is a
-                    // complete object, not a partial one its consumers
-                    // would have to patch from elsewhere.
+                _ => {
+                    // Either the policy preserves this role, or the shape
+                    // cannot hold the encoding. Carried verbatim so the
+                    // pack is a complete object, not a partial one its
+                    // consumers would have to patch from elsewhere.
                     carried_tensors += 1;
+                    *preserved_roles.entry(role).or_insert(0) += 1;
                     planned.push(PlannedTensor {
                         relative_name: t.name.clone(),
                         source_name: t.name.clone(),
@@ -241,9 +273,21 @@ pub fn compile_representation(
         }
 
         if compiled_tensors == 0 {
-            // Nothing to compile here; the object keeps its canonical
+            // Nothing eligible here; the object keeps its canonical
             // representation alone rather than gaining an identical copy
-            // under a misleading name.
+            // under a misleading name. Recorded, not silently skipped —
+            // "the embedding is BF16 because the policy protects it" and
+            // "the embedding is BF16 because nobody looked" are different
+            // facts and a report that cannot tell them apart is useless.
+            report.preserved_objects.push(PreservedObject {
+                object: entry.object.clone(),
+                encoding: entry.encoding.clone(),
+                bytes: entry.payload_bytes,
+                roles: preserved_roles
+                    .into_iter()
+                    .filter(|(_, n)| *n > 0)
+                    .collect(),
+            });
             continue;
         }
 
@@ -337,6 +381,10 @@ pub fn compile_representation(
             carried_tensors,
             source_bytes,
             compiled_bytes: written.payload_bytes,
+            preserved: preserved_roles
+                .into_iter()
+                .filter(|(_, n)| *n > 0)
+                .collect(),
         });
         compiled_object_ids.insert(entry.object.clone());
 
@@ -358,8 +406,9 @@ pub fn compile_representation(
 
     if added.is_empty() {
         return Err(VindexError::Parse(format!(
-            "no object in this container has a matrix `{}` applies to; \
-             nothing was compiled and no container was written",
+            "no tensor in this container is eligible for `{}` under the \
+             active role policy; nothing was compiled and no container \
+             was written",
             spec.encoding
         )));
     }

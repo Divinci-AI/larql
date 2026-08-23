@@ -234,9 +234,20 @@ pub struct RepresentArgs {
     pub encoding: String,
 
     /// Objects to compile. Repeat the flag to name several; omit to
-    /// compile every object carrying a matrix the encoding applies to.
+    /// compile every object carrying an eligible tensor.
     #[arg(long = "object")]
     pub objects: Vec<String>,
+
+    /// Compile a role the conservative default preserves. Repeat to name
+    /// several. Roles: decoder-linear, expert-weight, embedding,
+    /// output-head, norm, router, small-vector, unknown.
+    ///
+    /// The default compiles decoder-linear and expert-weight only —
+    /// the parameter mass — and preserves the surfaces where 4-bit is
+    /// known to be delicate. This flag is how a profile becomes more
+    /// aggressive deliberately rather than by accident.
+    #[arg(long = "include-role")]
+    pub include_roles: Vec<String>,
 }
 
 #[derive(Args)]
@@ -388,9 +399,16 @@ fn run_encode(args: EncodeArgs) -> Result<(), Box<dyn std::error::Error>> {
 fn run_represent(args: RepresentArgs) -> Result<(), Box<dyn std::error::Error>> {
     use larql_vindex::format::vindex3::represent::{compile_representation, RepresentSpec};
 
+    let mut roles = larql_vindex::format::vindex3::represent::policy::RolePolicy::default();
+    for name in &args.include_roles {
+        let role = larql_vindex::format::vindex3::represent::policy::Role::parse(name)
+            .ok_or_else(|| format!("unknown role `{name}`"))?;
+        roles = roles.including(role);
+    }
     let spec = RepresentSpec {
         encoding: args.encoding.clone(),
         objects: args.objects.clone(),
+        roles,
     };
     println!("== represent {} ==", args.encoding);
     println!("  in     : {}", args.container.display());
@@ -436,6 +454,29 @@ fn run_represent(args: RepresentArgs) -> Result<(), Box<dyn std::error::Error>> 
         human_bytes(out_total),
         ratio
     );
+    let mut protected: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
+    for c in &report.compiled_objects {
+        for (role, n) in &c.preserved {
+            *protected.entry(role.to_string()).or_insert(0) += n;
+        }
+    }
+    for po in &report.preserved_objects {
+        let roles: Vec<String> = po.roles.iter().map(|(r, n)| format!("{r} x{n}")).collect();
+        println!(
+            "  {:<34} {:>12} {:>12}   preserved whole [{}]",
+            po.object,
+            human_bytes(po.bytes),
+            po.encoding,
+            roles.join(", ")
+        );
+    }
+    if !protected.is_empty() {
+        println!("\n  preserved at source precision (conservative default):");
+        for (role, n) in &protected {
+            println!("    {role:<16} {n} tensor(s)");
+        }
+    }
     println!(
         "\n  {} segment(s) carried unchanged; canonical bytes are untouched.",
         report.linked_segments

@@ -58,6 +58,18 @@ impl Ablation {
 /// The buffers are keyed on the `AlignedBytes` address, which lives for
 /// the session, so `lowering_weight` caches them and the weight is
 /// uploaded once rather than per position.
+///
+/// `read_bytes` counts `logical_len`, not `as_slice().len()`. The
+/// allocation is padded to `DEVICE_PAGE_ALIGN`; the *tensor* is the prefix,
+/// and the byte-floor ledger divides these counts by measured bandwidth to
+/// price a token. Counting padding would inflate both the bytes and the
+/// achieved GB/s that follow from them.
+///
+/// The error is shape-dependent and therefore treacherous: it is exactly
+/// zero on Granite (every allocation lands on a page boundary) and 0.43% on
+/// gpt-oss's 2880-wide stack, so a ledger validated on one model can drift
+/// silently on the next. `packed_attention` below already counted logical
+/// bytes; these three arms did not.
 pub(super) fn resident_matrix(
     gpu: &MetalBackend,
     store: &OperandStore,
@@ -78,7 +90,7 @@ pub(super) fn resident_matrix(
             scales: gpu.lowering_weight(scales.as_slice()),
             packed_offset: 0,
             scales_offset: 0,
-            read_bytes: packed.as_slice().len() + scales.as_slice().len(),
+            read_bytes: packed.logical_len() + scales.logical_len(),
             tensor_scale: *tensor_scale,
             format: WeightFormat::Nvfp4,
             rows,
@@ -89,7 +101,7 @@ pub(super) fn resident_matrix(
             scales: gpu.lowering_weight(scales.as_slice()),
             packed_offset: 0,
             scales_offset: 0,
-            read_bytes: packed.as_slice().len() + scales.as_slice().len(),
+            read_bytes: packed.logical_len() + scales.logical_len(),
             tensor_scale: 1.0,
             format: WeightFormat::Mxfp4,
             rows,
@@ -100,7 +112,7 @@ pub(super) fn resident_matrix(
             scales: gpu.lowering_weight(&[]),
             packed_offset: 0,
             scales_offset: 0,
-            read_bytes: bytes.as_slice().len(),
+            read_bytes: bytes.logical_len(),
             tensor_scale: 1.0,
             format: WeightFormat::F16,
             rows,

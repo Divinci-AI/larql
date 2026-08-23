@@ -271,6 +271,7 @@ fn an_unknown_encoding_is_refused_before_anything_is_written() {
     let spec = RepresentSpec {
         encoding: "MXFP4".into(),
         objects: Vec::new(),
+        roles: policy::RolePolicy::default(),
     };
     let err = compile_representation(&src, &out, &spec)
         .unwrap_err()
@@ -319,6 +320,7 @@ fn an_object_filter_compiles_only_what_it_names() {
     let spec = RepresentSpec {
         encoding: DTYPE_NVFP4.to_string(),
         objects: vec![target.clone()],
+        roles: policy::RolePolicy::default(),
     };
     let report = compile_representation(&src, &out, &spec).unwrap();
     assert_eq!(report.compiled_objects.len(), 1);
@@ -386,4 +388,83 @@ fn the_pack_lives_under_segments_and_is_declared() {
             "stray segment at the container root: {name}"
         );
     }
+}
+
+#[test]
+fn the_default_policy_preserves_the_embedding_and_the_head() {
+    // Regression for the shape-based default: an embedding table is a 2-D
+    // matrix, and "matrix implies quantise" 4-bits one of the surfaces
+    // where 4-bit is least safe. Role decides now.
+    let tmp = tempfile::tempdir().unwrap();
+    let (_, out, report) = compiled_pair(&tmp);
+    let index = index_of(&out);
+
+    let compiled: Vec<&str> = report
+        .compiled_objects
+        .iter()
+        .map(|c| c.object.as_str())
+        .collect();
+    assert!(
+        compiled.iter().any(|o| o.contains("decoder_stack")),
+        "decoder linear weights are the point of the default policy"
+    );
+
+    // The embedding object may be compiled only if some tensor in it was
+    // eligible — under the default, none is.
+    for c in &report.compiled_objects {
+        if c.object.contains("embedding") || c.object.contains("output_head") {
+            panic!("{} was compiled under the conservative default", c.object);
+        }
+    }
+    // And no NVFP4 representation exists for it in the index.
+    for (id, e) in &index.representations {
+        if e.encoding == DTYPE_NVFP4 {
+            assert!(
+                !id.contains("embedding") && !id.contains("output_head"),
+                "{id} should not have a compiled pack by default"
+            );
+        }
+    }
+}
+
+#[test]
+fn opting_the_embedding_in_compiles_it() {
+    // The escape hatch works, and only for the role named.
+    let tmp = tempfile::tempdir().unwrap();
+    let checkpoint = tmp.path().join("ckpt");
+    std::fs::create_dir_all(&checkpoint).unwrap();
+    let src = tmp.path().join("src.vindex3");
+    let out = tmp.path().join("aggressive.vindex3");
+    encode_fixture_container(dense_f32_model, &checkpoint, &src, "target");
+
+    let mut spec = RepresentSpec::nvfp4();
+    spec.roles = spec.roles.clone().including(policy::Role::Embedding);
+    let report = compile_representation(&src, &out, &spec).unwrap();
+
+    assert!(
+        report
+            .compiled_objects
+            .iter()
+            .any(|c| c.object.contains("embedding")),
+        "explicit opt-in must compile the embedding"
+    );
+}
+
+#[test]
+fn the_report_names_what_the_policy_protected() {
+    // A conservative default is only trustworthy if it says what it
+    // conserved; a silent policy is indistinguishable from no policy.
+    let tmp = tempfile::tempdir().unwrap();
+    let (_, _, report) = compiled_pair(&tmp);
+    let stack = report
+        .compiled_objects
+        .iter()
+        .find(|c| c.object.contains("decoder_stack"))
+        .expect("the stack is compiled");
+    assert!(
+        !stack.preserved.is_empty(),
+        "the decoder stack carries norms the policy preserved"
+    );
+    let protected: usize = stack.preserved.values().sum();
+    assert_eq!(protected, stack.carried_tensors);
 }

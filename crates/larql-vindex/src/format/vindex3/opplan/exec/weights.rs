@@ -514,6 +514,44 @@ mod tests {
         f32::from_bits(u32::from(bits) << 16)
     }
 
+    /// `logical_len` is the tensor; `as_slice` is the allocation.
+    ///
+    /// Every byte-accounting consumer must use the former. The two are
+    /// equal whenever a size lands on a page boundary — which is why the
+    /// distinction is easy to lose: Granite's NVFP4 allocations are all
+    /// exact multiples, so a ledger built on `as_slice().len()` reads
+    /// correct there and drifts on gpt-oss's 2880-wide shapes.
+    #[test]
+    fn a_page_padded_allocation_reports_the_tensor_not_the_padding() {
+        // gpt-oss [2880, 2880] NVFP4 codes: 180 groups x 8 bytes x 2880 rows.
+        let logical: usize = 2880 * (2880 / 16) * 8;
+        assert!(
+            !logical.is_multiple_of(DEVICE_PAGE_ALIGN),
+            "fixture must not be page-aligned or it cannot detect the bug"
+        );
+
+        let bytes = AlignedBytes::zeroed(logical);
+        assert_eq!(bytes.logical_len(), logical);
+        assert!(
+            bytes.as_slice().len() > logical,
+            "the allocation is padded past the tensor"
+        );
+        assert_eq!(
+            bytes.as_slice().len(),
+            logical.div_ceil(DEVICE_PAGE_ALIGN) * DEVICE_PAGE_ALIGN
+        );
+    }
+
+    /// The aligned case, so the test above cannot be satisfied by an
+    /// implementation that always over-reports.
+    #[test]
+    fn an_exactly_page_sized_allocation_has_no_padding() {
+        let logical = DEVICE_PAGE_ALIGN * 3;
+        let bytes = AlignedBytes::zeroed(logical);
+        assert_eq!(bytes.logical_len(), logical);
+        assert_eq!(bytes.as_slice().len(), logical);
+    }
+
     /// Every normal-range bf16 value must convert to f16 exactly.
     #[test]
     fn normal_range_conversion_is_exact() {
