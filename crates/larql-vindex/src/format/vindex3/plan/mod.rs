@@ -29,6 +29,7 @@
 //! The verdict is fail-closed and the exit gate is mechanical:
 //! `blocking == 0` before a single weight byte is converted.
 
+pub mod capability;
 pub mod carriage;
 pub mod compare;
 pub mod report;
@@ -87,13 +88,24 @@ pub fn plan_system(named: &[(String, ArchitectureInventory)]) -> SystemPlan {
         }
     }
     summary.interfaces += interfaces.len();
+    // Whole-model completeness, unchanged: every declared semantic fact of
+    // this checkpoint has a faithful home. Deliberately still a single
+    // Boolean over everything — see `capability` for why execution needs a
+    // different question rather than a weaker version of this one.
     let admissible = summary.blocking == 0;
+    let capabilities = capability::Capability::ALL
+        .iter()
+        .map(|c| {
+            capability::admissible_for(*c, artifacts.iter().flat_map(|a| &a.findings), &built.graph)
+        })
+        .collect();
 
     SystemPlan {
         schema: PLAN_SCHEMA,
         artifacts,
         interfaces,
         admissible,
+        capabilities,
         summary,
         graph: built.graph,
     }

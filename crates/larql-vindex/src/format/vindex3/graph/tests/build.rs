@@ -333,6 +333,59 @@ fn the_gemma4_multimodal_embedder_is_a_perception_adapter() {
         .any(|b| b.tensor_prefix.contains("embed_vision")));
 }
 
+/// A group inside a modality's subtree is never filed under the language
+/// model, whatever its leaf happens to be called.
+///
+/// This is a live defect, caught by Gemma 4 12B (`gemma4_unified_vision`),
+/// whose encoder-free image path is a bare projection:
+/// `model.vision_embedder.pos_embedding` contains "embedding" and
+/// `model.vision_embedder.pos_norm` contains "norm", and the substring pass
+/// filed both into the TEXT model's embedding and norm groups.
+/// `model.embed_audio.embedding_projection` went the same way. The tensors
+/// were silently bound to objects no evidence says they implement — worse
+/// than the unplaced case above, which at least blocks the plan and says
+/// why.
+///
+/// The artifact here declares no perception component, so the correct
+/// outcome is `unplaced` for the *other* reason: classified for a component
+/// this artifact does not declare.
+#[test]
+fn a_modality_owned_group_is_never_filed_under_the_language_model() {
+    for prefix in [
+        "model.vision_embedder.pos_embedding",
+        "model.vision_embedder.pos_norm",
+        "model.vision_embedder.patch_dense",
+        "model.embed_audio.embedding_projection",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut inventory = known_dense(dir.path());
+        inventory
+            .tensors
+            .groups
+            .push(larql_models::inventory::TensorGroup {
+                prefix: prefix.to_string(),
+                tensors: 1,
+                bytes: 32,
+            });
+        let named = vec![("only-artifact".to_string(), inventory)];
+        let built = build_from_inventories(&named);
+
+        let bound_to_text = built.graph.objects.iter().find(|o| {
+            o.component == "target" && o.source_bindings.iter().any(|b| b.tensor_prefix == prefix)
+        });
+        assert!(
+            bound_to_text.is_none(),
+            "{prefix} was bound to the language model as {:?}",
+            bound_to_text.map(|o| &o.id)
+        );
+        assert!(
+            built.unplaced.iter().any(|u| u.prefix == prefix),
+            "{prefix} vanished: neither placed in a perception component \
+             nor reported unplaced"
+        );
+    }
+}
+
 /// Qwen3.5's MTP draft head declares its own tensor namespace (`mtp.fc`,
 /// `mtp.layers.*`, `mtp.norm`, `mtp.pre_fc_norm_hidden`,
 /// `mtp.pre_fc_norm_embedding`) sitting beside the primary text model's own

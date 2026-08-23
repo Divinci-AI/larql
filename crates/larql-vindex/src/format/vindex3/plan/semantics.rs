@@ -162,6 +162,19 @@ pub const TENSOR_SEMANTIC_KEYS: &[&str] = &[
     "n_layer",
     "n_inner",
     "n_head",
+    // Channel count of the patch embedder's input. Classified here beside
+    // the other patch geometry, with its Qwen3-VL spelling.
+    "num_channels",
+    "in_channels",
+    // Qwen3-VL perception-tower aliases of the shape fields above
+    // (`num_hidden_layers`, `num_attention_heads`, `merge_size`,
+    // `patch_temporal`). The same 27-layer, 16-head, 1152-wide tower under
+    // a different vocabulary — the inventory reads them canonical-first, so
+    // a checkpoint using the canonical spelling never reaches these.
+    "depth",
+    "num_heads",
+    "spatial_merge_size",
+    "temporal_patch_size",
     // The stored representation: what the checkpoint's raw-byte tensors
     // *are*. `quantization_config.quant_method` (`mxfp4` on GPT-OSS) and
     // its `modules_to_not_convert` exclusion list decide the encoding a

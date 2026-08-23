@@ -44,7 +44,19 @@ pub struct SystemPlan {
     /// Cross-component interfaces resolved into graph edges.
     pub interfaces: Vec<InterfacePlan>,
     /// True iff no blocking finding exists anywhere in the system.
+    ///
+    /// **Model completeness**, not executability. A container can be
+    /// inadmissible here and still run text generation perfectly — see
+    /// [`capabilities`](Self::capabilities).
     pub admissible: bool,
+    /// Per-capability execution admissibility, each judged on its own
+    /// dependency closure.
+    ///
+    /// Defaulted on deserialisation so plans written before capability
+    /// scoping existed still read, and skipped when empty so those plans
+    /// serialise byte-identically.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<super::capability::CapabilityStatus>,
     pub summary: PlanSummary,
     /// The system graph the builder produced — what G3 encodes.
     pub graph: SystemGraph,

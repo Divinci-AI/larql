@@ -27,6 +27,7 @@ fn component(id: &str, role: ComponentRole, layers: usize) -> Component {
             layers
         ]),
         execution: None,
+        perception: None,
     }
 }
 
