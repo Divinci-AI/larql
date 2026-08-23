@@ -273,6 +273,25 @@ impl ResponseKvCache {
         removed
     }
 
+    /// Free every continuation produced by `model_id`, regardless of
+    /// session ownership. Called on a successful model unload
+    /// (`docs/runtime-lifecycle-design.md` §1's id-reuse trap): a KV
+    /// state is meaningless once the runtime that produced it is gone,
+    /// and if a future load reuses the same model id with different
+    /// weights, nothing must survive to be silently resumed against
+    /// them. Safe to call when nothing matches. Returns how many
+    /// states were freed.
+    pub fn drop_owned_by_model(&self, model_id: &str) -> usize {
+        let mut inner = self.lock();
+        let before = inner.by_id.len();
+        inner.by_id.retain(|_, e| e.model_id != model_id);
+        let removed = before - inner.by_id.len();
+        if removed > 0 {
+            prune_order(&mut inner);
+        }
+        removed
+    }
+
     /// What `session_id` currently has to resume from.
     pub fn owned_by(&self, session_id: &str) -> SessionContinuation {
         let inner = self.lock();

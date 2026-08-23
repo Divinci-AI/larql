@@ -666,6 +666,8 @@ pub mod schemas {
         // admin
         crate::routes::health::handle_health,
         crate::routes::runtime::handle_runtime,
+        crate::routes::runtime_lifecycle::handle_load_model,
+        crate::routes::runtime_lifecycle::handle_unload_model,
         crate::routes::embed::handle_embed,
         crate::routes::embed::handle_embed_single,
         crate::routes::embed::handle_logits,
@@ -758,6 +760,7 @@ pub mod schemas {
         schemas::RuntimePerformance,
         schemas::RuntimeGeneration,
         schemas::RuntimeResponse,
+        crate::routes::runtime_lifecycle::LoadModelRequest,
         schemas::TokenEncodeResponse,
         schemas::TokenDecodeResponse,
         schemas::EmbedSingleJsonResponse,

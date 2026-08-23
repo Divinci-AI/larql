@@ -1,11 +1,12 @@
-# Runtime model lifecycle — design notes (pre-implementation)
+# Runtime model lifecycle — design notes
 
-Status: **rungs 1 and 2 of §6 are done; no endpoints, no
-state-machine code, no event stream yet.** This document exists to
-settle the state machine and inventory the seams a future
-`POST/DELETE /v1/runtime/model` would need, before any of it gets
-built. See `/v1/runtime` (`routes/runtime.rs`, `runtime_stats.rs`)
-for the read-only surface this lifecycle work sits underneath.
+Status: **all four rungs of §6 are done.** `ModelSet` is
+interior-mutable (rung 1), `V3Model` has an in-flight counter (rung
+2), `RouterTopology` freezes the 0↔1 invariant (rung 3), and
+`POST`/`DELETE /v1/runtime/model` are live on `single_model_router`
+(rung 4, `routes/runtime_lifecycle.rs`). No event stream yet — polling
+`/v1/runtime` (`routes/runtime.rs`, `runtime_stats.rs`) remains
+sufficient, per §5's non-goals.
 
 ## 1. What exists today (grounded in code, not assumption)
 
@@ -188,17 +189,21 @@ Two notes the diagram can't carry on its own:
 
 | Case | Resolution |
 |---|---|
-| Load B while A is loaded (single-slot scope) | Rejected as a **swap request**, not a raw load — the caller says "replace," the server does unload(A)-then-load(B) as one sequenced operation, never holding both. If the caller instead calls plain "load B" while a slot is occupied: reject (409-shaped), point at the swap operation. |
+| Load B while A is loaded (single-slot scope) | **Rung 4, as built:** no server-side swap operation — `POST` while a different model is bound is refused outright (409, `LoadDecision::Refuse`), naming the bound model and pointing at `DELETE /v1/runtime/model`. The caller sequences unload-then-load itself; the server never holds, or attempts to hold, both. (Supersedes this row's earlier "server does unload(A)-then-load(B) as one sequenced operation" framing — no such internal sequencing exists.) |
 | Unload while generation active | `ready → unloading`: stop resolving *new* requests to this slot immediately (an instant Vec/slot mutation); poll the model's in-flight counter with a timeout (GT6 shape); drop the `Arc` once it hits zero or the timeout elapses. See §1 on V3's missing counter — this is the blocking prerequisite for V3 unload specifically. |
 | Load while a load is already active | Single-flighted per slot, same shape as `LoadedModel.weights_init` today but at the *admin* layer, not the weights layer — a second concurrent load call on the same slot is rejected outright, not queued (queuing hides operator mistakes; better to fail loud). |
 | Failed load | Slot returns to `idle`; nothing was written to `AppState.models`; error surfaced. No retry state to manage. |
-| Failed unload (drain timeout) | Two legitimate policies, must pick one explicitly rather than let it be implicit: (a) force-drop the `Arc` anyway once the timeout elapses (in-flight requests keep working off their own clone, per §1 — this is safe, just not clean), or (b) refuse and stay in `unloading`, requiring an explicit force-unload. Recommend (a) with a logged warning, since it mirrors GT6's own choice (`drain_requests` logs and proceeds past its timeout rather than blocking forever). |
+| Failed unload (drain timeout) | **Rung 4, as built: policy (b), not the (a) this row originally recommended.** The model is put back in `ModelSet` exactly where it came from, `lifecycle` reverts to `Ready`, and the call returns a 409 — the drain timeout fails closed rather than force-dropping the `Arc`. Reasoning: this codebase has no cooperative generation cancellation (§3), so force-dropping on timeout would let the server claim "unloaded" while a generation might still be reading the weights through its own clone — an honest-but-surprising state for a caller who just got told the unload succeeded. Fail-closed keeps the invariant simple: the server never reports a mutation as done unless it verified the model's in-flight count actually reached zero. |
 | Cancelled generation (mid-unload) | See §3 — "stop waiting," not "stop running," matches the existing infer-timeout precedent. Don't promise more than the codebase can deliver today. |
 | VINDEX2 vs VINDEX3 lifecycle | Same state machine, different mechanics: V2 unload drops `Arc<LoadedModel>` (weights may or may not be loaded yet, per `weights: OnceLock`); V3 drops `Arc<V3Model>` (operands are lowered at bind time — `Vindex3Runtime::prepare`, see `vindex3.rs` module docs — so a V3 "load" is heavier up front and a V3 "unload" has nothing lazy left to *not* free). The important asymmetry is the in-flight counter gap noted in §1, not the drop itself. |
 
 ## 5. Explicit non-goals for this pass
 
-- No `POST`/`DELETE` endpoints yet.
+- No atomic A→B replacement — a client swaps a model by calling
+  `DELETE` then `POST`; `POST` while a different model is bound is
+  refused outright, naming the unload step. (This supersedes §4's
+  "swap request" framing above, which predates rung 4's actual
+  implementation — see rung 4's note in §6.)
 - No event stream (`runtime.model.loading` etc.) — polling
   `/v1/runtime` is sufficient until a real client (the Mac app)
   demonstrates it isn't.
@@ -215,13 +220,22 @@ Two notes the diagram can't carry on its own:
    slot~~ **Done** — `ModelSet` behind one `RwLock` (§1).
 2. ~~Add the missing V3 in-flight counter at the `generate_v3_request`
    choke point~~ **Done** — `V3Model::requests_in_flight()` (§1).
-3. Before the two endpoints: settle §7's `is_multi_model()` /
-   router-topology invariant explicitly — don't discover it mid-PR.
-4. Only then: the two endpoints, built directly against the state
-   machine in §3 and the edge-case table in §4 — at which point they
-   should be close to mechanical.
+3. ~~Before the two endpoints: settle §7's `is_multi_model()` /
+   router-topology invariant explicitly~~ **Done** — `RouterTopology`
+   frozen at boot, `AppState::validate_lifecycle_mutation` enforces
+   0↔1 (§7).
+4. ~~Only then: the two endpoints, built directly against the state
+   machine in §3 and the edge-case table in §4~~ **Done** —
+   `POST`/`DELETE /v1/runtime/model` (`routes/runtime_lifecycle.rs`),
+   wired on `single_model_router` only. `decide_load`/`decide_unload`
+   (`state/lifecycle.rs`) are the pure decision functions behind the
+   two handlers; the drain-timeout fail-closed policy is §4's updated
+   row above. On every successful unload, `SessionManager::drop_sessions_bound_to`
+   and `ResponseKvCache::drop_owned_by_model` purge state tied to the
+   unloaded model's id (§1's id-reuse trap) — unconditionally, not
+   only on a subsequent reload.
 
-## 7. Bank for rung 3: `is_multi_model()` must not go dynamic by accident
+## 7. `is_multi_model()` must not go dynamic by accident — resolved
 
 `AppState::is_multi_model()` (`state/model_set.rs`) reads the *current*
 `ModelSet` and returns `models.len() + v3_models.len() > 1`. Today
@@ -255,9 +269,19 @@ acceptable; picking neither is not):
   read the frozen fact; callers that care about current count read the
   live one; nothing reads one and assumes it means the other.
 
-Whichever is chosen, the constraint is the same: **don't let
-`is_multi_model()` silently become dynamic while the axum router
-remains static.** That mismatch is exactly the kind of bug that only
-shows up once someone actually calls the mutation endpoint in
-multi-model mode — which is also exactly why rung 1 scoped dynamic
-loading to 0↔1 in the first place (§2).
+**Resolution: both, combined.** `RouterTopology::SingleModel |
+MultiModel` (`state/lifecycle.rs`) freezes the boot-time fact —
+`RouterTopology::for_boot_count` is called once, from the same total
+`bootstrap::serve` uses to pick the axum `Router` variant, so the two
+can never disagree. `AppState::validate_lifecycle_mutation(proposed_count)`
+then enforces the 0↔1 invariant against that frozen fact: a
+`MultiModel` boot refuses every mutation outright regardless of
+`proposed_count`; a `SingleModel` boot allows one only while
+`proposed_count` stays ≤ 1. `is_multi_model()` itself is unchanged —
+still a live, reactive read of the current `ModelSet` — but it can no
+longer silently drift from what the router actually is, because
+`RouterTopology` is the fact anything that cares about *routing*
+should read instead, and no mutation can ever make the two disagree
+about which router shape is live. Every entry into `routes::runtime_lifecycle`'s
+`load_model`/`unload_model` checks `validate_lifecycle_mutation` first,
+before touching `lifecycle` or `model_set` at all.

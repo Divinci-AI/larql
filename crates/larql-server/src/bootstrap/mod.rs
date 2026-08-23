@@ -279,6 +279,29 @@ pub async fn serve(cli: Cli) -> Result<(), BoxError> {
     // actually exists can never disagree with each other.
     let router_topology =
         crate::state::RouterTopology::for_boot_count(models.len() + v3_models.len());
+    // The lifecycle flag's initial value: `Ready` only when boot
+    // loaded exactly the one model a single-model topology can ever
+    // hold; `Idle` for zero models *and* for a multi-model boot (2+).
+    // A multi-model boot's value is never actually consulted —
+    // `validate_lifecycle_mutation` refuses every mutation before
+    // anything reads `lifecycle` — but `Idle` is still the honest
+    // placeholder: `Ready` names exactly one binding, and a
+    // multi-model boot doesn't have one to name.
+    let initial_lifecycle = match (
+        models.first(),
+        v3_models.first(),
+        models.len() + v3_models.len(),
+    ) {
+        (Some(m), _, 1) => crate::state::LifecycleState::Ready {
+            model_id: m.id.clone(),
+            path: m.path.clone(),
+        },
+        (_, Some(m), 1) => crate::state::LifecycleState::Ready {
+            model_id: m.id.clone(),
+            path: m.path.clone(),
+        },
+        _ => crate::state::LifecycleState::Idle,
+    };
 
     let state = Arc::new(AppState {
         model_set: std::sync::RwLock::new(crate::state::ModelSet {
@@ -286,6 +309,7 @@ pub async fn serve(cli: Cli) -> Result<(), BoxError> {
             v3_models: v3_models.clone(),
         }),
         router_topology,
+        lifecycle: std::sync::Mutex::new(initial_lifecycle),
         started_at: std::time::Instant::now(),
         requests_served: std::sync::atomic::AtomicU64::new(0),
         api_key: cli.api_key.clone(),

@@ -332,6 +332,7 @@ async fn spawn_server_with_model(model: LoadedModel) -> String {
             v3_models: Vec::new(),
         }),
         router_topology: larql_server::state::RouterTopology::SingleModel,
+        lifecycle: std::sync::Mutex::new(larql_server::state::LifecycleState::Idle),
         started_at: std::time::Instant::now(),
         requests_served: std::sync::atomic::AtomicU64::new(0),
         api_key: None,

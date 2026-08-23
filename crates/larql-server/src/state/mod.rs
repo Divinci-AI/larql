@@ -6,9 +6,11 @@
 //! - `model_set.rs`    — `ModelSet` (the coherent V2+V3 snapshot),
 //!   `ServedModel`, and every `AppState` method that resolves a
 //!   request to a model.
-//! - `lifecycle.rs`    — `RouterTopology` and the invariant that
-//!   dynamic model lifecycle mutation cannot outgrow the router axum
-//!   was actually built with (`docs/runtime-lifecycle-design.md` §7).
+//! - `lifecycle.rs`    — `RouterTopology` (the invariant that dynamic
+//!   model lifecycle mutation cannot outgrow the router axum was
+//!   actually built with, `docs/runtime-lifecycle-design.md` §7) and
+//!   `LifecycleState` (the single-slot load/unload state machine
+//!   `routes/runtime_lifecycle.rs` drives).
 //! - this file          — `AppState` itself and small free-standing
 //!   helpers that don't belong to any of the above.
 //!
@@ -21,7 +23,10 @@ mod lifecycle;
 mod loaded_model;
 mod model_set;
 
-pub use lifecycle::{LifecycleError, RouterTopology};
+pub use lifecycle::{
+    decide_load, decide_unload, LifecycleError, LifecycleState, LoadDecision, RouterTopology,
+    UnloadDecision,
+};
 pub use loaded_model::LoadedModel;
 pub use model_set::{ModelSet, ServedModel};
 
@@ -48,6 +53,12 @@ pub struct AppState {
     /// §7. Every lifecycle mutation must go through
     /// [`AppState::validate_lifecycle_mutation`], which reads this.
     pub router_topology: RouterTopology,
+    /// The single-slot load/unload state flag `routes::runtime_lifecycle`
+    /// drives. Held only long enough to check-and-set — the actual
+    /// load/drain work runs with the lock released, so a concurrent
+    /// second lifecycle call sees the flag immediately (and rejects
+    /// outright) instead of blocking behind it.
+    pub lifecycle: std::sync::Mutex<LifecycleState>,
     /// Server start time for uptime reporting.
     pub started_at: std::time::Instant,
     /// Request counter.

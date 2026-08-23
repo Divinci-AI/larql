@@ -85,17 +85,14 @@ fn model_bytes(served: &ServedModel) -> Option<u64> {
     }
 }
 
-#[utoipa::path(
-    get,
-    path = "/v1/runtime",
-    tag = "admin",
-    responses(
-        (status = 200, description = "Server + model + backend + memory + performance snapshot", body = crate::openapi::schemas::RuntimeResponse),
-    ),
-)]
-pub async fn handle_runtime(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    state.bump_requests();
-
+/// Build the `/v1/runtime` snapshot. Shared with
+/// `routes::runtime_lifecycle`'s `POST`/`DELETE` handlers, which
+/// return this same shape after a successful (or idempotent, or
+/// refused) mutation — a client that just loaded or unloaded a model
+/// doesn't need a second round trip to see the result. Does not bump
+/// the request counter; callers do that once, at their own HTTP entry
+/// point.
+pub(crate) fn runtime_snapshot(state: &AppState) -> serde_json::Value {
     // Same "single binding or none" resolution `/v1/health` implicitly
     // relies on — never an error here, since the process-level facts
     // below are worth reporting regardless of how many models are
@@ -104,7 +101,7 @@ pub async fn handle_runtime(State(state): State<Arc<AppState>>) -> Json<serde_js
     let sample = state.runtime.last_sample();
     let active_requests = state.runtime.active_requests();
 
-    Json(serde_json::json!({
+    serde_json::json!({
         "status": STATUS_READY,
         "version": env!("CARGO_PKG_VERSION"),
         "uptime_ms": state.started_at.elapsed().as_millis() as u64,
@@ -125,7 +122,20 @@ pub async fn handle_runtime(State(state): State<Arc<AppState>>) -> Json<serde_js
             "active": active_requests > 0,
             "active_requests": active_requests,
         },
-    }))
+    })
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/runtime",
+    tag = "admin",
+    responses(
+        (status = 200, description = "Server + model + backend + memory + performance snapshot", body = crate::openapi::schemas::RuntimeResponse),
+    ),
+)]
+pub async fn handle_runtime(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    state.bump_requests();
+    Json(runtime_snapshot(&state))
 }
 
 #[cfg(test)]

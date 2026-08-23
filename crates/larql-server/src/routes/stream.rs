@@ -730,6 +730,7 @@ mod tests {
                 v3_models: Vec::new(),
             }),
             router_topology,
+            lifecycle: std::sync::Mutex::new(crate::state::LifecycleState::Idle),
             started_at: std::time::Instant::now(),
             requests_served: AtomicU64::new(0),
             api_key: None,

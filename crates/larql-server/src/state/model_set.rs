@@ -28,6 +28,48 @@ pub struct ModelSet {
     pub v3_models: Vec<Arc<crate::vindex3::V3Model>>,
 }
 
+impl ModelSet {
+    /// Bind a freshly loaded V2 model. Callers are responsible for the
+    /// 0↔1 topology invariant
+    /// ([`AppState::validate_lifecycle_mutation`]) *before* calling
+    /// this — a `ModelSet` has no opinion of its own about how many
+    /// entries it should hold, only about keeping the two lists
+    /// coherent with each other.
+    pub fn insert_v2(&mut self, model: Arc<LoadedModel>) {
+        self.models.push(model);
+    }
+
+    /// [`Self::insert_v2`]'s V3 counterpart.
+    pub fn insert_v3(&mut self, model: Arc<crate::vindex3::V3Model>) {
+        self.v3_models.push(model);
+    }
+
+    /// Remove the bound model with `id`, from whichever registry it's
+    /// actually in, and hand back what was removed so the caller can
+    /// finish tearing it down (drain, cache invalidation) or put it
+    /// straight back on a failed drain. `None` means nothing matched —
+    /// the idempotent-unload case, not an error.
+    pub fn remove(&mut self, id: &str) -> Option<ServedModel> {
+        if let Some(pos) = self.models.iter().position(|m| m.id == id) {
+            return Some(ServedModel::V2(self.models.remove(pos)));
+        }
+        if let Some(pos) = self.v3_models.iter().position(|m| m.id == id) {
+            return Some(ServedModel::V3(self.v3_models.remove(pos)));
+        }
+        None
+    }
+
+    /// Put a previously-[`remove`](Self::remove)d model back — the
+    /// fail-closed path when a drain times out. Nothing about the
+    /// binding changed, so it goes back exactly where it came from.
+    pub fn reinsert(&mut self, model: ServedModel) {
+        match model {
+            ServedModel::V2(m) => self.models.push(m),
+            ServedModel::V3(m) => self.v3_models.push(m),
+        }
+    }
+}
+
 /// One request's resolved model binding: which runtime serves it.
 /// Produced only by [`AppState::served`]; the enum exists so the
 /// version distinction lives at model resolution, not inside
@@ -253,6 +295,7 @@ mod model_set_tests {
                 v3_models: Vec::new(),
             }),
             router_topology,
+            lifecycle: std::sync::Mutex::new(crate::state::LifecycleState::Idle),
             started_at: std::time::Instant::now(),
             requests_served: std::sync::atomic::AtomicU64::new(0),
             api_key: None,
@@ -273,6 +316,47 @@ mod model_set_tests {
         let set = ModelSet::default();
         assert!(set.models.is_empty());
         assert!(set.v3_models.is_empty());
+    }
+
+    #[test]
+    fn insert_v2_and_remove_round_trip() {
+        let mut set = ModelSet::default();
+        set.insert_v2(stub_model("a"));
+        assert_eq!(set.models.len(), 1);
+
+        let removed = set.remove("a").expect("just inserted");
+        assert!(matches!(removed, ServedModel::V2(m) if m.id == "a"));
+        assert!(set.models.is_empty());
+    }
+
+    #[test]
+    fn remove_an_unknown_id_is_none_not_a_panic() {
+        let mut set = ModelSet::default();
+        set.insert_v2(stub_model("a"));
+        assert!(set.remove("missing").is_none());
+        assert_eq!(set.models.len(), 1, "the real entry must be untouched");
+    }
+
+    #[test]
+    fn remove_only_takes_the_matching_id_out_of_several() {
+        let mut set = ModelSet::default();
+        set.insert_v2(stub_model("a"));
+        set.insert_v2(stub_model("b"));
+        set.remove("a");
+        assert_eq!(set.models.len(), 1);
+        assert_eq!(set.models[0].id, "b");
+    }
+
+    #[test]
+    fn reinsert_puts_a_removed_v2_model_back() {
+        let mut set = ModelSet::default();
+        set.insert_v2(stub_model("a"));
+        let removed = set.remove("a").unwrap();
+        assert!(set.models.is_empty());
+
+        set.reinsert(removed);
+        assert_eq!(set.models.len(), 1);
+        assert_eq!(set.models[0].id, "a");
     }
 
     #[test]

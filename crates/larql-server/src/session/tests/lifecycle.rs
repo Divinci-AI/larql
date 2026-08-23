@@ -165,3 +165,41 @@ fn bind_evicts_expired_sessions_opportunistically() {
     assert!(!map.contains_key("stale"), "write paths still evict");
     assert!(map.contains_key("fresh"));
 }
+
+#[test]
+fn drop_sessions_bound_to_removes_only_the_matching_model() {
+    let sm = SessionManager::new(TEST_TTL_SECS);
+    let t0 = Instant::now();
+    block_on(sm.bind_at("a", "model-x", t0));
+    block_on(sm.bind_at("b", "model-x", t0));
+    block_on(sm.bind_at("c", "model-y", t0));
+
+    assert_eq!(block_on(sm.drop_sessions_bound_to("model-x")), 2);
+    assert_eq!(block_on(sm.session_count()), 1);
+    let map = sm.sessions_blocking_read();
+    assert!(map.contains_key("c"));
+    assert!(!map.contains_key("a"));
+    assert!(!map.contains_key("b"));
+}
+
+#[test]
+fn drop_sessions_bound_to_an_unknown_model_frees_nothing() {
+    let sm = SessionManager::new(TEST_TTL_SECS);
+    insert_session(&sm, "s", Instant::now());
+    assert_eq!(block_on(sm.drop_sessions_bound_to("never-bound")), 0);
+    assert_eq!(block_on(sm.session_count()), 1);
+}
+
+#[test]
+fn drop_sessions_bound_to_kills_the_lease_of_every_session_it_removes() {
+    // Same reason `delete`/eviction kill the lease: an in-flight
+    // generation holding the old lease must observe the model it was
+    // generating under is gone, not silently keep working as if the
+    // session were still live.
+    let sm = SessionManager::new(TEST_TTL_SECS);
+    let lease = block_on(sm.bind("doomed", "model-x"));
+    assert!(lease.is_alive());
+
+    assert_eq!(block_on(sm.drop_sessions_bound_to("model-x")), 1);
+    assert!(!lease.is_alive());
+}

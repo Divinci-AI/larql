@@ -111,6 +111,7 @@ fn state_for(container: &str, kv_entries: usize) -> Arc<AppState> {
             v3_models: vec![v3],
         }),
         router_topology: larql_server::state::RouterTopology::SingleModel,
+        lifecycle: std::sync::Mutex::new(larql_server::state::LifecycleState::Idle),
         started_at: Instant::now(),
         requests_served: AtomicU64::new(0),
         api_key: None,

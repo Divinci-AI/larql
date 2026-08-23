@@ -12,6 +12,7 @@ pub mod openai;
 pub mod patches;
 pub mod relations;
 pub mod runtime;
+pub mod runtime_lifecycle;
 pub mod select;
 pub mod sessions;
 pub mod shard;
@@ -37,6 +38,7 @@ use crate::state::AppState;
 
 const HEALTH: &str = "/v1/health";
 const RUNTIME: &str = "/v1/runtime";
+const RUNTIME_MODEL: &str = "/v1/runtime/model";
 const MODELS: &str = "/v1/models";
 const DESCRIBE: &str = "/v1/describe";
 const WALK: &str = "/v1/walk";
@@ -145,6 +147,15 @@ pub fn single_model_router(state: Arc<AppState>) -> Router {
         .route(STREAM, get(stream::handle_stream))
         .route(HEALTH, get(health::handle_health))
         .route(RUNTIME, get(runtime::handle_runtime))
+        // Dynamic model lifecycle — single-model topology only (0↔1
+        // invariant, `docs/runtime-lifecycle-design.md` §7). Not present
+        // on `multi_model_router`: that route table is sized for a
+        // fixed boot-time model count with no slot for this to mutate.
+        .route(
+            RUNTIME_MODEL,
+            post(runtime_lifecycle::handle_load_model)
+                .delete(runtime_lifecycle::handle_unload_model),
+        )
         .route(MODELS, get(models::handle_models))
         .route(WARMUP, post(warmup::handle_warmup))
         // Embed server endpoints (always available, required for --embed-only mode)

@@ -362,6 +362,29 @@ impl SessionManager {
         Some(removed.num_patches())
     }
 
+    /// Drop every session bound to `model_id`, killing each lease first —
+    /// the same reason `delete` kills the lease before removing the map
+    /// entry: it stops an in-flight generation from re-inserting a KV
+    /// continuation for a session this call is retiring. Called on a
+    /// successful model unload (`docs/runtime-lifecycle-design.md` §1's
+    /// id-reuse trap): a session's patch overlay was built against this
+    /// model's vindex, and a later load reusing the same id with
+    /// different weights must not let that overlay silently apply to
+    /// them. Safe to call when nothing matches. Returns how many
+    /// sessions were removed.
+    pub async fn drop_sessions_bound_to(&self, model_id: &str) -> usize {
+        let mut sessions = self.sessions.write().await;
+        let before = sessions.len();
+        sessions.retain(|_, s| {
+            let bound = s.lease().model_id() == model_id;
+            if bound {
+                s.lease().kill();
+            }
+            !bound
+        });
+        before - sessions.len()
+    }
+
     fn summarize(&self, session: &SessionState) -> SessionSummary {
         let lease = session.lease();
         SessionSummary {
