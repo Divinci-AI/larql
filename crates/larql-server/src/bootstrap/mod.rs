@@ -273,11 +273,19 @@ pub async fn serve(cli: Cli) -> Result<(), BoxError> {
                 }
             });
 
+    // Frozen once, from the exact same boot-time count that decides
+    // which axum `Router` gets built below — computing both from one
+    // call means the topology `AppState` freezes and the router that
+    // actually exists can never disagree with each other.
+    let router_topology =
+        crate::state::RouterTopology::for_boot_count(models.len() + v3_models.len());
+
     let state = Arc::new(AppState {
         model_set: std::sync::RwLock::new(crate::state::ModelSet {
             models: models.clone(),
             v3_models: v3_models.clone(),
         }),
+        router_topology,
         started_at: std::time::Instant::now(),
         requests_served: std::sync::atomic::AtomicU64::new(0),
         api_key: cli.api_key.clone(),
@@ -345,7 +353,10 @@ pub async fn serve(cli: Cli) -> Result<(), BoxError> {
     // a second, divergent way to read `AppState`'s model list.
     let boot_models = state.models_snapshot().models;
 
-    let is_multi = state.is_multi_model();
+    // The router-shape decision reads the frozen fact, not a live
+    // recount — `state.is_multi_model()` would (once mutation exists)
+    // answer a different question than "which router did we build".
+    let is_multi = state.router_topology == crate::state::RouterTopology::MultiModel;
     let mut app = if is_multi {
         info!("Multi-model mode ({} models)", boot_models.len());
         for m in &boot_models {

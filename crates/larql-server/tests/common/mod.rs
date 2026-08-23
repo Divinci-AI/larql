@@ -466,11 +466,13 @@ pub fn model_with_q4k_weights(
 // ══════════════════════════════════════════════════════════════
 
 pub fn state(models: Vec<Arc<LoadedModel>>) -> Arc<AppState> {
+    let router_topology = larql_server::state::RouterTopology::for_boot_count(models.len());
     Arc::new(AppState {
         model_set: std::sync::RwLock::new(larql_server::state::ModelSet {
             models,
             v3_models: Vec::new(),
         }),
+        router_topology,
         started_at: std::time::Instant::now(),
         requests_served: AtomicU64::new(0),
         api_key: None,
@@ -493,11 +495,13 @@ pub fn state_with_timeout(
     models: Vec<Arc<LoadedModel>>,
     timeout: std::time::Duration,
 ) -> Arc<AppState> {
+    let router_topology = larql_server::state::RouterTopology::for_boot_count(models.len());
     Arc::new(AppState {
         model_set: std::sync::RwLock::new(larql_server::state::ModelSet {
             models,
             v3_models: Vec::new(),
         }),
+        router_topology,
         started_at: std::time::Instant::now(),
         requests_served: AtomicU64::new(0),
         api_key: None,
@@ -514,11 +518,13 @@ pub fn state_with_timeout(
 }
 
 pub fn state_with_key(models: Vec<Arc<LoadedModel>>, key: &str) -> Arc<AppState> {
+    let router_topology = larql_server::state::RouterTopology::for_boot_count(models.len());
     Arc::new(AppState {
         model_set: std::sync::RwLock::new(larql_server::state::ModelSet {
             models,
             v3_models: Vec::new(),
         }),
+        router_topology,
         started_at: std::time::Instant::now(),
         requests_served: AtomicU64::new(0),
         api_key: Some(key.to_string()),
@@ -535,11 +541,13 @@ pub fn state_with_key(models: Vec<Arc<LoadedModel>>, key: &str) -> Arc<AppState>
 }
 
 pub fn state_with_cache(models: Vec<Arc<LoadedModel>>, cache_size: u64) -> Arc<AppState> {
+    let router_topology = larql_server::state::RouterTopology::for_boot_count(models.len());
     Arc::new(AppState {
         model_set: std::sync::RwLock::new(larql_server::state::ModelSet {
             models,
             v3_models: Vec::new(),
         }),
+        router_topology,
         started_at: std::time::Instant::now(),
         requests_served: AtomicU64::new(0),
         api_key: None,

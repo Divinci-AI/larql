@@ -723,11 +723,13 @@ mod tests {
     }
 
     fn test_state(models: Vec<Arc<LoadedModel>>) -> Arc<AppState> {
+        let router_topology = crate::state::RouterTopology::for_boot_count(models.len());
         Arc::new(AppState {
             model_set: std::sync::RwLock::new(crate::state::ModelSet {
                 models,
                 v3_models: Vec::new(),
             }),
+            router_topology,
             started_at: std::time::Instant::now(),
             requests_served: AtomicU64::new(0),
             api_key: None,

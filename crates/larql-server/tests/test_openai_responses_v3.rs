@@ -73,6 +73,7 @@ fn v3_state_with_kv_entries(container: &Path, kv_entries: usize) -> Arc<AppState
             models: Vec::new(),
             v3_models: vec![v3],
         }),
+        router_topology: larql_server::state::RouterTopology::SingleModel,
         started_at: std::time::Instant::now(),
         requests_served: std::sync::atomic::AtomicU64::new(0),
         api_key: None,

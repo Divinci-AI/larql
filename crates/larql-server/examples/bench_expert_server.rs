@@ -122,6 +122,7 @@ fn make_app_state(model: LoadedModel) -> Arc<AppState> {
             models: vec![Arc::new(model)],
             v3_models: Vec::new(),
         }),
+        router_topology: larql_server::state::RouterTopology::SingleModel,
         started_at: Instant::now(),
         requests_served: AtomicU64::new(0),
         api_key: None,

@@ -6,17 +6,22 @@
 //! - `model_set.rs`    — `ModelSet` (the coherent V2+V3 snapshot),
 //!   `ServedModel`, and every `AppState` method that resolves a
 //!   request to a model.
+//! - `lifecycle.rs`    — `RouterTopology` and the invariant that
+//!   dynamic model lifecycle mutation cannot outgrow the router axum
+//!   was actually built with (`docs/runtime-lifecycle-design.md` §7).
 //! - this file          — `AppState` itself and small free-standing
-//!   helpers that don't belong to either of the above.
+//!   helpers that don't belong to any of the above.
 //!
 //! The split is pure file-size hygiene (see `docs/runtime-lifecycle-design.md`
 //! §1 for the reasoning behind `ModelSet` itself) — every type here
 //! stays reachable at its original `crate::state::*` path via the
 //! re-exports below.
 
+mod lifecycle;
 mod loaded_model;
 mod model_set;
 
+pub use lifecycle::{LifecycleError, RouterTopology};
 pub use loaded_model::LoadedModel;
 pub use model_set::{ModelSet, ServedModel};
 
@@ -36,6 +41,13 @@ pub struct AppState {
     /// then release it — no inference work, and no `.await`, ever
     /// happens while the guard is held.
     pub model_set: std::sync::RwLock<ModelSet>,
+    /// The router topology `bootstrap::serve` actually built axum
+    /// with, frozen once at construction. This is *not* derivable
+    /// from `model_set`'s live count once lifecycle mutation exists —
+    /// see [`RouterTopology`] and `docs/runtime-lifecycle-design.md`
+    /// §7. Every lifecycle mutation must go through
+    /// [`AppState::validate_lifecycle_mutation`], which reads this.
+    pub router_topology: RouterTopology,
     /// Server start time for uptime reporting.
     pub started_at: std::time::Instant,
     /// Request counter.

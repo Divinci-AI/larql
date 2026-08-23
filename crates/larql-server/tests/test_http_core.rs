@@ -384,6 +384,7 @@ async fn http_warmup_no_model_returns_404() {
             models: vec![],
             v3_models: Vec::new(),
         }),
+        router_topology: larql_server::state::RouterTopology::SingleModel,
         started_at: std::time::Instant::now(),
         requests_served: AtomicU64::new(0),
         api_key: None,

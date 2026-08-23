@@ -246,11 +246,13 @@ mod model_set_tests {
     }
 
     fn state_with(models: Vec<Arc<LoadedModel>>) -> AppState {
+        let router_topology = crate::state::RouterTopology::for_boot_count(models.len());
         AppState {
             model_set: std::sync::RwLock::new(ModelSet {
                 models,
                 v3_models: Vec::new(),
             }),
+            router_topology,
             started_at: std::time::Instant::now(),
             requests_served: std::sync::atomic::AtomicU64::new(0),
             api_key: None,
