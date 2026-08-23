@@ -129,6 +129,38 @@ mod tests {
     /// The compose/parity fixtures cannot see this: their synthetic
     /// tokenizers and non-BOS architectures make both arms agree by
     /// accident. This pins the difference directly.
+    /// **The control for the gate below — keep them together.**
+    ///
+    /// A parity gate is worth nothing unless its fixture can see the
+    /// difference it claims to rule out, and this one's could not: the
+    /// V2 and V3 arms diverged for months while every compose/parity
+    /// test stayed green, because their synthetic tokenizers and
+    /// non-BOS architectures made both arms agree by accident.
+    ///
+    /// This pins the fixture's discriminating power directly. Feed the
+    /// V3 side no declared BOS — the pre-fix behaviour, and what a
+    /// container that declares nothing still does — and the two arms
+    /// MUST disagree. If a later simplification of the tokenizer or the
+    /// config makes this test fail, the agreement gate below has become
+    /// decorative and must be repaired, not deleted.
+    #[test]
+    fn the_bos_fixture_can_actually_see_a_divergence() {
+        let tokenizer = tokenizer_without_bos_postprocessor();
+
+        let v2 = encode_vindex_prompt(&gemma4_config(), &tokenizer, "hello").expect("v2 encode");
+        let v3_without_the_fact =
+            crate::executor::vindex3::encode_v3_prompt(&tokenizer, "hello", None)
+                .expect("v3 encode");
+
+        assert_ne!(
+            v2, v3_without_the_fact,
+            "the fixture must be able to distinguish the arms, or the \
+             agreement gate proves nothing"
+        );
+        assert_eq!(v2, vec![2, 3], "V2 prepends the architecture's BOS");
+        assert_eq!(v3_without_the_fact, vec![3], "an undeclared V3 does not");
+    }
+
     #[test]
     fn v2_and_v3_prompt_encoders_agree_on_a_bos_requiring_model() {
         let tokenizer = tokenizer_without_bos_postprocessor();
