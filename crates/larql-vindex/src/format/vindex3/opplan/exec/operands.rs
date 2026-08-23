@@ -37,6 +37,8 @@ pub struct OperandStore {
     /// pack whose bytes are being ignored — the program the oracle must
     /// reproduce. Empty when there is no pack, which is R0.
     precision_map: BTreeMap<String, BTreeMap<String, String>>,
+    /// The container's precision program, when it states one.
+    program: Option<crate::format::vindex3::represent::map::PrecisionMap>,
     /// Where representations were allowed to come from.
     source: RepresentationSource,
     /// Process-unique identity — see [`SourceStamp`].
@@ -200,6 +202,7 @@ impl OperandStore {
             segments,
             selected,
             precision_map,
+            program: inspection.index.precision_map.clone(),
             source,
             id: next_identity(),
             loads: std::sync::atomic::AtomicU64::new(0),
@@ -243,6 +246,21 @@ impl OperandStore {
             .get(object)?
             .get(tensor)
             .map(String::as_str)
+    }
+
+    /// The container's precision program, when it declares one.
+    pub fn program(&self) -> Option<&crate::format::vindex3::represent::map::PrecisionMap> {
+        self.program.as_ref()
+    }
+
+    /// Whether this object's bytes come from a compiled pack.
+    ///
+    /// Conformance is a claim about a *pack*. Under `transient` the bound
+    /// bytes are the canonical ones by design, and they are expected not to
+    /// match a map describing the pack — checking them against it would
+    /// refuse the oracle for doing exactly its job.
+    pub fn is_stored(&self, object: &str) -> bool {
+        self.selected.get(object).is_some_and(|s| s.stored)
     }
 
     /// How many tensors ran at their stored precision instead of the

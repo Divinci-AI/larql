@@ -180,6 +180,27 @@ pub fn load_weight(
             // the whole load is a read: no widening to f32, no requantise,
             // no arithmetic at all. That is the point of persisting it.
             let raw = store.load_raw(operand)?;
+            // The map is the authority a pack is supposed to satisfy, so
+            // `stored` checks conformance rather than taking the bytes'
+            // word for what program they implement. A pack that compiled a
+            // tensor the map protects is not a pack for this program, and
+            // silently executing it would mean running something other
+            // than what the container declares.
+            if let (Some(program), true) = (
+                store.store().program(),
+                store.store().is_stored(&operand.object),
+            ) {
+                use crate::format::vindex3::represent::policy::classify;
+                let role = classify(&operand.object, &operand.tensor, &operand.shape);
+                if !program.conforms(role, &operand.tensor, &raw.dtype) {
+                    return Err(VindexError::Parse(format!(
+                        "tensor `{}` is stored as `{}`, which the container's \
+                         precision map `{}` does not permit — the pack does not \
+                         implement the program the container declares",
+                        operand.tensor, raw.dtype, program.name
+                    )));
+                }
+            }
             if raw.dtype == DTYPE_NVFP4 {
                 return nvfp4_from_stored(&raw.bytes, rows, k, &operand.tensor);
             }
@@ -194,10 +215,21 @@ pub fn load_weight(
             // canonical bytes at the same precision, manufacturing nothing).
             // The two arms must run the same precision program or the
             // parity claim stops meaning anything the moment a map is mixed.
-            let mapped = store
-                .store()
-                .mapped_encoding(&operand.object, &operand.tensor);
-            let map_protects = matches!(mapped, Some(enc) if enc != DTYPE_NVFP4);
+            // The declared program is the authority. Only a container
+            // written before the map was explicit falls back to what its
+            // pack's tensor table happens to say.
+            let map_protects = match store.store().program() {
+                Some(program) => {
+                    use crate::format::vindex3::represent::map::Precision;
+                    use crate::format::vindex3::represent::policy::classify;
+                    let role = classify(&operand.object, &operand.tensor, &operand.shape);
+                    matches!(program.resolve(role, &operand.tensor), Precision::Source)
+                }
+                None => matches!(
+                    store.store().mapped_encoding(&operand.object, &operand.tensor),
+                    Some(enc) if enc != DTYPE_NVFP4
+                ),
+            };
             if src_policy == RepresentationSource::Stored || map_protects {
                 store.store().note_stored_precision();
                 return narrow_to_f16(&raw, &operand.tensor);

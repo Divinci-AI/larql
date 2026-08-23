@@ -1195,3 +1195,89 @@ fn a_mixed_precision_map_runs_identically_on_both_arms() {
     assert_eq!(stored.bound_at_stored_precision() as usize, protected);
     assert_eq!(transient.bound_at_stored_precision() as usize, protected);
 }
+
+#[test]
+fn the_container_declares_the_program_that_produced_it() {
+    // Authority, not description: a reader can ask *why* a tensor is BF16
+    // without having to observe that some pack stored it that way.
+    let tmp = tempfile::tempdir().unwrap();
+    let checkpoint = tmp.path().join("ckpt");
+    std::fs::create_dir_all(&checkpoint).unwrap();
+    let src = tmp.path().join("src.vindex3");
+    let out = tmp.path().join("mapped.vindex3");
+    encode_fixture_container(dense_f32_model, &checkpoint, &src, "target");
+
+    let mut spec = RepresentSpec::nvfp4();
+    spec.protect = policy::Protections::default().projection("v_proj");
+    compile_representation(&src, &out, &spec).unwrap();
+
+    let program = index_of(&out)
+        .precision_map
+        .expect("the container states its program");
+    assert_eq!(program.name, "r1-protect-v_proj");
+    assert_eq!(program.encoding, DTYPE_NVFP4);
+    assert!(program.roles.iter().any(|r| r == "decoder-linear"));
+
+    use crate::format::vindex3::represent::map::Precision;
+    assert_eq!(
+        program.resolve(policy::Role::DecoderLinear, "0.self_attn.v_proj.weight"),
+        Precision::Source
+    );
+    assert_eq!(
+        program.resolve(policy::Role::DecoderLinear, "0.self_attn.k_proj.weight"),
+        Precision::Compiled(DTYPE_NVFP4)
+    );
+    // And the map is a policy, not a transcript: it does not grow with the
+    // model it was compiled against.
+    assert!(program.exceptions.len() <= 2);
+}
+
+#[test]
+fn a_pack_that_disagrees_with_the_declared_program_is_refused() {
+    // The check `stored` owes. Without it a container could declare one
+    // program and execute another, and the declaration would be decoration.
+    let tmp = tempfile::tempdir().unwrap();
+    let (_, out, _) = compiled_pair(&tmp);
+
+    // Claim a program that protects a projection the pack actually compiled.
+    let mut index = index_of(&out);
+    let mut program = index.precision_map.clone().unwrap();
+    program.name = "claims-q-protected".into();
+    program.exceptions = policy::Protections::default()
+        .projection("q_proj")
+        .as_exceptions();
+    index.precision_map = Some(program);
+    std::fs::write(
+        out.join(INDEX_JSON),
+        serde_json::to_string_pretty(&index).unwrap(),
+    )
+    .unwrap();
+
+    let inspection = inspect_container(&out, false).unwrap();
+    let store = OperandStore::open_for(
+        &out,
+        &inspection,
+        Some(DTYPE_NVFP4),
+        RepresentationSource::Stored,
+    )
+    .unwrap();
+    let (object, tensor, dtype, shape) = a_compiled_tensor(&out);
+    let err = match load_weight(
+        (&store).into(),
+        &OperandRef {
+            object,
+            tensor,
+            dtype,
+            shape,
+        },
+        WeightFormat::Nvfp4,
+    ) {
+        Ok(_) => panic!("a non-conforming pack was executed"),
+        Err(e) => e.to_string(),
+    };
+    assert!(err.contains("does not permit"), "{err}");
+    assert!(
+        err.contains("claims-q-protected"),
+        "the refusal names the program: {err}"
+    );
+}

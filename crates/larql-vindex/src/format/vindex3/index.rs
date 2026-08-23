@@ -159,6 +159,21 @@ pub struct Vindex3Index {
     /// source. An absent field means "canonical", never "unknown".
     #[serde(default, skip_serializing_if = "is_canonical")]
     pub authority: ContainerAuthority,
+    /// The precision program this container's representations were
+    /// compiled under.
+    ///
+    /// The authority, not a description. `stored` checks its pack conforms
+    /// to this; `transient` manufactures exactly what this says is
+    /// represented, reading no pack; `auto` fills in what is missing. A
+    /// compiled artifact cannot be the authority for its own correctness,
+    /// which is what reading the decisions back out of a pack's tensor
+    /// table amounted to.
+    ///
+    /// `None` on containers with no compiled representation, and on those
+    /// written before the map was explicit — for which the pack's tensor
+    /// table remains the only available statement of what was done.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub precision_map: Option<crate::format::vindex3::represent::map::PrecisionMap>,
     /// Identity of the model this image derives from, when derived.
     ///
     /// A deployment image's representations name the digests they were
@@ -196,6 +211,7 @@ impl Vindex3Index {
             variants: VariantCatalogue::new(),
             segments,
             authority: ContainerAuthority::Canonical,
+            precision_map: None,
             derived_from_model: None,
         }
     }

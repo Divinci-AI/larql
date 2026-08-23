@@ -424,6 +424,30 @@ impl Protections {
         false
     }
 
+    /// Express these protections as precision-map exceptions.
+    ///
+    /// Protections are how a *compilation* is asked for; exceptions are how
+    /// the resulting *program* is stated. Keeping the conversion here means
+    /// the map a container carries is derived from the same object the
+    /// compiler acted on, rather than reconstructed alongside it.
+    pub fn as_exceptions(&self) -> Vec<super::map::Exception> {
+        let mut out: Vec<super::map::Exception> = self
+            .projections
+            .iter()
+            .map(|p| super::map::Exception {
+                projection: Some(p.clone()),
+                layers: None,
+                encoding: None,
+            })
+            .collect();
+        out.extend(self.layers.iter().map(|(lo, hi)| super::map::Exception {
+            projection: None,
+            layers: Some((*lo, *hi)),
+            encoding: None,
+        }));
+        out
+    }
+
     pub fn describe(&self) -> String {
         let mut parts: Vec<String> = self.projections.clone();
         parts.extend(self.layers.iter().map(|(a, b)| format!("layers {a}-{b}")));

@@ -45,6 +45,7 @@
 //! [`super::variants`] already states, and the reason a compiler is needed
 //! at all: a profile cannot turn one encoding's bytes into another's.
 
+pub mod map;
 pub mod nvfp4_pack;
 pub mod policy;
 
@@ -63,6 +64,7 @@ use super::opplan::exec::weights::{quantize_nvfp4, LoadedWeight};
 use super::opplan::OperandRef;
 use crate::error::VindexError;
 use crate::format::filenames::INDEX_JSON;
+use map::PrecisionMap;
 use nvfp4_pack::{CodecIdentity, EncoderRecipe, PackLayout, DTYPE_NVFP4};
 use policy::{classify_in, Protections, Role, RolePolicy};
 /// Filename of the system graph, carried beside the index.
@@ -157,6 +159,19 @@ impl RepresentSpec {
             roles: RolePolicy::default(),
             deployment: false,
             protect: Protections::default(),
+        }
+    }
+
+    /// A name for the program this spec describes, so two containers
+    /// compiled the same way say so identically.
+    pub fn map_name(&self) -> String {
+        if self.protect.is_empty() {
+            "r0-uniform".to_string()
+        } else {
+            format!(
+                "r1-protect-{}",
+                self.protect.describe().replace(", ", "+").replace(' ', "-")
+            )
         }
     }
 
@@ -496,6 +511,15 @@ pub fn compile_representation(
     for key in added_segment_keys {
         index.segments.insert(key, 1);
     }
+
+    // The program that produced these packs, recorded as authority rather
+    // than left to be inferred from the bytes it produced.
+    index.precision_map = Some(PrecisionMap::from_policy(
+        spec.map_name(),
+        &spec.encoding,
+        &spec.roles,
+        &spec.protect,
+    ));
 
     // The graph learns the object now has a second materialisation, marked
     // approximate: a profile may select it, and nothing may mistake it for
