@@ -20,6 +20,7 @@ use super::backend::{WeightFormat, WeightSlice};
 use super::operands::OperandSource;
 use crate::error::VindexError;
 use crate::format::vindex3::opplan::OperandRef;
+use crate::format::vindex3::represent::nvfp4_pack::DTYPE_NVFP4;
 use larql_models::quant::mxfp4::{e8m0_to_f32, MXFP4_TABLE};
 
 /// Alignment (and length granularity) of f16 weight allocations:
@@ -168,13 +169,22 @@ pub fn load_weight(
         WeightFormat::Mxfp4 => {
             let rows = operand.shape.first().copied().unwrap_or(0);
             let k = operand.shape.get(1).copied().unwrap_or(0);
+            store.store().note_runtime_quantisation(&operand.tensor)?;
             let values = store.load(operand)?;
             quantize_mxfp4(&values, rows, k, &operand.tensor)
         }
         WeightFormat::Nvfp4 => {
             let rows = operand.shape.first().copied().unwrap_or(0);
             let k = operand.shape.get(1).copied().unwrap_or(0);
-            let values = store.load(operand)?;
+            // A compiled pack is already in the grid the kernel wants, so
+            // the whole load is a read: no widening to f32, no requantise,
+            // no arithmetic at all. That is the point of persisting it.
+            let raw = store.load_raw(operand)?;
+            if raw.dtype == DTYPE_NVFP4 {
+                return nvfp4_from_stored(&raw.bytes, rows, k, &operand.tensor);
+            }
+            store.store().note_runtime_quantisation(&operand.tensor)?;
+            let values = widen_raw(&raw, &operand.tensor)?;
             quantize_nvfp4(&values, rows, k, &operand.tensor)
         }
         WeightFormat::F16 => {
@@ -195,6 +205,41 @@ pub fn load_weight(
             }
         }
     }
+}
+
+/// Bind a compiled NVFP4 pack: copy each region into a page-aligned
+/// buffer the device can take, and read the tensor scale.
+///
+/// No quantisation happens here and none may: if this path ever needed to
+/// compute a scale or round an element, the pack would not have been a
+/// compiled representation.
+fn nvfp4_from_stored(
+    bytes: &[u8],
+    rows: usize,
+    k: usize,
+    name: &str,
+) -> Result<LoadedWeight, VindexError> {
+    use crate::format::vindex3::represent::nvfp4_pack::{split, PackLayout};
+
+    let layout = PackLayout::derive(&[rows, k], name)?;
+    let (packed_src, scales_src, tensor_scale) = split(bytes, &layout, name)?;
+
+    let mut packed = AlignedBytes::zeroed(packed_src.len());
+    packed.as_mut_slice()[..packed_src.len()].copy_from_slice(packed_src);
+    let mut scales = AlignedBytes::zeroed(scales_src.len());
+    scales.as_mut_slice()[..scales_src.len()].copy_from_slice(scales_src);
+
+    Ok(LoadedWeight::Nvfp4 {
+        packed,
+        scales,
+        tensor_scale,
+    })
+}
+
+/// Widen an already-read raw operand, so the NVFP4 path can inspect the
+/// stored dtype without paying for a second read of the same bytes.
+fn widen_raw(raw: &super::operands::RawOperand, name: &str) -> Result<Vec<f32>, VindexError> {
+    super::operands::widen(&raw.dtype, &raw.bytes, name)
 }
 
 /// Values converted per parallel work item — large enough that the
