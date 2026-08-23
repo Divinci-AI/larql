@@ -17,6 +17,9 @@ mod coverage_experts_production;
 mod decode;
 mod device;
 mod gated_delta_parity;
+mod gated_delta_tiny;
+#[rustfmt::skip]
+mod qw2_tiny_fixture;
 mod gated_delta_refusal;
 mod gemma4;
 mod gemma4_refusals;
