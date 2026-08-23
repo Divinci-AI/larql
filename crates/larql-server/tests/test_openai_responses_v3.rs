@@ -69,8 +69,10 @@ fn v3_state_with_kv_entries(container: &Path, kv_entries: usize) -> Arc<AppState
         LoadedArtifact::V2(_) => panic!("a VINDEX3 container must bind as V3"),
     };
     Arc::new(AppState {
-        models: Vec::new(),
-        v3_models: vec![v3],
+        model_set: std::sync::RwLock::new(larql_server::state::ModelSet {
+            models: Vec::new(),
+            v3_models: vec![v3],
+        }),
         started_at: std::time::Instant::now(),
         requests_served: std::sync::atomic::AtomicU64::new(0),
         api_key: None,
@@ -168,7 +170,10 @@ async fn v3_responses_match_the_direct_runtime_text_for_text() {
     assert!(!expected.is_empty(), "fixture must emit text");
 
     let state = v3_state(container.path());
-    assert!(state.models.is_empty(), "no V2 model may exist");
+    assert!(
+        state.models_snapshot().models.is_empty(),
+        "no V2 model may exist"
+    );
     let app = larql_server::routes::single_model_router(state);
     let resp = post_responses(
         &app,
@@ -277,7 +282,7 @@ async fn v3_responses_tools_fail_closed_on_this_vocabulary() {
 async fn v3_model_retrieve_reports_generation_3() {
     let container = v3_container();
     let state = v3_state(container.path());
-    let model_id = state.v3_models[0].id.clone();
+    let model_id = state.models_snapshot().v3_models[0].id.clone();
     let app = larql_server::routes::single_model_router(state);
     let resp = app
         .clone()
@@ -702,7 +707,7 @@ async fn v3_stored_response_retains_kv_state_for_the_next_link() {
     let (status, second) = drain(resp).await;
     assert_eq!(status, StatusCode::OK, "{second}");
     assert_eq!(state.v3_kv.len(), 1, "old entry consumed, new one retained");
-    let model_id = state.v3_models[0].id.clone();
+    let model_id = state.models_snapshot().v3_models[0].id.clone();
     assert!(
         state
             .v3_kv

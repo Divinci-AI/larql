@@ -101,8 +101,10 @@ fn v3_state(container: &Path) -> Arc<AppState> {
         LoadedArtifact::V2(_) => panic!("a VINDEX3 container must bind as V3"),
     };
     Arc::new(AppState {
-        models: Vec::new(),
-        v3_models: vec![v3],
+        model_set: std::sync::RwLock::new(larql_server::state::ModelSet {
+            models: Vec::new(),
+            v3_models: vec![v3],
+        }),
         started_at: std::time::Instant::now(),
         requests_served: std::sync::atomic::AtomicU64::new(0),
         api_key: None,
@@ -135,7 +137,7 @@ async fn v3_stream_over_the_api_matches_the_direct_runtime_token_for_token() {
 
     let state = v3_state(container.path());
     assert!(
-        state.models.is_empty(),
+        state.models_snapshot().models.is_empty(),
         "no V2 model may exist while V3 serves"
     );
     let app = larql_server::routes::single_model_router(state);

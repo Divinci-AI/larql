@@ -327,8 +327,10 @@ fn make_loaded_model(
 
 async fn spawn_server_with_model(model: LoadedModel) -> String {
     let state = Arc::new(AppState {
-        models: vec![Arc::new(model)],
-        v3_models: Vec::new(),
+        model_set: std::sync::RwLock::new(larql_server::state::ModelSet {
+            models: vec![Arc::new(model)],
+            v3_models: Vec::new(),
+        }),
         started_at: std::time::Instant::now(),
         requests_served: std::sync::atomic::AtomicU64::new(0),
         api_key: None,

@@ -112,8 +112,10 @@ async fn main() {
     println!("bound: model `{}` (VINDEX3)\n", v3.id);
 
     let state = Arc::new(AppState {
-        models: Vec::new(),
-        v3_models: vec![v3],
+        model_set: std::sync::RwLock::new(larql_server::state::ModelSet {
+            models: Vec::new(),
+            v3_models: vec![v3],
+        }),
         started_at: Instant::now(),
         requests_served: AtomicU64::new(0),
         api_key: None,

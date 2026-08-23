@@ -265,7 +265,7 @@ pub async fn handle_insert(
     Json(req): Json<InsertRequest>,
 ) -> Result<Json<serde_json::Value>, ServerError> {
     state.bump_requests();
-    let model = Arc::clone(state.model_or_err(None)?);
+    let model = state.model_or_err(None)?;
     let sid = extract_session_id(&headers);
     let state2 = Arc::clone(&state);
     let result =
@@ -294,7 +294,7 @@ pub async fn handle_insert_multi(
     Json(req): Json<InsertRequest>,
 ) -> Result<Json<serde_json::Value>, ServerError> {
     state.bump_requests();
-    let model = Arc::clone(state.model_or_err(Some(&model_id))?);
+    let model = state.model_or_err(Some(&model_id))?;
     let sid = extract_session_id(&headers);
     let state2 = Arc::clone(&state);
     let result =

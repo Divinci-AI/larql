@@ -36,7 +36,7 @@ impl Drop for RifGuard {
 /// that skips it is invisible to drain and can be reassigned mid-request
 /// (ROADMAP hardening item 13).
 pub(crate) fn track_model_request(state: &crate::state::AppState) -> Option<RifGuard> {
-    state.models.first().map(|m| {
+    state.first_model().map(|m| {
         use std::sync::atomic::Ordering;
         m.requests_in_flight.fetch_add(1, Ordering::Relaxed);
         m.requests_total.fetch_add(1, Ordering::Relaxed);

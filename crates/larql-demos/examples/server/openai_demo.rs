@@ -117,8 +117,10 @@ async fn post_json(app: &Router, path: &str, body: &Value) -> (StatusCode, Value
 
 fn make_app_state(model: LoadedModel) -> Arc<AppState> {
     Arc::new(AppState {
-        models: vec![Arc::new(model)],
-        v3_models: Vec::new(),
+        model_set: std::sync::RwLock::new(larql_server::state::ModelSet {
+            models: vec![Arc::new(model)],
+            v3_models: Vec::new(),
+        }),
         started_at: Instant::now(),
         requests_served: AtomicU64::new(0),
         api_key: None,

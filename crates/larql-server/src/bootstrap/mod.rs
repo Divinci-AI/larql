@@ -274,8 +274,10 @@ pub async fn serve(cli: Cli) -> Result<(), BoxError> {
             });
 
     let state = Arc::new(AppState {
-        models: models.clone(),
-        v3_models: v3_models.clone(),
+        model_set: std::sync::RwLock::new(crate::state::ModelSet {
+            models: models.clone(),
+            v3_models: v3_models.clone(),
+        }),
         started_at: std::time::Instant::now(),
         requests_served: std::sync::atomic::AtomicU64::new(0),
         api_key: cli.api_key.clone(),
@@ -337,10 +339,16 @@ pub async fn serve(cli: Cli) -> Result<(), BoxError> {
         );
     }
 
+    // One snapshot for every boot-time loop below — the model set
+    // never changes after this point in this rung, but going through
+    // the same accessor every real caller uses keeps boot from being
+    // a second, divergent way to read `AppState`'s model list.
+    let boot_models = state.models_snapshot().models;
+
     let is_multi = state.is_multi_model();
     let mut app = if is_multi {
-        info!("Multi-model mode ({} models)", state.models.len());
-        for m in &state.models {
+        info!("Multi-model mode ({} models)", boot_models.len());
+        for m in &boot_models {
             info!("  /v1/{}/...", m.id);
         }
         routes::multi_model_router(Arc::clone(&state))
@@ -357,7 +365,7 @@ pub async fn serve(cli: Cli) -> Result<(), BoxError> {
     // the ~1.3 s lazy weight load + ~17 ms / cold layer (see
     // ROADMAP G1 / G2). Same code path as `POST /v1/warmup`.
     if cli.warmup_walk_ffn {
-        for m in &state.models {
+        for m in &boot_models {
             let req = routes::warmup::WarmupRequest {
                 layers: None,
                 skip_weights: false,
@@ -377,7 +385,7 @@ pub async fn serve(cli: Cli) -> Result<(), BoxError> {
     }
 
     // Per-(layer, expert) HNSW unit warmup.
-    for m in &state.models {
+    for m in &boot_models {
         if m.expert_filter.is_none() && !cli.warmup_walk_ffn {
             continue;
         }
@@ -404,7 +412,7 @@ pub async fn serve(cli: Cli) -> Result<(), BoxError> {
 
     // Metal expert cache warmup (cfg=metal-experts only).
     #[cfg(all(feature = "metal-experts", target_os = "macos"))]
-    for m in &state.models {
+    for m in &boot_models {
         if m.expert_filter.is_none() {
             continue;
         }
@@ -487,7 +495,7 @@ pub async fn serve(cli: Cli) -> Result<(), BoxError> {
         // `--shard-query-tau`; deployments that don't set it pay zero
         // for the feature.
         let shard_source = cli.shard_query_tau.and_then(|tau| {
-            let model = state.models.first()?;
+            let model = boot_models.first()?;
             info!(
                 "ShardService: enabled on model {} with tau={tau} (vindex-backed)",
                 model.id
@@ -531,7 +539,7 @@ pub async fn serve(cli: Cli) -> Result<(), BoxError> {
     // Grid announce (if --join provided).
     if let Some(join_spec) = cli.join.clone() {
         // The announce loop below iterates `models` (V2) only, and the
-        // ShardService registration above reads `state.models.first()` —
+        // ShardService registration above reads `boot_models.first()` —
         // a server whose only artifact is a VINDEX3 container would
         // otherwise join silently with nothing to announce.
         if models.is_empty() && !v3_models.is_empty() {

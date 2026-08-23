@@ -100,8 +100,10 @@ fn v3_state(containers: &[&Path], kv_entries: usize) -> Arc<AppState> {
         })
         .collect();
     Arc::new(AppState {
-        models: Vec::new(),
-        v3_models,
+        model_set: std::sync::RwLock::new(larql_server::state::ModelSet {
+            models: Vec::new(),
+            v3_models,
+        }),
         started_at: std::time::Instant::now(),
         requests_served: std::sync::atomic::AtomicU64::new(0),
         api_key: None,

@@ -49,7 +49,7 @@ const fn metal_compiled() -> bool {
 }
 
 /// The `model` block for one resolved binding.
-fn model_block(served: &ServedModel<'_>) -> serde_json::Value {
+fn model_block(served: &ServedModel) -> serde_json::Value {
     match served {
         ServedModel::V2(m) => serde_json::json!({
             "id": m.id,
@@ -78,7 +78,7 @@ fn model_block(served: &ServedModel<'_>) -> serde_json::Value {
 /// are lowered into the backend's execution form at bind time, not
 /// sized up front the way V2's mmap accounting is) — `None` rather
 /// than a guess.
-fn model_bytes(served: &ServedModel<'_>) -> Option<u64> {
+fn model_bytes(served: &ServedModel) -> Option<u64> {
     match served {
         ServedModel::V2(m) => Some(m.config.estimate_resident_bytes()),
         ServedModel::V3(_) => None,
