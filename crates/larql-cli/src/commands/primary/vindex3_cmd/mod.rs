@@ -146,6 +146,21 @@ pub struct ExecArgs {
     #[arg(long, value_enum, default_value_t = ExecBackend::Reference)]
     pub backend: ExecBackend,
 
+    /// Where an execution representation may come from.
+    ///
+    /// Separate from `--backend` on purpose: the backend says *what*
+    /// representation execution wants, this says whether the runtime may
+    /// manufacture it now.
+    ///
+    /// `auto` uses a compiled pack when present and quantises at load
+    /// otherwise. `stored` forbids manufacturing — the run fails naming any
+    /// tensor that would be quantised, so "no runtime quantisation" is an
+    /// invariant rather than a timing to infer. `transient` ignores any
+    /// pack and quantises at load; it is the oracle the representation
+    /// compiler is checked against, and is retained permanently.
+    #[arg(long, value_name = "auto|stored|transient", default_value = "auto")]
+    pub representation_source: String,
+
     /// Greedy-decode this many new tokens after the prompt, printing
     /// per-step timing and a decode report instead of a single-forward
     /// summary. Every step re-runs the full forward — the interpreter
