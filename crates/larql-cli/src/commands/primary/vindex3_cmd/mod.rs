@@ -280,6 +280,11 @@ pub struct RepresentArgs {
     /// Hold a projection at source precision despite its role being
     /// eligible, e.g. `--protect v_proj`. Repeat to name several.
     ///
+    /// Append `@LO-HI` to protect it only within a depth range —
+    /// `--protect gate_proj@30-39`. That intersection is a different
+    /// policy from `--protect gate_proj --protect-layers 30-39`, which is
+    /// their union and protects far more.
+    ///
     /// This is how a precision map is expressed: role eligibility says the
     /// encoding applies to a kind of weight, and this says which of them to
     /// actually spend it on.
@@ -449,7 +454,19 @@ fn run_represent(args: RepresentArgs) -> Result<(), Box<dyn std::error::Error>> 
     }
     let mut protect = larql_vindex::format::vindex3::represent::policy::Protections::default();
     for p in &args.protect {
-        protect = protect.projection(p);
+        protect = match p.split_once('@') {
+            Some((name, range)) => {
+                let (lo, hi) = range
+                    .split_once('-')
+                    .ok_or_else(|| format!("--protect {p}: expected PROJ@LO-HI"))?;
+                protect.projection_in(
+                    name,
+                    lo.trim().parse::<u32>().map_err(|e| format!("{p}: {e}"))?,
+                    hi.trim().parse::<u32>().map_err(|e| format!("{p}: {e}"))?,
+                )
+            }
+            None => protect.projection(p),
+        };
     }
     for r in &args.protect_layers {
         let (lo, hi) = r

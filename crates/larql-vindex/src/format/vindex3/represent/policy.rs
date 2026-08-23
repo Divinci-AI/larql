@@ -387,41 +387,89 @@ mod tests {
 /// Empty means protect nothing extra, which is R0.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Protections {
-    projections: Vec<String>,
-    layers: Vec<(u32, u32)>,
+    rules: Vec<ProtectRule>,
+}
+
+/// One protection. Stated conditions are ANDed; unstated ones match
+/// anything.
+///
+/// The union/intersection distinction matters and Q-BANK-1 forced it.
+/// Granite's damage is FFN-heavy *and* late-layer-heavy, and neither
+/// coarse split is both cheap and effective — protecting all FFN costs
+/// 3.4 GiB, protecting all late layers costs 1.1 GiB and leaves the tail
+/// at p99 1.12. Their *intersection* is the candidate worth testing, and
+/// a rule list of separate projections and ranges can only express the
+/// union.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProtectRule {
+    pub projection: Option<String>,
+    pub layers: Option<(u32, u32)>,
+}
+
+impl ProtectRule {
+    fn matches(&self, tensor: &str) -> bool {
+        if let Some(p) = &self.projection {
+            if projection_of(tensor) != Some(p.as_str()) {
+                return false;
+            }
+        }
+        if let Some((lo, hi)) = self.layers {
+            match layer_of(tensor) {
+                Some(l) if l >= lo && l <= hi => {}
+                _ => return false,
+            }
+        }
+        // A rule stating nothing matches everything, which is how "compile
+        // nothing" is written.
+        true
+    }
+
+    fn describe(&self) -> String {
+        match (&self.projection, self.layers) {
+            (Some(p), Some((lo, hi))) => format!("{p}@{lo}-{hi}"),
+            (Some(p), None) => p.clone(),
+            (None, Some((lo, hi))) => format!("layers {lo}-{hi}"),
+            (None, None) => "*".into(),
+        }
+    }
 }
 
 impl Protections {
-    /// Protect every tensor whose projection matches, e.g. `v_proj`.
+    /// Protect every tensor whose projection matches, at any depth.
     pub fn projection(mut self, name: impl Into<String>) -> Self {
-        self.projections.push(name.into());
+        self.rules.push(ProtectRule {
+            projection: Some(name.into()),
+            layers: None,
+        });
         self
     }
 
-    /// Protect an inclusive range of layer depths.
+    /// Protect an inclusive range of layer depths, any projection.
     pub fn layers(mut self, lo: u32, hi: u32) -> Self {
-        self.layers.push((lo, hi));
+        self.rules.push(ProtectRule {
+            projection: None,
+            layers: Some((lo, hi)),
+        });
+        self
+    }
+
+    /// Protect one projection *within* a depth range — the intersection.
+    pub fn projection_in(mut self, name: impl Into<String>, lo: u32, hi: u32) -> Self {
+        self.rules.push(ProtectRule {
+            projection: Some(name.into()),
+            layers: Some((lo, hi)),
+        });
         self
     }
 
     pub fn is_empty(&self) -> bool {
-        self.projections.is_empty() && self.layers.is_empty()
+        self.rules.is_empty()
     }
 
     /// Whether this tensor is held at source precision despite its role
-    /// being eligible.
+    /// being eligible. Rules are a union; each rule is a conjunction.
     pub fn protects(&self, tensor: &str) -> bool {
-        if let Some(p) = projection_of(tensor) {
-            if self.projections.iter().any(|w| w == p) {
-                return true;
-            }
-        }
-        if let Some(l) = layer_of(tensor) {
-            if self.layers.iter().any(|(lo, hi)| l >= *lo && l <= *hi) {
-                return true;
-            }
-        }
-        false
+        self.rules.iter().any(|r| r.matches(tensor))
     }
 
     /// Express these protections as precision-map exceptions.
@@ -431,31 +479,25 @@ impl Protections {
     /// the map a container carries is derived from the same object the
     /// compiler acted on, rather than reconstructed alongside it.
     pub fn as_exceptions(&self) -> Vec<super::map::Exception> {
-        let mut out: Vec<super::map::Exception> = self
-            .projections
+        self.rules
             .iter()
-            .map(|p| super::map::Exception {
-                projection: Some(p.clone()),
-                layers: None,
+            .map(|r| super::map::Exception {
+                projection: r.projection.clone(),
+                layers: r.layers,
                 encoding: None,
             })
-            .collect();
-        out.extend(self.layers.iter().map(|(lo, hi)| super::map::Exception {
-            projection: None,
-            layers: Some((*lo, *hi)),
-            encoding: None,
-        }));
-        out
+            .collect()
     }
 
     pub fn describe(&self) -> String {
-        let mut parts: Vec<String> = self.projections.clone();
-        parts.extend(self.layers.iter().map(|(a, b)| format!("layers {a}-{b}")));
-        if parts.is_empty() {
-            "none".into()
-        } else {
-            parts.join(", ")
+        if self.rules.is_empty() {
+            return "none".into();
         }
+        self.rules
+            .iter()
+            .map(ProtectRule::describe)
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 }
 
@@ -515,6 +557,41 @@ mod protection_tests {
         assert!(!p.protects("weight"));
         assert_eq!(layer_of("weight"), None);
         assert_eq!(projection_of("0.self_attn.q_proj.weight"), Some("q_proj"));
+    }
+
+    #[test]
+    fn an_intersection_protects_only_where_both_hold() {
+        // The R2 mechanism. A union of "gate_proj" and "layers 30-39"
+        // would protect gate at every depth AND every projection late;
+        // the intersection protects late gate only, which is a quarter of
+        // the bytes and the actual hypothesis under test.
+        let p = Protections::default().projection_in("gate_proj", 30, 39);
+        assert!(
+            p.protects("35.mlp.gate_proj.weight"),
+            "both conditions hold"
+        );
+        assert!(
+            !p.protects("5.mlp.gate_proj.weight"),
+            "right projection, wrong depth"
+        );
+        assert!(
+            !p.protects("35.mlp.up_proj.weight"),
+            "right depth, wrong projection"
+        );
+        assert_eq!(p.describe(), "gate_proj@30-39");
+    }
+
+    #[test]
+    fn a_union_and_an_intersection_are_different_policies() {
+        let union = Protections::default()
+            .projection("gate_proj")
+            .layers(30, 39);
+        let inter = Protections::default().projection_in("gate_proj", 30, 39);
+        // The union catches both of these; the intersection catches neither.
+        assert!(union.protects("5.mlp.gate_proj.weight"));
+        assert!(union.protects("35.mlp.up_proj.weight"));
+        assert!(!inter.protects("5.mlp.gate_proj.weight"));
+        assert!(!inter.protects("35.mlp.up_proj.weight"));
     }
 
     #[test]
