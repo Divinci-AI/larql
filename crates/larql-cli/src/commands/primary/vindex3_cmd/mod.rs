@@ -50,6 +50,10 @@ pub enum Vindex3Command {
     /// and marked approximate, and a profile then selects between
     /// representations that exist.
     Represent(RepresentArgs),
+    /// SENSITIVITY-1A: score every eligible tensor by the relative error
+    /// quantising it introduces, from the weights alone and with no forward
+    /// pass. One screen scores every candidate precision map.
+    Sensitivity(sensitivity::SensitivityArgs),
 }
 
 /// Which numerical realisation runs the plan. Both execute the *same*
@@ -352,11 +356,13 @@ pub fn run(cmd: Vindex3Command) -> Result<(), Box<dyn std::error::Error>> {
         Vindex3Command::Ops(args) => run_ops(args),
         Vindex3Command::Exec(args) => run_exec(args),
         Vindex3Command::Represent(args) => run_represent(args),
+        Vindex3Command::Sensitivity(args) => sensitivity::run(args),
     }
 }
 
 mod bank;
 mod exec;
+mod sensitivity;
 mod generate;
 #[cfg(all(feature = "gpu", target_os = "macos"))]
 mod lowered;

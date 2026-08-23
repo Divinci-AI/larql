@@ -88,3 +88,63 @@ Each rung is scored against the same frozen fifteen, against the same bar.
 
 No optimizer and no budget solver until step 4 passes. A search primitive
 that cannot predict the verdict is not a search primitive.
+
+
+---
+
+# Result: 1A FAILS, and the signal is flat
+
+Scored on Granite in 28 s against 1:51 per Q-BANK candidate — the cost
+ratio is right. The prediction is not.
+
+```
+rankings (best first)
+  1A rel/MiB       k-protected > v-protected > attn-protected > o-protected > ...
+  Q-BANK p99/MiB   late5-ffn > late10-ffn > late10-ffn-v > late10 > ...
+
+Spearman vs Q-BANK p99/MiB   -0.313
+
+THE BAR
+  1. identifies late-FFN highest-return : FAIL  (top = k-protected)
+  2. rejects v/k/down as low-value      : FAIL  (v and k rank 1st and 2nd of 13)
+  => FAIL
+```
+
+It ranks the two frozen negatives **first and second** — the exact
+candidates Q-BANK found buy nothing — and puts the measured knee fifth or
+lower. The correlation is *negative*, so the score is not merely
+uninformative; following it is worse than ignoring it.
+
+## Why: relative weight error is constant
+
+```
+projection     n  rel_error mean      params
+o_proj        40        0.009039   6,553,600
+up_proj       40        0.008999  20,971,520
+gate_proj     40        0.008997  20,971,520
+q_proj        40        0.008974   6,553,600
+down_proj     40        0.008948  20,971,520
+k_proj        40        0.008942   1,310,720
+v_proj        40        0.008931   1,310,720
+```
+
+Every projection quantises to within 1.2% of the same relative error.
+That is what NVFP4 *is*: a fixed relative grid, so it introduces
+approximately fixed relative error regardless of what the weights mean.
+
+The numerator therefore barely varies, and a per-byte score degenerates
+into ranking by inverse byte cost — smallest tensor wins. `k_proj` and
+`v_proj` are 1.3 M parameters against `gate_proj`'s 21 M, so they top the
+ranking for costing least, not for mattering most.
+
+## What this establishes
+
+**Weight geometry alone does not predict semantic quantisation
+sensitivity** — and specifically, for a fixed-relative-precision format it
+carries almost no discriminating signal at all. The differences Q-BANK
+measures between late FFN and everything else are invisible to a metric
+computed from weights in isolation.
+
+This is the argument for 1B, and it was stated before the score existed:
+what varies between these tensors is not how far the weights move but how
+much the model's activations amplify that movement. Escalate; do not tune.
