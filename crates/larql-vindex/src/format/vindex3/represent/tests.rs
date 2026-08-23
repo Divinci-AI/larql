@@ -468,3 +468,61 @@ fn the_report_names_what_the_policy_protected() {
     let protected: usize = stack.preserved.values().sum();
     assert_eq!(protected, stack.carried_tensors);
 }
+
+#[test]
+fn a_compiled_pack_records_the_abi_it_was_compiled_against() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (src, out, report) = compiled_pair(&tmp);
+    let src_index = index_of(&src);
+    let index = index_of(&out);
+
+    for c in &report.compiled_objects {
+        let entry = index.representations.get(&c.representation_id).unwrap();
+        let codec = entry
+            .codec
+            .as_ref()
+            .expect("a compiled pack states its ABI");
+        assert_eq!(codec.family, "nvfp4");
+        assert_eq!(codec.revision, nvfp4_pack::CodecIdentity::REVISION);
+        assert_eq!(codec.group_elems, 16);
+        codec.admit().expect("this build implements what it wrote");
+
+        // Provenance survives being copied out of the container.
+        let from = entry.compiled_from.as_deref().unwrap();
+        let digest = entry
+            .source_representation_digest
+            .as_deref()
+            .expect("a derived pack names the bytes it derives from");
+        assert_eq!(digest, src_index.representations[from].payload_sha256);
+    }
+
+    // Source-encoded representations carry no ABI: their bytes are the
+    // checkpoint's, not this compiler's.
+    for (id, e) in &index.representations {
+        if e.encoding != DTYPE_NVFP4 {
+            assert!(e.codec.is_none(), "{id} should not claim a compiler ABI");
+        }
+    }
+}
+
+#[test]
+fn a_future_abi_revision_is_refused_rather_than_decoded() {
+    // The whole point: an improved `quantize_nvfp4` must not silently
+    // redefine containers already on disk.
+    let mut future = nvfp4_pack::CodecIdentity::nvfp4_v1();
+    future.revision = nvfp4_pack::CodecIdentity::REVISION + 1;
+    let err = future.admit().unwrap_err().to_string();
+    assert!(err.contains("another build"), "{err}");
+    assert!(err.contains("Recompile"), "{err}");
+
+    let mut alien = nvfp4_pack::CodecIdentity::nvfp4_v1();
+    alien.family = "mxfp4".into();
+    assert!(alien.admit().unwrap_err().to_string().contains("is not"));
+
+    // Same revision, disagreeing geometry: a corrupted or hand-edited
+    // index, and named differently so it is not mistaken for version skew.
+    let mut bad = nvfp4_pack::CodecIdentity::nvfp4_v1();
+    bad.group_elems = 32;
+    let err = bad.admit().unwrap_err().to_string();
+    assert!(err.contains("disagrees with its own revision"), "{err}");
+}

@@ -155,8 +155,11 @@ pub fn encode_graph(
                 segment_sha256: written.segment_sha256,
                 // Encoded from the source checkpoint, not compiled from
                 // another representation: there is no container-side
-                // authority to name.
+                // authority to name, and the bytes are the source's, so
+                // this compiler's ABI does not describe them.
                 compiled_from: None,
+                codec: None,
+                source_representation_digest: None,
             },
         );
     }

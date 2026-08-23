@@ -46,6 +46,21 @@ pub struct RepresentationEntry {
     /// authority to name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compiled_from: Option<String>,
+    /// The representation ABI this pack was compiled against.
+    ///
+    /// `encoding` names a family; this names the contract. Without it a
+    /// container's bytes mean "whatever the encoder did that day", and an
+    /// improved encoder would silently redefine every artifact already on
+    /// disk. Readers refuse a revision they do not implement. `None` on a
+    /// representation taken from a source checkpoint — its bytes are the
+    /// source's, not this compiler's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codec: Option<crate::format::vindex3::represent::nvfp4_pack::CodecIdentity>,
+    /// Digest of the representation this was compiled from, so a derived
+    /// pack can be tied to the exact bytes it derives from even after it
+    /// is copied out of the container that holds them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_representation_digest: Option<String>,
 }
 
 pub use super::profile::PROFILE_EXACT;

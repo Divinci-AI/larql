@@ -237,3 +237,95 @@ mod tests {
         assert_eq!(l.total_len, l.tensor_scale_offset() + 4);
     }
 }
+
+/// The representation ABI a compiled pack was produced against.
+///
+/// `encoding: "NVFP4"` names a family, not a contract. Today's bytes are
+/// "whatever `quantize_nvfp4` currently emits", and that function will be
+/// improved — a better rounding rule, a GPTQ-style Hessian-aware encoder,
+/// a different scale search. None of those may silently change what an
+/// existing container *means*.
+///
+/// So a pack records the ABI it was compiled against, and a reader refuses
+/// a revision it does not implement rather than decoding old bytes under
+/// new rules. That is the difference between REPRESENT meaning "compile
+/// using a specified representation ABI" and "whatever the current
+/// function happens to produce".
+///
+/// The encoder may then improve freely: a new encoder that emits the same
+/// ABI bumps nothing, because the *bytes' meaning* is unchanged and only
+/// the choice of encoded values improved. A change to the grid, the group
+/// size, the scale types or the region order bumps [`Self::REVISION`].
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CodecIdentity {
+    /// Representation family. Stable across revisions.
+    pub family: String,
+    /// ABI revision. A reader refuses what it does not implement.
+    pub revision: u32,
+    /// Elements sharing one group scale.
+    pub group_elems: usize,
+    /// Element grid.
+    pub element: String,
+    /// Per-group scale type.
+    pub group_scale: String,
+    /// Per-tensor scale type.
+    pub tensor_scale: String,
+    /// Region order within a tensor's payload.
+    pub layout: String,
+}
+
+impl CodecIdentity {
+    /// The ABI this build compiles and reads.
+    ///
+    /// Bump on any change to what the bytes *mean*: grid, group size,
+    /// scale types, region order. Not on a better encoder that emits the
+    /// same shape.
+    pub const REVISION: u32 = 1;
+
+    pub fn nvfp4_v1() -> Self {
+        Self {
+            family: "nvfp4".into(),
+            revision: Self::REVISION,
+            group_elems: NVFP4_GROUP_ELEMS,
+            element: "e2m1".into(),
+            group_scale: "e4m3".into(),
+            tensor_scale: "f32-le".into(),
+            layout: "codes|group_scales|tensor_scale".into(),
+        }
+    }
+
+    /// Refuse a pack this build cannot decode under the rules it was
+    /// written under.
+    pub fn admit(&self) -> Result<(), VindexError> {
+        let want = Self::nvfp4_v1();
+        if self.family != want.family {
+            return Err(VindexError::Parse(format!(
+                "representation family `{}` is not `{}`",
+                self.family, want.family
+            )));
+        }
+        if self.revision != want.revision {
+            return Err(VindexError::Parse(format!(
+                "`{}` ABI revision {} was compiled by another build; this one \
+                 implements revision {}. Recompile the representation from its \
+                 canonical source rather than decoding it under new rules.",
+                self.family, self.revision, want.revision
+            )));
+        }
+        // A same-revision pack whose geometry disagrees is a corrupted or
+        // hand-edited index, not a version skew — say so differently.
+        if self.group_elems != want.group_elems
+            || self.element != want.element
+            || self.group_scale != want.group_scale
+            || self.tensor_scale != want.tensor_scale
+            || self.layout != want.layout
+        {
+            return Err(VindexError::Parse(format!(
+                "`{}` revision {} declares geometry this build does not \
+                 produce ({:?}); the index disagrees with its own revision",
+                self.family, self.revision, self
+            )));
+        }
+        Ok(())
+    }
+}

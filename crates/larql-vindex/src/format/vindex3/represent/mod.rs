@@ -63,7 +63,7 @@ use super::opplan::exec::weights::{quantize_nvfp4, LoadedWeight};
 use super::opplan::OperandRef;
 use crate::error::VindexError;
 use crate::format::filenames::INDEX_JSON;
-use nvfp4_pack::{PackLayout, DTYPE_NVFP4};
+use nvfp4_pack::{CodecIdentity, PackLayout, DTYPE_NVFP4};
 use policy::{classify, Role, RolePolicy};
 /// Filename of the system graph, carried beside the index.
 const SYSTEM_GRAPH_JSON: &str = "system_graph.json";
@@ -400,6 +400,13 @@ pub fn compile_representation(
                 payload_sha256: written.payload_sha256,
                 segment_sha256: written.segment_sha256,
                 compiled_from: Some(rep_id.clone()),
+                // The ABI these bytes were produced against, so a later
+                // build refuses them rather than decoding under new rules.
+                codec: Some(CodecIdentity::nvfp4_v1()),
+                // Ties the pack to the exact source bytes even after it is
+                // copied out of the container that holds them — which is
+                // precisely what a deployment artifact does.
+                source_representation_digest: Some(entry.payload_sha256.clone()),
             },
         ));
     }
