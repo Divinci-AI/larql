@@ -1,0 +1,61 @@
+{
+ "bank": "quality-bank-1",
+ "model": "muse-glimmer-30b",
+ "reference": "BF16 canonical, --backend metal",
+ "candidates": [
+  {
+   "label": "R0-deploy",
+   "positions": 1679,
+   "payload_bytes": 23380397696,
+   "runtime_compiled_total": 0,
+   "kl": {
+    "mean": 0.03118,
+    "p50": 0.01518,
+    "p95": 0.11004,
+    "p99": 0.249,
+    "max": 0.82232
+   },
+   "dnll_mean": 0.02192,
+   "flips": 100,
+   "flips_high_margin": 76,
+   "top5_overlap": 0.912,
+   "by_category": {
+    "arithmetic": {
+     "positions": 166,
+     "kl_mean": 0.02337,
+     "flips": 11
+    },
+    "code": {
+     "positions": 282,
+     "kl_mean": 0.01564,
+     "flips": 10
+    },
+    "factual": {
+     "positions": 214,
+     "kl_mean": 0.0173,
+     "flips": 4
+    },
+    "longform": {
+     "positions": 568,
+     "kl_mean": 0.04435,
+     "flips": 50
+    },
+    "prose": {
+     "positions": 154,
+     "kl_mean": 0.03196,
+     "flips": 11
+    },
+    "structured": {
+     "positions": 200,
+     "kl_mean": 0.03721,
+     "flips": 7
+    },
+    "uncertain": {
+     "positions": 95,
+     "kl_mean": 0.02944,
+     "flips": 7
+    }
+   }
+  }
+ ]
+}
