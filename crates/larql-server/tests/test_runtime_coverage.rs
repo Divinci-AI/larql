@@ -136,8 +136,14 @@ async fn runtime_reports_the_bound_v2_model() {
         "estimate_resident_bytes should report something nonzero for a real config: {v}"
     );
     // resident_bytes is `getrusage`'s peak RSS for this test process —
-    // real regardless of which model is bound.
+    // real regardless of which model is bound. `getrusage` has no
+    // Windows equivalent (`runtime_stats::resident_bytes` returns
+    // `None` there by design), so the assertion is platform-gated the
+    // same way `resident_bytes`'s own unit test is.
+    #[cfg(unix)]
     assert!(v["memory"]["resident_bytes"].as_u64().unwrap() > 0);
+    #[cfg(not(unix))]
+    assert!(v["memory"]["resident_bytes"].is_null());
     assert_eq!(
         v["backend"]["metal_compiled"],
         cfg!(all(feature = "metal-experts", target_os = "macos"))
