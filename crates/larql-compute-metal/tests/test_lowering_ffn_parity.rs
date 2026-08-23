@@ -439,6 +439,67 @@ fn lowered_ffn_matches_the_cpu_program_and_reads_its_judged_facts() {
 /// GPU-vs-GPU on purpose: the question is whether the plan's epsilon is
 /// *plumbed through* to the kernel, and comparing two lowered runs
 /// answers exactly that without a reference in between.
+/// Two-norm placement folds the residual add into the down-projection
+/// write (A-5b rung 2a). Every other test here passes `Some(post_norm)`,
+/// which takes the four-norm branch — so the fused path shipped
+/// unexercised, and stayed that way when it grew byte offsets for the
+/// packed-operand layout. That is the branch where dropping an offset
+/// would compute a different matrix's rows with the residual added on
+/// top: finite, plausible, wrong.
+#[test]
+fn two_norm_placement_folds_the_residual_into_the_down_write() {
+    let Some(gpu) = larql_compute_metal::MetalBackend::new() else {
+        eprintln!("no Metal device; skipping");
+        return;
+    };
+    let h = deterministic(HIDDEN, 31);
+    let norm_w = deterministic(HIDDEN, 32);
+    let gate_f = deterministic(INTER * HIDDEN, 33);
+    let up_f = deterministic(INTER * HIDDEN, 34);
+    let down_f = deterministic(HIDDEN * INTER, 35);
+
+    let gate = nvfp4::quantize(&gate_f, INTER, HIDDEN).unwrap();
+    let up = nvfp4::quantize(&up_f, INTER, HIDDEN).unwrap();
+    let down = nvfp4::quantize(&down_f, HIDDEN, INTER).unwrap();
+
+    // Reference consumes the QUANTISED weights, so this isolates the
+    // lowering from representation error (measured separately in Q2).
+    let gate_q = nvfp4::round_trip(&gate_f, INTER, HIDDEN).unwrap();
+    let up_q = nvfp4::round_trip(&up_f, INTER, HIDDEN).unwrap();
+    let down_q = nvfp4::round_trip(&down_f, HIDDEN, INTER).unwrap();
+    // `run_lowered` takes no activation argument — the harness fixes SiLU,
+    // so the reference must too. Passing `false` here compares against a
+    // GELU program and reports a kernel divergence that is really a
+    // fixture mistake (rel_rms 0.56 on the first run).
+    let expect = cpu_reference(
+        &h,
+        &norm_w,
+        &gate_q,
+        &up_q,
+        &down_q,
+        NORM_OFFSET,
+        true,
+        true,
+        PostNormMode::None,
+    );
+
+    // post_norm = None is what selects the fused branch.
+    let got = run_lowered(&gpu, &h, &norm_w, &gate, &up, &down, NORM_OFFSET, None, EPS);
+    let m = compare(&expect, &got);
+    assert!(
+        m.rel_rms < 1e-4,
+        "fused-residual down projection diverged: rel_rms {}, max_abs {}",
+        m.rel_rms,
+        m.max_abs
+    );
+    // The residual really is added, not dropped: without it the output
+    // would be the branch alone, which differs from h by construction.
+    assert!(
+        got.iter().zip(&h).any(|(o, i)| (o - i).abs() > 1e-6),
+        "output equals the input residual — the FFN branch was not added"
+    );
+}
+
 #[test]
 fn post_norm_epsilon_is_read_where_it_is_observable() {
     let Some(gpu) = larql_compute_metal::MetalBackend::new() else {
