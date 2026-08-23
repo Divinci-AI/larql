@@ -36,6 +36,16 @@ pub struct RepresentationEntry {
     /// SHA-256 over the whole segment file as written — detects
     /// post-write corruption independently of source access.
     pub segment_sha256: String,
+    /// Representation id this one was compiled from, when it was compiled
+    /// rather than encoded from a source checkpoint.
+    ///
+    /// Provenance a compiled pack cannot otherwise state: its bytes are
+    /// derived, and a reader deciding whether to trust them needs to know
+    /// what they are derived *from*. `None` on a representation taken
+    /// straight from the source — there is no earlier container-side
+    /// authority to name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compiled_from: Option<String>,
 }
 
 pub use super::profile::PROFILE_EXACT;

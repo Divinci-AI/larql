@@ -153,6 +153,10 @@ pub fn encode_graph(
                 payload_bytes: written.payload_bytes,
                 payload_sha256: written.payload_sha256,
                 segment_sha256: written.segment_sha256,
+                // Encoded from the source checkpoint, not compiled from
+                // another representation: there is no container-side
+                // authority to name.
+                compiled_from: None,
             },
         );
     }
