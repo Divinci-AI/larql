@@ -79,6 +79,7 @@ impl Session {
         let mut best_down: Option<Vec<f32>> = None;
         let mut stale_iters = 0usize;
 
+        let bos = self.v3_bos_token();
         for _iter in 0..BALANCE_ITERS {
             let target_prob = {
                 let Backend::Vindex3 {
@@ -91,7 +92,7 @@ impl Session {
                     unreachable!("caller matched the backend");
                 };
                 let tokenizer = tokenizer.as_ref().expect("compose install had a tokenizer");
-                let prompt_ids = encode_v3_prompt(tokenizer, prompt.as_str())?;
+                let prompt_ids = encode_v3_prompt(tokenizer, prompt.as_str(), bos)?;
                 probe_target_prob(runtime, tokenizer, overlay, &prompt_ids, target)?
             };
 
@@ -135,6 +136,7 @@ impl Session {
         layer: usize,
         feature: usize,
     ) -> Result<(), LqlError> {
+        let bos = self.v3_bos_token();
         if self.installed_edges.is_empty() {
             return Ok(());
         }
@@ -159,7 +161,8 @@ impl Session {
                     .collect();
                 let mut regressed = false;
                 for fact in priors {
-                    let fact_ids = encode_v3_prompt(tokenizer, fact.canonical_prompt.as_str())?;
+                    let fact_ids =
+                        encode_v3_prompt(tokenizer, fact.canonical_prompt.as_str(), bos)?;
                     let p =
                         probe_target_prob(runtime, tokenizer, overlay, &fact_ids, &fact.target)?;
                     if p < PRIOR_FLOOR {

@@ -71,8 +71,14 @@ pub(super) fn capture_layer_decoys(
         // Base program, same tap as the canonical capture — decoy
         // residuals must match the baseline the gates will be judged
         // against.
-        let residual =
-            capture_layer_residual(runtime, tokenizer, decoy_prompt.as_str(), layer, None)?;
+        let residual = capture_layer_residual(
+            runtime,
+            tokenizer,
+            decoy_prompt.as_str(),
+            layer,
+            None,
+            session.v3_bos_token(),
+        )?;
         captured.push(larql_vindex::ndarray::Array1::from_vec(residual));
     }
     Ok(Some(captured))

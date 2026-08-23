@@ -272,7 +272,9 @@ pub use layer_graph::{
     WalkLayerGraph,
 };
 pub use model::{load_model_dir, resolve_model_path, DequantScratch, ModelWeights, WeightsView};
-pub use tokenizer::{decode_token, decode_token_raw, encode_prompt, load_tokenizer};
+pub use tokenizer::{
+    decode_token, decode_token_raw, encode_prompt, load_tokenizer, maybe_prepend_bos,
+};
 pub use trace::{
     trace as trace_decomposed, trace_residuals, AnswerWaypoint, BoundaryStore, BoundaryWriter,
     ContextStore, ContextTier, ContextWriter, LayerSummary, ResidualTrace, TraceNode,

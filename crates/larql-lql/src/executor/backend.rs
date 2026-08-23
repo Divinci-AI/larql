@@ -69,6 +69,12 @@ pub(crate) enum Backend {
         /// Always present — mutation capability is not gated on the
         /// tokenizer.
         overlay: larql_vindex::format::vindex3::knowledge::KnowledgeOverlay,
+        /// The BOS token id the container **declares**, resolved once at
+        /// bind. Every prompt this session encodes prepends it when the
+        /// tokenizer's own post-processor did not — the V2 surface gets
+        /// the same fact from its architecture, and the two must agree
+        /// (`v2_and_v3_prompt_encoders_agree_on_a_bos_requiring_model`).
+        bos_token: Option<u32>,
     },
     /// Remote server backend — queries forwarded via HTTP.
     /// Local patches can be applied for client-side overlay.
