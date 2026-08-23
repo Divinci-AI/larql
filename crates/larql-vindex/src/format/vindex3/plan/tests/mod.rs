@@ -1,5 +1,6 @@
 //! Tests for the semantic representability plan.
 
+mod capability;
 mod carriage;
 mod compare;
 mod gemma4;

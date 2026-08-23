@@ -381,9 +381,17 @@ pub fn surface_from_nested(
         Some(d) => d,
         None if heads > 0 && hidden.is_multiple_of(heads) => hidden / heads,
         None => {
-            missing.push(format!(
-                "head_dim (hidden {hidden} not divisible by {heads} heads)"
-            ));
+            // Two different defects reach here and must not read alike.
+            // `heads == 0` is the sentinel for "no readable head count",
+            // so formatting it into the arithmetic produced Qwen3.8's
+            // "hidden 1152 not divisible by 0 heads" — a nonsense sum
+            // standing in for an unread config spelling. A genuine
+            // indivisibility is a different fact and keeps its own words.
+            missing.push(if heads == 0 {
+                "head_dim (no readable attention-head count to derive it from)".to_string()
+            } else {
+                format!("head_dim (hidden {hidden} not divisible by {heads} heads)")
+            });
             0
         }
     };

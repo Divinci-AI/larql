@@ -47,7 +47,10 @@ use serde::{Deserialize, Serialize};
 
 pub use build::{build_from_inventories, BuiltGraph, IncompleteSurface, UnplacedGroup};
 pub use complete::{execution_completeness, CompletenessDefect};
-pub use component::{Component, ComponentRole};
+pub use component::{
+    Component, ComponentRole, EncoderGeometry, Modality, PerceptionComponent, PerceptionTransform,
+    ProjectionGeometry,
+};
 pub use edge::HiddenStateEdge;
 pub use object::{most_specific_owner, LogicalObject, ObjectKind, Representation, SourceBinding};
 pub use policy::{AttentionLayerPolicy, HeadGeometry};
