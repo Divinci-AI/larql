@@ -16,6 +16,7 @@
 //!
 //! embedding                PRESERVE
 //! output head              PRESERVE
+//! vision / audio / drafter PRESERVE    a whole component, not a tensor
 //! norms                    PRESERVE
 //! router / gate            PRESERVE    tiny, and routing errors compound
 //! small vectors, biases    PRESERVE
@@ -46,6 +47,15 @@ pub enum Role {
     Router,
     /// 1-D vectors and biases.
     SmallVector,
+    /// A weight belonging to a component that is not the primary text
+    /// model — a vision or audio perception tower, a speculative drafter.
+    ///
+    /// Its tensors are named exactly like a decoder's (`attn.q_proj`,
+    /// `mlp.fc1`), so a name-based classifier reads them as ordinary
+    /// decoder linear work and quantises a perception encoder that the
+    /// wider ecosystem hard-protects. The component's declared role is the
+    /// signal that separates them; the tensor's name cannot.
+    AuxiliaryComponent,
     /// Recognised as nothing in particular.
     Unknown,
 }
@@ -60,6 +70,7 @@ impl Role {
         Role::Norm,
         Role::Router,
         Role::SmallVector,
+        Role::AuxiliaryComponent,
         Role::Unknown,
     ];
 
@@ -73,6 +84,7 @@ impl Role {
             Role::Norm => "norm",
             Role::Router => "router",
             Role::SmallVector => "small-vector",
+            Role::AuxiliaryComponent => "auxiliary-component",
             Role::Unknown => "unknown",
         }
     }
@@ -100,10 +112,27 @@ impl fmt::Display for Role {
 /// and the tensor name discriminates within a decoder stack, where a norm
 /// and a projection sit side by side under the same object.
 pub fn classify(object: &str, tensor: &str, shape: &[usize]) -> Role {
+    classify_in(true, object, tensor, shape)
+}
+
+/// Classify with the component's declared role in hand.
+///
+/// `primary_text` is the discriminator a tensor name cannot supply. A
+/// perception tower's weights are called `attn.q_proj.weight` and
+/// `mlp.fc1.weight` — identical to a decoder's — so classifying on names
+/// alone quantises the vision encoder along with the language model. Muse
+/// Glimmer is the case that showed it: 806 tensors, 3.45 GB, every one of
+/// them reading as ordinary decoder linear work.
+pub fn classify_in(primary_text: bool, object: &str, tensor: &str, shape: &[usize]) -> Role {
     // A tensor that is not a matrix cannot carry a block-quantised
     // representation regardless of what it means, so this is settled first.
     if shape.len() != 2 {
         return Role::SmallVector;
+    }
+    // A whole auxiliary component is out of scope before any tensor in it
+    // is examined — the decision belongs to the component, not the tensor.
+    if !primary_text {
+        return Role::AuxiliaryComponent;
     }
 
     let obj = object.to_ascii_lowercase();
@@ -301,6 +330,39 @@ mod tests {
         // Opting one role in must not opt others in with it.
         assert!(!p.compiles(Role::OutputHead));
         assert!(!p.compiles(Role::Router));
+    }
+
+    #[test]
+    fn a_perception_tower_is_not_decoder_work() {
+        // Muse Glimmer's vision tower carries `layers.attn.q_proj.weight`
+        // and `layers.mlp.fc1.weight` — byte-for-byte the naming a text
+        // decoder uses. Only the component's role tells them apart.
+        for t in [
+            "layers.attn.q_proj.weight",
+            "layers.attn.v_proj.weight",
+            "layers.mlp.fc1.weight",
+            "vision_projection.weight",
+        ] {
+            assert_eq!(
+                classify_in(false, "vision.perception_tower", t, M),
+                Role::AuxiliaryComponent,
+                "{t}"
+            );
+        }
+        // The decoder-shaped names among them ARE decoder work inside the
+        // text model — which is precisely why the name cannot decide.
+        for t in [
+            "layers.attn.q_proj.weight",
+            "layers.attn.v_proj.weight",
+            "layers.mlp.fc1.weight",
+        ] {
+            assert_eq!(
+                classify_in(true, "target.decoder_stack", t, M),
+                Role::DecoderLinear,
+                "{t}"
+            );
+        }
+        assert!(!RolePolicy::default().compiles(Role::AuxiliaryComponent));
     }
 
     #[test]

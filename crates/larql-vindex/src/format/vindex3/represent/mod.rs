@@ -64,7 +64,7 @@ use super::opplan::OperandRef;
 use crate::error::VindexError;
 use crate::format::filenames::INDEX_JSON;
 use nvfp4_pack::{CodecIdentity, EncoderRecipe, PackLayout, DTYPE_NVFP4};
-use policy::{classify, Role, RolePolicy};
+use policy::{classify_in, Role, RolePolicy};
 /// Filename of the system graph, carried beside the index.
 const SYSTEM_GRAPH_JSON: &str = "system_graph.json";
 
@@ -185,6 +185,26 @@ pub fn compile_representation(
         .map_err(|e| VindexError::Parse(format!("parse {INDEX_JSON}: {e}")))?;
 
     let inspection = inspect_container(src, false)?;
+    // Which objects belong to the primary text model. A perception tower's
+    // tensors are named exactly like a decoder's, so the component's
+    // declared role is the only thing that separates them — see
+    // `policy::classify_in`.
+    let primary_text: BTreeSet<String> = {
+        let text: BTreeSet<&str> = inspection
+            .graph
+            .components
+            .iter()
+            .filter(|c| c.role == super::graph::component::ComponentRole::PrimaryText)
+            .map(|c| c.id.as_str())
+            .collect();
+        inspection
+            .graph
+            .objects
+            .iter()
+            .filter(|o| text.contains(o.component.as_str()))
+            .map(|o| o.id.clone())
+            .collect()
+    };
     let store = OperandStore::open(src, &inspection)?;
     let source = OperandSource::from(&store);
 
@@ -237,7 +257,12 @@ pub fn compile_representation(
             // Role first, shape second. A tensor the policy preserves is
             // carried whatever its shape; a tensor the policy admits is
             // still refused by the layout if its `k` cannot be grouped.
-            let role = classify(&entry.object, &t.name, &t.shape);
+            let role = classify_in(
+                primary_text.contains(&entry.object),
+                &entry.object,
+                &t.name,
+                &t.shape,
+            );
             let eligible = spec.roles.compiles(role);
             match PackLayout::derive(&t.shape, &t.name) {
                 Ok(layout) if eligible => {
