@@ -37,7 +37,9 @@ const MODEL_OBJECT: &str = "model";
 const LIST_OBJECT: &str = "list";
 const OWNED_BY: &str = "larql";
 /// larql-specific `generation` marker for VINDEX3 containers.
-const V3_GENERATION: u32 = 3;
+/// Reported as `generation` on a V3 entry. Sourced from the format
+/// crate so the API and the container's own marker cannot drift.
+const V3_GENERATION: u32 = larql_vindex::format::generation::ContainerGeneration::V3.number();
 
 /// Returns the boot-time of this server in unix seconds. Used as the
 /// `created` field for every loaded model — close enough to the
@@ -80,8 +82,14 @@ pub async fn handle_models(State(state): State<Arc<AppState>>) -> Json<serde_jso
 }
 
 /// One list/retrieve entry for a V2 model. Extras beyond the OpenAI
-/// contract (`path`, `features`, `loaded`) are larql-specific and
-/// ignored by compatible clients.
+/// contract (`path`, `generation`, `features`, `loaded`) are
+/// larql-specific and ignored by compatible clients.
+///
+/// `generation` is reported for **both** classes. Emitting it only for
+/// V3 made V2 the implicit normal case and V3 the special one, so a
+/// client could not tell "generation 2" from "this server predates the
+/// field" without knowing larql's release history. Discovery states the
+/// generation of everything it lists.
 fn v2_entry(m: &LoadedModel, created: u64, multi: bool) -> serde_json::Value {
     let total_features: usize = m.config.layers.iter().map(|l| l.num_features).sum();
     serde_json::json!({
@@ -90,6 +98,7 @@ fn v2_entry(m: &LoadedModel, created: u64, multi: bool) -> serde_json::Value {
         "created": created,
         "owned_by": OWNED_BY,
         "path": model_path(&m.id, multi),
+        "generation": larql_vindex::format::generation::ContainerGeneration::V2.number(),
         "features": total_features,
         "loaded": true,
     })

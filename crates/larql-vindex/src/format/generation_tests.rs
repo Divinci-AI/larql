@@ -307,3 +307,46 @@ fn explicit_generation_requests_are_never_overridden() {
         ContainerGeneration::V3,
     );
 }
+
+/// The listing fact source answers for BOTH generations — the enabler
+/// for "no V3 artifact silently disappears from a consumer surface".
+#[test]
+fn summarize_container_reads_either_generation() {
+    use super::generation::summarize_container;
+
+    let v2 = temp_dir("summary-v2");
+    std::fs::write(
+        v2.join(INDEX_JSON),
+        r#"{"version":2,"model":"gemma-3-4b","num_layers":34}"#,
+    )
+    .unwrap();
+    let s = summarize_container(&v2).unwrap();
+    assert_eq!(s.generation, ContainerGeneration::V2);
+    assert_eq!(s.model, "gemma-3-4b");
+    assert_eq!(s.num_layers, 34);
+
+    let v3 = temp_dir("summary-v3");
+    std::fs::write(
+        v3.join(INDEX_JSON),
+        r#"{"version":4,"model":"granite-4.1-3b","num_layers":40}"#,
+    )
+    .unwrap();
+    let s = summarize_container(&v3).unwrap();
+    assert_eq!(s.generation, ContainerGeneration::V3);
+    assert_eq!(s.model, "granite-4.1-3b");
+    assert_eq!(s.num_layers, 40);
+}
+
+/// A container missing identity fields is listed with them blank —
+/// never hidden, and never a hard failure.
+#[test]
+fn summarize_container_tolerates_missing_identity_fields() {
+    use super::generation::summarize_container;
+
+    let dir = temp_dir("summary-sparse");
+    std::fs::write(dir.join(INDEX_JSON), r#"{"version":4}"#).unwrap();
+    let s = summarize_container(&dir).unwrap();
+    assert_eq!(s.generation, ContainerGeneration::V3);
+    assert!(s.model.is_empty());
+    assert_eq!(s.num_layers, 0);
+}
