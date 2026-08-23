@@ -262,6 +262,11 @@ pub struct LinearAttentionSurface {
     pub value_head_dim: usize,
     /// Depthwise causal convolution width over the fused q|k|v channels (4).
     pub conv_kernel: usize,
+    /// The precision the recurrence keeps its state at. Consumed: the
+    /// reference operator allocates and accumulates its state at this
+    /// precision rather than the model's bulk dtype.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_dtype: Option<larql_models::inventory::report::RecurrentStateDtype>,
 }
 
 impl LinearAttentionSurface {
@@ -305,6 +310,7 @@ pub fn surface_from_resolved(
             value_heads: t.value_heads,
             value_head_dim: t.value_head_dim,
             conv_kernel: t.conv_kernel,
+            state_dtype: t.state_dtype,
         }),
         attention: AttentionSurface {
             num_q_heads: resolved.num_q_heads,

@@ -584,9 +584,9 @@ pub const CARRIAGE_RULES: &[CarriageRule] = &[
     },
     CarriageRule {
         leaf: "mamba_ssm_dtype",
-        reaches: Carriage::Represented,
-        site: "no schema field — the linear-attention block's recurrent/SSM-adjacent state precision is not represented yet",
-        probe: Some(probe_unrepresented),
+        reaches: Carriage::Lowered,
+        site: "ExecutionSurface.linear_attention.state_dtype → GatedDeltaState precision",
+        probe: Some(probe_linear_state_dtype),
     },
     CarriageRule {
         leaf: "attn_output_gate",
@@ -917,6 +917,23 @@ fn probe_linear_conv_kernel(component: &Component, _ctx: &ProbeContext<'_>) -> O
     Some(json!(
         component.execution.as_ref()?.linear_attention?.conv_kernel
     ))
+}
+
+/// The recurrence's state precision, echoed in the checkpoint's own
+/// spelling.
+///
+/// `Lowered` rather than `Represented` because it has a consumer: the
+/// reference operator allocates and accumulates `GatedDeltaState` at this
+/// precision. Until that executor existed this rule refused, because
+/// claiming carriage into a runtime surface that could not use the value
+/// would have asserted something untrue.
+fn probe_linear_state_dtype(component: &Component, _ctx: &ProbeContext<'_>) -> Option<Value> {
+    Some(json!(component
+        .execution
+        .as_ref()?
+        .linear_attention?
+        .state_dtype?
+        .declared_name()))
 }
 
 /// The uniform sliding window across sliding layers, when there is one.

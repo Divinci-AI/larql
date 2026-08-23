@@ -153,6 +153,14 @@ pub enum Mutation {
     NoBeta,
     /// Use g directly instead of exp(g).
     RawGate,
+    /// Apply SiLU BEFORE the convolution instead of after.
+    SiluBeforeConv,
+    /// Centre the convolution window instead of making it causal, so a
+    /// position sees its own future.
+    CentredConv,
+    /// Tile q/k across heads (`h + j*Hk`) instead of `repeat_interleave`
+    /// (`h*3 + j`). Same shape, different pairing with the value heads.
+    TiledHeadExpansion,
 }
 
 fn step_inner(
@@ -243,4 +251,195 @@ pub fn recurrence_step_mutated(
     mutation: Mutation,
 ) -> Vec<f32> {
     step_inner(op, step, state, mutation)
+}
+
+/// The nine operands as plain f32 slices, in the checkpoint's own layouts.
+///
+/// Linear weights are `[out, in]` row-major, as PyTorch stores them, so a
+/// projection is `y[o] = sum_i x[i] * w[o][i]`. Nothing here re-derives a
+/// tensor from its name: the caller resolves the operands through the
+/// `GatedDeltaOp` that QW-1 built, which is the single architecture
+/// authority.
+pub struct GatedDeltaWeights<'a> {
+    pub in_proj_qkv: &'a [f32],
+    pub in_proj_a: &'a [f32],
+    pub in_proj_b: &'a [f32],
+    pub in_proj_z: &'a [f32],
+    pub conv1d: &'a [f32],
+    pub a_log: &'a [f32],
+    pub dt_bias: &'a [f32],
+    pub norm: &'a [f32],
+    pub out_proj: &'a [f32],
+    pub norm_eps: f32,
+}
+
+/// Every boundary the operator crosses, kept so a disagreement names its
+/// own stage instead of being debugged backwards from the layer output.
+#[derive(Debug, Default)]
+pub struct LayerPlanes {
+    /// Post-conv, post-SiLU, split and head-expanded: `[T][Hv*Dk]`.
+    pub query: Vec<Vec<f32>>,
+    pub key: Vec<Vec<f32>>,
+    /// `[T][Hv*Dv]`.
+    pub value: Vec<Vec<f32>>,
+    /// `[T][Hv]`.
+    pub g: Vec<Vec<f32>>,
+    pub beta: Vec<Vec<f32>>,
+    /// `[T][Hv*Dv]`.
+    pub z: Vec<Vec<f32>>,
+    pub core: Vec<Vec<f32>>,
+    /// `[T][hidden]`.
+    pub output: Vec<Vec<f32>>,
+}
+
+fn matvec(w: &[f32], x: &[f32], out_dim: usize) -> Vec<f32> {
+    let in_dim = x.len();
+    (0..out_dim)
+        .map(|o| {
+            let row = &w[o * in_dim..(o + 1) * in_dim];
+            row.iter().zip(x).map(|(a, b)| a * b).sum()
+        })
+        .collect()
+}
+
+fn silu(x: f32) -> f32 {
+    x / (1.0 + (-x).exp())
+}
+
+fn softplus(x: f32) -> f32 {
+    // The numerically stable form; large x must not overflow exp.
+    if x > 20.0 {
+        x
+    } else {
+        (1.0 + x.exp()).ln()
+    }
+}
+
+/// The whole operator: hidden states in, layer output out, state advanced.
+///
+/// Stage order is the specification. Three of these are places a plausible
+/// implementation goes wrong without looking wrong:
+/// the convolution is causal by left-pad and right-truncate (not centred),
+/// SiLU comes AFTER it, and q/k are `repeat_interleave`d 3x — head `e`
+/// takes original head `e / 3`, not `e % Hk`.
+pub fn layer_forward(
+    op: &GatedDeltaOp,
+    w: &GatedDeltaWeights<'_>,
+    hidden: &[Vec<f32>],
+    state: &mut GatedDeltaState,
+    mutation: Mutation,
+) -> LayerPlanes {
+    let (hk, hv) = (op.num_key_heads, op.num_value_heads);
+    let (dk, dv) = (op.key_head_dim, op.value_head_dim);
+    let (key_dim, value_dim) = (hk * dk, hv * dv);
+    let conv_dim = op.qkv_channels();
+    let kernel = op.conv_kernel;
+    let repeat = hv / hk;
+    let mut planes = LayerPlanes::default();
+
+    // Stage 1: the fused projection, per position.
+    let mixed: Vec<Vec<f32>> = hidden
+        .iter()
+        .map(|h| matvec(w.in_proj_qkv, h, conv_dim))
+        .collect();
+
+    // Stage 2: depthwise causal convolution, then SiLU.
+    let t_len = hidden.len();
+    let mut conv: Vec<Vec<f32>> = vec![vec![0.0; conv_dim]; t_len];
+    for c in 0..conv_dim {
+        let taps = &w.conv1d[c * kernel..(c + 1) * kernel];
+        for t in 0..t_len {
+            let mut acc = 0.0f32;
+            for (i, tap) in taps.iter().enumerate() {
+                // Causal: left-padded by kernel-1, so tap i reads
+                // position t - (kernel-1) + i. Centring it would let the
+                // position read its own future.
+                let offset = if mutation == Mutation::CentredConv {
+                    t as isize - (kernel as isize / 2) + i as isize
+                } else {
+                    t as isize - (kernel as isize - 1) + i as isize
+                };
+                if offset >= 0 && (offset as usize) < t_len {
+                    let x = mixed[offset as usize][c];
+                    acc += tap
+                        * if mutation == Mutation::SiluBeforeConv {
+                            silu(x)
+                        } else {
+                            x
+                        };
+                }
+            }
+            conv[t][c] = if mutation == Mutation::SiluBeforeConv {
+                acc
+            } else {
+                silu(acc)
+            };
+        }
+    }
+
+    for t in 0..t_len {
+        // Stage 3/4: split, then expand q/k from Hk heads to Hv.
+        let mut q = vec![0.0f32; hv * dk];
+        let mut k = vec![0.0f32; hv * dk];
+        for e in 0..hv {
+            let src = if mutation == Mutation::TiledHeadExpansion {
+                e % hk
+            } else {
+                e / repeat
+            };
+            for d in 0..dk {
+                q[e * dk + d] = conv[t][src * dk + d];
+                k[e * dk + d] = conv[t][key_dim + src * dk + d];
+            }
+        }
+        let value = conv[t][key_dim * 2..key_dim * 2 + value_dim].to_vec();
+
+        // Stage 5: the gates.
+        let a = matvec(w.in_proj_a, &hidden[t], hv);
+        let b = matvec(w.in_proj_b, &hidden[t], hv);
+        let z = matvec(w.in_proj_z, &hidden[t], value_dim);
+        let beta: Vec<f32> = b.iter().map(|x| 1.0 / (1.0 + (-x).exp())).collect();
+        let g: Vec<f32> = (0..hv)
+            .map(|h| -w.a_log[h].exp() * softplus(a[h] + w.dt_bias[h]))
+            .collect();
+
+        // Stage 6: the proven recurrence.
+        let core = step_inner(
+            op,
+            &RecurrenceStep {
+                query: &q,
+                key: &k,
+                value: &value,
+                g: &g,
+                beta: &beta,
+            },
+            state,
+            mutation,
+        );
+
+        // Stage 7: gated RMSNorm, per value head over Dv. Norm, then the
+        // weight, then the SiLU'd gate — that order is the reference's.
+        let mut normed = vec![0.0f32; value_dim];
+        for h in 0..hv {
+            let row = &core[h * dv..(h + 1) * dv];
+            let var: f32 = row.iter().map(|x| x * x).sum::<f32>() / dv as f32;
+            let inv = 1.0 / (var + w.norm_eps).sqrt();
+            for d in 0..dv {
+                normed[h * dv + d] = w.norm[d] * (row[d] * inv) * silu(z[h * dv + d]);
+            }
+        }
+
+        // Stage 8: back into the residual stream.
+        planes
+            .output
+            .push(matvec(w.out_proj, &normed, hidden[t].len()));
+        planes.query.push(q);
+        planes.key.push(k);
+        planes.value.push(value);
+        planes.g.push(g);
+        planes.beta.push(beta);
+        planes.z.push(z);
+        planes.core.push(core);
+    }
+    planes
 }

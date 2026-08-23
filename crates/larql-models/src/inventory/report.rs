@@ -144,6 +144,34 @@ pub struct ResolvedTopology {
     pub linear_attention: Option<LinearAttentionTopology>,
 }
 
+/// The precision a recurrent state is kept at.
+///
+/// Fail-closed by construction: a spelling this build does not represent
+/// answers `None` and stays blocking, rather than resolving to the model's
+/// bulk dtype. Only `float32` is represented, because that is the only
+/// value any judged checkpoint declares — adding speculative variants
+/// would claim representation this engine has never executed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecurrentStateDtype {
+    Float32,
+}
+
+impl RecurrentStateDtype {
+    pub fn from_declared(value: &str) -> Option<Self> {
+        match value {
+            "float32" | "f32" => Some(Self::Float32),
+            _ => None,
+        }
+    }
+
+    pub fn declared_name(self) -> &'static str {
+        match self {
+            Self::Float32 => "float32",
+        }
+    }
+}
+
 /// Gated DeltaNet geometry — an architectural fact, like the head counts
 /// beside it.
 ///
@@ -166,6 +194,11 @@ pub struct LinearAttentionTopology {
     /// `linear_conv_kernel_dim` — the depthwise causal convolution width
     /// over the fused q|k|v channels (4).
     pub conv_kernel: usize,
+    /// `mamba_ssm_dtype` — the precision the recurrence keeps its state at,
+    /// which Qwen3.8 declares as `float32` against a bf16 model. `None`
+    /// when undeclared or spelled in a way this build does not represent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_dtype: Option<RecurrentStateDtype>,
 }
 
 impl LinearAttentionTopology {
@@ -193,6 +226,10 @@ impl LinearAttentionTopology {
             value_heads: cfg.linear_num_value_heads?,
             value_head_dim: cfg.linear_value_head_dim?,
             conv_kernel: cfg.linear_conv_kernel_dim?,
+            state_dtype: cfg
+                .mamba_ssm_dtype
+                .as_deref()
+                .and_then(RecurrentStateDtype::from_declared),
         })
     }
 }
