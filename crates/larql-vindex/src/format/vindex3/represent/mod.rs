@@ -56,7 +56,7 @@ use super::encode::segment::{read_segment_header, write_segment, PlannedTensor};
 use super::encode::REPRESENTATION_ID_SEP;
 use super::encode::{SEGMENTS_DIR, SEGMENT_BIN_EXT};
 use super::graph::object::{Fidelity, Representation};
-use super::index::{RepresentationEntry, Vindex3Index};
+use super::index::{ContainerAuthority, RepresentationEntry, Vindex3Index};
 use super::inspect::inspect_container;
 use super::opplan::exec::operands::{OperandSource, OperandStore};
 use super::opplan::exec::weights::{quantize_nvfp4, LoadedWeight};
@@ -132,6 +132,18 @@ pub struct RepresentSpec {
     /// Which tensor roles are eligible. Conservative by default — see
     /// [`policy`] for what that means and why.
     pub roles: RolePolicy,
+    /// Write a deployment image rather than an archival container.
+    ///
+    /// A deployment image drops the source bytes of every object it
+    /// compiled, keeping the compiled pack plus every surface the precision
+    /// policy protected — the BF16 embedding and norms still have to
+    /// travel, or the image would not execute. Nothing is destroyed: the
+    /// canonical container is untouched and the image names the digests it
+    /// derives from.
+    ///
+    /// This is a different artifact, not a smaller one. It is executable
+    /// and not re-compilable, and [`ContainerAuthority::Derived`] says so.
+    pub deployment: bool,
 }
 
 impl RepresentSpec {
@@ -140,6 +152,7 @@ impl RepresentSpec {
             encoding: DTYPE_NVFP4.to_string(),
             objects: Vec::new(),
             roles: RolePolicy::default(),
+            deployment: false,
         }
     }
 
@@ -183,24 +196,11 @@ pub fn compile_representation(
         preserved_objects: Vec::new(),
     };
 
-    // Every existing representation travels unchanged: compiling an
-    // alternative never removes the canonical bytes it was derived from.
     let existing: Vec<(String, RepresentationEntry)> = index
         .representations
         .iter()
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
-    for (_, entry) in &existing {
-        let from = src.join(&entry.segment);
-        let to = out.join(&entry.segment);
-        if let Some(parent) = to.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        if std::fs::hard_link(&from, &to).is_err() {
-            std::fs::copy(&from, &to)?;
-        }
-        report.linked_segments += 1;
-    }
 
     let mut added: Vec<(String, RepresentationEntry)> = Vec::new();
     let mut added_segment_keys: Vec<String> = Vec::new();
@@ -412,6 +412,39 @@ pub fn compile_representation(
         ));
     }
 
+    // Source bytes travel unless this is a deployment image and their
+    // object has a compiled replacement. A protected surface — the BF16
+    // embedding, the norms — always travels: the image has to execute.
+    for (rep_id, entry) in &existing {
+        let superseded = spec.deployment && compiled_object_ids.contains(&entry.object);
+        if superseded {
+            continue;
+        }
+        let from = src.join(&entry.segment);
+        let to = out.join(&entry.segment);
+        if let Some(parent) = to.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        if std::fs::hard_link(&from, &to).is_err() {
+            std::fs::copy(&from, &to)?;
+        }
+        report.linked_segments += 1;
+        let _ = rep_id;
+    }
+    if spec.deployment {
+        index
+            .representations
+            .retain(|_, e| !compiled_object_ids.contains(&e.object));
+        index.segments.retain(|key, _| {
+            let seg = format!("{key}.{SEGMENT_BIN_EXT}");
+            !existing
+                .iter()
+                .any(|(_, e)| e.segment == seg && compiled_object_ids.contains(&e.object))
+        });
+        index.authority = ContainerAuthority::Derived;
+        index.derived_from_model = Some(index.model.clone());
+    }
+
     if added.is_empty() {
         return Err(VindexError::Parse(format!(
             "no tensor in this container is eligible for `{}` under the \
@@ -441,16 +474,26 @@ pub fn compile_representation(
         let mut graph: super::graph::SystemGraph = serde_json::from_str(&graph_raw)
             .map_err(|e| VindexError::Parse(format!("parse {SYSTEM_GRAPH_JSON}: {e}")))?;
         for object in &mut graph.objects {
-            if compiled_object_ids.contains(&object.id)
-                && !object
-                    .representations
-                    .iter()
-                    .any(|r| r.encoding == spec.encoding)
+            if !compiled_object_ids.contains(&object.id) {
+                continue;
+            }
+            if !object
+                .representations
+                .iter()
+                .any(|r| r.encoding == spec.encoding)
             {
                 object.representations.push(Representation {
                     encoding: spec.encoding.clone(),
                     fidelity: Fidelity::Approximate,
                 });
+            }
+            if spec.deployment {
+                // The source bytes are not in this image, so declaring a
+                // representation for them would point every reader at a
+                // segment that is not there.
+                object
+                    .representations
+                    .retain(|r| r.encoding == spec.encoding);
             }
         }
         let serialised = serde_json::to_string_pretty(&graph)

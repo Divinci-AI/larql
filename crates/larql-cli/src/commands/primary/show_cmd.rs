@@ -97,6 +97,24 @@ fn show_v3(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
         println!("Manifest:   {manifest}  (routed-MoE programme)");
     }
 
+    match index.authority {
+        larql_vindex::format::vindex3::index::ContainerAuthority::Canonical => {}
+        larql_vindex::format::vindex3::index::ContainerAuthority::Derived => {
+            println!("Authority:  derived  (executable; not re-compilable)");
+            if let Some(model) = index.derived_from_model.as_deref() {
+                println!("Source:     {model}");
+            }
+            let digests: Vec<&str> = index
+                .representations
+                .values()
+                .filter_map(|e| e.source_representation_digest.as_deref())
+                .collect();
+            if let Some(d) = digests.first() {
+                println!("Derives:    sha256:{}…", &d[..d.len().min(16)]);
+            }
+        }
+    }
+
     show_v3_representations(&index);
 
     // §9.1: show what each profile actually selects, not just that it exists.

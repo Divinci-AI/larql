@@ -10,6 +10,7 @@ use super::*;
 use crate::format::vindex3::fixtures::{
     dense_f32_model, encode_fixture_container, miniature_glimmer,
 };
+use crate::format::vindex3::index::ContainerAuthority;
 use crate::format::vindex3::opplan::exec::backend::WeightFormat;
 use crate::format::vindex3::opplan::exec::weights::load_weight;
 use nvfp4_pack::split;
@@ -288,6 +289,7 @@ fn an_unknown_encoding_is_refused_before_anything_is_written() {
         encoding: "MXFP4".into(),
         objects: Vec::new(),
         roles: policy::RolePolicy::default(),
+        deployment: false,
     };
     let err = compile_representation(&src, &out, &spec)
         .unwrap_err()
@@ -337,6 +339,7 @@ fn an_object_filter_compiles_only_what_it_names() {
         encoding: DTYPE_NVFP4.to_string(),
         objects: vec![target.clone()],
         roles: policy::RolePolicy::default(),
+        deployment: false,
     };
     let report = compile_representation(&src, &out, &spec).unwrap();
     assert_eq!(report.compiled_objects.len(), 1);
@@ -859,5 +862,128 @@ fn selection_reports_which_objects_came_from_a_pack() {
     if let Some((_, embed)) = sel.iter().find(|(k, _)| k.contains("embedding")) {
         assert!(!embed.stored);
         assert_ne!(embed.encoding, DTYPE_NVFP4);
+    }
+}
+
+// ── Deployment images ────────────────────────────────────────────────────
+
+fn deployment_of(
+    tmp: &tempfile::TempDir,
+) -> (std::path::PathBuf, std::path::PathBuf, RepresentReport) {
+    let checkpoint = tmp.path().join("ckpt");
+    std::fs::create_dir_all(&checkpoint).unwrap();
+    let src = tmp.path().join("src.vindex3");
+    let out = tmp.path().join("deploy.vindex3");
+    encode_fixture_container(dense_f32_model, &checkpoint, &src, "target");
+    let mut spec = RepresentSpec::nvfp4();
+    spec.deployment = true;
+    let report = compile_representation(&src, &out, &spec).unwrap();
+    (src, out, report)
+}
+
+#[test]
+fn a_deployment_image_drops_superseded_sources_and_keeps_protected_ones() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (_, out, report) = deployment_of(&tmp);
+    let index = index_of(&out);
+
+    // Compiled objects: only the pack.
+    for c in &report.compiled_objects {
+        let reps: Vec<&RepresentationEntry> = index
+            .representations
+            .values()
+            .filter(|e| e.object == c.object)
+            .collect();
+        assert_eq!(reps.len(), 1, "{} should carry only its pack", c.object);
+        assert_eq!(reps[0].encoding, DTYPE_NVFP4);
+    }
+
+    // Protected objects still travel — an image missing its BF16 embedding
+    // is smaller and does not execute.
+    for p in &report.preserved_objects {
+        let e = index
+            .representations
+            .values()
+            .find(|e| e.object == p.object)
+            .unwrap_or_else(|| panic!("{} must travel with the image", p.object));
+        assert_ne!(e.encoding, DTYPE_NVFP4);
+        assert!(
+            out.join(&e.segment).is_file(),
+            "{} bytes are present",
+            p.object
+        );
+    }
+
+    // Every declared segment resolves; nothing points at absent bytes.
+    for (id, e) in &index.representations {
+        assert!(out.join(&e.segment).is_file(), "{id} -> {}", e.segment);
+        let key = e.segment.trim_end_matches(".bin");
+        assert!(index.segments.contains_key(key), "{key} undeclared");
+    }
+}
+
+#[test]
+fn a_deployment_image_says_it_is_derived_and_names_its_source() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (_, out, _) = deployment_of(&tmp);
+    let index = index_of(&out);
+
+    // "Executable, not re-compilable" has to be a claim the artifact makes,
+    // not something an operator infers from what is missing.
+    assert_eq!(index.authority, ContainerAuthority::Derived);
+    assert!(index.derived_from_model.is_some());
+    for e in index.representations.values() {
+        if e.encoding == DTYPE_NVFP4 {
+            assert!(
+                e.source_representation_digest.is_some(),
+                "a derived pack names the bytes it derives from"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_graph_of_a_deployment_image_declares_only_present_bytes() {
+    // The store binds `representations.first()`. If the graph still listed
+    // the dropped canonical encoding, every reader would resolve to a
+    // segment that is not in the image.
+    let tmp = tempfile::tempdir().unwrap();
+    let (_, out, report) = deployment_of(&tmp);
+    let graph: crate::format::vindex3::graph::SystemGraph =
+        serde_json::from_str(&std::fs::read_to_string(out.join(SYSTEM_GRAPH_JSON)).unwrap())
+            .unwrap();
+    let index = index_of(&out);
+    let compiled: BTreeSet<&str> = report
+        .compiled_objects
+        .iter()
+        .map(|c| c.object.as_str())
+        .collect();
+
+    for object in &graph.objects {
+        if compiled.contains(object.id.as_str()) {
+            assert_eq!(object.representations.len(), 1, "{}", object.id);
+            assert_eq!(object.representations[0].encoding, DTYPE_NVFP4);
+        }
+        for r in &object.representations {
+            let id = format!("{}@{}", object.id, r.encoding);
+            if let Some(e) = index.representations.get(&id) {
+                assert!(out.join(&e.segment).is_file(), "{id}");
+            }
+        }
+    }
+}
+
+#[test]
+fn an_archival_container_is_unaffected_by_the_deployment_switch() {
+    // The default must stay archival: canonical bytes present, authority
+    // unchanged, so nobody loses their source by omitting a flag.
+    let tmp = tempfile::tempdir().unwrap();
+    let (src, out, _) = compiled_pair(&tmp);
+    let index = index_of(&out);
+    assert_eq!(index.authority, ContainerAuthority::Canonical);
+    assert!(index.derived_from_model.is_none());
+    for (id, e) in &index_of(&src).representations {
+        assert!(index.representations.contains_key(id), "{id} was dropped");
+        assert!(out.join(&e.segment).is_file());
     }
 }

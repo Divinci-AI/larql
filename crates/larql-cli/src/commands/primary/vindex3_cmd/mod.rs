@@ -263,6 +263,19 @@ pub struct RepresentArgs {
     /// aggressive deliberately rather than by accident.
     #[arg(long = "include-role")]
     pub include_roles: Vec<String>,
+
+    /// Write a deployment image instead of an archival container.
+    ///
+    /// The image carries the compiled representation plus every surface the
+    /// precision policy protected — the BF16 embedding and norms have to
+    /// travel or it will not execute — and drops the source bytes it
+    /// replaced. It names the digests it derives from, so the authority can
+    /// be found again; it cannot recompile itself.
+    ///
+    /// Nothing is destroyed: the container this was compiled from is
+    /// untouched.
+    #[arg(long)]
+    pub deployment: bool,
 }
 
 #[derive(Args)]
@@ -424,8 +437,17 @@ fn run_represent(args: RepresentArgs) -> Result<(), Box<dyn std::error::Error>> 
         encoding: args.encoding.clone(),
         objects: args.objects.clone(),
         roles,
+        deployment: args.deployment,
     };
-    println!("== represent {} ==", args.encoding);
+    println!(
+        "== represent {} ({}) ==",
+        args.encoding,
+        if args.deployment {
+            "deployment image"
+        } else {
+            "archival container"
+        }
+    );
     println!("  in     : {}", args.container.display());
     println!("  out    : {}", args.output.display());
     if !args.objects.is_empty() {

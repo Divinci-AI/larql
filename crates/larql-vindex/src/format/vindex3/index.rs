@@ -72,6 +72,28 @@ pub struct RepresentationEntry {
     pub encoder: Option<crate::format::vindex3::represent::nvfp4_pack::EncoderRecipe>,
 }
 
+/// Whether a container carries the authority for its own bytes.
+///
+/// A canonical container holds bit-authoritative source bytes and can
+/// recompile any derived representation from them. A deployment image
+/// holds only what execution needs: compiled representations plus the
+/// surfaces a precision policy protected, with the authority named by
+/// digest rather than carried.
+///
+/// The distinction is not "smaller" — it is what the bytes *claim*. A
+/// derived image cannot recompile itself, and saying so is the difference
+/// between an artifact that is missing something and one that never
+/// promised it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ContainerAuthority {
+    /// Source bytes present; derived representations can be recompiled.
+    #[default]
+    Canonical,
+    /// Executable, not re-compilable without the source it names.
+    Derived,
+}
+
 pub use super::profile::PROFILE_EXACT;
 
 /// `index.json` as a VINDEX3 container writes it.
@@ -130,6 +152,25 @@ pub struct Vindex3Index {
     pub variants: VariantCatalogue,
     /// Segment key → physical file count.
     pub segments: BTreeMap<String, u32>,
+    /// Whether this container carries the authority for its own bytes.
+    ///
+    /// Defaulted to [`ContainerAuthority::Canonical`], because every
+    /// container written before deployment images existed carries its
+    /// source. An absent field means "canonical", never "unknown".
+    #[serde(default, skip_serializing_if = "is_canonical")]
+    pub authority: ContainerAuthority,
+    /// Identity of the model this image derives from, when derived.
+    ///
+    /// A deployment image's representations name the digests they were
+    /// compiled from, but those digests resolve against a container that is
+    /// no longer present — so the image also names the model itself, which
+    /// is what an operator needs to find the authority again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub derived_from_model: Option<String>,
+}
+
+fn is_canonical(a: &ContainerAuthority) -> bool {
+    matches!(a, ContainerAuthority::Canonical)
 }
 
 impl Vindex3Index {
@@ -154,6 +195,8 @@ impl Vindex3Index {
             profiles: vec![Profile::exact()],
             variants: VariantCatalogue::new(),
             segments,
+            authority: ContainerAuthority::Canonical,
+            derived_from_model: None,
         }
     }
 
