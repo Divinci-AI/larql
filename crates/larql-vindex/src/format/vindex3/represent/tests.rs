@@ -1068,3 +1068,130 @@ fn a_protected_depth_range_is_carried_not_compiled() {
         "later layers still compile"
     );
 }
+
+/// The precision map is authority, and both arms must run the SAME
+/// program.
+///
+/// R0 could not see this: its map protects nothing in the decoder stack,
+/// so "quantise everything" and "reproduce the map" coincide. The moment a
+/// map is mixed they diverge, and the guarantee that stored and transient
+/// differ *only* in whether compiled bytes already existed would quietly
+/// stop being true.
+///
+/// The failure this pins is specific: a transient oracle that read
+/// `--backend metal-nvfp4-*` as permission to quantise a tensor the map
+/// deliberately kept at BF16 would be measuring a different model than the
+/// one that was compiled.
+#[test]
+fn a_mixed_precision_map_runs_identically_on_both_arms() {
+    let tmp = tempfile::tempdir().unwrap();
+    let checkpoint = tmp.path().join("ckpt");
+    std::fs::create_dir_all(&checkpoint).unwrap();
+    let src = tmp.path().join("src.vindex3");
+    let out = tmp.path().join("mixed.vindex3");
+    encode_fixture_container(dense_f32_model, &checkpoint, &src, "target");
+
+    // q_proj protected, everything else eligible: a genuinely mixed map.
+    let mut spec = RepresentSpec::nvfp4();
+    spec.protect = policy::Protections::default().projection("q_proj");
+    compile_representation(&src, &out, &spec).unwrap();
+
+    let index = index_of(&out);
+    let pack = index
+        .representations
+        .values()
+        .find(|e| e.encoding == DTYPE_NVFP4)
+        .expect("a pack exists");
+    let (header, _) = read_segment_header(&out.join(&pack.segment)).unwrap();
+
+    let open = |source| {
+        let insp = inspect_container(&out, false).unwrap();
+        OperandStore::open_for(&out, &insp, Some(DTYPE_NVFP4), source).unwrap()
+    };
+    let stored = open(RepresentationSource::Stored);
+    let transient = open(RepresentationSource::Transient);
+
+    let mut protected = 0usize;
+    let mut compiled = 0usize;
+
+    for t in &header.tensors {
+        if t.shape.len() != 2 {
+            continue;
+        }
+        let op = OperandRef {
+            object: pack.object.clone(),
+            tensor: t.name.clone(),
+            dtype: t.dtype.clone(),
+            shape: t.shape.clone(),
+        };
+        let a = load_weight((&stored).into(), &op, WeightFormat::Nvfp4).unwrap();
+        let b = load_weight((&transient).into(), &op, WeightFormat::Nvfp4).unwrap();
+
+        match (&a, &b) {
+            (LoadedWeight::F16(x), LoadedWeight::F16(y)) => {
+                // The map protected it: BOTH arms must keep it float, and
+                // the bytes must match.
+                assert!(t.name.contains("q_proj"), "{} unexpectedly float", t.name);
+                assert_eq!(
+                    &x.as_slice()[..x.logical_len()],
+                    &y.as_slice()[..y.logical_len()],
+                    "{}: protected tensor differs between arms",
+                    t.name
+                );
+                protected += 1;
+            }
+            (
+                LoadedWeight::Nvfp4 {
+                    packed: p1,
+                    scales: s1,
+                    tensor_scale: t1,
+                },
+                LoadedWeight::Nvfp4 {
+                    packed: p2,
+                    scales: s2,
+                    tensor_scale: t2,
+                },
+            ) => {
+                assert!(!t.name.contains("q_proj"), "{} should be protected", t.name);
+                assert_eq!(
+                    &p1.as_slice()[..p1.logical_len()],
+                    &p2.as_slice()[..p2.logical_len()],
+                    "{}: codes differ",
+                    t.name
+                );
+                assert_eq!(
+                    &s1.as_slice()[..s1.logical_len()],
+                    &s2.as_slice()[..s2.logical_len()],
+                    "{}: scales differ",
+                    t.name
+                );
+                assert_eq!(
+                    t1.to_bits(),
+                    t2.to_bits(),
+                    "{}: tensor scale differs",
+                    t.name
+                );
+                compiled += 1;
+            }
+            _ => panic!("{}: arms bound different formats", t.name),
+        }
+    }
+
+    assert!(
+        protected > 0,
+        "the fixture must exercise a protected tensor"
+    );
+    assert!(compiled > 0, "and a compiled one");
+
+    // Manufacture differs by exactly the compiled tensors, and by nothing
+    // else — which is the whole content of "the arms differ only in
+    // whether the bytes already existed".
+    assert_eq!(stored.runtime_quantised(), 0);
+    assert_eq!(
+        transient.runtime_quantised() as usize,
+        compiled,
+        "transient manufactured something other than the map's compiled set"
+    );
+    assert_eq!(stored.bound_at_stored_precision() as usize, protected);
+    assert_eq!(transient.bound_at_stored_precision() as usize, protected);
+}

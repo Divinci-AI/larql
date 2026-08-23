@@ -33,6 +33,10 @@ pub struct OperandStore {
     segments: BTreeMap<String, SegmentMap>,
     /// Which representation each object was bound to.
     selected: BTreeMap<String, SelectedRepresentation>,
+    /// Under `transient`, the encoding each tensor has in the compiled
+    /// pack whose bytes are being ignored — the program the oracle must
+    /// reproduce. Empty when there is no pack, which is R0.
+    precision_map: BTreeMap<String, BTreeMap<String, String>>,
     /// Where representations were allowed to come from.
     source: RepresentationSource,
     /// Process-unique identity — see [`SourceStamp`].
@@ -110,6 +114,7 @@ impl OperandStore {
     ) -> Result<Self, VindexError> {
         let mut segments = BTreeMap::new();
         let mut selected = BTreeMap::new();
+        let mut precision_map: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
         for object in &inspection.graph.objects {
             let Some(canonical) = object.representations.first() else {
                 continue;
@@ -122,6 +127,29 @@ impl OperandStore {
                 (RepresentationSource::Transient, _) | (_, None) => None,
                 (_, Some(id)) => inspection.index.representations.get(id).map(|e| (id, e)),
             };
+
+            // Under `transient` the pack's BYTES are deliberately ignored,
+            // but its DECISIONS are not: which tensors a precision map
+            // quantised is a property of the compiled representation, and
+            // an oracle that re-decided would be measuring a different
+            // program. Read the map from the pack's header even when the
+            // canonical bytes will be bound.
+            if source == RepresentationSource::Transient {
+                if let Some(id) = &packed_id {
+                    if let Some(pack) = inspection.index.representations.get(id) {
+                        if let Ok((header, _)) = read_segment_header(&root.join(&pack.segment)) {
+                            precision_map.insert(
+                                object.id.clone(),
+                                header
+                                    .tensors
+                                    .into_iter()
+                                    .map(|t| (t.name, t.dtype))
+                                    .collect(),
+                            );
+                        }
+                    }
+                }
+            }
 
             let (id, entry, is_stored) = match stored_entry {
                 Some((id, entry)) => {
@@ -171,6 +199,7 @@ impl OperandStore {
         Ok(Self {
             segments,
             selected,
+            precision_map,
             source,
             id: next_identity(),
             loads: std::sync::atomic::AtomicU64::new(0),
@@ -200,6 +229,20 @@ impl OperandStore {
     /// Where this store was allowed to source representations from.
     pub fn representation_source(&self) -> RepresentationSource {
         self.source
+    }
+
+    /// What encoding a compiled precision map gives this tensor, when the
+    /// store is reproducing one.
+    ///
+    /// `None` means no map is in force — either the store is not the
+    /// transient oracle, or no pack exists — and the caller decides as it
+    /// always did. `Some(enc)` is the compiled program's decision for this
+    /// tensor, and the oracle honours it rather than re-deciding.
+    pub fn mapped_encoding(&self, object: &str, tensor: &str) -> Option<&str> {
+        self.precision_map
+            .get(object)?
+            .get(tensor)
+            .map(String::as_str)
     }
 
     /// How many tensors ran at their stored precision instead of the

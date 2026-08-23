@@ -188,7 +188,17 @@ pub fn load_weight(
             // one. Under `stored` the map wins: a tensor its policy held at
             // source precision runs at source precision, which is higher
             // than the arm asked for and manufactures nothing.
-            if store.store().representation_source() == RepresentationSource::Stored {
+            let src_policy = store.store().representation_source();
+            // A compiled map protected this tensor: honour that under
+            // `stored` (bind what is there) and under `transient` (bind the
+            // canonical bytes at the same precision, manufacturing nothing).
+            // The two arms must run the same precision program or the
+            // parity claim stops meaning anything the moment a map is mixed.
+            let mapped = store
+                .store()
+                .mapped_encoding(&operand.object, &operand.tensor);
+            let map_protects = matches!(mapped, Some(enc) if enc != DTYPE_NVFP4);
+            if src_policy == RepresentationSource::Stored || map_protects {
                 store.store().note_stored_precision();
                 return narrow_to_f16(&raw, &operand.tensor);
             }
