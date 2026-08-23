@@ -131,6 +131,7 @@ fn make_app_state(model: LoadedModel) -> Arc<AppState> {
             larql_server::response_kv::DEFAULT_MAX_ENTRIES,
             larql_server::response_kv::DEFAULT_TTL_SECS,
         ),
+        runtime: Arc::new(larql_server::runtime_stats::RuntimeRecorder::new()),
     })
 }
 

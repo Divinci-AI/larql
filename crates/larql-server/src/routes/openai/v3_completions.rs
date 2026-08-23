@@ -50,6 +50,7 @@ pub(super) async fn respond(
     stream: bool,
     model_id: String,
     timeout: std::time::Duration,
+    runtime: Arc<crate::runtime_stats::RuntimeRecorder>,
 ) -> Result<Response, OpenAIError> {
     if stream {
         // Validation mirroring the V2 stream contract happened in the
@@ -62,21 +63,29 @@ pub(super) async fn respond(
             sampling_params,
             stop_strings,
             model_id,
+            runtime,
         )
         .into_response());
     }
 
+    let started = std::time::Instant::now();
+    let _gen_guard = Arc::clone(&runtime).enter_generation();
     let handle = tokio::task::spawn_blocking(move || -> Result<_, ServerError> {
-        run_v3_completions_loop(
+        let mut tally = crate::runtime_stats::GenerationTally::new();
+        let out = run_v3_completions_loop(
             &model,
             &prompts,
             max_tokens,
             sampling_params,
             &stop_strings,
             echo,
-        )
+            &mut tally,
+        )?;
+        Ok((out, tally))
     });
-    let (choices, prompt_tokens, completion_tokens) = join_generation(handle, timeout).await?;
+    let ((choices, prompt_tokens, completion_tokens), tally) =
+        join_generation(handle, timeout).await?;
+    runtime.record(tally.into_sample(crate::state::elapsed_ms(started)));
 
     Ok(Json(CompletionsResponse {
         id: format!("cmpl-{}", new_id_suffix()),
@@ -103,6 +112,7 @@ fn run_v3_completions_loop(
     sampling_params: super::util::SamplingParams,
     stop_strings: &[String],
     echo: bool,
+    tally: &mut crate::runtime_stats::GenerationTally,
 ) -> Result<(Vec<CompletionChoice>, usize, usize), ServerError> {
     let mut choices = Vec::with_capacity(prompts.len());
     let mut prompt_tokens_sum = 0;
@@ -111,6 +121,12 @@ fn run_v3_completions_loop(
         let prompt_ids = encode_prompt(model, prompt)?;
         let (sampling, eos) = build_sampling_eos(sampling_params, stop_strings);
         let generation = generate_v3(model, &prompt_ids, max_tokens, sampling, &eos, |_, _| {})?;
+        tally.add_v3(
+            generation.prompt_tokens,
+            generation.ids.len(),
+            generation.prefill_ms,
+            generation.decode_ms_total,
+        );
 
         // The V2 path's text-level EOS/stop-trim semantics, verbatim —
         // `finalize_completion` is shared, so the two runtimes agree
@@ -145,11 +161,14 @@ fn stream_v3_completions(
     sampling_params: super::util::SamplingParams,
     stop_strings: Vec<String>,
     model_id: String,
+    runtime: Arc<crate::runtime_stats::RuntimeRecorder>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let (tx, rx) = tokio::sync::mpsc::channel::<String>(SSE_CHANNEL_DEPTH);
     let cmpl_id = format!("cmpl-{}", new_id_suffix());
+    let call_started = std::time::Instant::now();
 
     tokio::task::spawn_blocking(move || {
+        let _gen_guard = runtime.clone().enter_generation();
         let prompt_ids = match encode_prompt(&model, &prompt) {
             Ok(ids) => ids,
             Err(e) => {
@@ -187,7 +206,7 @@ fn stream_v3_completions(
                 }
             },
         );
-        let finish_reason: &'static str = match result {
+        let finish_reason: &'static str = match &result {
             Ok(generation) if early_stop || generation.stopped_early => FINISH_REASON_STOP,
             Ok(_) => FINISH_REASON_LENGTH,
             Err(e) => {
@@ -195,6 +214,16 @@ fn stream_v3_completions(
                 return;
             }
         };
+        if let Ok(generation) = &result {
+            let mut tally = crate::runtime_stats::GenerationTally::new();
+            tally.add_v3(
+                generation.prompt_tokens,
+                generation.ids.len(),
+                generation.prefill_ms,
+                generation.decode_ms_total,
+            );
+            runtime.record(tally.into_sample(crate::state::elapsed_ms(call_started)));
+        }
         let final_chunk =
             build_text_completion_chunk(&cmpl_id, &model_id, None, Some(finish_reason));
         let _ = tx.blocking_send(final_chunk);

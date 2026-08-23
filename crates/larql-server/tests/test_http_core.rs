@@ -393,6 +393,7 @@ async fn http_warmup_no_model_returns_404() {
             larql_server::response_kv::DEFAULT_MAX_ENTRIES,
             larql_server::response_kv::DEFAULT_TTL_SECS,
         ),
+        runtime: Arc::new(larql_server::runtime_stats::RuntimeRecorder::new()),
     });
     let app = single_model_router(st);
     let resp = post_json(app, "/v1/warmup", serde_json::json!({})).await;

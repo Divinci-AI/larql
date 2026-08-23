@@ -299,6 +299,12 @@ pub struct AppState {
     /// background and its result is discarded.  Default: 60s; set
     /// to 0 to disable.  See BUG-infer-deadlock §5.6.
     pub infer_timeout: std::time::Duration,
+    /// Server-wide performance/activity recorder backing
+    /// `GET /v1/runtime` (see [`crate::runtime_stats`]). `Arc`-wrapped
+    /// so a streaming generation handler can clone the recorder alone
+    /// into its `spawn_blocking` closure, independently of the rest of
+    /// `AppState`.
+    pub runtime: Arc<crate::runtime_stats::RuntimeRecorder>,
 }
 
 /// One request's resolved model binding: which runtime serves it.

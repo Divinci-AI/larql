@@ -480,6 +480,7 @@ pub fn state(models: Vec<Arc<LoadedModel>>) -> Arc<AppState> {
             larql_server::response_kv::DEFAULT_MAX_ENTRIES,
             larql_server::response_kv::DEFAULT_TTL_SECS,
         ),
+        runtime: Arc::new(larql_server::runtime_stats::RuntimeRecorder::new()),
     })
 }
 
@@ -504,6 +505,7 @@ pub fn state_with_timeout(
             larql_server::response_kv::DEFAULT_MAX_ENTRIES,
             larql_server::response_kv::DEFAULT_TTL_SECS,
         ),
+        runtime: Arc::new(larql_server::runtime_stats::RuntimeRecorder::new()),
     })
 }
 
@@ -522,6 +524,7 @@ pub fn state_with_key(models: Vec<Arc<LoadedModel>>, key: &str) -> Arc<AppState>
             larql_server::response_kv::DEFAULT_MAX_ENTRIES,
             larql_server::response_kv::DEFAULT_TTL_SECS,
         ),
+        runtime: Arc::new(larql_server::runtime_stats::RuntimeRecorder::new()),
     })
 }
 
@@ -540,6 +543,7 @@ pub fn state_with_cache(models: Vec<Arc<LoadedModel>>, cache_size: u64) -> Arc<A
             larql_server::response_kv::DEFAULT_MAX_ENTRIES,
             larql_server::response_kv::DEFAULT_TTL_SECS,
         ),
+        runtime: Arc::new(larql_server::runtime_stats::RuntimeRecorder::new()),
     })
 }
 

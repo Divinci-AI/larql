@@ -287,6 +287,7 @@ pub async fn serve(cli: Cli) -> Result<(), BoxError> {
             cli.v3_kv_cache_entries,
             cli.v3_kv_ttl_secs,
         ),
+        runtime: Arc::new(crate::runtime_stats::RuntimeRecorder::new()),
     });
 
     if cli.infer_timeout_secs == 0 {

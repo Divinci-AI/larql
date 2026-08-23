@@ -125,6 +125,7 @@ async fn main() {
             larql_server::response_kv::DEFAULT_MAX_ENTRIES,
             larql_server::response_kv::DEFAULT_TTL_SECS,
         ),
+        runtime: Arc::new(larql_server::runtime_stats::RuntimeRecorder::new()),
     });
 
     // GET /v1/models — the registry lists the V3 model.

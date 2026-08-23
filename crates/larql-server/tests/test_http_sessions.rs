@@ -279,6 +279,7 @@ mod continuation {
                 kv_entries,
                 larql_server::response_kv::DEFAULT_TTL_SECS,
             ),
+            runtime: Arc::new(larql_server::runtime_stats::RuntimeRecorder::new()),
         })
     }
 

@@ -106,6 +106,7 @@ fn v3_app(container: &Path) -> axum::Router {
             larql_server::response_kv::DEFAULT_MAX_ENTRIES,
             larql_server::response_kv::DEFAULT_TTL_SECS,
         ),
+        runtime: Arc::new(larql_server::runtime_stats::RuntimeRecorder::new()),
     }))
 }
 

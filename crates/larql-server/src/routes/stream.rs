@@ -737,6 +737,7 @@ mod tests {
                 crate::response_kv::DEFAULT_MAX_ENTRIES,
                 crate::response_kv::DEFAULT_TTL_SECS,
             ),
+            runtime: std::sync::Arc::new(crate::runtime_stats::RuntimeRecorder::new()),
         })
     }
 

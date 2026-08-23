@@ -60,6 +60,9 @@ pub(super) struct GenerationOutcome {
     pub kv_handoff: Option<V3KvHandoff>,
     /// Prompt tokens served from a resumed KV instead of re-prefill.
     pub reused_prompt_tokens: usize,
+    /// This generation's measured performance, for the caller to feed
+    /// into `RuntimeRecorder::record` — see [`crate::runtime_stats`].
+    pub tally: crate::runtime_stats::GenerationTally,
 }
 
 /// Run one generation, invoking `on_token` per decoded token. The
@@ -168,6 +171,9 @@ fn generate_v2(
         )
     };
 
+    let mut tally = crate::runtime_stats::GenerationTally::new();
+    tally.add_v2(&result, prompt_tokens);
+
     let completion_tokens = result.tokens.len();
     let stopped = tap.halted() || completion_tokens < max_tokens;
     // Assemble the final text from the result's token list, not the
@@ -185,6 +191,7 @@ fn generate_v2(
         completion_tokens,
         kv_handoff: None,
         reused_prompt_tokens: 0,
+        tally,
     })
 }
 
@@ -228,6 +235,14 @@ fn generate_on_v3(
         },
     )?;
 
+    let mut tally = crate::runtime_stats::GenerationTally::new();
+    tally.add_v3(
+        generation.prompt_tokens,
+        generation.texts.len(),
+        generation.prefill_ms,
+        generation.decode_ms_total,
+    );
+
     let stopped = tap.halted() || generation.stopped_early || generation.texts.len() < max_tokens;
     let mut text = tap.into_text();
     if !stop_strings.is_empty() && contains_any(&text, stop_strings) {
@@ -240,6 +255,7 @@ fn generate_on_v3(
         completion_tokens: generation.texts.len(),
         kv_handoff: Some(handoff),
         reused_prompt_tokens: generation.reused_prompt_tokens,
+        tally,
     })
 }
 

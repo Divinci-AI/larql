@@ -340,6 +340,7 @@ async fn spawn_server_with_model(model: LoadedModel) -> String {
             larql_server::response_kv::DEFAULT_MAX_ENTRIES,
             larql_server::response_kv::DEFAULT_TTL_SECS,
         ),
+        runtime: Arc::new(larql_server::runtime_stats::RuntimeRecorder::new()),
     });
 
     let router = single_model_router(state);

@@ -11,6 +11,7 @@ pub mod models;
 pub mod openai;
 pub mod patches;
 pub mod relations;
+pub mod runtime;
 pub mod select;
 pub mod sessions;
 pub mod shard;
@@ -35,6 +36,7 @@ const EXPERT_BATCH_BODY_LIMIT: usize = crate::http::REQUEST_BODY_LIMIT_BYTES;
 use crate::state::AppState;
 
 const HEALTH: &str = "/v1/health";
+const RUNTIME: &str = "/v1/runtime";
 const MODELS: &str = "/v1/models";
 const DESCRIBE: &str = "/v1/describe";
 const WALK: &str = "/v1/walk";
@@ -142,6 +144,7 @@ pub fn single_model_router(state: Arc<AppState>) -> Router {
         .route(INSERT, post(insert::handle_insert))
         .route(STREAM, get(stream::handle_stream))
         .route(HEALTH, get(health::handle_health))
+        .route(RUNTIME, get(runtime::handle_runtime))
         .route(MODELS, get(models::handle_models))
         .route(WARMUP, post(warmup::handle_warmup))
         // Embed server endpoints (always available, required for --embed-only mode)
@@ -170,6 +173,7 @@ pub fn single_model_router(state: Arc<AppState>) -> Router {
 pub fn multi_model_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route(HEALTH, get(health::handle_health))
+        .route(RUNTIME, get(runtime::handle_runtime))
         .route(MODELS, get(models::handle_models))
         .route(M_DESCRIBE, get(describe::handle_describe_multi))
         .route(M_WALK, get(walk::handle_walk_multi))

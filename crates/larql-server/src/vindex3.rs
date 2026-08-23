@@ -152,6 +152,16 @@ pub struct V3Generation {
     /// How many of the run's prompt tokens were served from a resumed
     /// KV state instead of being re-prefilled (0 on a fresh run).
     pub reused_prompt_tokens: usize,
+    /// Wall-clock time of the `prefill_into` call below, in ms. The V3
+    /// driver ([`larql_inference::vindex3::generate`]) carries no
+    /// timing of its own, so this is measured here, around the two
+    /// calls the server already makes — a real number, not one
+    /// invented by an observability endpoint after the fact. Feeds
+    /// `GET /v1/runtime` via [`crate::runtime_stats::GenerationTally::add_v3`].
+    pub prefill_ms: f64,
+    /// Wall-clock time of the `continue_session[_masked]` call below,
+    /// in ms — the decode-loop counterpart of `prefill_ms`.
+    pub decode_ms_total: f64,
 }
 
 /// A generation's continuation state, detached from any session so it
@@ -260,10 +270,12 @@ pub fn generate_v3_request(
         None => (CanonicalKvState::new(), 0),
     };
 
+    let prefill_start = std::time::Instant::now();
     let prefill_logits = model
         .runtime
         .prefill_into(&prompt_ids[reused_prompt_tokens..], &mut kv)
         .map_err(|e| ServerError::Internal(format!("v3 prefill: {e}")))?;
+    let prefill_ms = crate::state::elapsed_ms(prefill_start);
     let mut session = model
         .runtime
         .session_with_kv(&mut kv)
@@ -277,6 +289,7 @@ pub fn generate_v3_request(
         on_token(id, &text);
         texts.push(text);
     };
+    let decode_start = std::time::Instant::now();
     let result = match mask_fn {
         Some(mask_fn) => continue_session_masked(
             &mut session,
@@ -297,6 +310,7 @@ pub fn generate_v3_request(
         ),
     }
     .map_err(|e| ServerError::Internal(format!("v3 decode: {e}")))?;
+    let decode_ms_total = crate::state::elapsed_ms(decode_start);
     drop(session);
 
     // The KV's logical position says exactly how many of
@@ -316,6 +330,8 @@ pub fn generate_v3_request(
             prompt_tokens: prompt_ids.len(),
             stopped_early,
             reused_prompt_tokens,
+            prefill_ms,
+            decode_ms_total,
         },
         V3KvHandoff { kv, absorbed_ids },
     ))
