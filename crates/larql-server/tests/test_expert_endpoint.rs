@@ -327,8 +327,12 @@ fn make_loaded_model(
 
 async fn spawn_server_with_model(model: LoadedModel) -> String {
     let state = Arc::new(AppState {
-        models: vec![Arc::new(model)],
-        v3_models: Vec::new(),
+        model_set: std::sync::RwLock::new(larql_server::state::ModelSet {
+            models: vec![Arc::new(model)],
+            v3_models: Vec::new(),
+        }),
+        router_topology: larql_server::state::RouterTopology::SingleModel,
+        lifecycle: std::sync::Mutex::new(larql_server::state::LifecycleState::Idle),
         started_at: std::time::Instant::now(),
         requests_served: std::sync::atomic::AtomicU64::new(0),
         api_key: None,
@@ -340,6 +344,7 @@ async fn spawn_server_with_model(model: LoadedModel) -> String {
             larql_server::response_kv::DEFAULT_MAX_ENTRIES,
             larql_server::response_kv::DEFAULT_TTL_SECS,
         ),
+        runtime: Arc::new(larql_server::runtime_stats::RuntimeRecorder::new()),
     });
 
     let router = single_model_router(state);

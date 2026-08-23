@@ -380,8 +380,12 @@ async fn http_load_probe_labels_roundtrip() {
 async fn http_warmup_no_model_returns_404() {
     // single_model_router with empty model list → model(None) returns None → 404.
     let st = Arc::new(AppState {
-        models: vec![],
-        v3_models: Vec::new(),
+        model_set: std::sync::RwLock::new(larql_server::state::ModelSet {
+            models: vec![],
+            v3_models: Vec::new(),
+        }),
+        router_topology: larql_server::state::RouterTopology::SingleModel,
+        lifecycle: std::sync::Mutex::new(larql_server::state::LifecycleState::Idle),
         started_at: std::time::Instant::now(),
         requests_served: AtomicU64::new(0),
         api_key: None,
@@ -393,6 +397,7 @@ async fn http_warmup_no_model_returns_404() {
             larql_server::response_kv::DEFAULT_MAX_ENTRIES,
             larql_server::response_kv::DEFAULT_TTL_SECS,
         ),
+        runtime: Arc::new(larql_server::runtime_stats::RuntimeRecorder::new()),
     });
     let app = single_model_router(st);
     let resp = post_json(app, "/v1/warmup", serde_json::json!({})).await;

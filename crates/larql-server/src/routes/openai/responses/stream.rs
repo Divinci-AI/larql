@@ -44,6 +44,8 @@ pub(super) fn sse_response(
 /// The blocking worker: lifecycle events, generation, terminal event,
 /// and (on success) persistence for `previous_response_id` chaining.
 fn stream_worker(state: &AppState, plan: &RequestPlan, tx: &tokio::sync::mpsc::Sender<EventFrame>) {
+    let started = std::time::Instant::now();
+    let _gen_guard = Arc::clone(&state.runtime).enter_generation();
     let mut seq = EventSeq::new();
 
     let opening = build_envelope(plan, STATUS_IN_PROGRESS, None, Vec::new(), None);
@@ -126,6 +128,9 @@ fn stream_worker(state: &AppState, plan: &RequestPlan, tx: &tokio::sync::mpsc::S
             return;
         }
     };
+    state
+        .runtime
+        .record(outcome.tally.into_sample(crate::state::elapsed_ms(started)));
     super::handler::retain_kv_handoff(state, plan, &mut outcome);
     let (mut output, status, incomplete) = match build_output(plan.tools_active, &outcome) {
         Ok(parts) => parts,

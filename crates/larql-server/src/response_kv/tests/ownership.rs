@@ -86,6 +86,51 @@ fn drop_owned_by_an_unknown_session_frees_nothing() {
 }
 
 #[test]
+fn drop_owned_by_model_frees_every_entry_regardless_of_session_ownership() {
+    // Unload's cache sweep — unlike `drop_owned_by`, this doesn't care
+    // who (if anyone) owns an entry; only which runtime produced it.
+    let manager = SessionManager::new(OWNER_TTL_SECS);
+    let cache = cache();
+    let owned = owner(&manager, "s");
+    cache.insert("resp_1", "model-x", Some(owned), handoff(&[1]));
+    cache.insert("resp_2", "model-x", None, handoff(&[2]));
+    cache.insert("resp_3", "model-y", None, handoff(&[3]));
+
+    assert_eq!(cache.drop_owned_by_model("model-x"), 2);
+    assert_eq!(cache.len(), 1);
+    assert!(
+        cache.take("resp_3", "model-y").is_some(),
+        "other model kept"
+    );
+}
+
+#[test]
+fn drop_owned_by_an_unknown_model_frees_nothing() {
+    let cache = cache();
+    cache.insert("resp_1", TEST_MODEL, None, handoff(&[1]));
+    assert_eq!(cache.drop_owned_by_model("never-loaded"), 0);
+    assert_eq!(cache.len(), 1);
+}
+
+#[test]
+fn drop_owned_by_model_keeps_capacity_accounting_consistent() {
+    let cache = ResponseKvCache::new(2, TEST_TTL_SECS);
+    cache.insert("resp_1", "model-x", None, handoff(&[1]));
+    assert_eq!(cache.drop_owned_by_model("model-x"), 1);
+
+    cache.insert("resp_2", TEST_MODEL, None, handoff(&[2]));
+    cache.insert("resp_3", TEST_MODEL, None, handoff(&[3]));
+    cache.insert("resp_4", TEST_MODEL, None, handoff(&[4]));
+    assert_eq!(cache.len(), 2);
+    assert!(
+        cache.take("resp_2", TEST_MODEL).is_none(),
+        "resp_2 was the oldest live entry"
+    );
+    assert!(cache.take("resp_3", TEST_MODEL).is_some());
+    assert!(cache.take("resp_4", TEST_MODEL).is_some());
+}
+
+#[test]
 fn drop_owned_by_keeps_capacity_accounting_consistent() {
     // The order queue must be compacted alongside the map, or capacity
     // eviction later targets an id that is no longer resident.

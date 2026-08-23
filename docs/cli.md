@@ -688,6 +688,9 @@ forwarded by the wrapper — run `larql-server` directly to use them.
 | GET | `/v1/shard/{model_id}/{range}` | Mode B shard handoff: donor streams its on-disk vindex as a tar |
 | WS | `/v1/stream` | WebSocket streaming (layer-by-layer DESCRIBE) |
 | GET | `/v1/health` | Health check (auth exempt) |
+| GET | `/v1/runtime` | Server + model + backend + memory + performance snapshot |
+| POST | `/v1/runtime/model` | Load a model into an idle single-model server (single-model topology only; no atomic A→B replacement — `DELETE` first) |
+| DELETE | `/v1/runtime/model` | Unload the bound model (drains in-flight generations, fails closed on timeout; single-model topology only) |
 | GET | `/v1/models` | List loaded models (OpenAI-compatible shape) |
 | POST | `/v1/completions` | OpenAI-compatible text completions (SSE streaming with `stream: true`) |
 | POST | `/v1/chat/completions` | OpenAI-compatible chat completions (SSE streaming with `stream: true`) |

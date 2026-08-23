@@ -35,11 +35,14 @@ pub(super) fn stream_chat_completion(
     constrained_schema: Option<Schema>,
     tools_active: bool,
     model_id: String,
+    runtime: Arc<crate::runtime_stats::RuntimeRecorder>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let (tx, rx) = tokio::sync::mpsc::channel::<String>(SSE_CHANNEL_DEPTH);
     let chat_id = format!("chatcmpl-{}", new_id_suffix());
+    let call_started = std::time::Instant::now();
 
     tokio::task::spawn_blocking(move || {
+        let _gen_guard = runtime.clone().enter_generation();
         let mut weights_guard = match model.lock_weights_for_gen() {
             Ok(w) => w,
             Err(e) => {
@@ -138,6 +141,10 @@ pub(super) fn stream_chat_completion(
                 None,
             )
         };
+
+        let mut tally = crate::runtime_stats::GenerationTally::new();
+        tally.add_v2(&result, prompt_ids.len());
+        runtime.record(tally.into_sample(crate::state::elapsed_ms(call_started)));
 
         // Final-chunk finish reason: layer_graph::generate halts on
         // EOS internally; tokens.len() < max_tokens implies stop.

@@ -106,8 +106,12 @@ fn state_for(container: &str, kv_entries: usize) -> Arc<AppState> {
         LoadedArtifact::V2(_) => panic!("this ledger measures the V3 continuation cache"),
     };
     Arc::new(AppState {
-        models: Vec::new(),
-        v3_models: vec![v3],
+        model_set: std::sync::RwLock::new(larql_server::state::ModelSet {
+            models: Vec::new(),
+            v3_models: vec![v3],
+        }),
+        router_topology: larql_server::state::RouterTopology::SingleModel,
+        lifecycle: std::sync::Mutex::new(larql_server::state::LifecycleState::Idle),
         started_at: Instant::now(),
         requests_served: AtomicU64::new(0),
         api_key: None,
@@ -119,6 +123,7 @@ fn state_for(container: &str, kv_entries: usize) -> Arc<AppState> {
             kv_entries,
             larql_server::response_kv::DEFAULT_TTL_SECS,
         ),
+        runtime: Arc::new(larql_server::runtime_stats::RuntimeRecorder::new()),
     })
 }
 

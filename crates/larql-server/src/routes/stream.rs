@@ -197,7 +197,7 @@ async fn stream_describe_messages(
     };
 
     let model = match state.model(None) {
-        Some(m) => Arc::clone(m),
+        Some(m) => m,
         None => return vec![ws_error("no model loaded")],
     };
 
@@ -301,7 +301,7 @@ async fn handle_stream_infer(
     };
 
     let model = match state.model(None) {
-        Some(m) => Arc::clone(m),
+        Some(m) => m,
         None => {
             send_error(socket, "no model loaded").await;
             return;
@@ -408,7 +408,7 @@ async fn handle_stream_generate(
         .unwrap_or(DEFAULT_STREAM_MAX_TOKENS) as usize;
 
     let model = match state.model(None) {
-        Some(m) => Arc::clone(m),
+        Some(m) => m,
         None => {
             send_error(socket, "no model loaded").await;
             return;
@@ -723,9 +723,14 @@ mod tests {
     }
 
     fn test_state(models: Vec<Arc<LoadedModel>>) -> Arc<AppState> {
+        let router_topology = crate::state::RouterTopology::for_boot_count(models.len());
         Arc::new(AppState {
-            models,
-            v3_models: Vec::new(),
+            model_set: std::sync::RwLock::new(crate::state::ModelSet {
+                models,
+                v3_models: Vec::new(),
+            }),
+            router_topology,
+            lifecycle: std::sync::Mutex::new(crate::state::LifecycleState::Idle),
             started_at: std::time::Instant::now(),
             requests_served: AtomicU64::new(0),
             api_key: None,
@@ -737,6 +742,7 @@ mod tests {
                 crate::response_kv::DEFAULT_MAX_ENTRIES,
                 crate::response_kv::DEFAULT_TTL_SECS,
             ),
+            runtime: std::sync::Arc::new(crate::runtime_stats::RuntimeRecorder::new()),
         })
     }
 

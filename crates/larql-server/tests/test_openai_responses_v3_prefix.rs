@@ -100,8 +100,12 @@ fn v3_state(containers: &[&Path], kv_entries: usize) -> Arc<AppState> {
         })
         .collect();
     Arc::new(AppState {
-        models: Vec::new(),
-        v3_models,
+        model_set: std::sync::RwLock::new(larql_server::state::ModelSet {
+            models: Vec::new(),
+            v3_models,
+        }),
+        router_topology: larql_server::state::RouterTopology::SingleModel,
+        lifecycle: std::sync::Mutex::new(larql_server::state::LifecycleState::Idle),
         started_at: std::time::Instant::now(),
         requests_served: std::sync::atomic::AtomicU64::new(0),
         api_key: None,
@@ -113,6 +117,7 @@ fn v3_state(containers: &[&Path], kv_entries: usize) -> Arc<AppState> {
             kv_entries,
             larql_server::response_kv::DEFAULT_TTL_SECS,
         ),
+        runtime: Arc::new(larql_server::runtime_stats::RuntimeRecorder::new()),
     })
 }
 

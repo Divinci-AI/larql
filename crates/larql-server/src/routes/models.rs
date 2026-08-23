@@ -67,13 +67,22 @@ pub async fn handle_models(State(state): State<Arc<AppState>>) -> Json<serde_jso
 
     let created = server_boot_unix_secs(&state);
     let multi = state.is_multi_model();
+    // One coherent snapshot for the whole listing, rather than reading
+    // the V2 and V3 registries as two separate locked reads — see
+    // `ModelSet`.
+    let snapshot = state.models_snapshot();
 
-    let mut data: Vec<serde_json::Value> = state
+    let mut data: Vec<serde_json::Value> = snapshot
         .models
         .iter()
         .map(|m| v2_entry(m, created, multi))
         .collect();
-    data.extend(state.v3_models.iter().map(|m| v3_entry(m, created, multi)));
+    data.extend(
+        snapshot
+            .v3_models
+            .iter()
+            .map(|m| v3_entry(m, created, multi)),
+    );
 
     Json(serde_json::json!({
         "object": LIST_OBJECT,
@@ -145,11 +154,12 @@ pub async fn handle_model_retrieve(
     let created = server_boot_unix_secs(&state);
     let multi = state.is_multi_model();
 
-    if let Some(m) = state.models.iter().find(|m| m.id == model) {
-        return Ok(Json(v2_entry(m, created, multi)));
+    // `served(Some(id))` searches V2 then V3 by exact id match — the
+    // same order and semantics this handler implemented by hand
+    // before; reusing it means one search implementation, not two.
+    match state.served(Some(&model)) {
+        Some(crate::state::ServedModel::V2(m)) => Ok(Json(v2_entry(&m, created, multi))),
+        Some(crate::state::ServedModel::V3(m)) => Ok(Json(v3_entry(&m, created, multi))),
+        None => Err(OpenAIError::not_found(format!("model '{model}' not found"))),
     }
-    if let Some(m) = state.v3_models.iter().find(|m| m.id == model) {
-        return Ok(Json(v3_entry(m, created, multi)));
-    }
-    Err(OpenAIError::not_found(format!("model '{model}' not found")))
 }

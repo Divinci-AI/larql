@@ -182,10 +182,11 @@ pub enum LoadedArtifact {
 A VINDEX3 container binds as an executable program — it structurally
 cannot take the V2 path, whose `load_vindex_config` refuses non-V2
 generations. Nothing downstream re-detects the format: the server keeps
-V3 models in a separate `AppState.v3_models` registry, and
-`AppState::served` (`crates/larql-server/src/state.rs`) resolves a
-request's model id to a `ServedModel::V2` or `ServedModel::V3` — the
-single request-time decision point.
+V3 models in a separate `v3_models` list inside the coherent
+`AppState.model_set: RwLock<ModelSet>` snapshot (`crates/larql-server/src/state/model_set.rs`),
+and `AppState::served` (same file) resolves a request's model id to a
+`ServedModel::V2` or `ServedModel::V3` — the single request-time
+decision point.
 
 `V3Model` (`crates/larql-server/src/vindex3.rs`) is one bound container:
 the opened `Vindex3Runtime<ProductionBackend>` plus serving glue (an id

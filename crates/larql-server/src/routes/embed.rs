@@ -288,7 +288,7 @@ async fn handle_embed_inner(
         ));
     }
 
-    let h = match embed_tokens(model, &token_ids) {
+    let h = match embed_tokens(&model, &token_ids) {
         Ok(h) => h,
         Err(e) => return e.into_response(),
     };

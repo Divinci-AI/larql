@@ -266,6 +266,7 @@ pub async fn handle_completions(
                 stream,
                 model_id,
                 state.infer_timeout,
+                Arc::clone(&state.runtime),
             )
             .await;
         }
@@ -281,6 +282,7 @@ pub async fn handle_completions(
             sampling_params,
             stop_strings,
             model_id,
+            Arc::clone(&state.runtime),
         )
         .into_response());
     }
@@ -295,8 +297,10 @@ pub async fn handle_completions(
     // doesn't) in the background, same tradeoff /v1/infer already accepts.
     let logprobs_requested = req.logprobs;
     let started = std::time::Instant::now();
+    let _gen_guard = Arc::clone(&state.runtime).enter_generation();
     let handle = tokio::task::spawn_blocking(move || -> Result<_, ServerError> {
-        run_completions_loop(
+        let mut tally = crate::runtime_stats::GenerationTally::new();
+        let out = run_completions_loop(
             &model_arc,
             &prompts,
             max_tokens,
@@ -304,10 +308,12 @@ pub async fn handle_completions(
             &stop_strings,
             echo,
             logprobs_requested,
-        )
+            &mut tally,
+        )?;
+        Ok((out, tally))
     });
     let timeout = state.infer_timeout;
-    let (choices, prompt_tokens, completion_tokens) = if timeout.is_zero() {
+    let ((choices, prompt_tokens, completion_tokens), tally) = if timeout.is_zero() {
         handle
             .await
             .map_err(|e| ServerError::Internal(e.to_string()))??
@@ -328,6 +334,9 @@ pub async fn handle_completions(
             }
         }
     };
+    state
+        .runtime
+        .record(tally.into_sample(crate::state::elapsed_ms(started)));
 
     Ok(Json(CompletionsResponse {
         id: format!("cmpl-{}", new_id_suffix()),
@@ -355,11 +364,14 @@ fn stream_completions(
     sampling_params: super::util::SamplingParams,
     stop_strings: Vec<String>,
     model_id: String,
+    runtime: Arc<crate::runtime_stats::RuntimeRecorder>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let (tx, rx) = tokio::sync::mpsc::channel::<String>(SSE_CHANNEL_DEPTH);
     let cmpl_id = format!("cmpl-{}", new_id_suffix());
+    let call_started = std::time::Instant::now();
 
     tokio::task::spawn_blocking(move || {
+        let _gen_guard = runtime.clone().enter_generation();
         let mut weights_guard = match model.lock_weights_for_gen() {
             Ok(w) => w,
             Err(e) => {
@@ -429,6 +441,9 @@ fn stream_completions(
         } else {
             FINISH_REASON_LENGTH
         };
+        let mut tally = crate::runtime_stats::GenerationTally::new();
+        tally.add_v2(&result, prompt_ids.len());
+        runtime.record(tally.into_sample(crate::state::elapsed_ms(call_started)));
         let final_chunk =
             build_text_completion_chunk(&cmpl_id, &model_id, None, Some(finish_reason));
         let _ = tx.blocking_send(final_chunk);
@@ -519,6 +534,7 @@ fn run_completions_loop(
     stop_strings: &[String],
     echo: bool,
     logprobs_requested: Option<usize>,
+    tally: &mut crate::runtime_stats::GenerationTally,
 ) -> Result<(Vec<CompletionChoice>, usize, usize), ServerError> {
     // Take an exclusive write guard on the weights. Each prompt in
     // the batch is generated in turn under the same guard so the
@@ -569,6 +585,7 @@ fn run_completions_loop(
             sampling,
             &eos,
         );
+        tally.add_v2(&result, prompt_ids.len());
 
         let (completion_text, completion_tokens, finish_reason) =
             finalize_completion(&result.tokens, stop_strings);

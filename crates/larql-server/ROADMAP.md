@@ -688,12 +688,20 @@ prefill.
 **Files**: `crates/larql-inference/src/layer_graph/generate/*`,
 `crates/larql-server/src/routes/infer.rs`.
 
-### F8. Vindex hot-swap admin endpoints
-**Files**: `crates/larql-server/src/routes/` (new `admin.rs`),
-`crates/larql-server/src/state.rs` (mutable model registry).
-`POST /v1/admin/vindex/load`, `DELETE /v1/admin/vindex/{id}`,
-`POST /v1/admin/vindex/reload`. Admin-key-gated (see **F14**). Otherwise every
-model swap is a process restart.
+### F8. Vindex hot-swap admin endpoints — done (single-model topology)
+Shipped as `POST`/`DELETE /v1/runtime/model` rather than the
+`/v1/admin/vindex/...` shape originally sketched here — no separate
+`/reload` verb; a client swaps by calling `DELETE` then `POST`. Scoped
+to single-model-topology servers only (`RouterTopology`, 0↔1
+invariant) — a boot-time multi-model server still requires a process
+restart to change its bound set, and dynamic multi-model loading
+remains unimplemented. Gated by the existing single API key like every
+other route, not a separate admin key — real per-key admin scoping is
+still **F14**, unimplemented.
+**Files**: `crates/larql-server/src/routes/runtime_lifecycle.rs`,
+`crates/larql-server/src/state/lifecycle.rs` (state machine),
+`crates/larql-server/src/state/model_set.rs` (mutable model registry).
+See `docs/runtime-lifecycle-design.md` for the full design record.
 
 ### F9. Binary wire format for `expert/batch`
 **Files**: `crates/larql-server/src/routes/expert/`,

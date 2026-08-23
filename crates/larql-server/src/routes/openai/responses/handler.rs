@@ -97,6 +97,8 @@ pub async fn handle_responses(
         plan.schema.clone(),
     );
     let resume = take_kv_resume(&state, &plan);
+    let started = std::time::Instant::now();
+    let _gen_guard = Arc::clone(&state.runtime).enter_generation();
     let handle = tokio::task::spawn_blocking(move || -> Result<GenerationOutcome, ServerError> {
         super::engine::generate(
             &engine,
@@ -110,6 +112,9 @@ pub async fn handle_responses(
         )
     });
     let mut outcome = join_generation(handle, state.infer_timeout).await?;
+    state
+        .runtime
+        .record(outcome.tally.into_sample(crate::state::elapsed_ms(started)));
     retain_kv_handoff(&state, &plan, &mut outcome);
 
     let (output, status, incomplete) =

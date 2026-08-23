@@ -347,6 +347,73 @@ pub mod schemas {
     }
 
     #[derive(Serialize, ToSchema)]
+    pub struct RuntimeModel {
+        pub id: String,
+        pub architecture: String,
+        /// `"vindex2"` | `"vindex3"`.
+        pub format: String,
+        /// `None` for a VINDEX3 container — it carries no single
+        /// top-level quant tag the way a VINDEX2 `index.json` does.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub quantization: Option<String>,
+    }
+
+    #[derive(Serialize, ToSchema)]
+    pub struct RuntimeBackend {
+        /// Whether this binary was compiled with Metal-accelerated MoE
+        /// expert dispatch — a compile-time fact, not a claim that
+        /// Metal is driving the current request.
+        pub metal_compiled: bool,
+    }
+
+    #[derive(Serialize, ToSchema)]
+    pub struct RuntimeMemory {
+        /// Peak resident-set size of this process (`getrusage`), in
+        /// bytes. `None` on a non-Unix target or a syscall failure.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub resident_bytes: Option<u64>,
+        /// Estimated resident footprint of the bound model's weights.
+        /// `None` when no model is bound, or on a VINDEX3 container
+        /// (no estimator exists yet).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub model_bytes: Option<u64>,
+    }
+
+    #[derive(Serialize, ToSchema)]
+    pub struct RuntimePerformance {
+        /// `None` until at least one generation has completed.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub prefill_tokens_per_second: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub decode_tokens_per_second: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub last_request_latency_ms: Option<f64>,
+    }
+
+    #[derive(Serialize, ToSchema)]
+    pub struct RuntimeGeneration {
+        pub active: bool,
+        pub active_requests: u32,
+    }
+
+    /// `GET /v1/runtime` — server + model + backend + memory +
+    /// performance snapshot. Never constructed at runtime (the handler
+    /// builds `serde_json::Value` directly); this exists purely so the
+    /// OpenAPI spec documents the shape.
+    #[derive(Serialize, ToSchema)]
+    pub struct RuntimeResponse {
+        pub status: String,
+        pub version: String,
+        pub uptime_ms: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub model: Option<RuntimeModel>,
+        pub backend: RuntimeBackend,
+        pub memory: RuntimeMemory,
+        pub performance: RuntimePerformance,
+        pub generation: RuntimeGeneration,
+    }
+
+    #[derive(Serialize, ToSchema)]
     pub struct TokenEncodeResponse {
         pub token_ids: Vec<u32>,
         pub text: String,
@@ -598,6 +665,9 @@ pub mod schemas {
         crate::routes::patches::handle_remove_patch,
         // admin
         crate::routes::health::handle_health,
+        crate::routes::runtime::handle_runtime,
+        crate::routes::runtime_lifecycle::handle_load_model,
+        crate::routes::runtime_lifecycle::handle_unload_model,
         crate::routes::embed::handle_embed,
         crate::routes::embed::handle_embed_single,
         crate::routes::embed::handle_logits,
@@ -684,6 +754,13 @@ pub mod schemas {
         schemas::SessionDeletedResponse,
         // admin
         schemas::HealthResponse,
+        schemas::RuntimeModel,
+        schemas::RuntimeBackend,
+        schemas::RuntimeMemory,
+        schemas::RuntimePerformance,
+        schemas::RuntimeGeneration,
+        schemas::RuntimeResponse,
+        crate::routes::runtime_lifecycle::LoadModelRequest,
         schemas::TokenEncodeResponse,
         schemas::TokenDecodeResponse,
         schemas::EmbedSingleJsonResponse,

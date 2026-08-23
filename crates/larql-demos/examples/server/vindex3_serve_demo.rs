@@ -112,8 +112,12 @@ async fn main() {
     println!("bound: model `{}` (VINDEX3)\n", v3.id);
 
     let state = Arc::new(AppState {
-        models: Vec::new(),
-        v3_models: vec![v3],
+        model_set: std::sync::RwLock::new(larql_server::state::ModelSet {
+            models: Vec::new(),
+            v3_models: vec![v3],
+        }),
+        router_topology: larql_server::state::RouterTopology::SingleModel,
+        lifecycle: std::sync::Mutex::new(larql_server::state::LifecycleState::Idle),
         started_at: Instant::now(),
         requests_served: AtomicU64::new(0),
         api_key: None,
@@ -125,6 +129,7 @@ async fn main() {
             larql_server::response_kv::DEFAULT_MAX_ENTRIES,
             larql_server::response_kv::DEFAULT_TTL_SECS,
         ),
+        runtime: Arc::new(larql_server::runtime_stats::RuntimeRecorder::new()),
     });
 
     // GET /v1/models — the registry lists the V3 model.
