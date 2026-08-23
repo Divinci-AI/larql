@@ -15,6 +15,7 @@ impl Parser {
         let mut components = None;
         let mut layers = None;
         let mut extract_level = ExtractLevel::Browse;
+        let mut format = None;
 
         loop {
             match self.peek() {
@@ -25,6 +26,26 @@ impl Parser {
                 crate::lexer::Token::Keyword(Keyword::Layers) => {
                     self.advance();
                     layers = Some(self.parse_range()?);
+                }
+                crate::lexer::Token::Keyword(Keyword::Format) => {
+                    self.advance();
+                    // VINDEX2 / VINDEX3 are bare identifiers, as with
+                    // COMPILE INTO VINDEX.
+                    format = Some(match self.peek() {
+                        crate::lexer::Token::Ident(ref s) if s.eq_ignore_ascii_case("vindex2") => {
+                            self.advance();
+                            ExtractFormat::Vindex2
+                        }
+                        crate::lexer::Token::Ident(ref s) if s.eq_ignore_ascii_case("vindex3") => {
+                            self.advance();
+                            ExtractFormat::Vindex3
+                        }
+                        other => {
+                            return Err(ParseError(format!(
+                                "EXTRACT FORMAT expects VINDEX2 or VINDEX3, found {other:?}"
+                            )))
+                        }
+                    });
                 }
                 crate::lexer::Token::Keyword(Keyword::With) => {
                     self.advance();
@@ -52,6 +73,7 @@ impl Parser {
             components,
             layers,
             extract_level,
+            format,
         })
     }
 

@@ -2,13 +2,16 @@
 
 use std::path::PathBuf;
 
-use crate::ast::{Component, ExtractLevel, Range};
+use crate::ast::{Component, ExtractFormat, ExtractLevel, Range};
 use crate::error::LqlError;
 use crate::executor::helpers::format_number;
 use crate::executor::memit_persist::load_memit_store;
 use crate::executor::{Backend, Session};
 use crate::relations::RelationClassifier;
 use larql_vindex::format::filenames::KNN_STORE_BIN;
+use larql_vindex::format::generation::{
+    admit_extraction_generation, ContainerGeneration, GenerationRequest,
+};
 
 impl Session {
     pub(crate) fn exec_extract(
@@ -18,7 +21,35 @@ impl Session {
         _components: Option<&[Component]>,
         _layers: Option<&Range>,
         _extract_level: ExtractLevel,
+        format: Option<ExtractFormat>,
     ) -> Result<Vec<String>, LqlError> {
+        // Resolve the generation FIRST — the request must be admitted or
+        // refused before any model bytes move. `None` is "no preference",
+        // resolved by the vindex crate's single policy site (the
+        // default-flip gate), never by a default here.
+        let request = match format {
+            None => GenerationRequest::Auto,
+            Some(ExtractFormat::Vindex2) => GenerationRequest::Explicit(ContainerGeneration::V2),
+            Some(ExtractFormat::Vindex3) => GenerationRequest::Explicit(ContainerGeneration::V3),
+        };
+        match admit_extraction_generation(request) {
+            ContainerGeneration::V2 => {}
+            // This surface extracts from a live model's weights; the
+            // VINDEX3 producer (`larql vindex3 encode`) consumes HF
+            // checkpoint artifacts. Until EXTRACT is wired to the V3
+            // encoder, an explicit V3 request is refused by name — it is
+            // never downgraded to a V2 extraction.
+            ContainerGeneration::V3 => {
+                return Err(LqlError::Execution(
+                    "EXTRACT cannot write a VINDEX3 container from this surface yet: \
+                     VINDEX3 containers are produced by `larql vindex3 encode` from HF \
+                     checkpoint artifacts. FORMAT VINDEX2 remains available and must be \
+                     selected explicitly rather than fallen back to."
+                        .into(),
+                ));
+            }
+        }
+
         let output_dir = PathBuf::from(output);
 
         let mut out = Vec::new();

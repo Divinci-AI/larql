@@ -17,12 +17,14 @@ fn parse_extract_minimal() {
             components,
             layers,
             extract_level,
+            format,
         } => {
             assert_eq!(model, "google/gemma-3-4b-it");
             assert_eq!(output, "gemma3-4b.vindex");
             assert!(components.is_none());
             assert!(layers.is_none());
             assert_eq!(extract_level, ExtractLevel::Browse);
+            assert_eq!(format, None, "no FORMAT clause = no preference");
         }
         _ => panic!("expected Extract"),
     }
