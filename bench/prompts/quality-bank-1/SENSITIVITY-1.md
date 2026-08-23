@@ -53,6 +53,30 @@ This is the oQ-style normalised local error, computed from weights alone.
 It is deliberately *not* a forward-pass metric: if a local signal suffices,
 screening costs one pass over the weights rather than one per candidate.
 
+## Escalation ladder, frozen before any score is computed
+
+The proxy below is weight-only. It measures how far the weights move, not
+how strongly the model *uses* the directions they move in — two tensors can
+carry identical relative weight error while one sits in an
+activation-sensitive region and the other barely matters. So it may well
+fail, and the response to failure is fixed in advance rather than chosen
+after seeing which formula would have passed.
+
+| rung | score | cost |
+|---|---|---|
+| **1A** | `‖W − Q(W)‖² / ‖W‖²`, weight-only | one pass over the weights |
+| **1B** | `E[‖XW − XQ(W)‖² / ‖XW‖²]`, activation-weighted over a small calibration sample | one forward pass per layer, still no bank |
+| **1C** | curvature / Hessian-aware, the oQ/GPTQ-style machinery | calibration plus second-order statistics |
+
+**Do not massage 1A until it passes.** A clean 1A failure is itself a
+result: it would say that weight geometry alone does not predict semantic
+quantisation sensitivity, which is worth knowing and is the argument for
+1B. Tuning a weight-only score until it happens to reproduce fifteen known
+verdicts would produce a number that fits this validation set and predicts
+nothing.
+
+Each rung is scored against the same frozen fifteen, against the same bar.
+
 ## Order
 
 1. Glimmer coarse surface — is its low R0 damage flat or concentrated?
