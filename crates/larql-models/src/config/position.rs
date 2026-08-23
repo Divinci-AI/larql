@@ -51,8 +51,90 @@ pub enum PositionPolicy {
         rotary_fraction: f64,
         basis: RotaryFrequencyBasis,
     },
+    /// Multi-axis rotary ("M-RoPE", Qwen-VL family): the rotary frequency
+    /// slots are divided between three position axes — time, height,
+    /// width — so one head can carry a token's position in a 3-D grid.
+    ///
+    /// Its own variant rather than [`Self::PartialRope`] plus metadata
+    /// held elsewhere, for the reason [`Self::Yarn`] is its own variant:
+    /// these four facts *jointly* define the positional operator. Split
+    /// them and it becomes possible for the graph to say "partial rotary"
+    /// while silently dropping the multi-axis transformation — which is
+    /// precisely the state this variant was introduced to end, where
+    /// Qwen3.8 resolved to `Rope { theta }` and would have rotated all
+    /// 256 head dims instead of 64.
+    ///
+    /// **On the text path this operator is exactly degenerate.** When
+    /// `t == h == w` — every text-only position — the axis assignment
+    /// selects between identical values, so the result is bit-identical
+    /// to a plain partial rotary (measured against HF: max abs difference
+    /// `0.0`). No text-only test can falsify [`Self::section`] or
+    /// [`Self::interleaved`]; both are carried and lowered on the
+    /// strength of the declaration and the image path's eventual
+    /// execution, never on text parity.
+    MRope {
+        theta: f64,
+        /// Fraction of each head that rotates: `0.25` on Qwen3.8, which
+        /// is 64 dims of a 256-dim head.
+        rotary_fraction: f64,
+        basis: RotaryFrequencyBasis,
+        /// Frequency slots per axis, in `(t, h, w)` order.
+        ///
+        /// Sums to the FREQUENCY count — `rotary_dim / 2` — and **not**
+        /// to `rotary_dim`. `[11, 11, 10]` on Qwen3.8: 32 frequencies
+        /// over a 64-dim rotary block. Reading the sum as `rotary_dim`
+        /// closes only if the head width is taken as 128, which is the
+        /// *Gated DeltaNet* head width and a different operator.
+        ///
+        /// An array, not a list: HF expands `inv_freq` to `(3, …)` and
+        /// iterates H and W explicitly, so three axes is the operator's
+        /// arity rather than a configurable length.
+        section: [usize; 3],
+        /// Whether the axes interleave across the frequency slots
+        /// (`THWTHW…`, HF's `apply_interleaved_mrope`) or occupy
+        /// contiguous blocks (`TTT…HHH…WWW…`).
+        interleaved: bool,
+    },
     /// No positional encoding — the layer attends position-agnostically.
     None,
+}
+
+/// Axis index (0 = t, 1 = h, 2 = w) each frequency slot draws its
+/// position from, under an M-RoPE `section`/`interleaved` policy.
+///
+/// Transcribed from HF `apply_interleaved_mrope`, which starts from the
+/// T-axis frequencies and overwrites `slice(1, section[1] * 3, 3)` with H
+/// and `slice(2, section[2] * 3, 3)` with W. Expressing it as a per-slot
+/// axis table rather than a tensor permutation is what lets the executor
+/// run the real assignment on 1-D positions: the lookup happens, and it
+/// happens to select equal values.
+///
+/// `n_freqs` is `rotary_dim / 2`. Slots beyond what `section` accounts
+/// for stay on the T axis, matching HF's "just overwrite the first
+/// dimension" construction.
+pub fn mrope_axis_table(section: [usize; 3], interleaved: bool, n_freqs: usize) -> Vec<u8> {
+    let mut axes = vec![0u8; n_freqs];
+    if interleaved {
+        for (axis, offset) in [(1usize, 1usize), (2, 2)] {
+            let mut slot = offset;
+            while slot < section[axis] * 3 && slot < n_freqs {
+                axes[slot] = axis as u8;
+                slot += 3;
+            }
+        }
+    } else {
+        let mut slot = section[0].min(n_freqs);
+        for (axis, count) in [(1u8, section[1]), (2, section[2])] {
+            for _ in 0..count {
+                if slot >= n_freqs {
+                    break;
+                }
+                axes[slot] = axis;
+                slot += 1;
+            }
+        }
+    }
+    axes
 }
 
 /// The width the inverse-frequency series of a partial rotary is taken
@@ -92,9 +174,10 @@ impl PositionPolicy {
     /// no default.
     pub fn rope_theta(self) -> Option<f64> {
         match self {
-            Self::Rope { theta } | Self::Yarn { theta, .. } | Self::PartialRope { theta, .. } => {
-                Some(theta)
-            }
+            Self::Rope { theta }
+            | Self::Yarn { theta, .. }
+            | Self::PartialRope { theta, .. }
+            | Self::MRope { theta, .. } => Some(theta),
             Self::None => None,
         }
     }
@@ -105,6 +188,9 @@ impl PositionPolicy {
     pub fn rotary_fraction(self) -> Option<f64> {
         match self {
             Self::PartialRope {
+                rotary_fraction, ..
+            }
+            | Self::MRope {
                 rotary_fraction, ..
             } => Some(rotary_fraction),
             Self::Rope { .. } | Self::Yarn { .. } | Self::None => None,
@@ -122,7 +208,18 @@ impl PositionPolicy {
                 basis: RotaryFrequencyBasis::HeadWidth,
                 ..
             } => Some(super::rope_types::ROPE_TYPE_PROPORTIONAL),
+            Self::MRope {
+                basis: RotaryFrequencyBasis::HeadWidth,
+                ..
+            } => Some(super::rope_types::ROPE_TYPE_PROPORTIONAL),
+            // M-RoPE's own spelling lives in `mrope_section`, not in
+            // `rope_type`: Qwen3.8 declares `rope_type: "default"` and
+            // carries the multi-axis facts beside it.
             Self::PartialRope {
+                basis: RotaryFrequencyBasis::RotaryWidth,
+                ..
+            }
+            | Self::MRope {
                 basis: RotaryFrequencyBasis::RotaryWidth,
                 ..
             }
@@ -136,7 +233,21 @@ impl PositionPolicy {
     pub fn yarn(self) -> Option<YarnRopeScaling> {
         match self {
             Self::Yarn { scaling, .. } => Some(scaling),
-            Self::Rope { .. } | Self::PartialRope { .. } | Self::None => None,
+            Self::Rope { .. } | Self::PartialRope { .. } | Self::MRope { .. } | Self::None => None,
+        }
+    }
+
+    /// The multi-axis sectioning when the policy is M-RoPE; `None`
+    /// otherwise — "this layer declares no axis split", never an implied
+    /// single-axis default.
+    pub fn mrope(self) -> Option<([usize; 3], bool)> {
+        match self {
+            Self::MRope {
+                section,
+                interleaved,
+                ..
+            } => Some((section, interleaved)),
+            Self::Rope { .. } | Self::Yarn { .. } | Self::PartialRope { .. } | Self::None => None,
         }
     }
 

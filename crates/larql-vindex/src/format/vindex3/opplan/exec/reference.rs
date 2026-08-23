@@ -22,8 +22,9 @@ use super::backend::{
     PlanBackend, ProjectCall, ProjectedQkv, QkNormCall, RoutedFfnCall,
 };
 use super::kernels::{
-    activate, matvec, norm, partial_rotary_frequencies, partial_rotary_slice, rope_rotate,
-    rope_rotate_scaled, sigmoid, softcap, softmax, softmax_with_sink, yarn_frequencies,
+    activate, matvec, mrope_rotate, norm, partial_rotary_frequencies, partial_rotary_slice,
+    rope_rotate, rope_rotate_scaled, sigmoid, softcap, softmax, softmax_with_sink,
+    yarn_frequencies,
 };
 use crate::error::VindexError;
 use larql_models::config::NormType;
@@ -179,6 +180,39 @@ impl ReferenceBackend {
                     }
                 }
             },
+            // Multi-axis rotary. The interpreter holds one scalar
+            // position, so the grid is `(p, p, p)` — a text sequence,
+            // where the axis assignment provably selects equal values.
+            // The assignment still runs: see `mrope_rotate`.
+            PositionPolicy::MRope {
+                theta,
+                rotary_fraction,
+                basis,
+                section,
+                interleaved,
+            } => {
+                let width =
+                    match basis {
+                        RotaryFrequencyBasis::RotaryWidth => {
+                            partial_rotary_slice(head_dim, rotary_fraction)
+                        }
+                        // No judged checkpoint pairs a head-width basis with
+                        // M-RoPE; refusing beats guessing which block the
+                        // sections index.
+                        RotaryFrequencyBasis::HeadWidth => return Err(VindexError::Parse(
+                            "M-RoPE with a head-width frequency basis is unjudged; no checkpoint \
+                             declares it and the section-to-dimension mapping is undefined"
+                                .to_string(),
+                        )),
+                    };
+                let grid = [position, position, position];
+                for head in q.chunks_exact_mut(head_dim) {
+                    mrope_rotate(&mut head[..width], grid, theta, section, interleaved);
+                }
+                for head in k.chunks_exact_mut(head_dim) {
+                    mrope_rotate(&mut head[..width], grid, theta, section, interleaved);
+                }
+            }
         }
         Ok((q, k, v))
     }

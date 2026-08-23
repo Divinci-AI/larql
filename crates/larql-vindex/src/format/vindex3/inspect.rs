@@ -192,7 +192,7 @@ pub fn inspect_container(
             let table = c.attention.as_ref();
             let sliding = table.map(|t| {
                 t.iter()
-                    .filter(|l| matches!(l.span, AttentionSpan::Sliding))
+                    .filter(|l| matches!(l.span, Some(AttentionSpan::Sliding)))
                     .count()
             });
             ComponentSummary {

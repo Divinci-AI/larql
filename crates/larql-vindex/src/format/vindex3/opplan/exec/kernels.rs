@@ -7,7 +7,7 @@
 //! row-major `[out, in]` weights, no BLAS, no SIMD: semantic fidelity is
 //! the only job.
 
-use larql_models::config::{Activation, NormType};
+use larql_models::config::{mrope_axis_table, Activation, NormType};
 
 /// `y[o] = Σ_i w[o*in + i] * x[i]` — weight stored `[out, in]` row-major.
 pub fn matvec(weight: &[f32], out_dim: usize, in_dim: usize, x: &[f32]) -> Vec<f32> {
@@ -209,6 +209,62 @@ pub fn partial_rotary_frequencies(head_dim: usize, rotary_fraction: f64, theta: 
 /// rotate-half block — HF's `int(head_dim * partial_rotary_factor)`.
 pub fn partial_rotary_slice(head_dim: usize, rotary_fraction: f64) -> usize {
     (head_dim as f64 * rotary_fraction) as usize
+}
+
+/// Rotate-half M-RoPE on one head at one **grid** position: the rotary
+/// prefix rotates as its own block, and each frequency slot draws its
+/// angle from the position axis its section assigns it.
+///
+/// `positions` is `(t, h, w)`. On the text path all three are the token
+/// index, and the axis lookup therefore selects between equal values —
+/// so this reduces, exactly, to a plain partial rotary. That degeneracy
+/// is a property of the INPUT, not of this function: the assignment is
+/// consulted either way, so the code an image position would take is the
+/// code text takes, and only the position source differs. Bypassing the
+/// lookup for text would have made the multi-axis path untested by
+/// construction.
+pub fn mrope_rotate(
+    head: &mut [f32],
+    positions: [usize; 3],
+    theta: f64,
+    section: [usize; 3],
+    interleaved: bool,
+) {
+    let rotary_dim = head.len();
+    let half = rotary_dim / 2;
+    let inv_freq: Vec<f64> = (0..half)
+        .map(|i| theta.powf(-2.0 * i as f64 / rotary_dim as f64))
+        .collect();
+    let axes = mrope_axis_table(section, interleaved, half);
+    mrope_rotate_scaled(head, positions, &axes, &inv_freq, 1.0);
+}
+
+/// [`mrope_rotate`] with **given** per-slot inverse frequencies, so the
+/// served frequency planner and the reference transcription share the
+/// application while keeping their own arithmetic — the same split
+/// [`rope_rotate_scaled`] already provides for single-axis rotaries.
+///
+/// `axes[i]` is the position axis slot `i` draws from
+/// ([`mrope_axis_table`]).
+pub fn mrope_rotate_scaled(
+    head: &mut [f32],
+    positions: [usize; 3],
+    axes: &[u8],
+    inv_freq: &[f64],
+    amplitude: f32,
+) {
+    let half = head.len() / 2;
+    debug_assert_eq!(inv_freq.len(), half);
+    debug_assert_eq!(axes.len(), half);
+    for i in 0..half {
+        let angle = positions[axes[i] as usize] as f64 * inv_freq[i];
+        let sin_t = angle.sin() as f32 * amplitude;
+        let cos_t = angle.cos() as f32 * amplitude;
+        let x0 = head[i];
+        let x1 = head[half + i];
+        head[i] = x0 * cos_t - x1 * sin_t;
+        head[half + i] = x0 * sin_t + x1 * cos_t;
+    }
 }
 
 /// YaRN's per-pair inverse frequencies and attention amplitude for one

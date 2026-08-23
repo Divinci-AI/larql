@@ -12,7 +12,7 @@ use larql_models::config::PositionPolicy;
 use larql_models::inventory::{ArchitectureInventory, ConfigKeyFact};
 use serde_json::Value;
 
-use super::super::graph::policy::AttentionSpan;
+use super::super::graph::policy::{resolve_layer_kind, AttentionSpan, LayerOperator};
 use super::report::{Finding, FindingCategory, SemanticClass};
 use super::semantics::component_of;
 
@@ -140,6 +140,7 @@ pub fn compare(inventory: &ArchitectureInventory) -> Vec<Finding> {
     findings.extend(rope_theta_findings(inventory));
     findings.extend(layer_rope_theta_findings(inventory));
     findings.extend(layer_types_finding(inventory));
+    findings.extend(duplicate_spelling_findings(inventory));
     findings
 }
 
@@ -284,18 +285,35 @@ fn layer_types_finding(inventory: &ArchitectureInventory) -> Option<Finding> {
     let disagreeing = layers
         .iter()
         .filter(|l| {
-            declared_array
-                .get(l.layer)
-                .and_then(Value::as_str)
-                .is_none_or(|declared| match AttentionSpan::from_declared(declared) {
-                    Some(AttentionSpan::Sliding) => l.attention != ATTENTION_SLIDING,
-                    Some(_) => l.attention == ATTENTION_SLIDING,
-                    // Outside the vocabulary entirely: the resolved
-                    // boolean split cannot represent it either way, so
-                    // this is a disagreement regardless of what
-                    // `attention` happens to say.
-                    None => true,
-                })
+            let Some(declared) = declared_array.get(l.layer).and_then(Value::as_str) else {
+                return true;
+            };
+            let (operator, span) =
+                resolve_layer_kind(Some(declared), l.attention == ATTENTION_SLIDING);
+            match operator {
+                // A recurrence round-trips by construction, so this arm
+                // proves only that the graph records what was declared —
+                // it is NOT evidence the layer really is a recurrence.
+                //
+                // The independent authority for that is operand evidence:
+                // the op plan picks its operator from the presence of
+                // `linear_attn.in_proj_qkv` and never from this spelling.
+                // Those two tables cannot be compared yet — the inventory
+                // carries tensor GROUP prefixes, not per-layer operand
+                // names, and no hybrid container exists to plan against
+                // while encode still refuses. The comparison is therefore
+                // OWED at the first Qwen3.8 encode (census: 48
+                // `GatedDeltaOp` + 16 `Softmax`), and this arm is a
+                // recorded declaration until then. Said plainly here so
+                // the arm is not read as a check it is not.
+                LayerOperator::GatedDelta => false,
+                // The genuine comparison: the declared spelling against a
+                // span the *parser's* boolean produced, not against
+                // itself.
+                LayerOperator::Softmax => span
+                    .map(AttentionSpan::declared_name)
+                    .is_none_or(|carried| !declared.eq_ignore_ascii_case(carried)),
+            }
         })
         .count();
     let agrees = disagreeing == 0 && declared_array.len() == layers.len();
@@ -310,17 +328,103 @@ fn layer_types_finding(inventory: &ArchitectureInventory) -> Option<Finding> {
         subject: fact.path.clone(),
         carriage: None,
         detail: if agrees {
-            format!(
-                "declared interleave honoured ({} sliding / {} full)",
-                inventory.resolved.attention.sliding_layers,
-                inventory.resolved.attention.full_layers
-            )
+            {
+                let recurrent = declared_array
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .filter(|d| {
+                        matches!(
+                            resolve_layer_kind(Some(d), false).0,
+                            LayerOperator::GatedDelta
+                        )
+                    })
+                    .count();
+                if recurrent > 0 {
+                    format!(
+                        "declared interleave honoured ({recurrent} gated-delta recurrent / {} \
+                         softmax, of {} layers)",
+                        layers.len() - recurrent,
+                        layers.len()
+                    )
+                } else {
+                    format!(
+                        "declared interleave honoured ({} sliding / {} full)",
+                        inventory.resolved.attention.sliding_layers,
+                        inventory.resolved.attention.full_layers
+                    )
+                }
+            }
         } else {
             format!("{disagreeing} layers resolve a different attention kind than declared")
         },
         declared: Some(Value::from(declared_array.len() as u64)),
         resolved: Some(Value::from(layers.len() as u64)),
     })
+}
+
+/// Paths that are two spellings of **one** fact: `(plain, nested)`,
+/// matched as suffixes within a single component.
+///
+/// A registered list, not a heuristic over repeated leaf names. The
+/// heuristic version flagged Gemma 4, which declares `rope_theta` and
+/// `rope_type` at BOTH `rope_parameters.full_attention.*` and
+/// `rope_parameters.sliding_attention.*` — two facts about two layer
+/// classes, correctly disagreeing, and not a checkpoint contradicting
+/// itself. `a_per_layer_class_pair_is_not_a_duplicate_spelling` keeps
+/// that distinction pinned.
+const DUPLICATE_SPELLINGS: &[(&str, &str)] = &[(
+    "partial_rotary_factor",
+    "rope_parameters.partial_rotary_factor",
+)];
+
+/// A fact the checkpoint spells two ways, disagreeing with itself.
+///
+/// Qwen3.8 declares `partial_rotary_factor` at `text_config` and again
+/// inside `text_config.rope_parameters`, and HF reads only the
+/// `rope_parameters` one. Both being *present* proves nothing: the parser
+/// picks one, and if the other disagrees the checkpoint states two
+/// different execution semantics while the plan reports whichever was
+/// read. On this checkpoint they agree (both `0.25`), so this moves no
+/// count — it closes a gate that could not previously fail, the same
+/// shape as the `full_attention_interval` corroboration.
+fn duplicate_spelling_findings(inventory: &ArchitectureInventory) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    for (plain, nested) in DUPLICATE_SPELLINGS {
+        let nested_suffix = format!(".{nested}");
+        let plain_suffix = format!(".{plain}");
+        for nested_fact in inventory
+            .config_keys
+            .iter()
+            .filter(|f| f.path.ends_with(&nested_suffix))
+        {
+            let component = component_of(&nested_fact.path);
+            let Some(plain_fact) = inventory.config_keys.iter().find(|f| {
+                f.path.ends_with(&plain_suffix)
+                    && !f.path.ends_with(&nested_suffix)
+                    && component_of(&f.path) == component
+            }) else {
+                continue;
+            };
+            if plain_fact.value == nested_fact.value {
+                continue;
+            }
+            findings.push(Finding {
+                category: FindingCategory::Mismatched,
+                class: SemanticClass::ExecutionSemantic,
+                component,
+                subject: format!("{plain} (two spellings)"),
+                carriage: None,
+                detail: format!(
+                    "the checkpoint spells one fact two ways and they disagree: `{}`={} vs \
+                     `{}`={}; a parser reads one and the other is silently dropped",
+                    plain_fact.path, plain_fact.value, nested_fact.path, nested_fact.value
+                ),
+                declared: Some(nested_fact.value.clone()),
+                resolved: Some(plain_fact.value.clone()),
+            });
+        }
+    }
+    findings
 }
 
 /// The text-path `layer_types` fact — vision towers declare their own list

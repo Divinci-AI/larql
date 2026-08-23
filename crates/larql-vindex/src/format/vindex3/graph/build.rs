@@ -9,7 +9,7 @@
 
 use std::collections::BTreeMap;
 
-use larql_models::config::PositionPolicy;
+use larql_models::config::{PositionPolicy, LAYER_TYPE_LINEAR_ATTENTION};
 use larql_models::inventory::{ArchitectureInventory, TensorGroup};
 
 use super::component::{
@@ -18,7 +18,9 @@ use super::component::{
 };
 use super::edge::HiddenStateEdge;
 use super::object::{Fidelity, LogicalObject, ObjectKind, Representation, SourceBinding};
-use super::policy::{AttentionLayerPolicy, AttentionSpan, HeadGeometry};
+use super::policy::{
+    resolve_layer_kind, AttentionLayerPolicy, AttentionSpan, HeadGeometry, LayerOperator,
+};
 use super::surface::{
     attach_stack_evidence, gate_evidence, head_from_resolved, surface_from_nested,
     surface_from_resolved,
@@ -543,26 +545,32 @@ fn attention_table(inventory: &ArchitectureInventory) -> Vec<AttentionLayerPolic
         .resolved
         .layers
         .iter()
-        .map(|layer| AttentionLayerPolicy {
-            span: if layer.attention == RESOLVED_ATTENTION_SLIDING {
-                AttentionSpan::Sliding
-            } else {
-                AttentionSpan::Full
-            },
-            window: layer.window,
-            position: layer.position,
-            geometry: Some(HeadGeometry {
-                head_dim: layer.head_dim,
-                num_kv_heads: layer.num_kv_heads,
-            }),
-            v_from_k: layer.v_from_k,
-            // Carried alongside the boolean-derived `span` verbatim, so a
-            // declared spelling the vocabulary cannot express (a hybrid
-            // linear-attention interleave) is recorded rather than
-            // silently lost behind whatever `span` defaulted to. See
-            // `AttentionLayerPolicy::declared_span` and
-            // `plan::carriage::probe_layer_types`.
-            declared_span: layer.declared_span.clone(),
+        .map(|layer| {
+            // Operator and span decided together, in the one place that
+            // rule lives — a recurrence gets no span rather than a
+            // defaulted `Full`.
+            let (operator, span) = resolve_layer_kind(
+                layer.declared_span.as_deref(),
+                layer.attention == RESOLVED_ATTENTION_SLIDING,
+            );
+            AttentionLayerPolicy {
+                operator,
+                span,
+                window: layer.window,
+                position: layer.position,
+                geometry: Some(HeadGeometry {
+                    head_dim: layer.head_dim,
+                    num_kv_heads: layer.num_kv_heads,
+                }),
+                v_from_k: layer.v_from_k,
+                // Carried alongside the boolean-derived `span` verbatim, so a
+                // declared spelling the vocabulary cannot express (a hybrid
+                // linear-attention interleave) is recorded rather than
+                // silently lost behind whatever `span` defaulted to. See
+                // `AttentionLayerPolicy::declared_span` and
+                // `plan::carriage::probe_layer_types`.
+                declared_span: layer.declared_span.clone(),
+            }
         })
         .collect()
 }
@@ -607,8 +615,25 @@ fn nested_attention_table(
     layer_types
         .iter()
         .map(|entry| {
+            // A nested component's contract is stricter than the text
+            // stack's: it has no resolved boolean to fall back on, so an
+            // unrecognised spelling refuses the whole table rather than
+            // deferring to a comparison downstream. `linear_attention` is
+            // named here so that a perception tower which declares a
+            // recurrence records one — no judged tower does today, and
+            // the alternative is for it to refuse a spelling the schema
+            // now has a home for.
+            let (operator, span) = if entry.eq_ignore_ascii_case(LAYER_TYPE_LINEAR_ATTENTION) {
+                (LayerOperator::GatedDelta, None)
+            } else {
+                (
+                    LayerOperator::Softmax,
+                    Some(AttentionSpan::from_declared(entry)?),
+                )
+            };
             Some(AttentionLayerPolicy {
-                span: AttentionSpan::from_declared(entry)?,
+                operator,
+                span,
                 // No nested component declares a sequence window today;
                 // a spatial window's extent is not a position count.
                 window: None,

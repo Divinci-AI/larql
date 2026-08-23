@@ -388,7 +388,7 @@ fn a_tower_without_layer_types_gets_a_full_table_and_its_facts_are_judged() {
     assert_eq!(table.len(), 2);
     assert!(table
         .iter()
-        .all(|l| l.span == crate::format::vindex3::graph::policy::AttentionSpan::Full));
+        .all(|l| l.span == Some(crate::format::vindex3::graph::policy::AttentionSpan::Full)));
     for subject in [
         "vision_config.rope_parameters.rope_theta",
         "vision_config.rope_parameters.rope_type",
@@ -447,4 +447,43 @@ fn the_multimodal_interface_and_tower_metadata_are_read_and_classified() {
             f.detail
         );
     }
+}
+
+/// **Control for the duplicate-spelling gate (QW-3.5B).**
+///
+/// Gemma 4 declares `rope_theta` and `rope_type` at BOTH
+/// `rope_parameters.full_attention.*` and
+/// `rope_parameters.sliding_attention.*`, with deliberately different
+/// values — two facts about two layer classes, not one fact spelled
+/// twice. A first cut of the gate matched on "same leaf, same component"
+/// and flagged all of it, turning eight Gemma 4 tests red.
+///
+/// The gate is a registered pair list because of this case. Without this
+/// test the narrowing looks arbitrary, and the next person to reach for
+/// the heuristic version has nothing telling them why it fails.
+#[test]
+fn a_per_layer_class_pair_is_not_a_duplicate_spelling() {
+    let dir = tempfile::tempdir().unwrap();
+    let plan = plan_of(gemma4_shaped_target(dir.path()));
+    let flagged: Vec<&str> = findings(&plan)
+        .into_iter()
+        .filter(|f| f.subject.contains("two spellings"))
+        .map(|f| f.subject.as_str())
+        .collect();
+    assert!(
+        flagged.is_empty(),
+        "per-layer-class rope facts are distinct facts, not duplicate spellings: {flagged:?}"
+    );
+    // And the pair really is present and really does disagree — without
+    // this the assertion above would also pass on a fixture that simply
+    // never declared them.
+    let thetas: Vec<f64> = findings(&plan)
+        .into_iter()
+        .filter(|f| f.subject.ends_with("rope_theta"))
+        .filter_map(|f| f.declared.as_ref().and_then(serde_json::Value::as_f64))
+        .collect();
+    assert!(
+        thetas.contains(&GEMMA4_FULL_THETA) && thetas.contains(&GEMMA4_SLIDING_THETA),
+        "the fixture must actually declare two disagreeing thetas: {thetas:?}"
+    );
 }

@@ -195,11 +195,60 @@ fn unconsumed_class(leaf: &str, inventory: &ArchitectureInventory) -> SemanticCl
         other.status == KeyStatus::Consumed
             && (other.path == canonical || other.path.ends_with(&format!(".{canonical}")))
     });
-    if backed {
-        SemanticClass::Alias
-    } else {
-        SemanticClass::Unknown
+    if !backed {
+        return SemanticClass::Unknown;
     }
+    // Presence of the canonical key is not enough. An alias is benign
+    // only while it *corroborates* the canonical fact; one that
+    // contradicts it is a second, disagreeing authority, and grading that
+    // `Alias` would be exactly the "way to silence a key" the class
+    // contract forbids. Qwen3.8 declares `full_attention_interval: 4`
+    // beside a 64-entry `layer_types`, and the two agree — but nothing
+    // checked that until this rung, so a checkpoint whose interval
+    // disagreed with its own array would have passed silently.
+    if alias_contradicts_canonical(leaf, inventory) {
+        return SemanticClass::Unknown;
+    }
+    SemanticClass::Alias
+}
+
+/// Whether a registered alias disagrees with the canonical fact it is
+/// supposed to restate.
+///
+/// Only aliases with a checkable relationship are examined; one with no
+/// derivation into the canonical form cannot contradict it and answers
+/// `false`. Never the source of truth: this decides only whether the
+/// alias is *benign*, and `layer_types` remains the authority the graph
+/// is built from either way.
+fn alias_contradicts_canonical(leaf: &str, inventory: &ArchitectureInventory) -> bool {
+    const FULL_ATTENTION_INTERVAL: &str = "full_attention_interval";
+    if leaf != FULL_ATTENTION_INTERVAL {
+        return false;
+    }
+    let value_of = |name: &str| {
+        inventory
+            .config_keys
+            .iter()
+            .find(|f| semantics::leaf_of(&f.path) == name)
+            .map(|f| &f.value)
+    };
+    let Some(interval) = value_of(FULL_ATTENTION_INTERVAL)
+        .and_then(serde_json::Value::as_u64)
+        .filter(|n| *n > 0)
+    else {
+        // An interval this build cannot read is not a corroboration.
+        return true;
+    };
+    let Some(declared) = value_of("layer_types").and_then(serde_json::Value::as_array) else {
+        return true;
+    };
+    // "Every Nth layer attends fully": layer i is full iff (i+1) % N == 0.
+    !declared.iter().enumerate().all(|(i, entry)| {
+        entry.as_str().is_some_and(|spelling| {
+            spelling.eq_ignore_ascii_case(larql_models::config::LAYER_TYPE_FULL_ATTENTION)
+                == (i as u64 + 1).is_multiple_of(interval)
+        })
+    })
 }
 
 /// The carriage verdict for one consumed key: does VINDEX3 carry it past
@@ -474,30 +523,32 @@ fn attention_policy_findings(artifact: &str, built: &BuiltGraph) -> Vec<Finding>
         .filter(|c| c.source_artifact == artifact && c.role != ComponentRole::Perception)
         .filter_map(|component| {
             let table = component.attention.as_ref()?;
+            // Buckets are disjoint by construction: an unfaithful layer
+            // is counted only as `unexpressed`, and a recurrence is
+            // counted only as `recurrent`, so no layer contributes twice
+            // and `full` stays a real remainder.
+            let unexpressed = table.iter().filter(|l| !l.matches_declaration()).count();
+            let recurrent = table
+                .iter()
+                .filter(|l| l.operator == super::graph::LayerOperator::GatedDelta)
+                .count();
             let sliding = table
                 .iter()
-                .filter(|l| matches!(l.span, super::graph::policy::AttentionSpan::Sliding))
+                .filter(|l| {
+                    l.matches_declaration()
+                        && l.span == Some(super::graph::policy::AttentionSpan::Sliding)
+                })
                 .count();
             let nope = table
                 .iter()
                 .filter(|l| l.position == larql_models::config::PositionPolicy::None)
                 .count();
-            // A layer whose own declared spelling disagrees with what
-            // `span` resolved to: the boolean sliding/full split has no
-            // vocabulary for it (a hybrid linear-attention layer, e.g.)
-            // and silently defaulted it to `Full`. Counted apart from
-            // `full` so this summary does not read as a faithful count
-            // when part of it is a fallback default — see
-            // `plan::carriage::probe_layer_types`.
-            let defaulted = table
-                .iter()
-                .filter(|l| {
-                    l.declared_span.as_deref().is_some_and(|raw| {
-                        super::graph::policy::AttentionSpan::from_declared(raw) != Some(l.span)
-                    })
-                })
-                .count();
-            let full = table.len() - sliding - defaulted;
+            // A layer whose own declared spelling this schema still has
+            // no way to express. Before QW-3.5A every `linear_attention`
+            // layer landed here and was reported as "defaulted to full";
+            // they are now `recurrent` and counted as themselves, so what
+            // remains here is a genuinely unknown spelling.
+            let full = table.len() - sliding - recurrent - unexpressed;
             Some(Finding {
                 category: FindingCategory::Representable,
                 class: SemanticClass::ExecutionSemantic,
@@ -506,14 +557,29 @@ fn attention_policy_findings(artifact: &str, built: &BuiltGraph) -> Vec<Finding>
                 declared: None,
                 resolved: None,
                 carriage: None,
-                detail: if defaulted > 0 {
-                    format!(
+                // Each clause appears only when it describes a non-zero
+                // count. A clause that is always present states nothing
+                // when its count is zero, and a gate asserting on such a
+                // clause passes without testing anything — which is what
+                // the fixed "declared span(s) …" wording did as soon as
+                // `linear_attention` stopped landing there.
+                detail: if unexpressed > 0 || recurrent > 0 {
+                    let mut detail = format!(
                         "per-layer policy recorded on component `{}`: {sliding} sliding / \
-                         {full} full / {defaulted} declared span(s) this schema has no \
-                         execution vocabulary for (defaulted to full — see \
-                         text_config.layer_types), {nope} NoPE layer(s)",
+                         {full} full",
                         component.id,
-                    )
+                    );
+                    if recurrent > 0 {
+                        detail.push_str(&format!(" / {recurrent} gated-delta recurrent"));
+                    }
+                    if unexpressed > 0 {
+                        detail.push_str(&format!(
+                            " / {unexpressed} declared span(s) this schema has no execution \
+                             vocabulary for (see text_config.layer_types)"
+                        ));
+                    }
+                    detail.push_str(&format!(", {nope} NoPE layer(s)"));
+                    detail
                 } else {
                     format!(
                         "per-layer policy recorded on component `{}`: {sliding} sliding / \

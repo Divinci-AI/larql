@@ -18,8 +18,9 @@
 //! sharing code, which is exactly the agreement that proves nothing.
 
 use larql_models::config::{
-    Activation, AttentionSinkSpec, ExpertRoutingPolicy, GateActivation, GateCombine, GatePlacement,
-    GateSource, GateUpBranch, MoeRouterKind, NormType, PositionPolicy, RotaryFrequencyBasis,
+    mrope_axis_table, Activation, AttentionSinkSpec, ExpertRoutingPolicy, GateActivation,
+    GateCombine, GatePlacement, GateSource, GateUpBranch, MoeRouterKind, NormType, PositionPolicy,
+    RotaryFrequencyBasis,
 };
 use ndarray::Array2;
 
@@ -38,7 +39,7 @@ use super::backend::{
     AttentionCall, AttentionOut, AttentionStepCall, AttentionStepOut, FfnCall, GateCall, NormCall,
     PlanBackend, ProjectCall, ProjectedQkv, QkNormCall, RoutedFfnCall,
 };
-use super::kernels::{rope_rotate, rope_rotate_scaled};
+use super::kernels::{mrope_rotate_scaled, rope_rotate, rope_rotate_scaled};
 use larql_compute::attention::rope::{
     rope_freq_plan, rope_freq_plan_proportional, RopeFreqScaling,
 };
@@ -238,6 +239,43 @@ pub(super) fn condition_qk_in_place(
                 for head in k.chunks_exact_mut(head_dim) {
                     rope_rotate_scaled(&mut head[..width], position, &plan.inv_freq, 1.0);
                 }
+            }
+        },
+        // Multi-axis rotary on the served frequency plan. The prefix
+        // block and its frequencies are exactly the plain partial
+        // rotary's; only which position each slot reads differs, and on
+        // the interpreter's scalar position the grid is `(p, p, p)`.
+        PositionPolicy::MRope {
+            theta,
+            rotary_fraction,
+            basis,
+            section,
+            interleaved,
+        } => match basis {
+            RotaryFrequencyBasis::RotaryWidth => {
+                let plan = rope_freq_plan(
+                    head_dim,
+                    rotary_fraction,
+                    theta,
+                    NO_POSITION_DIVISOR,
+                    RopeFreqScaling::None,
+                );
+                let width = plan.inv_freq.len() * 2;
+                let axes = mrope_axis_table(section, interleaved, plan.inv_freq.len());
+                let grid = [position, position, position];
+                for head in q.chunks_exact_mut(head_dim) {
+                    mrope_rotate_scaled(&mut head[..width], grid, &axes, &plan.inv_freq, 1.0);
+                }
+                for head in k.chunks_exact_mut(head_dim) {
+                    mrope_rotate_scaled(&mut head[..width], grid, &axes, &plan.inv_freq, 1.0);
+                }
+            }
+            RotaryFrequencyBasis::HeadWidth => {
+                return Err(VindexError::Parse(
+                    "M-RoPE with a head-width frequency basis is unjudged; no checkpoint \
+                     declares it and the section-to-dimension mapping is undefined"
+                        .to_string(),
+                ))
             }
         },
     }

@@ -2,7 +2,7 @@
 
 use larql_models::config::PositionPolicy;
 
-use crate::format::vindex3::graph::policy::AttentionSpan;
+use crate::format::vindex3::graph::policy::{AttentionSpan, LayerOperator};
 use crate::format::vindex3::graph::{
     AttentionLayerPolicy, Component, ComponentRole, GraphDefect, HiddenStateEdge, LogicalObject,
     ObjectKind, SourceBinding, SystemGraph, GRAPH_SCHEMA,
@@ -17,7 +17,8 @@ fn component(id: &str, role: ComponentRole, layers: usize) -> Component {
         hidden_size: 64,
         attention: Some(vec![
             AttentionLayerPolicy {
-                span: AttentionSpan::Sliding,
+                operator: LayerOperator::Softmax,
+                span: Some(AttentionSpan::Sliding),
                 window: Some(16),
                 position: PositionPolicy::Rope { theta: 10000.0 },
                 geometry: None,
@@ -138,7 +139,8 @@ fn graph_round_trips_through_json_with_nope_policies() {
     let mut graph = valid_graph();
     // A NoPE layer must survive serialisation as a policy variant.
     graph.components[0].attention.as_mut().unwrap()[3] = AttentionLayerPolicy {
-        span: AttentionSpan::Full,
+        operator: LayerOperator::Softmax,
+        span: Some(AttentionSpan::Full),
         window: None,
         position: PositionPolicy::None,
         geometry: None,

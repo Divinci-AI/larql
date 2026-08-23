@@ -19,6 +19,7 @@ mod decode;
 mod device;
 mod gated_delta_parity;
 mod gated_delta_tiny;
+mod mrope_parity;
 mod plan_fixtures;
 #[rustfmt::skip]
 mod qw2_tiny_fixture;

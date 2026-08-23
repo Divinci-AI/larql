@@ -140,21 +140,50 @@ fn every_execution_semantic_leaf_has_a_carriage_rule() {
     );
 }
 
-/// A judged partial rotary is carried, per layer type: Gemma 4 declares
-/// `partial_rotary_factor` under `rope_parameters.full_attention` and the
-/// probe answers from the full layers' policy alone.
+/// A declared partial rotary is carried into the layer policy, at the
+/// value declared.
+///
+/// This test previously asserted the opposite — that the fact was parsed
+/// and dropped, which was the honest verdict while no resolver honoured
+/// it. QW-3.5B moved `partial_rotary_factor` into the trait default, so
+/// the generic path now resolves `PositionPolicy::PartialRope` and the
+/// probe answers. The assertion that keeps this from being a weakening is
+/// the value: the probe must report the DECLARED fraction, so a resolver
+/// that carried some other fraction still fails here.
 #[test]
-fn a_partial_rotary_factor_is_judged_against_the_full_layers() {
+fn a_partial_rotary_factor_is_carried_at_the_declared_value() {
     let findings = plan_with(|config| {
         config["text_config"]["partial_rotary_factor"] = serde_json::json!(0.5);
     });
     let finding = finding_for(&findings, "partial_rotary_factor");
-    // Glimmer's resolver knows no partial rotary, so the fact is declared
-    // and dropped — the honest verdict, and it blocks.
     assert_eq!(finding.class, SemanticClass::ExecutionSemantic);
-    assert_eq!(finding.category, FindingCategory::Unrepresented);
-    assert!(finding.detail.contains("PartialRope"), "{}", finding.detail);
-    assert!(finding.blocks());
+    assert_eq!(
+        finding.category,
+        FindingCategory::Representable,
+        "{}",
+        finding.detail
+    );
+    assert!(!finding.blocks());
+    assert_eq!(
+        finding.resolved,
+        Some(serde_json::json!(0.5)),
+        "the probe must report the declared fraction, not merely answer: {}",
+        finding.detail
+    );
+
+    // A full rotary is not a partial one: declaring 1.0 must NOT put the
+    // model on the partial path, or every ordinary checkpoint changes
+    // execution. This is the arm that stops the change above from being
+    // "always resolve PartialRope".
+    let full = plan_with(|config| {
+        config["text_config"]["partial_rotary_factor"] = serde_json::json!(1.0);
+    });
+    let full = finding_for(&full, "partial_rotary_factor");
+    assert!(
+        full.resolved != Some(serde_json::json!(1.0)),
+        "a fraction of 1.0 is a full rotary and must not resolve as a partial one: {}",
+        full.detail
+    );
 }
 
 /// `swiglu_limit` on an architecture whose FFN gate is plain gating: the
@@ -456,7 +485,7 @@ fn a_nested_components_declared_policy_reaches_the_graph() {
     assert_eq!(
         table
             .iter()
-            .map(|l| l.span.declared_name())
+            .map(|l| l.declared_name().expect("a softmax span renders"))
             .collect::<Vec<_>>(),
         vec![
             "window_attention",

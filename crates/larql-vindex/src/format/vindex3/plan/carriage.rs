@@ -40,7 +40,7 @@ use serde_json::{json, Value};
 
 use larql_models::config::score_scale_from_query_pre_attn_scalar;
 
-use super::super::graph::policy::AttentionSpan;
+use super::super::graph::policy::{AttentionLayerPolicy, AttentionSpan};
 use super::super::graph::Component;
 
 /// How far a declared fact travels from `config.json` into execution.
@@ -146,7 +146,7 @@ pub const CARRIAGE_RULES: &[CarriageRule] = &[
     CarriageRule {
         leaf: "partial_rotary_factor",
         reaches: Carriage::Lowered,
-        site: "Component.attention[].position (PositionPolicy::PartialRope.rotary_fraction) → AttentionOp.position",
+        site: "Component.attention[].position (PositionPolicy::{PartialRope,MRope}.rotary_fraction) → AttentionOp.position",
         probe: Some(probe_partial_rotary_factor),
     },
     CarriageRule {
@@ -244,7 +244,7 @@ pub const CARRIAGE_RULES: &[CarriageRule] = &[
     CarriageRule {
         leaf: "layer_types",
         reaches: Carriage::Lowered,
-        site: "Component.attention[].span → AttentionOp.span",
+        site: "Component.attention[].{operator,span} → LayerAttention::{GatedDelta,Softmax}",
         probe: Some(probe_layer_types),
     },
     CarriageRule {
@@ -614,15 +614,15 @@ pub const CARRIAGE_RULES: &[CarriageRule] = &[
     },
     CarriageRule {
         leaf: "mrope_interleaved",
-        reaches: Carriage::Represented,
-        site: "no schema field — mRoPE multi-axis sectioning is not represented yet",
-        probe: Some(probe_unrepresented),
+        reaches: Carriage::Lowered,
+        site: "Component.attention[].position (PositionPolicy::MRope.interleaved) → mrope_axis_table → mrope_rotate",
+        probe: Some(probe_mrope_interleaved),
     },
     CarriageRule {
         leaf: "mrope_section",
-        reaches: Carriage::Represented,
-        site: "no schema field — mRoPE multi-axis sectioning is not represented yet",
-        probe: Some(probe_unrepresented),
+        reaches: Carriage::Lowered,
+        site: "Component.attention[].position (PositionPolicy::MRope.section) → mrope_axis_table → mrope_rotate",
+        probe: Some(probe_mrope_section),
     },
 ];
 
@@ -684,7 +684,7 @@ fn layers_in_scope<'a>(
     Some(
         table
             .iter()
-            .filter(move |l| span.is_none_or(|s| l.span == s)),
+            .filter(move |l| span.is_none_or(|s| l.span == Some(s))),
     )
 }
 
@@ -765,7 +765,7 @@ fn probe_full_layer_head_dim(component: &Component, _ctx: &ProbeContext<'_>) -> 
     let surface = component.execution.as_ref()?;
     let mut dims = table
         .iter()
-        .filter(|l| l.span == AttentionSpan::Full)
+        .filter(|l| l.span == Some(AttentionSpan::Full))
         .map(|l| {
             l.geometry
                 .map_or(surface.attention.head_dim, |g| g.head_dim)
@@ -780,7 +780,7 @@ fn probe_full_layer_kv_heads(component: &Component, _ctx: &ProbeContext<'_>) -> 
     let surface = component.execution.as_ref()?;
     let mut heads = table
         .iter()
-        .filter(|l| l.span == AttentionSpan::Full)
+        .filter(|l| l.span == Some(AttentionSpan::Full))
         .map(|l| {
             l.geometry
                 .map_or(surface.attention.num_kv_heads, |g| g.num_kv_heads)
@@ -809,6 +809,49 @@ fn probe_partial_rotary_factor(component: &Component, ctx: &ProbeContext<'_>) ->
         layers_in_scope(component, ctx)?.filter_map(|l| l.position.rotary_fraction());
     let first = fractions.next()?;
     fractions.all(|f| f == first).then(|| json!(first))
+}
+
+/// The multi-axis sectioning the layers in scope carry, when every
+/// rotating layer agrees.
+///
+/// Refuses unless the arithmetic closes:
+///
+/// ```text
+/// sum(section) * 2 == rotary_dim == head_dim * rotary_fraction
+/// ```
+///
+/// `sum(section)` counts FREQUENCY slots, which is `rotary_dim / 2` — not
+/// `rotary_dim`. On Qwen3.8 that is `11+11+10 = 32` against a 64-dim
+/// rotary block on a **256**-dim head. Taking the head width as 128 (the
+/// Gated DeltaNet head dim, a different operator) makes `sum == rotary_dim`
+/// close instead, which is why the identity is asserted against the
+/// component's own resolved `head_dim` rather than any nearby 128.
+fn mrope_of(component: &Component, ctx: &ProbeContext<'_>) -> Option<([usize; 3], bool)> {
+    let head_dim = component.execution.as_ref()?.attention.head_dim;
+    let mut policies = layers_in_scope(component, ctx)?.filter_map(|l| {
+        l.position
+            .mrope()
+            .zip(l.position.rotary_fraction())
+            .map(|((section, interleaved), fraction)| (section, interleaved, fraction))
+    });
+    let first = policies.next()?;
+    if !policies.all(|p| p == first) {
+        return None;
+    }
+    let (section, interleaved, fraction) = first;
+    let rotary_dim = (head_dim as f64 * fraction) as usize;
+    let closes = rotary_dim > 0
+        && rotary_dim.is_multiple_of(2)
+        && section.iter().sum::<usize>() * 2 == rotary_dim;
+    closes.then_some((section, interleaved))
+}
+
+fn probe_mrope_section(component: &Component, ctx: &ProbeContext<'_>) -> Option<Value> {
+    mrope_of(component, ctx).map(|(section, _)| json!(section))
+}
+
+fn probe_mrope_interleaved(component: &Component, ctx: &ProbeContext<'_>) -> Option<Value> {
+    mrope_of(component, ctx).map(|(_, interleaved)| json!(interleaved))
 }
 
 /// The YaRN block the table carries, when it carries one. `None` when the
@@ -859,19 +902,17 @@ fn probe_yarn_original_max(component: &Component, _ctx: &ProbeContext<'_>) -> Op
 /// actually dropped it. See `docs/k3-funnel.md` §4.7.8.
 fn probe_layer_types(component: &Component, _ctx: &ProbeContext<'_>) -> Option<Value> {
     let table = component.attention.as_ref()?;
-    let all_faithful = table.iter().all(|l| match l.declared_span.as_deref() {
-        Some(raw) => AttentionSpan::from_declared(raw) == Some(l.span),
-        None => true,
-    });
-    if !all_faithful {
+    if !table.iter().all(AttentionLayerPolicy::matches_declaration) {
         return None;
     }
-    Some(Value::Array(
-        table
-            .iter()
-            .map(|l| json!(l.span.declared_name()))
-            .collect(),
-    ))
+    // Every layer round-trips, so rendering the carried policy back into
+    // the checkpoint's vocabulary is a report rather than a claim. A
+    // layer the schema has no spelling for already refused above.
+    table
+        .iter()
+        .map(|l| l.declared_name().map(|n| json!(n)))
+        .collect::<Option<Vec<_>>>()
+        .map(Value::Array)
 }
 
 /// The Gated DeltaNet geometry the surface carries, read back per field.

@@ -553,7 +553,20 @@ pub fn plan_component_ops(
                     query_scale: attn.query_scale,
                     score_scale: attn.score_scale,
                     logit_softcapping: attn.logit_softcapping,
-                    span: policy.span,
+                    // The graph carries no span exactly when it recorded
+                    // a recurrence for this layer. Reaching here means the
+                    // layer ships softmax operands anyway — the checkpoint
+                    // contradicting itself, config against tensors — and
+                    // the mirror of the panic above: an invariant the
+                    // builder upholds, not a case to paper over with a
+                    // default span.
+                    span: policy.span.unwrap_or_else(|| {
+                        panic!(
+                            "layer {layer} ships softmax attention operands while the graph \
+                             records a recurrence for it (no span); the checkpoint's \
+                             layer_types and its tensors disagree"
+                        )
+                    }),
                     window: policy.window,
                     position: policy.position,
                     qk_norm,

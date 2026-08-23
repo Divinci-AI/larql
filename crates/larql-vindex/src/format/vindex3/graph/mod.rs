@@ -53,7 +53,7 @@ pub use component::{
 };
 pub use edge::HiddenStateEdge;
 pub use object::{most_specific_owner, LogicalObject, ObjectKind, Representation, SourceBinding};
-pub use policy::{AttentionLayerPolicy, HeadGeometry};
+pub use policy::{AttentionLayerPolicy, HeadGeometry, LayerOperator};
 pub use roles::{NormPlacement, OperandRole};
 pub use surface::ExecutionSurface;
 
