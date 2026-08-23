@@ -22,8 +22,8 @@ use crate::error::VindexError;
 use crate::format::vindex3::encode::encode_system;
 use crate::format::vindex3::inspect::inspect_container;
 use crate::format::vindex3::opplan::exec::backend::{
-    AttentionCall, AttentionStepCall, AttentionStepOut, FfnCall, NormCall, PlanBackend,
-    ProjectCall, RoutedFfnCall, WeightSlice,
+    AttentionCall, AttentionOut, AttentionStepCall, AttentionStepOut, FfnCall, NormCall,
+    PlanBackend, ProjectCall, RoutedFfnCall, WeightSlice,
 };
 use crate::format::vindex3::opplan::exec::operands::OperandStore;
 use crate::format::vindex3::opplan::exec::production::ProductionBackend;
@@ -75,7 +75,7 @@ impl PlanBackend for RecordingBackend {
         self.inner.project(call)
     }
 
-    fn attention(&self, call: AttentionCall<'_>) -> Result<Vec<Vec<f32>>, VindexError> {
+    fn attention(&self, call: AttentionCall<'_>) -> Result<AttentionOut, VindexError> {
         self.record("attention");
         self.inner.attention(call)
     }
@@ -141,7 +141,7 @@ impl PlanBackend for PerturbedBackend {
         self.0.project(call)
     }
 
-    fn attention(&self, call: AttentionCall<'_>) -> Result<Vec<Vec<f32>>, VindexError> {
+    fn attention(&self, call: AttentionCall<'_>) -> Result<AttentionOut, VindexError> {
         self.0.attention(call)
     }
 

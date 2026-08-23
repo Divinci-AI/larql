@@ -420,7 +420,30 @@ fn execute_layer<B: PlanBackend + ?Sized, K: KvState + ?Sized>(
         .par_iter()
         .map(|row| prepared.pre_attention.apply(backend, row))
         .collect();
+    // V3-SERVE-2: the attention realisation and the K/V behaviour are
+    // separate decisions. Wanting a populated provider does not mean
+    // wanting per-position arithmetic — the batched pass computes the
+    // same conditioned rows and now returns them, so it can populate the
+    // provider from the one traversal it already performs.
+    //
+    // The exception is not a preference but an expressibility limit: a
+    // batched pass conditions position `p` as the `p`-th token of the
+    // sequence it is given, so it cannot serve a prefill that resumes
+    // part-way through one. Extending a populated provider therefore
+    // still steps.
     let attn_out = match kv {
+        Some((kv, layer_index)) if kv.position() == 0 => {
+            let out = backend.attention(prepared.attention.call(
+                &layer.attention,
+                &inputs,
+                layer.pre_attention_norm.eps,
+                hidden,
+            ))?;
+            for (key, value) in out.keys.into_iter().zip(out.values) {
+                kv.append(layer_index, key, value);
+            }
+            out.outputs
+        }
         Some((kv, layer_index)) => attention_into_kv(
             &layer.attention,
             &prepared.attention,
@@ -431,12 +454,16 @@ fn execute_layer<B: PlanBackend + ?Sized, K: KvState + ?Sized>(
             kv,
             layer_index,
         )?,
-        None => backend.attention(prepared.attention.call(
-            &layer.attention,
-            &inputs,
-            layer.pre_attention_norm.eps,
-            hidden,
-        ))?,
+        None => {
+            backend
+                .attention(prepared.attention.call(
+                    &layer.attention,
+                    &inputs,
+                    layer.pre_attention_norm.eps,
+                    hidden,
+                ))?
+                .outputs
+        }
     };
     h.par_iter_mut()
         .zip(attn_out.par_iter())

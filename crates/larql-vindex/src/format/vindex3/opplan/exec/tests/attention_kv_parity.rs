@@ -120,6 +120,14 @@ fn hidden_per_layer<B: PlanBackend>(
     per_layer
 }
 
+/// What one realisation produced: outputs, and the conditioned rows a
+/// provider would cache.
+struct Realisation {
+    outputs: Vec<Vec<f32>>,
+    keys: Vec<Vec<f32>>,
+    values: Vec<Vec<f32>>,
+}
+
 /// Run both realisations of one layer's attention over the same inputs.
 fn both_realisations<B: PlanBackend>(
     plan: &ComponentOpPlan,
@@ -127,7 +135,7 @@ fn both_realisations<B: PlanBackend>(
     backend: &B,
     layer_index: usize,
     hidden: &[Vec<f32>],
-) -> (Vec<Vec<f32>>, Vec<Vec<f32>>) {
+) -> (Realisation, Realisation) {
     let layer = &plan.layers[layer_index];
     let prepared = &ops.layers()[layer_index];
     let width = ops.hidden();
@@ -140,20 +148,29 @@ fn both_realisations<B: PlanBackend>(
         .collect();
 
     // Realisation A: one batched call over every position.
-    let batched = backend
+    let out = backend
         .attention(
             prepared
                 .attention
                 .call(&layer.attention, &inputs, eps, width),
         )
         .unwrap();
+    let batched = Realisation {
+        outputs: out.outputs,
+        keys: out.keys,
+        values: out.values,
+    };
 
     // Realisation B: position by position into a provider — the code
     // `attention_into_kv` runs, transcribed so the probe cannot drift
     // from it silently.
     let mut kv = RowKvState::default();
     kv.prepare(&super::super::kv::plan_kv_geometry(plan));
-    let mut stepped = Vec::with_capacity(inputs.len());
+    let mut stepped = Realisation {
+        outputs: Vec::with_capacity(inputs.len()),
+        keys: Vec::with_capacity(inputs.len()),
+        values: Vec::with_capacity(inputs.len()),
+    };
     for offset in 0..inputs.len() {
         let call = prepared
             .attention
@@ -166,8 +183,10 @@ fn both_realisations<B: PlanBackend>(
                 values: kv.values(layer_index),
             })
             .unwrap();
+        stepped.keys.push(out.key.clone());
+        stepped.values.push(out.value.clone());
         kv.append(layer_index, out.key, out.value);
-        stepped.push(out.output);
+        stepped.outputs.push(out.output);
     }
     (batched, stepped)
 }
@@ -180,19 +199,26 @@ fn probe<B: PlanBackend>(name: &str, backend: &B) {
 
     for (layer_index, rows) in hidden.iter().enumerate() {
         let (batched, stepped) = both_realisations(&plan, &ops, backend, layer_index, rows);
-        let d = diverge(&batched, &stepped);
-        println!(
-            "{name} layer {layer_index}: max_abs={:.3e} rel_rms={:.3e} bit_identical={}",
-            d.max_abs, d.rel_rms, d.bit_identical
-        );
-        assert!(
-            d.bit_identical,
-            "{name} layer {layer_index}: the batched and per-position attention \
-             realisations disagree (max_abs={:.3e}, rel_rms={:.3e}). The K/V rows the \
-             batched path computes are not the rows the provider accumulates, so \
-             V3-SERVE-2 cannot simply return them.",
-            d.max_abs, d.rel_rms
-        );
+        for (what, a, b) in [
+            ("K", &batched.keys, &stepped.keys),
+            ("V", &batched.values, &stepped.values),
+            ("output", &batched.outputs, &stepped.outputs),
+        ] {
+            let d = diverge(a, b);
+            println!(
+                "{name} layer {layer_index} {what}: max_abs={:.3e} rel_rms={:.3e} \
+                 bit_identical={}",
+                d.max_abs, d.rel_rms, d.bit_identical
+            );
+            assert!(
+                d.bit_identical,
+                "{name} layer {layer_index}: the batched and per-position realisations \
+                 disagree on {what} (max_abs={:.3e}, rel_rms={:.3e}). The rows the \
+                 batched pass returns are not the rows the provider would accumulate, \
+                 so populating from them changes what the model computes.",
+                d.max_abs, d.rel_rms
+            );
+        }
     }
 }
 
@@ -276,7 +302,7 @@ fn the_probe_reports_a_divergence_when_the_paths_are_fed_different_inputs() {
     skewed[2][0] += 1e-3;
     let (_, stepped_skewed) = both_realisations(&plan, &ops, &backend, 0, &skewed);
 
-    let d = diverge(&batched, &stepped_skewed);
+    let d = diverge(&batched.keys, &stepped_skewed.keys);
     assert!(
         !d.bit_identical && d.max_abs > 0.0,
         "the comparison did not notice a perturbed input — the parity result above \
@@ -319,20 +345,20 @@ fn real_container_batched_and_stepped_attention_agree_per_position() {
     let mut worst = 0.0f32;
     for (layer_index, rows) in hidden.iter().enumerate() {
         let (batched, stepped) = both_realisations(&plan, &ops, &backend, layer_index, rows);
-        let d = diverge(&batched, &stepped);
-        worst = worst.max(d.max_abs);
-        if !d.bit_identical {
-            println!(
-                "  layer {layer_index}: max_abs={:.3e} rel_rms={:.3e} NOT bit-identical",
+        for (what, a, b) in [
+            ("K", &batched.keys, &stepped.keys),
+            ("V", &batched.values, &stepped.values),
+            ("output", &batched.outputs, &stepped.outputs),
+        ] {
+            let d = diverge(a, b);
+            worst = worst.max(d.max_abs);
+            assert!(
+                d.bit_identical,
+                "layer {layer_index} of {path}: realisations disagree on {what} \
+                 (max_abs={:.3e}, rel_rms={:.3e})",
                 d.max_abs, d.rel_rms
             );
         }
-        assert!(
-            d.bit_identical,
-            "layer {layer_index} of {path}: realisations disagree \
-             (max_abs={:.3e}, rel_rms={:.3e})",
-            d.max_abs, d.rel_rms
-        );
     }
     println!(
         "{} layers, all bit-identical (worst max_abs {worst:.3e})",

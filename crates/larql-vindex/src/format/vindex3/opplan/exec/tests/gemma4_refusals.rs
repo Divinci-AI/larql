@@ -110,10 +110,12 @@ fn partial_rotary_bases_execute_at_parity_and_are_distinct_rotations() {
         .map(|&policy| {
             let r = reference
                 .attention(call(&inputs, &w, policy))
-                .unwrap_or_else(|e| panic!("reference {policy:?}: {e}"));
+                .unwrap_or_else(|e| panic!("reference {policy:?}: {e}"))
+                .outputs;
             let p = production
                 .attention(call(&inputs, &w, policy))
-                .unwrap_or_else(|e| panic!("production {policy:?}: {e}"));
+                .unwrap_or_else(|e| panic!("production {policy:?}: {e}"))
+                .outputs;
             let diff = relative_diff(&r, &p);
             assert!(diff < PARITY, "{policy:?}: reference vs production {diff}");
             r

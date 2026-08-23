@@ -18,8 +18,8 @@ use larql_models::config::{
 
 use super::super::super::graph::policy::AttentionSpan;
 use super::backend::{
-    AttentionCall, AttentionStepCall, AttentionStepOut, FfnCall, GateCall, NormCall, PlanBackend,
-    ProjectCall, ProjectedQkv, QkNormCall, RoutedFfnCall,
+    AttentionCall, AttentionOut, AttentionStepCall, AttentionStepOut, FfnCall, GateCall, NormCall,
+    PlanBackend, ProjectCall, ProjectedQkv, QkNormCall, RoutedFfnCall,
 };
 use super::kernels::{
     activate, matvec, norm, partial_rotary_frequencies, partial_rotary_slice, rope_rotate,
@@ -413,7 +413,7 @@ impl PlanBackend for ReferenceBackend {
         ))
     }
 
-    fn attention(&self, call: AttentionCall<'_>) -> Result<Vec<Vec<f32>>, VindexError> {
+    fn attention(&self, call: AttentionCall<'_>) -> Result<AttentionOut, VindexError> {
         // Projections per position, with QK normalisation, query scale
         // and position encoding applied in the judged order. Positions
         // are independent, so they run in parallel with each position's
@@ -435,7 +435,7 @@ impl PlanBackend for ReferenceBackend {
 
         // Each query position reads every position's K/V but writes only
         // its own output row — parallel over queries, arithmetic intact.
-        queries
+        let outputs: Vec<Vec<f32>> = queries
             .par_iter()
             .enumerate()
             .map(|(position, query)| {
@@ -448,7 +448,12 @@ impl PlanBackend for ReferenceBackend {
                     &call.inputs[position],
                 )
             })
-            .collect()
+            .collect::<Result<_, VindexError>>()?;
+        Ok(AttentionOut {
+            outputs,
+            keys,
+            values,
+        })
     }
 
     fn attention_step(&self, step: AttentionStepCall<'_>) -> Result<AttentionStepOut, VindexError> {

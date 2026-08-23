@@ -149,6 +149,14 @@ fn prepared_and_unprepared_paths_agree_bit_for_bit() {
 /// populated provider must land on the same logits as a session that
 /// prefilled the whole prompt itself. This is the property N1's
 /// bit-identical resumption rests on, now over shared operands.
+///
+/// Since V3-SERVE-2 this gate straddles both attention realisations,
+/// which is what makes it load-bearing: the whole-prompt arm starts at
+/// position 0 and takes the **batched** branch, while the split arm's
+/// second chunk extends a populated provider and takes the
+/// **per-position** branch. They must still agree bit-for-bit — a
+/// batched pass that populated K/V differently from the stepped one
+/// would show up here as a resumed continuation that diverges.
 #[test]
 fn resuming_over_a_prepared_image_matches_a_full_prefill() {
     let (_container, plan, store) = fixture();
