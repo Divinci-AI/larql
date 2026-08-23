@@ -42,6 +42,14 @@ pub enum Vindex3Command {
     /// `shannon layer-dump` format so `layer-diff` can compare it
     /// against an upstream trace with no new comparator.
     Exec(ExecArgs),
+    /// Compile a physical representation of the container's objects and
+    /// persist it beside the canonical bytes, so execution reads a
+    /// compiled pack instead of quantising every operand at load.
+    ///
+    /// The canonical representation is never replaced: the pack is added
+    /// and marked approximate, and a profile then selects between
+    /// representations that exist.
+    Represent(RepresentArgs),
 }
 
 /// Which numerical realisation runs the plan. Both execute the *same*
@@ -211,6 +219,27 @@ pub struct EncodeArgs {
 }
 
 #[derive(Args)]
+pub struct RepresentArgs {
+    /// Container directory to compile from.
+    pub container: PathBuf,
+
+    /// Container directory to write. The canonical segments are
+    /// hard-linked where the filesystem allows, so the new container costs
+    /// the compiled pack's bytes rather than the whole model's.
+    #[arg(long)]
+    pub output: PathBuf,
+
+    /// Target encoding. `NVFP4` is the only compiler today.
+    #[arg(long, default_value = "NVFP4")]
+    pub encoding: String,
+
+    /// Objects to compile. Repeat the flag to name several; omit to
+    /// compile every object carrying a matrix the encoding applies to.
+    #[arg(long = "object")]
+    pub objects: Vec<String>,
+}
+
+#[derive(Args)]
 pub struct InspectArgs {
     /// Container directory.
     pub container: PathBuf,
@@ -249,6 +278,7 @@ pub fn run(cmd: Vindex3Command) -> Result<(), Box<dyn std::error::Error>> {
         Vindex3Command::Verify(args) => run_verify(args),
         Vindex3Command::Ops(args) => run_ops(args),
         Vindex3Command::Exec(args) => run_exec(args),
+        Vindex3Command::Represent(args) => run_represent(args),
     }
 }
 
@@ -348,6 +378,86 @@ fn run_encode(args: EncodeArgs) -> Result<(), Box<dyn std::error::Error>> {
         outcome.container.display(),
     );
     Ok(())
+}
+
+/// `larql vindex3 represent` — compile a physical representation.
+///
+/// Prints what each object cost before and after, because the whole point
+/// of the operation is a number: the pack is only worth persisting if it is
+/// materially smaller than the bytes it was compiled from.
+fn run_represent(args: RepresentArgs) -> Result<(), Box<dyn std::error::Error>> {
+    use larql_vindex::format::vindex3::represent::{compile_representation, RepresentSpec};
+
+    let spec = RepresentSpec {
+        encoding: args.encoding.clone(),
+        objects: args.objects.clone(),
+    };
+    println!("== represent {} ==", args.encoding);
+    println!("  in     : {}", args.container.display());
+    println!("  out    : {}", args.output.display());
+    if !args.objects.is_empty() {
+        println!("  objects: {}", args.objects.join(", "));
+    }
+
+    let started = std::time::Instant::now();
+    let report = compile_representation(&args.container, &args.output, &spec)?;
+
+    println!("\n── compiled ──");
+    println!(
+        "  {:<34} {:>12} {:>12} {:>8} {:>9}",
+        "object", "source", "compiled", "ratio", "tensors"
+    );
+    println!("  {}", "-".repeat(80));
+    let mut src_total = 0u64;
+    let mut out_total = 0u64;
+    for c in &report.compiled_objects {
+        src_total += c.source_bytes;
+        out_total += c.compiled_bytes;
+        println!(
+            "  {:<34} {:>12} {:>12} {:>7.2}x {:>4} +{:<4}",
+            c.object,
+            human_bytes(c.source_bytes),
+            human_bytes(c.compiled_bytes),
+            c.compression(),
+            c.compiled_tensors,
+            c.carried_tensors,
+        );
+    }
+    println!("  {}", "-".repeat(80));
+    let ratio = if out_total == 0 {
+        0.0
+    } else {
+        src_total as f64 / out_total as f64
+    };
+    println!(
+        "  {:<34} {:>12} {:>12} {:>7.2}x",
+        "TOTAL",
+        human_bytes(src_total),
+        human_bytes(out_total),
+        ratio
+    );
+    println!(
+        "\n  {} segment(s) carried unchanged; canonical bytes are untouched.",
+        report.linked_segments
+    );
+    println!("  wall time: {:.1}s", started.elapsed().as_secs_f64());
+    println!("\n→ {}", args.output.display());
+    Ok(())
+}
+
+fn human_bytes(bytes: u64) -> String {
+    const K: u64 = 1024;
+    const M: u64 = K * 1024;
+    const G: u64 = M * 1024;
+    if bytes >= G {
+        format!("{:.2} GB", bytes as f64 / G as f64)
+    } else if bytes >= M {
+        format!("{:.1} MB", bytes as f64 / M as f64)
+    } else if bytes >= K {
+        format!("{:.1} KB", bytes as f64 / K as f64)
+    } else {
+        format!("{bytes} B")
+    }
 }
 
 fn run_inspect(args: InspectArgs) -> Result<(), Box<dyn std::error::Error>> {

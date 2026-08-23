@@ -72,8 +72,8 @@ fn show_v3(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
     // be running `show` to understand. The MoE reader is opened below, only
     // once there is a programme for it to describe.
     let raw = std::fs::read_to_string(path.join(larql_vindex::format::filenames::INDEX_JSON))?;
-    let index: larql_vindex::format::vindex3::Vindex3Index = serde_json::from_str(&raw)
-        .map_err(|e| format!("parse VINDEX3 index.json: {e}"))?;
+    let index: larql_vindex::format::vindex3::Vindex3Index =
+        serde_json::from_str(&raw).map_err(|e| format!("parse VINDEX3 index.json: {e}"))?;
 
     println!("Generation: VINDEX3 (index.json schema {})", index.version);
     println!("Layers:     {}", index.num_layers);
@@ -193,7 +193,13 @@ fn show_v3_representations(index: &larql_vindex::format::vindex3::Vindex3Index) 
         );
     }
     println!("  {}", "-".repeat(72));
-    println!("  {:<34} {:<12} {:>8} {:>14}", "TOTAL", "", "", human_size(total));
+    println!(
+        "  {:<34} {:<12} {:>8} {:>14}",
+        "TOTAL",
+        "",
+        "",
+        human_size(total)
+    );
 }
 
 /// Print the per-projection precision map, if this vindex has one.

@@ -343,3 +343,47 @@ fn a_model_whose_k_is_not_group_aligned_is_refused_whole() {
     assert!(err.contains("nothing was compiled"), "{err}");
     assert!(!out.join(INDEX_JSON).exists(), "no container was written");
 }
+
+#[test]
+fn the_pack_lives_under_segments_and_is_declared() {
+    // Two ways a pack goes missing: written outside `segments/`, or written
+    // there but absent from `index.segments`, which
+    // `Vindex3Container::segment` refuses to resolve.
+    let tmp = tempfile::tempdir().unwrap();
+    let (_, out, report) = compiled_pair(&tmp);
+    let index = index_of(&out);
+
+    for compiled in &report.compiled_objects {
+        let entry = index
+            .representations
+            .get(&compiled.representation_id)
+            .unwrap();
+        assert!(
+            entry.segment.starts_with("segments/"),
+            "pack at {} is outside segments/",
+            entry.segment
+        );
+        assert!(entry.segment.ends_with(".bin"), "{}", entry.segment);
+        assert!(
+            out.join(&entry.segment).is_file(),
+            "{} does not exist on disk",
+            entry.segment
+        );
+
+        let key = entry.segment.trim_end_matches(".bin");
+        assert!(
+            index.segments.contains_key(key),
+            "segment key {key} is not declared; declared: {:?}",
+            index.segments.keys().collect::<Vec<_>>()
+        );
+    }
+
+    // Nothing stray at the container root.
+    for e in std::fs::read_dir(&out).unwrap() {
+        let name = e.unwrap().file_name().to_string_lossy().into_owned();
+        assert!(
+            !name.ends_with(".lyrw") && !name.contains("@"),
+            "stray segment at the container root: {name}"
+        );
+    }
+}

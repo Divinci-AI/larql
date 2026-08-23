@@ -53,6 +53,7 @@ use std::path::Path;
 
 use super::encode::segment::{read_segment_header, write_segment, PlannedTensor};
 use super::encode::REPRESENTATION_ID_SEP;
+use super::encode::{SEGMENTS_DIR, SEGMENT_BIN_EXT};
 use super::graph::object::{Fidelity, Representation};
 use super::index::{RepresentationEntry, Vindex3Index};
 use super::inspect::inspect_container;
@@ -178,6 +179,7 @@ pub fn compile_representation(
     }
 
     let mut added: Vec<(String, RepresentationEntry)> = Vec::new();
+    let mut added_segment_keys: Vec<String> = Vec::new();
     let mut compiled_object_ids: BTreeSet<String> = BTreeSet::new();
 
     for (rep_id, entry) in &existing {
@@ -245,8 +247,12 @@ pub fn compile_representation(
             continue;
         }
 
-        let out_segment = super::write::segment_path(out, &target_id);
-        let segment_rel = super::write::segment_path(Path::new(""), &target_id);
+        // Same naming convention the encoder uses, so a pack is not a
+        // second kind of file living somewhere else: `segments/<key>.bin`,
+        // with the key registered in `index.segments` below.
+        let segment_key = format!("{SEGMENTS_DIR}/{target_id}");
+        let segment_rel = format!("{segment_key}.{SEGMENT_BIN_EXT}");
+        let out_segment = out.join(&segment_rel);
         if let Some(parent) = out_segment.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -334,12 +340,13 @@ pub fn compile_representation(
         });
         compiled_object_ids.insert(entry.object.clone());
 
+        added_segment_keys.push(segment_key);
         added.push((
             target_id,
             RepresentationEntry {
                 object: entry.object.clone(),
                 encoding: spec.encoding.clone(),
-                segment: segment_rel.to_string_lossy().into_owned(),
+                segment: segment_rel,
                 tensor_count: written.tensor_count,
                 payload_bytes: written.payload_bytes,
                 payload_sha256: written.payload_sha256,
@@ -359,6 +366,12 @@ pub fn compile_representation(
 
     for (id, entry) in added {
         index.representations.insert(id, entry);
+    }
+    // A segment a reader cannot resolve by key is a segment it refuses:
+    // `Vindex3Container::segment` rejects anything `index.segments` does
+    // not declare.
+    for key in added_segment_keys {
+        index.segments.insert(key, 1);
     }
 
     // The graph learns the object now has a second materialisation, marked
