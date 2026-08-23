@@ -1,28 +1,35 @@
 # Runtime model lifecycle — design notes (pre-implementation)
 
-Status: **design only** — no endpoints, no state-machine code, no event
-stream. This document exists to settle the state machine and inventory
-the seams a future `POST/DELETE /v1/runtime/model` would need, before
-any of it gets built. See `/v1/runtime` (`routes/runtime.rs`,
-`runtime_stats.rs`) for the read-only surface this lifecycle work sits
-underneath.
+Status: **rungs 1 and 2 of §6 are done; no endpoints, no
+state-machine code, no event stream yet.** This document exists to
+settle the state machine and inventory the seams a future
+`POST/DELETE /v1/runtime/model` would need, before any of it gets
+built. See `/v1/runtime` (`routes/runtime.rs`, `runtime_stats.rs`)
+for the read-only surface this lifecycle work sits underneath.
 
 ## 1. What exists today (grounded in code, not assumption)
 
-- `AppState.models: Vec<Arc<LoadedModel>>` and `v3_models: Vec<Arc<V3Model>>`
-  are populated **once**, in `bootstrap::serve` (`bootstrap/mod.rs:68-190`),
-  before `AppState` is constructed (`bootstrap/mod.rs:276`). They are
-  plain `Vec`s — not `RwLock`, not `ArcSwap`. There is no code path,
-  anywhere in the crate, that mutates them after boot. **This is the
-  seam**: nothing about routing, request dispatch, or the OpenAI
-  handlers assumes an immutable model list, but the storage itself is
-  immutable. Every other lifecycle question is downstream of fixing
-  this one fact.
+- ~~`AppState.models: Vec<Arc<LoadedModel>>` and `v3_models:
+  Vec<Arc<V3Model>>` are populated once... plain `Vec`s, not
+  interior-mutable~~ **Done (rung 1).** Both now live in one
+  `ModelSet { models, v3_models }` behind a single
+  `AppState.model_set: RwLock<ModelSet>` (`state/model_set.rs`) —
+  deliberately one lock, not two independent ones, so a reader can
+  never observe the V2 and V3 registries at two different points in
+  time. Every resolution method (`model()`, `served()`,
+  `is_multi_model()`, `first_model()`, `models_snapshot()`) takes the
+  read guard, finds and clones the `Arc` it needs, and releases the
+  guard before returning — no inference work and no `.await` ever
+  happens while it's held. `ServedModel` dropped its lifetime
+  parameter accordingly (it now owns its `Arc`). Bootstrap still
+  constructs the set exactly once, no user-visible behavior changed —
+  there is still no mutation API. **The remaining seam is exactly what
+  §2 says it is: nothing yet writes to this lock after boot.**
 - Route dispatch already goes through `AppState::model(id)` /
-  `AppState::served(id)` (`state.rs`) at request time, searching the
-  Vec by id. So once the Vecs are interior-mutable, **no router or
-  handler code needs to change to pick up a newly-loaded or
-  newly-removed model** — the seam is narrow.
+  `AppState::served(id)` (`state/model_set.rs`) at request time,
+  searching the snapshot by id. So a future load/unload **doesn't need
+  to touch router or handler code at all** to be picked up — the seam
+  really is this narrow.
 - **The router topology is a separate, bigger seam.** `bootstrap/mod.rs:340-353`
   picks `single_model_router` or `multi_model_router` **once**, based
   on `state.is_multi_model()` (`models.len() + v3_models.len() > 1`)
@@ -52,19 +59,26 @@ underneath.
   below exists for *policy* (don't claim "unloaded" — or start loading
   a replacement — while the old one might still be resident), not for
   safety.
-- **In-flight accounting is inconsistent across the two things that
-  would need it.** `LoadedModel.requests_in_flight: AtomicU32` exists
-  but is walk-ffn/grid-shard-scoped only (its own doc comment says so;
-  it's what GT6 drain reads — see below). My new
-  `RuntimeRecorder.active_requests` is OpenAI-generation-scoped but
-  **server-wide**, not per-model — fine for today's single-model-focus
-  `/v1/runtime`, but it cannot answer "is *this* model still serving a
-  request" once two models can be bound at once. **`V3Model` has no
-  in-flight counter of any kind today** — zero fields for it, the same
-  gap `runtime_stats` just closed for *timing* on V3 (no instrumentation
-  existed; it got added once at the `generate_v3_request` choke point).
-  Unload-safety accounting for V3 needs the identical move: one counter
-  at that same choke point, not one per route.
+- **In-flight accounting is inconsistent across the things that would
+  need it.** `LoadedModel.requests_in_flight: AtomicU32` exists but is
+  walk-ffn/grid-shard-scoped only (its own doc comment says so; it's
+  what GT6 drain reads — see below), and it's a raw `pub` field any
+  caller can mutate directly. `RuntimeRecorder.active_requests` is
+  OpenAI-generation-scoped but **server-wide**, not per-model.
+  ~~`V3Model` has no in-flight counter of any kind today~~ **Done
+  (rung 2).** `V3Model::requests_in_flight() -> u32` now exists,
+  backed by a *private* counter — the only way to change it is
+  `V3GenerationGuard`, entered once as the first statement of
+  `generate_v3_request` (the same choke point that already carries V3's
+  timing) and dropped on every exit, `Ok` or `Err`. A concurrency test
+  (`test_vindex3_serve.rs::v3_generation_in_flight_counter_reflects_genuine_concurrency`)
+  proves the counter reads `1` *while* a real generation is mid-flight
+  on another thread, not just before/after — a before/after check alone
+  would pass even if the guard were scoped wrong. This is stricter than
+  `LoadedModel`'s equivalent (private + guard-only vs. a raw mutable
+  `pub` field) — a deliberate improvement, not an inconsistency to
+  paper over; `LoadedModel`'s stays as-is since GT6 already depends on
+  its exact shape.
 - **A drain-then-signal pattern already ships** — GT6 in `announce.rs`
   (`drain_requests`, `DRAIN_TIMEOUT`, `DroppingMsg`): on `UnassignMsg`
   from the grid router, stop accepting new shard work, poll
@@ -197,13 +211,53 @@ Two notes the diagram can't carry on its own:
 
 ## 6. What actually has to land first, in order
 
-1. Make `AppState.models` / `v3_models` interior-mutable for a single
-   slot (the narrow seam from §1) — this alone is real, reviewable,
-   low-risk work with no user-visible behavior change yet.
-2. Add the missing V3 in-flight counter at the `generate_v3_request`
-   choke point (mirrors exactly how V3 timing was added for
-   `/v1/runtime`) — needed before "unload while generating" can be
-   honest for V3, independent of whether the endpoints exist yet.
-3. Only then: the two endpoints, built directly against the state
+1. ~~Make `AppState.models` / `v3_models` interior-mutable for a single
+   slot~~ **Done** — `ModelSet` behind one `RwLock` (§1).
+2. ~~Add the missing V3 in-flight counter at the `generate_v3_request`
+   choke point~~ **Done** — `V3Model::requests_in_flight()` (§1).
+3. Before the two endpoints: settle §7's `is_multi_model()` /
+   router-topology invariant explicitly — don't discover it mid-PR.
+4. Only then: the two endpoints, built directly against the state
    machine in §3 and the edge-case table in §4 — at which point they
    should be close to mechanical.
+
+## 7. Bank for rung 3: `is_multi_model()` must not go dynamic by accident
+
+`AppState::is_multi_model()` (`state/model_set.rs`) reads the *current*
+`ModelSet` and returns `models.len() + v3_models.len() > 1`. Today
+that's safe *only* because nothing ever changes the set after boot —
+the value `is_multi_model()` computes at request time is, in practice,
+identical to the value `bootstrap::serve` computed once to choose
+`single_model_router` vs. `multi_model_router` (§1's router-topology
+seam). Rung 3 breaks that coincidence the moment a mutation endpoint
+exists: the router variant stays whatever axum built at boot — static,
+un-swappable without extra machinery — while `is_multi_model()` would
+start reporting the *current*, potentially different, model count. A
+handler that trusts `is_multi_model()` to mean "which router shape is
+active" would then be reading a lie.
+
+Two ways to close this before any mutation endpoint lands (either is
+acceptable; picking neither is not):
+
+- **Enforce the 0↔1 invariant at the mutation boundary.** A load/unload
+  call that would ever make `models.len() + v3_models.len()` exceed 1
+  is rejected outright — not deferred to a "multi-model dynamic
+  loading" follow-up, refused *at the point of mutation*, with a clear
+  error naming the reason. This keeps `is_multi_model()`'s current
+  reactive definition truthful, because the thing it worries about
+  (crossing into multi-model territory) is structurally impossible.
+- **Or separate the two questions the name currently conflates.**
+  Freeze a `boot_router_topology: SingleModel | MultiModel` fact
+  (computed once, matching what `bootstrap::serve` actually built),
+  and give `is_multi_model()` — or a differently-named method — a
+  documented answer to "how many models are bound *right now*" that
+  makes no claim about routing. Callers that care about routing shape
+  read the frozen fact; callers that care about current count read the
+  live one; nothing reads one and assumes it means the other.
+
+Whichever is chosen, the constraint is the same: **don't let
+`is_multi_model()` silently become dynamic while the axum router
+remains static.** That mismatch is exactly the kind of bug that only
+shows up once someone actually calls the mutation endpoint in
+multi-model mode — which is also exactly why rung 1 scoped dynamic
+loading to 0↔1 in the first place (§2).

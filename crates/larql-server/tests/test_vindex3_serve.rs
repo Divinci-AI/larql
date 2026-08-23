@@ -29,6 +29,7 @@ use larql_server::bootstrap::{
     load_artifact, load_single_vindex, LoadVindexOptions, LoadedArtifact,
 };
 use larql_server::state::AppState;
+use larql_server::vindex3::generate_v3;
 use larql_vindex::format::load::load_vindex_config;
 use larql_vindex::format::vindex3::fixtures::{
     encode_fixture_container, miniature_glimmer, G_VOCAB,
@@ -542,4 +543,82 @@ fn a_v3_container_refuses_options_it_cannot_honour() {
         .map_err(|e| e.to_string())
         .expect("a V3 container with no unsupported options binds");
     assert!(matches!(ok, LoadedArtifact::V3(_)));
+}
+
+/// `V3Model::requests_in_flight` must reflect generation genuinely
+/// running, not just "a request handler is somewhere on the stack" —
+/// the guard lives inside `generate_v3_request` for exactly this
+/// reason (see `docs/runtime-lifecycle-design.md` and the doc comment
+/// on `V3GenerationGuard`). A before/after check alone can't catch an
+/// incorrectly scoped guard (e.g. one that decrements immediately
+/// after entering, or one entered too late to cover the decode loop):
+/// this test needs to observe `1` *while* a real generation is
+/// mid-flight on another thread, then `0` once it's done.
+#[test]
+fn v3_generation_in_flight_counter_reflects_genuine_concurrency() {
+    let container = v3_container();
+    let artifact = load_artifact(
+        &container.path().to_string_lossy(),
+        LoadVindexOptions::default(),
+    )
+    .unwrap();
+    let model = match artifact {
+        LoadedArtifact::V3(m) => Arc::new(*m),
+        LoadedArtifact::V2(_) => panic!("a VINDEX3 container must bind as V3"),
+    };
+    assert_eq!(model.requests_in_flight(), 0, "idle before any generation");
+
+    let prompt_ids: Vec<u32> = model
+        .tokenizer
+        .encode(PROMPT, true)
+        .unwrap()
+        .get_ids()
+        .to_vec();
+    assert!(!prompt_ids.is_empty());
+
+    let model_bg = Arc::clone(&model);
+    let handle = std::thread::spawn(move || {
+        generate_v3(
+            &model_bg,
+            &prompt_ids,
+            NEW_TOKENS,
+            SamplingConfig::greedy(),
+            &EosConfig::builtin(),
+            |_id, _text| {
+                // Widen the in-flight window enough for the polling
+                // loop below to catch it deterministically — the same
+                // technique `ensure_weights_cell_single_flights_
+                // concurrent_loaders` (state/loaded_model.rs) uses to
+                // make a race window observable in a unit test.
+                std::thread::sleep(std::time::Duration::from_millis(15));
+            },
+        )
+        .expect("generation must succeed against the fixture container");
+    });
+
+    // Poll for genuine in-flight work rather than sleeping a fixed
+    // guess-and-hope duration — fail loudly if it's never observed,
+    // rather than passing on a lucky timing coincidence.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut observed_in_flight = false;
+    while std::time::Instant::now() < deadline {
+        if model.requests_in_flight() == 1 {
+            observed_in_flight = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    assert!(
+        observed_in_flight,
+        "never observed requests_in_flight() == 1 while a generation with a 15ms/token \
+         callback delay ({} tokens) was running on another thread",
+        NEW_TOKENS
+    );
+
+    handle.join().expect("generation thread must not panic");
+    assert_eq!(
+        model.requests_in_flight(),
+        0,
+        "the guard must decrement back to 0 once generation returns"
+    );
 }
