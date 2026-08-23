@@ -42,13 +42,38 @@ pub struct LayerKvGeometry {
     pub window: Option<usize>,
 }
 
-/// Every layer's [`LayerKvGeometry`], in layer order, from the plan.
+/// Every layer's [`LayerKvGeometry`], in layer order.
+///
+/// **Compatibility adapter.** The authoritative seam is
+/// [`plan_continuation_geometry`](super::continuation::plan_continuation_geometry),
+/// which describes what each layer must retain without assuming it is KV.
+/// This flattens that back to the older shape and exists only until its
+/// callers migrate.
+///
+/// It REFUSES a model carrying any non-KV continuation rather than
+/// answering for the layers it happens to understand. Returning only the
+/// softmax layers would silently renumber them; returning a zero-width row
+/// for a recurrence would claim a KV store the layer does not have and
+/// mis-size every allocation downstream. Qwen3.8 is 48 of 64 such layers,
+/// so this is the common case for a hybrid, not an edge.
 pub fn plan_kv_geometry(plan: &ComponentOpPlan) -> Vec<LayerKvGeometry> {
-    plan.layers
+    try_plan_kv_geometry(plan).unwrap_or_else(|e| panic!("{e}"))
+}
+
+/// [`plan_kv_geometry`] without the panic, for callers that can refuse.
+pub fn try_plan_kv_geometry(plan: &ComponentOpPlan) -> Result<Vec<LayerKvGeometry>, String> {
+    let continuation = super::continuation::plan_continuation_geometry(plan)?;
+    continuation
         .iter()
-        .map(|layer| LayerKvGeometry {
-            kv_dim: layer.attention.num_kv_heads * layer.attention.head_dim,
-            window: layer.attention.window,
+        .enumerate()
+        .map(|(index, geometry)| {
+            geometry.kv().cloned().ok_or_else(|| {
+                format!(
+                    "layer {index} carries recurrent continuation state, not KV; \
+                     this model needs `plan_continuation_geometry`, which describes \
+                     both forms"
+                )
+            })
         })
         .collect()
 }

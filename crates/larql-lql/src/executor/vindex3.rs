@@ -305,19 +305,36 @@ impl Session {
         ));
         out.push("-".repeat(60));
         for (index, layer) in plan.layers.iter().enumerate() {
-            let attention = &layer.attention;
-            let (kind, window) = match attention.window {
-                Some(w) => ("sliding", w.to_string()),
-                None => ("full", "-".to_string()),
+            // A linear-attention layer has no window and no softmax head
+            // geometry to show. The columns read `-` rather than borrowing
+            // the recurrence's head counts, which describe a fixed-size
+            // state and not retained positions.
+            let dash = "-".to_string();
+            let (kind, window, q_heads, kv_heads, head_dim) = match layer.attention.softmax() {
+                Some(op) => (
+                    if op.window.is_some() {
+                        "sliding"
+                    } else {
+                        "full"
+                    },
+                    op.window
+                        .map(|w| w.to_string())
+                        .unwrap_or_else(|| dash.clone()),
+                    op.num_q_heads.to_string(),
+                    op.num_kv_heads.to_string(),
+                    op.head_dim.to_string(),
+                ),
+                None => (
+                    "linear",
+                    dash.clone(),
+                    dash.clone(),
+                    dash.clone(),
+                    dash.clone(),
+                ),
             };
             out.push(format!(
                 "{:<8} {:<10} {:>8} {:>10} {:>10} {:>8}",
-                index,
-                kind,
-                window,
-                attention.num_q_heads,
-                attention.num_kv_heads,
-                attention.head_dim,
+                index, kind, window, q_heads, kv_heads, head_dim,
             ));
         }
         Ok(out)
@@ -352,16 +369,23 @@ impl Session {
                 match op.as_str() {
                     "attention" => {
                         let a = &layer.attention;
+                        let num = |v: Option<usize>| v.map_or("-".to_string(), |n| n.to_string());
                         out.push(format!(
                             "    attention  mode {} window {}  q/kv {}/{}  head_dim {}{}{}",
                             a.mode,
                             a.window.map_or("-".into(), |w| w.to_string()),
-                            a.q_heads,
-                            a.kv_heads,
-                            a.head_dim,
+                            num(a.q_heads),
+                            num(a.kv_heads),
+                            num(a.head_dim),
                             if a.gated { "  gated" } else { "" },
                             if a.qk_norm { "  qk_norm" } else { "" },
                         ));
+                        // A recurrence states the one number a softmax
+                        // layer cannot: state that does not grow with the
+                        // sequence.
+                        if let Some(elements) = a.state_elements {
+                            out.push(format!("      state       {elements} elements/layer"));
+                        }
                         if a.sinks || a.biased {
                             out.push(format!(
                                 "      extras      {}{}",

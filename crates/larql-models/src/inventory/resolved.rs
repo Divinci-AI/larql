@@ -181,6 +181,10 @@ pub fn resolve(config: &Value, identity: &Identity) -> (Detection, ResolvedTopol
         },
         layers,
         execution: Some(execution),
+        // Present only when the model declares a complete recurrence.
+        // A partial declaration resolves to `None` rather than being
+        // completed with defaults — see `LinearAttentionTopology::from_config`.
+        linear_attention: crate::inventory::report::LinearAttentionTopology::from_config(cfg),
     };
     (detection, topology)
 }

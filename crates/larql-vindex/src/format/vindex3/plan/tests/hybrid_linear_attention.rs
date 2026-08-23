@@ -152,26 +152,21 @@ fn unrelated_per_layer_facts_still_carry_with_a_hybrid_interleave() {
     }
 }
 
-/// Every newly-parsed hybrid linear-attention / MTP / mRoPE field is
-/// retained (the parser reads it — no more silent drop) but stays
-/// honestly `unrepresented`: there is no `AttentionOp`/component variant
-/// for a linear-attention layer, no MTP-head object, and no multi-axis
-/// position policy in the schema yet, so nothing here claims a
-/// representation that does not exist. Each gets its own `CarriageRule`
-/// (the shared `probe_unrepresented` idiom `norm_topk_prob` and
-/// `high_freq_factor` already use for "no schema field yet") rather than
-/// falling through the generic no-rule message — so
-/// `every_execution_semantic_leaf_has_a_carriage_rule` covers these too.
+/// The hybrid fields that still have no destination stay honestly
+/// `unrepresented`.
+///
+/// QW-1 gave the five linear GEOMETRY fields a real destination and QW-2
+/// gave `mamba_ssm_dtype` one — see
+/// [`the_linear_geometry_is_carried_into_the_operator`] and
+/// [`the_state_precision_moves_with_its_executor`]. What remains here has
+/// none: MTP has no head object, mRoPE has no multi-axis position policy,
+/// and the attention output gate has no judged semantics. Each stays
+/// honestly `unrepresented` rather than claiming a home that does not
+/// exist.
 #[test]
-fn declared_hybrid_fields_are_parsed_but_stay_honestly_unrepresented() {
+fn declared_hybrid_fields_without_a_destination_stay_unrepresented() {
     let findings = hybrid_findings();
     for subject in [
-        "text_config.linear_conv_kernel_dim",
-        "text_config.linear_key_head_dim",
-        "text_config.linear_value_head_dim",
-        "text_config.linear_num_key_heads",
-        "text_config.linear_num_value_heads",
-        "text_config.mamba_ssm_dtype",
         "text_config.attn_output_gate",
         "text_config.output_gate_type",
         "text_config.mtp_num_hidden_layers",
@@ -193,6 +188,65 @@ fn declared_hybrid_fields_are_parsed_but_stay_honestly_unrepresented() {
             finding.detail
         );
         assert!(finding.blocks(), "{subject}");
+    }
+}
+
+/// `mamba_ssm_dtype` moved only when something could honour it.
+///
+/// QW-1 deliberately left it blocking while the field was parsed and
+/// nearby: with no executor able to keep a recurrence at a declared
+/// precision, claiming carriage would have asserted a runtime surface that
+/// could not use the value. QW-2's reference operator allocates and
+/// accumulates `GatedDeltaState` at exactly this precision, so the claim is
+/// now true — and it is the ONLY blocker that rung moved.
+#[test]
+fn the_state_precision_moves_with_its_executor() {
+    let findings = hybrid_findings();
+    let finding = finding_for(&findings, "text_config.mamba_ssm_dtype");
+    assert_eq!(
+        finding.category,
+        FindingCategory::Representable,
+        "{}",
+        finding.detail
+    );
+    assert!(!finding.blocks());
+    assert!(
+        finding.detail.contains("state_dtype") || finding.detail.contains("linear_attention"),
+        "must name where it lands: {}",
+        finding.detail
+    );
+}
+
+/// The five linear geometry fields now terminate in a real operator.
+///
+/// Each lands on `ExecutionSurface.linear_attention` and is consumed by
+/// `GatedDeltaOp`, and together they derive the `qkv_channels` and
+/// `value_width` that the nine `LinearAttn*` operand contracts close
+/// against stored tensors. That whole path is why these grade `Lowered`
+/// while `mamba_ssm_dtype` beside them does not.
+#[test]
+fn the_linear_geometry_is_carried_into_the_operator() {
+    let findings = hybrid_findings();
+    for subject in [
+        "text_config.linear_conv_kernel_dim",
+        "text_config.linear_key_head_dim",
+        "text_config.linear_value_head_dim",
+        "text_config.linear_num_key_heads",
+        "text_config.linear_num_value_heads",
+    ] {
+        let finding = finding_for(&findings, subject);
+        assert_eq!(
+            finding.category,
+            FindingCategory::Representable,
+            "{subject}: {}",
+            finding.detail
+        );
+        assert!(!finding.blocks(), "{subject}");
+        assert!(
+            finding.detail.contains("linear_attention"),
+            "{subject} must name where it lands: {}",
+            finding.detail
+        );
     }
 }
 

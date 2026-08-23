@@ -152,7 +152,7 @@ fn both_realisations<B: PlanBackend>(
         .attention(
             prepared
                 .attention
-                .call(&layer.attention, &inputs, eps, width),
+                .call(layer.attention.softmax().unwrap(), &inputs, eps, width),
         )
         .unwrap();
     let batched = Realisation {
@@ -172,9 +172,12 @@ fn both_realisations<B: PlanBackend>(
         values: Vec::with_capacity(inputs.len()),
     };
     for offset in 0..inputs.len() {
-        let call = prepared
-            .attention
-            .call(&layer.attention, &inputs[offset..=offset], eps, width);
+        let call = prepared.attention.call(
+            layer.attention.softmax().unwrap(),
+            &inputs[offset..=offset],
+            eps,
+            width,
+        );
         let out = backend
             .attention_step(AttentionStepCall {
                 op: call,
@@ -258,7 +261,7 @@ fn stepping_the_same_position_twice_yields_identical_rows() {
 
     let step = |position: usize| {
         let call = prepared.attention.call(
-            &layer.attention,
+            layer.attention.softmax().unwrap(),
             &inputs[position..=position],
             layer.pre_attention_norm.eps,
             width,

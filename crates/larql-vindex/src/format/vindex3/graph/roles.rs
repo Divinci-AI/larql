@@ -39,6 +39,31 @@ pub enum OperandRole {
     AttnSinks,
     AttnQNorm,
     AttnKNorm,
+
+    /// Gated DeltaNet operands. A `linear_attention` layer owns all nine
+    /// and none of the `Attn*` roles: there is no query/key/value to
+    /// retain, no output gate projection separate from `InProjZ`, and no
+    /// span to mask. Closure requires the complete set — a DeltaNet layer
+    /// missing one is not a partially-specified attention layer, it is an
+    /// operator that cannot run.
+    /// Fused query|key|value, `[2·Hk·Dk + Hv·Dv, hidden]`.
+    LinearAttnInProjQkv,
+    /// Per-value-head decay projection, `[Hv, hidden]`.
+    LinearAttnInProjA,
+    /// Per-value-head write-strength projection, `[Hv, hidden]`.
+    LinearAttnInProjB,
+    /// Output-gate projection, `[Hv·Dv, hidden]`.
+    LinearAttnInProjZ,
+    /// Depthwise causal convolution over the fused q|k|v channels.
+    LinearAttnConv1d,
+    /// Per-value-head log decay, `[Hv]`.
+    LinearAttnALog,
+    /// Per-value-head timestep bias, `[Hv]`.
+    LinearAttnDtBias,
+    /// Gated RMSNorm weight over one value head's width, `[Dv]`.
+    LinearAttnNorm,
+    /// Output projection, `[hidden, Hv·Dv]`.
+    LinearAttnOutProj,
     /// `input_layernorm` — normalises the stream before attention.
     PreAttentionNorm,
     /// `post_attention_layernorm` — before-FFN in a two-norm layer,
@@ -127,6 +152,35 @@ const ROLE_TABLE: &[(&str, OperandRole)] = &[
     ("self_attn.sinks", OperandRole::AttnSinks),
     ("self_attn.q_norm.weight", OperandRole::AttnQNorm),
     ("self_attn.k_norm.weight", OperandRole::AttnKNorm),
+    // Gated DeltaNet (Qwen3.8 `linear_attention` layers). Nine operands,
+    // sharing nothing with the softmax set above: the recurrence has no
+    // per-position key or value to retain, so none of the Attn* roles
+    // apply. Exact suffixes, like every entry here — a DeltaNet layer's
+    // `linear_attn.norm.weight` must never be mistaken for a decoder norm.
+    (
+        "linear_attn.in_proj_qkv.weight",
+        OperandRole::LinearAttnInProjQkv,
+    ),
+    (
+        "linear_attn.in_proj_a.weight",
+        OperandRole::LinearAttnInProjA,
+    ),
+    (
+        "linear_attn.in_proj_b.weight",
+        OperandRole::LinearAttnInProjB,
+    ),
+    (
+        "linear_attn.in_proj_z.weight",
+        OperandRole::LinearAttnInProjZ,
+    ),
+    ("linear_attn.conv1d.weight", OperandRole::LinearAttnConv1d),
+    ("linear_attn.A_log", OperandRole::LinearAttnALog),
+    ("linear_attn.dt_bias", OperandRole::LinearAttnDtBias),
+    ("linear_attn.norm.weight", OperandRole::LinearAttnNorm),
+    (
+        "linear_attn.out_proj.weight",
+        OperandRole::LinearAttnOutProj,
+    ),
     ("input_layernorm.weight", OperandRole::PreAttentionNorm),
     (
         "post_attention_layernorm.weight",

@@ -595,6 +595,8 @@ fn the_plan_executes_yarn_and_its_factor_is_load_bearing() {
     let plan = closure(container.path()).plan.unwrap();
     assert!(plan.layers.iter().all(|l| l
         .attention
+        .softmax()
+        .unwrap()
         .position
         .yarn()
         .is_some_and(|y| y.factor == 32.0)));

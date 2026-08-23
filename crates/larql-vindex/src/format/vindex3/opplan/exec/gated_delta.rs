@@ -1,0 +1,426 @@
+//! Reference Gated DeltaNet: the recurrence, written to be read.
+//!
+//! Deliberately slow and literal. No fused kernel, no vectorisation, no
+//! reassociation — this exists so someone can put it beside
+//! `torch_recurrent_gated_delta_rule` in `transformers` and compare it line
+//! by line. Speed is QW-4's problem.
+//!
+//! The state is owned here, on purpose. A DeltaNet layer's continuation
+//! state is one dense `Dk × Dv` matrix per value head and does not grow
+//! with the sequence, so it is not a KV cache and must not be forced
+//! through one. Whether the engine should have a single abstraction
+//! covering both is a real question, and it is QW-3's — answering it before
+//! the arithmetic is proven would risk baking a wrong recurrence into a
+//! nice-looking generic interface.
+
+// Explicit index loops on purpose. This module's stated job is to sit
+// beside `torch_recurrent_gated_delta_rule` and be checkable line by line,
+// and the reference indexes `[..., i]` over named axes. Iterator chains
+// would read better in isolation and worse against the thing they must be
+// verified against — and verification is the entire point of the file.
+#![allow(clippy::needless_range_loop)]
+
+use super::super::gated_delta::StateDtype;
+use super::super::GatedDeltaOp;
+use super::continuation::{RecurrentGeometry, RecurrentState, StateInitialization};
+
+/// L2-normalisation epsilon, from the reference kernel's own default.
+const L2NORM_EPS: f32 = 1e-6;
+
+/// This operator's state, expressed in the engine's generic terms.
+///
+/// A Gated DeltaNet layer keeps one `Dk × Dv` matrix per value head. That
+/// is a [`RecurrentGeometry`] like any other — the shape is the operator's
+/// business, and the storage is not. There is deliberately no
+/// `GatedDeltaState` type: a state named after one operator is exactly what
+/// KDA would have had to work around.
+///
+/// `None` when the checkpoint declared no state precision this build
+/// represents. It does NOT fall back to a default, for the same reason
+/// [`plan_continuation_geometry`](super::continuation::plan_continuation_geometry)
+/// does not: a default that happens to be right for one checkpoint lets
+/// every test pass while the architecture is wrong, and the next operator
+/// inherits the accident.
+pub fn state_geometry(op: &GatedDeltaOp) -> Option<RecurrentGeometry> {
+    Some(RecurrentGeometry {
+        shape: vec![op.num_value_heads, op.key_head_dim, op.value_head_dim],
+        dtype: op.state_dtype?,
+        initialization: StateInitialization::Zeros,
+    })
+}
+
+/// Compile-time reminder that the two dtype spellings are one type.
+const _: fn() = || {
+    let _: Option<StateDtype> = None::<StateDtype>;
+};
+
+/// Index of one state cell in the flat buffer, `[head][k][v]` row-major.
+fn cell(op: &GatedDeltaOp, head: usize, k: usize, v: usize) -> usize {
+    (head * op.key_head_dim + k) * op.value_head_dim + v
+}
+
+/// One position's inputs to the recurrence, per value head, already split
+/// and head-expanded by the caller.
+///
+/// Taking them pre-derived keeps this function the *recurrence* and nothing
+/// else: the projections, convolution and head expansion are separate
+/// stages with their own comparison planes.
+pub struct RecurrenceStep<'a> {
+    /// `[value_heads * key_head_dim]`, NOT yet L2-normalised or scaled.
+    pub query: &'a [f32],
+    /// `[value_heads * key_head_dim]`, NOT yet L2-normalised.
+    pub key: &'a [f32],
+    /// `[value_heads * value_head_dim]`.
+    pub value: &'a [f32],
+    /// `[value_heads]` — already `-exp(A_log) * softplus(a + dt_bias)`, so
+    /// it is negative and `exp(g)` is a decay in `(0, 1]`.
+    pub g: &'a [f32],
+    /// `[value_heads]` — already through the sigmoid.
+    pub beta: &'a [f32],
+}
+
+fn l2_normalise(row: &mut [f32]) {
+    let sum_sq: f32 = row.iter().map(|x| x * x).sum();
+    let inv = 1.0 / (sum_sq + L2NORM_EPS).sqrt();
+    for x in row.iter_mut() {
+        *x *= inv;
+    }
+}
+
+/// Advance the state by one position and return that position's output.
+///
+/// Returns `[value_heads * value_head_dim]` — the recurrence's own output,
+/// before the gated norm and the output projection.
+///
+/// Transcribed from `torch_recurrent_gated_delta_rule`. The order is the
+/// specification, not an implementation detail:
+///
+/// ```text
+/// S  = S * exp(g)                  decay first
+/// kv = k · S                       read with the key
+/// d  = (v - kv) * beta             the delta rule
+/// S  = S + outer(k, d)             rank-1 write
+/// o  = q · S                       read with the query, AFTER the write
+/// ```
+///
+/// That last ordering is why a single-position test cannot validate this:
+/// the current position reads a state it has just written, so an
+/// implementation that reads before writing produces a plausible first
+/// output and a wrong second one.
+pub fn recurrence_step(
+    op: &GatedDeltaOp,
+    step: &RecurrenceStep<'_>,
+    state: &mut RecurrentState,
+) -> Vec<f32> {
+    step_inner(op, step, state, Mutation::None)
+}
+
+/// Deliberate defects, for the negative controls.
+///
+/// Test-only, but they perturb the REAL function rather than a copy of it:
+/// a control that mutates a duplicate proves only that the duplicate is
+/// detectable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mutation {
+    None,
+    /// Apply the query scale BEFORE the L2-norm, so normalisation undoes it.
+    ScaleBeforeNorm,
+    /// Read the state with q BEFORE the rank-1 write, so the current
+    /// position cannot see its own contribution.
+    ReadBeforeWrite,
+    /// Skip the decay entirely.
+    NoDecay,
+    /// Drop beta from the delta rule.
+    NoBeta,
+    /// Use g directly instead of exp(g).
+    RawGate,
+    /// Apply SiLU BEFORE the convolution instead of after.
+    SiluBeforeConv,
+    /// Centre the convolution window instead of making it causal, so a
+    /// position sees its own future.
+    CentredConv,
+    /// Tile q/k across heads (`h + j*Hk`) instead of `repeat_interleave`
+    /// (`h*3 + j`). Same shape, different pairing with the value heads.
+    TiledHeadExpansion,
+}
+
+fn step_inner(
+    op: &GatedDeltaOp,
+    step: &RecurrenceStep<'_>,
+    state: &mut RecurrentState,
+    mutation: Mutation,
+) -> Vec<f32> {
+    let (hv, dk, dv) = (op.num_value_heads, op.key_head_dim, op.value_head_dim);
+    let mut out = vec![0.0f32; hv * dv];
+    // The reference L2-normalises inside the kernel and applies the query
+    // scale AFTERWARDS. Scaling first would rescale the normalisation and
+    // is a different function.
+    let scale = 1.0 / (dk as f32).sqrt();
+
+    for h in 0..hv {
+        let mut q: Vec<f32> = step.query[h * dk..(h + 1) * dk].to_vec();
+        let mut k: Vec<f32> = step.key[h * dk..(h + 1) * dk].to_vec();
+        if mutation == Mutation::ScaleBeforeNorm {
+            for x in q.iter_mut() {
+                *x *= scale;
+            }
+        }
+        l2_normalise(&mut q);
+        l2_normalise(&mut k);
+        if mutation != Mutation::ScaleBeforeNorm {
+            for x in q.iter_mut() {
+                *x *= scale;
+            }
+        }
+        let v = &step.value[h * dv..(h + 1) * dv];
+        let decay = match mutation {
+            Mutation::NoDecay => 1.0,
+            Mutation::RawGate => step.g[h],
+            _ => step.g[h].exp(),
+        };
+        let beta = if mutation == Mutation::NoBeta {
+            1.0
+        } else {
+            step.beta[h]
+        };
+
+        for kk in 0..dk {
+            for vv in 0..dv {
+                let idx = cell(op, h, kk, vv);
+                state.cells_mut()[idx] *= decay;
+            }
+        }
+        // kv = sum over the KEY axis, weighted by k.
+        let mut kv = vec![0.0f32; dv];
+        for kk in 0..dk {
+            let kw = k[kk];
+            for vv in 0..dv {
+                kv[vv] += state.cells_mut()[cell(op, h, kk, vv)] * kw;
+            }
+        }
+        let delta: Vec<f32> = (0..dv).map(|vv| (v[vv] - kv[vv]) * beta).collect();
+        let mut read = |state: &RecurrentState| {
+            for kk in 0..dk {
+                let qw = q[kk];
+                for vv in 0..dv {
+                    out[h * dv + vv] += state.cells()[cell(op, h, kk, vv)] * qw;
+                }
+            }
+        };
+        if mutation == Mutation::ReadBeforeWrite {
+            read(state);
+        }
+        for kk in 0..dk {
+            let kw = k[kk];
+            for vv in 0..dv {
+                let idx = cell(op, h, kk, vv);
+                state.cells_mut()[idx] += kw * delta[vv];
+            }
+        }
+        if mutation != Mutation::ReadBeforeWrite {
+            read(state);
+        }
+    }
+    out
+}
+
+/// Run the recurrence with a deliberate defect. Negative controls only.
+pub fn recurrence_step_mutated(
+    op: &GatedDeltaOp,
+    step: &RecurrenceStep<'_>,
+    state: &mut RecurrentState,
+    mutation: Mutation,
+) -> Vec<f32> {
+    step_inner(op, step, state, mutation)
+}
+
+/// The nine operands as plain f32 slices, in the checkpoint's own layouts.
+///
+/// Linear weights are `[out, in]` row-major, as PyTorch stores them, so a
+/// projection is `y[o] = sum_i x[i] * w[o][i]`. Nothing here re-derives a
+/// tensor from its name: the caller resolves the operands through the
+/// `GatedDeltaOp` that QW-1 built, which is the single architecture
+/// authority.
+pub struct GatedDeltaWeights<'a> {
+    pub in_proj_qkv: &'a [f32],
+    pub in_proj_a: &'a [f32],
+    pub in_proj_b: &'a [f32],
+    pub in_proj_z: &'a [f32],
+    pub conv1d: &'a [f32],
+    pub a_log: &'a [f32],
+    pub dt_bias: &'a [f32],
+    pub norm: &'a [f32],
+    pub out_proj: &'a [f32],
+    pub norm_eps: f32,
+}
+
+/// Every boundary the operator crosses, kept so a disagreement names its
+/// own stage instead of being debugged backwards from the layer output.
+#[derive(Debug, Default)]
+pub struct LayerPlanes {
+    /// Post-conv, post-SiLU, split and head-expanded: `[T][Hv*Dk]`.
+    pub query: Vec<Vec<f32>>,
+    pub key: Vec<Vec<f32>>,
+    /// `[T][Hv*Dv]`.
+    pub value: Vec<Vec<f32>>,
+    /// `[T][Hv]`.
+    pub g: Vec<Vec<f32>>,
+    pub beta: Vec<Vec<f32>>,
+    /// `[T][Hv*Dv]`.
+    pub z: Vec<Vec<f32>>,
+    pub core: Vec<Vec<f32>>,
+    /// `[T][hidden]`.
+    pub output: Vec<Vec<f32>>,
+}
+
+fn matvec(w: &[f32], x: &[f32], out_dim: usize) -> Vec<f32> {
+    let in_dim = x.len();
+    (0..out_dim)
+        .map(|o| {
+            let row = &w[o * in_dim..(o + 1) * in_dim];
+            row.iter().zip(x).map(|(a, b)| a * b).sum()
+        })
+        .collect()
+}
+
+fn silu(x: f32) -> f32 {
+    x / (1.0 + (-x).exp())
+}
+
+fn softplus(x: f32) -> f32 {
+    // The numerically stable form; large x must not overflow exp.
+    if x > 20.0 {
+        x
+    } else {
+        (1.0 + x.exp()).ln()
+    }
+}
+
+/// The whole operator: hidden states in, layer output out, state advanced.
+///
+/// Stage order is the specification. Three of these are places a plausible
+/// implementation goes wrong without looking wrong:
+/// the convolution is causal by left-pad and right-truncate (not centred),
+/// SiLU comes AFTER it, and q/k are `repeat_interleave`d 3x — head `e`
+/// takes original head `e / 3`, not `e % Hk`.
+pub fn layer_forward(
+    op: &GatedDeltaOp,
+    w: &GatedDeltaWeights<'_>,
+    hidden: &[Vec<f32>],
+    state: &mut RecurrentState,
+    mutation: Mutation,
+) -> LayerPlanes {
+    let (hk, hv) = (op.num_key_heads, op.num_value_heads);
+    let (dk, dv) = (op.key_head_dim, op.value_head_dim);
+    let (key_dim, value_dim) = (hk * dk, hv * dv);
+    let conv_dim = op.qkv_channels();
+    let kernel = op.conv_kernel;
+    let repeat = hv / hk;
+    let mut planes = LayerPlanes::default();
+
+    // Stage 1: the fused projection, per position.
+    let mixed: Vec<Vec<f32>> = hidden
+        .iter()
+        .map(|h| matvec(w.in_proj_qkv, h, conv_dim))
+        .collect();
+
+    // Stage 2: depthwise causal convolution, then SiLU.
+    let t_len = hidden.len();
+    let mut conv: Vec<Vec<f32>> = vec![vec![0.0; conv_dim]; t_len];
+    for c in 0..conv_dim {
+        let taps = &w.conv1d[c * kernel..(c + 1) * kernel];
+        for t in 0..t_len {
+            let mut acc = 0.0f32;
+            for (i, tap) in taps.iter().enumerate() {
+                // Causal: left-padded by kernel-1, so tap i reads
+                // position t - (kernel-1) + i. Centring it would let the
+                // position read its own future.
+                let offset = if mutation == Mutation::CentredConv {
+                    t as isize - (kernel as isize / 2) + i as isize
+                } else {
+                    t as isize - (kernel as isize - 1) + i as isize
+                };
+                if offset >= 0 && (offset as usize) < t_len {
+                    let x = mixed[offset as usize][c];
+                    acc += tap
+                        * if mutation == Mutation::SiluBeforeConv {
+                            silu(x)
+                        } else {
+                            x
+                        };
+                }
+            }
+            conv[t][c] = if mutation == Mutation::SiluBeforeConv {
+                acc
+            } else {
+                silu(acc)
+            };
+        }
+    }
+
+    for t in 0..t_len {
+        // Stage 3/4: split, then expand q/k from Hk heads to Hv.
+        let mut q = vec![0.0f32; hv * dk];
+        let mut k = vec![0.0f32; hv * dk];
+        for e in 0..hv {
+            let src = if mutation == Mutation::TiledHeadExpansion {
+                e % hk
+            } else {
+                e / repeat
+            };
+            for d in 0..dk {
+                q[e * dk + d] = conv[t][src * dk + d];
+                k[e * dk + d] = conv[t][key_dim + src * dk + d];
+            }
+        }
+        let value = conv[t][key_dim * 2..key_dim * 2 + value_dim].to_vec();
+
+        // Stage 5: the gates.
+        let a = matvec(w.in_proj_a, &hidden[t], hv);
+        let b = matvec(w.in_proj_b, &hidden[t], hv);
+        let z = matvec(w.in_proj_z, &hidden[t], value_dim);
+        let beta: Vec<f32> = b.iter().map(|x| 1.0 / (1.0 + (-x).exp())).collect();
+        let g: Vec<f32> = (0..hv)
+            .map(|h| -w.a_log[h].exp() * softplus(a[h] + w.dt_bias[h]))
+            .collect();
+
+        // Stage 6: the proven recurrence.
+        let core = step_inner(
+            op,
+            &RecurrenceStep {
+                query: &q,
+                key: &k,
+                value: &value,
+                g: &g,
+                beta: &beta,
+            },
+            state,
+            mutation,
+        );
+
+        // Stage 7: gated RMSNorm, per value head over Dv. Norm, then the
+        // weight, then the SiLU'd gate — that order is the reference's.
+        let mut normed = vec![0.0f32; value_dim];
+        for h in 0..hv {
+            let row = &core[h * dv..(h + 1) * dv];
+            let var: f32 = row.iter().map(|x| x * x).sum::<f32>() / dv as f32;
+            let inv = 1.0 / (var + w.norm_eps).sqrt();
+            for d in 0..dv {
+                normed[h * dv + d] = w.norm[d] * (row[d] * inv) * silu(z[h * dv + d]);
+            }
+        }
+
+        // Stage 8: back into the residual stream.
+        planes
+            .output
+            .push(matvec(w.out_proj, &normed, hidden[t].len()));
+        planes.query.push(q);
+        planes.key.push(k);
+        planes.value.push(value);
+        planes.g.push(g);
+        planes.beta.push(beta);
+        planes.z.push(z);
+        planes.core.push(core);
+    }
+    planes
+}

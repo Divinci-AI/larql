@@ -238,19 +238,30 @@ impl<'a> LoweredSession<'a> {
         // lowering still has no kernel for is refused, typed, here: a
         // rotary-width partial rotary (a prefix rotated as its own block)
         // and a gate activation other than SiLU / tanh-GELU.
+        // No DeltaNet kernel exists on this path. Refuse the whole plan
+        // rather than lower the 16 softmax layers of a 64-layer hybrid and
+        // silently drop the other 48.
+        if let Some(l) = plan.layers.iter().find(|l| l.attention.softmax().is_none()) {
+            return Err(VindexError::Parse(format!(
+                "layer {} carries `{}`, which this lowering has no kernel for; refusing",
+                l.layer,
+                l.attention.declared_name(),
+            )));
+        }
         if let Some(l) = plan.layers.iter().find(|l| {
             matches!(
-                l.attention.position,
-                PositionPolicy::PartialRope {
+                l.attention.softmax().map(|op| &op.position),
+                Some(PositionPolicy::PartialRope {
                     basis: larql_models::config::RotaryFrequencyBasis::RotaryWidth,
                     ..
-                }
+                })
             )
         }) {
             return Err(VindexError::Parse(format!(
                 "layer {} carries {:?}, whose prefix-block rotation the rope kernel does not \
                  express; refusing rather than rotating the whole head",
-                l.layer, l.attention.position
+                l.layer,
+                l.attention.softmax().map(|op| &op.position)
             )));
         }
         if let Some(l) = plan
@@ -286,7 +297,12 @@ impl<'a> LoweredSession<'a> {
 
         let mut layers = Vec::with_capacity(plan.layers.len());
         for layer in &plan.layers {
-            let a = &layer.attention;
+            let a = layer.attention.softmax().unwrap_or_else(|| {
+                panic!(
+                    "layer {} is not softmax; the lowering refused this plan in `new`",
+                    layer.layer
+                )
+            });
             let kv_rows = a.num_kv_heads * a.head_dim;
             let zeros = vec![0.0f32; max_positions * kv_rows];
             // On a K≡V layer the plan's `v` IS the K operand: the same
@@ -380,7 +396,8 @@ impl<'a> LoweredSession<'a> {
         let max_q = plan
             .layers
             .iter()
-            .map(|l| l.attention.num_q_heads * l.attention.head_dim)
+            .filter_map(|l| l.attention.softmax())
+            .map(|op| op.num_q_heads * op.head_dim)
             .max()
             .unwrap_or(hidden);
         let max_inter = plan
@@ -443,7 +460,12 @@ impl<'a> LoweredSession<'a> {
         // rope from `rope_rotate`, YaRN from `kernels::yarn_frequencies`.
         let mut inv_freq: HashMap<u64, DeviceBuffer> = HashMap::new();
         for layer in &plan.layers {
-            let a = &layer.attention;
+            let a = layer.attention.softmax().unwrap_or_else(|| {
+                panic!(
+                    "layer {} is not softmax; the lowering refused this plan in `new`",
+                    layer.layer
+                )
+            });
             let key = rope_table_key(&a.position, a.head_dim);
             if let Some(key) = key {
                 inv_freq.entry(key).or_insert_with(|| {
@@ -548,7 +570,12 @@ impl<'a> LoweredSession<'a> {
         r: &'b LayerResident,
         t: usize,
     ) -> LayerLowering<'b> {
-        let a = &plan_layer.attention;
+        let a = plan_layer.attention.softmax().unwrap_or_else(|| {
+            panic!(
+                "layer {} is not softmax; the lowering refused this plan in `new`",
+                plan_layer.layer
+            )
+        });
         let post = |slot: &'b Option<(DeviceBuffer, f32, f32)>, scratch: &'b DeviceBuffer| {
             slot.as_ref().map(|(w, eps, off)| PostNorm {
                 weight: w,

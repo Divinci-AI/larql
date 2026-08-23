@@ -215,7 +215,12 @@ fn a_session_fails_closed_on_an_unresolvable_operand_at_every_site() {
     let backend = ReferenceBackend::new();
 
     let mut attention_broken = plan.clone();
-    attention_broken.layers[0].attention.q.tensor = UNRESOLVABLE_TENSOR.to_string();
+    attention_broken.layers[0]
+        .attention
+        .softmax_mut()
+        .unwrap()
+        .q
+        .tensor = UNRESOLVABLE_TENSOR.to_string();
     let mut ffn_broken = plan.clone();
     let LayerFfn::Dense(op) = &mut ffn_broken.layers[0].ffn else {
         panic!("dense fixture");

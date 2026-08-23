@@ -554,39 +554,39 @@ pub const CARRIAGE_RULES: &[CarriageRule] = &[
     // before it fails on a checkpoint.
     CarriageRule {
         leaf: "linear_conv_kernel_dim",
-        reaches: Carriage::Represented,
-        site: "no schema field — the linear-attention block's short-conv geometry is not represented yet",
-        probe: Some(probe_unrepresented),
+        reaches: Carriage::Lowered,
+        site: "ExecutionSurface.linear_attention.conv_kernel → GatedDeltaOp.conv_kernel",
+        probe: Some(probe_linear_conv_kernel),
     },
     CarriageRule {
         leaf: "linear_key_head_dim",
-        reaches: Carriage::Represented,
-        site: "no schema field — the linear-attention block's head geometry is not represented yet",
-        probe: Some(probe_unrepresented),
+        reaches: Carriage::Lowered,
+        site: "ExecutionSurface.linear_attention.key_head_dim → GatedDeltaOp.key_head_dim",
+        probe: Some(probe_linear_key_head_dim),
     },
     CarriageRule {
         leaf: "linear_value_head_dim",
-        reaches: Carriage::Represented,
-        site: "no schema field — the linear-attention block's head geometry is not represented yet",
-        probe: Some(probe_unrepresented),
+        reaches: Carriage::Lowered,
+        site: "ExecutionSurface.linear_attention.value_head_dim → GatedDeltaOp.value_head_dim",
+        probe: Some(probe_linear_value_head_dim),
     },
     CarriageRule {
         leaf: "linear_num_key_heads",
-        reaches: Carriage::Represented,
-        site: "no schema field — the linear-attention block's head geometry is not represented yet",
-        probe: Some(probe_unrepresented),
+        reaches: Carriage::Lowered,
+        site: "ExecutionSurface.linear_attention.key_heads → GatedDeltaOp.num_key_heads",
+        probe: Some(probe_linear_key_heads),
     },
     CarriageRule {
         leaf: "linear_num_value_heads",
-        reaches: Carriage::Represented,
-        site: "no schema field — the linear-attention block's head geometry is not represented yet",
-        probe: Some(probe_unrepresented),
+        reaches: Carriage::Lowered,
+        site: "ExecutionSurface.linear_attention.value_heads → GatedDeltaOp.num_value_heads",
+        probe: Some(probe_linear_value_heads),
     },
     CarriageRule {
         leaf: "mamba_ssm_dtype",
-        reaches: Carriage::Represented,
-        site: "no schema field — the linear-attention block's recurrent/SSM-adjacent state precision is not represented yet",
-        probe: Some(probe_unrepresented),
+        reaches: Carriage::Lowered,
+        site: "ExecutionSurface.linear_attention.state_dtype → GatedDeltaState precision",
+        probe: Some(probe_linear_state_dtype),
     },
     CarriageRule {
         leaf: "attn_output_gate",
@@ -872,6 +872,68 @@ fn probe_layer_types(component: &Component, _ctx: &ProbeContext<'_>) -> Option<V
             .map(|l| json!(l.span.declared_name()))
             .collect(),
     ))
+}
+
+/// The Gated DeltaNet geometry the surface carries, read back per field.
+///
+/// Each answers only if the component actually built a linear-attention
+/// block. A component with no recurrence answers `None`, and the gate then
+/// reports carriage without a value comparison rather than inventing a
+/// disagreement — the same contract every probe here has.
+///
+/// These are `Lowered` rather than `Represented` because each value
+/// terminates in a real operand contract: the five together derive
+/// `qkv_channels` and `value_width`, which the nine `LinearAttn*` shape
+/// checks close against the stored tensors.
+fn probe_linear_key_heads(component: &Component, _ctx: &ProbeContext<'_>) -> Option<Value> {
+    Some(json!(
+        component.execution.as_ref()?.linear_attention?.key_heads
+    ))
+}
+
+fn probe_linear_key_head_dim(component: &Component, _ctx: &ProbeContext<'_>) -> Option<Value> {
+    Some(json!(
+        component.execution.as_ref()?.linear_attention?.key_head_dim
+    ))
+}
+
+fn probe_linear_value_heads(component: &Component, _ctx: &ProbeContext<'_>) -> Option<Value> {
+    Some(json!(
+        component.execution.as_ref()?.linear_attention?.value_heads
+    ))
+}
+
+fn probe_linear_value_head_dim(component: &Component, _ctx: &ProbeContext<'_>) -> Option<Value> {
+    Some(json!(
+        component
+            .execution
+            .as_ref()?
+            .linear_attention?
+            .value_head_dim
+    ))
+}
+
+fn probe_linear_conv_kernel(component: &Component, _ctx: &ProbeContext<'_>) -> Option<Value> {
+    Some(json!(
+        component.execution.as_ref()?.linear_attention?.conv_kernel
+    ))
+}
+
+/// The recurrence's state precision, echoed in the checkpoint's own
+/// spelling.
+///
+/// `Lowered` rather than `Represented` because it has a consumer: the
+/// reference operator allocates and accumulates `GatedDeltaState` at this
+/// precision. Until that executor existed this rule refused, because
+/// claiming carriage into a runtime surface that could not use the value
+/// would have asserted something untrue.
+fn probe_linear_state_dtype(component: &Component, _ctx: &ProbeContext<'_>) -> Option<Value> {
+    Some(json!(component
+        .execution
+        .as_ref()?
+        .linear_attention?
+        .state_dtype?
+        .declared_name()))
 }
 
 /// The uniform sliding window across sliding layers, when there is one.
