@@ -22,6 +22,7 @@ pub mod backend;
 pub mod decode;
 pub mod device;
 mod experts;
+pub mod gated_delta;
 pub mod kernels;
 pub mod kv;
 pub mod observe;

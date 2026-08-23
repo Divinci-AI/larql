@@ -16,6 +16,7 @@ mod coverage_device;
 mod coverage_experts_production;
 mod decode;
 mod device;
+mod gated_delta_parity;
 mod gated_delta_refusal;
 mod gemma4;
 mod gemma4_refusals;
