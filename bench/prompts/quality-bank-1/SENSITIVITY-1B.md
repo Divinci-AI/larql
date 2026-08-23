@@ -104,3 +104,81 @@ assigned intelligently from weight statistics alone, so any 2.8T-scale
 compiler needs representative activation traffic through the model. 1B is
 the cheapest form of that, and its per-feature moments are a vector per
 site rather than anything that scales with expert count.
+
+
+---
+
+# Result: 1B-a FAILS on the primary score
+
+Controls first, both pass:
+
+```
+reconstruction control   max |reconstructed - executor| 3.18e-06
+                         relative to output magnitude   1.07e-07   PASS
+observed vs unobserved   an_observed_step_is_bit_identical...      PASS
+```
+
+So `silu(gate) ⊙ up` is the executor's semantics and the captured
+activations are the ones execution sees. The failure is the score's, not
+the harness's.
+
+```
+  candidate          +MiB    1B e/MiB   Q-BANK p99/MiB
+  late5-ffn           431    0.000293          0.00774
+  late10-ffn          862    0.000302          0.00390
+  ffn-protected      3450    0.000306          0.00115
+  v-protected          72    0.005990          0.00027
+  down-protected     1150    0.000297         -0.00016
+  k-protected          72    0.004119         -0.00034
+
+  1B primary   v-protected > k-protected > late10-ffn-v > ...
+  Q-BANK       late5-ffn > late10-ffn > late10-ffn-v > ...
+
+  Spearman -0.524   (1A was -0.313)
+
+  1. late-FFN highest-return : FAIL  (top = v-protected)
+  2. v/k/down low-value      : FAIL  (ranks 1, 2, 7 of 8)
+  => 1B-a FAIL
+```
+
+## Why: the normalisation reintroduces 1A's bias
+
+`v_proj` and `k_proj` top the ranking again, and for the same underlying
+reason. Dividing by `‖XW‖²` measures error *relative to the operand's own
+output*, so an operand whose output is small scores high — exactly as 1A's
+division by `‖W‖²` rewarded operands whose weights were small.
+
+Activation weighting did supply the missing factor. **The normalisation
+then removed it again.**
+
+## An observation that is NOT a result
+
+The secondary unnormalised variant, `Σ_j d_j ‖ΔW_{:,j}‖²` per MiB,
+computed from the same capture, ranks:
+
+```
+late5-ffn > late10-ffn > late10-ffn-v > down-protected > late15-ffn
+          > ffn-protected > k-protected > v-protected
+```
+
+against a truth order of `late5-ffn > late10-ffn > late10-ffn-v >
+late15-ffn > ffn-protected > v > down > k`. Top three exactly right, both
+of `v`/`k` at the bottom, one misplacement (`down-protected`).
+
+**This is not being promoted.** The pre-registration says the secondary is
+not eligible to become primary after the fact, and this is precisely the
+situation it was written for: the variant looks good *on the data that
+suggested it*, which is not evidence. Promoting it here would make the
+whole ladder decorative.
+
+If the unnormalised form is to be tested, it must be pre-registered as
+1B'-primary and judged on **1B-b's disjoint calibration set**, scored
+once. That is its first and only shot.
+
+## What 1B-a establishes
+
+Activation weighting alone does not rescue the screen, and the specific
+lesson is about *normalisation*, not about activations: both failures came
+from dividing by a quantity that scales with the operand's own size.
+A local score must express **absolute consequence**, not consequence
+relative to the operand.

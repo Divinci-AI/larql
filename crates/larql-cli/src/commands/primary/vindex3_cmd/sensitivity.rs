@@ -78,6 +78,9 @@ struct TensorScore {
 }
 
 pub fn run(args: SensitivityArgs) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(cal) = args.calibration.clone() {
+        return capture_moments(&args, &cal);
+    }
     use larql_models::quant::nvfp4::{round_trip, NVFP4_GROUP_ELEMS};
     use larql_vindex::format::vindex3::represent::nvfp4_pack::PackLayout;
 
@@ -186,8 +189,23 @@ pub struct MomentCollector {
     pub sums: std::collections::BTreeMap<(usize, u8), (Vec<f64>, u64)>,
     /// One captured (ffn input, ffn output) pair, for the control.
     pub control: Option<(usize, Vec<f32>, Vec<f32>)>,
+    /// Sampled FFN inputs per layer.
+    ///
+    /// `down_proj`'s input is `act(gate(x)) * up(x)`, and its second
+    /// moments cannot be derived from `x`'s: the nonlinearity does not
+    /// commute with the expectation. So a stride of actual inputs is kept
+    /// and the intermediate's moments are computed offline from them —
+    /// the same reconstruction the control just verified, rather than a
+    /// second approximation stacked on the first.
+    pub ffn_samples: std::collections::BTreeMap<usize, Vec<Vec<f32>>>,
     pending_ffn_input: Option<(usize, Vec<f32>)>,
+    seen: std::collections::BTreeMap<usize, u64>,
 }
+
+/// Keep one FFN input in this many, per layer. 395 calibration positions
+/// give ~50 samples per layer, which is ample for a per-feature second
+/// moment and small enough to serialise.
+const FFN_SAMPLE_STRIDE: u64 = 8;
 
 impl larql_vindex::format::vindex3::opplan::exec::observe::StepObserver for MomentCollector {
     fn event(&mut self, _e: larql_vindex::format::vindex3::opplan::exec::observe::StepEvent) {}
@@ -206,6 +224,14 @@ impl larql_vindex::format::vindex3::opplan::exec::observe::StepObserver for Mome
         };
         if site == InputSite::Ffn {
             self.pending_ffn_input = Some((layer, values.to_vec()));
+            let n = self.seen.entry(layer).or_insert(0);
+            if *n % FFN_SAMPLE_STRIDE == 0 {
+                self.ffn_samples
+                    .entry(layer)
+                    .or_default()
+                    .push(values.to_vec());
+            }
+            *n += 1;
         }
         if site == InputSite::FfnOutput {
             // Keep exactly one pair: the control needs a single position
@@ -229,4 +255,122 @@ impl larql_vindex::format::vindex3::opplan::exec::observe::StepObserver for Mome
         }
         entry.1 += 1;
     }
+}
+
+
+/// SENSITIVITY-1B capture: run the calibration set through the reference
+/// backend, accumulating per-feature second moments at each input site.
+///
+/// The forward pass is the *canonical* one with an observer attached —
+/// `an_observed_step_is_bit_identical_to_an_unobserved_one` is what makes
+/// the captured activations the ones execution actually sees.
+fn capture_moments(
+    args: &SensitivityArgs,
+    calibration: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use larql_vindex::format::vindex3::opplan::exec::decode::DecodeSession;
+    use larql_vindex::format::vindex3::opplan::exec::kv::RowKvState;
+    use larql_vindex::format::vindex3::opplan::plan_component_ops;
+
+    let out = args
+        .moments
+        .clone()
+        .ok_or("--calibration requires --moments")?;
+    let inspection = inspect_container(&args.container, false)?;
+    let outcome = plan_component_ops(&inspection, &args.container, "target")?;
+    let plan = outcome.plan.ok_or("component produced no plan")?;
+    let store = OperandStore::open_for(
+        &args.container,
+        &inspection,
+        None,
+        RepresentationSource::Transient,
+    )?;
+
+    #[derive(serde::Deserialize)]
+    struct Entry {
+        id: String,
+        ids: Vec<u32>,
+    }
+    let text = std::fs::read_to_string(calibration)?;
+    let entries: Vec<Entry> = text
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(serde_json::from_str)
+        .collect::<Result<_, _>>()?;
+
+    // The f16 Metal realisation, the same one `exec --backend metal` uses
+    // and the one Granite's external oracle was verified against. The
+    // naive f32 reference is correct and takes hours on a 40-layer model
+    // with no KV cache, which would make the screen more expensive than
+    // the Q-BANK run it exists to avoid.
+    let gpu = larql_compute_metal::MetalBackend::new()
+        .ok_or("no Metal device available for the sensitivity capture")?;
+    let backend = larql_vindex::format::vindex3::opplan::exec::device::DevicePlanBackend::new(
+        gpu,
+        "metal-r3-f16",
+        larql_vindex::format::vindex3::opplan::exec::backend::WeightFormat::F16,
+    );
+    let mut collector = MomentCollector::default();
+    let started = std::time::Instant::now();
+    let mut positions = 0usize;
+
+    for (n, e) in entries.iter().enumerate() {
+        // A fresh state per prompt, as Q-BANK-2 established: every
+        // position must see the context its own prompt gives it.
+        let mut kv = RowKvState::default();
+        let mut session = DecodeSession::with_kv_state(&plan, &store, &backend, &mut kv)?;
+        for &t in &e.ids {
+            session.step_observed(t, &mut collector)?;
+            positions += 1;
+        }
+        println!(
+            "  {}/{} {} ({} ids, {:.0}s)",
+            n + 1,
+            entries.len(),
+            e.id,
+            e.ids.len(),
+            started.elapsed().as_secs_f64()
+        );
+    }
+
+    let moments: Vec<serde_json::Value> = collector
+        .sums
+        .iter()
+        .map(|((layer, site), (sums, count))| {
+            let n = (*count).max(1) as f64;
+            serde_json::json!({
+                "layer": layer,
+                "site": match site { 0 => "attention", 1 => "ffn", _ => "other" },
+                "positions": count,
+                // E[x_j^2] per input feature — a vector, not a matrix.
+                "second_moment": sums.iter().map(|v| v / n).collect::<Vec<f64>>(),
+            })
+        })
+        .collect();
+
+    let samples: Vec<serde_json::Value> = collector
+        .ffn_samples
+        .iter()
+        .map(|(layer, rows)| serde_json::json!({ "layer": layer, "rows": rows }))
+        .collect();
+    let control = collector.control.map(|(layer, input, output)| {
+        serde_json::json!({ "layer": layer, "ffn_input": input, "ffn_output": output })
+    });
+
+    std::fs::write(
+        &out,
+        serde_json::to_string(&serde_json::json!({
+            "positions": positions,
+            "sites": moments,
+            "ffn_samples": samples,
+            "control": control,
+        }))?,
+    )?;
+    println!(
+        "captured {} sites over {positions} positions in {:.0}s\n-> {}",
+        collector.sums.len(),
+        started.elapsed().as_secs_f64(),
+        out.display()
+    );
+    Ok(())
 }
