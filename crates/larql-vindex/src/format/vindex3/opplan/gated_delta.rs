@@ -22,8 +22,8 @@ use serde::Serialize;
 
 use super::OperandRef;
 
-/// The recurrent state's declared element type, verbatim from the
-/// checkpoint's `mamba_ssm_dtype`.
+/// The recurrent state's declared element type, from the checkpoint's
+/// `mamba_ssm_dtype`.
 ///
 /// Carried as the declaration rather than resolved to the container's
 /// bulk dtype on purpose: Qwen3.8 declares `float32` here against a model
@@ -34,7 +34,7 @@ use super::OperandRef;
 /// executor that quietly ran this state at the bulk dtype would be running
 /// a different model, so the declaration is recorded and left for the
 /// executor to honour or refuse.
-pub type StateDtype = String;
+pub use larql_models::inventory::report::RecurrentStateDtype as StateDtype;
 
 /// One layer's Gated DeltaNet operator.
 ///
@@ -62,11 +62,9 @@ pub struct GatedDeltaOp {
     pub conv_kernel: usize,
     /// `mamba_ssm_dtype`. See [`StateDtype`].
     ///
-    /// `None` until an executor exists that could honour it (QW-2). The
-    /// declaration is a precision *choice* — Qwen3.8 says `float32` against
-    /// a bf16 model — so it is carried when something consumes it, not
-    /// stapled onto the geometry: the surface's linear-attention block is
-    /// dimensions, and a dtype is not a dimension.
+    /// `None` when the checkpoint declares none, or spells one this build
+    /// does not represent — a fact, never a licence to fall back to the
+    /// model's bulk dtype.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub state_dtype: Option<StateDtype>,
 

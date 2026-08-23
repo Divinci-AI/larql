@@ -43,7 +43,7 @@ fn op() -> GatedDeltaOp {
         key_head_dim: fx::KEY_HEAD_DIM,
         value_head_dim: fx::VALUE_HEAD_DIM,
         conv_kernel: fx::CONV_KERNEL,
-        state_dtype: Some("float32".into()),
+        state_dtype: Some(larql_models::inventory::report::RecurrentStateDtype::Float32),
         in_proj_qkv: operand(),
         in_proj_a: operand(),
         in_proj_b: operand(),

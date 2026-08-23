@@ -19,6 +19,7 @@
 //! against a checkpoint-driven oracle.
 
 pub mod backend;
+pub mod continuation;
 pub mod decode;
 pub mod device;
 mod experts;

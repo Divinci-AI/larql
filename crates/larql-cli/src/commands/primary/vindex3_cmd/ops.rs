@@ -231,7 +231,9 @@ fn print_gated_delta(op: &GatedDeltaOp) {
     println!(
         "    state: {} elements/layer at {} — constant in sequence length",
         op.state_elements(),
-        op.state_dtype.as_deref().unwrap_or("dtype not carried")
+        op.state_dtype
+            .map(|d| d.declared_name())
+            .unwrap_or("undeclared")
     );
     for (name, operand) in [
         ("in_proj_qkv", &op.in_proj_qkv),

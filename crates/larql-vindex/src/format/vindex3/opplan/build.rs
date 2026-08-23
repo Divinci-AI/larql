@@ -534,8 +534,7 @@ pub fn plan_component_ops(
                     key_head_dim: l.key_head_dim,
                     value_head_dim: l.value_head_dim,
                     conv_kernel: l.conv_kernel,
-                    // See `GatedDeltaOp::state_dtype`: carried at QW-2.
-                    state_dtype: None,
+                    state_dtype: l.state_dtype,
                     in_proj_qkv: operand(&stack_id, get(OperandRole::LinearAttnInProjQkv)),
                     in_proj_a: operand(&stack_id, get(OperandRole::LinearAttnInProjA)),
                     in_proj_b: operand(&stack_id, get(OperandRole::LinearAttnInProjB)),
