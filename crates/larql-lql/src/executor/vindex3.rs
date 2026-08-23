@@ -21,9 +21,14 @@ use crate::executor::{Backend, Session};
 
 /// The statements a VINDEX3 binding serves today. Everything else gets
 /// [`unsupported`] — a capability refusal, not a format apology.
+/// The capability string is part of the contract, not decoration: a
+/// statement that executes on a V3 binding must appear here, or the
+/// binding is understating what it serves. EXTRACT does execute (the
+/// dispatch does not gate on the backend) and now says so.
 pub(crate) const SUPPORTED: &str = "SELECT, DESCRIBE, WALK, EXPLAIN WALK, \
-     SHOW RELATIONS/LAYERS/FEATURES/ENTITIES/PATCHES, INFER [TOP n] [GENERATE n], \
-     EXPLAIN INFER, TRACE, STATS, USE, INSERT [MODE KNN|COMPOSE], DELETE, UPDATE, MERGE, \
+     SHOW RELATIONS/LAYERS/FEATURES/ENTITIES/PATCHES/MODELS, INFER [TOP n] [GENERATE n], \
+     EXPLAIN INFER, TRACE, STATS, USE, EXTRACT [FORMAT VINDEX2|VINDEX3], \
+     INSERT [MODE KNN|COMPOSE], DELETE, UPDATE, MERGE, \
      BEGIN/SAVE/APPLY/REMOVE PATCH, COMPILE [CURRENT] INTO VINDEX, DIFF [PHYSICAL], COMPACT INTO VINDEX";
 
 /// Component id a container's text stack is bound under.

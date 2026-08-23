@@ -242,6 +242,21 @@ pub fn vindex_to_fp4(
     std::fs::create_dir_all(&dst_tmp)
         .map_err(|e| VindexError::Parse(format!("create staging dir: {e}")))?;
 
+    // The converter transcodes VINDEX2 tensors named by the V2 layout.
+    // A V3 container's payload lives in framed segments, so parsing its
+    // index.json as a V2 config fails deep inside serde with a message
+    // about a missing field rather than about the generation. Refuse up
+    // front, naming it.
+    if let Ok(found) = crate::format::generation::detect_generation(src) {
+        if found != crate::format::generation::ContainerGeneration::V2 {
+            return Err(crate::format::generation::unsupported_generation(
+                "quantisation conversion",
+                src,
+                found,
+            ));
+        }
+    }
+
     // Parse source config.
     let mut src_config: VindexConfig = serde_json::from_str(
         &std::fs::read_to_string(src.join(INDEX_JSON))

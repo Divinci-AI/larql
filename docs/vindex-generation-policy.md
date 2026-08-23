@@ -114,6 +114,49 @@ both say id 2. Gated by
 A container that declares nothing — including any predating the
 capability snapshot — encodes exactly as before.
 
+## Consumer matrix (M3)
+
+**Acceptance criterion: no VINDEX3 artifact can enter the system and
+then silently disappear from a consumer surface.** Every consumer is in
+one of two states — *supports*, or *refuses explicitly, naming the
+generation*. "Hidden", "not found", and an empty listing are failures of
+this contract, not neutral outcomes.
+
+| Consumer | V3 state | How |
+|---|---|---|
+| `USE` / binding | supports | `detect_generation`, bind-once |
+| `INFER` / `TRACE` / browse / mutation / lifecycle | supports | the V3 statement arms |
+| `EXTRACT ... FORMAT VINDEX3` | supports | M2's shared encode pipeline |
+| `SHOW MODELS` | supports | `summarize_container`, generation column |
+| `/v1/models` | supports | `generation` reported for **both** classes |
+| `larql vindex3 *` | supports | V3-native verbs |
+| `link` | supports | aliasing is generation-agnostic |
+| `run` | explicit refuse | `load_vindex_config` names the generation |
+| Vindexfile `FROM` | explicit refuse | `load_vindex_config` names the generation |
+| `publish` | explicit refuse | `load_vindex_config` names the generation |
+| `slice` | explicit refuse | `unsupported_generation("slice", …)` |
+| quantisation conversion | explicit refuse | `unsupported_generation(…)` |
+
+Two of these were genuine defects rather than gaps:
+
+- **`SHOW MODELS` hid V3 containers.** It listed only directories whose
+  `index.json` parsed as a V2 config, so a container the user had just
+  extracted did not appear at all. It now reads the generation-neutral
+  `summarize_container`, names the generation in its own column, and
+  lists a container it cannot identify as `unreadable` rather than
+  dropping the row.
+- **`slice` and quantisation conversion would have produced wrong
+  output**, not an error: both select or parse by V2 layout, so a V3
+  container yields a copy missing its weights, or a serde error about a
+  missing field rather than about the generation. Both now refuse up
+  front through `unsupported_generation`, one wording to grep for when
+  these refusals start becoming implementations.
+
+Capability strings are part of this contract. The V3 `SUPPORTED` string
+lists `EXTRACT` and `SHOW MODELS`, which execute on a V3 binding and
+previously went unadvertised — a binding that understates what it serves
+is the same class of problem as a listing that hides what exists.
+
 ## Rungs to the flip
 
 - **M1 — the seam. DONE** (PR #290): policy type, pinned default,
@@ -124,10 +167,8 @@ capability snapshot — encodes exactly as before.
   `--generation v3`, capability snapshot closing the tokenizer/HF
   metadata gap on all three producers, post-extract auto-bind through
   `USE`'s own binding block.
-- **M3 — consumer readiness.** V2-only consumers either route by
-  detection or refuse by name: `SHOW MODELS` must list V3 containers,
-  `run`/`walk`/`describe`/`stats`, Vindexfile `FROM`, slice/publish/link,
-  quant converters; `/v1/models` reports `generation` for both.
+- **M3 — consumer readiness. DONE**: every consumer supports V3 or
+  refuses naming the generation; see the consumer matrix above.
 - **M4 — the flip.** `DEFAULT_EXTRACTION_GENERATION = V3` + the pinned
   test, in one commit. V2 becomes the explicitly-requested compatibility
   generation. Evidence rows required by then: the real-model compose

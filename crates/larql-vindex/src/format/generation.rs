@@ -122,6 +122,22 @@ impl ContainerGeneration {
         }
     }
 
+    /// Short label for tables and API fields — "v2" / "v3".
+    pub const fn schema_label(self) -> &'static str {
+        match self {
+            Self::V2 => "v2",
+            Self::V3 => "v3",
+        }
+    }
+
+    /// The generation number, for APIs that report it numerically.
+    pub const fn number(self) -> u32 {
+        match self {
+            Self::V2 => 2,
+            Self::V3 => 3,
+        }
+    }
+
     /// Human-readable name used in diagnostics — "VINDEX2" / "VINDEX3".
     pub const fn name(self) -> &'static str {
         match self {
@@ -266,6 +282,71 @@ pub fn detect_generation(dir: &Path) -> Result<ContainerGeneration, VindexError>
             ),
         }),
     }
+}
+
+/// The refusal a consumer owes a container generation it does not
+/// implement.
+///
+/// Consumer readiness has three allowed states — supports, explicitly
+/// refuses, or is not reached — and "silently does nothing" is not one
+/// of them. A V2-only verb that meets a V3 container must say which
+/// verb, which container, and which generation, so the user can act;
+/// "not found" and an empty listing are both failures of this contract.
+///
+/// Prefer this over hand-rolled strings: one wording means one thing to
+/// grep for when the flip lands and these refusals start turning into
+/// implementations.
+pub fn unsupported_generation(op: &str, dir: &Path, found: ContainerGeneration) -> VindexError {
+    VindexError::Parse(format!(
+        "{op} does not support {} containers yet; {} is generation {}",
+        found.name(),
+        dir.display(),
+        found.schema_label(),
+    ))
+}
+
+/// A container's identity, readable without knowing its generation.
+///
+/// The consumer-readiness rule (`docs/vindex-generation-policy.md`) is
+/// that no VINDEX3 artifact may enter the system and then silently
+/// disappear from a listing. Listing surfaces therefore need one fact
+/// source that answers for both generations — otherwise each surface
+/// grows its own `match generation` and V3 falls out of whichever one
+/// nobody updated.
+#[derive(Debug, Clone)]
+pub struct ContainerSummary {
+    pub generation: ContainerGeneration,
+    /// The model identity the container names itself by.
+    pub model: String,
+    pub num_layers: usize,
+}
+
+/// Read one container's identity, whichever generation it holds.
+///
+/// Both generations record model and layer count in `index.json`, so
+/// this stays a single small read — cheap enough for a directory scan,
+/// and it never opens segments or builds a plan.
+pub fn summarize_container(dir: &Path) -> Result<ContainerSummary, VindexError> {
+    let generation = detect_generation(dir)?;
+    let text = std::fs::read_to_string(dir.join(INDEX_JSON))?;
+    let probe: IdentityProbe =
+        serde_json::from_str(&text).map_err(|e| VindexError::Parse(e.to_string()))?;
+    Ok(ContainerSummary {
+        generation,
+        model: probe.model.unwrap_or_default(),
+        num_layers: probe.num_layers.unwrap_or(0),
+    })
+}
+
+/// The identity fields both generations spell the same way in
+/// `index.json`. Optional throughout: a container missing one is
+/// listed with the field blank, never hidden.
+#[derive(serde::Deserialize)]
+struct IdentityProbe {
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    num_layers: Option<usize>,
 }
 
 /// Minimal view over `index.json` — the version field and nothing else.

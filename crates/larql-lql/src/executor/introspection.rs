@@ -451,34 +451,66 @@ impl Session {
         Ok(out)
     }
 
+    /// `SHOW MODELS` — every container in the working directory, of
+    /// **either** generation.
+    ///
+    /// This listed only containers whose `index.json` parsed as a V2
+    /// config, so a VINDEX3 container in the directory silently
+    /// vanished: the user saw an empty listing beside a model they had
+    /// just extracted. Consumer readiness
+    /// (`docs/vindex-generation-policy.md`) forbids that — a container
+    /// is either understood or explicitly accounted for, never hidden —
+    /// so the listing reads the generation-neutral summary and names
+    /// the generation in its own column. A directory holding an
+    /// `index.json` this binary cannot identify is listed too, with the
+    /// reason in place of its facts.
     pub(crate) fn exec_show_models(&self) -> Result<Vec<String>, LqlError> {
+        let cwd = std::env::current_dir().unwrap_or_default();
+        Self::show_models_in(&cwd)
+    }
+
+    /// The listing itself, over an explicit directory — `SHOW MODELS`
+    /// passes the working directory. Split out so the
+    /// both-generations claim is testable without changing a
+    /// process-global cwd.
+    pub fn show_models_in(dir: &std::path::Path) -> Result<Vec<String>, LqlError> {
         let mut out = Vec::new();
         out.push(format!(
-            "{:<35} {:>10} {:>8} {:>12}",
-            "Model", "Size", "Layers", "Status"
+            "{:<35} {:>10} {:>5} {:>8} {:>12}",
+            "Model", "Size", "Gen", "Layers", "Status"
         ));
-        out.push("-".repeat(70));
+        out.push("-".repeat(75));
 
-        let cwd = std::env::current_dir().unwrap_or_default();
-        if let Ok(entries) = std::fs::read_dir(&cwd) {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            let mut rows: Vec<String> = Vec::new();
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.is_dir() {
-                    let index_json = path.join(INDEX_JSON);
-                    if index_json.exists() {
-                        if let Ok(config) = larql_vindex::load_vindex_config(&path) {
-                            let size = dir_size(&path);
-                            out.push(format!(
-                                "{:<35} {:>10} {:>8} {:>12}",
-                                path.file_name().unwrap_or_default().to_string_lossy(),
-                                format_bytes(size),
-                                config.num_layers,
-                                "ready",
-                            ));
-                        }
-                    }
+                if !path.is_dir() || !path.join(INDEX_JSON).exists() {
+                    continue;
                 }
+                let name = path.file_name().unwrap_or_default().to_string_lossy();
+                let size = format_bytes(dir_size(&path));
+                rows.push(
+                    match larql_vindex::format::generation::summarize_container(&path) {
+                        Ok(summary) => format!(
+                            "{:<35} {:>10} {:>5} {:>8} {:>12}",
+                            name,
+                            size,
+                            summary.generation.schema_label(),
+                            summary.num_layers,
+                            "ready",
+                        ),
+                        // Unidentifiable, but present: say so rather than
+                        // drop the row.
+                        Err(_) => format!(
+                            "{:<35} {:>10} {:>5} {:>8} {:>12}",
+                            name, size, "?", "-", "unreadable",
+                        ),
+                    },
+                );
             }
+            rows.sort();
+            out.extend(rows);
         }
 
         if out.len() == 2 {

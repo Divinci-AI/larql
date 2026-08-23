@@ -181,3 +181,59 @@ fn extract_format_vindex3_refuses_a_non_checkpoint_directory() {
     .expect_err("a directory with no config.json is not a checkpoint");
     assert!(err.contains("config.json + safetensors"), "{err}");
 }
+
+// ── M3 consumer readiness: no V3 artifact silently disappears ──
+
+/// `SHOW MODELS` lists containers of BOTH generations.
+///
+/// It previously listed only directories whose `index.json` parsed as a
+/// VINDEX2 config, so a V3 container in the working directory vanished
+/// from the listing entirely — the user saw nothing beside a model they
+/// had just extracted. Invisibility is not an allowed consumer state:
+/// a container is understood, or explicitly accounted for.
+#[test]
+fn show_models_lists_both_generations_and_never_hides_one() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // A real V3 container, produced the way M2 produces them.
+    let checkpoint = checkpoint_with_tokenizer();
+    let mut session = Session::new();
+    extract_v3(
+        &mut session,
+        checkpoint.path(),
+        &dir.path().join("v3-model"),
+    );
+
+    // A V2 container beside it (index.json is the listing's whole input).
+    std::fs::create_dir(dir.path().join("v2-model")).unwrap();
+    std::fs::write(
+        dir.path().join("v2-model").join("index.json"),
+        r#"{"version":2,"model":"legacy","num_layers":34}"#,
+    )
+    .unwrap();
+
+    // And a directory holding an index.json this binary cannot identify.
+    std::fs::create_dir(dir.path().join("mystery")).unwrap();
+    std::fs::write(dir.path().join("mystery").join("index.json"), "{}").unwrap();
+
+    let listing = larql_lql::Session::show_models_in(dir.path())
+        .expect("listing")
+        .join("\n");
+
+    assert!(
+        listing.contains("v3-model"),
+        "V3 must be listed:\n{listing}"
+    );
+    assert!(
+        listing.contains("v2-model"),
+        "V2 must be listed:\n{listing}"
+    );
+    assert!(
+        listing.contains("mystery"),
+        "an unidentifiable container is accounted for, not dropped:\n{listing}"
+    );
+    // The generation is named, so V2 is not the implicit normal case.
+    assert!(listing.contains("v3"), "{listing}");
+    assert!(listing.contains("v2"), "{listing}");
+    assert!(listing.contains("unreadable"), "{listing}");
+}
