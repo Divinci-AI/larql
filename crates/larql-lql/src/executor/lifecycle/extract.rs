@@ -34,20 +34,7 @@ impl Session {
         };
         match admit_extraction_generation(request) {
             ContainerGeneration::V2 => {}
-            // This surface extracts from a live model's weights; the
-            // VINDEX3 producer (`larql vindex3 encode`) consumes HF
-            // checkpoint artifacts. Until EXTRACT is wired to the V3
-            // encoder, an explicit V3 request is refused by name — it is
-            // never downgraded to a V2 extraction.
-            ContainerGeneration::V3 => {
-                return Err(LqlError::Execution(
-                    "EXTRACT cannot write a VINDEX3 container from this surface yet: \
-                     VINDEX3 containers are produced by `larql vindex3 encode` from HF \
-                     checkpoint artifacts. FORMAT VINDEX2 remains available and must be \
-                     selected explicitly rather than fallen back to."
-                        .into(),
-                ));
-            }
+            ContainerGeneration::V3 => return self.exec_extract_v3(model, output),
         }
 
         let output_dir = PathBuf::from(output);
@@ -139,6 +126,61 @@ impl Session {
             memit_store,
         };
 
+        Ok(out)
+    }
+
+    /// The VINDEX3 arm: HF checkpoint artifacts → `encode_checkpoint`
+    /// (plan gate with itemised blocking findings, segments, capability
+    /// snapshot) → bind, through the same block `USE` binds with.
+    ///
+    /// The V2 arm above loads a model through `InferenceModel::load`,
+    /// which accepts GGUF as well as safetensors; the V3 encoder takes
+    /// only HF checkpoint artifacts, because a container may not
+    /// transcode on the way in. A source it cannot consume refuses by
+    /// name rather than falling back to a V2 extraction.
+    fn exec_extract_v3(&mut self, model: &str, output: &str) -> Result<Vec<String>, LqlError> {
+        let model_path = larql_models::resolve_model_path(model)
+            .map_err(|e| LqlError::exec("failed to resolve model path", e))?;
+        if model_path.is_file() {
+            return Err(LqlError::Execution(format!(
+                "{} is a GGUF file; the VINDEX3 encoder consumes HF checkpoint artifacts \
+                 (config.json + safetensors) and a container may not transcode on the way \
+                 in. Use FORMAT VINDEX2 for GGUF sources.",
+                model_path.display()
+            )));
+        }
+
+        let output_dir = PathBuf::from(output);
+        let mut out = vec![format!(
+            "Encoding checkpoint {} → {} (VINDEX3)...",
+            model_path.display(),
+            output_dir.display()
+        )];
+        let encoded = larql_vindex::format::vindex3::encode::checkpoint::encode_checkpoint(
+            &model_path,
+            &output_dir,
+        )
+        .map_err(|e| LqlError::exec("VINDEX3 encode failed", e))?;
+        out.push(format!(
+            "Encoded {} ({} representation(s), {} payload bytes).",
+            encoded.artifact,
+            encoded.outcome.representations,
+            format_number(encoded.outcome.total_payload_bytes as usize),
+        ));
+        if encoded.capabilities.is_empty() {
+            out.push(
+                "No tokenizer.json beside the checkpoint — binding with token-id \
+                 capability only."
+                    .into(),
+            );
+        } else {
+            out.push(format!(
+                "Capabilities: {}.",
+                encoded.capabilities.join(", ")
+            ));
+        }
+
+        out.extend(self.bind_v3_session(output_dir)?);
         Ok(out)
     }
 }

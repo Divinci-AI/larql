@@ -324,6 +324,23 @@ fn run_encode(args: EncodeArgs) -> Result<(), Box<dyn std::error::Error>> {
         named.push((artifact_name(path), load_artifact(path)?));
     }
     let outcome = larql_vindex::format::vindex3::encode::encode_system(&named, &args.output)?;
+    // Capability snapshot: tokenizer + HF metadata from the first
+    // artifact directory that carries them (the inventory records its
+    // source dir, so this covers both checkpoint-dir and saved-inventory
+    // inputs). A container without them binds with token-id capability
+    // only — which is why the granite smoke needed a manual copy before
+    // this existed.
+    for (_, inventory) in &named {
+        let copied =
+            larql_vindex::format::vindex3::encode::checkpoint::snapshot_checkpoint_capabilities(
+                std::path::Path::new(&inventory.path),
+                &args.output,
+            )?;
+        if !copied.is_empty() {
+            eprintln!("capabilities: {}", copied.join(", "));
+            break;
+        }
+    }
     eprintln!(
         "encoded {} representation(s), {:.2} GB payload → {}",
         outcome.representations,

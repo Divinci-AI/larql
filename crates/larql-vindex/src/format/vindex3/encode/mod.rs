@@ -22,6 +22,7 @@
 //! └── segments/<object>.bin  self-describing framed segments
 //! ```
 
+pub mod checkpoint;
 pub mod segment;
 pub mod source;
 
