@@ -44,6 +44,32 @@ def container_identity(container):
     }
 
 
+def run_bank_arm(container, entries, backend, source, dump_dir):
+    """One resident model, every entry. Q-BANK-2.
+
+    Proven bitwise interchangeable with the process-per-prompt path
+    (69/69 on Granite), so results from either are comparable — but a
+    Glimmer sweep is only affordable this way.
+    """
+    manifest = os.path.join(dump_dir, "_entries.jsonl")
+    os.makedirs(dump_dir, exist_ok=True)
+    with open(manifest, "w") as f:
+        for e in entries:
+            f.write(json.dumps({"id": e["id"], "ids": e["ids"]}) + "\n")
+    cmd = [LARQL, "vindex3", "exec", container, "--tokens", "1",
+           "--backend", backend, "--bank", manifest, "--dump-dir", dump_dir]
+    if source:
+        cmd += ["--representation-source", source]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0:
+        raise SystemExit(f"bank run failed:\n{r.stdout}\n{r.stderr}")
+    compiled = 0
+    for line in r.stdout.splitlines():
+        if line.startswith("runtime compile:"):
+            compiled = int(line.split(":")[1].strip().split()[0])
+    return compiled
+
+
 def run_arm(container, entry, backend, source, dump):
     cmd = [LARQL, "vindex3", "exec", container,
            "--tokens", ",".join(map(str, entry["ids"])),
@@ -72,28 +98,27 @@ def cmd_reference(container, tokenizer, outdir, backend, limit):
     meta = {"arm": "reference", "backend": backend, "container": container_identity(container),
             "bank": load_bank()["bank"], "entries": []}
     refdir = os.path.join(outdir, "ref")
-    os.makedirs(refdir, exist_ok=True)
-    for i, e in enumerate(entries):
+    run_bank_arm(container, entries, backend, None, refdir)
+    for e in entries:
         dump = os.path.join(refdir, f"{e['id']}.f32")
-        run_arm(container, e, backend, None, dump)
         meta["entries"].append({"id": e["id"], "category": e["category"],
                                 "ids": e["ids"], "dump": os.path.relpath(dump, outdir)})
-        print(f"  ref {i+1}/{len(entries)} {e['id']} ({len(e['ids'])} ids)", flush=True)
     json.dump(meta, open(os.path.join(outdir, "reference.json"), "w"), indent=1)
     print(f"banked {len(entries)} references -> {outdir}")
 
 
 def cmd_compare(container, outdir, backend, source, label):
     meta = json.load(open(os.path.join(outdir, "reference.json")))
-    rows, compiled_total = [], 0
-    tmp = os.path.join(outdir, "_cand.f32")
+    rows = []
+    canddir = os.path.join(outdir, f"_cand-{label}")
+    compiled_total = run_bank_arm(container, meta["entries"], backend, source, canddir)
     for i, e in enumerate(meta["entries"]):
         ref = np.fromfile(os.path.join(outdir, e["dump"]), dtype=np.float32)
         n = len(e["ids"])
         vocab = ref.size // n
         ref = ref.reshape(n, vocab).astype(np.float64)
-        compiled_total += run_arm(container, e, backend, source, tmp)
-        cand = np.fromfile(tmp, dtype=np.float32).reshape(n, vocab).astype(np.float64)
+        cand = np.fromfile(os.path.join(canddir, f"{e['id']}.f32"),
+                           dtype=np.float32).reshape(n, vocab).astype(np.float64)
 
         P, Q = softmax_rows(ref), softmax_rows(cand)
         eps = 1e-12
@@ -118,9 +143,8 @@ def cmd_compare(container, outdir, backend, source, label):
                 "dmean": float(np.abs(ref[j] - cand[j]).mean()),
                 "dnll": float(dnll[j]) if j < m else None,
             })
-        print(f"  cmp {i+1}/{len(meta['entries'])} {e['id']}", flush=True)
-    if os.path.exists(tmp):
-        os.remove(tmp)
+    import shutil
+    shutil.rmtree(canddir, ignore_errors=True)
     ref_bytes = meta["container"].get("payload_bytes", 0)
     cand_bytes = container_identity(container).get("payload_bytes", 0)
     out = {"label": label, "backend": backend, "source": source,
