@@ -12,6 +12,11 @@ pub enum Statement {
         components: Option<Vec<Component>>,
         layers: Option<Range>,
         extract_level: ExtractLevel,
+        /// `FORMAT VINDEX2 | VINDEX3` — which container generation to
+        /// write. `None` = no preference; the executor resolves it
+        /// through the vindex crate's single extraction-generation
+        /// policy, never a parser- or surface-local default.
+        format: Option<ExtractFormat>,
     },
     Compile {
         vindex: VindexRef,
@@ -271,6 +276,15 @@ pub enum ExtractLevel {
     Inference,
     /// + up, norms, lm_head (~10 GB f16), enables COMPILE
     All,
+}
+
+/// `EXTRACT ... FORMAT <generation>` — an explicit container-generation
+/// request. Absence means "no preference", which is NOT the same value:
+/// the default lives in one policy site in the vindex crate, not here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExtractFormat {
+    Vindex2,
+    Vindex3,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

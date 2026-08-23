@@ -1,10 +1,11 @@
 //! EXTRACT — `larql extract` against the FETCH-scoped HF cache.
 //!
-//! Maps the recipe's free-form `extractor.options` to the two flags
+//! Maps the recipe's free-form `extractor.options` to the flags
 //! that currently exist on `larql extract`: `down_q4k` (bool) implies
 //! `--quant q4k --down-q4k` — `--down-q4k` is a modifier of `--quant
-//! q4k`, invalid on its own — and `drop_gate_vectors` (bool) maps
-//! directly. Any other option key (e.g. the sample recipe's
+//! q4k`, invalid on its own — `drop_gate_vectors` (bool) maps
+//! directly, and `generation` (`"v2"`/`"v3"`) pins the container
+//! generation via `--generation`. Any other option key (e.g. the sample recipe's
 //! `preserve_mtp_head`) has no CLI flag yet and is silently ignored —
 //! `options` is deliberately open-ended per docs/vindex-factory.md §4,
 //! and a future extractor version may recognise more of them.
@@ -20,6 +21,11 @@ use crate::Recipe;
 const HF_HUB_CACHE_ENV: &str = "HF_HUB_CACHE";
 const DOWN_Q4K_OPTION_KEY: &str = "down_q4k";
 const DROP_GATE_VECTORS_OPTION_KEY: &str = "drop_gate_vectors";
+/// `extractor.options.generation` — an explicit container-generation pin
+/// (`"v2"` | `"v3"`), forwarded as `--generation`. Absent = no preference:
+/// the tool's own policy site decides, and the recipe's `build_id` already
+/// reflects the pin when one is set (options participate in `build_id`).
+const GENERATION_OPTION_KEY: &str = "generation";
 
 fn option_bool(recipe: &Recipe, key: &str) -> bool {
     recipe
@@ -61,6 +67,16 @@ pub fn invocation(recipe: &Recipe, full_dir: &Path, hf_cache_dir: &Path) -> Invo
     }
     if option_bool(recipe, DROP_GATE_VECTORS_OPTION_KEY) {
         args.push("--drop-gate-vectors".to_string());
+    }
+    if let Some(generation) = recipe
+        .spec
+        .extractor
+        .options
+        .get(GENERATION_OPTION_KEY)
+        .and_then(|v| v.as_str())
+    {
+        args.push("--generation".to_string());
+        args.push(generation.to_string());
     }
     // Safe unconditionally: a no-op on a fresh build, resumes a
     // partially-completed one on retry (§7's "each stage independently
@@ -144,6 +160,34 @@ mod tests {
         let inv = invocation(&recipe, &full, &cache);
         assert!(!inv.args.contains(&"--quant".to_string()));
         assert!(!inv.args.contains(&"--down-q4k".to_string()));
+    }
+
+    #[test]
+    fn generation_option_pins_the_container_generation() {
+        let mut recipe = sample_recipe();
+        recipe.spec.extractor.options.insert(
+            GENERATION_OPTION_KEY.into(),
+            serde_json::Value::String("v2".into()),
+        );
+        let (full, cache) = dirs();
+        let inv = invocation(&recipe, &full, &cache);
+        let at = inv
+            .args
+            .iter()
+            .position(|a| a == "--generation")
+            .expect("--generation forwarded");
+        assert_eq!(inv.args[at + 1], "v2");
+    }
+
+    #[test]
+    fn absent_generation_option_expresses_no_preference() {
+        let recipe = sample_recipe();
+        let (full, cache) = dirs();
+        let inv = invocation(&recipe, &full, &cache);
+        assert!(
+            !inv.args.contains(&"--generation".to_string()),
+            "the recipe must not smuggle a surface-local default"
+        );
     }
 
     #[test]

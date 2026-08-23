@@ -158,6 +158,50 @@ impl ContainerGeneration {
 pub const ALL_GENERATIONS: [ContainerGeneration; 2] =
     [ContainerGeneration::V2, ContainerGeneration::V3];
 
+/// Which container generation a caller **asked** a fresh extraction to
+/// write.
+///
+/// Deliberately a different type from [`ContainerGeneration`] (what the
+/// policy *decided*), for the same reason `ExtractionRequest` is not
+/// `ExtractionTarget`: "V3 was requested and refused" and "V3 was never
+/// requested" must never collapse into the same value. Every extraction
+/// surface (LQL `EXTRACT`, `larql extract`, factory recipes) resolves its
+/// caller's intent to this type and passes it through
+/// [`admit_extraction_generation`] — none of them carries its own default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GenerationRequest {
+    /// No preference; [`DEFAULT_EXTRACTION_GENERATION`] applies.
+    Auto,
+    /// The named generation, explicitly. Refuses if the surface cannot
+    /// produce it — never downgrades.
+    Explicit(ContainerGeneration),
+}
+
+/// **The default-flip gate.** The generation `Auto` resolves to — i.e.
+/// what a fresh extraction writes when the caller expressed no preference.
+///
+/// Flipping this constant to `V3` IS the "VINDEX3 becomes the primary
+/// generation" decision. It is made here, once, together with the pinned
+/// test in `generation_tests.rs` that names the decision — never as a
+/// side effect of a CLI default, a recipe template, or a surface-local
+/// fallback. Until the flip: V3 stays the explicitly-requested
+/// generation, V2 the default; after it: V2 becomes the explicitly-
+/// requested compatibility generation.
+pub const DEFAULT_EXTRACTION_GENERATION: ContainerGeneration = ContainerGeneration::V2;
+
+/// Resolve a caller's extraction-generation request to a decision.
+///
+/// This is deliberately the only place `Auto` gains a meaning. It cannot
+/// refuse — whether the *surface* can actually produce the decided
+/// generation is that surface's own admission step, and its refusal must
+/// name the request rather than fall back.
+pub fn admit_extraction_generation(request: GenerationRequest) -> ContainerGeneration {
+    match request {
+        GenerationRequest::Auto => DEFAULT_EXTRACTION_GENERATION,
+        GenerationRequest::Explicit(generation) => generation,
+    }
+}
+
 /// Map a schema revision to its owning container generation.
 ///
 /// `index.json.version` remains the **sole** dispatch input — no filename

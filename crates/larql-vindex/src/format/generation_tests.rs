@@ -6,8 +6,9 @@
 //! `version == generation` fails loudly.
 
 use super::generation::{
-    detect_generation, generation_for_schema, schema_range_label, supported_schema_summary,
-    ContainerGeneration, IndexSchemaVersion, ALL_GENERATIONS, V2_CURRENT_SCHEMA, V2_MIN_SCHEMA,
+    admit_extraction_generation, detect_generation, generation_for_schema, schema_range_label,
+    supported_schema_summary, ContainerGeneration, GenerationRequest, IndexSchemaVersion,
+    ALL_GENERATIONS, DEFAULT_EXTRACTION_GENERATION, V2_CURRENT_SCHEMA, V2_MIN_SCHEMA,
     V3_CURRENT_SCHEMA,
 };
 use crate::format::filenames::INDEX_JSON;
@@ -274,4 +275,35 @@ fn malformed_json_is_a_parse_error() {
 fn a_schema_version_displays_as_its_number() {
     assert_eq!(schema(3).to_string(), "3");
     assert_eq!(schema(3).get(), 3);
+}
+
+/// **The default-flip gate's pinned test.** A fresh extraction with no
+/// expressed preference writes VINDEX2 today. Flipping the programme to
+/// "VINDEX3 is the primary generation" means changing
+/// `DEFAULT_EXTRACTION_GENERATION` AND this test together — that pair is
+/// the explicit decision. If this test fails because the constant moved,
+/// the flip was made deliberately; update the assertion in the same
+/// commit that states the new policy.
+#[test]
+fn auto_extraction_resolves_to_v2_until_the_default_flip_is_decided() {
+    assert_eq!(
+        admit_extraction_generation(GenerationRequest::Auto),
+        ContainerGeneration::V2,
+    );
+    assert_eq!(DEFAULT_EXTRACTION_GENERATION, ContainerGeneration::V2);
+}
+
+/// Explicit requests pass through admission untouched, in both
+/// directions — the escape hatch works the same before and after the
+/// flip.
+#[test]
+fn explicit_generation_requests_are_never_overridden() {
+    assert_eq!(
+        admit_extraction_generation(GenerationRequest::Explicit(ContainerGeneration::V2)),
+        ContainerGeneration::V2,
+    );
+    assert_eq!(
+        admit_extraction_generation(GenerationRequest::Explicit(ContainerGeneration::V3)),
+        ContainerGeneration::V3,
+    );
 }

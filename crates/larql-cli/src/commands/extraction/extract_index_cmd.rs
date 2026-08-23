@@ -121,6 +121,25 @@ pub struct ExtractIndexArgs {
     /// Skip stages that already have output files (resume interrupted builds).
     #[arg(long)]
     resume: bool,
+
+    /// Container generation to write: `v2` or `v3`, explicitly. Omitted =
+    /// no preference — the vindex crate's extraction-generation policy
+    /// decides (the default-flip gate), never a CLI default. `v3` refuses
+    /// on this surface rather than downgrading: VINDEX3 containers are
+    /// produced by `larql vindex3 encode` from HF checkpoint artifacts.
+    #[arg(long, value_parser = parse_generation)]
+    generation: Option<larql_vindex::format::generation::ContainerGeneration>,
+}
+
+fn parse_generation(
+    s: &str,
+) -> Result<larql_vindex::format::generation::ContainerGeneration, String> {
+    use larql_vindex::format::generation::ContainerGeneration;
+    match s.to_lowercase().as_str() {
+        "v2" | "vindex2" => Ok(ContainerGeneration::V2),
+        "v3" | "vindex3" => Ok(ContainerGeneration::V3),
+        other => Err(format!("unknown container generation '{other}' (v2 | v3)")),
+    }
 }
 
 fn parse_quant(s: &str) -> Result<larql_vindex::QuantFormat, String> {
@@ -248,6 +267,29 @@ impl IndexBuildCallbacks for CliBuildCallbacks {
 }
 
 pub fn run(args: ExtractIndexArgs) -> Result<(), Box<dyn std::error::Error>> {
+    // Resolve the container generation before any bytes move. Omitted =
+    // Auto, decided by the one policy site in larql-vindex (the
+    // default-flip gate). An explicit `v3` refuses by name on this
+    // surface — it is never downgraded to a V2 extraction.
+    {
+        use larql_vindex::format::generation::{
+            admit_extraction_generation, ContainerGeneration, GenerationRequest,
+        };
+        let request = match args.generation {
+            None => GenerationRequest::Auto,
+            Some(generation) => GenerationRequest::Explicit(generation),
+        };
+        if admit_extraction_generation(request) == ContainerGeneration::V3 {
+            return Err(
+                "`larql extract` cannot write a VINDEX3 container yet: VINDEX3 \
+                 containers are produced by `larql vindex3 encode` from HF checkpoint \
+                 artifacts. `--generation v2` remains available and must be selected \
+                 explicitly rather than fallen back to."
+                    .into(),
+            );
+        }
+    }
+
     let mut callbacks = CliBuildCallbacks::new();
     let build_start = Instant::now();
 

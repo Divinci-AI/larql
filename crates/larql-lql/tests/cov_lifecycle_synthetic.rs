@@ -534,3 +534,20 @@ fn compile_path_into_vindex_from_other_vindex() {
         ),
     );
 }
+
+/// `EXTRACT ... FORMAT VINDEX3` refuses BY NAME before any model bytes
+/// move — this surface's V3 producer does not exist yet, and an explicit
+/// request must never silently downgrade to a V2 extraction. The refusal
+/// arriving (rather than a model-loading error for the bogus model id)
+/// proves the generation is resolved first.
+#[test]
+fn extract_format_vindex3_refuses_by_name_before_loading() {
+    let mut session = Session::new();
+    let err = try_run(
+        &mut session,
+        r#"EXTRACT MODEL "no-such-model" INTO "/nonexistent/out" FORMAT VINDEX3;"#,
+    )
+    .expect_err("an explicit V3 request must refuse on this surface");
+    assert!(err.contains("vindex3 encode"), "{err}");
+    assert!(err.contains("FORMAT VINDEX2"), "{err}");
+}

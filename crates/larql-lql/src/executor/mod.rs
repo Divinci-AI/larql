@@ -194,12 +194,14 @@ impl Session {
                 components,
                 layers,
                 extract_level,
+                format,
             } => self.exec_extract(
                 model,
                 output,
                 components.as_deref(),
                 layers.as_ref(),
                 *extract_level,
+                *format,
             ),
             Statement::Compile {
                 vindex,
