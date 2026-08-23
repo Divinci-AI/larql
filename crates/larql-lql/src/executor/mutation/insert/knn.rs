@@ -138,10 +138,8 @@ impl Session {
             target_id = target_encoding.get_ids().first().copied().unwrap_or(0);
 
             let prompt = knn_canonical_prompt(entity, relation);
-            let encoding = tokenizer
-                .encode(prompt.as_str(), true)
-                .map_err(|e| LqlError::exec("tokenize error", e))?;
-            let token_ids: Vec<u32> = encoding.get_ids().to_vec();
+            let token_ids =
+                crate::executor::query::encode_vindex_prompt(config, &tokenizer, prompt.as_str())?;
 
             // `InferenceWeights::load` branches on `config.quant` — callers
             // do not need to know the on-disk format.
