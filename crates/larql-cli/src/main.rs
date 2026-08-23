@@ -706,13 +706,17 @@ fn run_dev(cmd: DevCommand) -> Result<(), Box<dyn std::error::Error>> {
 fn run_serve(args: ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd_args = Vec::new();
     if let Some(ref path) = args.vindex_path {
-        // Resolve cache shorthands / owner-name / hf:// → actual path
-        // so `larql serve gemma3-4b-v2` works the same as `larql run`.
-        // Explicit directories and already-resolved paths pass through.
-        let resolved = commands::primary::cache::resolve_model(path)
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|_| path.clone());
-        cmd_args.push(resolved);
+        // Resolve cache shorthands / owner-name / hf:// → actual path so
+        // `larql serve gemma3-4b-v2` works the same as `larql run`. A
+        // name the VINDEX3 registry has claimed resolves through it
+        // exclusively (no fallback on failure); everything else keeps
+        // today's cache-shorthand/hf:///local-path behaviour, and a real
+        // resolution failure now propagates instead of being silently
+        // replaced by the raw, unresolved string. See
+        // `commands::primary::serve_resolve` module docs.
+        cmd_args.push(commands::primary::serve_resolve::resolve_serve_target(
+            path,
+        )?);
     }
     if let Some(ref dir) = args.dir {
         cmd_args.push("--dir".into());

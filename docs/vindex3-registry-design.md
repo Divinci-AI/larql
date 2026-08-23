@@ -1,13 +1,15 @@
 # VINDEX3 registry/resolver — design notes
 
-Status: **rung 1 implemented** (`crates/larql-vindex/src/registry/`).
-§1–§7 below are the pre-implementation investigation this rung's
-instruction required — *"Before implementation, report the existing
-resolution seams and any places where the current code would force an
-awkward compatibility compromise. Ground the design in the code rather
-than adding a parallel resolver."* §8 records the three architecture
-decisions that investigation surfaced, confirmed by the user on
-2026-08-23. §9 records what was actually built against those decisions.
+Status: **rung 1 (registry contract) + rung 2A (`serve` convergence)
+implemented.** §1–§7 below are the pre-implementation investigation
+rung 1's instruction required — *"Before implementation, report the
+existing resolution seams and any places where the current code would
+force an awkward compatibility compromise. Ground the design in the
+code rather than adding a parallel resolver."* §8 records the three
+architecture decisions that investigation surfaced, confirmed by the
+user on 2026-08-23. §9 records what rung 1 built. §10 records the
+"resolver convergence" rung's scope and the claimed/unclaimed decision,
+and what 2A (`larql serve`) built.
 
 The scope is deliberately narrow (see §7): a versioned VINDEX3-only
 registry manifest, a name/variant grammar, one shared resolver
@@ -333,3 +335,117 @@ against the new crate-root re-exports. Not wired into `larql run`/
 `serve`/`pull`/the three existing resolvers, and not wired into the Mac
 app or runtime lifecycle — both explicitly out of scope for this rung
 (§7).
+
+## 10. Rung 2 — resolver convergence (2026-08-23)
+
+Next-rung decision (user, 2026-08-23): with rung 1's contract proven,
+converge the three existing resolvers (`cache::resolve_model`,
+`larql-server`'s `load_artifact`, `pull_cmd`'s HF heuristic) onto it
+one seam at a time — not `--profile` CLI wiring next. Internal
+structure: **2A** `cache`/`serve` convergence, **2B** server artifact
+convergence, **2C** VINDEX3 HF pull/download correctness (the
+finding in §5 that `larql pull` on a real VINDEX3 repo would silently
+miss the container — a distribution/download-semantics fix, not a
+resolver swap, tackled last).
+
+### 10.1 The claimed/unclaimed boundary (confirmed)
+
+Two facts changed convergence's shape from the literal reading of
+"short name → VINDEX3 registry resolver ONLY, no fallback":
+`resolve_shorthand` today searches both caches generation-mixed and is
+the *only* way users reference a locally-linked/pulled model (V2 or
+V3) by short name — there is no separate "legacy alias" mechanism; and
+rung 1 shipped no real registry data, only a test fixture. Applied
+literally today, every bare-shorthand reference would refuse until
+real entries exist.
+
+**Confirmed boundary**: registry ownership is authoritative *only once
+a name is claimed by the registry*.
+
+```text
+bare name
+  |
+  +-- registry contains name (registry.models.contains_key)
+  |      -> VINDEX3 registry resolution, exclusively
+  |      -> success OR hard failure — no legacy/cache fallback, ever
+  |
+  +-- registry does not contain name
+         -> existing cache-shorthand lookup (V2/V3 mixed, unchanged)
+```
+
+Encoded as membership (`registry.models.contains_key(name)`), **not**
+by pattern-matching `resolve()`'s `UnknownModel` error and falling back
+on that specific variant — the two look identical today but only
+membership stays correct once a claimed name can fail for other
+reasons (bad variant, incompatible ABI) that must never fall through.
+The banned pattern, explicitly:
+
+```rust
+// NEVER: silently downgrades a claimed name's real failure into a guess.
+resolve_registry(name).or_else(|_| resolve_legacy(name))
+```
+
+Controls this boundary must satisfy (pinned as tests — see 10.2):
+unclaimed name + cached V2/V3 → legacy succeeds unchanged; claimed name
++ valid entry → registry wins even over a same-named cache entry;
+claimed name + bad/missing variant, or incompatible ABI → hard error,
+legacy never touched; explicit `hf://`/local-path references bypass the
+claim check entirely (§10.2 explains why); malformed grammar falls
+through to legacy (it was never a registry lookup to begin with).
+
+Migration story this buys: `qwen3.8` today resolves via legacy cache
+shorthand; the day it's added to the registry, it silently becomes
+registry-owned — no CLI syntax change, no flag day where all shorthand
+breaks before the registry has anything in it.
+
+### 10.2 2A scope: `serve`'s trampoline only (confirmed, built)
+
+`cache::resolve_model` is shared by `run`/`chat`/`show`/`slice` (all
+VINDEX2-only — no VINDEX3 execution path exists for them, §1) and
+`larql serve`'s CLI trampoline (the only command that can actually run
+VINDEX3 today). 2A touches **only** the `serve` trampoline
+(`crates/larql-cli/src/commands/primary/serve_resolve.rs`, called from
+`main.rs::run_serve`) — `run`/`chat`/`show`/`slice` keep calling the
+untouched `cache::resolve_model`.
+
+Within `serve`'s own resolution, only the **bare-name branch** gets the
+claimed/unclaimed check. An explicit `hf://owner/repo` or
+`/local/path` argument bypasses the claim check and keeps using
+`cache::resolve_model` unchanged, deliberately: both forms already
+dispatch correctly on whichever generation they find
+(`load_artifact`'s own `detect_generation` call downstream), so routing
+them through the new resolver's stricter explicit arms — which refuse
+a VINDEX2 local directory outright — would *regress* existing VINDEX2
+`serve` usage, not fix anything. Widening those forms into the new
+resolver is a later decision, not a side effect of this rung.
+
+**The other fix landed here**: `run_serve` used to do
+`cache::resolve_model(path).unwrap_or_else(|_| path.clone())` —
+silently substituting the raw, unresolved string on *any* resolution
+failure (including an ambiguous shorthand with a good error message)
+and handing it across the process boundary to a server binary with no
+shorthand knowledge at all, which then failed three layers down with a
+confusing IO error. This now propagates the real error. Nothing
+legitimate depended on the fallback: `cache::resolve_model`'s own
+"already a local directory" branch already accepts a raw valid path
+before ever reaching the failure cases the fallback used to catch.
+
+**Production registry is still empty** — `serve_resolve::
+production_registry()` returns a manifest with zero models. No official
+VINDEX3 model is published yet, and where real registry data will
+actually come from (embedded? a file? fetched?) remains an open,
+separate decision. Shipping this wiring now means zero behaviour
+change for any caller today, and the claimed/unclaimed split activates
+itself correctly the moment a real entry is added — no second
+migration required.
+
+Gates: 10 unit tests (`serve_resolve::tests`) via dependency-injected
+`legacy`/`fetch_hf` closures pinning every control in 10.1, plus one
+hermetic test of the real (non-injected) `resolve_serve_target` against
+a tempdir; full `larql-cli` suite (763 tests) green; clippy
+`--all-targets -D warnings` clean; `cargo fmt --check` clean; 92.5% line
+coverage on the new file (the residual gap is two structurally-`
+unreachable!()` defensive arms plus the untested thin real-wiring body
+of `resolve_serve_target` itself — the same "test the injected core, not
+the env-touching wrapper" pattern `cache.rs`'s own `resolve_shorthand`
+vs `resolve_shorthand_from` already uses in this crate).
