@@ -332,3 +332,84 @@ fn the_gemma4_multimodal_embedder_is_a_perception_adapter() {
         .iter()
         .any(|b| b.tensor_prefix.contains("embed_vision")));
 }
+
+/// Qwen3.5's MTP draft head declares its own tensor namespace (`mtp.fc`,
+/// `mtp.layers.*`, `mtp.norm`, `mtp.pre_fc_norm_hidden`,
+/// `mtp.pre_fc_norm_embedding`) sitting beside the primary text model's own
+/// tensors. Every one of these prefixes shares a substring with a
+/// [`GROUP_PATTERNS`]-style rule — `mtp.layers` contains `"layers"`,
+/// `mtp.norm`/`mtp.pre_fc_norm_hidden` contain `"norm"`,
+/// `mtp.pre_fc_norm_embedding` contains `"embedding"` — so before the
+/// `mtp`-namespace check existed, only `mtp.fc` (which matches nothing)
+/// surfaced honestly; the rest were silently absorbed into the primary
+/// text component's `decoder_stack`/`final_norm`/`embedding` objects.
+///
+/// This asserts the whole `mtp.*` family surfaces in `unplaced` with the
+/// standard reason, and that none of it leaks into the primary text
+/// component's objects.
+#[test]
+fn mtp_namespace_groups_are_unplaced_not_merged_into_the_primary_text_component() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut inventory = known_dense(dir.path());
+    // known_dense's own tensor list has no "layers"/"norm"/"embed_tokens"
+    // group beyond `model.embed_tokens` — add the primary decoder stack and
+    // final norm groups a real checkpoint would carry, so the mtp groups
+    // have a real target object to (incorrectly) fall into if the fix
+    // regresses.
+    for (prefix, tensors, bytes) in [
+        ("model.language_model.layers", 8usize, 4096u64),
+        ("model.language_model.norm", 1, 128),
+        // The MTP draft head's own namespace — must NOT merge into any of
+        // the objects above.
+        ("mtp.fc", 1, 512),
+        ("mtp.layers", 11, 2048),
+        ("mtp.norm", 1, 128),
+        ("mtp.pre_fc_norm_hidden", 1, 128),
+        ("mtp.pre_fc_norm_embedding", 1, 128),
+    ] {
+        inventory
+            .tensors
+            .groups
+            .push(larql_models::inventory::TensorGroup {
+                prefix: prefix.to_string(),
+                tensors,
+                bytes,
+            });
+    }
+    let named = vec![("only-artifact".to_string(), inventory)];
+    let built = build_from_inventories(&named);
+
+    for mtp_prefix in [
+        "mtp.fc",
+        "mtp.layers",
+        "mtp.norm",
+        "mtp.pre_fc_norm_hidden",
+        "mtp.pre_fc_norm_embedding",
+    ] {
+        let unplaced = built
+            .unplaced
+            .iter()
+            .find(|u| u.prefix == mtp_prefix)
+            .unwrap_or_else(|| panic!("{mtp_prefix} was placed anyway: {:?}", built.unplaced));
+        assert!(
+            unplaced
+                .reason
+                .contains("no placement rule owns this group"),
+            "{mtp_prefix}: {}",
+            unplaced.reason
+        );
+    }
+
+    // None of the mtp.* bytes leaked into the primary text component's
+    // objects — the regression this test guards against.
+    for object in &built.graph.objects {
+        for binding in &object.source_bindings {
+            assert!(
+                !binding.tensor_prefix.starts_with("mtp"),
+                "object `{}` absorbed mtp-namespace group `{}`",
+                object.id,
+                binding.tensor_prefix
+            );
+        }
+    }
+}
