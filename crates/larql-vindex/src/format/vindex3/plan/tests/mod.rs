@@ -5,6 +5,7 @@ mod carriage;
 mod compare;
 mod gemma4;
 mod hybrid_linear_attention;
+mod qw35d_admission;
 mod semantics;
 mod system;
 

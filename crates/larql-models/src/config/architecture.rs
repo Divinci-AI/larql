@@ -19,7 +19,7 @@ use crate::validation::ConfigValidationResult;
 use super::{
     layer_types, rope_types, Activation, EmbeddingNorm, ExpertFormat, ExpertGatePolicy,
     ExpertRoutingPolicy, FfnType, GateUpLayout, Llama3RopeScaling, ModelConfig, NormSpec, NormType,
-    PositionPolicy, PostNormEps, QkNormScope, YarnRopeScaling,
+    PositionPolicy, PostNormEps, QkNormScope, RotaryFrequencyBasis, YarnRopeScaling,
 };
 
 /// The multiplier that leaves a value unchanged.
@@ -468,15 +468,74 @@ pub trait ModelArchitecture: Send + Sync {
             .as_ref()
             .and_then(|thetas| thetas.get(layer))
         {
-            Some(&declared) => PositionPolicy::from_declared_theta_with_yarn(declared, yarn),
+            Some(&declared) => {
+                // A per-layer theta states WHICH base this layer rotates
+                // at. It does not state that the layer stops being a
+                // partial or multi-axis rotary, so the config's rotary
+                // shape is re-applied at that theta. Without this, any
+                // checkpoint declaring `layer_rope_theta` alongside
+                // `partial_rotary_factor` would silently rotate the whole
+                // head — the same drop this rung exists to close, one
+                // branch over.
+                match PositionPolicy::from_declared_theta_with_yarn(declared, yarn) {
+                    PositionPolicy::Rope { theta } => self.rotary_policy(theta),
+                    // NoPE has no rotary shape, and YaRN carries its own.
+                    resolved => resolved,
+                }
+            }
             None => match yarn {
                 Some(scaling) => PositionPolicy::Yarn {
                     theta: self.rope_base_for_layer(layer),
                     scaling,
                 },
-                None => PositionPolicy::Rope {
-                    theta: self.rope_base_for_layer(layer),
-                },
+                None => self.rotary_policy(self.rope_base_for_layer(layer)),
+            },
+        }
+    }
+
+    /// The unscaled rotary policy at `theta`: plain, partial, or
+    /// multi-axis, decided by what the config declares.
+    ///
+    /// Lives in the trait default rather than a family override because
+    /// `partial_rotary_factor` and `rope_parameters.mrope_*` are config
+    /// facts, not family facts — a model declaring them means the same
+    /// thing whatever its `model_type`. A family whose partial rotary
+    /// uses a different frequency basis (Gemma 4, HF `proportional`)
+    /// overrides [`Self::position_policy_for_layer`] and never reaches
+    /// here.
+    ///
+    /// A declared fraction of `1.0` is a full rotary and stays
+    /// [`PositionPolicy::Rope`]: the fraction is then not a partial
+    /// rotary fact, and manufacturing a `PartialRope` for it would put
+    /// every ordinary model on the partial path.
+    fn rotary_policy(&self, theta: f64) -> PositionPolicy {
+        let cfg = self.config();
+        let Some(rotary_fraction) = cfg.partial_rotary_factor.filter(|f| *f < 1.0) else {
+            return PositionPolicy::Rope { theta };
+        };
+        // HF's `default` rope with `partial_rotary_factor` takes the
+        // inverse frequencies over the ROTARY width — `base**(arange(0,
+        // dim, 2) / dim)` with `dim = head_dim * factor`. The head-width
+        // basis is a different declaration (`proportional`) and a
+        // different family's override.
+        let basis = RotaryFrequencyBasis::RotaryWidth;
+        match (cfg.mrope_section.as_deref(), cfg.mrope_interleaved) {
+            (Some([t, h, w]), Some(interleaved)) => PositionPolicy::MRope {
+                theta,
+                rotary_fraction,
+                basis,
+                section: [*t, *h, *w],
+                interleaved,
+            },
+            // Either half alone is an incomplete declaration. Resolving
+            // it as a plain partial rotary would drop the multi-axis
+            // fact silently, so the partial policy is built and the
+            // plan's carriage gate refuses the unpaired key — the
+            // refusal belongs where refusals are reported, not here.
+            _ => PositionPolicy::PartialRope {
+                theta,
+                rotary_fraction,
+                basis,
             },
         }
     }

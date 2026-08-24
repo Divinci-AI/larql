@@ -251,10 +251,16 @@ impl<'a> LoweredSession<'a> {
         if let Some(l) = plan.layers.iter().find(|l| {
             matches!(
                 l.attention.softmax().map(|op| &op.position),
-                Some(PositionPolicy::PartialRope {
-                    basis: larql_models::config::RotaryFrequencyBasis::RotaryWidth,
-                    ..
-                })
+                // M-RoPE joins the refusal on the same ground: its
+                // rotary block is prefix-shaped, and its per-slot axis
+                // assignment is a second thing the rope kernel does not
+                // express.
+                Some(
+                    PositionPolicy::PartialRope {
+                        basis: larql_models::config::RotaryFrequencyBasis::RotaryWidth,
+                        ..
+                    } | PositionPolicy::MRope { .. }
+                )
             )
         }) {
             return Err(VindexError::Parse(format!(
@@ -632,6 +638,10 @@ impl<'a> LoweredSession<'a> {
                 position: match a.position {
                     _ if self.ablate.no_rope => LoweredPosition::None,
                     PositionPolicy::Rope { theta } => LoweredPosition::Rope { theta },
+                    // Refused above, before the session exists.
+                    PositionPolicy::MRope { .. } => {
+                        unreachable!("M-RoPE is refused before the session is built")
+                    }
                     // YaRN's ramped `inv_freq` rides the shared table
                     // (built for this layer's policy in `new`); the
                     // amplitude rides slot 6 of the rope kernel.

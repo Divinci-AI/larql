@@ -42,6 +42,7 @@ fn greedy_decode_runs_end_to_end_on_the_encoded_fixture() {
     let dir = fixture_dir(true);
     let out = dir.path().join("container");
     run(Vindex3Command::Encode(EncodeArgs {
+        capability: None,
         artifacts: vec![dir.path().to_path_buf()],
         output: out.clone(),
     }))

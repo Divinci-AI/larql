@@ -360,6 +360,10 @@ pub(super) fn rope_table_key(position: &PositionPolicy, head_dim: usize) -> Opti
             scaling.truncate.hash(&mut h);
             Some(h.finish() | 1)
         }
+        // No lowered table: refused in `LoweredSession::new`, so a key
+        // is never asked for. `None` rather than a hash keeps a
+        // half-built session from sharing a table with plain rope.
+        PositionPolicy::MRope { .. } => None,
         PositionPolicy::None => None,
     }
 }
@@ -400,6 +404,9 @@ pub(super) fn rope_inv_freq_table(position: &PositionPolicy, head_dim: usize) ->
             basis: RotaryFrequencyBasis::RotaryWidth,
             ..
         } => unreachable!("RotaryWidth partial rotary is refused before the session is built"),
+        PositionPolicy::MRope { .. } => {
+            unreachable!("M-RoPE is refused before the session is built")
+        }
     }
 }
 

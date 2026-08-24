@@ -22,7 +22,10 @@
 
 use super::super::gated_delta::StateDtype;
 use super::super::GatedDeltaOp;
-use super::continuation::{RecurrentGeometry, RecurrentState, StateInitialization};
+use super::continuation::{
+    RecurrentBuffer, RecurrentBufferGeometry, RecurrentGeometry, RecurrentState,
+    StateInitialization,
+};
 
 /// L2-normalisation epsilon, from the reference kernel's own default.
 const L2NORM_EPS: f32 = 1e-6;
@@ -43,11 +46,29 @@ const L2NORM_EPS: f32 = 1e-6;
 /// inherits the accident.
 pub fn state_geometry(op: &GatedDeltaOp) -> Option<RecurrentGeometry> {
     Some(RecurrentGeometry {
-        shape: vec![op.num_value_heads, op.key_head_dim, op.value_head_dim],
-        dtype: op.state_dtype?,
-        initialization: StateInitialization::Zeros,
+        buffers: vec![
+            // Buffer 0 — the delta matrix.
+            RecurrentBufferGeometry {
+                shape: vec![op.num_value_heads, op.key_head_dim, op.value_head_dim],
+                dtype: op.state_dtype?,
+                initialization: StateInitialization::Zeros,
+            },
+            // Buffer 1 — the causal convolution's history. See
+            // `plan_continuation_geometry` for why its precision is not
+            // taken from `state_dtype`.
+            RecurrentBufferGeometry {
+                shape: vec![op.qkv_channels(), op.conv_kernel],
+                dtype: StateDtype::Float32,
+                initialization: StateInitialization::Zeros,
+            },
+        ],
     })
 }
+
+/// Buffer indices this operator assigns. The storage layer holds a list;
+/// these names are the operator's private knowledge of what is in it.
+pub const DELTA_MATRIX: usize = 0;
+pub const CONV_HISTORY: usize = 1;
 
 /// Compile-time reminder that the two dtype spellings are one type.
 const _: fn() = || {
@@ -110,7 +131,7 @@ fn l2_normalise(row: &mut [f32]) {
 pub fn recurrence_step(
     op: &GatedDeltaOp,
     step: &RecurrenceStep<'_>,
-    state: &mut RecurrentState,
+    state: &mut RecurrentBuffer,
 ) -> Vec<f32> {
     step_inner(op, step, state, Mutation::None)
 }
@@ -147,7 +168,7 @@ pub enum Mutation {
 fn step_inner(
     op: &GatedDeltaOp,
     step: &RecurrenceStep<'_>,
-    state: &mut RecurrentState,
+    state: &mut RecurrentBuffer,
     mutation: Mutation,
 ) -> Vec<f32> {
     let (hv, dk, dv) = (op.num_value_heads, op.key_head_dim, op.value_head_dim);
@@ -199,7 +220,7 @@ fn step_inner(
             }
         }
         let delta: Vec<f32> = (0..dv).map(|vv| (v[vv] - kv[vv]) * beta).collect();
-        let mut read = |state: &RecurrentState| {
+        let mut read = |state: &RecurrentBuffer| {
             for kk in 0..dk {
                 let qw = q[kk];
                 for vv in 0..dv {
@@ -228,7 +249,7 @@ fn step_inner(
 pub fn recurrence_step_mutated(
     op: &GatedDeltaOp,
     step: &RecurrenceStep<'_>,
-    state: &mut RecurrentState,
+    state: &mut RecurrentBuffer,
     mutation: Mutation,
 ) -> Vec<f32> {
     step_inner(op, step, state, mutation)
@@ -325,7 +346,25 @@ pub fn layer_forward(
         .collect();
 
     // Stage 2: depthwise causal convolution, then SiLU.
+    //
+    // The window reaches back `kernel-1` positions. Those may lie BEFORE
+    // this batch, which is why the convolution keeps a durable history
+    // rather than left-padding with zeros: zeros are only correct at the
+    // start of a sequence, and a continuation that assumed them would
+    // silently truncate every layer's receptive field at the batch
+    // boundary. Invisible on a whole-prefix forward — which is exactly
+    // how it stayed missing until now — and wrong on the first
+    // continuation step.
     let t_len = hidden.len();
+    let history_len = kernel - 1;
+    let history: Vec<f32> = state.buffer(CONV_HISTORY).cells().to_vec();
+    // `history` is `[conv_dim][kernel]`, oldest first; the newest
+    // `kernel-1` entries are the positions preceding this batch.
+    let past = |c: usize, back: usize| -> f32 {
+        // `back` = 1 means the position immediately before the batch.
+        let slot = kernel - back;
+        history[c * kernel + slot]
+    };
     let mut conv: Vec<Vec<f32>> = vec![vec![0.0; conv_dim]; t_len];
     for c in 0..conv_dim {
         let taps = &w.conv1d[c * kernel..(c + 1) * kernel];
@@ -340,7 +379,17 @@ pub fn layer_forward(
                 } else {
                     t as isize - (kernel as isize - 1) + i as isize
                 };
-                if offset >= 0 && (offset as usize) < t_len {
+                if offset < 0 {
+                    // Before this batch: the durable history answers, and
+                    // its zeros ARE correct at sequence start because the
+                    // buffer was initialised to zeros there.
+                    let back = (-offset) as usize;
+                    if back <= history_len {
+                        acc += tap * past(c, back);
+                    }
+                    continue;
+                }
+                if (offset as usize) < t_len {
                     let x = mixed[offset as usize][c];
                     acc += tap
                         * if mutation == Mutation::SiluBeforeConv {
@@ -394,7 +443,7 @@ pub fn layer_forward(
                 g: &g,
                 beta: &beta,
             },
-            state,
+            state.buffer_mut(DELTA_MATRIX),
             mutation,
         );
 
@@ -421,6 +470,38 @@ pub fn layer_forward(
         planes.beta.push(beta);
         planes.z.push(z);
         planes.core.push(core);
+    }
+
+    // Roll the convolution history forward: the last `kernel` positions of
+    // the PRE-convolution projection, oldest first — the same window HF's
+    // `conv_state.copy_(cat([conv_state, x])[..., -state_len:])` keeps.
+    //
+    // Taken from `mixed`, not from `conv`: the buffer holds the
+    // convolution's INPUT, and seeding it with the output would feed the
+    // next batch a doubly-convolved signal.
+    {
+        let history = state.buffer_mut(CONV_HISTORY);
+        let cells = history.cells_mut();
+        for c in 0..conv_dim {
+            for slot in 0..kernel {
+                // `slot` counts from oldest to newest across the window
+                // ending at the last position of this batch.
+                let back = kernel - 1 - slot;
+                let value = if back < t_len {
+                    mixed[t_len - 1 - back][c]
+                } else {
+                    // The batch was shorter than the window, so the tail
+                    // of the PREVIOUS history still occupies these slots.
+                    let older = back - t_len;
+                    if older < history_len {
+                        past(c, older + 1)
+                    } else {
+                        0.0
+                    }
+                };
+                cells[c * kernel + slot] = value;
+            }
+        }
     }
     planes
 }

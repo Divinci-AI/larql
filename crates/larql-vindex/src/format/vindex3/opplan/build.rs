@@ -148,6 +148,21 @@ pub fn plan_component_ops(
         StackGeometry {
             hidden,
             q_rows: attn.num_q_heads * head_dim,
+            // The independent witness for the gate. The config says
+            // `attn_output_gate: true`; the stored projection says
+            // `2 · 24 · 256 = 12288` against an ungated 6144, and this
+            // contract is what makes the two cross-examine each other
+            // instead of the config being believed on its own.
+            q_proj_rows: attn.num_q_heads
+                * head_dim
+                * if matches!(
+                    attn.output_gate.map(|g| g.source),
+                    Some(larql_models::config::GateSource::FusedQueryProjection)
+                ) {
+                    2
+                } else {
+                    1
+                },
             kv_rows: num_kv_heads * head_dim,
             intermediate: inter,
             head_dim,
@@ -243,13 +258,29 @@ pub fn plan_component_ops(
             let ops = LayerOps {
                 placement,
                 gated_ffn,
-                output_gate: attn.output_gate.is_some(),
+                // A fused gate ships no operand of its own — demanding
+                // one would make every Qwen3.8 layer a closure defect for
+                // a tensor that correctly does not exist.
+                output_gate: matches!(
+                    attn.output_gate.map(|g| g.source),
+                    Some(larql_models::config::GateSource::AttentionInput)
+                ),
                 attention_bias: attn.attention_bias == Some(true),
                 sinks: attn.sinks.is_some(),
                 routed,
                 hybrid,
                 moe: surface.ffn.moe,
                 v_from_k: policy.v_from_k,
+                // Which operand family this layer must supply, taken from
+                // the GRAPH's operator. The op below picks its operator
+                // from operand EVIDENCE instead, so the two authorities
+                // meet here: a layer the graph calls recurrent while its
+                // tensors say softmax (or the reverse) fails closure with
+                // the missing roles named. That cross-check was recorded
+                // as owed at the first real encode in QW-3.5A, and this
+                // is where it lands.
+                recurrent: policy.operator
+                    == crate::format::vindex3::graph::LayerOperator::GatedDelta,
             };
             for role in required_roles(&ops) {
                 let holder = if role.is_expert_bank() { bank } else { present };
@@ -553,7 +584,20 @@ pub fn plan_component_ops(
                     query_scale: attn.query_scale,
                     score_scale: attn.score_scale,
                     logit_softcapping: attn.logit_softcapping,
-                    span: policy.span,
+                    // The graph carries no span exactly when it recorded
+                    // a recurrence for this layer. Reaching here means the
+                    // layer ships softmax operands anyway — the checkpoint
+                    // contradicting itself, config against tensors — and
+                    // the mirror of the panic above: an invariant the
+                    // builder upholds, not a case to paper over with a
+                    // default span.
+                    span: policy.span.unwrap_or_else(|| {
+                        panic!(
+                            "layer {layer} ships softmax attention operands while the graph \
+                             records a recurrence for it (no span); the checkpoint's \
+                             layer_types and its tensors disagree"
+                        )
+                    }),
                     window: policy.window,
                     position: policy.position,
                     qk_norm,
@@ -572,9 +616,24 @@ pub fn plan_component_ops(
                     ),
                     v_from_k: policy.v_from_k,
                     o: operand(&stack_id, get(OperandRole::AttnO)),
+                    // On a fused source the gate has NO operand of its
+                    // own: it is the per-head second half of the query
+                    // projection, so the op names `q_proj` and reads one
+                    // matrix for both roles — the same "one matrix, two
+                    // roles" statement `v_from_k` makes for K≡V layers.
                     output_gate: attn.output_gate.map(|spec| GateOp {
                         spec,
-                        projection: operand(&stack_id, get(OperandRole::AttnOutputGate)),
+                        projection: operand(
+                            &stack_id,
+                            get(match spec.source {
+                                larql_models::config::GateSource::AttentionInput => {
+                                    OperandRole::AttnOutputGate
+                                }
+                                larql_models::config::GateSource::FusedQueryProjection => {
+                                    OperandRole::AttnQ
+                                }
+                            }),
+                        ),
                     }),
                     // Closure held, so `Some(true)` means all four are here
                     // and anything else means none is.
@@ -666,6 +725,10 @@ struct LayerOps {
     /// V is the K projection on this layer: no V operand is required, and
     /// one present is a stray.
     v_from_k: bool,
+    /// This layer runs a Gated DeltaNet recurrence rather than softmax
+    /// attention, so it supplies the nine `LinearAttn*` operands and none
+    /// of the softmax ones.
+    recurrent: bool,
 }
 
 /// Roles every layer must supply, given the surface's ops.
@@ -673,12 +736,29 @@ fn required_roles(ops: &LayerOps) -> Vec<OperandRole> {
     let mut roles = vec![
         OperandRole::PreAttentionNorm,
         OperandRole::PostAttentionNorm,
-        OperandRole::AttnQ,
-        OperandRole::AttnK,
-        OperandRole::AttnO,
     ];
-    if !ops.v_from_k {
-        roles.push(OperandRole::AttnV);
+    if ops.recurrent {
+        // A recurrence has no query, key, value or output projection —
+        // demanding them made all 48 of Qwen3.8's linear layers report
+        // four missing operands each for tensors that correctly do not
+        // exist. Its nine operands are required instead, so the layer is
+        // still fully pinned rather than merely exempted.
+        roles.extend([
+            OperandRole::LinearAttnInProjQkv,
+            OperandRole::LinearAttnInProjA,
+            OperandRole::LinearAttnInProjB,
+            OperandRole::LinearAttnInProjZ,
+            OperandRole::LinearAttnConv1d,
+            OperandRole::LinearAttnALog,
+            OperandRole::LinearAttnDtBias,
+            OperandRole::LinearAttnNorm,
+            OperandRole::LinearAttnOutProj,
+        ]);
+    } else {
+        roles.extend([OperandRole::AttnQ, OperandRole::AttnK, OperandRole::AttnO]);
+        if !ops.v_from_k {
+            roles.push(OperandRole::AttnV);
+        }
     }
     if ops.placement == NormPlacement::PrePost {
         roles.push(OperandRole::PreFfnNorm);
@@ -813,7 +893,19 @@ fn absent_op(role: OperandRole, ops: &LayerOps) -> Option<&'static str> {
 /// layer's own head geometry under the component's query-head count.
 struct StackGeometry {
     hidden: usize,
+    /// `num_q_heads · head_dim` — the ATTENTION width. What `o_proj`
+    /// consumes, and what the query half occupies.
     q_rows: usize,
+    /// Rows the stored query projection actually carries.
+    ///
+    /// Equal to [`Self::q_rows`] on an ordinary stack, and **twice** it
+    /// when the component's output gate is sourced from the query
+    /// projection: that projection emits `2 · head_dim` per head, query
+    /// and gate interleaved. Kept as its own field rather than doubling
+    /// `q_rows`, because `o_proj` and the query-bias contract are still
+    /// sized by the attention width — conflating the two would silently
+    /// demand a 12288-wide `o_proj` on Qwen3.8, which carries 6144.
+    q_proj_rows: usize,
     kv_rows: usize,
     intermediate: usize,
     head_dim: usize,
@@ -838,6 +930,7 @@ fn expected_shape(
     let StackGeometry {
         hidden,
         q_rows,
+        q_proj_rows,
         kv_rows,
         intermediate,
         head_dim,
@@ -847,7 +940,7 @@ fn expected_shape(
         linear,
     } = *g;
     match role {
-        OperandRole::AttnQ => Some(vec![q_rows, hidden]),
+        OperandRole::AttnQ => Some(vec![q_proj_rows, hidden]),
         OperandRole::AttnK | OperandRole::AttnV => Some(vec![kv_rows, hidden]),
         OperandRole::AttnO => Some(vec![hidden, q_rows]),
         OperandRole::PreAttentionNorm

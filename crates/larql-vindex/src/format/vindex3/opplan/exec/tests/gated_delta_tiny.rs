@@ -108,6 +108,21 @@ fn hidden() -> Vec<Vec<f32>> {
         .collect()
 }
 
+/// A longer input than the pinned fixture's three positions.
+///
+/// The pinned expectations cover `POSITIONS = 3`, which is SHORTER than
+/// the 4-wide convolution window — so no split of it can straddle that
+/// window, and a continuation test built on it would assert nothing. The
+/// split tests compare one batch against a chained split rather than
+/// against pinned values, so they are free to use a longer sequence and
+/// must.
+fn long_hidden(positions: usize) -> Vec<Vec<f32>> {
+    let flat = lcg_values(positions * fx::HIDDEN, fx::SEED_INPUT);
+    (0..positions)
+        .map(|t| flat[t * fx::HIDDEN..(t + 1) * fx::HIDDEN].to_vec())
+        .collect()
+}
+
 fn metrics(mine: &[f32], theirs: &[f32]) -> (f32, f32) {
     assert_eq!(mine.len(), theirs.len());
     let (mut se, mut ss, mut dot, mut na, mut nb) = (0.0f64, 0.0f64, 0.0f64, 0.0f64, 0.0f64);
@@ -155,7 +170,11 @@ fn the_tiny_operator_matches_the_reference_at_every_plane() {
     let flat = |v: &Vec<Vec<f32>>| -> Vec<f32> { v.iter().flatten().copied().collect() };
     check("q", &flat(&planes.query), &fx::EXPECTED_Q);
     check("core", &flat(&planes.core), &fx::EXPECTED_CORE);
-    check("final state", state.cells(), &fx::EXPECTED_FINAL_STATE);
+    check(
+        "final state",
+        state.buffer(0).cells(),
+        &fx::EXPECTED_FINAL_STATE,
+    );
     check("output", &flat(&planes.output), &fx::EXPECTED_OUTPUT);
 }
 
@@ -185,7 +204,7 @@ fn every_defect_is_still_caught_by_the_compact_fixture() {
         let planes = layer_forward(&op, &weights(&s), &h, &mut state, mutation);
         let (q_rel, _) = metrics(&flat(&planes.query), &fx::EXPECTED_Q);
         let (core_rel, core_cos) = metrics(&flat(&planes.core), &fx::EXPECTED_CORE);
-        let (st_rel, _) = metrics(state.cells(), &fx::EXPECTED_FINAL_STATE);
+        let (st_rel, _) = metrics(state.buffer(0).cells(), &fx::EXPECTED_FINAL_STATE);
         let (out_rel, _) = metrics(&flat(&planes.output), &fx::EXPECTED_OUTPUT);
 
         let caught = q_rel > MAX_REL_RMS
@@ -200,4 +219,125 @@ fn every_defect_is_still_caught_by_the_compact_fixture() {
              (q {q_rel:.3e}, core {core_rel:.3e}, state {st_rel:.3e}, out {out_rel:.3e})"
         );
     }
+}
+
+/// **QW-3.6.** Splitting a sequence into two batches, with state chained,
+/// reproduces the single-batch result exactly.
+///
+/// This is the falsifier for the convolution history. Before it existed,
+/// `layer_forward` left-padded the window with zeros at every batch
+/// boundary, so the second batch's first `kernel-1` positions saw a
+/// truncated receptive field. Nothing caught it: the whole-prefix gates
+/// pass either way, because when the batch IS the prefix the zeros are
+/// correct.
+///
+/// The control is the same test with the history suppressed — if that
+/// does NOT diverge, the buffer is not load-bearing and this test proves
+/// nothing.
+#[test]
+fn a_split_sequence_with_chained_state_matches_one_batch() {
+    let s = store();
+    let op = op();
+    let full = long_hidden(9);
+    let cut = 5;
+    assert!(
+        full.len() - cut >= op.conv_kernel && cut >= op.conv_kernel,
+        "both sides of the split must exceed the convolution window, or the boundary \
+         is not actually exercised"
+    );
+
+    // One batch.
+    let mut whole = RecurrentState::zeros(&state_geometry(&op).unwrap());
+    let one = layer_forward(&op, &weights(&s), &full, &mut whole, Mutation::None);
+
+    // Two batches, state carried across.
+    let mut chained = RecurrentState::zeros(&state_geometry(&op).unwrap());
+    layer_forward(
+        &op,
+        &weights(&s),
+        &full[..cut],
+        &mut chained,
+        Mutation::None,
+    );
+    let two = layer_forward(
+        &op,
+        &weights(&s),
+        &full[cut..],
+        &mut chained,
+        Mutation::None,
+    );
+
+    // Relative, not absolute. This fixture's activations sit around
+    // 1e-2 and its delta matrix around 1e-5, so an absolute tolerance of
+    // 1e-5 would swallow a total corruption of the signal — the control
+    // below measured exactly that and came in UNDER such a bound.
+    let tail: Vec<f32> = one.core[cut..].iter().flatten().copied().collect();
+    let got: Vec<f32> = two.core.iter().flatten().copied().collect();
+    assert_eq!(tail.len(), got.len());
+    let (rel, cos) = metrics(&got, &tail);
+    assert!(
+        rel < 1e-6 && cos > 0.999999,
+        "a chained split must reproduce the single batch: rel_rms {rel:e} cos {cos:.7} \
+         — the convolution history is not carried across the boundary"
+    );
+
+    // ...and the two states agree too, not just the outputs.
+    let sw = whole.buffer(0).cells();
+    let sc = chained.buffer(0).cells();
+    let state_gap = sw
+        .iter()
+        .zip(sc)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f32, f32::max);
+    assert!(
+        state_gap < 1e-5,
+        "final delta matrices differ: {state_gap:e}"
+    );
+}
+
+/// **The control for the test above.** With the convolution history
+/// zeroed between batches — the pre-QW-3.6 behaviour — the split MUST
+/// diverge.
+///
+/// Without this, `a_split_sequence_with_chained_state_matches_one_batch`
+/// would also pass on a model whose convolution kernel happened not to
+/// reach across the cut.
+#[test]
+fn suppressing_the_convolution_history_makes_the_split_diverge() {
+    let s = store();
+    let op = op();
+    let full = long_hidden(9);
+    let cut = 5;
+
+    let mut whole = RecurrentState::zeros(&state_geometry(&op).unwrap());
+    let one = layer_forward(&op, &weights(&s), &full, &mut whole, Mutation::None);
+
+    let mut chained = RecurrentState::zeros(&state_geometry(&op).unwrap());
+    layer_forward(
+        &op,
+        &weights(&s),
+        &full[..cut],
+        &mut chained,
+        Mutation::None,
+    );
+    // Exactly the defect QW-3.6 removed: forget the window.
+    chained.buffer_mut(1).cells_mut().fill(0.0);
+    let two = layer_forward(
+        &op,
+        &weights(&s),
+        &full[cut..],
+        &mut chained,
+        Mutation::None,
+    );
+
+    let tail: Vec<f32> = one.core[cut..].iter().flatten().copied().collect();
+    let got: Vec<f32> = two.core.iter().flatten().copied().collect();
+    let (rel, cos) = metrics(&got, &tail);
+    println!("  history suppressed: rel_rms {rel:e}  cos {cos:.7}");
+    assert!(
+        rel > 1e-2,
+        "forgetting the convolution history must change the answer, or the buffer is \
+         not load-bearing and the equivalence test proves nothing: rel_rms {rel:e} \
+         cos {cos:.7}"
+    );
 }

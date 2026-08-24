@@ -255,6 +255,40 @@ pub struct EncodeArgs {
     /// Container directory to write.
     #[arg(long)]
     pub output: PathBuf,
+
+    /// Gate admission on ONE capability's execution closure instead of
+    /// whole-model completeness.
+    ///
+    /// Without this, encode requires every declared execution-semantic
+    /// fact in the checkpoint to be understood — the right bar for
+    /// "we understand this model", and too strong a bar for "we can run
+    /// text generation on it". Qwen3.8-27B is admissible for text with
+    /// 16 whole-model findings outstanding, none of them reachable from
+    /// a text forward pass.
+    ///
+    /// The container written is identical either way; only the gate
+    /// changes.
+    #[arg(long, value_enum)]
+    pub capability: Option<EncodeCapability>,
+}
+
+/// Capabilities `--capability` accepts. A subset of
+/// [`larql_vindex::format::vindex3::plan::capability::Capability`]: only
+/// those this build can execute are offerable, because encoding for a
+/// capability with no executor would be a promise the runtime cannot
+/// keep.
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+pub enum EncodeCapability {
+    /// Text in, text out.
+    TextGeneration,
+}
+
+impl From<EncodeCapability> for larql_vindex::format::vindex3::plan::capability::Capability {
+    fn from(value: EncodeCapability) -> Self {
+        match value {
+            EncodeCapability::TextGeneration => Self::TextGeneration,
+        }
+    }
 }
 
 #[derive(Args)]
@@ -440,7 +474,20 @@ fn run_encode(args: EncodeArgs) -> Result<(), Box<dyn std::error::Error>> {
     for path in &args.artifacts {
         named.push((artifact_name(path), load_artifact(path)?));
     }
-    let outcome = larql_vindex::format::vindex3::encode::encode_system(&named, &args.output)?;
+    let outcome = match args.capability {
+        Some(capability) => {
+            eprintln!(
+                "admission scoped to {:?}; whole-model completeness is NOT asserted",
+                capability
+            );
+            larql_vindex::format::vindex3::encode::encode_system_for_capability(
+                &named,
+                &args.output,
+                capability.into(),
+            )?
+        }
+        None => larql_vindex::format::vindex3::encode::encode_system(&named, &args.output)?,
+    };
     // Capability snapshot: tokenizer + HF metadata from the first
     // artifact directory that carries them (the inventory records its
     // source dir, so this covers both checkpoint-dir and saved-inventory
@@ -625,7 +672,14 @@ fn run_inspect(args: InspectArgs) -> Result<(), Box<dyn std::error::Error>> {
         for c in &inspection.components {
             let policy = match (c.sliding_layers, c.full_layers, c.nope_layers) {
                 (Some(s), Some(f), Some(n)) => {
-                    format!(", {s} sliding / {f} full, {n} NoPE, window {:?}", c.window)
+                    format!(
+                        ", {s} sliding / {f} full{}, {n} NoPE, window {:?}",
+                        match c.recurrent_layers {
+                            Some(r) if r > 0 => format!(" / {r} gated-delta recurrent"),
+                            _ => String::new(),
+                        },
+                        c.window
+                    )
                 }
                 _ => ", (no per-layer table)".to_string(),
             };

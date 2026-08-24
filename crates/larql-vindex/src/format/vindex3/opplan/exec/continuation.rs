@@ -43,22 +43,22 @@ pub enum StateInitialization {
     Zeros,
 }
 
-/// A durable state whose size does not depend on how many positions have
-/// been seen.
+/// ONE durable buffer whose size does not depend on how many positions
+/// have been seen.
 ///
 /// Deliberately says nothing about the operator that owns it — no head
 /// semantics, no update rule, no family name. `shape` is whatever that
-/// operator's state is; for a Gated DeltaNet layer it happens to be
+/// operator's buffer is; for a Gated DeltaNet layer buffer 0 happens to be
 /// `[value_heads, key_head_dim, value_head_dim]`, but this type does not
 /// know that and must not learn it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RecurrentGeometry {
+pub struct RecurrentBufferGeometry {
     pub shape: Vec<usize>,
     pub dtype: RecurrentStateDtype,
     pub initialization: StateInitialization,
 }
 
-impl RecurrentGeometry {
+impl RecurrentBufferGeometry {
     pub fn elements(&self) -> usize {
         self.shape.iter().product()
     }
@@ -68,6 +68,49 @@ impl RecurrentGeometry {
             * match self.dtype {
                 RecurrentStateDtype::Float32 => 4,
             }
+    }
+}
+
+/// A recurrent layer's COMPLETE durable state: one or more buffers.
+///
+/// Plural because a recurrence is not always one tensor, and discovering
+/// that late is expensive. Gated DeltaNet keeps two — the delta matrix and
+/// a causal-convolution history — and HF's cache holds them as separate
+/// `recurrent_states` and `conv_states` fields for exactly that reason.
+/// Modelling only the matrix made the layer's persistent state look
+/// complete while a whole buffer was missing, and no whole-prefix forward
+/// could notice: the convolution history is reconstructible from the batch
+/// when the batch IS the prefix, and only becomes load-bearing at
+/// `seq_len == 1`.
+///
+/// Which buffer means what is the OPERATOR's knowledge. This type, and
+/// everything below it in the storage layer, still knows nothing about
+/// Gated DeltaNet, KDA, or any other rule — it knows sizes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecurrentGeometry {
+    pub buffers: Vec<RecurrentBufferGeometry>,
+}
+
+impl RecurrentGeometry {
+    /// A single-buffer recurrence, for operators that keep one tensor.
+    pub fn single(buffer: RecurrentBufferGeometry) -> Self {
+        Self {
+            buffers: vec![buffer],
+        }
+    }
+
+    pub fn elements(&self) -> usize {
+        self.buffers
+            .iter()
+            .map(RecurrentBufferGeometry::elements)
+            .sum()
+    }
+
+    pub fn bytes(&self) -> usize {
+        self.buffers
+            .iter()
+            .map(RecurrentBufferGeometry::bytes)
+            .sum()
     }
 }
 
@@ -150,9 +193,33 @@ pub fn plan_continuation_geometry(
                     )
                 })?;
                 Ok(LayerContinuationGeometry::Recurrent(RecurrentGeometry {
-                    shape: vec![op.num_value_heads, op.key_head_dim, op.value_head_dim],
-                    dtype,
-                    initialization: StateInitialization::Zeros,
+                    buffers: vec![
+                        // Buffer 0 — the delta matrix, at the precision
+                        // the checkpoint declared for its recurrence.
+                        RecurrentBufferGeometry {
+                            shape: vec![op.num_value_heads, op.key_head_dim, op.value_head_dim],
+                            dtype,
+                            initialization: StateInitialization::Zeros,
+                        },
+                        // Buffer 1 — the causal convolution's history:
+                        // the last `conv_kernel` positions of the fused
+                        // projection, per channel.
+                        //
+                        // Its precision is NOT `mamba_ssm_dtype`. That
+                        // key governs the recurrence; HF seeds this
+                        // buffer from the projection activations
+                        // (`F.pad(mixed_qkv, …)`) and so holds it at the
+                        // activation dtype. The two are independently
+                        // determined and only coincide here because the
+                        // reference path is f32 throughout — recorded so
+                        // a later bf16 path does not inherit the wrong
+                        // one from a shared field.
+                        RecurrentBufferGeometry {
+                            shape: vec![op.qkv_channels(), op.conv_kernel],
+                            dtype: RecurrentStateDtype::Float32,
+                            initialization: StateInitialization::Zeros,
+                        },
+                    ],
                 }))
             }
         })
@@ -198,20 +265,21 @@ impl LayerKvRows {
     }
 }
 
-/// A recurrence's durable buffer.
+/// ONE of a recurrence's durable buffers.
 ///
 /// Carries its shape so a consumer can index it, and nothing else. It does
-/// not know which operator owns it: the same type serves Gated DeltaNet
-/// today and is meant to serve KDA unchanged.
+/// not know which operator owns it, nor which buffer of that operator it
+/// is: the same type serves Gated DeltaNet's delta matrix, its convolution
+/// history, and KDA's buffers unchanged.
 #[derive(Debug, Clone, PartialEq)]
-pub struct RecurrentState {
+pub struct RecurrentBuffer {
     shape: Vec<usize>,
     cells: Vec<f32>,
 }
 
-impl RecurrentState {
+impl RecurrentBuffer {
     /// The zero start a sequence begins from.
-    pub fn zeros(geometry: &RecurrentGeometry) -> Self {
+    pub fn zeros(geometry: &RecurrentBufferGeometry) -> Self {
         match geometry.initialization {
             StateInitialization::Zeros => Self {
                 shape: geometry.shape.clone(),
@@ -221,7 +289,7 @@ impl RecurrentState {
     }
 
     /// Adopt existing cells — a captured state, or one being resumed.
-    pub fn from_cells(geometry: &RecurrentGeometry, cells: Vec<f32>) -> Result<Self, String> {
+    pub fn from_cells(geometry: &RecurrentBufferGeometry, cells: Vec<f32>) -> Result<Self, String> {
         if cells.len() != geometry.elements() {
             return Err(format!(
                 "state has {} cells, this geometry needs {}",
@@ -245,6 +313,71 @@ impl RecurrentState {
 
     pub fn cells_mut(&mut self) -> &mut [f32] {
         &mut self.cells
+    }
+}
+
+/// A recurrent layer's complete durable state, mirroring
+/// [`RecurrentGeometry`].
+///
+/// Indexed, not named: the storage layer does not learn that buffer 1 is a
+/// convolution history. The operator that wrote the geometry is the one
+/// that knows, and it is the only thing that indexes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecurrentState {
+    buffers: Vec<RecurrentBuffer>,
+}
+
+impl RecurrentState {
+    pub fn zeros(geometry: &RecurrentGeometry) -> Self {
+        Self {
+            buffers: geometry
+                .buffers
+                .iter()
+                .map(RecurrentBuffer::zeros)
+                .collect(),
+        }
+    }
+
+    /// A single-buffer state, for operators that keep one tensor.
+    pub fn single(buffer: RecurrentBuffer) -> Self {
+        Self {
+            buffers: vec![buffer],
+        }
+    }
+
+    pub fn buffer(&self, index: usize) -> &RecurrentBuffer {
+        &self.buffers[index]
+    }
+
+    pub fn buffer_mut(&mut self, index: usize) -> &mut RecurrentBuffer {
+        &mut self.buffers[index]
+    }
+
+    /// Two buffers at once, for an operator that reads one and writes the
+    /// other in the same step. Panics if the indices are equal, which
+    /// would alias.
+    pub fn buffer_pair_mut(
+        &mut self,
+        a: usize,
+        b: usize,
+    ) -> (&mut RecurrentBuffer, &mut RecurrentBuffer) {
+        assert_ne!(a, b, "a buffer cannot be borrowed mutably twice");
+        let (lo, hi) = if a < b { (a, b) } else { (b, a) };
+        let (left, right) = self.buffers.split_at_mut(hi);
+        let (x, y) = (&mut left[lo], &mut right[0]);
+        if a < b {
+            (x, y)
+        } else {
+            (y, x)
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.buffers.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.buffers.is_empty()
     }
 }
 
@@ -313,7 +446,9 @@ impl ContinuationState {
                 LayerContinuationState::Kv(rows) => {
                     rows.keys.first().map_or(0, |r| r.len()) * 2 * positions
                 }
-                LayerContinuationState::Recurrent(r) => r.cells.len(),
+                LayerContinuationState::Recurrent(r) => {
+                    (0..r.len()).map(|i| r.buffer(i).cells().len()).sum()
+                }
                 LayerContinuationState::Stateless => 0,
             })
             .sum()
