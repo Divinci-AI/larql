@@ -11,6 +11,7 @@
 
 mod attention_kv_parity;
 mod bf16_gemv_bench;
+mod bf16_residency;
 mod continuation;
 mod controls;
 mod coverage_backend_decode;

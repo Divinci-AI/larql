@@ -121,6 +121,9 @@ impl Drop for AlignedBytes {
 #[derive(Debug)]
 pub enum LoadedWeight {
     F32(Vec<f32>),
+    /// Stored bf16 code units, byte-for-byte as the checkpoint holds
+    /// them. The cheapest possible load: no conversion at all.
+    Bf16(AlignedBytes),
     F16(AlignedBytes),
     Mxfp4 {
         packed: AlignedBytes,
@@ -138,6 +141,15 @@ impl LoadedWeight {
     pub fn slice(&self) -> WeightSlice<'_> {
         match self {
             LoadedWeight::F32(w) => WeightSlice::F32(w),
+            // SAFETY: `AlignedBytes` is page-aligned, so u16 alignment
+            // holds; the length is even because the load arm rejects a
+            // byte count that is not.
+            LoadedWeight::Bf16(b) => {
+                let bytes = b.as_slice();
+                WeightSlice::Bf16(unsafe {
+                    std::slice::from_raw_parts(bytes.as_ptr().cast::<u16>(), bytes.len() / 2)
+                })
+            }
             LoadedWeight::F16(b) => WeightSlice::F16(b.as_slice()),
             LoadedWeight::Mxfp4 { packed, scales } => WeightSlice::Mxfp4 {
                 packed: packed.as_slice(),
@@ -165,6 +177,22 @@ pub fn load_weight(
 ) -> Result<LoadedWeight, VindexError> {
     match format {
         WeightFormat::F32 => Ok(LoadedWeight::F32(store.load(operand)?)),
+        WeightFormat::Bf16 => {
+            let raw = store.load_raw(operand)?;
+            if raw.dtype.as_str() != DTYPE_BF16 {
+                // No widening or narrowing here on purpose. This format
+                // means "the stored bytes ARE the resident bytes"; a
+                // checkpoint holding something else needs a judged
+                // conversion, and inventing one silently would make the
+                // format a lie.
+                return Err(VindexError::Parse(format!(
+                    "tensor `{}` is `{}`, not bf16 — the bf16 residency format copies stored \
+                     bytes and performs no conversion",
+                    operand.tensor, raw.dtype
+                )));
+            }
+            Ok(LoadedWeight::Bf16(AlignedBytes::from_bytes(&raw.bytes)))
+        }
         WeightFormat::Mxfp4 => {
             let rows = operand.shape.first().copied().unwrap_or(0);
             let k = operand.shape.get(1).copied().unwrap_or(0);

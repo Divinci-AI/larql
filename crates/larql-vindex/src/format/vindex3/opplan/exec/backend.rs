@@ -40,6 +40,19 @@ use crate::error::VindexError;
 pub enum WeightFormat {
     /// Widened f32 — the constitutional representation.
     F32,
+    /// Stored bf16, kept EXACTLY as the checkpoint holds it.
+    ///
+    /// Not a conversion and not a quantisation: bf16 is the top 16 bits
+    /// of the f32 it denotes, so a consumer widens with `(bits as u32) <<
+    /// 16` — no rounding, no table, no loss. Declaring this removes the
+    /// artificial F32 materialisation (107.6 GB resident against a 53.8
+    /// GB checkpoint) rather than introducing a new numeric format.
+    ///
+    /// Only worth declaring for matrices large enough to STREAM. A
+    /// cache-resident matrix has no RAM traffic to halve, and the
+    /// measured `48 x 5120` case runs 3.8x faster through BLAS f32 — see
+    /// `exec::cpu::kernels::FusedBf16`.
+    Bf16,
     /// IEEE 754 half, little-endian. Exactly representable from stored
     /// bf16 for all normal-range values (bf16's 7 mantissa bits fit in
     /// f16's 10); conversion fails closed on overflow. A device backend
@@ -108,6 +121,8 @@ impl WeightFormats {
 #[derive(Clone, Copy)]
 pub enum WeightSlice<'a> {
     F32(&'a [f32]),
+    /// Stored bf16 code units, still compact.
+    Bf16(&'a [u16]),
     /// Little-endian IEEE f16 bytes.
     F16(&'a [u8]),
     /// MXFP4: packed e2m1 codes (`[n, k/32, 16]`, lo nibble first) and
@@ -130,16 +145,34 @@ impl<'a> WeightSlice<'a> {
     /// The f32 view a CPU backend computes with. A backend that declared
     /// `F32` can never legitimately receive `F16`, so this is fail-closed
     /// evidence of an interpreter bug, not a conversion point.
+    /// The stored bf16 code units, when that is what was loaded.
+    ///
+    /// Deliberately NOT a widening accessor. A `Bf16` variant whose only
+    /// consumer called `as_f32()` would give a tidy type and zero
+    /// benefit: the whole point is that the compact bytes reach a kernel
+    /// still compact.
+    pub fn as_bf16(&self) -> Result<&'a [u16], VindexError> {
+        match self {
+            WeightSlice::Bf16(w) => Ok(w),
+            _ => Err(VindexError::Parse(
+                "backend declared bf16 weights but was handed another format — interpreter \
+                 loaded the wrong representation"
+                    .to_string(),
+            )),
+        }
+    }
+
     pub fn as_f32(&self) -> Result<&'a [f32], VindexError> {
         match self {
             WeightSlice::F32(w) => Ok(w),
-            WeightSlice::F16(_) | WeightSlice::Mxfp4 { .. } | WeightSlice::Nvfp4 { .. } => {
-                Err(VindexError::Parse(
-                    "backend declared f32 weights but was handed another format — interpreter \
+            WeightSlice::Bf16(_)
+            | WeightSlice::F16(_)
+            | WeightSlice::Mxfp4 { .. }
+            | WeightSlice::Nvfp4 { .. } => Err(VindexError::Parse(
+                "backend declared f32 weights but was handed another format — interpreter \
                  loaded the wrong representation"
-                        .to_string(),
-                ))
-            }
+                    .to_string(),
+            )),
         }
     }
 }

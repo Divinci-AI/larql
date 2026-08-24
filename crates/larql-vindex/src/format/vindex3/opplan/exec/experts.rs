@@ -420,6 +420,15 @@ fn from_f32(
         }
         WeightFormat::Mxfp4 => quantize_mxfp4(&values, rows, k, name),
         WeightFormat::Nvfp4 => quantize_nvfp4(&values, rows, k, name),
+        // This path has already widened to f32 (packed expert banks
+        // arrive that way), and narrowing back would ROUND — bf16
+        // residency means the stored bytes are the resident bytes, and
+        // there are no stored bytes left here to keep. Refuse rather
+        // than quietly return something the format does not promise.
+        WeightFormat::Bf16 => Err(VindexError::Parse(format!(
+            "tensor `{name}`: bf16 residency needs the stored bytes, and this expert path \
+             has already widened to f32"
+        ))),
     }
 }
 

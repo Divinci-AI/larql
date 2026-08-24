@@ -392,6 +392,7 @@ pub(super) fn mxfp4_bytes(operands: &FfnOperands) -> Vec<(Vec<u8>, Vec<u8>)> {
 pub(super) fn slice_kind(slice: &WeightSlice<'_>) -> &'static str {
     match slice {
         WeightSlice::F32(_) => "f32",
+        WeightSlice::Bf16(_) => "bf16",
         WeightSlice::F16(_) => "f16",
         WeightSlice::Mxfp4 { .. } => "mxfp4",
         WeightSlice::Nvfp4 { .. } => "nvfp4",
