@@ -173,22 +173,36 @@ weights under the same head scale.
 
 **Head-scale confound: checked, absent.** A pre-fix Granite encode carrying
 `output_multiplier: 10.0` — the `logits_scaling` defect, a factor of 100 —
-exists at `granite-4.1-3b-broken-logit-scale-control.vindex3` and **must
-not be used**. It was checked rather than assumed, because a reference on
-`0.1` compared against an R0 arm on `10.0` would have made every banked
-Granite verdict a measurement of the head scale:
+existed when these verdicts were banked. It was checked rather than
+assumed, because a reference on `0.1` compared against an R0 arm on `10.0`
+would have made every banked Granite verdict a measurement of the head
+scale:
 
 | container | `head.output_multiplier` |
 |---|---|
 | `granite-4.1-3b.vindex3` (canonical) | **0.1** — correct |
 | `granite-4.1-3b-deploy.vindex3` (R0 arm) | **0.1** — correct |
-| `…-broken-logit-scale-control.vindex3` | **10.0** — the defect, quarantined |
+| the pre-fix encode *(since deleted)* | **10.0** — the defect |
 
 Both Granite arms are on `0.1` and Glimmer's containers all agree at
-`0.196116…`, so neither model's verdicts are confounded. The defect is
-pinned in-repo by
-`inventory::tests::resolved::granite_resolves_its_divisor_head_scale_to_a_multiplier`,
-falsification-verified.
+`0.196116…`, so neither model's verdicts are confounded.
+
+The pre-fix container was verified end to end against the canonical one —
+same 4 tokens, identical argmax `89`, logits `+1451.1790` against
+`+14.5118`, a ratio of exactly `100.0000` — and then **deleted on
+2026-08-24**, once the defect was pinned in-repo and did not need 6.3 GiB
+of disk to reproduce:
+
+```text
+detect::tests::declared_scalars::granite_spellings_resolve_through_the_canonical_names
+    logits_scaling 10.0  ->  logit_scale() == Some(0.1)          [on main]
+
+inventory::tests::resolved::granite_resolves_its_divisor_head_scale_to_a_multiplier
+    config in  ->  ResolvedExecution.output_multiplier == 0.1    [this branch]
+```
+
+Both falsification-verified: reverting `logit_scale()` to pass the divisor
+through fails the second with `must carry 1/10, got 10`.
 
 The head multiplier sits downstream of every tapped site, so it cannot
 affect `d_j` — but the container is pinned by digest anyway rather than
