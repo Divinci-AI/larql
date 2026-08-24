@@ -23,6 +23,7 @@ mod hybrid_traversal;
 mod mrope_parity;
 mod output_gate_fused;
 mod plan_fixtures;
+mod qw36c_layer0;
 #[rustfmt::skip]
 mod qw2_tiny_fixture;
 mod gated_delta_refusal;
