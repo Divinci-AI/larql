@@ -38,6 +38,8 @@ pub mod weights;
 #[cfg(test)]
 mod tests;
 
+use larql_models::config::GateSource;
+
 use super::{AttentionOp, ComponentOpPlan, LayerPlan};
 use crate::error::VindexError;
 use backend::{
@@ -639,13 +641,24 @@ impl AttentionOperands {
                 Some(qk) => Some((store.load(&qk.q)?, store.load(&qk.k)?)),
                 None => None,
             },
+            // **One physical projection, two consumers.**
+            //
+            // A `FusedQueryProjection` gate names the QUERY operand — the
+            // op builder binds `OperandRole::AttnQ` for it — so loading it
+            // here would hold Qwen3.8's `12288 x 5120` q_proj twice: 2.01
+            // GB of the same bytes under two names. The call builder hands
+            // both consumers the one slice instead.
+            //
+            // Keyed on the judged gate SOURCE rather than on the two
+            // operands resolving to the same tensor. The source is what
+            // the plan asserts; pointer identity would make this an
+            // optimisation that silently stopped applying the day an
+            // unrelated loader change broke the aliasing.
             gate: match &op.output_gate {
-                Some(gate) => Some(load_weight(
-                    store,
-                    &gate.projection,
-                    format(&gate.projection),
-                )?),
-                None => None,
+                Some(gate) if gate.spec.source != GateSource::FusedQueryProjection => Some(
+                    load_weight(store, &gate.projection, format(&gate.projection))?,
+                ),
+                _ => None,
             },
             biases: match (&op.q_bias, &op.k_bias, &op.v_bias, &op.o_bias) {
                 (Some(q), Some(k), Some(v), Some(o)) => Some([
@@ -717,10 +730,22 @@ impl AttentionOperands {
             _ => None,
         };
         let gate = match (&op.output_gate, &self.gate) {
+            // Its own operand: an `AttentionInput` gate is a separate
+            // matrix read over a separate activation.
             (Some(gate), Some(weight)) => Some(GateCall {
                 spec: gate.spec,
                 weight: weight.slice(),
             }),
+            // The other half of the query projection — the same slice,
+            // not a copy of it. A backend that computes both halves at
+            // once reads these bytes once; one that projects again is
+            // still CORRECT, because the operand really is `w_q`.
+            (Some(gate), None) if gate.spec.source == GateSource::FusedQueryProjection => {
+                Some(GateCall {
+                    spec: gate.spec,
+                    weight: self.w_q.slice(),
+                })
+            }
             _ => None,
         };
         let bias = self.biases.as_ref().map(|[q, k, v, o]| BiasCall {

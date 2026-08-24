@@ -43,6 +43,7 @@ mod residency;
 mod residency_census;
 mod routed;
 mod seam;
+mod shared_projection;
 mod sinks_bias;
 mod smoke;
 mod streaming;

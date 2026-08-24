@@ -268,15 +268,7 @@ pub fn timed(class: OpClass) -> Timed {
     }
 }
 
-static LEDGER: TimingLedger = TimingLedger {
-    slots: [const {
-        Slot {
-            calls: AtomicU64::new(0),
-            nanos: AtomicU64::new(0),
-        }
-    }; 14],
-    nested: AtomicU64::new(0),
-};
+static LEDGER: TimingLedger = TimingLedger::new();
 
 /// The process's timing ledger.
 pub fn ledger() -> &'static TimingLedger {

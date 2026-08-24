@@ -16,6 +16,7 @@
 //! always on rather than behind a feature that would be off exactly when
 //! a number needed explaining.
 
+use std::cell::Cell;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::physical::PhysicalProjectionPlan;
@@ -77,6 +78,7 @@ impl ProjectionLedger {
     }
 
     pub(super) fn record(&self, plan: PhysicalProjectionPlan, bytes: usize, slabs: usize) {
+        THREAD_CALLS.with(|c| c.set(c.get() + 1));
         let t = self.tally(plan);
         t.calls.fetch_add(1, Ordering::Relaxed);
         t.bytes.fetch_add(bytes as u64, Ordering::Relaxed);
@@ -136,4 +138,24 @@ static LEDGER: ProjectionLedger = ProjectionLedger {
 /// The process's projection ledger.
 pub fn ledger() -> &'static ProjectionLedger {
     &LEDGER
+}
+
+thread_local! {
+    /// Projections ISSUED BY THIS THREAD.
+    static THREAD_CALLS: Cell<u64> = const { Cell::new(0) };
+}
+
+/// How many projections this thread has issued.
+///
+/// The process ledger prices a decode step, which runs on one thread, so
+/// for that purpose the two agree. This exists for the case they do not:
+/// a caller — a test, most often — that needs a count immune to whatever
+/// else the process is doing concurrently. Comparing two arms against a
+/// shared counter while the rest of a suite runs its own projections
+/// measures the suite, not the arms.
+///
+/// Counts the CALL, not the worker slabs it fans out into, because it is
+/// recorded on the issuing thread before the fan-out.
+pub fn thread_projection_calls() -> u64 {
+    THREAD_CALLS.with(|c| c.get())
 }

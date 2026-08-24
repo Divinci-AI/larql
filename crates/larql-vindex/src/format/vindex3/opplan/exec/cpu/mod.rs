@@ -27,7 +27,7 @@ pub mod projector;
 
 pub use executor::{shared, CpuExecutor};
 pub use kernels::{BlasF32, FusedBf16, ScalarF32};
-pub use ledger::{ledger, PlanTally, ProjectionLedger};
+pub use ledger::{ledger, thread_projection_calls, PlanTally, ProjectionLedger};
 pub use physical::PhysicalProjectionPlan;
 pub use projector::{CpuParallelism, DenseProjector, WeightRows};
 

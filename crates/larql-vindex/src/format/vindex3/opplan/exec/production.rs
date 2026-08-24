@@ -509,14 +509,30 @@ pub(super) fn aggregate_heads<'k>(
     concat
 }
 
+/// One position's projections, plus the gate half when it came out of
+/// the same product.
+///
+/// Private to this backend: `ProjectedQkv` is the shared seam type and
+/// the reference backend deliberately still projects the gate a second
+/// time — it is the literal transcription, and the oracle's value is that
+/// it does the obvious thing. That the two agree to 4e-7 is what licenses
+/// this sharing.
+pub(super) struct ProjectedAttention {
+    pub(super) qkv: ProjectedQkv,
+    /// The gate's values when the plan said they are the other half of
+    /// the query projection. `None` for a gate with its own operand, and
+    /// for a layer with no gate at all.
+    pub(super) gate: Option<Vec<f32>>,
+}
+
 impl ProductionBackend {
     /// One position's Q/K/V projections through the production matvec,
     /// conditioned by the shared glue.
-    fn project_position(
+    pub(super) fn project_position(
         call: &AttentionCall<'_>,
         position: usize,
         pre: &[f32],
-    ) -> Result<ProjectedQkv, VindexError> {
+    ) -> Result<ProjectedAttention, VindexError> {
         let head_dim = call.head_dim;
         let q_rows = call.num_q_heads * head_dim;
         let kv_rows = call.num_kv_heads * head_dim;
@@ -527,28 +543,53 @@ impl ProductionBackend {
             call.gate.as_ref().map(|g| g.spec.source),
             Some(GateSource::FusedQueryProjection)
         );
-        let mut q = if fused_gate {
+        // **Both halves come out of one product.**
+        //
+        // `FusedQueryProjection` says the gate IS the other half of this
+        // projection, over this same activation. Projecting again to
+        // collect it read Qwen3.8's `12288 x 5120` q_proj a second time
+        // per layer — 2.01 GB/token, 3.8% of every token's traffic, for a
+        // vector already computed and discarded.
+        //
+        // The gather is per HEAD, not a contiguous range: head 0's query
+        // rows, then head 0's gate rows, then head 1's. Taking the first
+        // or second `q_rows` would have the right shape and the wrong
+        // tensor.
+        let (mut q, gate) = if fused_gate {
             let full = project_matrix(&call.w_q, pre, q_rows * 2, call.hidden)?;
-            gather_fused_half(&full, call.num_q_heads, head_dim, FusedHalf::Query)
+            (
+                gather_fused_half(&full, call.num_q_heads, head_dim, FusedHalf::Query),
+                Some(gather_fused_half(
+                    &full,
+                    call.num_q_heads,
+                    head_dim,
+                    FusedHalf::Gate,
+                )),
+            )
         } else {
-            project_matrix(&call.w_q, pre, q_rows, call.hidden)?
+            (project_matrix(&call.w_q, pre, q_rows, call.hidden)?, None)
         };
         let mut k = project_matrix(&call.w_k, pre, kv_rows, call.hidden)?;
         let mut v = project_matrix(&call.w_v, pre, kv_rows, call.hidden)?;
         add_projection_biases(call, &mut q, &mut k, &mut v);
         condition_v_in_place(call, &mut v);
         condition_qk_in_place(call, position, &mut q, &mut k)?;
-        Ok((q, k, v))
+        Ok(ProjectedAttention {
+            qkv: (q, k, v),
+            gate,
+        })
     }
 
     /// Aggregation plus this backend's own gate and output matmuls.
-    fn attend_position<'k>(
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn attend_position<'k>(
         call: &AttentionCall<'_>,
         position: usize,
         query: &[f32],
         key_of: impl Fn(usize) -> &'k [f32],
         value_of: impl Fn(usize) -> &'k [f32],
         gate_input: &[f32],
+        projected_gate: Option<&[f32]>,
     ) -> Result<Vec<f32>, VindexError> {
         let q_rows = call.num_q_heads * call.head_dim;
         let mut concat = aggregate_heads(call, position, query, key_of, value_of);
@@ -560,13 +601,23 @@ impl ProductionBackend {
             let GateActivation::Sigmoid = spec.activation;
             let GateCombine::ElementwiseMultiply = spec.combine;
             let GatePlacement::AfterAggregationBeforeOutputProjection = spec.placement;
-            let gate_values = match spec.source {
-                GateSource::AttentionInput => {
-                    project_matrix(weight, gate_input, q_rows, call.hidden)?
-                }
-                GateSource::FusedQueryProjection => {
+            let gate_values = match (spec.source, projected_gate) {
+                // Already computed: the projection that produced the
+                // queries produced these in the same pass.
+                (GateSource::FusedQueryProjection, Some(values)) => values.to_vec(),
+                // A fused gate with nothing handed over — the batched
+                // path before it threads one through, or a caller that
+                // reached here another way. Correct, and reads the
+                // operand a second time; the ledger shows it as an extra
+                // call rather than hiding it.
+                (GateSource::FusedQueryProjection, None) => {
                     let full = project_matrix(weight, gate_input, q_rows * 2, call.hidden)?;
                     gather_fused_half(&full, call.num_q_heads, call.head_dim, FusedHalf::Gate)
+                }
+                // Its own matrix over its own activation: nothing to
+                // share, and sharing would be wrong.
+                (GateSource::AttentionInput, _) => {
+                    project_matrix(weight, gate_input, q_rows, call.hidden)?
                 }
             };
             let _t = timed(OpClass::OutputGate);
@@ -641,7 +692,7 @@ impl PlanBackend for ProductionBackend {
         // Positions are independent, so projection runs in parallel with
         // each position's arithmetic untouched — bit-identical to the
         // serial order.
-        let projected: Vec<(Vec<f32>, Vec<f32>, Vec<f32>)> = call
+        let projected: Vec<ProjectedAttention> = call
             .inputs
             .par_iter()
             .enumerate()
@@ -650,10 +701,19 @@ impl PlanBackend for ProductionBackend {
         let mut queries = Vec::with_capacity(projected.len());
         let mut keys = Vec::with_capacity(projected.len());
         let mut values = Vec::with_capacity(projected.len());
-        for (q, k, v) in projected {
+        // The gate halves travel with their positions: the batched path
+        // shares the projection exactly as the step path does, so the two
+        // do not differ in how many times they read `w_q`.
+        let mut gates: Vec<Option<Vec<f32>>> = Vec::with_capacity(projected.len());
+        for ProjectedAttention {
+            qkv: (q, k, v),
+            gate,
+        } in projected
+        {
             queries.push(q);
             keys.push(k);
             values.push(v);
+            gates.push(gate);
         }
 
         // Each query position reads every position's K/V but writes only
@@ -669,6 +729,7 @@ impl PlanBackend for ProductionBackend {
                     |p| keys[p].as_slice(),
                     |p| values[p].as_slice(),
                     &call.inputs[position],
+                    gates[position].as_deref(),
                 )
             })
             .collect::<Result<_, VindexError>>()?;
@@ -682,7 +743,10 @@ impl PlanBackend for ProductionBackend {
     fn attention_step(&self, step: AttentionStepCall<'_>) -> Result<AttentionStepOut, VindexError> {
         let call = &step.op;
         let pre = &call.inputs[0];
-        let (q, k, v) = Self::project_position(call, step.position, pre)?;
+        let ProjectedAttention {
+            qkv: (q, k, v),
+            gate,
+        } = Self::project_position(call, step.position, pre)?;
         let output = Self::attend_position(
             call,
             step.position,
@@ -702,6 +766,7 @@ impl PlanBackend for ProductionBackend {
                 }
             },
             pre,
+            gate.as_deref(),
         )?;
         Ok(AttentionStepOut {
             key: k,
