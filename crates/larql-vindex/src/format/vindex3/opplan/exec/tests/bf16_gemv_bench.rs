@@ -53,6 +53,78 @@ fn tiled_blas(w: &[u16], x: &[f32], out_dim: usize, in_dim: usize, rows: usize) 
     y
 }
 
+/// **The candidate.** Fused: load BF16, widen in REGISTERS, multiply by
+/// the f32 activation, accumulate in f32. No scratch matrix, so the only
+/// bytes crossing RAM are the 2-per-weight actually stored.
+///
+/// The widen is exact — bf16 is the top half of f32, so `(bits as u32)
+/// << 16` reproduces the value with no rounding and no table. The
+/// activation stays f32 and the accumulator stays f32, which keeps this
+/// a change of REPRESENTATION AND MECHANICS ONLY: no stored weight and
+/// no residual-stream value takes a different numerical value than the
+/// f32 path would give. Rounding activations to bf16 would be a second,
+/// separate precision decision and is deliberately not made here.
+///
+/// Four accumulators to hide FMA latency; the tail is scalar.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn fused_bf16_dot(w: &[u16], x: &[f32]) -> f32 {
+    use std::arch::aarch64::*;
+    let n = x.len();
+    let (wp, xp) = (w.as_ptr(), x.as_ptr());
+    let (mut a0, mut a1) = (vdupq_n_f32(0.0), vdupq_n_f32(0.0));
+    let (mut a2, mut a3) = (vdupq_n_f32(0.0), vdupq_n_f32(0.0));
+    let mut i = 0usize;
+    while i + 16 <= n {
+        let w0 = vld1q_u16(wp.add(i));
+        let w1 = vld1q_u16(wp.add(i + 8));
+        let f0 = vreinterpretq_f32_u32(vshlq_n_u32(vmovl_u16(vget_low_u16(w0)), 16));
+        let f1 = vreinterpretq_f32_u32(vshlq_n_u32(vmovl_u16(vget_high_u16(w0)), 16));
+        let f2 = vreinterpretq_f32_u32(vshlq_n_u32(vmovl_u16(vget_low_u16(w1)), 16));
+        let f3 = vreinterpretq_f32_u32(vshlq_n_u32(vmovl_u16(vget_high_u16(w1)), 16));
+        a0 = vfmaq_f32(a0, f0, vld1q_f32(xp.add(i)));
+        a1 = vfmaq_f32(a1, f1, vld1q_f32(xp.add(i + 4)));
+        a2 = vfmaq_f32(a2, f2, vld1q_f32(xp.add(i + 8)));
+        a3 = vfmaq_f32(a3, f3, vld1q_f32(xp.add(i + 12)));
+        i += 16;
+    }
+    let mut acc = vaddvq_f32(vaddq_f32(vaddq_f32(a0, a1), vaddq_f32(a2, a3)));
+    while i < n {
+        acc += f32::from_bits((*w.get_unchecked(i) as u32) << 16) * *x.get_unchecked(i);
+        i += 1;
+    }
+    acc
+}
+
+#[cfg(target_arch = "aarch64")]
+fn fused_bf16(w: &[u16], x: &[f32], out_dim: usize, in_dim: usize) -> Vec<f32> {
+    (0..out_dim)
+        .map(|o| unsafe { fused_bf16_dot(&w[o * in_dim..(o + 1) * in_dim], x) })
+        .collect()
+}
+
+/// The same kernel with output rows across workers — CPU-1B0 showed
+/// threading saturates at two on the f32 path, so this asks whether a
+/// kernel reading HALF the bytes has more headroom.
+#[cfg(target_arch = "aarch64")]
+fn fused_bf16_threaded(
+    w: &[u16],
+    x: &[f32],
+    out_dim: usize,
+    in_dim: usize,
+    workers: usize,
+) -> Vec<f32> {
+    use rayon::prelude::*;
+    let rows = out_dim.div_ceil(workers);
+    w.par_chunks(rows * in_dim)
+        .flat_map_iter(|slab| {
+            (0..slab.len() / in_dim)
+                .map(|o| unsafe { fused_bf16_dot(&slab[o * in_dim..(o + 1) * in_dim], x) })
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
 /// Scalar dot with widening inlined — no scratch at all.
 fn direct_scalar(w: &[u16], x: &[f32], out_dim: usize, in_dim: usize) -> Vec<f32> {
     (0..out_dim)
@@ -147,6 +219,46 @@ fn bench_shape(label: &str, out_dim: usize, in_dim: usize) {
         scal * 1e3,
         stored_bytes / scal / 1e9,
     );
+    #[cfg(target_arch = "aarch64")]
+    {
+        let t = Instant::now();
+        for _ in 0..iters {
+            sink += fused_bf16(&bf, &x, out_dim, in_dim)[0];
+        }
+        let f1 = t.elapsed().as_secs_f64() / iters as f64;
+        println!(
+            "     bf16 fused x1   {:7.2} ms   {:6.1} GB/s read   {:5.2}x vs f32 blas",
+            f1 * 1e3,
+            stored_bytes / f1 / 1e9,
+            base / f1
+        );
+        for workers in [2usize, 4, 8, 12] {
+            let t = Instant::now();
+            for _ in 0..iters {
+                sink += fused_bf16_threaded(&bf, &x, out_dim, in_dim, workers)[0];
+            }
+            let dt = t.elapsed().as_secs_f64() / iters as f64;
+            println!(
+                "     bf16 fused x{workers:<2}  {:7.2} ms   {:6.1} GB/s read   {:5.2}x vs f32 blas",
+                dt * 1e3,
+                stored_bytes / dt / 1e9,
+                base / dt
+            );
+        }
+        // Exactness: the widen must reproduce the f32 path bit-for-bit
+        // up to summation order alone.
+        let a = fused_bf16(&bf, &x, out_dim, in_dim);
+        let b = larql_compute::cpu::ops::moe::math::matmul_vec(&x, &f32w, out_dim, in_dim);
+        let (mut num, mut den) = (0.0f64, 0.0f64);
+        for (p, q) in a.iter().zip(&b) {
+            num += (*p as f64 - *q as f64).powi(2);
+            den += (*q as f64).powi(2);
+        }
+        println!(
+            "     fused vs f32 blas  rel_rms {:.3e}  (summation order only)",
+            (num / den.max(f64::MIN_POSITIVE)).sqrt()
+        );
+    }
     for (n, dt, gbs) in &thr {
         println!(
             "     f32 x{n:<2}         {:7.2} ms   {:6.1} GB/s read   {:5.2}x vs 1 thread",
