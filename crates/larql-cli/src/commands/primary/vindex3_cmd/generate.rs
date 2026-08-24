@@ -41,6 +41,13 @@ pub(super) fn run_generate<B: PlanBackend>(
     plan: &ComponentOpPlan,
     store: &OperandStore,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // Admission BEFORE any work: this is the only point at which the
+    // load average is about the machine rather than about us.
+    let replaying = std::env::var("LARQL_REPLAY_PROJECTIONS").is_ok();
+    if replaying && !admitted(cpu::environment::Phase::BeforeWork)? {
+        return Ok(());
+    }
+
     let loading = Instant::now();
     let mut session = DecodeSession::new(plan, store, backend)?;
     let load_seconds = loading.elapsed().as_secs_f64();
@@ -141,7 +148,7 @@ pub(super) fn run_generate<B: PlanBackend>(
         report_projections(seconds, &tallies);
         report_leaves(seconds);
     }
-    if std::env::var("LARQL_REPLAY_PROJECTIONS").is_ok() {
+    if replaying {
         replay_projections(&mut session)?;
     }
     Ok(())
@@ -179,6 +186,28 @@ fn report_residency(census: &ResidencyCensus) {
 /// A path that kept bf16 resident and widened a scratch tile before
 /// computing would satisfy the census and show up here as `blas-f32` at
 /// twice the bytes.
+/// Whether this machine may be measured on, reporting either way.
+///
+/// Refuses rather than warns. Three contamination events in one session
+/// were each caught only because a number happened to be absurd, and a
+/// caveat attached to a plausible one does not survive contact with the
+/// table the number ends up in.
+fn admitted(phase: cpu::environment::Phase) -> Result<bool, Box<dyn std::error::Error>> {
+    let environment = cpu::Environment::read();
+    let refusals = environment.disqualifiers(phase);
+    println!("  machine ({phase:?}): {}", environment.describe());
+    if refusals.is_empty() {
+        return Ok(true);
+    }
+    println!("  REFUSING to measure — this machine is not quiet:");
+    for reason in &refusals {
+        println!("    - {reason}");
+    }
+    println!("  Nothing is reported: a contaminated replay would calibrate the cost");
+    println!("  model against whatever else was running.");
+    Ok(false)
+}
+
 /// **CPU-PERF-3B.** Replay one steady token's projections against the
 /// operands the model is already holding.
 ///
@@ -196,6 +225,14 @@ fn replay_projections<B: PlanBackend>(
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Capture one more step, which the report above has already priced,
     // so the replay and the ledger describe the same call set.
+    // Sanity AFTER our own load phase: external signals only. Opening a
+    // 51 GB model is sixteen seconds of every core, so a raised
+    // one-minute average at this point is US, and refusing for it would
+    // be refusing LARQL for being LARQL.
+    if !admitted(cpu::environment::Phase::AfterWork)? {
+        return Ok(());
+    }
+
     cpu::start_capture();
     session.step(0)?;
     let calls = cpu::take_capture();

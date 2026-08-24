@@ -194,7 +194,11 @@ fn slicing_rows_cuts_the_scales_too() {
 ///
 /// Biased by 8 so a nibble is unsigned 0..15 — the kernel's unbias is one
 /// vector subtract rather than a sign-extension from four bits.
-fn quantise_q4(weights: &[f32], in_dim: usize, block: usize) -> (Vec<u8>, Vec<f32>) {
+pub(super) fn quantise_q4_for_test(
+    weights: &[f32],
+    in_dim: usize,
+    block: usize,
+) -> (Vec<u8>, Vec<f32>) {
     let per_row = in_dim.div_ceil(block);
     let rows = weights.len() / in_dim;
     let mut packed = vec![0u8; weights.len() / 2];
@@ -229,7 +233,7 @@ fn the_q4_kernel_computes_what_the_format_denotes() {
     const OUT: usize = 5;
     for in_dim in [BLOCK, BLOCK * 3, 5120] {
         let w = lcg_values(OUT * in_dim, 15);
-        let (packed, scales) = quantise_q4(&w, in_dim, BLOCK);
+        let (packed, scales) = quantise_q4_for_test(&w, in_dim, BLOCK);
         let x = lcg_values(in_dim, 16);
         let mut got = vec![0.0f32; OUT];
         FusedQ4.project_rows(
@@ -272,7 +276,7 @@ fn slicing_q4_rows_halves_the_byte_offset() {
     const OUT: usize = 8;
     let in_dim = BLOCK * 2;
     let w = lcg_values(OUT * in_dim, 17);
-    let (packed, scales) = quantise_q4(&w, in_dim, BLOCK);
+    let (packed, scales) = quantise_q4_for_test(&w, in_dim, BLOCK);
     let rows = WeightRows::Q4 {
         packed: &packed,
         scales: &scales,
@@ -327,7 +331,7 @@ fn bf16_against_q8_against_q4_on_the_real_shapes() {
         let f32w = lcg_values(out_dim * in_dim, 11);
         let bf: Vec<u16> = f32w.iter().map(|v| (v.to_bits() >> 16) as u16).collect();
         let (codes, q8_scales) = quantise(&f32w, in_dim, BLOCK);
-        let (packed, q4_scales) = quantise_q4(&f32w, in_dim, BLOCK);
+        let (packed, q4_scales) = quantise_q4_for_test(&f32w, in_dim, BLOCK);
         let x = lcg_values(in_dim, 22);
         let arms = [
             WeightRows::Bf16(&bf),

@@ -120,6 +120,58 @@ unsafe fn sdot_row(codes: &[i8], scales: &[f32], qx: &[i8], in_dim: usize) -> f3
     acc
 }
 
+/// **CPU-4Y.** Q4 weights against a Q8 activation.
+///
+/// CPU-4A killed Q4 x F32 — half the bytes, 20% SLOWER, because the
+/// kernel was already conversion-bound and Q4 adds a nibble split on top.
+/// But SDOT then showed that integer arithmetic removes the conversion
+/// tax entirely and puts Q8 back on the memory wall at 118 GB/s.
+///
+/// So the two levers are coupled, and CPU-4A tested one alone. Q4's 14.4
+/// GB/token against a ~120 GB/s wall is a ~120 ms floor; the question is
+/// only how much of that the nibble unpack gives back.
+///
+/// The unpack feeds SDOT directly: mask and shift a 16-byte load into two
+/// int8 vectors, unbias by 8, and dot each against its half of the
+/// activation. No widening, no float anywhere in the inner loop.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "dotprod")]
+unsafe fn q4_sdot_row(packed: &[u8], scales: &[f32], qx: &[i8], in_dim: usize) -> f32 {
+    use std::arch::aarch64::*;
+    let mask = vdupq_n_u8(0x0f);
+    let bias = vdupq_n_s8(8);
+    let mut acc = 0.0f32;
+    for (b, scale) in scales.iter().enumerate() {
+        let lo = b * BLOCK;
+        let hi = (lo + BLOCK).min(in_dim);
+        let half = (hi - lo) / 2;
+        let base = packed.as_ptr().add(lo / 2);
+        let xbase = qx.as_ptr().add(lo);
+        let mut lanes = vdupq_n_s32(0);
+        let mut j = 0usize;
+        while j + 16 <= half {
+            let raw = vld1q_u8(base.add(j));
+            // Byte `j` carries element `j` low and `j + half` high, so one
+            // load yields two CONTIGUOUS runs rather than 32 interleaved
+            // elements — see `WeightRows::Q4`.
+            let low = vsubq_s8(vreinterpretq_s8_u8(vandq_u8(raw, mask)), bias);
+            let high = vsubq_s8(vreinterpretq_s8_u8(vshrq_n_u8(raw, 4)), bias);
+            lanes = vdotq_s32(lanes, low, vld1q_s8(xbase.add(j)));
+            lanes = vdotq_s32(lanes, high, vld1q_s8(xbase.add(j + half)));
+            j += 16;
+        }
+        let mut sum = vaddvq_s32(lanes);
+        while j < half {
+            let byte = *packed.get_unchecked(lo / 2 + j);
+            sum += ((byte & 0x0f) as i32 - 8) * *qx.get_unchecked(lo + j) as i32;
+            sum += ((byte >> 4) as i32 - 8) * *qx.get_unchecked(lo + j + half) as i32;
+            j += 1;
+        }
+        acc += scale * sum as f32;
+    }
+    acc
+}
+
 /// The portable definition, and what runs where `dotprod` is absent.
 fn sdot_row_portable(codes: &[i8], scales: &[f32], qx: &[i8], in_dim: usize) -> f32 {
     let mut acc = 0.0f32;
@@ -239,6 +291,45 @@ fn time(iters: usize, mut f: impl FnMut()) -> f64 {
     t.elapsed().as_secs_f64() / iters as f64
 }
 
+/// Q4 x Q8 realises what the Q4 format denotes, against a portable
+/// definition of the same integer arithmetic.
+#[test]
+fn the_q4_integer_kernel_computes_what_the_format_denotes() {
+    #[cfg(target_arch = "aarch64")]
+    {
+        if !std::arch::is_aarch64_feature_detected!("dotprod") {
+            return;
+        }
+        const IN: usize = BLOCK * 3;
+        let w = lcg_values(IN, 51);
+        let (packed, scales) = super::q8::quantise_q4_for_test(&w, IN, BLOCK);
+        let x = lcg_values(IN, 52);
+        let mut qx = vec![0i8; IN];
+        quantise_activation(&x, &mut qx);
+
+        // The definition: unbiased nibble times quantised activation,
+        // summed per block and scaled once.
+        let mut want = 0.0f32;
+        for (b, scale) in scales.iter().enumerate() {
+            let (lo, hi) = (b * BLOCK, (b + 1) * BLOCK);
+            let half = (hi - lo) / 2;
+            let mut sum = 0i32;
+            for j in 0..half {
+                let byte = packed[lo / 2 + j];
+                sum += ((byte & 0x0f) as i32 - 8) * qx[lo + j] as i32;
+                sum += ((byte >> 4) as i32 - 8) * qx[lo + j + half] as i32;
+            }
+            want += scale * sum as f32;
+        }
+        // SAFETY: `dotprod` checked above.
+        let got = unsafe { q4_sdot_row(&packed, &scales, &qx, IN) };
+        assert!(
+            (got - want).abs() <= want.abs() * 1e-5 + 1e-4,
+            "{got} against the format's {want}"
+        );
+    }
+}
+
 /// **The measurement.** Q8 x F32 against Q8 x Q8, three costs apart.
 #[test]
 fn q8_float_against_q8_integer() {
@@ -266,13 +357,16 @@ fn q8_float_against_q8_integer() {
     );
     println!(
         "  {:<22} {:>6} {:>10} {:>9} {:>9} {:>9} {:>8}",
-        "projection", "calls", "q8xf32 ms", "quant", "gemv", "rescale", "speedup"
+        "projection", "calls", "q8xf32", "q8xq8", "q4xq8", "q8 gain", "q4/q8"
     );
 
     let (mut float_ms, mut quant_ms, mut gemv_ms, mut rescale_ms) = (0.0, 0.0, 0.0, 0.0);
+    let mut q4_ms = 0.0f64;
+    let mut q4_gb = 0.0f64;
     for (name, out_dim, in_dim, calls) in super::projection_cost::COMPACT.iter().copied() {
-        let w = lcg_values(out_dim * in_dim, 11);
-        let (codes, scales) = quantise_weights(&w, in_dim);
+        let f32w_for_q4 = lcg_values(out_dim * in_dim, 11);
+        let w = &f32w_for_q4;
+        let (codes, scales) = quantise_weights(w, in_dim);
         let x = lcg_values(in_dim, 22);
         let rows = WeightRows::Q8 {
             codes: &codes,
@@ -311,6 +405,32 @@ fn q8_float_against_q8_integer() {
                 *v *= a_scale;
             }
         });
+
+        // CPU-4Y: the same integer arithmetic over HALF the bytes.
+        let (packed, q4_scales) = super::q8::quantise_q4_for_test(&f32w_for_q4, in_dim, BLOCK);
+        let q4_each = time(iters, || {
+            pool.install(|| {
+                use rayon::prelude::*;
+                out.par_chunks_mut(per).enumerate().for_each(|(i, slot)| {
+                    let start = i * per;
+                    let bytes_per_row = in_dim / 2;
+                    for (o, cell) in slot.iter_mut().enumerate() {
+                        let r = start + o;
+                        // SAFETY: `dotprod` checked before this bench ran.
+                        *cell = unsafe {
+                            q4_sdot_row(
+                                &packed[r * bytes_per_row..(r + 1) * bytes_per_row],
+                                &q4_scales[r * per_row..(r + 1) * per_row],
+                                &qx,
+                                in_dim,
+                            )
+                        };
+                    }
+                });
+            });
+        });
+        q4_ms += q4_each * calls as f64 * 1e3;
+        q4_gb += (packed.len() + q4_scales.len() * 4) as f64 * calls as f64 / 1e9;
         std::hint::black_box(&out);
 
         let c = calls as f64;
@@ -320,12 +440,12 @@ fn q8_float_against_q8_integer() {
         gemv_ms += gemv_each * c * 1e3;
         rescale_ms += rescale_each * c * 1e3;
         println!(
-            "  {name:<22} {calls:>6} {:>10.2} {:>9.2} {:>9.2} {:>9.2} {:>7.2}x",
+            "  {name:<22} {calls:>6} {:>10.2} {:>9.2} {:>9.2} {:>9.2} {:>8.2}",
             f32_each * c * 1e3,
-            quant_each * c * 1e3,
             gemv_each * c * 1e3,
-            rescale_each * c * 1e3,
+            q4_each * c * 1e3,
             f32_each * c * 1e3 / integer,
+            gemv_each / q4_each,
         );
     }
 
@@ -340,6 +460,28 @@ fn q8_float_against_q8_integer() {
         "Q8 x Q8 (SDOT)", integer_ms, quant_ms, gemv_ms, rescale_ms
     );
     println!("  {:<22} {:>10.2}x", "speedup", float_ms / integer_ms);
+    println!(
+        "  {:<22} {:>10.2} ms/token   {:.2} GB   {:.1} GB/s   {:.2}x over Q8xQ8",
+        "Q4 x Q8 (SDOT)",
+        q4_ms,
+        q4_gb,
+        q4_gb / (q4_ms / 1e3),
+        gemv_ms / q4_ms,
+    );
+    // Pre-registered before the run, so the number is read against a
+    // scale rather than talked into one.
+    println!(
+        "  {:<22} {}",
+        "CPU-4Y verdict",
+        match q4_ms {
+            m if m < 135.0 => "SPECTACULAR — essentially at the roofline",
+            m if m < 155.0 => "EXCELLENT",
+            m if m < 180.0 => "STRONG",
+            m if m < 210.0 => "USEFUL",
+            m if m < 230.0 => "MARGINAL over Q8 x Q8",
+            _ => "FAILED — unpack defeated the byte reduction again",
+        }
+    );
 
     // The control has to reproduce the number this is being judged
     // against, or the comparison is between two different harnesses.
