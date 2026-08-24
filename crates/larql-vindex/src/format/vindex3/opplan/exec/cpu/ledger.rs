@@ -137,7 +137,3 @@ static LEDGER: ProjectionLedger = ProjectionLedger {
 pub fn ledger() -> &'static ProjectionLedger {
     &LEDGER
 }
-
-#[cfg(test)]
-#[path = "ledger_tests.rs"]
-mod tests;

@@ -45,6 +45,7 @@ use super::cpu::PhysicalProjectionPlan;
 use super::kernels::{
     gather_fused_half, mrope_rotate_scaled, rope_rotate, rope_rotate_scaled, FusedHalf,
 };
+use super::timing::{timed, OpClass};
 use larql_compute::attention::rope::{
     rope_freq_plan, rope_freq_plan_proportional, RopeFreqScaling,
 };
@@ -158,6 +159,10 @@ pub(super) fn condition_qk_in_place(
         Some((scope, offset, q_w, k_w)) => (scope, offset, Some(q_w), Some(k_w)),
         None => (larql_models::config::QkNormScope::PerHead, 0.0, None, None),
     };
+    // Two leaves, not one: QK normalisation and position encoding are
+    // different operations that happen to be adjacent, and "conditioning
+    // cost 9 ms" would not say which to look at.
+    let norm = timed(OpClass::Norm);
     qk_norm_in_place(
         q,
         q_w.map(|w| (w, offset)),
@@ -182,6 +187,9 @@ pub(super) fn condition_qk_in_place(
             *value *= query_scale as f32;
         }
     }
+    drop(norm);
+
+    let _t = timed(OpClass::Rope);
     match call.position {
         PositionPolicy::Rope { theta } => {
             for head in q.chunks_exact_mut(head_dim) {
@@ -292,6 +300,7 @@ pub(super) fn condition_qk_in_place(
 /// for the production and device backends, applied right after the
 /// projection biases and before V is cached.
 pub(super) fn condition_v_in_place(call: &AttentionCall<'_>, v: &mut [f32]) {
+    let _t = timed(OpClass::Norm);
     if call.parameter_free_qk_norm.v {
         let normed = rms_norm_heads_no_weight_eps(
             &as_row(v),
@@ -462,6 +471,7 @@ pub(super) fn aggregate_heads<'k>(
         // component's own geometry here rather than this fallthrough.
         (AttentionSpan::Windowed, _) => 0,
     };
+    let _t = timed(OpClass::AttentionCore);
     let mut concat = vec![0.0f32; q_rows];
     for q_head in 0..call.num_q_heads {
         let kv_head = q_head / group;
@@ -559,6 +569,7 @@ impl ProductionBackend {
                     gather_fused_half(&full, call.num_q_heads, call.head_dim, FusedHalf::Gate)
                 }
             };
+            let _t = timed(OpClass::OutputGate);
             for (c, g) in concat.iter_mut().zip(&gate_values) {
                 *c *= 1.0 / (1.0 + (-g).exp());
             }
@@ -597,6 +608,7 @@ impl PlanBackend for ProductionBackend {
     }
 
     fn embed(&self, table: &[f32], hidden: usize, token: u32, scale: Option<f32>) -> Vec<f32> {
+        let _t = timed(OpClass::Embed);
         let row = &table[token as usize * hidden..(token as usize + 1) * hidden];
         match scale {
             Some(scale) => row.iter().map(|v| v * scale).collect(),
@@ -605,6 +617,7 @@ impl PlanBackend for ProductionBackend {
     }
 
     fn norm(&self, call: NormCall<'_>) -> Vec<f32> {
+        let _t = timed(OpClass::Norm);
         let weight = (!call.weight.is_empty()).then(|| call.weight.to_vec());
         let normed = match call.kind {
             NormType::RmsNorm => rms_norm_eps(
@@ -700,11 +713,18 @@ impl PlanBackend for ProductionBackend {
     fn ffn(&self, call: FfnCall<'_>) -> Result<Vec<f32>, VindexError> {
         require_plain_gate("production", call.gate_policy)?;
         let up = project_matrix(&call.up, call.x, call.intermediate, call.hidden)?;
-        let inner: Vec<f32> = match call.gate {
-            Some(gate_weight) => {
-                let gate = project_matrix(&gate_weight, call.x, call.intermediate, call.hidden)?;
+        let gate = match call.gate {
+            Some(w) => Some(project_matrix(&w, call.x, call.intermediate, call.hidden)?),
+            None => None,
+        };
+        // The activation ONLY. The three projections around it are timed
+        // by the executor, and a timer that spanned them would make this
+        // class the whole FFN.
+        let activation = timed(OpClass::FfnActivation);
+        let inner: Vec<f32> = match &gate {
+            Some(gate) => {
                 match call.activation {
-                    Activation::Silu => geglu_silu_alloc(&gate, &up),
+                    Activation::Silu => geglu_silu_alloc(gate, &up),
                     // The served Gemma gate/up kernel (tanh-approximated
                     // GELU on the gate, times up).
                     Activation::GeluTanh => gate
@@ -721,6 +741,7 @@ impl PlanBackend for ProductionBackend {
                 other => return Err(unsupported_activation("ungated", other)),
             },
         };
+        drop(activation);
         project_matrix(&call.down, &inner, call.hidden, call.intermediate)
     }
 
@@ -763,6 +784,10 @@ impl PlanBackend for ProductionBackend {
         softcapping: Option<f32>,
     ) -> Result<Vec<f32>, VindexError> {
         let mut logits = project_matrix(&projection, x, vocab, hidden)?;
+        // The vocabulary pass only — 248320 elements of multiplier and
+        // softcap, which is real work and nothing to do with the matmul
+        // that produced them.
+        let _t = timed(OpClass::Logits);
         for logit in &mut logits {
             if let Some(multiplier) = multiplier {
                 *logit *= multiplier as f32;
@@ -775,6 +800,7 @@ impl PlanBackend for ProductionBackend {
     }
 
     fn residual_add(&self, acc: &mut [f32], delta: &[f32]) {
+        let _t = timed(OpClass::Residual);
         for (a, b) in acc.iter_mut().zip(delta) {
             *a += b;
         }

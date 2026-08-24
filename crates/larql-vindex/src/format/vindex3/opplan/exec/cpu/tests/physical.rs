@@ -1,10 +1,10 @@
 //! The plan must pair a format with a kernel that consumes it, and the
 //! executor's observation must land on the loader's decision.
 
-use super::super::projector::WeightRows;
-use super::{
+use super::super::physical::{
     compact_threshold_bytes, project_matrix, ExecutorProjections, PhysicalProjectionPlan, F32_BYTES,
 };
+use super::super::projector::WeightRows;
 use crate::format::vindex3::opplan::exec::backend::{WeightFormat, WeightSlice};
 use crate::format::vindex3::opplan::exec::gated_delta::DenseProjections;
 

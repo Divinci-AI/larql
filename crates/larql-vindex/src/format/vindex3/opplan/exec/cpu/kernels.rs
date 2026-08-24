@@ -101,7 +101,7 @@ impl DenseProjector for FusedBf16 {
 
 /// One row's dot product, widening in registers.
 #[inline]
-fn bf16_dot(w: &[u16], x: &[f32]) -> f32 {
+pub(super) fn bf16_dot(w: &[u16], x: &[f32]) -> f32 {
     #[cfg(target_arch = "aarch64")]
     {
         // SAFETY: NEON is baseline on every aarch64 target Rust supports,
@@ -115,7 +115,7 @@ fn bf16_dot(w: &[u16], x: &[f32]) -> f32 {
 
 /// The portable widen-and-accumulate, and the definition the NEON
 /// version must agree with.
-fn bf16_dot_portable(w: &[u16], x: &[f32]) -> f32 {
+pub(super) fn bf16_dot_portable(w: &[u16], x: &[f32]) -> f32 {
     w.iter()
         .zip(x)
         .map(|(b, v)| f32::from_bits((*b as u32) << 16) * v)
@@ -152,7 +152,3 @@ unsafe fn bf16_dot_neon(w: &[u16], x: &[f32]) -> f32 {
     }
     acc
 }
-
-#[cfg(test)]
-#[path = "kernels_tests.rs"]
-mod tests;

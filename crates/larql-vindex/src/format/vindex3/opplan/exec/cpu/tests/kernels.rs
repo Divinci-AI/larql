@@ -2,8 +2,8 @@
 //! not change an answer.
 
 use super::super::executor::CpuExecutor;
+use super::super::kernels::{bf16_dot, bf16_dot_portable, BlasF32, FusedBf16, ScalarF32};
 use super::super::projector::{CpuParallelism, DenseProjector, WeightRows};
-use super::{BlasF32, FusedBf16, ScalarF32};
 use crate::format::vindex3::fixtures::lcg_values;
 
 fn narrow(v: f32) -> u16 {
@@ -358,16 +358,31 @@ fn the_shared_pool_is_one_pool() {
 /// The worker count falls back sanely where no performance-core split is
 /// reported — every non-Apple target, and a machine reporting nonsense.
 #[test]
-fn the_worker_count_survives_a_machine_that_reports_nothing() {
+fn the_worker_count_saturates_rather_than_fills_the_machine() {
     use super::super::executor::workers_from;
+    // Half the cores, because a streaming kernel saturates memory long
+    // before it runs out of cores — measured 488.7 ms of projection at
+    // twelve workers against 440.3 at six, on the same token.
+    assert_eq!(workers_from(Some(12)), 6);
+    assert_eq!(workers_from(Some(16)), 8);
+    // ...but never below the measured floor, where the memory system
+    // stops being saturated at all (3 workers cost 589 ms/token).
+    assert_eq!(workers_from(Some(8)), 4);
+    assert_eq!(workers_from(Some(6)), 4);
+    // ...and never more workers than the machine has cores.
+    assert_eq!(workers_from(Some(2)), 2);
+    assert_eq!(workers_from(Some(1)), 1);
+
+    // Nonsense and silence both fall back to the total core count, then
+    // through the same policy.
     let total = std::thread::available_parallelism().map_or(1, |n| n.get());
-    assert_eq!(workers_from(None), total);
+    let expect = (total / 2).clamp(1, total).max(4.min(total));
+    assert_eq!(workers_from(None), expect);
     assert_eq!(
         workers_from(Some(0)),
-        total,
+        expect,
         "zero performance cores is nonsense, not a pool size"
     );
-    assert_eq!(workers_from(Some(4)), 4);
 }
 
 /// `WeightRows` reports geometry and slices the same way in both
@@ -408,8 +423,8 @@ fn the_portable_and_neon_dots_agree() {
         let w: Vec<u16> = f.iter().map(|v| narrow(*v)).collect();
         let x: Vec<f32> = (0..len).map(|i| ((i * 11) as f32 * 0.017).cos()).collect();
 
-        let portable = super::bf16_dot_portable(&w, &x);
-        let dispatched = super::bf16_dot(&w, &x);
+        let portable = bf16_dot_portable(&w, &x);
+        let dispatched = bf16_dot(&w, &x);
         let magnitude: f32 = w.iter().zip(&x).map(|(b, v)| (widen(*b) * v).abs()).sum();
         assert!(
             (portable - dispatched).abs() <= 1e-6 * magnitude.max(1.0),
@@ -446,4 +461,27 @@ fn the_fused_kernel_refuses_widened_weights() {
     let w = [1.0f32; 8];
     let mut out = [0.0f32; 2];
     FusedBf16.project_rows(WeightRows::F32(&w), &[1.0; 4], &mut out);
+}
+
+/// The pool size can be pinned, and only by a value that makes sense.
+///
+/// The parse is deliberately strict about the floor: a `0` reaching
+/// `ThreadPoolBuilder` produces rayon's DEFAULT pool, not an empty one,
+/// so a typo would silently change the topology under a measurement and
+/// look like a result.
+#[test]
+fn a_pinned_pool_size_is_honoured_and_nonsense_is_not() {
+    use super::super::executor::{parse_workers, WORKERS_ENV};
+    assert_eq!(WORKERS_ENV, "LARQL_CPU_WORKERS");
+    // The executor's OWN parse, not a restatement of it: a test that
+    // rewrote the chain would agree with itself whatever the real one
+    // did. Called directly rather than through the environment, which the
+    // rest of the suite shares.
+    assert_eq!(parse_workers(Some("10")), Some(10));
+    assert_eq!(parse_workers(Some(" 8 ")), Some(8));
+    assert_eq!(parse_workers(Some("0")), None);
+    assert_eq!(parse_workers(Some("-4")), None);
+    assert_eq!(parse_workers(Some("many")), None);
+    assert_eq!(parse_workers(Some("")), None);
+    assert_eq!(parse_workers(None), None);
 }

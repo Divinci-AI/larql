@@ -22,6 +22,7 @@ use larql_vindex::format::vindex3::opplan::exec::cpu::{ledger, PhysicalProjectio
 use larql_vindex::format::vindex3::opplan::exec::decode::DecodeSession;
 use larql_vindex::format::vindex3::opplan::exec::operands::OperandStore;
 use larql_vindex::format::vindex3::opplan::exec::prepared::ResidencyCensus;
+use larql_vindex::format::vindex3::opplan::exec::timing;
 use larql_vindex::format::vindex3::opplan::ComponentOpPlan;
 
 /// The steady-state window is the tail half of the decode steps — after
@@ -74,6 +75,7 @@ pub(super) fn run_generate<B: PlanBackend>(
         let price_this_step = step + 1 == new_tokens.saturating_sub(1);
         if price_this_step {
             ledger().reset();
+            timing::ledger().reset();
         }
         let started = Instant::now();
         let logits = session
@@ -134,6 +136,7 @@ pub(super) fn run_generate<B: PlanBackend>(
     }
     if let Some((seconds, tallies)) = priced_step {
         report_projections(seconds, &tallies);
+        report_leaves(seconds);
     }
     Ok(())
 }
@@ -192,6 +195,69 @@ fn report_projections(seconds: f64, tallies: &[(PhysicalProjectionPlan, PlanTall
         );
     }
 }
+
+/// **Where the token's milliseconds went.**
+///
+/// The counterpart to the byte ledger, at the same call sites. Ends with
+/// the reconciliation rather than the classes, because the classes alone
+/// invite reading a table and skipping the part that says whether the
+/// table is complete.
+///
+/// `unattributed` is a FAILING DIAGNOSTIC, not a bucket. Above
+/// `UNATTRIBUTED_LIMIT` the instrumentation is incomplete and the right
+/// response is to find the missing boundary — not to optimise the
+/// largest named class, and not to name the gap and move on.
+fn report_leaves(seconds: f64) {
+    let l = timing::ledger();
+    let nested = l.nested();
+    let mut rows: Vec<_> = l.all().into_iter().filter(|(_, t)| t.calls > 0).collect();
+    rows.sort_by_key(|(_, t)| std::cmp::Reverse(t.nanos));
+
+    println!("\n  where the token went (one steady step):");
+    println!(
+        "  {:<18} {:>7} {:>10} {:>10} {:>8}",
+        "class", "calls", "total ms", "us/call", "% token"
+    );
+    let wall_ns = seconds * 1e9;
+    for (class, t) in &rows {
+        println!(
+            "  {:<18} {:>7} {:>9.2}  {:>9.2} {:>7.1}%",
+            class.name(),
+            t.calls,
+            t.nanos as f64 / 1e6,
+            t.nanos_per_call() / 1e3,
+            t.nanos as f64 / wall_ns * 100.0,
+        );
+    }
+
+    let timed_ns = l.total_nanos() as f64;
+    let unattributed = wall_ns - timed_ns;
+    let share = unattributed / wall_ns * 100.0;
+    println!("  {:-<58}", "");
+    println!("  {:<18} {:>28.2} ms", "timed leaves", timed_ns / 1e6);
+    println!(
+        "  {:<18} {:>28.2} ms  {:>6.1}%",
+        "unattributed",
+        unattributed / 1e6,
+        share
+    );
+    println!("  {:<18} {:>28.2} ms", "steady token wall", wall_ns / 1e6);
+    if nested > 0 {
+        println!(
+            "\n  REFUSING TO RECONCILE: {nested} overlapping timers. Leaves that nest \
+             double-count, so the total above is not a sum of disjoint work."
+        );
+    } else if share.abs() > UNATTRIBUTED_LIMIT {
+        println!(
+            "\n  INCOMPLETE: {share:.1}% unattributed exceeds {UNATTRIBUTED_LIMIT:.0}%. A \
+             boundary is missing — find it before optimising any class above."
+        );
+    }
+}
+
+/// Above this share of the token, the ledger is reporting its own gaps
+/// rather than the model's costs.
+const UNATTRIBUTED_LIMIT: f64 = 5.0;
 
 /// Snapshot every plan's tally.
 fn read_ledger() -> Vec<(PhysicalProjectionPlan, PlanTally)> {

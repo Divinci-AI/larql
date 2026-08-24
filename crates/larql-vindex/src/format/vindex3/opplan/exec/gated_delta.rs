@@ -27,6 +27,7 @@ use super::continuation::{
     StateInitialization,
 };
 use super::cpu::WeightRows;
+use super::timing::{timed, OpClass};
 
 /// L2-normalisation epsilon, from the reference kernel's own default.
 const L2NORM_EPS: f32 = 1e-6;
@@ -441,6 +442,7 @@ pub fn layer_forward_with(
         history[c * kernel + slot]
     };
     let mut conv: Vec<Vec<f32>> = vec![vec![0.0; conv_dim]; t_len];
+    let convolution = timed(OpClass::DeltaConv);
     for c in 0..conv_dim {
         let taps = &w.conv1d[c * kernel..(c + 1) * kernel];
         for t in 0..t_len {
@@ -481,9 +483,11 @@ pub fn layer_forward_with(
             };
         }
     }
+    drop(convolution);
 
     for t in 0..t_len {
         // Stage 3/4: split, then expand q/k from Hk heads to Hv.
+        let expand = timed(OpClass::DeltaHeadExpand);
         let mut q = vec![0.0f32; hv * dk];
         let mut k = vec![0.0f32; hv * dk];
         for e in 0..hv {
@@ -498,17 +502,22 @@ pub fn layer_forward_with(
             }
         }
         let value = conv[t][key_dim * 2..key_dim * 2 + value_dim].to_vec();
+        drop(expand);
 
-        // Stage 5: the gates.
+        // Stage 5: the gates. The three projections are timed by the
+        // executor; only the elementwise part is this leaf.
         let a = proj.project(w.in_proj_a, &hidden[t], hv);
         let b = proj.project(w.in_proj_b, &hidden[t], hv);
         let z = proj.project(w.in_proj_z, &hidden[t], value_dim);
+        let gates = timed(OpClass::DeltaGates);
         let beta: Vec<f32> = b.iter().map(|x| 1.0 / (1.0 + (-x).exp())).collect();
         let g: Vec<f32> = (0..hv)
             .map(|h| -w.a_log[h].exp() * softplus(a[h] + w.dt_bias[h]))
             .collect();
+        drop(gates);
 
         // Stage 6: the proven recurrence.
+        let recurrence = timed(OpClass::DeltaRecurrence);
         let core = step_inner(
             op,
             &RecurrenceStep {
@@ -522,8 +531,11 @@ pub fn layer_forward_with(
             mutation,
         );
 
+        drop(recurrence);
+
         // Stage 7: gated RMSNorm, per value head over Dv. Norm, then the
         // weight, then the SiLU'd gate — that order is the reference's.
+        let gated_norm = timed(OpClass::DeltaGatedNorm);
         let mut normed = vec![0.0f32; value_dim];
         for h in 0..hv {
             let row = &core[h * dv..(h + 1) * dv];
@@ -533,6 +545,8 @@ pub fn layer_forward_with(
                 normed[h * dv + d] = w.norm[d] * (row[d] * inv) * silu(z[h * dv + d]);
             }
         }
+
+        drop(gated_norm);
 
         // Stage 8: back into the residual stream.
         planes

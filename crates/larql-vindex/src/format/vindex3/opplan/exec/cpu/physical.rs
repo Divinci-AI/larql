@@ -152,7 +152,7 @@ impl crate::format::vindex3::opplan::exec::gated_delta::DenseProjections for Exe
 }
 
 /// f32 bytes per element — what the BLAS alternative must read.
-const F32_BYTES: usize = 4;
+pub(super) const F32_BYTES: usize = 4;
 
 /// The f32 footprint at or above which compact-to-registers wins.
 ///
@@ -175,7 +175,7 @@ const F32_BYTES: usize = 4;
 /// so this model would decode identically under any threshold inside
 /// that bracket. A future model with a matrix in the gap is what the
 /// boundary is for.
-fn compact_threshold_bytes() -> usize {
+pub(super) fn compact_threshold_bytes() -> usize {
     #[cfg(target_os = "macos")]
     {
         if let Some(bytes) = super::executor::sysctl_usize("hw.perflevel0.l2cachesize") {
@@ -184,7 +184,3 @@ fn compact_threshold_bytes() -> usize {
     }
     DEFAULT_L2_BYTES
 }
-
-#[cfg(test)]
-#[path = "physical_tests.rs"]
-mod tests;

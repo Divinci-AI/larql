@@ -30,3 +30,6 @@ pub use kernels::{BlasF32, FusedBf16, ScalarF32};
 pub use ledger::{ledger, PlanTally, ProjectionLedger};
 pub use physical::PhysicalProjectionPlan;
 pub use projector::{CpuParallelism, DenseProjector, WeightRows};
+
+#[cfg(test)]
+mod tests;

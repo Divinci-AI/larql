@@ -2,6 +2,7 @@
 
 use std::sync::OnceLock;
 
+use super::super::timing::{timed, OpClass};
 use super::ledger::ledger;
 use super::physical::PhysicalProjectionPlan;
 use super::projector::{CpuParallelism, DenseProjector, WeightRows};
@@ -55,15 +56,17 @@ pub struct CpuExecutor {
 const MIN_SPLIT_BYTES: usize = 4 * 1024 * 1024;
 
 impl CpuExecutor {
-    /// A pool sized to the machine's performance cores.
+    /// A pool sized to SATURATE the memory system, not to fill the
+    /// machine — see [`workers_from`].
     ///
-    /// Performance cores specifically: the fused BF16 kernel is a
+    /// Performance cores are the input because the fused BF16 kernel is a
     /// streaming load, and efficiency cores contribute little to memory
     /// throughput while still taking a share of the rows and finishing
     /// late. Falls back to the total core count where the split is not
     /// reported.
     pub fn new() -> Result<Self, String> {
-        let workers = workers_from(reported_performance_cores());
+        let workers =
+            requested_workers().unwrap_or_else(|| workers_from(reported_performance_cores()));
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(workers)
             .thread_name(|i| format!("larql-cpu-{i}"))
@@ -105,6 +108,9 @@ impl CpuExecutor {
         x: &[f32],
         out_dim: usize,
     ) -> Vec<f32> {
+        // The SAME site the byte ledger is written, so time and traffic
+        // describe one call set rather than two.
+        let _t = timed(OpClass::Projection);
         let in_dim = x.len();
         let mut out = vec![0.0f32; out_dim];
         let workers = if caller_owns_the_machine() {
@@ -157,6 +163,34 @@ fn caller_owns_the_machine() -> bool {
     rayon::current_thread_index().is_some()
 }
 
+/// Environment variable pinning the pool size.
+pub const WORKERS_ENV: &str = "LARQL_CPU_WORKERS";
+
+/// An explicit pool size, when one is asked for.
+///
+/// Exists so the worker POLICY can be priced on a real decode rather than
+/// on a transcription of it. A standalone probe can sweep worker counts
+/// all it likes, but the shipped executor is the authority on what the
+/// shipped executor does, and rebuilding the binary per point would make
+/// the sweep a comparison across builds.
+///
+/// Ignored unless it parses to at least one — a typo must not silently
+/// produce a pool of no workers, which would look like a hang rather than
+/// a misconfiguration.
+fn requested_workers() -> Option<usize> {
+    parse_workers(std::env::var(WORKERS_ENV).ok().as_deref())
+}
+
+/// The parse, separated from the environment read.
+///
+/// Separated so a test can exercise it without setting a process-wide
+/// variable the rest of the suite shares — and so the test calls THIS
+/// rather than restating the same `trim().parse().filter()` chain, which
+/// would pass whatever the real one did.
+pub(super) fn parse_workers(raw: Option<&str>) -> Option<usize> {
+    raw?.trim().parse::<usize>().ok().filter(|n| *n >= 1)
+}
+
 /// Performance-core count where the machine reports one.
 ///
 /// `None` on a machine that does not draw the distinction, which is most
@@ -171,22 +205,64 @@ fn reported_performance_cores() -> Option<usize> {
     None
 }
 
-/// Turn that into a worker count.
+/// Fewest workers below which the memory system is no longer saturated.
+///
+/// Measured on the real decode: 3 workers cost 589 ms/token and 2 cost
+/// 836, against 484-490 anywhere from 4 to 8. The cliff is sharp on this
+/// side, so the floor is not a taste.
+const MIN_STREAMING_WORKERS: usize = 4;
+
+/// Turn a reported performance-core count into a pool size.
+///
+/// **Half the performance cores, because a streaming kernel saturates the
+/// memory system long before it runs out of cores.** Past saturation an
+/// extra worker adds a dispatch to every projection and no bandwidth, and
+/// the executor was paying that on every one of the 417 compact
+/// projections a Qwen3.8 token runs.
+///
+/// Measured through this executor on the real model, interleaved, two
+/// passes agreeing within 0.5%:
+///
+/// ```text
+///  workers   ms/token   tok/s
+///       12        518    1.93
+///       10        494    2.02
+///        8        489    2.05
+///        6        484    2.06
+///        4        487    2.05
+///        3        589    1.70
+/// ```
+///
+/// The leaf ledger says the whole difference is inside the projection
+/// class — 488.7 ms at twelve against 440.3 ms at six, with the
+/// recurrence and the elementwise glue unchanged to 0.5%. So this is
+/// bandwidth saturation and dispatch cost, NOT the pool competing with
+/// the caller's own work, and the policy is about the memory system
+/// rather than about leaving a core free.
+///
+/// The basin is flat from 4 to 8 (within 1.3%), so being wrong by two
+/// either way costs about one percent — the same robustness the L2
+/// threshold has, and the reason half-the-cores is defensible as an
+/// extrapolation from one machine rather than a fitted constant.
+/// [`WORKERS_ENV`] re-calibrates it where that extrapolation does not
+/// hold.
 ///
 /// Split out from the query so BOTH answers are reachable from a test on
-/// one machine. The fallback is the branch that matters and the branch a
-/// macOS-only test can never take: every non-Apple target reaches it, and
-/// a `0` from a machine that reports nonsense must not produce a pool of
-/// no workers.
+/// one machine. The fallback is the branch a macOS-only test can never
+/// take: every non-Apple target reaches it, and a `0` from a machine that
+/// reports nonsense must not produce a pool of no workers.
 pub(super) fn workers_from(reported: Option<usize>) -> usize {
-    match reported {
+    let cores = match reported {
         Some(n) if n >= 1 => n,
         // Reported zero, or not reported at all: the total core count is
         // the honest answer, and one is the floor.
         _ => std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(1),
-    }
+    };
+    (cores / 2)
+        .clamp(1, cores)
+        .max(MIN_STREAMING_WORKERS.min(cores))
 }
 
 /// One integer `sysctl`, or `None` where the machine does not report it.

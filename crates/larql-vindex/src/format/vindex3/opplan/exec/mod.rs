@@ -32,6 +32,7 @@ pub mod operands;
 pub mod prepared;
 pub mod production;
 pub mod reference;
+pub mod timing;
 pub mod weights;
 
 #[cfg(test)]

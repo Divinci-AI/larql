@@ -6,8 +6,8 @@
 //! be racing the thing it was trying to measure — and would pass or fail
 //! depending on what else happened to be running.
 
+use super::super::ledger::{ledger, ProjectionLedger};
 use super::super::physical::PhysicalProjectionPlan;
-use super::ProjectionLedger;
 
 const PLANS: [PhysicalProjectionPlan; 3] = [
     PhysicalProjectionPlan::ScalarF32,
@@ -79,5 +79,5 @@ fn reset_clears_every_plan() {
 /// The process-wide ledger exists and is the same one every time.
 #[test]
 fn the_shared_ledger_is_one_ledger() {
-    assert!(std::ptr::eq(super::ledger(), super::ledger()));
+    assert!(std::ptr::eq(ledger(), ledger()));
 }
