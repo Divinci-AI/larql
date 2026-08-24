@@ -36,9 +36,14 @@ pub struct ComponentSummary {
     pub role: String,
     pub num_layers: usize,
     pub hidden_size: usize,
-    /// (sliding, full) layer counts when the policy table exists.
+    /// Per-operator layer counts when the policy table exists. Softmax
+    /// spans and recurrences are counted apart: a hybrid stack whose
+    /// recurrences were folded into `full_layers` reports a tower it does
+    /// not have.
     pub sliding_layers: Option<usize>,
     pub full_layers: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recurrent_layers: Option<usize>,
     /// Layers with no positional encoding.
     pub nope_layers: Option<usize>,
     pub window: Option<usize>,
@@ -201,7 +206,21 @@ pub fn inspect_container(
                 num_layers: c.num_layers,
                 hidden_size: c.hidden_size,
                 sliding_layers: sliding,
-                full_layers: table.map(|t| t.len()).zip(sliding).map(|(n, s)| n - s),
+                // `n - sliding` counted every recurrence as a full-
+                // attention layer, so the first real hybrid container
+                // read back "0 sliding / 64 full" for a stack that is 48
+                // recurrent. Counted by operator instead, and the
+                // recurrent count is reported rather than folded away.
+                full_layers: table.map(|t| {
+                    t.iter()
+                        .filter(|l| l.span == Some(AttentionSpan::Full))
+                        .count()
+                }),
+                recurrent_layers: table.map(|t| {
+                    t.iter()
+                        .filter(|l| l.operator == super::graph::LayerOperator::GatedDelta)
+                        .count()
+                }),
                 nope_layers: table.map(|t| {
                     t.iter()
                         .filter(|l| l.position == PositionPolicy::None)

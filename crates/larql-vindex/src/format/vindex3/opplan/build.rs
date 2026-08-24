@@ -271,6 +271,16 @@ pub fn plan_component_ops(
                 hybrid,
                 moe: surface.ffn.moe,
                 v_from_k: policy.v_from_k,
+                // Which operand family this layer must supply, taken from
+                // the GRAPH's operator. The op below picks its operator
+                // from operand EVIDENCE instead, so the two authorities
+                // meet here: a layer the graph calls recurrent while its
+                // tensors say softmax (or the reverse) fails closure with
+                // the missing roles named. That cross-check was recorded
+                // as owed at the first real encode in QW-3.5A, and this
+                // is where it lands.
+                recurrent: policy.operator
+                    == crate::format::vindex3::graph::LayerOperator::GatedDelta,
             };
             for role in required_roles(&ops) {
                 let holder = if role.is_expert_bank() { bank } else { present };
@@ -715,6 +725,10 @@ struct LayerOps {
     /// V is the K projection on this layer: no V operand is required, and
     /// one present is a stray.
     v_from_k: bool,
+    /// This layer runs a Gated DeltaNet recurrence rather than softmax
+    /// attention, so it supplies the nine `LinearAttn*` operands and none
+    /// of the softmax ones.
+    recurrent: bool,
 }
 
 /// Roles every layer must supply, given the surface's ops.
@@ -722,12 +736,29 @@ fn required_roles(ops: &LayerOps) -> Vec<OperandRole> {
     let mut roles = vec![
         OperandRole::PreAttentionNorm,
         OperandRole::PostAttentionNorm,
-        OperandRole::AttnQ,
-        OperandRole::AttnK,
-        OperandRole::AttnO,
     ];
-    if !ops.v_from_k {
-        roles.push(OperandRole::AttnV);
+    if ops.recurrent {
+        // A recurrence has no query, key, value or output projection —
+        // demanding them made all 48 of Qwen3.8's linear layers report
+        // four missing operands each for tensors that correctly do not
+        // exist. Its nine operands are required instead, so the layer is
+        // still fully pinned rather than merely exempted.
+        roles.extend([
+            OperandRole::LinearAttnInProjQkv,
+            OperandRole::LinearAttnInProjA,
+            OperandRole::LinearAttnInProjB,
+            OperandRole::LinearAttnInProjZ,
+            OperandRole::LinearAttnConv1d,
+            OperandRole::LinearAttnALog,
+            OperandRole::LinearAttnDtBias,
+            OperandRole::LinearAttnNorm,
+            OperandRole::LinearAttnOutProj,
+        ]);
+    } else {
+        roles.extend([OperandRole::AttnQ, OperandRole::AttnK, OperandRole::AttnO]);
+        if !ops.v_from_k {
+            roles.push(OperandRole::AttnV);
+        }
     }
     if ops.placement == NormPlacement::PrePost {
         roles.push(OperandRole::PreFfnNorm);

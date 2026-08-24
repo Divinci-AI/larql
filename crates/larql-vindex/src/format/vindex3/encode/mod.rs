@@ -78,6 +78,57 @@ pub fn encode_system(
     encode_graph(&plan.graph, named, out)
 }
 
+/// Encode a system gated on ONE capability's dependency closure instead of
+/// the whole model's.
+///
+/// [`encode_system`] is unchanged and still means *every declared
+/// execution-semantic fact of this checkpoint is understood*. This is the
+/// narrower question the capability machinery exists to answer: **is
+/// everything the requested capability actually executes understood?**
+///
+/// Qwen3.8-27B is why. Its text closure is complete — 0 blocking — while
+/// 16 whole-model findings remain: an unexecutable vision surface, an
+/// unsupported MTP draft head, and two metadata keys whose semantic
+/// ownership is unresolved. None of those is reachable from a text
+/// forward pass, and refusing to write the container because of them
+/// would block a capability this build has proven it can run.
+///
+/// The graph encoded is the WHOLE graph, not a text-only projection: the
+/// container stays a faithful record of the checkpoint, and it is the
+/// admission GATE that is scoped, never the contents. A reader of the
+/// container still sees the vision component and still finds it
+/// inadmissible.
+pub fn encode_system_for_capability(
+    named: &[(String, ArchitectureInventory)],
+    out: &Path,
+    capability: crate::format::vindex3::plan::capability::Capability,
+) -> Result<EncodeOutcome, VindexError> {
+    let plan = plan_system(named);
+    let status = plan
+        .capabilities
+        .iter()
+        .find(|c| c.capability == capability)
+        .ok_or_else(|| {
+            VindexError::Parse(format!("this build reports no verdict for {capability:?}"))
+        })?;
+    if !status.admissible {
+        return Err(VindexError::Parse(format!(
+            "refusing to encode for {:?}: {} blocking finding(s) inside that capability's \
+             closure; run `larql vindex3 plan` for the itemised reasons",
+            capability, status.blocking
+        )));
+    }
+    // Understanding the semantics is not the same as this build being
+    // able to run them, and a container written for a capability nothing
+    // can execute would be a promise the runtime cannot keep.
+    if !status.supported {
+        return Err(VindexError::Parse(format!(
+            "refusing to encode for {capability:?}: this build has no executor for it"
+        )));
+    }
+    encode_graph(&plan.graph, named, out)
+}
+
 /// Encode an already-built system graph. `encode_system` is this after
 /// the plan gate; a caller holding a graph it built (or edited) itself
 /// comes in here and gets the same validation and the same bytes.

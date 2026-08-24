@@ -152,6 +152,7 @@ fn verify_round_trips_an_encoded_fixture() {
     let dir = fixture_dir(true);
     let out = dir.path().join("container");
     run(Vindex3Command::Encode(EncodeArgs {
+        capability: None,
         artifacts: vec![dir.path().to_path_buf()],
         output: out.clone(),
     }))
@@ -169,6 +170,7 @@ fn verify_exits_nonzero_on_a_corrupted_container() {
     let dir = fixture_dir(true);
     let out = dir.path().join("container");
     run(Vindex3Command::Encode(EncodeArgs {
+        capability: None,
         artifacts: vec![dir.path().to_path_buf()],
         output: out.clone(),
     }))
@@ -197,6 +199,7 @@ fn execution_complete_gate_passes_then_refuses_a_stripped_graph() {
     let dir = fixture_dir(true);
     let out = dir.path().join("container");
     run(Vindex3Command::Encode(EncodeArgs {
+        capability: None,
         artifacts: vec![dir.path().to_path_buf()],
         output: out.clone(),
     }))
@@ -227,6 +230,7 @@ fn ops_emits_a_closed_plan_for_an_encoded_fixture() {
     let dir = fixture_dir(true);
     let out = dir.path().join("container");
     run(Vindex3Command::Encode(EncodeArgs {
+        capability: None,
         artifacts: vec![dir.path().to_path_buf()],
         output: out.clone(),
     }))
@@ -269,6 +273,7 @@ fn verify_prints_semantic_failures_on_a_tampered_graph() {
     let dir = fixture_dir(true);
     let out = dir.path().join("container");
     run(Vindex3Command::Encode(EncodeArgs {
+        capability: None,
         artifacts: vec![dir.path().to_path_buf()],
         output: out.clone(),
     }))
@@ -292,6 +297,7 @@ fn ops_refusals_and_bad_layer_exit_nonzero() {
     let dir = fixture_dir(true);
     let out = dir.path().join("container");
     run(Vindex3Command::Encode(EncodeArgs {
+        capability: None,
         artifacts: vec![dir.path().to_path_buf()],
         output: out.clone(),
     }))
@@ -328,6 +334,7 @@ fn inspect_exits_nonzero_on_an_incoherent_container() {
     let dir = fixture_dir(true);
     let out = dir.path().join("container");
     run(Vindex3Command::Encode(EncodeArgs {
+        capability: None,
         artifacts: vec![dir.path().to_path_buf()],
         output: out.clone(),
     }))

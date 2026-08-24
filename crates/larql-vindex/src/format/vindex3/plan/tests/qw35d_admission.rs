@@ -146,3 +146,81 @@ fn the_draft_head_leaves_text_and_remains_blocking_for_drafting() {
         "no draft-head executor exists; claiming support would be the lie"
     );
 }
+
+/// The scoped encode gate: a container whose TEXT closure is complete
+/// encodes for text, while whole-model encode still refuses.
+///
+/// This is the pair that matters. If only the first half were asserted,
+/// the test would also pass on a build that had quietly weakened
+/// whole-model admissibility to get the write through.
+#[test]
+fn a_text_admissible_model_encodes_for_text_and_still_refuses_whole_model() {
+    use crate::format::vindex3::encode::{encode_system, encode_system_for_capability};
+
+    let dir = tempfile::tempdir().unwrap();
+    // Glimmer-shaped, plus an unowned root key nothing can attribute:
+    // whole-model inadmissible, text closure untouched.
+    let inventory = glimmer_shaped_target_with(dir.path(), |config| {
+        config["text_config"]["attn_output_gate"] = serde_json::json!(true);
+        config["text_config"]["output_gate_type"] = serde_json::json!("swish");
+        // ADDED to the tower's config, not substituted for it: replacing
+        // the block orphans the vision tensors, which then correctly fail
+        // closed for every capability and would make this test pass for
+        // entirely the wrong reason.
+        config["vision_config"]["some_unjudged_tower_fact"] = serde_json::json!(7);
+    });
+    let named = vec![("target-artifact".to_string(), inventory)];
+
+    let plan = plan_system(&named);
+    assert!(
+        !plan.admissible,
+        "the fixture must be whole-model inadmissible or this proves nothing"
+    );
+    let offenders: Vec<String> = plan
+        .artifacts
+        .iter()
+        .flat_map(|a| &a.findings)
+        .filter(|f| {
+            f.blocks()
+                && crate::format::vindex3::plan::capability::requires(
+                    Capability::TextGeneration,
+                    f,
+                    &plan.graph,
+                )
+        })
+        .map(|f| f.subject.clone())
+        .collect();
+    assert_eq!(text_blocking(&plan), 0, "text blockers: {offenders:?}");
+
+    let whole = tempfile::tempdir().unwrap();
+    assert!(
+        encode_system(&named, whole.path()).is_err(),
+        "whole-model encode must still refuse — scoping the gate must not weaken it"
+    );
+
+    let scoped = tempfile::tempdir().unwrap();
+    encode_system_for_capability(&named, scoped.path(), Capability::TextGeneration)
+        .expect("text generation is admissible, available and supported");
+}
+
+/// The scoped gate refuses a capability this build cannot execute, even
+/// when its semantics are fully understood.
+///
+/// Understanding is not running. Writing a container "for drafting" when
+/// nothing can execute a draft head would be a promise the runtime cannot
+/// keep, so `supported` is checked alongside `admissible`.
+#[test]
+fn the_scoped_gate_refuses_a_capability_with_no_executor() {
+    use crate::format::vindex3::encode::encode_system_for_capability;
+
+    let dir = tempfile::tempdir().unwrap();
+    let inventory = glimmer_shaped_target_with(dir.path(), |_| {});
+    let named = vec![("target-artifact".to_string(), inventory)];
+    let out = tempfile::tempdir().unwrap();
+    let err = encode_system_for_capability(&named, out.path(), Capability::Drafting)
+        .expect_err("no draft-head executor exists");
+    assert!(
+        format!("{err}").contains("no executor"),
+        "the refusal must say WHY: {err}"
+    );
+}
