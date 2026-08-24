@@ -294,6 +294,35 @@ pub struct LayerPlanes {
     pub output: Vec<Vec<f32>>,
 }
 
+/// How a Gated DeltaNet layer performs its DENSE projections.
+///
+/// The seam exists so a backend can accelerate the five matrix products
+/// around the recurrence **without touching the recurrence**. Everything
+/// QW-2/QW-2E proved stage-by-stage against HF — the convolution, the
+/// head expansion, the gates, the delta rule, the gated norm — is below
+/// this trait and identical for every implementation.
+///
+/// `ReferenceBackend` keeps [`ScalarProjections`], which is the literal
+/// transcription and shares no arithmetic with `larql-compute`. That
+/// independence is what makes it an oracle, so it is never routed
+/// through BLAS however much faster BLAS is.
+pub trait DenseProjector: Sync {
+    /// `y = W x`, with `W` row-major `[out_dim, x.len()]`.
+    fn project(&self, weight: &[f32], x: &[f32], out_dim: usize) -> Vec<f32>;
+}
+
+/// The literal projection: one scalar dot per row.
+///
+/// Measured at a flat 5.6 GB/s across every Qwen3.8 projection shape —
+/// which is why it is the oracle and not the execution strategy.
+pub struct ScalarProjections;
+
+impl DenseProjector for ScalarProjections {
+    fn project(&self, weight: &[f32], x: &[f32], out_dim: usize) -> Vec<f32> {
+        matvec(weight, x, out_dim)
+    }
+}
+
 fn matvec(w: &[f32], x: &[f32], out_dim: usize) -> Vec<f32> {
     let in_dim = x.len();
     (0..out_dim)
@@ -331,6 +360,20 @@ pub fn layer_forward(
     state: &mut RecurrentState,
     mutation: Mutation,
 ) -> LayerPlanes {
+    layer_forward_with(op, w, hidden, state, mutation, &ScalarProjections)
+}
+
+/// [`layer_forward`] with a chosen projection strategy. The public entry
+/// point above always passes [`ScalarProjections`], so the reference
+/// path is unchanged and the oracle stays independent.
+pub fn layer_forward_with(
+    op: &GatedDeltaOp,
+    w: &GatedDeltaWeights<'_>,
+    hidden: &[Vec<f32>],
+    state: &mut RecurrentState,
+    mutation: Mutation,
+    proj: &dyn DenseProjector,
+) -> LayerPlanes {
     let (hk, hv) = (op.num_key_heads, op.num_value_heads);
     let (dk, dv) = (op.key_head_dim, op.value_head_dim);
     let (key_dim, value_dim) = (hk * dk, hv * dv);
@@ -342,7 +385,7 @@ pub fn layer_forward(
     // Stage 1: the fused projection, per position.
     let mixed: Vec<Vec<f32>> = hidden
         .iter()
-        .map(|h| matvec(w.in_proj_qkv, h, conv_dim))
+        .map(|h| proj.project(w.in_proj_qkv, h, conv_dim))
         .collect();
 
     // Stage 2: depthwise causal convolution, then SiLU.
@@ -425,9 +468,9 @@ pub fn layer_forward(
         let value = conv[t][key_dim * 2..key_dim * 2 + value_dim].to_vec();
 
         // Stage 5: the gates.
-        let a = matvec(w.in_proj_a, &hidden[t], hv);
-        let b = matvec(w.in_proj_b, &hidden[t], hv);
-        let z = matvec(w.in_proj_z, &hidden[t], value_dim);
+        let a = proj.project(w.in_proj_a, &hidden[t], hv);
+        let b = proj.project(w.in_proj_b, &hidden[t], hv);
+        let z = proj.project(w.in_proj_z, &hidden[t], value_dim);
         let beta: Vec<f32> = b.iter().map(|x| 1.0 / (1.0 + (-x).exp())).collect();
         let g: Vec<f32> = (0..hv)
             .map(|h| -w.a_log[h].exp() * softplus(a[h] + w.dt_bias[h]))
@@ -462,7 +505,7 @@ pub fn layer_forward(
         // Stage 8: back into the residual stream.
         planes
             .output
-            .push(matvec(w.out_proj, &normed, hidden[t].len()));
+            .push(proj.project(w.out_proj, &normed, hidden[t].len()));
         planes.query.push(q);
         planes.key.push(k);
         planes.value.push(value);

@@ -501,12 +501,13 @@ fn execute_layer<B: PlanBackend + ?Sized, K: KvState + ?Sized>(
             // these buffers must not see a half-updated layer — the same
             // refuse-before-commit contract QW-1 established for the plan.
             let state = provider.recurrent_state(layer_index)?;
-            gated_delta::layer_forward(
+            gated_delta::layer_forward_with(
                 &ops.op,
                 &ops.weights(),
                 &inputs,
                 state,
                 gated_delta::Mutation::None,
+                backend.dense_projector(),
             )
             .output
         }

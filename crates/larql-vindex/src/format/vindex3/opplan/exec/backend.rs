@@ -395,6 +395,17 @@ pub trait PlanBackend: Sync {
         WeightFormat::F32
     }
 
+    /// How this backend performs a Gated DeltaNet layer's dense
+    /// projections.
+    ///
+    /// Defaults to the literal scalar transcription, so a backend that
+    /// says nothing gets the reference arithmetic rather than inheriting
+    /// somebody else's. The recurrence itself is not selectable — only
+    /// the five matrix products around it.
+    fn dense_projector(&self) -> &dyn super::gated_delta::DenseProjector {
+        &super::gated_delta::ScalarProjections
+    }
+
     /// Residency hint before a decode run: every matrix operand the
     /// session will read, already loaded. Computes nothing and must
     /// change no number — a backend may warm caches or wire device

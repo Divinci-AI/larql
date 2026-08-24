@@ -252,12 +252,14 @@ impl<'a, B: PlanBackend> DecodeSession<'a, B> {
             let raw_attn = match &state.attention {
                 super::prepared::PreparedAttention::GatedDelta(delta) => {
                     let recurrent = self.kv.state_mut().recurrent_state(index)?;
-                    let mut planes = super::gated_delta::layer_forward(
+                    let projector = self.backend.dense_projector();
+                    let mut planes = super::gated_delta::layer_forward_with(
                         &delta.op,
                         &delta.weights(),
                         &inputs,
                         recurrent,
                         super::gated_delta::Mutation::None,
+                        projector,
                     );
                     planes.output.remove(0)
                 }

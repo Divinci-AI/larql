@@ -39,6 +39,26 @@ use super::backend::{
     AttentionCall, AttentionOut, AttentionStepCall, AttentionStepOut, FfnCall, GateCall, NormCall,
     PlanBackend, ProjectCall, ProjectedQkv, QkNormCall, RoutedFfnCall,
 };
+/// Gated DeltaNet's dense projections through `larql-compute`, which
+/// dispatches to BLAS `sgemv` (Accelerate on macOS, OpenBLAS on
+/// Linux/FreeBSD, scalar on Windows by deliberate choice).
+///
+/// Measured against the scalar transcription on Qwen3.8's real shapes:
+/// 18.5x at 10240x5120, 19.2x at 6144x5120, 20.8x at 5120x6144, and
+/// 46.9x at the tiny 48x5120 — BLAS call overhead never lost, so all
+/// five projections route here rather than only the large ones.
+///
+/// NOT bit-identical: sgemv reassociates the sum, measured at rel_rms
+/// ~1.3e-6 against the scalar path. The existing parity gates are what
+/// judge that, and the reference implementation stays independent.
+struct BlasProjections;
+
+impl super::gated_delta::DenseProjector for BlasProjections {
+    fn project(&self, weight: &[f32], x: &[f32], out_dim: usize) -> Vec<f32> {
+        matmul_vec(x, weight, out_dim, x.len())
+    }
+}
+
 use super::kernels::{
     gather_fused_half, mrope_rotate_scaled, rope_rotate, rope_rotate_scaled, FusedHalf,
 };
@@ -568,6 +588,10 @@ impl ProductionBackend {
 }
 
 impl PlanBackend for ProductionBackend {
+    fn dense_projector(&self) -> &dyn super::gated_delta::DenseProjector {
+        &BlasProjections
+    }
+
     fn name(&self) -> &str {
         NAME
     }
