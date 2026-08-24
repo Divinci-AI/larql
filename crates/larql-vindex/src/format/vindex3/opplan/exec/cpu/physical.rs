@@ -19,7 +19,7 @@
 //! the observation, and a projection helper that sat somewhere else would
 //! be one refactor away from choosing its own kernel again.
 
-use super::kernels::{BlasF32, FusedBf16, FusedQ8, ScalarF32};
+use super::kernels::{BlasF32, FusedBf16, FusedQ4, FusedQ8, ScalarF32};
 use super::projector::{DenseProjector, WeightRows};
 use crate::error::VindexError;
 use crate::format::vindex3::opplan::exec::backend::{WeightFormat, WeightSlice};
@@ -47,6 +47,13 @@ pub enum PhysicalProjectionPlan {
     /// the kernel stops waiting for memory and starts waiting for the
     /// widen.
     FusedQ8,
+    /// Q4 resident, unpacked and scaled in registers.
+    ///
+    /// Reachable by OBSERVATION and not by [`Self::choose`]: CPU-4A asks
+    /// only whether Q4 x f32 is worth making a model representation, and
+    /// no `WeightFormat` names it, so a policy answering Q4 would refuse
+    /// at load. Listed so `for_resident` stays total.
+    FusedQ4,
     /// f32 resident, BLAS `sgemv`, threaded by the library.
     ///
     /// The right answer for a matrix whose widened image still fits
@@ -66,6 +73,8 @@ impl PhysicalProjectionPlan {
             Self::ScalarF32 | Self::BlasF32 => WeightFormat::F32,
             Self::FusedBf16 => WeightFormat::Bf16,
             Self::FusedQ8 => WeightFormat::Q8,
+            // No `WeightFormat` names Q4; see the variant's note.
+            Self::FusedQ4 => WeightFormat::Q8,
         }
     }
 
@@ -76,6 +85,7 @@ impl PhysicalProjectionPlan {
             Self::BlasF32 => &BlasF32,
             Self::FusedBf16 => &FusedBf16,
             Self::FusedQ8 => &FusedQ8,
+            Self::FusedQ4 => &FusedQ4,
         }
     }
 
@@ -125,6 +135,7 @@ impl PhysicalProjectionPlan {
             WeightRows::F32(_) => Self::BlasF32,
             WeightRows::Bf16(_) => Self::FusedBf16,
             WeightRows::Q8 { .. } => Self::FusedQ8,
+            WeightRows::Q4 { .. } => Self::FusedQ4,
         }
     }
 }

@@ -12,11 +12,12 @@ use super::super::physical::PhysicalProjectionPlan;
 /// Every plan the ledger has a slot for. Adding a plan without adding it
 /// here would leave the new slot untested, so `all_enumerates_every_plan`
 /// checks the two agree in length as well as in content.
-const PLANS: [PhysicalProjectionPlan; 4] = [
+const PLANS: [PhysicalProjectionPlan; 5] = [
     PhysicalProjectionPlan::ScalarF32,
     PhysicalProjectionPlan::BlasF32,
     PhysicalProjectionPlan::FusedBf16,
     PhysicalProjectionPlan::FusedQ8,
+    PhysicalProjectionPlan::FusedQ4,
 ];
 
 #[test]
@@ -109,11 +110,11 @@ fn a_slot_works_before_the_policy_can_reach_it() {
             slabs: 6,
         }
     );
-    for other in [
-        PhysicalProjectionPlan::ScalarF32,
-        PhysicalProjectionPlan::BlasF32,
-        PhysicalProjectionPlan::FusedBf16,
-    ] {
+    for other in PLANS
+        .iter()
+        .copied()
+        .filter(|p| *p != PhysicalProjectionPlan::FusedQ8)
+    {
         assert_eq!(
             l.get(other),
             Default::default(),

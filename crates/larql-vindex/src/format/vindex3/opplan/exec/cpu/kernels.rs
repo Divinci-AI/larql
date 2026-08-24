@@ -146,6 +146,120 @@ impl DenseProjector for FusedQ8 {
     }
 }
 
+/// **Fused Q4.** Two codes per byte, unpacked and scaled in registers.
+///
+/// Same architecture as [`FusedQ8`], one representation further down, and
+/// asked the same question: at 4.5 bits/weight is there still traffic
+/// left to trade for the extra unpacking? Q8 answered 1.28x against a
+/// 1.9x byte reduction because it left the memory-bound regime; Q4 halves
+/// the bytes again and adds a nibble split, a mask and a bias on top.
+///
+/// Codes are symmetric `-8..=7`, stored biased by 8 so a nibble is an
+/// unsigned 0..15 and the unbias is one vector subtract.
+pub struct FusedQ4;
+
+impl DenseProjector for FusedQ4 {
+    fn parallelism(&self) -> CpuParallelism {
+        CpuParallelism::ExternalPool
+    }
+
+    fn project_rows(&self, weight_rows: WeightRows<'_>, x: &[f32], out: &mut [f32]) {
+        let WeightRows::Q4 {
+            packed,
+            scales,
+            block,
+        } = weight_rows
+        else {
+            panic!("the fused q4 kernel consumes q4 weights only");
+        };
+        let in_dim = x.len();
+        let per_row = in_dim.div_ceil(block);
+        let bytes_per_row = in_dim / 2;
+        for (o, slot) in out.iter_mut().enumerate() {
+            let row = &packed[o * bytes_per_row..(o + 1) * bytes_per_row];
+            let row_scales = &scales[o * per_row..(o + 1) * per_row];
+            let mut acc = 0.0f32;
+            for (b, scale) in row_scales.iter().enumerate() {
+                let lo = b * block;
+                let hi = (lo + block).min(in_dim);
+                if lo >= hi {
+                    break;
+                }
+                acc += scale * q4_block_dot(&row[lo / 2..hi / 2], &x[lo..hi]);
+            }
+            *slot = acc;
+        }
+    }
+}
+
+/// One block's unscaled dot. `packed.len() * 2 == x.len()`.
+#[inline]
+fn q4_block_dot(packed: &[u8], x: &[f32]) -> f32 {
+    #[cfg(target_arch = "aarch64")]
+    {
+        // SAFETY: NEON is baseline on aarch64, and every access stays
+        // inside `packed` and `x`, whose lengths the caller pairs.
+        return unsafe { q4_block_dot_neon(packed, x) };
+    }
+    #[allow(unreachable_code)]
+    q4_block_dot_portable(packed, x)
+}
+
+/// The portable definition the NEON version must agree with.
+///
+/// Byte `j` carries element `j` in its low nibble and element
+/// `j + half` in its high one — see [`WeightRows::Q4`].
+pub(super) fn q4_block_dot_portable(packed: &[u8], x: &[f32]) -> f32 {
+    let half = packed.len();
+    let mut acc = 0.0f32;
+    for (j, byte) in packed.iter().enumerate() {
+        acc += ((byte & 0x0f) as i32 - 8) as f32 * x[j];
+        acc += ((byte >> 4) as i32 - 8) as f32 * x[j + half];
+    }
+    acc
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn q4_block_dot_neon(packed: &[u8], x: &[f32]) -> f32 {
+    use std::arch::aarch64::*;
+    let half = packed.len();
+    let (pp, xp) = (packed.as_ptr(), x.as_ptr());
+    let (mut a0, mut a1) = (vdupq_n_f32(0.0), vdupq_n_f32(0.0));
+    let (mut a2, mut a3) = (vdupq_n_f32(0.0), vdupq_n_f32(0.0));
+    let mask = vdupq_n_u8(0x0f);
+    let bias = vdupq_n_s8(8);
+    let mut j = 0usize;
+    while j + 16 <= half {
+        let raw = vld1q_u8(pp.add(j));
+        // Low nibbles are elements j..j+16, high nibbles j+half..+16.
+        let lo = vsubq_s8(vreinterpretq_s8_u8(vandq_u8(raw, mask)), bias);
+        let hi = vsubq_s8(vreinterpretq_s8_u8(vshrq_n_u8(raw, 4)), bias);
+        for (n, half_off) in [(lo, 0usize), (hi, half)] {
+            let w = vmovl_s8(vget_low_s8(n));
+            let z = vmovl_s8(vget_high_s8(n));
+            let f0 = vcvtq_f32_s32(vmovl_s16(vget_low_s16(w)));
+            let f1 = vcvtq_f32_s32(vmovl_s16(vget_high_s16(w)));
+            let f2 = vcvtq_f32_s32(vmovl_s16(vget_low_s16(z)));
+            let f3 = vcvtq_f32_s32(vmovl_s16(vget_high_s16(z)));
+            let base = xp.add(j + half_off);
+            a0 = vfmaq_f32(a0, f0, vld1q_f32(base));
+            a1 = vfmaq_f32(a1, f1, vld1q_f32(base.add(4)));
+            a2 = vfmaq_f32(a2, f2, vld1q_f32(base.add(8)));
+            a3 = vfmaq_f32(a3, f3, vld1q_f32(base.add(12)));
+        }
+        j += 16;
+    }
+    let mut acc = vaddvq_f32(vaddq_f32(vaddq_f32(a0, a1), vaddq_f32(a2, a3)));
+    while j < half {
+        let byte = *packed.get_unchecked(j);
+        acc += ((byte & 0x0f) as i32 - 8) as f32 * *x.get_unchecked(j);
+        acc += ((byte >> 4) as i32 - 8) as f32 * *x.get_unchecked(j + half);
+        j += 1;
+    }
+    acc
+}
+
 /// One row's dot product: per-block integer accumulation, scaled once.
 #[inline]
 pub(super) fn q8_dot(codes: &[i8], scales: &[f32], block: usize, x: &[f32]) -> f32 {

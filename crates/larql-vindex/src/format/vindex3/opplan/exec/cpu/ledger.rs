@@ -67,6 +67,7 @@ pub struct ProjectionLedger {
     blas: Tally,
     fused: Tally,
     fused_q8: Tally,
+    fused_q4: Tally,
 }
 
 impl ProjectionLedger {
@@ -76,6 +77,7 @@ impl ProjectionLedger {
             PhysicalProjectionPlan::BlasF32 => &self.blas,
             PhysicalProjectionPlan::FusedBf16 => &self.fused,
             PhysicalProjectionPlan::FusedQ8 => &self.fused_q8,
+            PhysicalProjectionPlan::FusedQ4 => &self.fused_q4,
         }
     }
 
@@ -94,12 +96,13 @@ impl ProjectionLedger {
     /// Every plan, so a reader enumerates rather than remembers. A caller
     /// that listed the plans itself would stop covering a new one on the
     /// day it was added.
-    pub fn all(&self) -> [(PhysicalProjectionPlan, PlanTally); 4] {
+    pub fn all(&self) -> [(PhysicalProjectionPlan, PlanTally); 5] {
         [
             PhysicalProjectionPlan::ScalarF32,
             PhysicalProjectionPlan::BlasF32,
             PhysicalProjectionPlan::FusedBf16,
             PhysicalProjectionPlan::FusedQ8,
+            PhysicalProjectionPlan::FusedQ4,
         ]
         .map(|p| (p, self.get(p)))
     }
@@ -118,6 +121,7 @@ impl ProjectionLedger {
         self.blas.reset();
         self.fused.reset();
         self.fused_q8.reset();
+        self.fused_q4.reset();
     }
 }
 
@@ -136,6 +140,7 @@ impl ProjectionLedger {
             blas: ZERO,
             fused: ZERO,
             fused_q8: ZERO,
+            fused_q4: ZERO,
         }
     }
 }

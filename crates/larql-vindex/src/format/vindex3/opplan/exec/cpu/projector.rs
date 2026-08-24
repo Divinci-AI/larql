@@ -68,6 +68,19 @@ pub enum WeightRows<'a> {
         scales: &'a [f32],
         block: usize,
     },
+    /// Symmetric int4, two codes per byte, one f32 scale per `block`
+    /// elements.
+    ///
+    /// **Byte `j` of a block holds elements `j` and `j + block/2`**, not
+    /// `2j` and `2j+1`. Adjacent packing would make one 16-byte load
+    /// yield 32 INTERLEAVED elements, and every kernel would spend its
+    /// time undoing that; half-block packing yields two contiguous runs
+    /// that pair directly with two runs of the activation.
+    Q4 {
+        packed: &'a [u8],
+        scales: &'a [f32],
+        block: usize,
+    },
     /// Big-endian-agnostic bf16 code units: each is the top 16 bits of the
     /// f32 it denotes, so widening is `(bits as u32) << 16` — exact, no
     /// rounding, no table.
@@ -81,6 +94,7 @@ impl WeightRows<'_> {
             Self::F32(w) => w.len() / in_dim,
             Self::Bf16(w) => w.len() / in_dim,
             Self::Q8 { codes, .. } => codes.len() / in_dim,
+            Self::Q4 { packed, .. } => packed.len() * 2 / in_dim,
         }
     }
 
@@ -106,6 +120,18 @@ impl WeightRows<'_> {
                     block: *block,
                 }
             }
+            Self::Q4 {
+                packed,
+                scales,
+                block,
+            } => {
+                let per_row = in_dim.div_ceil(*block);
+                Self::Q4 {
+                    packed: &packed[a / 2..b / 2],
+                    scales: &scales[start * per_row..(start + count) * per_row],
+                    block: *block,
+                }
+            }
         }
     }
 
@@ -119,6 +145,7 @@ impl WeightRows<'_> {
             // ignored its own metadata would flatter the format by the
             // exact amount the metadata costs.
             Self::Q8 { codes, scales, .. } => codes.len() + scales.len() * 4,
+            Self::Q4 { packed, scales, .. } => packed.len() + scales.len() * 4,
         }
     }
 }

@@ -15,7 +15,10 @@
 //! weights DENOTE — so neither can be quoted without the other.
 
 use super::super::executor::CpuExecutor;
-use super::super::kernels::{q8_block_dot_portable, q8_dot, FusedBf16, FusedQ8};
+use super::super::kernels::{
+    q4_block_dot_portable, q8_block_dot_portable, q8_dot, FusedQ4, FusedQ8,
+};
+use super::super::physical::PhysicalProjectionPlan;
 use super::super::projector::{DenseProjector, WeightRows};
 use crate::format::vindex3::fixtures::lcg_values;
 
@@ -187,7 +190,107 @@ fn slicing_rows_cuts_the_scales_too() {
     }
 }
 
-/// **The comparison.** BF16 against Q8 on the shapes a token runs.
+/// Symmetric int4, two codes per byte, `j` and `j + half` sharing one.
+///
+/// Biased by 8 so a nibble is unsigned 0..15 — the kernel's unbias is one
+/// vector subtract rather than a sign-extension from four bits.
+fn quantise_q4(weights: &[f32], in_dim: usize, block: usize) -> (Vec<u8>, Vec<f32>) {
+    let per_row = in_dim.div_ceil(block);
+    let rows = weights.len() / in_dim;
+    let mut packed = vec![0u8; weights.len() / 2];
+    let mut scales = vec![0.0f32; rows * per_row];
+    for r in 0..rows {
+        for b in 0..per_row {
+            let lo = b * block;
+            let hi = (lo + block).min(in_dim);
+            let src = &weights[r * in_dim + lo..r * in_dim + hi];
+            let peak = src.iter().fold(0.0f32, |m, w| m.max(w.abs()));
+            // 7 and not 8: symmetric, so the negative extreme is unused.
+            let scale = if peak > 0.0 { peak / 7.0 } else { 1.0 };
+            scales[r * per_row + b] = scale;
+            let half = (hi - lo) / 2;
+            let base = (r * in_dim + lo) / 2;
+            for j in 0..half {
+                let code = |v: f32| ((v / scale).round().clamp(-8.0, 7.0) as i32 + 8) as u8;
+                packed[base + j] = code(src[j]) | (code(src[j + half]) << 4);
+            }
+        }
+    }
+    (packed, scales)
+}
+
+/// The Q4 kernel realises what the Q4 format denotes.
+///
+/// Against the portable definition, not the original weights: at 4.5
+/// bits the quantiser's error is large enough to hide almost any kernel
+/// bug inside a tolerance chosen for it.
+#[test]
+fn the_q4_kernel_computes_what_the_format_denotes() {
+    const OUT: usize = 5;
+    for in_dim in [BLOCK, BLOCK * 3, 5120] {
+        let w = lcg_values(OUT * in_dim, 15);
+        let (packed, scales) = quantise_q4(&w, in_dim, BLOCK);
+        let x = lcg_values(in_dim, 16);
+        let mut got = vec![0.0f32; OUT];
+        FusedQ4.project_rows(
+            WeightRows::Q4 {
+                packed: &packed,
+                scales: &scales,
+                block: BLOCK,
+            },
+            &x,
+            &mut got,
+        );
+        let per_row = in_dim.div_ceil(BLOCK);
+        let bytes_per_row = in_dim / 2;
+        for (o, value) in got.iter().enumerate() {
+            let mut want = 0.0f32;
+            for b in 0..per_row {
+                let (lo, hi) = (b * BLOCK, ((b + 1) * BLOCK).min(in_dim));
+                want += scales[o * per_row + b]
+                    * q4_block_dot_portable(
+                        &packed[o * bytes_per_row + lo / 2..o * bytes_per_row + hi / 2],
+                        &x[lo..hi],
+                    );
+            }
+            assert!(
+                (value - want).abs() <= want.abs() * 1e-5 + 1e-4,
+                "row {o} at in_dim {in_dim}: {value} against the format's {want}"
+            );
+        }
+    }
+}
+
+/// Q4 rows slice with their scales, and at HALF a byte per weight.
+///
+/// The byte offset is `row * in_dim / 2`, not `row * in_dim`. A slice
+/// that forgot the packing would hand a worker the rows of a different
+/// part of the matrix — plausible numbers, wrong weights, and only when
+/// the executor partitions.
+#[test]
+fn slicing_q4_rows_halves_the_byte_offset() {
+    const OUT: usize = 8;
+    let in_dim = BLOCK * 2;
+    let w = lcg_values(OUT * in_dim, 17);
+    let (packed, scales) = quantise_q4(&w, in_dim, BLOCK);
+    let rows = WeightRows::Q4 {
+        packed: &packed,
+        scales: &scales,
+        block: BLOCK,
+    };
+    assert_eq!(rows.rows(in_dim), OUT);
+    let x = lcg_values(in_dim, 18);
+    let mut whole = vec![0.0f32; OUT];
+    FusedQ4.project_rows(rows, &x, &mut whole);
+    for (start, want) in whole.iter().enumerate() {
+        let mut one = vec![0.0f32; 1];
+        FusedQ4.project_rows(rows.slice_rows(in_dim, start, 1), &x, &mut one);
+        assert_eq!(one[0], *want, "row {start} moved when sliced out");
+    }
+}
+
+/// **The comparison.** BF16 against Q8 against Q4, on the shapes a token
+/// runs.
 ///
 /// Measured through `CpuExecutor` with the SHIPPED kernels, in the same
 /// binary and the same harness whose BF16 arm reproduces the model's
@@ -195,94 +298,98 @@ fn slicing_rows_cuts_the_scales_too() {
 /// harness would not license a claim about LARQL — CPU-2D spent a rung
 /// learning that.
 ///
+/// Time per matrix, not GB/s: half the bytes at a lower rate is still
+/// less time, and a rate comparison hides exactly the thing being asked.
+///
 /// ```text
 /// QW_Q8_BENCH=1 cargo test --release exec::cpu::tests::q8 -- --nocapture
 /// ```
 #[test]
-fn bf16_against_q8_on_the_real_shapes() {
+fn bf16_against_q8_against_q4_on_the_real_shapes() {
     if std::env::var("QW_Q8_BENCH").is_err() {
-        eprintln!("SKIP bf16_against_q8: set QW_Q8_BENCH=1");
+        eprintln!("SKIP format comparison: set QW_Q8_BENCH=1");
         return;
     }
     use std::time::Instant;
     let exec = CpuExecutor::new().unwrap();
     println!(
-        "\n  BF16 against Q8 (block {BLOCK}), {} workers — TIME per matrix,\n  \
-         because half the bytes at a lower rate is still less time.\n",
+        "\n  BF16 / Q8 / Q4 (block {BLOCK}), {} workers — TIME per matrix.\n",
         exec.workers()
     );
     println!(
-        "  {:<22} {:>6} {:>9} {:>9} {:>7} {:>10} {:>10}",
-        "projection", "calls", "bf16 ms", "q8 ms", "speedup", "bf16 MB", "q8 MB"
+        "  {:<22} {:>6} {:>9} {:>9} {:>9} {:>8} {:>8}",
+        "projection", "calls", "bf16 ms", "q8 ms", "q4 ms", "q8 vs", "q4 vs"
     );
 
-    let (mut bf_ms, mut q8_ms, mut bf_gb, mut q8_gb) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+    let mut ms = [0.0f64; 3];
+    let mut gb = [0.0f64; 3];
     for (name, out_dim, in_dim, calls) in super::projection_cost::COMPACT.iter().copied() {
         let f32w = lcg_values(out_dim * in_dim, 11);
         let bf: Vec<u16> = f32w.iter().map(|v| (v.to_bits() >> 16) as u16).collect();
-        let (codes, scales) = quantise(&f32w, in_dim, BLOCK);
+        let (codes, q8_scales) = quantise(&f32w, in_dim, BLOCK);
+        let (packed, q4_scales) = quantise_q4(&f32w, in_dim, BLOCK);
         let x = lcg_values(in_dim, 22);
-        let q8_rows = WeightRows::Q8 {
-            codes: &codes,
-            scales: &scales,
-            block: BLOCK,
-        };
+        let arms = [
+            WeightRows::Bf16(&bf),
+            WeightRows::Q8 {
+                codes: &codes,
+                scales: &q8_scales,
+                block: BLOCK,
+            },
+            WeightRows::Q4 {
+                packed: &packed,
+                scales: &q4_scales,
+                block: BLOCK,
+            },
+        ];
         let iters = (3_000_000_000.0 / (out_dim * in_dim) as f64).clamp(3.0, 100.0) as usize;
 
         let mut sink = 0.0f32;
-        let mut time_it = |f: &mut dyn FnMut(&mut f32)| {
-            f(&mut sink);
+        let mut each = [0.0f64; 3];
+        for (i, rows) in arms.iter().copied().enumerate() {
+            let plan = PhysicalProjectionPlan::for_resident(rows);
+            let mut run = || sink += exec.project(plan.kernel(), rows, &x, out_dim)[0];
+            run();
             let t = Instant::now();
             for _ in 0..iters {
-                f(&mut sink);
+                run();
             }
-            t.elapsed().as_secs_f64() / iters as f64
-        };
-        let bf_each = time_it(&mut |s: &mut f32| {
-            *s += exec.project(&FusedBf16, WeightRows::Bf16(&bf), &x, out_dim)[0]
-        });
-        let q8_each =
-            time_it(&mut |s: &mut f32| *s += exec.project(&FusedQ8, q8_rows, &x, out_dim)[0]);
+            each[i] = t.elapsed().as_secs_f64() / iters as f64;
+            ms[i] += each[i] * calls as f64 * 1e3;
+            gb[i] += rows.bytes() as f64 * calls as f64 / 1e9;
+        }
         std::hint::black_box(sink);
-
-        let bf_bytes = (out_dim * in_dim * 2) as f64;
-        let q8_bytes = q8_rows.bytes() as f64;
-        bf_ms += bf_each * calls as f64 * 1e3;
-        q8_ms += q8_each * calls as f64 * 1e3;
-        bf_gb += bf_bytes * calls as f64 / 1e9;
-        q8_gb += q8_bytes * calls as f64 / 1e9;
         println!(
-            "  {name:<22} {calls:>6} {:>9.3} {:>9.3} {:>6.2}x {:>10.1} {:>10.1}",
-            bf_each * 1e3,
-            q8_each * 1e3,
-            bf_each / q8_each,
-            bf_bytes / 1e6,
-            q8_bytes / 1e6,
+            "  {name:<22} {calls:>6} {:>9.3} {:>9.3} {:>9.3} {:>7.2}x {:>7.2}x",
+            each[0] * 1e3,
+            each[1] * 1e3,
+            each[2] * 1e3,
+            each[0] / each[1],
+            each[0] / each[2],
         );
     }
 
     println!("  {:-<80}", "");
+    let bits = |i: usize| gb[i] / gb[0] * 16.0;
+    for (i, name) in ["bf16", "q8", "q4"].iter().enumerate() {
+        println!(
+            "  {name:<6} {:>8.2} ms/token {:>8.2} GB/token {:>7.1} GB/s stored {:>6.2} bits/w \
+             {:>6.2}x",
+            ms[i],
+            gb[i],
+            gb[i] / (ms[i] / 1e3),
+            bits(i),
+            ms[0] / ms[i],
+        );
+    }
+    // The whole question of the rung, stated where a reader cannot miss
+    // it: is the next representation worth making real?
     println!(
-        "  {:<22} {:>16.2} {:>9.2} {:>6.2}x",
-        "ms/token",
-        bf_ms,
-        q8_ms,
-        bf_ms / q8_ms
-    );
-    println!(
-        "  {:<22} {:>16.2} {:>9.2}   GB/token stored",
-        "traffic", bf_gb, q8_gb
-    );
-    println!(
-        "  {:<22} {:>16.1} {:>9.1}   GB/s stored   ({:.1} vs {:.1} GB/s of DENOTED f32)",
-        "rate",
-        bf_gb / (bf_ms / 1e3),
-        q8_gb / (q8_ms / 1e3),
-        bf_gb * 2.0 / (bf_ms / 1e3),
-        bf_gb * 2.0 / (q8_ms / 1e3),
-    );
-    println!(
-        "\n  bits/weight: bf16 16.00, q8 {:.2} (scales included)\n",
-        q8_gb / bf_gb * 16.0
+        "\n  Q8 -> Q4 buys {:.2}x on projections; a token would go {:.0} -> {:.0} ms \
+         (+{:.0} ms non-projection).\n",
+        ms[1] / ms[2],
+        ms[1] + 23.5,
+        ms[2] + 23.5,
+        23.5
     );
 }
