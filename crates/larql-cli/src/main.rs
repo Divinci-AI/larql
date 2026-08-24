@@ -87,6 +87,11 @@ enum Commands {
     /// Publish a vindex to HuggingFace — full vindex plus slice siblings.
     Publish(publish_cmd::PublishArgs),
 
+    /// Validate the VINDEX3 production registry (registry/index.json +
+    /// registry/models/*.json).
+    #[command(subcommand)]
+    Registry(registry_cmd::RegistryCommand),
+
     /// Remove a cached vindex.
     Rm(rm_cmd::RmArgs),
 
@@ -615,6 +620,7 @@ fn real_main() -> i32 {
         Commands::Show(args) => show_cmd::run(args),
         Commands::Slice(args) => slice_cmd::run(args),
         Commands::Publish(args) => publish_cmd::run(args),
+        Commands::Registry(cmd) => registry_cmd::run(cmd),
         Commands::Rm(args) => rm_cmd::run(args),
 
         // ── Build / extract ──

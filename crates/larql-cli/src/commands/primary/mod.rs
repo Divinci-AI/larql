@@ -19,6 +19,7 @@ pub mod model_cmd;
 pub mod publish_cmd;
 pub mod pull_cmd;
 pub mod recipe_cmd;
+pub mod registry_cmd;
 pub mod rm_cmd;
 pub mod run_cmd;
 pub mod run_cmd_image;
