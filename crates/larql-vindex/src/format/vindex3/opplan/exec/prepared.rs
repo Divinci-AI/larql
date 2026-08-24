@@ -532,6 +532,31 @@ impl PreparedOperands {
         census
     }
 
+    /// Where this image's allocations landed. See [`AllocationCensus`].
+    pub fn allocation_census(&self) -> AllocationCensus {
+        let mut census = AllocationCensus::default();
+        let mut add = |w: &LoadedWeight| {
+            for (address, bytes) in w.allocations() {
+                census.add(address, bytes);
+            }
+        };
+        for layer in &self.layers {
+            match &layer.attention {
+                PreparedAttention::Softmax(ops) => {
+                    ops.loaded_matrices().iter().for_each(|w| add(w))
+                }
+                PreparedAttention::GatedDelta(ops) => {
+                    ops.loaded_matrices().iter().for_each(|w| add(w))
+                }
+            }
+            layer.ffn.loaded_matrices().iter().for_each(|w| add(w));
+        }
+        if let Some((_, projection)) = &self.output {
+            add(projection);
+        }
+        census
+    }
+
     /// The slice this image was prepared for.
     pub fn slice(&self) -> &ExecutionSlice {
         &self.slice
@@ -601,6 +626,45 @@ impl PreparedOperands {
 
     pub(super) fn output(&self) -> Option<&(OutputOp, LoadedWeight)> {
         self.output.as_ref()
+    }
+}
+
+/// Where a prepared image's allocations LAND, as distinct from how many
+/// bytes they hold.
+///
+/// CPU-PERF-1 found the isolated kernel harness predicts real bf16
+/// projection to +0.7% and misses real Q8 by 7.9%, and CPU-PERF-2 ruled
+/// out machine state. What is left is the resident representation itself,
+/// and the two formats differ in more than bytes: bf16 lands in
+/// page-aligned `AlignedBytes`, one allocation per matrix, while Q8 uses
+/// ordinary heap vectors and TWO allocations per matrix.
+///
+/// This measures that difference before anything is changed on the
+/// strength of it — a large `Vec` may already receive a page-aligned VM
+/// region, in which case "align it" would be an intervention with nothing
+/// to intervene on.
+#[derive(Default, Clone, Copy, Debug)]
+pub struct AllocationCensus {
+    pub allocations: usize,
+    pub page_aligned: usize,
+    /// The coarsest alignment every allocation shares, in bytes.
+    pub common_alignment: usize,
+    pub bytes: usize,
+}
+
+impl AllocationCensus {
+    fn add(&mut self, address: usize, bytes: usize) {
+        self.allocations += 1;
+        self.bytes += bytes;
+        if address.is_multiple_of(super::weights::DEVICE_PAGE_ALIGN) {
+            self.page_aligned += 1;
+        }
+        let align = 1usize << address.trailing_zeros().min(30);
+        self.common_alignment = if self.allocations == 1 {
+            align
+        } else {
+            self.common_alignment.min(align)
+        };
     }
 }
 

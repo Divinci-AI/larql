@@ -163,6 +163,33 @@ impl LoadedWeight {
         }
     }
 
+    /// Every backing allocation this operand holds: `(address, bytes)`.
+    ///
+    /// Plural because the compact formats are not one buffer. Q8 keeps
+    /// codes and scales in separate allocations, so a model resident as
+    /// Q8 holds roughly twice as many as the same model as bf16 — and
+    /// where those land is invisible to a kernel benchmark that allocates
+    /// one matrix and reuses it.
+    pub fn allocations(&self) -> Vec<(usize, usize)> {
+        let of = |p: *const u8, n: usize| (p as usize, n);
+        match self {
+            LoadedWeight::F32(w) => vec![of(w.as_ptr().cast(), std::mem::size_of_val(&w[..]))],
+            LoadedWeight::Q8 { codes, scales } => vec![
+                of(codes.as_ptr().cast(), codes.len()),
+                of(scales.as_ptr().cast(), std::mem::size_of_val(&scales[..])),
+            ],
+            LoadedWeight::Bf16(b) | LoadedWeight::F16(b) => {
+                vec![of(b.as_slice().as_ptr(), b.as_slice().len())]
+            }
+            LoadedWeight::Mxfp4 { packed, scales } | LoadedWeight::Nvfp4 { packed, scales, .. } => {
+                vec![
+                    of(packed.as_slice().as_ptr(), packed.as_slice().len()),
+                    of(scales.as_slice().as_ptr(), scales.as_slice().len()),
+                ]
+            }
+        }
+    }
+
     /// Whether these bytes are the checkpoint's own, or a widened image
     /// of them.
     ///

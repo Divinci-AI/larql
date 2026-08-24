@@ -184,6 +184,11 @@ impl<'a, B: PlanBackend> DecodeSession<'a, B> {
         self.ops.get().residency_census()
     }
 
+    /// Where this session's operand allocations landed.
+    pub fn allocation_census(&self) -> super::prepared::AllocationCensus {
+        self.ops.get().allocation_census()
+    }
+
     /// Positions consumed so far — read from the continuation state,
     /// which is the single position authority (VI3-INF-3).
     pub fn position(&self) -> usize {

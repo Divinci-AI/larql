@@ -21,7 +21,7 @@ use larql_vindex::format::vindex3::opplan::exec::backend::PlanBackend;
 use larql_vindex::format::vindex3::opplan::exec::cpu::{ledger, PhysicalProjectionPlan, PlanTally};
 use larql_vindex::format::vindex3::opplan::exec::decode::DecodeSession;
 use larql_vindex::format::vindex3::opplan::exec::operands::OperandStore;
-use larql_vindex::format::vindex3::opplan::exec::prepared::ResidencyCensus;
+use larql_vindex::format::vindex3::opplan::exec::prepared::{AllocationCensus, ResidencyCensus};
 use larql_vindex::format::vindex3::opplan::exec::timing;
 use larql_vindex::format::vindex3::opplan::ComponentOpPlan;
 
@@ -44,6 +44,7 @@ pub(super) fn run_generate<B: PlanBackend>(
     let load_seconds = loading.elapsed().as_secs_f64();
     eprintln!("weights resident in {load_seconds:.1} s");
     report_residency(&session.residency_census());
+    report_allocations(&session.allocation_census());
 
     // Prompt ingestion: every position must pass through the stack to
     // fill the KV cache; only the last position's logits are consumed.
@@ -173,6 +174,25 @@ fn report_residency(census: &ResidencyCensus) {
 /// A path that kept bf16 resident and widened a scratch tile before
 /// computing would satisfy the census and show up here as `blas-f32` at
 /// twice the bytes.
+/// Where the operand allocations landed, as distinct from how big they
+/// are.
+///
+/// Printed beside the byte census because the two answer different
+/// questions and one of them is currently unexplained: an isolated kernel
+/// harness predicts real bf16 projection to +0.7% and misses real Q8 by
+/// 7.9%, and the formats differ in allocation COUNT and ALIGNMENT as well
+/// as in bytes.
+fn report_allocations(census: &AllocationCensus) {
+    println!(
+        "allocations: {} holding {:.2} GB — {} page-aligned ({:.0}%), common alignment {} B",
+        census.allocations,
+        census.bytes as f64 / 1e9,
+        census.page_aligned,
+        census.page_aligned as f64 / census.allocations.max(1) as f64 * 100.0,
+        census.common_alignment,
+    );
+}
+
 fn report_projections(seconds: f64, tallies: &[(PhysicalProjectionPlan, PlanTally)]) {
     let total: u64 = tallies.iter().map(|(_, t)| t.bytes).sum();
     println!(
