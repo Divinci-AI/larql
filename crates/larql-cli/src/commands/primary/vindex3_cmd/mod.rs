@@ -50,6 +50,15 @@ pub enum Vindex3Command {
     /// and marked approximate, and a profile then selects between
     /// representations that exist.
     Represent(RepresentArgs),
+    /// SENSITIVITY-1A: score every eligible tensor by the relative error
+    /// quantising it introduces, from the weights alone and with no forward
+    /// pass. One screen scores every candidate precision map.
+    Sensitivity(sensitivity::SensitivityArgs),
+
+    /// SENSITIVITY-1B': per-tensor activation-weighted consequence from a
+    /// frozen capture. Emits numbers only — aggregation and the bar live in
+    /// `bench/prompts/quality-bank-1/`.
+    Consequence(consequence::ConsequenceArgs),
 }
 
 /// Which numerical realisation runs the plan. Both execute the *same*
@@ -352,16 +361,20 @@ pub fn run(cmd: Vindex3Command) -> Result<(), Box<dyn std::error::Error>> {
         Vindex3Command::Ops(args) => run_ops(args),
         Vindex3Command::Exec(args) => run_exec(args),
         Vindex3Command::Represent(args) => run_represent(args),
+        Vindex3Command::Sensitivity(args) => sensitivity::run(args),
+        Vindex3Command::Consequence(args) => consequence::run(args),
     }
 }
 
 mod bank;
+mod consequence;
 mod exec;
 mod generate;
 #[cfg(all(feature = "gpu", target_os = "macos"))]
 mod lowered;
 mod ops;
 mod optional_op;
+mod sensitivity;
 mod teacher_force;
 use exec::run_exec;
 use ops::run_ops;
