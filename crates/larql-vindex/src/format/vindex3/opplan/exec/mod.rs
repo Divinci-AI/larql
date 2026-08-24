@@ -20,6 +20,7 @@
 
 pub mod backend;
 pub mod continuation;
+pub mod cpu;
 pub mod decode;
 pub mod device;
 mod experts;
