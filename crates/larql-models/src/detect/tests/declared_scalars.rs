@@ -35,7 +35,7 @@ fn glimmer_shaped() -> serde_json::Value {
 fn scaling_and_norm_scalars_are_read() {
     let arch = detect_from_json(&glimmer_shaped());
     assert_eq!(arch.qk_scale_factor(), Some(3.87));
-    assert_eq!(arch.output_multiplier(), Some(0.196));
+    assert_eq!(arch.logit_scale(), Some(0.196));
     assert_eq!(arch.post_norm_eps(), Some(PostNormEps::Value(1e-8)));
     assert_eq!(arch.attention_bias(), Some(false));
     assert_eq!(arch.max_position_embeddings(), Some(131072));
@@ -54,7 +54,7 @@ fn absent_scalars_stay_none_not_defaulted() {
         "num_key_value_heads": 8
     }));
     assert_eq!(arch.qk_scale_factor(), None);
-    assert_eq!(arch.output_multiplier(), None);
+    assert_eq!(arch.logit_scale(), None);
     assert_eq!(arch.post_norm_eps(), None);
     assert_eq!(arch.attention_bias(), None);
     assert_eq!(arch.max_position_embeddings(), None);
@@ -81,7 +81,13 @@ fn granite_spellings_resolve_through_the_canonical_names() {
         "logits_scaling": 10.0,
         "residual_multiplier": 0.22
     }));
-    assert_eq!(arch.output_multiplier(), Some(10.0));
+    // `logits_scaling` is a DIVISOR: HF Granite computes `logits / 10`.
+    // Resolving it to the multiplicative factor is the whole job of
+    // `logit_scale`, and passing 10.0 through unchanged is the bug this
+    // pins — it put Granite's logits out by 100x and saturated every
+    // softmax built on them, while leaving argmax (and so every generation
+    // oracle) exactly right.
+    assert_eq!(arch.logit_scale(), Some(0.1));
     assert_eq!(arch.residual_scale(), Some(0.22));
     assert_eq!(
         arch.qk_scale_factor(),
@@ -139,7 +145,7 @@ fn the_canonical_spelling_wins_when_both_are_declared() {
         "output_multiplier": 2.0,
         "logits_scaling": 10.0
     }));
-    assert_eq!(arch.output_multiplier(), Some(2.0));
+    assert_eq!(arch.logit_scale(), Some(2.0));
 }
 
 /// No spelling of either operation declared: absence stays absence, not an
@@ -218,4 +224,46 @@ fn bare_block_size_is_not_a_drafter_block() {
         "block_size": 1024
     }));
     assert_eq!(arch.config().draft_block_size, None);
+}
+
+/// A degenerate `logits_scaling` yields no operation rather than an
+/// infinite multiplier.
+///
+/// `1/0` is `inf`, and multiplying a head by `inf` produces NaN logits —
+/// a failure that surfaces far from its cause. `None` means "this model
+/// declares no output scaling", which is the honest reading of a divisor
+/// that cannot be inverted.
+#[test]
+fn a_degenerate_logits_scaling_is_no_operation_not_an_infinity() {
+    for bad in [0.0, f64::INFINITY, f64::NAN] {
+        let arch = detect_from_json(&serde_json::json!({
+            "model_type": "granite",
+            "hidden_size": 64,
+            "num_hidden_layers": 2,
+            "intermediate_size": 256,
+            "num_attention_heads": 8,
+            "num_key_value_heads": 8,
+            "head_dim": 64,
+            "logits_scaling": bad,
+        }));
+        assert_eq!(arch.logit_scale(), None, "logits_scaling = {bad}");
+    }
+}
+
+/// An explicit `output_multiplier` is already a multiplier and passes
+/// through untouched, even when a divisor is also present.
+#[test]
+fn an_explicit_multiplier_is_not_inverted() {
+    let arch = detect_from_json(&serde_json::json!({
+        "model_type": "granite",
+        "hidden_size": 64,
+        "num_hidden_layers": 2,
+        "intermediate_size": 256,
+        "num_attention_heads": 8,
+        "num_key_value_heads": 8,
+        "head_dim": 64,
+        "output_multiplier": 0.25,
+        "logits_scaling": 10.0,
+    }));
+    assert_eq!(arch.logit_scale(), Some(0.25));
 }

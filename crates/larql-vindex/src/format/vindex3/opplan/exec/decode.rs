@@ -254,6 +254,14 @@ impl<'a, B: PlanBackend> DecodeSession<'a, B> {
             // Attention input is normalised once and handed over; the
             // judged gate reads the same vector (same as the batch path).
             let inputs = [state.pre_attention.apply(self.backend, &h)];
+            // The sensitivity tap from main, kept ahead of the operator
+            // dispatch: it observes the attention INPUT, which both
+            // operators read, so it belongs to neither branch.
+            observer.operand_input(
+                index,
+                super::observe::InputSite::Attention,
+                inputs[0].as_slice(),
+            );
             // One position, either operator. A recurrence appends no KV
             // row — it rewrites its own buffers in place, which is only
             // correct because those buffers are DURABLE: the convolution
@@ -303,10 +311,16 @@ impl<'a, B: PlanBackend> DecodeSession<'a, B> {
             observer.event(StepEvent::AttentionDone { layer: index });
 
             let normed = state.pre_ffn.apply(self.backend, &h);
+            observer.operand_input(index, super::observe::InputSite::Ffn, normed.as_slice());
             let ffn_out =
                 state
                     .ffn
                     .apply_from_residual(&layer.ffn, self.backend, &h, &normed, hidden)?;
+            observer.operand_input(
+                index,
+                super::observe::InputSite::FfnOutput,
+                ffn_out.as_slice(),
+            );
             let mut ffn_out = match &state.post_ffn {
                 Some(norm) => norm.apply(self.backend, &ffn_out),
                 None => ffn_out,

@@ -42,6 +42,23 @@ pub enum Vindex3Command {
     /// `shannon layer-dump` format so `layer-diff` can compare it
     /// against an upstream trace with no new comparator.
     Exec(ExecArgs),
+    /// Compile a physical representation of the container's objects and
+    /// persist it beside the canonical bytes, so execution reads a
+    /// compiled pack instead of quantising every operand at load.
+    ///
+    /// The canonical representation is never replaced: the pack is added
+    /// and marked approximate, and a profile then selects between
+    /// representations that exist.
+    Represent(RepresentArgs),
+    /// SENSITIVITY-1A: score every eligible tensor by the relative error
+    /// quantising it introduces, from the weights alone and with no forward
+    /// pass. One screen scores every candidate precision map.
+    Sensitivity(sensitivity::SensitivityArgs),
+
+    /// SENSITIVITY-1B': per-tensor activation-weighted consequence from a
+    /// frozen capture. Emits numbers only — aggregation and the bar live in
+    /// `bench/prompts/quality-bank-1/`.
+    Consequence(consequence::ConsequenceArgs),
 }
 
 /// Which numerical realisation runs the plan. Both execute the *same*
@@ -138,12 +155,42 @@ pub struct ExecArgs {
     #[arg(long, value_enum, default_value_t = ExecBackend::Reference)]
     pub backend: ExecBackend,
 
+    /// Where an execution representation may come from.
+    ///
+    /// Separate from `--backend` on purpose: the backend says *what*
+    /// representation execution wants, this says whether the runtime may
+    /// manufacture it now.
+    ///
+    /// `auto` uses a compiled pack when present and quantises at load
+    /// otherwise. `stored` forbids manufacturing — the run fails naming any
+    /// tensor that would be quantised, so "no runtime quantisation" is an
+    /// invariant rather than a timing to infer. `transient` ignores any
+    /// pack and quantises at load; it is the oracle the representation
+    /// compiler is checked against, and is retained permanently.
+    #[arg(long, value_name = "auto|stored|transient", default_value = "auto")]
+    pub representation_source: String,
+
     /// Greedy-decode this many new tokens after the prompt, printing
     /// per-step timing and a decode report instead of a single-forward
     /// summary. Every step re-runs the full forward — the interpreter
     /// has no KV cache yet, and the report says so.
     #[arg(long, conflicts_with_all = ["dump_layers", "resume"])]
     pub generate: Option<usize>,
+
+    /// Teacher-force a whole quality bank through ONE resident model,
+    /// writing `<--dump-dir>/<id>.f32` per entry.
+    ///
+    /// The file is JSON lines: `{"id": "...", "ids": [1,2,3]}`. Each entry
+    /// gets a brand-new continuation state, and the run fails if a session
+    /// does not start at position 0 or does not end at the entry's length
+    /// — a leak between entries would silently score later prompts against
+    /// a context no reference ever saw.
+    #[arg(long, value_name = "JSONL")]
+    pub bank: Option<PathBuf>,
+
+    /// Where `--bank` writes its per-entry logit dumps.
+    #[arg(long, value_name = "DIR")]
+    pub dump_dir: Option<PathBuf>,
 
     /// Step the given tokens through the plan one position at a time and
     /// write every position's logits here as `[positions, vocab]` f32.
@@ -245,6 +292,70 @@ impl From<EncodeCapability> for larql_vindex::format::vindex3::plan::capability:
 }
 
 #[derive(Args)]
+pub struct RepresentArgs {
+    /// Container directory to compile from.
+    pub container: PathBuf,
+
+    /// Container directory to write. The canonical segments are
+    /// hard-linked where the filesystem allows, so the new container costs
+    /// the compiled pack's bytes rather than the whole model's.
+    #[arg(long)]
+    pub output: PathBuf,
+
+    /// Target encoding. `NVFP4` is the only compiler today.
+    #[arg(long, default_value = "NVFP4")]
+    pub encoding: String,
+
+    /// Objects to compile. Repeat the flag to name several; omit to
+    /// compile every object carrying an eligible tensor.
+    #[arg(long = "object")]
+    pub objects: Vec<String>,
+
+    /// Compile a role the conservative default preserves. Repeat to name
+    /// several. Roles: decoder-linear, expert-weight, embedding,
+    /// output-head, norm, router, small-vector, unknown.
+    ///
+    /// The default compiles decoder-linear and expert-weight only —
+    /// the parameter mass — and preserves the surfaces where 4-bit is
+    /// known to be delicate. This flag is how a profile becomes more
+    /// aggressive deliberately rather than by accident.
+    #[arg(long = "include-role")]
+    pub include_roles: Vec<String>,
+
+    /// Write a deployment image instead of an archival container.
+    ///
+    /// The image carries the compiled representation plus every surface the
+    /// precision policy protected — the BF16 embedding and norms have to
+    /// travel or it will not execute — and drops the source bytes it
+    /// replaced. It names the digests it derives from, so the authority can
+    /// be found again; it cannot recompile itself.
+    ///
+    /// Nothing is destroyed: the container this was compiled from is
+    /// untouched.
+    #[arg(long)]
+    pub deployment: bool,
+
+    /// Hold a projection at source precision despite its role being
+    /// eligible, e.g. `--protect v_proj`. Repeat to name several.
+    ///
+    /// Append `@LO-HI` to protect it only within a depth range —
+    /// `--protect gate_proj@30-39`. That intersection is a different
+    /// policy from `--protect gate_proj --protect-layers 30-39`, which is
+    /// their union and protects far more.
+    ///
+    /// This is how a precision map is expressed: role eligibility says the
+    /// encoding applies to a kind of weight, and this says which of them to
+    /// actually spend it on.
+    #[arg(long = "protect")]
+    pub protect: Vec<String>,
+
+    /// Hold an inclusive range of layer depths at source precision, e.g.
+    /// `--protect-layers 0-7`. Repeat to name several.
+    #[arg(long = "protect-layers", value_name = "LO-HI")]
+    pub protect_layers: Vec<String>,
+}
+
+#[derive(Args)]
 pub struct InspectArgs {
     /// Container directory.
     pub container: PathBuf,
@@ -283,15 +394,21 @@ pub fn run(cmd: Vindex3Command) -> Result<(), Box<dyn std::error::Error>> {
         Vindex3Command::Verify(args) => run_verify(args),
         Vindex3Command::Ops(args) => run_ops(args),
         Vindex3Command::Exec(args) => run_exec(args),
+        Vindex3Command::Represent(args) => run_represent(args),
+        Vindex3Command::Sensitivity(args) => sensitivity::run(args),
+        Vindex3Command::Consequence(args) => consequence::run(args),
     }
 }
 
+mod bank;
+mod consequence;
 mod exec;
 mod generate;
 #[cfg(all(feature = "gpu", target_os = "macos"))]
 mod lowered;
 mod ops;
 mod optional_op;
+mod sensitivity;
 mod teacher_force;
 use exec::run_exec;
 use ops::run_ops;
@@ -395,6 +512,154 @@ fn run_encode(args: EncodeArgs) -> Result<(), Box<dyn std::error::Error>> {
         outcome.container.display(),
     );
     Ok(())
+}
+
+/// `larql vindex3 represent` — compile a physical representation.
+///
+/// Prints what each object cost before and after, because the whole point
+/// of the operation is a number: the pack is only worth persisting if it is
+/// materially smaller than the bytes it was compiled from.
+fn run_represent(args: RepresentArgs) -> Result<(), Box<dyn std::error::Error>> {
+    use larql_vindex::format::vindex3::represent::{compile_representation, RepresentSpec};
+
+    let mut roles = larql_vindex::format::vindex3::represent::policy::RolePolicy::default();
+    for name in &args.include_roles {
+        let role = larql_vindex::format::vindex3::represent::policy::Role::parse(name)
+            .ok_or_else(|| format!("unknown role `{name}`"))?;
+        roles = roles.including(role);
+    }
+    let mut protect = larql_vindex::format::vindex3::represent::policy::Protections::default();
+    for p in &args.protect {
+        protect = match p.split_once('@') {
+            Some((name, range)) => {
+                let (lo, hi) = range
+                    .split_once('-')
+                    .ok_or_else(|| format!("--protect {p}: expected PROJ@LO-HI"))?;
+                protect.projection_in(
+                    name,
+                    lo.trim().parse::<u32>().map_err(|e| format!("{p}: {e}"))?,
+                    hi.trim().parse::<u32>().map_err(|e| format!("{p}: {e}"))?,
+                )
+            }
+            None => protect.projection(p),
+        };
+    }
+    for r in &args.protect_layers {
+        let (lo, hi) = r
+            .split_once('-')
+            .ok_or_else(|| format!("--protect-layers expects LO-HI, got `{r}`"))?;
+        protect = protect.layers(
+            lo.trim().parse::<u32>().map_err(|e| format!("{r}: {e}"))?,
+            hi.trim().parse::<u32>().map_err(|e| format!("{r}: {e}"))?,
+        );
+    }
+    if !protect.is_empty() {
+        println!("  protect: {}", protect.describe());
+    }
+    let spec = RepresentSpec {
+        encoding: args.encoding.clone(),
+        objects: args.objects.clone(),
+        roles,
+        deployment: args.deployment,
+        protect,
+    };
+    println!(
+        "== represent {} ({}) ==",
+        args.encoding,
+        if args.deployment {
+            "deployment image"
+        } else {
+            "archival container"
+        }
+    );
+    println!("  in     : {}", args.container.display());
+    println!("  out    : {}", args.output.display());
+    if !args.objects.is_empty() {
+        println!("  objects: {}", args.objects.join(", "));
+    }
+
+    let started = std::time::Instant::now();
+    let report = compile_representation(&args.container, &args.output, &spec)?;
+
+    println!("\n── compiled ──");
+    println!(
+        "  {:<34} {:>12} {:>12} {:>8} {:>9}",
+        "object", "source", "compiled", "ratio", "tensors"
+    );
+    println!("  {}", "-".repeat(80));
+    let mut src_total = 0u64;
+    let mut out_total = 0u64;
+    for c in &report.compiled_objects {
+        src_total += c.source_bytes;
+        out_total += c.compiled_bytes;
+        println!(
+            "  {:<34} {:>12} {:>12} {:>7.2}x {:>4} +{:<4}",
+            c.object,
+            human_bytes(c.source_bytes),
+            human_bytes(c.compiled_bytes),
+            c.compression(),
+            c.compiled_tensors,
+            c.carried_tensors,
+        );
+    }
+    println!("  {}", "-".repeat(80));
+    let ratio = if out_total == 0 {
+        0.0
+    } else {
+        src_total as f64 / out_total as f64
+    };
+    println!(
+        "  {:<34} {:>12} {:>12} {:>7.2}x",
+        "TOTAL",
+        human_bytes(src_total),
+        human_bytes(out_total),
+        ratio
+    );
+    let mut protected: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
+    for c in &report.compiled_objects {
+        for (role, n) in &c.preserved {
+            *protected.entry(role.to_string()).or_insert(0) += n;
+        }
+    }
+    for po in &report.preserved_objects {
+        let roles: Vec<String> = po.roles.iter().map(|(r, n)| format!("{r} x{n}")).collect();
+        println!(
+            "  {:<34} {:>12} {:>12}   preserved whole [{}]",
+            po.object,
+            human_bytes(po.bytes),
+            po.encoding,
+            roles.join(", ")
+        );
+    }
+    if !protected.is_empty() {
+        println!("\n  preserved at source precision (conservative default):");
+        for (role, n) in &protected {
+            println!("    {role:<16} {n} tensor(s)");
+        }
+    }
+    println!(
+        "\n  {} segment(s) carried unchanged; canonical bytes are untouched.",
+        report.linked_segments
+    );
+    println!("  wall time: {:.1}s", started.elapsed().as_secs_f64());
+    println!("\n→ {}", args.output.display());
+    Ok(())
+}
+
+fn human_bytes(bytes: u64) -> String {
+    const K: u64 = 1024;
+    const M: u64 = K * 1024;
+    const G: u64 = M * 1024;
+    if bytes >= G {
+        format!("{:.2} GB", bytes as f64 / G as f64)
+    } else if bytes >= M {
+        format!("{:.1} MB", bytes as f64 / M as f64)
+    } else if bytes >= K {
+        format!("{:.1} KB", bytes as f64 / K as f64)
+    } else {
+        format!("{bytes} B")
+    }
 }
 
 fn run_inspect(args: InspectArgs) -> Result<(), Box<dyn std::error::Error>> {

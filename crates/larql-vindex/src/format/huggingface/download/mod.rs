@@ -4,8 +4,13 @@
 //! Carved out of the monolithic `huggingface.rs` in the 2026-04-25
 //! reorg. See `super::mod.rs` for the module map.
 //!
-//! Sibling layout (round-6 split, 2026-05-10):
-//! - `helpers` — pure non-network utilities (etag/repo-filter/cache-path).
+//! Sibling layout (round-6 split, 2026-05-10; tests split further
+//! 2026-08-23 per the `format/generation.rs`+`format/generation_tests.rs`
+//! pattern):
+//! - `helpers`      — pure non-network utilities (etag/repo-filter/cache-path).
+//! - `tests`        — hf_hub-plumbing tests (resolve/download/cache-walk).
+//! - `tests_v3`     — VINDEX3 generation-aware completeness tests.
+//! - `test_support` — mock/env-guard scaffolding shared by both test files.
 
 mod helpers;
 
@@ -13,6 +18,7 @@ use std::path::PathBuf;
 
 use crate::error::VindexError;
 use crate::format::filenames::*;
+use crate::format::generation::{detect_generation, ContainerGeneration};
 
 use super::publish::get_hf_token;
 use super::{vindex_core_files, VINDEX_METADATA_FILES, VINDEX_WEIGHT_FILES};
@@ -223,13 +229,47 @@ pub use hf_hub::api::Progress as DownloadProgress;
 ///
 /// Returns `None` on any failure (HEAD error, cache missing, etag
 /// absent, etc.); the caller falls back to `download_with_progress`.
+///
+/// # Why this only ever accepts the pinned revision's own snapshot dir
+///
+/// This used to also accept (a) any *other* revision's snapshot symlink
+/// for the same filename, and (b) the bare blob path with no snapshot
+/// symlink at all, on the reasoning that "the caller only needs a file
+/// it can open." That reasoning is wrong for this caller specifically:
+/// [`resolve_hf_vindex_with_progress`]'s V3 completeness loop discards
+/// the returned `PathBuf` entirely (`fetch(...).ok_or_else(...)?` —
+/// only the `Option`-ness is checked) and relies on every fetched file
+/// actually landing under `vindex_dir` (the pinned revision's own
+/// `snapshots/<revision>/` directory, established by `index.json`'s own
+/// fetch) — that is what the VINDEX3 container loader opens files
+/// relative to afterwards. A bare blob path, or a symlink living under
+/// some *other* revision's snapshot dir, satisfies neither: the loop
+/// reports success, but `vindex_dir` is left missing the file, and the
+/// failure only surfaces later, opaquely, when the container is opened.
+///
+/// Concretely: `target.embedding.bin`'s blob was already resident
+/// locally (deduped — identical BF16 embedding bytes from an earlier,
+/// unrelated pull of a sibling container), so this function used to
+/// report it "cached" via the removed fallback, the real
+/// `download_with_progress` call that would have created the pinned
+/// revision's own symlink never ran, and `larql serve` on the claimed
+/// registry name failed with a bare `IO error: No such file or
+/// directory` — nothing about that error named the missing symlink.
+///
+/// With no accepted fallback, an unpinned `revision: None` request
+/// always misses here (there is no single directory a "None" revision
+/// unambiguously names yet) and falls through to `download_with_progress`,
+/// which resolves "current HEAD" and places every file consistently —
+/// slightly less cache-optimized for the unpinned case, never silently
+/// wrong.
 fn cached_snapshot_file(
     kind: RepoKind,
     repo_id: &str,
     revision: Option<&str>,
     filename: &str,
 ) -> Option<(PathBuf, u64)> {
-    let (etag, size) = head_etag_and_size(kind, repo_id, revision, filename)?;
+    let revision = revision?;
+    let (etag, size) = head_etag_and_size(kind, repo_id, Some(revision), filename)?;
     let repo_dir = hf_cache_repo_dir(kind, repo_id)?;
     let blob_path = repo_dir.join("blobs").join(&etag);
     let meta = std::fs::metadata(&blob_path).ok()?;
@@ -242,27 +282,11 @@ fn cached_snapshot_file(
         return None;
     }
 
-    // Return the snapshot path (symlink → blob) if the repo has one,
-    // otherwise the blob path itself. Either works — the caller only
-    // needs a file it can open.
-    let snapshots = repo_dir.join("snapshots");
-    if let Ok(entries) = std::fs::read_dir(&snapshots) {
-        for entry in entries.flatten() {
-            let snap_file = entry.path().join(filename);
-            if snap_file.exists() {
-                return Some((snap_file, size));
-            }
-        }
+    let snap_file = repo_dir.join("snapshots").join(revision).join(filename);
+    if snap_file.exists() {
+        return Some((snap_file, size));
     }
-    // Fall back to the pinned revision (if any) even if the symlink is
-    // missing — the blob still has the bytes.
-    if let Some(rev) = revision {
-        let snap_file = snapshots.join(rev).join(filename);
-        if snap_file.exists() {
-            return Some((snap_file, size));
-        }
-    }
-    Some((blob_path, size))
+    None
 }
 
 /// Issue a HEAD against HF's file-resolve endpoint for this repo+file
@@ -339,6 +363,30 @@ fn head_etag_and_size(
 /// `progress` is a factory: called once per file with the filename.
 /// Return a fresh `DownloadProgress` — typically an
 /// `indicatif::ProgressBar` fetched from a `MultiProgress`.
+///
+/// # Generation-aware since the vindex3-registry initiative's 2C rung
+///
+/// `index.json` is downloaded first regardless of generation — it is
+/// the minimal control metadata every container declares itself with.
+/// What happens next branches on what it says:
+///
+/// - **VINDEX2** — unchanged: [`vindex_core_files()`]'s fixed metadata
+///   + big-tensor-file list, optional entries skipped silently (most
+///   candidate files genuinely don't exist in most repos; that's the
+///   list's whole design).
+/// - **VINDEX3** — the repo's own file listing (`repo.info().siblings`)
+///   *is* the required payload, downloaded in full. VINDEX3 has no
+///   metadata/weight split the way VINDEX2 does — its payload IS its
+///   structure (segments, representations, manifests, the M2 migration
+///   rung's capability-snapshot side-channel) — so a hand-enumerated
+///   "which `index.json` fields name a file" list would just be the
+///   fixed-list bug this rung exists to fix, one layer removed: it
+///   would silently miss whatever the format grows next, exactly like
+///   the old list silently missed VINDEX3 entirely. A repo dedicated to
+///   one vindex has no meaningful unrelated bulk to over-fetch (see
+///   `docs/vindex3-registry-design.md` §10.5). Every listed file is
+///   therefore required, not optional: a failed fetch is a hard error
+///   naming the file, not a silently-skipped candidate.
 pub fn resolve_hf_vindex_with_progress<F, P>(
     hf_path: &str,
     mut progress: F,
@@ -401,12 +449,32 @@ where
             .ok_or_else(|| VindexError::Parse("cannot determine vindex directory".into()))?
             .to_path_buf();
 
-        for filename in vindex_core_files() {
-            if filename == INDEX_JSON {
-                continue;
+        match detect_generation(&vindex_dir)? {
+            ContainerGeneration::V3 => {
+                let info = repo.info().map_err(|e| {
+                    VindexError::Parse(format!("HF info failed for hf://{repo_id}: {e}"))
+                })?;
+                for sibling in &info.siblings {
+                    if sibling.rfilename == INDEX_JSON {
+                        continue;
+                    }
+                    fetch(&sibling.rfilename, &sibling.rfilename).ok_or_else(|| {
+                        VindexError::Parse(format!(
+                            "failed to download required VINDEX3 file '{}' from hf://{repo_id}",
+                            sibling.rfilename
+                        ))
+                    })?;
+                }
             }
-            // Optional files — ignore failures (missing from repo is fine).
-            let _ = fetch(filename, filename);
+            ContainerGeneration::V2 => {
+                for filename in vindex_core_files() {
+                    if filename == INDEX_JSON {
+                        continue;
+                    }
+                    // Optional files — ignore failures (missing from repo is fine).
+                    let _ = fetch(filename, filename);
+                }
+            }
         }
         return Ok(vindex_dir);
     }
@@ -414,6 +482,30 @@ where
     Err(VindexError::Parse(format!(
         "failed to fetch index.json from hf://{repo_id}"
     )))
+}
+
+/// A `DownloadProgress` that reports nothing — for callers that need
+/// [`resolve_hf_vindex_with_progress`]'s generation-aware completeness
+/// but have no UI to drive (a background `serve`/server-side load, not
+/// an interactive `pull`). Mirrors this crate's `SilentLoadCallbacks` /
+/// `SilentPublishCallbacks` / `SilentBuildCallbacks` convention.
+struct NoDownloadProgress;
+impl DownloadProgress for NoDownloadProgress {
+    fn init(&mut self, _size: usize, _filename: &str) {}
+    fn update(&mut self, _size: usize) {}
+    fn finish(&mut self) {}
+}
+
+/// [`resolve_hf_vindex_with_progress`] with no progress reporting.
+///
+/// Not [`resolve_hf_vindex`] — that function is deliberately
+/// metadata-only for VINDEX2 (small files, cheap for `larql show`-style
+/// callers). This one always fetches the complete, generation-aware
+/// payload; use it wherever the caller actually needs a working
+/// container, not just a peek at its metadata — the VINDEX3 registry's
+/// `resolve_claimed` is the first such caller.
+pub fn resolve_hf_vindex_complete(hf_path: &str) -> Result<PathBuf, VindexError> {
+    resolve_hf_vindex_with_progress(hf_path, |_| NoDownloadProgress)
 }
 
 /// Resolve an `hf://` model repo path to a local snapshot directory,
@@ -508,4 +600,8 @@ where
 }
 
 #[cfg(test)]
+mod test_support;
+#[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_v3;

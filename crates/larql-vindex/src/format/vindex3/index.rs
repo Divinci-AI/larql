@@ -36,6 +36,62 @@ pub struct RepresentationEntry {
     /// SHA-256 over the whole segment file as written — detects
     /// post-write corruption independently of source access.
     pub segment_sha256: String,
+    /// Representation id this one was compiled from, when it was compiled
+    /// rather than encoded from a source checkpoint.
+    ///
+    /// Provenance a compiled pack cannot otherwise state: its bytes are
+    /// derived, and a reader deciding whether to trust them needs to know
+    /// what they are derived *from*. `None` on a representation taken
+    /// straight from the source — there is no earlier container-side
+    /// authority to name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compiled_from: Option<String>,
+    /// The representation ABI this pack was compiled against.
+    ///
+    /// `encoding` names a family; this names the contract. Without it a
+    /// container's bytes mean "whatever the encoder did that day", and an
+    /// improved encoder would silently redefine every artifact already on
+    /// disk. Readers refuse a revision they do not implement. `None` on a
+    /// representation taken from a source checkpoint — its bytes are the
+    /// source's, not this compiler's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codec: Option<crate::format::vindex3::represent::nvfp4_pack::CodecIdentity>,
+    /// Digest of the representation this was compiled from, so a derived
+    /// pack can be tied to the exact bytes it derives from even after it
+    /// is copied out of the container that holds them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_representation_digest: Option<String>,
+    /// Which compilation algorithm chose these values.
+    ///
+    /// Separate from [`Self::codec`] on purpose: the codec is the decode
+    /// contract, this is the encode recipe. Nearest-rounding and a
+    /// Hessian-aware encoder emit the same ABI and different numbers, so
+    /// only this field decides whether a pack is byte-reproducible by the
+    /// build reading it. A mismatch is never a refusal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoder: Option<crate::format::vindex3::represent::nvfp4_pack::EncoderRecipe>,
+}
+
+/// Whether a container carries the authority for its own bytes.
+///
+/// A canonical container holds bit-authoritative source bytes and can
+/// recompile any derived representation from them. A deployment image
+/// holds only what execution needs: compiled representations plus the
+/// surfaces a precision policy protected, with the authority named by
+/// digest rather than carried.
+///
+/// The distinction is not "smaller" — it is what the bytes *claim*. A
+/// derived image cannot recompile itself, and saying so is the difference
+/// between an artifact that is missing something and one that never
+/// promised it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ContainerAuthority {
+    /// Source bytes present; derived representations can be recompiled.
+    #[default]
+    Canonical,
+    /// Executable, not re-compilable without the source it names.
+    Derived,
 }
 
 pub use super::profile::PROFILE_EXACT;
@@ -57,9 +113,14 @@ pub struct Vindex3Index {
     pub hidden_size: usize,
     pub num_layers: usize,
     /// Filename of the MoE programme manifest, relative to the root.
-    /// `None` on a system container with no routed programme — a dense
-    /// system has nothing for a MoE manifest to describe, and inventing an
-    /// empty one would be a fabricated authority.
+    /// `None` when no routed programme is declared; inventing an empty one
+    /// would be a fabricated authority.
+    ///
+    /// Absence is **not** evidence the model is dense. This manifest is an
+    /// artifact of the import path; a graph-encoded container carries none
+    /// whether or not it routes — `gpt-oss-20b.vindex3` is a routed MoE with a
+    /// `target.expert_bank` representation and `moe_manifest: None`. Read
+    /// [`Self::representations`] to learn what a container actually holds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub moe_manifest: Option<String>,
     /// Filename of the system-graph manifest
@@ -91,6 +152,40 @@ pub struct Vindex3Index {
     pub variants: VariantCatalogue,
     /// Segment key → physical file count.
     pub segments: BTreeMap<String, u32>,
+    /// Whether this container carries the authority for its own bytes.
+    ///
+    /// Defaulted to [`ContainerAuthority::Canonical`], because every
+    /// container written before deployment images existed carries its
+    /// source. An absent field means "canonical", never "unknown".
+    #[serde(default, skip_serializing_if = "is_canonical")]
+    pub authority: ContainerAuthority,
+    /// The precision program this container's representations were
+    /// compiled under.
+    ///
+    /// The authority, not a description. `stored` checks its pack conforms
+    /// to this; `transient` manufactures exactly what this says is
+    /// represented, reading no pack; `auto` fills in what is missing. A
+    /// compiled artifact cannot be the authority for its own correctness,
+    /// which is what reading the decisions back out of a pack's tensor
+    /// table amounted to.
+    ///
+    /// `None` on containers with no compiled representation, and on those
+    /// written before the map was explicit — for which the pack's tensor
+    /// table remains the only available statement of what was done.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub precision_map: Option<crate::format::vindex3::represent::map::PrecisionMap>,
+    /// Identity of the model this image derives from, when derived.
+    ///
+    /// A deployment image's representations name the digests they were
+    /// compiled from, but those digests resolve against a container that is
+    /// no longer present — so the image also names the model itself, which
+    /// is what an operator needs to find the authority again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub derived_from_model: Option<String>,
+}
+
+fn is_canonical(a: &ContainerAuthority) -> bool {
+    matches!(a, ContainerAuthority::Canonical)
 }
 
 impl Vindex3Index {
@@ -115,6 +210,9 @@ impl Vindex3Index {
             profiles: vec![Profile::exact()],
             variants: VariantCatalogue::new(),
             segments,
+            authority: ContainerAuthority::Canonical,
+            precision_map: None,
+            derived_from_model: None,
         }
     }
 

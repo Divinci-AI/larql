@@ -30,7 +30,7 @@ use std::time::Instant;
 use larql_vindex::error::VindexError;
 use larql_vindex::format::vindex3::inspect::inspect_container;
 use larql_vindex::format::vindex3::opplan::exec::backend::PlanBackend;
-use larql_vindex::format::vindex3::opplan::exec::operands::OperandStore;
+use larql_vindex::format::vindex3::opplan::exec::operands::{OperandStore, RepresentationSource};
 use larql_vindex::format::vindex3::opplan::exec::production::ProductionBackend;
 use larql_vindex::format::vindex3::opplan::exec::reference::ReferenceBackend;
 use larql_vindex::format::vindex3::opplan::exec::{
@@ -89,7 +89,35 @@ pub fn run_exec(args: ExecArgs) -> Result<(), Box<dyn std::error::Error>> {
     let plan = outcome
         .plan
         .ok_or_else(|| format!("component `{}` produced no plan", args.component))?;
-    let store = OperandStore::open(&args.container, &inspection)?;
+    // What execution wants, and whether it may be manufactured now, are
+    // separate questions — see `--representation-source`.
+    let source = match args.representation_source.as_str() {
+        "auto" => RepresentationSource::Auto,
+        "stored" => RepresentationSource::Stored,
+        "transient" => RepresentationSource::Transient,
+        other => {
+            return Err(format!(
+                "unknown --representation-source `{other}`; expected auto, stored or transient"
+            )
+            .into())
+        }
+    };
+    // The encoding a compiled pack would have to carry for this backend.
+    // `None` on arms that execute the canonical bytes directly, which then
+    // never look for a pack.
+    let want = wanted_representation(args.backend);
+    let store = OperandStore::open_for(&args.container, &inspection, want, source)?;
+
+    let from_pack = store.selection().values().filter(|s| s.stored).count();
+    if want.is_some() {
+        println!(
+            "representation: {}  source: {}  objects from a compiled pack: {}/{}",
+            want.unwrap_or("-"),
+            args.representation_source,
+            from_pack,
+            store.selection().len()
+        );
+    }
 
     #[cfg(all(feature = "gpu", target_os = "macos"))]
     {
@@ -135,10 +163,12 @@ pub fn run_exec(args: ExecArgs) -> Result<(), Box<dyn std::error::Error>> {
             _ => None,
         };
         if let Some((formats, label)) = lowered {
-            return super::lowered::run_lowered(&args, &tokens, &plan, &store, formats, label);
+            let r = super::lowered::run_lowered(&args, &tokens, &plan, &store, formats, label);
+            report_representation_work(&store, want, r.is_ok());
+            return r;
         }
     }
-    match args.backend {
+    let outcome = match args.backend {
         ExecBackend::Reference => run_on(&ReferenceBackend::new(), &args, &tokens, &plan, &store),
         ExecBackend::Production => run_on(&ProductionBackend::new(), &args, &tokens, &plan, &store),
         #[cfg(all(feature = "gpu", target_os = "macos"))]
@@ -258,6 +288,40 @@ pub fn run_exec(args: ExecArgs) -> Result<(), Box<dyn std::error::Error>> {
                 );
             run_on(&backend, &args, &tokens, &plan, &store)
         }
+    };
+    report_representation_work(&store, want, outcome.is_ok());
+    outcome
+}
+
+/// Say how much of the representation the runtime had to manufacture.
+///
+/// The number that matters is not how long a load took but whether the
+/// quantisation phase happened at all: a compiled representation is only
+/// doing its job when this reads zero.
+fn report_representation_work(store: &OperandStore, want: Option<&str>, ok: bool) {
+    // A refused run has quantised nothing, but saying "served entirely
+    // from stored bytes" over a failure would read as success.
+    if want.is_none() || !ok {
+        return;
+    }
+    let n = store.runtime_quantised();
+    println!(
+        "runtime compile: {n} tensor(s){}",
+        if n == 0 {
+            "  — served entirely from stored bytes"
+        } else {
+            ""
+        }
+    );
+    let held = store.bound_at_stored_precision();
+    if held > 0 {
+        // Honouring a precision map means running higher precision than the
+        // arm asked for. Never silent: a size that does not match the arm's
+        // name should be explicable from the run's own output.
+        println!(
+            "stored precision: {held} tensor(s) ran above the requested format \
+             (the pack's precision map)"
+        );
     }
 }
 
@@ -270,6 +334,19 @@ fn run_on<B: PlanBackend>(
     store: &OperandStore,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let engine = format!("{ENGINE_PREFIX}-{}", backend.name());
+    // A whole bank through one resident model. Checked before the
+    // single-prompt paths because `--bank` supplies its own ids and the
+    // `--tokens` argument is unused by it.
+    if let Some(path) = &args.bank {
+        let dump = args.dump_dir.clone().ok_or("--bank requires --dump-dir")?;
+        let text = std::fs::read_to_string(path)?;
+        let entries: Vec<super::bank::BankEntry> = text
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(serde_json::from_str)
+            .collect::<Result<_, _>>()?;
+        return super::bank::run_bank(backend, &engine, plan, store, &entries, &dump);
+    }
     if let Some(out) = &args.logit_dump {
         return super::teacher_force::run_teacher_force(backend, &engine, tokens, plan, store, out);
     }
@@ -533,5 +610,25 @@ fn summarise(engine: &str, trace: &ExecutionTrace) {
             None => println!("logits: empty"),
         },
         None => println!("logits: none (plan carries no output head)"),
+    }
+}
+
+/// The stored encoding a backend could be served from, if one is compiled.
+///
+/// Only the NVFP4 arms have a compiled counterpart today. Arms that run
+/// the canonical bytes return `None` and never look for a pack, so adding
+/// packs to a container cannot change what they execute.
+fn wanted_representation(backend: ExecBackend) -> Option<&'static str> {
+    #[cfg(all(feature = "gpu", target_os = "macos"))]
+    use larql_vindex::format::vindex3::represent::nvfp4_pack::DTYPE_NVFP4;
+    match backend {
+        #[cfg(all(feature = "gpu", target_os = "macos"))]
+        ExecBackend::MetalNvfp4
+        | ExecBackend::MetalNvfp4Ffn
+        | ExecBackend::MetalNvfp4NoHead
+        | ExecBackend::MetalLowered
+        | ExecBackend::MetalLoweredFfn
+        | ExecBackend::MetalLoweredNoHead => Some(DTYPE_NVFP4),
+        _ => None,
     }
 }

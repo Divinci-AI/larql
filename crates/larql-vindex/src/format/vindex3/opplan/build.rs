@@ -1057,3 +1057,359 @@ fn scales_shape(moe: &MoeSurface, rows: usize, k: usize) -> Vec<usize> {
         ExpertFormat::PackedBF16 | ExpertFormat::PerExpert => vec![moe.experts, rows],
     }
 }
+
+/// `absent_op`/`expected_shape`/`required_roles` are private pure
+/// functions over private `LayerOps`/`StackGeometry` structs, so — unlike
+/// the rest of this crate's tests, which build a real component/plan
+/// through `opplan/tests/` — these have to live beside the code they
+/// test (same reasoning `quant/convert.rs` and `opplan/gated_delta.rs`
+/// already use for their own pure-function arms). Every arm here is one
+/// no dense/softmax/non-MoE fixture reaches: hybrid dense+routed FFN,
+/// Gemma 4's router conditioning, a declared-false router bias, an
+/// unsplit expert scale stream, and the Gated DeltaNet operand-shape
+/// table (nothing in this crate encodes a `linear_attention` checkpoint
+/// through the real closure path yet — Qwen3.8's ladder is tracked
+/// separately).
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn base_ops() -> LayerOps {
+        LayerOps {
+            placement: NormPlacement::PrePost,
+            gated_ffn: true,
+            output_gate: false,
+            attention_bias: false,
+            sinks: false,
+            routed: false,
+            hybrid: false,
+            moe: None,
+            v_from_k: false,
+            // Softmax by default: these fixtures predate the hybrid
+            // ladder, and a recurrent default would silently retarget
+            // every one of them at the operator they were not written for.
+            recurrent: false,
+        }
+    }
+
+    fn moe(
+        router_kind: MoeRouterKind,
+        router_bias: bool,
+        expert_format: ExpertFormat,
+    ) -> MoeSurface {
+        MoeSurface {
+            experts: 8,
+            top_k: 2,
+            expert_intermediate_size: 64,
+            router_kind,
+            routing_policy: larql_models::config::ExpertRoutingPolicy::SoftmaxThenSelect,
+            router_bias,
+            expert_format,
+            gate_up_layout: Some(larql_models::config::GateUpLayout::ContiguousHalves),
+            shared_experts: 0,
+            hybrid: false,
+        }
+    }
+
+    // ── absent_op: hybrid / routed-FFN / MoE exclusions ──────────────
+
+    #[test]
+    fn dense_ffn_roles_absent_on_a_routed_non_hybrid_layer() {
+        let ops = LayerOps {
+            routed: true,
+            hybrid: false,
+            moe: Some(moe(
+                MoeRouterKind::TopKSoftmax,
+                true,
+                ExpertFormat::PackedMxfp4,
+            )),
+            ..base_ops()
+        };
+        for role in [
+            OperandRole::FfnGate,
+            OperandRole::FfnUp,
+            OperandRole::FfnDown,
+        ] {
+            assert_eq!(
+                absent_op(role, &ops),
+                Some("dense FFN (this layer is routed)"),
+                "{role:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn gemma4_router_conditioning_absent_unless_the_router_kind_says_so() {
+        let non_gemma4 = LayerOps {
+            routed: true,
+            moe: Some(moe(
+                MoeRouterKind::TopKSoftmax,
+                true,
+                ExpertFormat::PackedMxfp4,
+            )),
+            ..base_ops()
+        };
+        for role in [
+            OperandRole::MoeRouterScale,
+            OperandRole::MoeRouterPerExpertScale,
+        ] {
+            assert_eq!(
+                absent_op(role, &non_gemma4),
+                Some("Gemma 4 router conditioning (router kind gemma4_top_k_softmax)"),
+                "{role:?}"
+            );
+        }
+        let gemma4 = LayerOps {
+            routed: true,
+            moe: Some(moe(
+                MoeRouterKind::Gemma4Hybrid,
+                true,
+                ExpertFormat::PackedMxfp4,
+            )),
+            ..base_ops()
+        };
+        assert_eq!(
+            absent_op(OperandRole::MoeRouterScale, &gemma4),
+            None,
+            "a declared Gemma 4 router must not be reported absent"
+        );
+    }
+
+    #[test]
+    fn hybrid_branch_norms_absent_on_a_non_hybrid_layer() {
+        let ops = base_ops();
+        for role in [
+            OperandRole::PreExpertsNorm,
+            OperandRole::PostDenseFfnNorm,
+            OperandRole::PostExpertsNorm,
+        ] {
+            assert_eq!(
+                absent_op(role, &ops),
+                Some("hybrid dense+routed FFN (judged semantics)"),
+                "{role:?}"
+            );
+        }
+        let hybrid = LayerOps {
+            hybrid: true,
+            ..base_ops()
+        };
+        assert_eq!(absent_op(OperandRole::PreExpertsNorm, &hybrid), None);
+    }
+
+    #[test]
+    fn router_bias_absent_when_the_judgment_declares_none() {
+        let no_bias = LayerOps {
+            routed: true,
+            moe: Some(moe(
+                MoeRouterKind::TopKSoftmax,
+                false,
+                ExpertFormat::PackedMxfp4,
+            )),
+            ..base_ops()
+        };
+        assert_eq!(
+            absent_op(OperandRole::MoeRouterBias, &no_bias),
+            Some("router bias (declared by the routed-FFN judgment)")
+        );
+        let with_bias = LayerOps {
+            routed: true,
+            moe: Some(moe(
+                MoeRouterKind::TopKSoftmax,
+                true,
+                ExpertFormat::PackedMxfp4,
+            )),
+            ..base_ops()
+        };
+        assert_eq!(absent_op(OperandRole::MoeRouterBias, &with_bias), None);
+    }
+
+    #[test]
+    fn expert_scale_streams_absent_when_the_format_carries_none() {
+        let unsplit = LayerOps {
+            routed: true,
+            moe: Some(moe(
+                MoeRouterKind::TopKSoftmax,
+                true,
+                ExpertFormat::PerExpert,
+            )),
+            ..base_ops()
+        };
+        for role in [
+            OperandRole::ExpertGateUpScales,
+            OperandRole::ExpertDownScales,
+        ] {
+            assert_eq!(
+                absent_op(role, &unsplit),
+                Some("a scaled expert format (this format carries no separate scales)"),
+                "{role:?}"
+            );
+        }
+        let split = LayerOps {
+            routed: true,
+            moe: Some(moe(
+                MoeRouterKind::TopKSoftmax,
+                true,
+                ExpertFormat::PackedMxfp4,
+            )),
+            ..base_ops()
+        };
+        assert_eq!(absent_op(OperandRole::ExpertGateUpScales, &split), None);
+    }
+
+    // ── expected_shape: Gated DeltaNet + MoE geometry ────────────────
+
+    fn base_geometry(linear: Option<LinearAttentionSurface>) -> StackGeometry {
+        StackGeometry {
+            hidden: 64,
+            q_rows: 32,
+            kv_rows: 16,
+            intermediate: 128,
+            head_dim: 8,
+            num_q_heads: 4,
+            num_kv_heads: 2,
+            qk_scope: larql_models::config::QkNormScope::PerHead,
+            // Ordinary width: a fused query/gate projection is twice this,
+            // and the fixtures that exercise that say so themselves.
+            q_proj_rows: 32,
+            linear,
+        }
+    }
+
+    fn linear_surface() -> LinearAttentionSurface {
+        // Qwen3.8's own geometry — see gated_delta.rs's state_elements()
+        // test for why real numbers, not placeholders.
+        LinearAttentionSurface {
+            key_heads: 16,
+            key_head_dim: 128,
+            value_heads: 48,
+            value_head_dim: 128,
+            conv_kernel: 4,
+            state_dtype: Some(larql_models::inventory::report::RecurrentStateDtype::Float32),
+        }
+    }
+
+    #[test]
+    fn full_projection_qk_norm_shape_is_unpinned() {
+        let g = StackGeometry {
+            qk_scope: larql_models::config::QkNormScope::FullProjection,
+            ..base_geometry(None)
+        };
+        assert_eq!(expected_shape(OperandRole::AttnQNorm, &g, None), None);
+    }
+
+    #[test]
+    fn linear_attention_shapes_follow_the_recurrence_geometry_not_the_softmax_fields() {
+        let l = linear_surface();
+        let g = base_geometry(Some(l));
+        assert_eq!(
+            expected_shape(OperandRole::LinearAttnInProjQkv, &g, None),
+            Some(vec![l.qkv_channels(), g.hidden])
+        );
+        assert_eq!(
+            expected_shape(OperandRole::LinearAttnInProjA, &g, None),
+            Some(vec![l.value_heads, g.hidden])
+        );
+        assert_eq!(
+            expected_shape(OperandRole::LinearAttnInProjB, &g, None),
+            Some(vec![l.value_heads, g.hidden])
+        );
+        assert_eq!(
+            expected_shape(OperandRole::LinearAttnInProjZ, &g, None),
+            Some(vec![l.value_width(), g.hidden])
+        );
+        assert_eq!(
+            expected_shape(OperandRole::LinearAttnConv1d, &g, None),
+            Some(vec![l.qkv_channels(), 1, l.conv_kernel])
+        );
+        assert_eq!(
+            expected_shape(OperandRole::LinearAttnALog, &g, None),
+            Some(vec![l.value_heads])
+        );
+        assert_eq!(
+            expected_shape(OperandRole::LinearAttnDtBias, &g, None),
+            Some(vec![l.value_heads])
+        );
+        assert_eq!(
+            expected_shape(OperandRole::LinearAttnNorm, &g, None),
+            Some(vec![l.value_head_dim])
+        );
+        assert_eq!(
+            expected_shape(OperandRole::LinearAttnOutProj, &g, None),
+            Some(vec![g.hidden, l.value_width()])
+        );
+    }
+
+    #[test]
+    fn linear_attention_operands_have_no_shape_contract_without_a_declared_recurrence() {
+        // `linear` absent while such an operand exists is a refusal, not
+        // a waiver — every LinearAttn* role must fall through to `None`
+        // via the `linear?` short-circuit, never invent a shape from the
+        // softmax fields.
+        let g = base_geometry(None);
+        for role in [
+            OperandRole::LinearAttnInProjQkv,
+            OperandRole::LinearAttnInProjA,
+            OperandRole::LinearAttnInProjZ,
+            OperandRole::LinearAttnConv1d,
+            OperandRole::LinearAttnALog,
+            OperandRole::LinearAttnNorm,
+            OperandRole::LinearAttnOutProj,
+        ] {
+            assert_eq!(expected_shape(role, &g, None), None, "{role:?}");
+        }
+    }
+
+    #[test]
+    fn moe_router_and_expert_shapes_follow_the_judged_geometry() {
+        let g = base_geometry(None);
+        let m = moe(MoeRouterKind::TopKSoftmax, true, ExpertFormat::PerExpert);
+        assert_eq!(
+            expected_shape(OperandRole::MoeRouterPerExpertScale, &g, Some(&m)),
+            Some(vec![m.experts])
+        );
+        assert_eq!(
+            expected_shape(OperandRole::MoeRouterWeight, &g, Some(&m)),
+            Some(vec![m.experts, g.hidden])
+        );
+        assert_eq!(
+            expected_shape(OperandRole::MoeRouterBias, &g, Some(&m)),
+            Some(vec![m.experts])
+        );
+        // PerExpert/PackedBF16 keep the unpacked [experts, rows, k] shape
+        // and a bare [experts, rows] scales stream (packed_shape/
+        // scales_shape's non-MXFP4 arm).
+        assert_eq!(
+            expected_shape(OperandRole::ExpertGateUp, &g, Some(&m)),
+            Some(vec![
+                m.experts,
+                FUSED_BRANCHES * m.expert_intermediate_size,
+                g.hidden
+            ])
+        );
+        assert_eq!(
+            expected_shape(OperandRole::ExpertGateUpBias, &g, Some(&m)),
+            Some(vec![m.experts, FUSED_BRANCHES * m.expert_intermediate_size])
+        );
+        assert_eq!(
+            expected_shape(OperandRole::ExpertDown, &g, Some(&m)),
+            Some(vec![m.experts, g.hidden, m.expert_intermediate_size])
+        );
+        assert_eq!(
+            expected_shape(OperandRole::ExpertDownBias, &g, Some(&m)),
+            Some(vec![m.experts, g.hidden])
+        );
+        let split = moe(MoeRouterKind::TopKSoftmax, true, ExpertFormat::PackedMxfp4);
+        assert_eq!(
+            expected_shape(OperandRole::ExpertGateUpScales, &g, Some(&split)),
+            Some(scales_shape(
+                &split,
+                FUSED_BRANCHES * split.expert_intermediate_size,
+                g.hidden
+            ))
+        );
+        assert_eq!(
+            expected_shape(OperandRole::ExpertDownScales, &g, Some(&m)),
+            Some(scales_shape(&m, g.hidden, m.expert_intermediate_size))
+        );
+    }
+}

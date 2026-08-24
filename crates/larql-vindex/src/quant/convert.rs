@@ -635,6 +635,53 @@ mod tests {
     }
 
     #[test]
+    fn policy_parse_accepts_option_c_in_every_written_form() {
+        assert_eq!(Policy::parse("option-c").unwrap(), Policy::C);
+        assert_eq!(Policy::parse("c").unwrap(), Policy::C);
+        assert_eq!(Policy::parse("C").unwrap(), Policy::C);
+    }
+
+    #[test]
+    fn policy_label_round_trips_through_parse_for_every_variant() {
+        // label() is the sidecar-JSON representation
+        // (compliance_sidecar_json); parse() must accept its own output
+        // back, so a written sidecar's "policy" field is always
+        // re-readable.
+        for p in [Policy::A, Policy::B, Policy::C] {
+            assert_eq!(Policy::parse(p.label()).unwrap(), p);
+        }
+        assert_eq!(Policy::A.label(), "option-a");
+        assert_eq!(Policy::B.label(), "option-b");
+        assert_eq!(Policy::C.label(), "option-c");
+    }
+
+    #[test]
+    fn projection_outcome_action_str_names_every_variant() {
+        // The sidecar's "action" field — pin the exact strings since
+        // external tooling may key off them.
+        use ProjectionOutcome::*;
+        let cases = [
+            (WroteFp4, "wrote_fp4"),
+            (WroteFp8, "wrote_fp8_per_policy_default"),
+            (WroteF16, "wrote_f16_per_policy_default"),
+            (LinkedAsSource, "linked_as_source_dtype"),
+            (DowngradedFp4ToFp8, "downgraded_fp4_to_fp8"),
+            (DowngradedFp4ToF16, "downgraded_fp4_to_f16"),
+        ];
+        for (variant, expected) in cases {
+            assert_eq!(variant.action_str(), expected);
+        }
+    }
+
+    #[test]
+    fn precision_str_names_every_precision() {
+        assert_eq!(precision_str(Precision::Fp4), "fp4");
+        assert_eq!(precision_str(Precision::Fp8), "fp8");
+        assert_eq!(precision_str(Precision::F16), "f16");
+        assert_eq!(precision_str(Precision::F32), "f32");
+    }
+
+    #[test]
     fn default_config_is_option_b() {
         let c = Fp4ConvertConfig::default();
         assert_eq!(c.policy, Policy::B);
