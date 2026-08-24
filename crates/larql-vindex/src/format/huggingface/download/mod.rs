@@ -4,8 +4,13 @@
 //! Carved out of the monolithic `huggingface.rs` in the 2026-04-25
 //! reorg. See `super::mod.rs` for the module map.
 //!
-//! Sibling layout (round-6 split, 2026-05-10):
-//! - `helpers` — pure non-network utilities (etag/repo-filter/cache-path).
+//! Sibling layout (round-6 split, 2026-05-10; tests split further
+//! 2026-08-23 per the `format/generation.rs`+`format/generation_tests.rs`
+//! pattern):
+//! - `helpers`      — pure non-network utilities (etag/repo-filter/cache-path).
+//! - `tests`        — hf_hub-plumbing tests (resolve/download/cache-walk).
+//! - `tests_v3`     — VINDEX3 generation-aware completeness tests.
+//! - `test_support` — mock/env-guard scaffolding shared by both test files.
 
 mod helpers;
 
@@ -577,4 +582,8 @@ where
 }
 
 #[cfg(test)]
+mod test_support;
+#[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_v3;

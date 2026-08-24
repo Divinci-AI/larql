@@ -83,7 +83,7 @@ pub use download::{
 };
 pub use publish::{
     publish_vindex, publish_vindex_with_opts, set_repo_visibility, PublishCallbacks,
-    PublishOptions, SilentPublishCallbacks,
+    PublishOptions, PublishResult, SilentPublishCallbacks,
 };
 
 /// Check if a path is an `hf://` reference. Lives here (not under
