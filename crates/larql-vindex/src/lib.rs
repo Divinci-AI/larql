@@ -36,6 +36,9 @@ pub mod index;
 pub mod kv_index_impl;
 pub mod patch;
 pub mod quant;
+/// The VINDEX3-only registry/resolver (the `vindex3-registry` initiative).
+/// See the module docs for scope and what is deliberately not wired yet.
+pub mod registry;
 pub mod runtime;
 pub mod trie;
 pub mod walker;
@@ -96,9 +99,9 @@ pub use format::load::{
 pub use format::huggingface::{
     dataset_repo_exists, download_hf_weights, ensure_collection, fetch_collection_items,
     is_hf_path, publish_vindex, publish_vindex_with_opts, repo_exists,
-    resolve_hf_model_with_progress, resolve_hf_vindex, resolve_hf_vindex_with_progress,
-    set_repo_visibility, CollectionItem, DownloadProgress, PublishCallbacks, PublishOptions,
-    SilentPublishCallbacks,
+    resolve_hf_model_with_progress, resolve_hf_vindex, resolve_hf_vindex_complete,
+    resolve_hf_vindex_with_progress, set_repo_visibility, CollectionItem, DownloadProgress,
+    PublishCallbacks, PublishOptions, PublishResult, SilentPublishCallbacks,
 };
 pub use format::weights::{
     arch_from_vindex_config, load_model_weights, load_model_weights_kquant,
@@ -106,6 +109,13 @@ pub use format::weights::{
     write_model_weights_kquant, write_model_weights_kquant_with_opts,
     write_model_weights_with_opts, DownProjFormat, KquantWriteOptions, LoadWeightsOptions,
     StreamingWeights, WeightSource, WriteWeightsOptions,
+};
+
+// Registry — VINDEX3-only model reference resolution.
+pub use registry::{
+    resolve as resolve_vindex3_reference, ArtifactRef as Vindex3ArtifactRef, ModelName,
+    ModelReference, Provenance as Vindex3Provenance, RegistryError, RegistryManifest,
+    ResolvedVindex3, VariantName, Vindex3Abi, Vindex3Resolution,
 };
 
 // Patch

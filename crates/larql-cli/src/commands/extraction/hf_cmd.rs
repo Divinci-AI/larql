@@ -163,9 +163,10 @@ fn run_publish(
         private,
         ..Default::default()
     };
-    let url = larql_vindex::publish_vindex_with_opts(vindex, repo, &opts, &mut callbacks)?;
+    let result = larql_vindex::publish_vindex_with_opts(vindex, repo, &opts, &mut callbacks)?;
 
-    eprintln!("\nPublished: {}", url);
+    eprintln!("\nPublished: {}", result.url);
+    eprintln!("  pinned revision: {}", result.revision);
     eprintln!("\nUsage:");
     eprintln!("  larql repl");
     eprintln!("  larql> USE \"hf://{}\";", repo);

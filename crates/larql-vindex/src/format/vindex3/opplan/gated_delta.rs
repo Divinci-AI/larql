@@ -114,3 +114,45 @@ impl GatedDeltaOp {
         self.num_value_heads * self.key_head_dim * self.value_head_dim
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn operand() -> OperandRef {
+        OperandRef {
+            object: "target.decoder_stack".into(),
+            tensor: "tiny".into(),
+            dtype: "F32".into(),
+            shape: vec![1],
+        }
+    }
+
+    /// Qwen3.8's own linear-layer geometry (16 key heads, 48 value heads,
+    /// 128-wide on both), so the number this pins is the real per-layer
+    /// state size a continuation-storage planner would size against —
+    /// not an arbitrary tiny fixture.
+    #[test]
+    fn state_elements_is_value_heads_times_key_dim_times_value_dim() {
+        let op = GatedDeltaOp {
+            num_key_heads: 16,
+            num_value_heads: 48,
+            key_head_dim: 128,
+            value_head_dim: 128,
+            conv_kernel: 4,
+            state_dtype: Some(StateDtype::Float32),
+            in_proj_qkv: operand(),
+            in_proj_a: operand(),
+            in_proj_b: operand(),
+            in_proj_z: operand(),
+            conv1d: operand(),
+            a_log: operand(),
+            dt_bias: operand(),
+            norm: operand(),
+            out_proj: operand(),
+        };
+        // Constant in sequence length, by design — the whole point of
+        // this being state_elements() rather than a per-position size.
+        assert_eq!(op.state_elements(), 48 * 128 * 128);
+    }
+}
