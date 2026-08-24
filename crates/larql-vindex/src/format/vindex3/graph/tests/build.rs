@@ -332,3 +332,137 @@ fn the_gemma4_multimodal_embedder_is_a_perception_adapter() {
         .iter()
         .any(|b| b.tensor_prefix.contains("embed_vision")));
 }
+
+/// A group inside a modality's subtree is never filed under the language
+/// model, whatever its leaf happens to be called.
+///
+/// This is a live defect, caught by Gemma 4 12B (`gemma4_unified_vision`),
+/// whose encoder-free image path is a bare projection:
+/// `model.vision_embedder.pos_embedding` contains "embedding" and
+/// `model.vision_embedder.pos_norm` contains "norm", and the substring pass
+/// filed both into the TEXT model's embedding and norm groups.
+/// `model.embed_audio.embedding_projection` went the same way. The tensors
+/// were silently bound to objects no evidence says they implement — worse
+/// than the unplaced case above, which at least blocks the plan and says
+/// why.
+///
+/// The artifact here declares no perception component, so the correct
+/// outcome is `unplaced` for the *other* reason: classified for a component
+/// this artifact does not declare.
+#[test]
+fn a_modality_owned_group_is_never_filed_under_the_language_model() {
+    for prefix in [
+        "model.vision_embedder.pos_embedding",
+        "model.vision_embedder.pos_norm",
+        "model.vision_embedder.patch_dense",
+        "model.embed_audio.embedding_projection",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut inventory = known_dense(dir.path());
+        inventory
+            .tensors
+            .groups
+            .push(larql_models::inventory::TensorGroup {
+                prefix: prefix.to_string(),
+                tensors: 1,
+                bytes: 32,
+            });
+        let named = vec![("only-artifact".to_string(), inventory)];
+        let built = build_from_inventories(&named);
+
+        let bound_to_text = built.graph.objects.iter().find(|o| {
+            o.component == "target" && o.source_bindings.iter().any(|b| b.tensor_prefix == prefix)
+        });
+        assert!(
+            bound_to_text.is_none(),
+            "{prefix} was bound to the language model as {:?}",
+            bound_to_text.map(|o| &o.id)
+        );
+        assert!(
+            built.unplaced.iter().any(|u| u.prefix == prefix),
+            "{prefix} vanished: neither placed in a perception component \
+             nor reported unplaced"
+        );
+    }
+}
+
+/// Qwen3.5's MTP draft head declares its own tensor namespace (`mtp.fc`,
+/// `mtp.layers.*`, `mtp.norm`, `mtp.pre_fc_norm_hidden`,
+/// `mtp.pre_fc_norm_embedding`) sitting beside the primary text model's own
+/// tensors. Every one of these prefixes shares a substring with a
+/// [`GROUP_PATTERNS`]-style rule — `mtp.layers` contains `"layers"`,
+/// `mtp.norm`/`mtp.pre_fc_norm_hidden` contain `"norm"`,
+/// `mtp.pre_fc_norm_embedding` contains `"embedding"` — so before the
+/// `mtp`-namespace check existed, only `mtp.fc` (which matches nothing)
+/// surfaced honestly; the rest were silently absorbed into the primary
+/// text component's `decoder_stack`/`final_norm`/`embedding` objects.
+///
+/// This asserts the whole `mtp.*` family surfaces in `unplaced` with the
+/// standard reason, and that none of it leaks into the primary text
+/// component's objects.
+#[test]
+fn mtp_namespace_groups_are_unplaced_not_merged_into_the_primary_text_component() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut inventory = known_dense(dir.path());
+    // known_dense's own tensor list has no "layers"/"norm"/"embed_tokens"
+    // group beyond `model.embed_tokens` — add the primary decoder stack and
+    // final norm groups a real checkpoint would carry, so the mtp groups
+    // have a real target object to (incorrectly) fall into if the fix
+    // regresses.
+    for (prefix, tensors, bytes) in [
+        ("model.language_model.layers", 8usize, 4096u64),
+        ("model.language_model.norm", 1, 128),
+        // The MTP draft head's own namespace — must NOT merge into any of
+        // the objects above.
+        ("mtp.fc", 1, 512),
+        ("mtp.layers", 11, 2048),
+        ("mtp.norm", 1, 128),
+        ("mtp.pre_fc_norm_hidden", 1, 128),
+        ("mtp.pre_fc_norm_embedding", 1, 128),
+    ] {
+        inventory
+            .tensors
+            .groups
+            .push(larql_models::inventory::TensorGroup {
+                prefix: prefix.to_string(),
+                tensors,
+                bytes,
+            });
+    }
+    let named = vec![("only-artifact".to_string(), inventory)];
+    let built = build_from_inventories(&named);
+
+    for mtp_prefix in [
+        "mtp.fc",
+        "mtp.layers",
+        "mtp.norm",
+        "mtp.pre_fc_norm_hidden",
+        "mtp.pre_fc_norm_embedding",
+    ] {
+        let unplaced = built
+            .unplaced
+            .iter()
+            .find(|u| u.prefix == mtp_prefix)
+            .unwrap_or_else(|| panic!("{mtp_prefix} was placed anyway: {:?}", built.unplaced));
+        assert!(
+            unplaced
+                .reason
+                .contains("no placement rule owns this group"),
+            "{mtp_prefix}: {}",
+            unplaced.reason
+        );
+    }
+
+    // None of the mtp.* bytes leaked into the primary text component's
+    // objects — the regression this test guards against.
+    for object in &built.graph.objects {
+        for binding in &object.source_bindings {
+            assert!(
+                !binding.tensor_prefix.starts_with("mtp"),
+                "object `{}` absorbed mtp-namespace group `{}`",
+                object.id,
+                binding.tensor_prefix
+            );
+        }
+    }
+}

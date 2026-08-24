@@ -21,17 +21,26 @@ fn target_plan_reads_span_and_position_from_the_table() {
     assert_eq!(plan.layers.len(), 8);
 
     let layer0 = &plan.layers[0];
-    assert_eq!(layer0.attention.span, AttentionSpan::Sliding);
-    assert_eq!(layer0.attention.window, Some(16));
+    assert_eq!(
+        layer0.attention.softmax().unwrap().span,
+        AttentionSpan::Sliding
+    );
+    assert_eq!(layer0.attention.softmax().unwrap().window, Some(16));
     assert!(matches!(
-        layer0.attention.position,
+        layer0.attention.softmax().unwrap().position,
         PositionPolicy::Rope { .. }
     ));
 
     let layer3 = &plan.layers[3];
-    assert_eq!(layer3.attention.span, AttentionSpan::Full);
-    assert_eq!(layer3.attention.window, None);
-    assert_eq!(layer3.attention.position, PositionPolicy::None);
+    assert_eq!(
+        layer3.attention.softmax().unwrap().span,
+        AttentionSpan::Full
+    );
+    assert_eq!(layer3.attention.softmax().unwrap().window, None);
+    assert_eq!(
+        layer3.attention.softmax().unwrap().position,
+        PositionPolicy::None
+    );
 
     // Four-norm placement, explicit positions — not a count.
     assert!(layer0.post_attention_norm.is_some());
@@ -60,14 +69,22 @@ fn target_plan_reads_span_and_position_from_the_table() {
     // Both scales reach the kernel arguments, unfolded.
     let query_scale = layer0
         .attention
+        .softmax()
+        .unwrap()
         .query_scale
         .expect("declared qk_scale_factor");
     assert!((query_scale - 3.87).abs() < 1e-12);
-    assert!((layer0.attention.score_scale - (8f64).powf(-0.5)).abs() < 1e-12);
+    assert!((layer0.attention.softmax().unwrap().score_scale - (8f64).powf(-0.5)).abs() < 1e-12);
     // The judged gate binds its operand.
-    let gate = layer0.attention.output_gate.as_ref().unwrap();
+    let gate = layer0
+        .attention
+        .softmax()
+        .unwrap()
+        .output_gate
+        .as_ref()
+        .unwrap();
     assert!(gate.projection.tensor.contains("self_attn.gate_proj"));
-    assert!(layer0.attention.parameter_free_qk_norm.q);
+    assert!(layer0.attention.softmax().unwrap().parameter_free_qk_norm.q);
 }
 
 /// Drafter: two-norm placement — `post_attention_layernorm` *is* the
@@ -90,7 +107,13 @@ fn drafter_plan_uses_two_norm_placement_and_qk_norms() {
         .tensor
         .contains("post_attention_layernorm"));
 
-    let qk = layer0.attention.qk_norm.as_ref().unwrap();
+    let qk = layer0
+        .attention
+        .softmax()
+        .unwrap()
+        .qk_norm
+        .as_ref()
+        .unwrap();
     assert_eq!(qk.q.shape, vec![8]);
     assert_eq!(qk.k.shape, vec![8]);
 
@@ -98,7 +121,7 @@ fn drafter_plan_uses_two_norm_placement_and_qk_norms() {
     assert!(plan.embedding.is_none());
     assert!(plan.output.is_none());
     assert!(plan.final_norm.is_some());
-    assert_eq!(layer0.attention.num_kv_heads, 4);
+    assert_eq!(layer0.attention.softmax().unwrap().num_kv_heads, 4);
     assert_eq!(layer0.ffn.dense().unwrap().activation, Activation::Silu);
 
     // 11 operands: 4 attn + 2 qk norms + 2 norms + 3 mlp.
@@ -118,6 +141,9 @@ fn plan_operands_reference_logical_objects_only() {
     assert!(!json.contains("model.language_model"), "HF prefix leaked");
     assert!(!json.contains("lm_head"), "HF head name leaked");
     for layer in &plan.layers {
-        assert_eq!(layer.attention.q.object, "target.decoder_stack");
+        assert_eq!(
+            layer.attention.softmax().unwrap().q.object,
+            "target.decoder_stack"
+        );
     }
 }

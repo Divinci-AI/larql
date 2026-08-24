@@ -12,6 +12,7 @@ use larql_models::config::PositionPolicy;
 use larql_models::inventory::{ArchitectureInventory, ConfigKeyFact};
 use serde_json::Value;
 
+use super::super::graph::policy::AttentionSpan;
 use super::report::{Finding, FindingCategory, SemanticClass};
 use super::semantics::component_of;
 
@@ -266,22 +267,34 @@ fn layer_rope_theta_findings(inventory: &ArchitectureInventory) -> Option<Findin
 
 /// Declared `layer_types` interleave vs the resolved per-layer table.
 fn layer_types_finding(inventory: &ArchitectureInventory) -> Option<Finding> {
-    const SLIDING_DECLARATION: &str = "sliding_attention";
     let fact = inventory
         .config_keys
         .iter()
         .find(|f| semantics_is_layer_types(&f.path))?;
     let declared_array = fact.value.as_array()?;
     let layers = &inventory.resolved.layers;
+    // A layer disagrees when its own declared spelling names something
+    // outside the schema's executable span vocabulary (a hybrid
+    // linear-attention layer, e.g.), or when it names something the
+    // vocabulary does have and the resolved boolean split answers the
+    // opposite. Checking sliding-ness alone — the previous shape — let a
+    // spelling like `linear_attention` pass silently as "agrees, full
+    // attention" purely because neither side claims sliding: the same
+    // collapse the carriage gate exists to catch, one function over.
     let disagreeing = layers
         .iter()
         .filter(|l| {
             declared_array
                 .get(l.layer)
                 .and_then(Value::as_str)
-                .is_some_and(|declared| {
-                    declared.eq_ignore_ascii_case(SLIDING_DECLARATION)
-                        != (l.attention == ATTENTION_SLIDING)
+                .is_none_or(|declared| match AttentionSpan::from_declared(declared) {
+                    Some(AttentionSpan::Sliding) => l.attention != ATTENTION_SLIDING,
+                    Some(_) => l.attention == ATTENTION_SLIDING,
+                    // Outside the vocabulary entirely: the resolved
+                    // boolean split cannot represent it either way, so
+                    // this is a disagreement regardless of what
+                    // `attention` happens to say.
+                    None => true,
                 })
         })
         .count();

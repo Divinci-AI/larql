@@ -36,6 +36,20 @@ pub const LAYER_TYPE_FULL_ATTENTION: &str = "full_attention";
 /// the two were aliased.
 pub const LAYER_TYPE_WINDOW_ATTENTION: &str = "window_attention";
 
+/// A layer computing attention via a recurrent linear-attention mechanism
+/// (gated linear attention / delta-rule / SSM-adjacent short-conv state)
+/// instead of softmax over an explicit K/V sequence — the span kind
+/// hybrid linear-attention architectures (Kimi-Linear, Qwen3-Next,
+/// Qwen3.5) interleave with [`LAYER_TYPE_FULL_ATTENTION`].
+///
+/// Declared here as a vocabulary fact only. Recording *that* a layer is
+/// `linear_attention` is honest plumbing — a linear-attention forward
+/// pass is real, separate compute this crate has not implemented, so
+/// nothing downstream treats this spelling as executable (see
+/// `larql-vindex`'s `AttentionSpan`, which deliberately has no variant
+/// for it yet — R2/Kimi-Linear rung, `docs/k3-funnel.md`).
+pub const LAYER_TYPE_LINEAR_ATTENTION: &str = "linear_attention";
+
 /// Whether `layer_types` marks `layer` as sliding-window.
 ///
 /// Returns `None` when the config declares no `layer_types`, leaving the

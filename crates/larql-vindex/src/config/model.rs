@@ -339,6 +339,28 @@ mod tests {
             // 4.1 3B/8B/30B included) declares `false`, so no vindex-served
             // model needs this today.
             "mlp_bias",
+            // Hybrid linear-attention + multi-token-prediction geometry
+            // (Qwen3.5/Kimi-Linear-style — R2/Kimi-Linear rung,
+            // docs/k3-funnel.md). No forward pass anywhere in this crate,
+            // VINDEX1/2 or VINDEX3, executes a linear-attention layer or
+            // an MTP head yet — there is no served model this gap could
+            // silently mis-serve. `larql vindex3 plan` reports every one
+            // of these `unrepresented` (see
+            // `format::vindex3::plan::semantics::EXECUTION_SEMANTIC_KEYS`)
+            // rather than answering for it, which is what this list
+            // exists to force a decision about.
+            "linear_conv_kernel_dim",
+            "linear_key_head_dim",
+            "linear_value_head_dim",
+            "linear_num_key_heads",
+            "linear_num_value_heads",
+            "mamba_ssm_dtype",
+            "attn_output_gate",
+            "output_gate_type",
+            "mtp_num_hidden_layers",
+            "mtp_use_dedicated_embeddings",
+            "mrope_interleaved",
+            "mrope_section",
         ];
 
         let src = include_str!("../../../larql-models/src/config/model_config.rs");

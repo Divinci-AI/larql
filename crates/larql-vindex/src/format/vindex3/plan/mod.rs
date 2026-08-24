@@ -29,6 +29,7 @@
 //! The verdict is fail-closed and the exit gate is mechanical:
 //! `blocking == 0` before a single weight byte is converted.
 
+pub mod capability;
 pub mod carriage;
 pub mod compare;
 pub mod report;
@@ -87,13 +88,24 @@ pub fn plan_system(named: &[(String, ArchitectureInventory)]) -> SystemPlan {
         }
     }
     summary.interfaces += interfaces.len();
+    // Whole-model completeness, unchanged: every declared semantic fact of
+    // this checkpoint has a faithful home. Deliberately still a single
+    // Boolean over everything — see `capability` for why execution needs a
+    // different question rather than a weaker version of this one.
     let admissible = summary.blocking == 0;
+    let capabilities = capability::Capability::ALL
+        .iter()
+        .map(|c| {
+            capability::admissible_for(*c, artifacts.iter().flat_map(|a| &a.findings), &built.graph)
+        })
+        .collect();
 
     SystemPlan {
         schema: PLAN_SCHEMA,
         artifacts,
         interfaces,
         admissible,
+        capabilities,
         summary,
         graph: built.graph,
     }
@@ -470,6 +482,22 @@ fn attention_policy_findings(artifact: &str, built: &BuiltGraph) -> Vec<Finding>
                 .iter()
                 .filter(|l| l.position == larql_models::config::PositionPolicy::None)
                 .count();
+            // A layer whose own declared spelling disagrees with what
+            // `span` resolved to: the boolean sliding/full split has no
+            // vocabulary for it (a hybrid linear-attention layer, e.g.)
+            // and silently defaulted it to `Full`. Counted apart from
+            // `full` so this summary does not read as a faithful count
+            // when part of it is a fallback default — see
+            // `plan::carriage::probe_layer_types`.
+            let defaulted = table
+                .iter()
+                .filter(|l| {
+                    l.declared_span.as_deref().is_some_and(|raw| {
+                        super::graph::policy::AttentionSpan::from_declared(raw) != Some(l.span)
+                    })
+                })
+                .count();
+            let full = table.len() - sliding - defaulted;
             Some(Finding {
                 category: FindingCategory::Representable,
                 class: SemanticClass::ExecutionSemantic,
@@ -478,14 +506,21 @@ fn attention_policy_findings(artifact: &str, built: &BuiltGraph) -> Vec<Finding>
                 declared: None,
                 resolved: None,
                 carriage: None,
-                detail: format!(
-                    "per-layer policy recorded on component `{}`: {} sliding / {} full, \
-                     {} NoPE layer(s)",
-                    component.id,
-                    sliding,
-                    table.len() - sliding,
-                    nope,
-                ),
+                detail: if defaulted > 0 {
+                    format!(
+                        "per-layer policy recorded on component `{}`: {sliding} sliding / \
+                         {full} full / {defaulted} declared span(s) this schema has no \
+                         execution vocabulary for (defaulted to full — see \
+                         text_config.layer_types), {nope} NoPE layer(s)",
+                        component.id,
+                    )
+                } else {
+                    format!(
+                        "per-layer policy recorded on component `{}`: {sliding} sliding / \
+                         {full} full, {nope} NoPE layer(s)",
+                        component.id,
+                    )
+                },
             })
         })
         .collect()

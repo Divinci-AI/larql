@@ -12,7 +12,10 @@ use std::collections::BTreeMap;
 use larql_models::config::PositionPolicy;
 use larql_models::inventory::{ArchitectureInventory, TensorGroup};
 
-use super::component::{Component, ComponentRole};
+use super::component::{
+    Component, ComponentRole, EncoderGeometry, Modality, PerceptionComponent, PerceptionTransform,
+    ProjectionGeometry,
+};
 use super::edge::HiddenStateEdge;
 use super::object::{Fidelity, LogicalObject, ObjectKind, Representation, SourceBinding};
 use super::policy::{AttentionLayerPolicy, AttentionSpan, HeadGeometry};
@@ -90,6 +93,24 @@ const GROUP_PATTERNS: &[(GroupClass, &[&str])] = &[
             // would otherwise match — and it is the projector, not the
             // text embedding table.
             "embed_vision",
+            "embed_audio",
+            // An encoder-free modality path (Gemma 4 12B,
+            // `gemma4_unified_vision`): patches are projected straight into
+            // the language embedding space, so the whole modality lives
+            // under one embedder prefix with no tower above it.
+            //
+            // These MUST be owned here rather than left to the generic
+            // fragments below, and the reason is a live defect, not
+            // tidiness: `model.vision_embedder.pos_embedding` contains
+            // "embedding" and `model.vision_embedder.pos_norm` contains
+            // "norm", so without an owning pattern the substring pass filed
+            // image tensors into the LANGUAGE model's embedding and norm
+            // groups (`target.embedding`), and
+            // `model.embed_audio.embedding_projection` went the same way.
+            // Silently misplacing a modality is worse than leaving it
+            // unplaced — an unplaced group blocks the plan and says so.
+            "vision_embedder",
+            "audio_embedder",
         ],
     ),
     (
@@ -100,6 +121,37 @@ const GROUP_PATTERNS: &[(GroupClass, &[&str])] = &[
     (GroupClass::Norm, &["norm", "ln_", "layernorm"]),
     (GroupClass::Stack, &["layers", "blocks"]),
 ];
+
+/// Top-level path segments that name a tensor namespace declared *outside*
+/// any component this builder places — evidence the checkpoint carries a
+/// distinct sub-model the placement vocabulary has no `GroupClass`/
+/// `ObjectKind` for yet. Qwen3.5's multi-token-prediction draft head is the
+/// first observed case: `mtp.fc`, `mtp.layers.*`, `mtp.norm`,
+/// `mtp.pre_fc_norm_hidden`, `mtp.pre_fc_norm_embedding` all live under a
+/// `mtp.` prefix that sits beside — not inside — the primary text model's
+/// own `model.language_model.*` tensors.
+///
+/// This check must run *before* the substring [`GROUP_PATTERNS`] scan, not
+/// after: `mtp.layers` contains `"layers"`, `mtp.norm` and
+/// `mtp.pre_fc_norm_hidden` contain `"norm"`, and `mtp.pre_fc_norm_embedding`
+/// contains `"embedding"`, so each would otherwise silently name-classify as
+/// `Stack`/`Norm`/`Embedding` and merge into the primary text component's
+/// own `DecoderStack`/`FinalNorm`/`Embedding` object — corrupting that
+/// object's tensor accounting with a different sub-model's weights. Only
+/// `mtp.fc` matches no existing pattern and already surfaced honestly; every
+/// other `mtp.*` group was being lost to this shadowing. A namespace here
+/// classifies as [`GroupClass::Unknown`] and surfaces in `unplaced` with the
+/// same "no placement rule" reason a truly-unrecognised prefix gets — there
+/// is no `ObjectKind` for an MTP draft head yet, so honestly refusing to
+/// place it is the correct behaviour, not a stand-in for one.
+const COMPONENT_EXTERNAL_NAMESPACES: &[&str] = &["mtp"];
+
+/// Whether `prefix`'s first `.`-separated path segment names a
+/// [`COMPONENT_EXTERNAL_NAMESPACES`] entry.
+fn is_component_external_namespace(prefix: &str) -> bool {
+    let first_segment = prefix.split('.').next().unwrap_or(prefix);
+    COMPONENT_EXTERNAL_NAMESPACES.contains(&first_segment)
+}
 
 /// Intermediate classification of one tensor-group prefix.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,7 +165,71 @@ enum GroupClass {
     Unknown,
 }
 
+/// Which modality a tensor group belongs to, from the subtree that owns it.
+///
+/// This is ownership, not naming: everything under `model.vision_embedder.`
+/// is the image path whatever its leaf is called. Without it a group can
+/// only be classified as "some perception thing", and a checkpoint with two
+/// perception components has nowhere correct to put it — Gemma 4 12B bound
+/// its image tensors to the AUDIO component because placement took the
+/// first perception component it found.
+fn group_modality(prefix: &str) -> Option<Modality> {
+    // Audio first: `embed_audio` would also satisfy no image fragment, but
+    // testing it first keeps the two families from ever racing.
+    if prefix.contains("audio") {
+        return Some(Modality::Audio);
+    }
+    if prefix.contains("vision") || prefix.contains("visual") {
+        return Some(Modality::Image);
+    }
+    None
+}
+
+/// The modality a nested component declares, from the checkpoint's own key
+/// (`vision_config` → the component named `vision`).
+///
+/// Reading the declaration, not inferring from tensor names: the checkpoint
+/// states what the component perceives, and this records it so no consumer
+/// has to re-derive it from an id string.
+fn declared_modality(name: &str) -> Option<Modality> {
+    group_modality(name)
+}
+
+/// The perception component a group belongs in.
+///
+/// Prefers an exact modality match. Falls back to the sole perception
+/// component when the group names no modality and there is exactly one
+/// candidate — which is every single-tower checkpoint, so their placement
+/// is unchanged. With two perception components and no modality on the
+/// group, refuses: a wrong modality is corruption, and unplaced at least
+/// blocks the plan and says so.
+fn perception_component_for(
+    components: &[Component],
+    artifact: &str,
+    modality: Option<Modality>,
+) -> Option<String> {
+    let candidates: Vec<&Component> = components
+        .iter()
+        .filter(|c| c.source_artifact == artifact && c.role == ComponentRole::Perception)
+        .collect();
+    if let Some(modality) = modality {
+        if let Some(hit) = candidates
+            .iter()
+            .find(|c| c.perception.map(|p| p.modality) == Some(modality))
+        {
+            return Some(hit.id.clone());
+        }
+    }
+    match candidates.as_slice() {
+        [only] => Some(only.id.clone()),
+        _ => None,
+    }
+}
+
 fn classify_group(prefix: &str) -> GroupClass {
+    if is_component_external_namespace(prefix) {
+        return GroupClass::Unknown;
+    }
     for (class, patterns) in GROUP_PATTERNS {
         if patterns.iter().any(|p| prefix.contains(p)) {
             return *class;
@@ -158,14 +274,48 @@ pub fn build_from_inventories(named: &[(String, ArchitectureInventory)]) -> Buil
             hidden_size: inventory.resolved.hidden_size,
             attention: Some(attention_table(inventory)),
             execution: None, // attached in pass 3, once objects are known
+            perception: None,
         });
         for nested in &inventory.nested_components {
             let id = unique_id(&nested.name, &components);
             nested_by_component.insert(id.clone(), nested);
+            // Species from TENSOR EVIDENCE, never from declared depth.
+            // Qwen3.8 and Gemma 4 12B both resolve `num_layers: None` — the
+            // first because this build reads `num_hidden_layers` and Qwen
+            // declares `depth`, the second because there is no tower to
+            // declare. Only the tensors tell those apart: Qwen carries
+            // `model.visual.blocks.*`, Gemma 4 12B carries a flat
+            // `model.vision_embedder.*` projection.
+            let modality = declared_modality(&nested.name);
+            let owns_a_stack = inventory.tensors.groups.iter().any(|g| {
+                classify_group(&g.prefix) == GroupClass::PerceptionTower
+                    && group_modality(&g.prefix) == modality
+            });
+            let perception = modality.map(|modality| PerceptionComponent {
+                modality,
+                transform: if owns_a_stack {
+                    // Every `None` here means "this build could not read
+                    // it", never "it does not apply" — the tower exists.
+                    PerceptionTransform::Encoder(EncoderGeometry {
+                        depth: nested.num_layers,
+                        width: nested.hidden_size,
+                        num_heads: nested.num_attention_heads,
+                    })
+                } else {
+                    PerceptionTransform::DirectProjection(ProjectionGeometry {
+                        output_width: nested.hidden_size,
+                    })
+                },
+            });
             components.push(Component {
                 id,
                 role: ComponentRole::Perception,
                 source_artifact: artifact.clone(),
+                // Legacy fields, kept so containers written now still read
+                // on older builds. NOT the source of perception semantics:
+                // `perception` is authoritative where present, and the 0s
+                // these produce for an encoder-free path are exactly the
+                // fabrication it exists to replace.
                 num_layers: nested.num_layers.unwrap_or(0),
                 hidden_size: nested.hidden_size.unwrap_or(0),
                 // From the component's own topology, the same way the
@@ -174,6 +324,7 @@ pub fn build_from_inventories(named: &[(String, ArchitectureInventory)]) -> Buil
                 // or names a span the vocabulary cannot express.
                 attention: nested_attention_table(nested),
                 execution: None, // attached in pass 3
+                perception,
             });
         }
     }
@@ -186,11 +337,6 @@ pub fn build_from_inventories(named: &[(String, ArchitectureInventory)]) -> Buil
     // otherwise name-classify as `final_norm`).
     for (artifact, inventory) in named {
         let text_component = component_for_artifact(&components, artifact);
-        let perception_component = components
-            .iter()
-            .find(|c| c.source_artifact == *artifact && c.role == ComponentRole::Perception)
-            .map(|c| c.id.clone());
-
         let taps = declared_taps(inventory);
         let projector_segment = taps.as_ref().and_then(|taps| {
             find_projector_segment(artifact, inventory, taps, &mut unresolved_interfaces)
@@ -212,12 +358,14 @@ pub fn build_from_inventories(named: &[(String, ArchitectureInventory)]) -> Buil
             }
             let class = classify_group(&group.prefix);
             let placement = match class {
-                GroupClass::PerceptionTower => perception_component
-                    .clone()
-                    .map(|c| (c, ObjectKind::PerceptionTower)),
-                GroupClass::PerceptionAdapter => perception_component
-                    .clone()
-                    .map(|c| (c, ObjectKind::PerceptionAdapter)),
+                GroupClass::PerceptionTower => {
+                    perception_component_for(&components, artifact, group_modality(&group.prefix))
+                        .map(|c| (c, ObjectKind::PerceptionTower))
+                }
+                GroupClass::PerceptionAdapter => {
+                    perception_component_for(&components, artifact, group_modality(&group.prefix))
+                        .map(|c| (c, ObjectKind::PerceptionAdapter))
+                }
                 GroupClass::Embedding => text_component.clone().map(|c| (c, ObjectKind::Embedding)),
                 GroupClass::Head => text_component.clone().map(|c| (c, ObjectKind::OutputHead)),
                 GroupClass::Norm => text_component.clone().map(|c| (c, ObjectKind::FinalNorm)),
@@ -270,6 +418,24 @@ pub fn build_from_inventories(named: &[(String, ArchitectureInventory)]) -> Buil
             continue;
         };
         let result = match component.role {
+            // A direct projection has no encoder surface to complete, and
+            // asking for one produced exactly the nonsense this ontology
+            // exists to remove: Gemma 4 12B reported "hidden 0 not
+            // divisible by 0 heads" for a path that has neither. It still
+            // blocks — this build cannot execute it — but it blocks in its
+            // own terms.
+            ComponentRole::Perception
+                if matches!(
+                    component.perception.map(|p| p.transform),
+                    Some(PerceptionTransform::DirectProjection(_))
+                ) =>
+            {
+                Err(vec![
+                    "direct-projection perception: this build has no execution surface for a \
+                     modality transform that owns no internal representation"
+                        .to_string(),
+                ])
+            }
             ComponentRole::Perception => match nested_by_component.get(&component.id) {
                 Some(nested) => {
                     let has_gate_tensors = objects.values().any(|object| {
@@ -390,6 +556,13 @@ fn attention_table(inventory: &ArchitectureInventory) -> Vec<AttentionLayerPolic
                 num_kv_heads: layer.num_kv_heads,
             }),
             v_from_k: layer.v_from_k,
+            // Carried alongside the boolean-derived `span` verbatim, so a
+            // declared spelling the vocabulary cannot express (a hybrid
+            // linear-attention interleave) is recorded rather than
+            // silently lost behind whatever `span` defaulted to. See
+            // `AttentionLayerPolicy::declared_span` and
+            // `plan::carriage::probe_layer_types`.
+            declared_span: layer.declared_span.clone(),
         })
         .collect()
 }
@@ -444,6 +617,7 @@ fn nested_attention_table(
                 // whole tower; the surface carries it.
                 geometry: None,
                 v_from_k: false,
+                declared_span: Some(entry.clone()),
             })
         })
         .collect()
