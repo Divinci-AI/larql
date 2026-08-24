@@ -104,6 +104,77 @@ fn glimmer_target_resolves_with_judged_semantics() {
     assert!(execution.score_scale < 1.0);
 }
 
+/// A Granite-shaped config, whose head scale is declared as a DIVISOR.
+fn granite_shaped() -> serde_json::Value {
+    json!({
+        "architectures": ["GraniteForCausalLM"],
+        "model_type": "granite",
+        "hidden_size": 64,
+        "num_hidden_layers": 2,
+        "intermediate_size": 256,
+        "num_attention_heads": 8,
+        "num_key_value_heads": 8,
+        "head_dim": 64,
+        "attention_multiplier": 0.015625,
+        "logits_scaling": 10.0,
+        "residual_multiplier": 0.22
+    })
+}
+
+/// The resolved graph carries the head scale as a **multiplier**, already
+/// inverted from Granite's divisor spelling.
+///
+/// `logit_scale()` is unit-tested on its own, but this pins the
+/// *composition* — config in, resolved execution out — because that is the
+/// step a container encode performs, and it is where the defect was
+/// actually observed: a container whose `system_graph.json` carried
+/// `output_multiplier: 10.0` instead of `0.1`, a factor of 100 in the head.
+///
+/// It survived because a positive scalar cannot reorder logits, so argmax,
+/// generated ids and every oracle built on them agreed exactly while the
+/// distribution was wrong. Only a probability-space measurement could see
+/// it, and KL against a same-scaled reference read exactly `0.000000` —
+/// not a good result, an unmeasurable one.
+///
+/// This assertion is what makes the pre-fix 6 GiB container disposable: the
+/// defect is reproduced here in milliseconds rather than kept on disk.
+#[test]
+fn granite_resolves_its_divisor_head_scale_to_a_multiplier() {
+    let config = granite_shaped();
+    let identity = read_identity(&config);
+    let (_, topology) = resolve(&config, &identity);
+    let execution = topology.execution.expect("judged execution");
+
+    let multiplier = execution
+        .output_multiplier
+        .expect("declared logits_scaling must resolve, not vanish");
+    assert!(
+        (multiplier - 0.1).abs() < 1e-12,
+        "logits_scaling 10.0 is a divisor: the graph must carry 1/10, got {multiplier}"
+    );
+    // The specific regression: the divisor passed through unchanged.
+    assert!(
+        (multiplier - 10.0).abs() > 1e-9,
+        "graph carries the raw divisor — this is the pre-fix defect"
+    );
+}
+
+/// An explicit `output_multiplier` is already a multiplier and wins over
+/// the divisor spelling, so a model declaring both is not inverted twice.
+#[test]
+fn an_explicit_multiplier_is_not_inverted_again() {
+    let mut config = granite_shaped();
+    config["output_multiplier"] = json!(0.25);
+    let identity = read_identity(&config);
+    let (_, topology) = resolve(&config, &identity);
+    let multiplier = topology
+        .execution
+        .expect("judged execution")
+        .output_multiplier
+        .expect("explicit multiplier");
+    assert!((multiplier - 0.25).abs() < 1e-12, "got {multiplier}");
+}
+
 /// A known family does not trip the fallback flag.
 #[test]
 fn known_family_is_not_a_fallback() {
