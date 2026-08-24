@@ -390,12 +390,11 @@ pub(super) fn mxfp4_bytes(operands: &FfnOperands) -> Vec<(Vec<u8>, Vec<u8>)> {
         .collect()
 }
 
+/// The representation's name, for a panic message.
+///
+/// Delegates rather than matching again: this used to be a second copy of
+/// the same table, and a copy is one variant away from disagreeing with
+/// the one the refusals print.
 pub(super) fn slice_kind(slice: &WeightSlice<'_>) -> &'static str {
-    match slice {
-        WeightSlice::F32(_) => "f32",
-        WeightSlice::Bf16(_) => "bf16",
-        WeightSlice::F16(_) => "f16",
-        WeightSlice::Mxfp4 { .. } => "mxfp4",
-        WeightSlice::Nvfp4 { .. } => "nvfp4",
-    }
+    slice.representation()
 }

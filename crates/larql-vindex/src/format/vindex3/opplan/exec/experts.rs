@@ -14,11 +14,9 @@ use larql_models::config::ExpertFormat;
 use larql_models::quant::mxfp4::{dequantize_expert, MXFP4_GROUP_BYTES, MXFP4_GROUP_ELEMS};
 
 use super::backend::{FfnCall, NormCall, RoutedFfnCall, WeightFormat, WeightSlice};
+use super::narrow::{bf16_bytes_to_f16, f32_bytes_to_f16};
 use super::operands::{widen, OperandSource};
-use super::weights::{
-    bf16_bytes_to_f16, f32_bytes_to_f16, load_weight, quantize_mxfp4, quantize_nvfp4, AlignedBytes,
-    LoadedWeight,
-};
+use super::weights::{load_weight, quantize_mxfp4, quantize_nvfp4, AlignedBytes, LoadedWeight};
 use crate::error::VindexError;
 use crate::format::vindex3::opplan::{FfnOp, LayerFfn, NormOp, PackedProjection, RoutedFfnOp};
 
@@ -453,8 +451,8 @@ fn from_f32(
         // residency means the stored bytes are the resident bytes, and
         // there are no stored bytes left here to keep. Refuse rather
         // than quietly return something the format does not promise.
-        WeightFormat::Bf16 => Err(VindexError::Parse(format!(
-            "tensor `{name}`: bf16 residency needs the stored bytes, and this expert path \
+        WeightFormat::Bf16 | WeightFormat::Q8 => Err(VindexError::Parse(format!(
+            "tensor `{name}`: compact residency needs the stored bytes, and this expert path \
              has already widened to f32"
         ))),
     }

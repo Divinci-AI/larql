@@ -54,6 +54,22 @@ pub enum WeightFormat {
     /// measured `48 x 5120` case runs 3.8x faster through BLAS f32 — see
     /// `exec::cpu::kernels::FusedBf16`.
     Bf16,
+    /// Symmetric int8, one f32 scale per [`Q8_BLOCK`] elements along the
+    /// input axis.
+    ///
+    /// **The first LOSSY residency format.** `Bf16` keeps the
+    /// checkpoint's own bytes and changes no value; this one quantises at
+    /// load and the model it decodes is not quite the model that was
+    /// stored. Everything about it is therefore judged on logits, KL, a
+    /// trajectory and recurrent-state drift, not on residency alone.
+    ///
+    /// Blocked along the input axis so a kernel accumulates a block and
+    /// scales once. 8.5 bits/weight with the scales counted.
+    ///
+    /// Worth declaring only where the BF16 image is too big for cache —
+    /// measured, `1024 x 5120` runs 0.81x through Q8 because at 10.5 MB
+    /// it is already L2-resident and the extra unpacking is pure cost.
+    Q8,
     /// IEEE 754 half, little-endian. Exactly representable from stored
     /// bf16 for all normal-range values (bf16's 7 mantissa bits fit in
     /// f16's 10); conversion fails closed on overflow. A device backend
@@ -157,6 +173,12 @@ pub enum WeightSlice<'a> {
     F32(&'a [f32]),
     /// Stored bf16 code units, still compact.
     Bf16(&'a [u16]),
+    /// Symmetric int8 codes and their per-block f32 scales.
+    Q8 {
+        codes: &'a [i8],
+        scales: &'a [f32],
+        block: usize,
+    },
     /// Little-endian IEEE f16 bytes.
     F16(&'a [u8]),
     /// MXFP4: packed e2m1 codes (`[n, k/32, 16]`, lo nibble first) and
@@ -227,6 +249,21 @@ impl<'a> WeightSlice<'a> {
                 .get(..want)
                 .map(WeightRows::Bf16)
                 .ok_or_else(|| short(w.len())),
+            WeightSlice::Q8 {
+                codes,
+                scales,
+                block,
+            } => {
+                let per_row = in_dim.div_ceil(*block);
+                match (codes.get(..want), scales.get(..out_dim * per_row)) {
+                    (Some(codes), Some(scales)) => Ok(WeightRows::Q8 {
+                        codes,
+                        scales,
+                        block: *block,
+                    }),
+                    _ => Err(short(codes.len())),
+                }
+            }
             other => Err(VindexError::Parse(format!(
                 "no CPU projection kernel consumes {} weights — the backend declared a \
                  representation only a device can run, so this refuses rather than converting \
@@ -243,6 +280,7 @@ impl<'a> WeightSlice<'a> {
         match self {
             WeightSlice::F32(_) => "f32",
             WeightSlice::Bf16(_) => "bf16",
+            WeightSlice::Q8 { .. } => "q8",
             WeightSlice::F16(_) => "f16",
             WeightSlice::Mxfp4 { .. } => "mxfp4",
             WeightSlice::Nvfp4 { .. } => "nvfp4",
@@ -253,6 +291,7 @@ impl<'a> WeightSlice<'a> {
         match self {
             WeightSlice::F32(w) => Ok(w),
             WeightSlice::Bf16(_)
+            | WeightSlice::Q8 { .. }
             | WeightSlice::F16(_)
             | WeightSlice::Mxfp4 { .. }
             | WeightSlice::Nvfp4 { .. } => Err(VindexError::Parse(

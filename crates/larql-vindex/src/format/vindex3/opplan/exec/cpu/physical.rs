@@ -41,11 +41,11 @@ pub enum PhysicalProjectionPlan {
     ScalarF32,
     /// Q8 resident, widened and scaled in registers, executor-threaded.
     ///
-    /// Reachable by OBSERVATION but not yet by [`Self::choose`]: the
-    /// kernel is proven and the loader cannot make a Q8 operand resident
-    /// yet, and a policy that answered `Q8` today would refuse at load.
-    /// Listed here so `for_resident` stays total — the moment it needed a
-    /// fallback arm it would be guessing.
+    /// The first LOSSY plan: the values it decodes are not the values the
+    /// checkpoint stores. Worth 1.28x on the projections a token runs —
+    /// half the bytes returning a third of the time, because at 8.5 bits
+    /// the kernel stops waiting for memory and starts waiting for the
+    /// widen.
     FusedQ8,
     /// f32 resident, BLAS `sgemv`, threaded by the library.
     ///
@@ -65,10 +65,7 @@ impl PhysicalProjectionPlan {
         match self {
             Self::ScalarF32 | Self::BlasF32 => WeightFormat::F32,
             Self::FusedBf16 => WeightFormat::Bf16,
-            // No `WeightFormat` names Q8 yet; declaring one before the
-            // loader can honour it would let the policy pick a format
-            // that fails at load.
-            Self::FusedQ8 => WeightFormat::Bf16,
+            Self::FusedQ8 => WeightFormat::Q8,
         }
     }
 
@@ -96,10 +93,22 @@ impl PhysicalProjectionPlan {
     /// stored bytes are the resident bytes, and a policy that quietly
     /// quantised to hit its own threshold would make that a lie.
     pub fn choose(elements: usize, stored_bf16: bool) -> Self {
-        if stored_bf16 && elements * F32_BYTES >= compact_threshold_bytes() {
-            Self::FusedBf16
+        if !stored_bf16 || elements * F32_BYTES < compact_threshold_bytes() {
+            return Self::BlasF32;
+        }
+        // **The same cache argument, one format further down.**
+        //
+        // BF16 beats BLAS f32 once the F32 image stops fitting L2; Q8
+        // beats BF16 once the BF16 image does. Measured on the real
+        // shapes: `1024 x 5120` is 10.5 MB as bf16, still L2-resident,
+        // and runs 0.81x through Q8 — no traffic to halve and the extra
+        // unpacking is pure cost. `5120 x 6144` is 62.9 MB, streams, and
+        // wins 1.16x. Every measured shape falls on the side this
+        // predicts.
+        if elements * BF16_BYTES >= compact_threshold_bytes() && q8_permitted() {
+            Self::FusedQ8
         } else {
-            Self::BlasF32
+            Self::FusedBf16
         }
     }
 
@@ -165,8 +174,33 @@ impl crate::format::vindex3::opplan::exec::gated_delta::DenseProjections for Exe
     }
 }
 
+/// Caps the policy at a representation, for A/B'ing FORMATS in one
+/// binary.
+pub const MAX_FORMAT_ENV: &str = "LARQL_CPU_MAX_FORMAT";
+
+/// Whether the policy may reach Q8.
+///
+/// Exists so a lossy format can be compared against the exact one it
+/// replaces WITHOUT rebuilding. Q8 changes logits, so the comparison has
+/// to be against the same binary's own bf16 answer — a rebuild moved an
+/// untouched function 14% in CPU-2D, and a numerical A/B across builds
+/// would be arguing with a compiler as much as with a format.
+///
+/// Only `bf16` caps anything; every other value (and no value) leaves the
+/// measured policy in force, so a typo cannot silently disable Q8 in
+/// production and be mistaken for a regression.
+fn q8_permitted() -> bool {
+    !matches!(
+        std::env::var(MAX_FORMAT_ENV).ok().as_deref().map(str::trim),
+        Some("bf16")
+    )
+}
+
 /// f32 bytes per element — what the BLAS alternative must read.
 pub(super) const F32_BYTES: usize = 4;
+
+/// bf16 bytes per element — what the Q8 alternative must read.
+pub(super) const BF16_BYTES: usize = 2;
 
 /// The f32 footprint at or above which compact-to-registers wins.
 ///
