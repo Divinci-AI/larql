@@ -619,8 +619,10 @@ fn summarise(engine: &str, trace: &ExecutionTrace) {
 /// the canonical bytes return `None` and never look for a pack, so adding
 /// packs to a container cannot change what they execute.
 fn wanted_representation(backend: ExecBackend) -> Option<&'static str> {
+    #[cfg(all(feature = "gpu", target_os = "macos"))]
     use larql_vindex::format::vindex3::represent::nvfp4_pack::DTYPE_NVFP4;
     match backend {
+        #[cfg(all(feature = "gpu", target_os = "macos"))]
         ExecBackend::MetalNvfp4
         | ExecBackend::MetalNvfp4Ffn
         | ExecBackend::MetalNvfp4NoHead
