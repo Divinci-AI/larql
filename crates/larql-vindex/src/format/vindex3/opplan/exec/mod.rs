@@ -819,24 +819,3 @@ fn project<B: PlanBackend + ?Sized>(
         x,
     })
 }
-
-/// This layer's softmax attention op, or a refusal naming what it carries
-/// instead.
-///
-/// Support or refuse, never invisibility (rung M3). A Gated DeltaNet layer
-/// has no per-position keys or values to hand a softmax backend and keeps
-/// no KV row, so there is nothing here to execute *as attention* — and on
-/// a hybrid checkpoint that is not an edge case: Qwen3.8-27B declares 48
-/// of its 64 layers that way. Running the plan anyway would execute a
-/// different model and report a number for it, which is the one outcome
-/// this engine refuses.
-pub(crate) fn softmax_or_refuse(layer: &LayerPlan) -> Result<&AttentionOp, VindexError> {
-    layer.attention.softmax().ok_or_else(|| {
-        VindexError::Parse(format!(
-            "layer {} carries `{}`, which this executor cannot run: it has \
-             no softmax attention and keeps no KV row",
-            layer.layer,
-            layer.attention.declared_name(),
-        ))
-    })
-}

@@ -240,3 +240,65 @@ fn a_persisted_split_prefix_matches_one_batch() {
         "global position drifted"
     );
 }
+
+/// **QW-3.7 — decode equals batch on a hybrid stack.**
+///
+/// The single-position path and the batched one must agree token for
+/// token. This is the gate that makes autoregressive generation
+/// meaningful: a decode step that reconstructed its convolution window
+/// from the current batch would see a window of ONE and still produce
+/// plausible numbers, and only a comparison against the batched
+/// realisation catches it.
+///
+/// Both arms teacher-force the same tokens, so a per-position difference
+/// is attributable to the realisation rather than to the two arms having
+/// generated different text.
+#[test]
+fn stepping_a_hybrid_stack_matches_the_batched_traversal() {
+    use crate::format::vindex3::opplan::exec::decode::DecodeSession;
+
+    let (_c, plan, store) = hybrid();
+    let tokens = [1u32, 2, 3, 4, 5, 6, 7];
+
+    // Batched: the realisation QW-3.6b proved against HF.
+    let mut batched = RowKvState::default();
+    let batch_logits = run(&plan, &store, &tokens, &mut batched).unwrap();
+
+    // Stepped: one position at a time, state carried in place.
+    let mut session = DecodeSession::new(&plan, &store, &ReferenceBackend).unwrap();
+    let mut last = Vec::new();
+    for &token in &tokens {
+        last = session
+            .step(token)
+            .unwrap()
+            .logits
+            .expect("the fixture carries an output head");
+    }
+
+    assert_eq!(last.len(), batch_logits.len());
+    let num: f32 = last
+        .iter()
+        .zip(&batch_logits)
+        .map(|(a, b)| (a - b) * (a - b))
+        .sum();
+    let den: f32 = batch_logits.iter().map(|b| b * b).sum();
+    let rel = (num / den.max(f32::MIN_POSITIVE)).sqrt();
+    assert!(
+        rel < 1e-5,
+        "stepped decode disagrees with the batched traversal on a hybrid stack: \
+         rel_rms {rel:e} — the recurrent buffers are not carrying across steps"
+    );
+
+    // The recurrent buffers must have MOVED, or the comparison above
+    // would also be satisfied by two runs that both did nothing.
+    for (index, layer) in plan.layers.iter().enumerate() {
+        if matches!(layer.attention, LayerAttention::GatedDelta(_)) {
+            let state = batched.recurrent_state(index).unwrap();
+            assert!(
+                state.buffer(0).cells().iter().any(|c| *c != 0.0)
+                    && state.buffer(1).cells().iter().any(|c| *c != 0.0),
+                "layer {index} finished with untouched state"
+            );
+        }
+    }
+}

@@ -174,20 +174,6 @@ impl PreparedAttention {
             Self::GatedDelta(_) => Vec::new(),
         }
     }
-
-    /// The softmax operands, or a refusal naming what this layer holds.
-    ///
-    /// The KV-shaped paths still call this; it is the one place they
-    /// learn that a layer is not theirs.
-    pub(super) fn softmax(&self) -> Result<&AttentionOperands, VindexError> {
-        match self {
-            Self::Softmax(ops) => Ok(ops),
-            Self::GatedDelta(_) => Err(VindexError::Parse(
-                "this layer runs a Gated DeltaNet recurrence; it has no softmax operands"
-                    .to_string(),
-            )),
-        }
-    }
 }
 
 /// The nine operands a Gated DeltaNet layer reads, loaded once.
