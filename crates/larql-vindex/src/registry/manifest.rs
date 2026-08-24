@@ -49,6 +49,31 @@ pub struct RegistryArtifactRef {
     pub revision: String,
 }
 
+/// How a [`Provenance`]'s `{repo, revision}` was determined.
+///
+/// `encode` takes no source parameter at all (design doc §4/publishing
+/// grounding, Q4) — nothing in the pipeline mechanically guarantees a
+/// registry entry's source is correct. This is the marker the design's
+/// open question 4 asked for: an entry must say which case it is, never
+/// let a hand-checked value silently read as pipeline-verified.
+/// `#[serde(tag = "kind")]` so the JSON itself always names one — no
+/// field can be omitted and default to the safer-looking case.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Attestation {
+    /// The pipeline itself produced and checked `{repo, revision}` —
+    /// no case exists yet (the encode-time gap above), but the variant
+    /// is here so one can be wired in later without reshaping every
+    /// existing entry.
+    Mechanical,
+    /// A person read `{repo, revision}` off the checkpoint/cache by hand
+    /// and is vouching for it. `by` names who, so the audit trail
+    /// (design doc's "git history, not a field" rule for revisions)
+    /// has the same answer for *this* claim: who to ask, not just that
+    /// someone did.
+    HandAttested { by: String },
+}
+
 /// Where a registry variant's VINDEX3 container was built *from* — the
 /// upstream checkpoint, carried out-of-band from the container itself.
 /// `Vindex3Index` carries no provenance fields (design doc §4); this is
@@ -58,6 +83,7 @@ pub struct RegistryArtifactRef {
 pub struct Provenance {
     pub repo: String,
     pub revision: String,
+    pub attestation: Attestation,
 }
 
 /// One selectable build of a registry model.
@@ -123,6 +149,7 @@ impl RegistryManifest {
             for (variant_name, variant) in &model.variants {
                 check_pinned(name, variant_name, &variant.artifact.revision)?;
                 check_pinned(name, variant_name, &variant.source.revision)?;
+                check_attested(name, variant_name, &variant.source.attestation)?;
             }
         }
         Ok(())
@@ -136,6 +163,25 @@ fn check_pinned(name: &str, variant: &str, revision: &str) -> Result<(), Registr
             variant: variant.to_string(),
             revision: revision.to_string(),
         });
+    }
+    Ok(())
+}
+
+/// A `HandAttested { by: "" }` would satisfy the enum's shape while
+/// saying nothing an audit trail could act on — the same "structurally
+/// present but empty" gap [`check_pinned`] closes for revisions.
+fn check_attested(
+    name: &str,
+    variant: &str,
+    attestation: &Attestation,
+) -> Result<(), RegistryError> {
+    if let Attestation::HandAttested { by } = attestation {
+        if by.trim().is_empty() {
+            return Err(RegistryError::EmptyAttestationBy {
+                name: name.to_string(),
+                variant: variant.to_string(),
+            });
+        }
     }
     Ok(())
 }

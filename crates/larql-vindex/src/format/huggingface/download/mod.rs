@@ -229,13 +229,47 @@ pub use hf_hub::api::Progress as DownloadProgress;
 ///
 /// Returns `None` on any failure (HEAD error, cache missing, etag
 /// absent, etc.); the caller falls back to `download_with_progress`.
+///
+/// # Why this only ever accepts the pinned revision's own snapshot dir
+///
+/// This used to also accept (a) any *other* revision's snapshot symlink
+/// for the same filename, and (b) the bare blob path with no snapshot
+/// symlink at all, on the reasoning that "the caller only needs a file
+/// it can open." That reasoning is wrong for this caller specifically:
+/// [`resolve_hf_vindex_with_progress`]'s V3 completeness loop discards
+/// the returned `PathBuf` entirely (`fetch(...).ok_or_else(...)?` —
+/// only the `Option`-ness is checked) and relies on every fetched file
+/// actually landing under `vindex_dir` (the pinned revision's own
+/// `snapshots/<revision>/` directory, established by `index.json`'s own
+/// fetch) — that is what the VINDEX3 container loader opens files
+/// relative to afterwards. A bare blob path, or a symlink living under
+/// some *other* revision's snapshot dir, satisfies neither: the loop
+/// reports success, but `vindex_dir` is left missing the file, and the
+/// failure only surfaces later, opaquely, when the container is opened.
+///
+/// Concretely: `target.embedding.bin`'s blob was already resident
+/// locally (deduped — identical BF16 embedding bytes from an earlier,
+/// unrelated pull of a sibling container), so this function used to
+/// report it "cached" via the removed fallback, the real
+/// `download_with_progress` call that would have created the pinned
+/// revision's own symlink never ran, and `larql serve` on the claimed
+/// registry name failed with a bare `IO error: No such file or
+/// directory` — nothing about that error named the missing symlink.
+///
+/// With no accepted fallback, an unpinned `revision: None` request
+/// always misses here (there is no single directory a "None" revision
+/// unambiguously names yet) and falls through to `download_with_progress`,
+/// which resolves "current HEAD" and places every file consistently —
+/// slightly less cache-optimized for the unpinned case, never silently
+/// wrong.
 fn cached_snapshot_file(
     kind: RepoKind,
     repo_id: &str,
     revision: Option<&str>,
     filename: &str,
 ) -> Option<(PathBuf, u64)> {
-    let (etag, size) = head_etag_and_size(kind, repo_id, revision, filename)?;
+    let revision = revision?;
+    let (etag, size) = head_etag_and_size(kind, repo_id, Some(revision), filename)?;
     let repo_dir = hf_cache_repo_dir(kind, repo_id)?;
     let blob_path = repo_dir.join("blobs").join(&etag);
     let meta = std::fs::metadata(&blob_path).ok()?;
@@ -248,27 +282,11 @@ fn cached_snapshot_file(
         return None;
     }
 
-    // Return the snapshot path (symlink → blob) if the repo has one,
-    // otherwise the blob path itself. Either works — the caller only
-    // needs a file it can open.
-    let snapshots = repo_dir.join("snapshots");
-    if let Ok(entries) = std::fs::read_dir(&snapshots) {
-        for entry in entries.flatten() {
-            let snap_file = entry.path().join(filename);
-            if snap_file.exists() {
-                return Some((snap_file, size));
-            }
-        }
+    let snap_file = repo_dir.join("snapshots").join(revision).join(filename);
+    if snap_file.exists() {
+        return Some((snap_file, size));
     }
-    // Fall back to the pinned revision (if any) even if the symlink is
-    // missing — the blob still has the bytes.
-    if let Some(rev) = revision {
-        let snap_file = snapshots.join(rev).join(filename);
-        if snap_file.exists() {
-            return Some((snap_file, size));
-        }
-    }
-    Some((blob_path, size))
+    None
 }
 
 /// Issue a HEAD against HF's file-resolve endpoint for this repo+file

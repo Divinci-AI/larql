@@ -701,3 +701,95 @@ these untouched — no VINDEX3 execution path exists for them yet, per
 the rung-1 inventory); widening explicit `hf://`/local-path forms into
 the new resolver's stricter arms; `--profile` CLI wiring once a real
 registry entry exists to select a variant of.
+
+## 11. Rung 3A — the production registry's data source (2026-08-24)
+
+Deliberately narrow, per the user's own scoping: canonical
+`registry/index.json` + `registry/models/*.json` at the repo root,
+parsed by the *existing* production Rust schema, containing one real
+entry (`granite-4.1-3b`) — no promotion command in this rung. The
+point of keeping R3A alone is proving production registry data can
+exist, be validated, and be consumed by the resolver **without fixture
+machinery**, before any promotion tooling exists that could mask a
+problem in the representation itself.
+
+**The data-source question §7 left open** ("embedded? a file?
+fetched?") is answered: **compile-time embed**, via `include_str!`
+(`crates/larql-vindex/src/registry/embedded.rs`), matching
+[`fixtures`]'s existing "static, in-process, no network" precedent. A
+runtime file read relative to the process only works from a source
+checkout — release binaries (ADR-0026) ship standalone with no repo
+nearby; a remote fetch would add a second service dependency beyond HF
+for every `pull`/`serve`, which this rung's own non-goals already
+ruled out. Accepted consequence: a new or updated entry reaches users
+on the next binary *release*, not instantly on merge — no regression,
+since "official status conferred by PR merge" (§8 of the publishing
+doc) was already going to need a release to actually ship the entry.
+
+**File split, and why two files, not one**: `registry/index.json`
+names which models exist under which manifest schema version;
+`registry/models/<name>.json` holds one model's full body
+(`RegistryModel`: default variant + variants). `embedded.rs` parses
+the index, then for each named model looks up a **small, explicit**
+`include_str!` list (`embedded_model_json`) rather than a glob —
+`include_str!` needs a compile-time literal path, and R3A is
+deliberately one entry; a generalised N-model embed mechanism ahead of
+a second real entry existing would be exactly the premature machinery
+this initiative has avoided elsewhere. A second entry adds one
+`include_str!` line and one match arm, reviewed in the same PR as its
+`registry/models/*.json` file.
+
+**Testability**: `embedded.rs`'s core (`assemble_registry`) takes an
+injected `lookup` closure — the same convention `production.rs`
+already used for `resolve_claimed`/`resolve_claimed_with` — so every
+failure branch (malformed index, an index name with no matching embed,
+malformed per-model JSON, a manifest that parses but fails
+`validate()`) is provable against synthetic data, independent of the
+real embedded files. `production_registry()` stays the plain,
+infallible `RegistryManifest` every existing caller already expects;
+it panics only if the checked-in `registry/` files themselves are
+malformed, which R3B's CI conformance gate exists to catch before
+merge — the same "fixture serialises" contract
+`fixtures::tiny_static_registry_json` already relies on.
+
+**R3A's acceptance gate**:
+
+```text
+production_registry()
+    -> reads canonical repo registry
+    -> granite-4.1-3b exists
+    -> resolves to pinned VINDEX3 artifact
+```
+
+See `docs/vindex3-registry-publishing-design.md` §8 for the
+`granite-4.1-3b` publish itself, including a real `create_hf_repo`
+namespace bug found and fixed along the way.
+
+**A second real bug, found by actually running the acceptance gate, not
+just wiring it**: `larql pull granite-4.1-3b` + `larql serve
+granite-4.1-3b` initially failed — `open VINDEX3 container: IO error:
+No such file or directory` — even though `pull` itself reported
+success. Root cause in `cached_snapshot_file`
+(`format/huggingface/download/mod.rs`): its "already cached" fast path
+accepted a blob whose bytes existed locally (deduped — this session had
+already pulled a byte-identical `target.embedding.bin` from an
+unrelated repo) but for which the *pinned revision's own* snapshot
+symlink didn't exist, falling back to returning the bare blob path. The
+V3 completeness loop that calls it discards the returned path entirely
+(`fetch(...).ok_or_else(...)?` — only checks `Option`-ness), so it
+reported success while the pinned revision's `snapshots/<rev>/` never
+actually got the symlink the container loader needs. Fixed by making
+the fast path only ever accept the pinned revision's own snapshot
+symlink — an unpinned `revision: None` now always misses immediately
+and falls through to `download_with_progress`, which creates the
+correct symlink without re-transferring already-local bytes. Regression
+tests pin the exact failure shape (blob present, symlink absent for the
+pinned revision → miss) and the now-narrower unpinned-revision case.
+
+**R3A acceptance gate: PASSED for real**, both bugs above fixed first —
+`larql pull granite-4.1-3b` resolved through the production registry to
+`hf://larql/granite-4.1-3b@1048a8eb2fec5812a698e76d7e603527d0475c17`
+and downloaded a complete container; `larql serve granite-4.1-3b`
+loaded it and served a real `/v1/chat/completions` request end to end
+("The capital of France is" → "Paris."). No fixture registry, no manual
+local path, no floating HF revision, anywhere in that chain.

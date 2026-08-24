@@ -21,12 +21,15 @@
 //! this resolver, and a tiny static test registry ([`fixtures`]).
 //! Rung 2 ("resolver convergence", §10) added [`production`] — the
 //! shared claimed/unclaimed dispatch `larql-cli` and `larql-server` both
-//! call, and the (still empty) production registry. Not a generic model
+//! call. Rung 3A (§11) gave the production registry its first real
+//! data — [`embedded`] embeds `registry/index.json` +
+//! `registry/models/*.json` at compile time. Not a generic model
 //! registry, and VINDEX2 has no representation in this schema at all —
 //! see [`manifest`] and [`resolver`] for where that is enforced
 //! structurally rather than by convention.
 
 mod abi;
+mod embedded;
 mod error;
 pub mod fixtures;
 mod manifest;
@@ -36,6 +39,8 @@ mod resolver;
 
 #[cfg(test)]
 mod abi_tests;
+#[cfg(test)]
+mod embedded_tests;
 #[cfg(test)]
 mod manifest_tests;
 #[cfg(test)]
@@ -48,7 +53,7 @@ mod resolver_tests;
 pub use abi::{Vindex3Abi, CURRENT_VINDEX3_ABI};
 pub use error::RegistryError;
 pub use manifest::{
-    Provenance, RegistryArtifactRef, RegistryManifest, RegistryModel, RegistryVariant,
+    Attestation, Provenance, RegistryArtifactRef, RegistryManifest, RegistryModel, RegistryVariant,
     REGISTRY_MANIFEST_SCHEMA_VERSION,
 };
 pub use production::{

@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use super::abi::{Vindex3Abi, CURRENT_VINDEX3_ABI};
 use super::error::RegistryError;
 use super::manifest::{
-    Provenance, RegistryArtifactRef, RegistryManifest, RegistryModel, RegistryVariant,
+    Attestation, Provenance, RegistryArtifactRef, RegistryManifest, RegistryModel, RegistryVariant,
     REGISTRY_MANIFEST_SCHEMA_VERSION,
 };
 use super::production::{production_registry, resolve_claimed, resolve_claimed_with};
@@ -28,6 +28,7 @@ fn registry_claiming_qwen38(abi: Vindex3Abi) -> RegistryManifest {
             source: Provenance {
                 repo: "Qwen/Qwen3.8-27B".to_string(),
                 revision: "8c4fdeadbeef".to_string(),
+                attestation: Attestation::Mechanical,
             },
         },
     );
@@ -46,8 +47,13 @@ fn registry_claiming_qwen38(abi: Vindex3Abi) -> RegistryManifest {
 }
 
 #[test]
-fn production_registry_is_empty_today() {
-    assert!(production_registry().models.is_empty());
+fn production_registry_is_no_longer_empty_since_r3a() {
+    // Was `production_registry_is_empty_today` through rung 2 — R3A
+    // (`registry/index.json` + `registry/models/*.json`, embedded at
+    // compile time via `super::embedded`) is the point this stops
+    // being true. See `embedded_tests` for what the real entries are
+    // and R3A's own acceptance gate.
+    assert!(!production_registry().models.is_empty());
 }
 
 #[test]
@@ -133,6 +139,7 @@ fn a_claimed_name_with_an_explicit_variant_fetches_and_validates_that_variant() 
             source: Provenance {
                 repo: "Qwen/Qwen3.8-27B".to_string(),
                 revision: "8c4fdeadbeef".to_string(),
+                attestation: Attestation::Mechanical,
             },
         },
     );

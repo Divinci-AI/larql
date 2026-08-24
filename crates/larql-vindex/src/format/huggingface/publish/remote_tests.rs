@@ -612,6 +612,34 @@ fn create_hf_repo_uses_last_path_segment_as_name() {
 }
 
 #[test]
+fn create_hf_repo_body_omits_organization_for_a_bare_name() {
+    // A repo_id with no `/` names no owner at all — `organization`
+    // must be entirely absent so HF defaults the create to the
+    // token's own namespace, which is exactly what "no owner
+    // requested" should mean.
+    let body = create_hf_repo_body("loose-repo", "model", false);
+    assert_eq!(body["name"], "loose-repo");
+    assert!(
+        body.get("organization").is_none(),
+        "unexpected organization field: {body}"
+    );
+}
+
+#[test]
+fn create_hf_repo_body_sends_organization_for_a_namespaced_repo() {
+    // The real fix: omitting `organization` makes HF default repo
+    // creation to the *token's own* namespace, not the caller's
+    // intended one — `--repo larql/granite-4.1-3b` from a
+    // `chrishayuk`-owned token used to silently create
+    // `chrishayuk/granite-4.1-3b` instead, and the next call (which
+    // does address the real repo_id) 404'd on a repo that was never
+    // created. `organization` must carry the owner verbatim.
+    let body = create_hf_repo_body("larql/granite-4.1-3b", "model", false);
+    assert_eq!(body["name"], "granite-4.1-3b");
+    assert_eq!(body["organization"], "larql");
+}
+
+#[test]
 #[serial]
 fn create_hf_repo_send_failure_propagates() {
     let _guard = EnvBaseGuard::new(UNREACHABLE_ENDPOINT);

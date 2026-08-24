@@ -8,7 +8,7 @@ use super::abi::CURRENT_VINDEX3_ABI;
 use super::error::RegistryError;
 use super::fixtures::{tiny_static_registry, tiny_static_registry_json};
 use super::manifest::{
-    Provenance, RegistryArtifactRef, RegistryManifest, RegistryModel, RegistryVariant,
+    Attestation, Provenance, RegistryArtifactRef, RegistryManifest, RegistryModel, RegistryVariant,
     REGISTRY_MANIFEST_SCHEMA_VERSION,
 };
 
@@ -40,6 +40,22 @@ fn variant(artifact_revision: &str, source_revision: &str) -> RegistryVariant {
         source: Provenance {
             repo: "Qwen/Qwen3.8-27B".to_string(),
             revision: source_revision.to_string(),
+            attestation: Attestation::Mechanical,
+        },
+    }
+}
+
+fn hand_attested_variant(by: &str) -> RegistryVariant {
+    RegistryVariant {
+        artifact: RegistryArtifactRef {
+            repo: "larql/qwen3.8-27b-nvfp4".to_string(),
+            revision: "abc123f0".to_string(),
+        },
+        abi: CURRENT_VINDEX3_ABI,
+        source: Provenance {
+            repo: "Qwen/Qwen3.8-27B".to_string(),
+            revision: "8c4fdead".to_string(),
+            attestation: Attestation::HandAttested { by: by.to_string() },
         },
     }
 }
@@ -138,4 +154,59 @@ fn from_json_rejects_a_manifest_that_parses_but_fails_validation() {
 fn from_json_rejects_malformed_json_text() {
     let err = RegistryManifest::from_json("not json").unwrap_err();
     assert!(matches!(err, RegistryError::MalformedManifest { .. }));
+}
+
+// ── Attestation ──────────────────────────────────────────────────────────
+
+#[test]
+fn a_hand_attestation_naming_someone_validates() {
+    let mut variants = BTreeMap::new();
+    variants.insert("27b-nvfp4".to_string(), hand_attested_variant("chrishayuk"));
+    let m = one_model("27b-nvfp4", variants);
+    m.validate().unwrap();
+}
+
+#[test]
+fn a_hand_attestation_naming_no_one_refuses() {
+    let mut variants = BTreeMap::new();
+    variants.insert("27b-nvfp4".to_string(), hand_attested_variant(""));
+    let m = one_model("27b-nvfp4", variants);
+    let err = m.validate().unwrap_err();
+    assert!(matches!(err, RegistryError::EmptyAttestationBy { .. }));
+}
+
+#[test]
+fn a_hand_attestation_naming_only_whitespace_refuses() {
+    let mut variants = BTreeMap::new();
+    variants.insert("27b-nvfp4".to_string(), hand_attested_variant("   "));
+    let m = one_model("27b-nvfp4", variants);
+    let err = m.validate().unwrap_err();
+    assert!(matches!(err, RegistryError::EmptyAttestationBy { .. }));
+}
+
+#[test]
+fn attestation_round_trips_through_json_tagged_by_kind() {
+    // `#[serde(tag = "kind")]` is the load-bearing choice: the wire
+    // format always names which case an entry is, so a manifest text
+    // can never omit the field and silently read as the
+    // safer-looking `Mechanical` case.
+    let mechanical = serde_json::to_value(Attestation::Mechanical).unwrap();
+    assert_eq!(mechanical, serde_json::json!({"kind": "mechanical"}));
+
+    let hand_attested = serde_json::to_value(Attestation::HandAttested {
+        by: "chrishayuk".to_string(),
+    })
+    .unwrap();
+    assert_eq!(
+        hand_attested,
+        serde_json::json!({"kind": "hand_attested", "by": "chrishayuk"})
+    );
+
+    let parsed: Attestation = serde_json::from_value(hand_attested).unwrap();
+    assert_eq!(
+        parsed,
+        Attestation::HandAttested {
+            by: "chrishayuk".to_string()
+        }
+    );
 }

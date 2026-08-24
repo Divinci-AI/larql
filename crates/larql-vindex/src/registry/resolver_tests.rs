@@ -9,7 +9,7 @@ use super::abi::{Vindex3Abi, CURRENT_VINDEX3_ABI};
 use super::error::RegistryError;
 use super::fixtures::tiny_static_registry;
 use super::manifest::{
-    Provenance, RegistryArtifactRef, RegistryManifest, RegistryModel, RegistryVariant,
+    Attestation, Provenance, RegistryArtifactRef, RegistryManifest, RegistryModel, RegistryVariant,
     REGISTRY_MANIFEST_SCHEMA_VERSION,
 };
 use super::resolver::{resolve, ArtifactRef, Vindex3Resolution};
@@ -50,6 +50,7 @@ fn bare_name_resolves_to_the_declared_default_variant() {
         Provenance {
             repo: "Qwen/Qwen3.8-27B".to_string(),
             revision: "8c4fdeadbeef".to_string(),
+            attestation: Attestation::Mechanical,
         }
     );
     assert_eq!(resolved.abi, CURRENT_VINDEX3_ABI);
@@ -129,6 +130,7 @@ fn registry_with_abi(abi: Vindex3Abi) -> RegistryManifest {
             source: Provenance {
                 repo: "Qwen/Qwen3.8-27B".to_string(),
                 revision: "8c4fdeadbeef".to_string(),
+                attestation: Attestation::Mechanical,
             },
         },
     );
