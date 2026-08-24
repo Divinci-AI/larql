@@ -77,8 +77,16 @@ const _: fn() = || {
     let _: Option<StateDtype> = None::<StateDtype>;
 };
 
-/// Index of one state cell in the flat buffer, `[head][k][v]` row-major.
-fn cell(op: &GatedDeltaOp, head: usize, k: usize, v: usize) -> usize {
+/// Flat index of one state cell, and the layout authority the hoisted
+/// [`step_inner`] slices by.
+///
+/// `#[cfg(test)]` because the shipped path no longer indexes cell by
+/// cell — that was the cost CPU-2D1 removed. It stays as the written form
+/// of the layout, with `the_head_block_is_the_cell_formula` pinning that
+/// `h * dk * dv + kk * dv + vv` really is what this computes; the hoist's
+/// correctness rests on exactly that identity.
+#[cfg(test)]
+pub(super) fn cell(op: &GatedDeltaOp, head: usize, k: usize, v: usize) -> usize {
     (head * op.key_head_dim + k) * op.value_head_dim + v
 }
 
@@ -167,7 +175,133 @@ pub enum Mutation {
     TiledHeadExpansion,
 }
 
+/// The delta rule, with the geometry and the state slice lifted OUT of
+/// the inner loops.
+///
+/// Same arithmetic, same order, same rounding — [`step_inner_literal`] is
+/// kept beside it and `the_hoisted_recurrence_is_bit_identical` asserts
+/// both the output and the STATE match exactly. Nothing here is a
+/// numerical decision.
+///
+/// **What changed is what the compiler can see.** The literal form reads
+/// `dk`/`dv` from a `&GatedDeltaOp` and reaches every element through
+/// `state.cells_mut()[cell(op, h, kk, vv)]`, so each of the four sweeps
+/// is an indexed access through a reborrow with a bound the optimiser
+/// cannot prove loop-invariant. Lifting the head's own `dk * dv` block
+/// into a slice and walking it as `chunks_exact(dv)` says the same thing
+/// in a form that vectorises: the rows are contiguous, the length is
+/// known, and there is no aliasing question left to answer.
+///
+/// A transcription of this loop with compile-time dimensions ran 1.92x
+/// faster than one with runtime dimensions and the accessor — same
+/// arithmetic, same machine, same process. That gap is what this
+/// function exists to close, and it is why the rung is a REFACTOR and
+/// hand-written SIMD is a later, separate question.
+///
+/// `kv`, `delta`, `q` and `k` are allocated once for the layer instead of
+/// once per head — 192 allocations per layer at Qwen3.8's 48 heads — for
+/// the same reason: it is bookkeeping, not arithmetic.
 fn step_inner(
+    op: &GatedDeltaOp,
+    step: &RecurrenceStep<'_>,
+    state: &mut RecurrentBuffer,
+    mutation: Mutation,
+) -> Vec<f32> {
+    let (hv, dk, dv) = (op.num_value_heads, op.key_head_dim, op.value_head_dim);
+    let mut out = vec![0.0f32; hv * dv];
+    // The reference L2-normalises inside the kernel and applies the query
+    // scale AFTERWARDS. Scaling first would rescale the normalisation and
+    // is a different function.
+    let scale = 1.0 / (dk as f32).sqrt();
+
+    let cells = state.cells_mut();
+    let (mut q, mut k) = (vec![0.0f32; dk], vec![0.0f32; dk]);
+    let (mut kv, mut delta) = (vec![0.0f32; dv], vec![0.0f32; dv]);
+
+    for h in 0..hv {
+        q.copy_from_slice(&step.query[h * dk..(h + 1) * dk]);
+        k.copy_from_slice(&step.key[h * dk..(h + 1) * dk]);
+        if mutation == Mutation::ScaleBeforeNorm {
+            for x in q.iter_mut() {
+                *x *= scale;
+            }
+        }
+        l2_normalise(&mut q);
+        l2_normalise(&mut k);
+        if mutation != Mutation::ScaleBeforeNorm {
+            for x in q.iter_mut() {
+                *x *= scale;
+            }
+        }
+        let v = &step.value[h * dv..(h + 1) * dv];
+        let decay = match mutation {
+            Mutation::NoDecay => 1.0,
+            Mutation::RawGate => step.g[h],
+            _ => step.g[h].exp(),
+        };
+        let beta = if mutation == Mutation::NoBeta {
+            1.0
+        } else {
+            step.beta[h]
+        };
+
+        // `cell(op, h, kk, vv)` is `h * dk * dv + kk * dv + vv`, so this
+        // head owns one contiguous block and each `kk` is one contiguous
+        // row of `dv`.
+        let head = &mut cells[h * dk * dv..(h + 1) * dk * dv];
+
+        for row in head.chunks_exact_mut(dv) {
+            for cell in row.iter_mut() {
+                *cell *= decay;
+            }
+        }
+        // kv = sum over the KEY axis, weighted by k.
+        kv.fill(0.0);
+        for (kk, row) in head.chunks_exact(dv).enumerate() {
+            let kw = k[kk];
+            for (vv, cell) in row.iter().enumerate() {
+                kv[vv] += *cell * kw;
+            }
+        }
+        for vv in 0..dv {
+            delta[vv] = (v[vv] - kv[vv]) * beta;
+        }
+
+        let out_row = &mut out[h * dv..(h + 1) * dv];
+        let read = |head: &[f32], out_row: &mut [f32]| {
+            for (kk, row) in head.chunks_exact(dv).enumerate() {
+                let qw = q[kk];
+                for (vv, cell) in row.iter().enumerate() {
+                    out_row[vv] += *cell * qw;
+                }
+            }
+        };
+        if mutation == Mutation::ReadBeforeWrite {
+            read(head, out_row);
+        }
+        for (kk, row) in head.chunks_exact_mut(dv).enumerate() {
+            let kw = k[kk];
+            for (vv, cell) in row.iter_mut().enumerate() {
+                *cell += kw * delta[vv];
+            }
+        }
+        if mutation != Mutation::ReadBeforeWrite {
+            read(head, out_row);
+        }
+    }
+    out
+}
+
+/// The literal delta rule, kept as a permanent ORACLE.
+///
+/// Not dead code and not history: a recurrence can produce a plausible
+/// output while corrupting the state every following token reads, so the
+/// optimised form needs something to be exactly equal TO. This is the
+/// version that reads line by line beside the operator spec, and
+/// `the_hoisted_recurrence_is_bit_identical` is what makes keeping it
+/// worth the lines.
+#[cfg(test)]
+pub(super) fn step_inner_literal(
     op: &GatedDeltaOp,
     step: &RecurrenceStep<'_>,
     state: &mut RecurrentBuffer,

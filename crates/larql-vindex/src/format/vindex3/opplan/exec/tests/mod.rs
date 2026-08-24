@@ -39,6 +39,7 @@ mod kv;
 mod observe;
 mod overrides;
 mod parity;
+mod recurrence_shape;
 mod residency;
 mod residency_census;
 mod routed;
