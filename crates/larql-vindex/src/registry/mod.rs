@@ -27,11 +27,15 @@
 //! the filesystem-reading counterpart CI and `larql registry check`
 //! validate a checked-out `registry/` directory with, reusing the same
 //! assembly/validation core rather than a second definition of "valid."
+//! Rung 3C added [`candidate`] — turning a successful `larql publish`
+//! into a deterministic, schema-validated candidate registry record,
+//! without ever writing into `registry/models/` itself (that's R3D).
 //! Not a generic model registry, and VINDEX2 has no representation in
 //! this schema at all — see [`manifest`] and [`resolver`] for where
 //! that is enforced structurally rather than by convention.
 
 mod abi;
+mod candidate;
 mod check;
 mod embedded;
 mod error;
@@ -43,6 +47,8 @@ mod resolver;
 
 #[cfg(test)]
 mod abi_tests;
+#[cfg(test)]
+mod candidate_tests;
 #[cfg(test)]
 mod check_tests;
 #[cfg(test)]
@@ -57,6 +63,7 @@ mod reference_tests;
 mod resolver_tests;
 
 pub use abi::{Vindex3Abi, CURRENT_VINDEX3_ABI};
+pub use candidate::{build_candidate, CandidateInputs};
 pub use check::load_registry_from_dir;
 pub use embedded::load_production_registry;
 pub use error::RegistryError;

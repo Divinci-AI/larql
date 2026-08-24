@@ -25,9 +25,14 @@
 //! - `upload`        — slice-preset resolution, the per-step upload plan,
 //!                      `UploadStep`/`StepOutcome`.
 //! - `progress`       — the indicatif progress-bar `PublishCallbacks` impl.
+//! - `registry_candidate` — `--emit-registry-candidate` (R3C): turns a
+//!                      successful publish's own pinned revision into a
+//!                      candidate `registry/models/<name>.json` body.
+//!                      Opt-in; plain `larql publish` is unaffected.
 
 mod collections;
 mod progress;
+mod registry_candidate;
 mod upload;
 
 use larql_vindex::format::filenames::*;
@@ -146,6 +151,59 @@ pub struct PublishArgs {
     /// existing visibility; this only affects repo *creation*.
     #[arg(long)]
     pub private: bool,
+
+    /// After a successful publish, emit a candidate VINDEX3 registry
+    /// record for `--repo`'s pinned artifact — R3C
+    /// (docs/vindex3-registry-design.md §13). Requires
+    /// `--registry-name`, `--registry-variant`, `--source-repo`,
+    /// `--source-revision`, and `--attested-by`; incompatible with
+    /// `--no-full` (a candidate names the full artifact's own
+    /// revision, which doesn't exist without publishing it). Never
+    /// writes into `registry/models/` or touches `registry/index.json`
+    /// — that's a separate promotion step (R3D), not this flag.
+    #[arg(long)]
+    pub emit_registry_candidate: bool,
+
+    /// Registry model name for the candidate (e.g. `granite-4.1-3b`).
+    /// Required with `--emit-registry-candidate`.
+    #[arg(long)]
+    pub registry_name: Option<String>,
+
+    /// Registry variant name for the candidate (e.g. `bf16`). Required
+    /// with `--emit-registry-candidate`.
+    #[arg(long)]
+    pub registry_variant: Option<String>,
+
+    /// Upstream checkpoint repo the published artifact was built from.
+    /// Required with `--emit-registry-candidate`. Never guessed from
+    /// `--repo`, a filename, or an HF cache path — candidate
+    /// generation must never invent information.
+    #[arg(long)]
+    pub source_repo: Option<String>,
+
+    /// Upstream checkpoint's pinned revision. Required with
+    /// `--emit-registry-candidate`, same reasoning as `--source-repo`.
+    #[arg(long)]
+    pub source_revision: Option<String>,
+
+    /// Who is vouching for `--source-repo`/`--source-revision`.
+    /// Required with `--emit-registry-candidate` — this rung's only
+    /// attestation path is hand-attested; no mechanical capture exists
+    /// yet (`encode` takes no source parameter at all).
+    #[arg(long)]
+    pub attested_by: Option<String>,
+
+    /// Override the VINDEX3 runtime ABI the candidate declares.
+    /// Defaults to the ABI this binary implements — not a guess, the
+    /// only value that could be correct without inventing a
+    /// compatibility range no second ABI value exists to justify yet.
+    #[arg(long)]
+    pub registry_abi: Option<u32>,
+
+    /// Write the registry candidate JSON here instead of printing it
+    /// to stdout.
+    #[arg(long)]
+    pub registry_candidate_out: Option<PathBuf>,
 }
 
 /// Whether `collections` is exactly [`DEFAULT_COLLECTIONS`] (case-insensitive,
@@ -164,6 +222,13 @@ pub(super) fn collections_match_default(collections: &[String]) -> bool {
 }
 
 pub fn run(args: PublishArgs) -> Result<(), Box<dyn std::error::Error>> {
+    // 0. Registry-candidate flags, checked before any network call —
+    // a caller with a missing companion flag finds out immediately,
+    // not after paying for a real publish. `None` when
+    // `--emit-registry-candidate` wasn't passed: plain `larql publish`
+    // takes no new code path at all.
+    let candidate_request = registry_candidate::parse_candidate_request(&args)?;
+
     // 1. Resolve source.
     let src = cache::resolve_model(&args.source)?;
     if !src.is_dir() {
@@ -338,6 +403,14 @@ pub fn run(args: PublishArgs) -> Result<(), Box<dyn std::error::Error>> {
     for r in &results {
         println!("  larql pull hf://{}@{}", r.repo, r.revision);
     }
+
+    // 7. Registry candidate — opt-in, and strictly last: only a
+    // successful publish (every prior step already returned Ok) has a
+    // pinned revision worth building a candidate from.
+    if let Some(request) = candidate_request {
+        registry_candidate::emit(request, &results)?;
+    }
+
     Ok(())
 }
 
@@ -396,6 +469,14 @@ mod tests {
             repo_type: "model".to_string(),
             private: false,
             no_prune: false,
+            emit_registry_candidate: false,
+            registry_name: None,
+            registry_variant: None,
+            source_repo: None,
+            source_revision: None,
+            attested_by: None,
+            registry_abi: None,
+            registry_candidate_out: None,
         }
     }
 
