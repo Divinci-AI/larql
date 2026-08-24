@@ -132,8 +132,32 @@ reported for q/k/v, gate/up and down separately. Secondary, reported but
 not decisive: pack stability between `N` and `4N` — how many E2M1 codes and
 group scales change.
 
-`N` is then frozen as the smallest size at which `recon` has materially
-stopped improving. **No Q-BANK number is looked at before that freeze.**
+### The selection rule — mechanical, frozen here
+
+"Materially stopped improving" would leave the decision to be made after
+seeing the numbers, which is the thing this gate exists to prevent. The
+rule is therefore a **one-standard-error rule**, fixed now:
+
+```text
+for each site class c in {qkv, gate_up, down}:
+    r_c(N)  =  held-out reconstruction error at calibration size N
+    SE_c    =  standard error of the BEST observed r_c,
+               by resampling VALIDATION PROMPTS (not token positions)
+
+choose the smallest N such that, for EVERY site class c:
+
+    r_c(N)  <=  min_N' r_c(N')  +  SE_c(at the argmin)
+```
+
+Resampling is over **prompts**, because positions inside one prompt are not
+independent — 458 positions from 12 prompts are not 458 independent
+observations, and a position-level bootstrap would understate the error by
+a large factor.
+
+This is the standard "smallest model statistically indistinguishable from
+the best" rule. It invents no quality threshold, and it can be evaluated by
+a script with no judgement call. **No Q-BANK number is looked at before
+that freeze.**
 
 Two informative outcomes, both worth having:
 
@@ -312,55 +336,165 @@ This second arm is **not** run if the first shows no material improvement.
   proposal. The SENSITIVITY ladder stays paused.
 - **Other models.** Granite only. Glimmer and an MoE are R6.
 
-## R4.1 — what "GPTQ for NVFP4" means. STILL OPEN.
+## R4.1 — `nvfp4-gptq-v1` is FIXED-GRID GPTQ
 
-NVFP4 is not a plain scalar quantiser: it carries 16-element group scales
-and a tensor scale. Without pinning what the encoder may choose,
-`nvfp4-gptq-v1` degenerates into "whatever the implementation happened to
-do", and the one-variable contract above becomes unenforceable.
+**Only the E2M1 code nibbles may differ from `nvfp4-nearest-v1`.** Every
+scale byte is byte-identical, by construction rather than by assertion.
 
-To be specified **before implementation**, and written into this document:
+That is a stronger contract than "same codec, same size, different
+encoder", and it makes R4 answer one question exactly:
+
+> Is nearest **rounding** the problem?
+
+not the compound question "is nearest rounding, or the tensor scale, or the
+group scales, the problem?" — which no single arm could separate.
+
+### The grid, taken from `larql_models::quant::nvfp4` as the authority
+
+Transcribed from the local encoder, not from generic NVFP4 descriptions:
 
 ```text
-codec (fixed)     nvfp4/rev1, group_elems = 16, layout unchanged
+orientation     W is [rows = output, k = input], row-major
+grouping        contiguous runs of 16 along the INPUT axis; groups = k/16
+packing         [rows, groups, 8] bytes, LO nibble = even element
+scales          [rows, groups] E4M3 bytes — one per (row, group)
 
-encoder (to pin)  damping rule
-                  column order / act-order
-                  GPTQ block size
-                  tensor-scale selection rule
-                  16-value group-scale selection rule
-                  E2M1 code selection rule
-                  when scales are (re)computed
-                  whether compensated weights may change a later group scale
+tensor_scale    amax(|W|) over the WHOLE matrix / (E4M3_MAX * E2M1_MAX)
+                = amax / (448 * 6) = amax / 2688
+                (1.0 for an all-zero or non-finite matrix)
+
+group scale     wanted   = amax(|group|) / E2M1_MAX / tensor_scale
+                byte     = f32_to_e4m3(wanted)
+
+step            tensor_scale * e4m3_to_f32(byte)
+inv             1/step, or 0 when step is non-positive or non-finite
+
+code            f32_to_e2m1(value * inv) & 0x0F
+                grid |m| in {0, .5, 1, 1.5, 2, 3, 4, 6}
+                ties -> even index; SATURATES at ±6
 ```
 
-The last two matter most. If compensation can move a weight across a group
-boundary and trigger a rescale, then column order changes the **grid**, not
-merely the rounding decisions — and two runs of "the same" recipe would not
-be the same encoder.
+### What is frozen, and what GPTQ may choose
 
-`nvfp4-gptq-v1` must be deterministic: same weights, same calibration,
-same `N` → byte-identical pack.
+```text
+FROZEN, from the ORIGINAL W, before any compensation:
+    tensor_scale        byte-identical to nvfp4-nearest-v1
+    every group scale   byte-identical to nvfp4-nearest-v1
+    grouping, layout, nibble order, serialization
+
+GPTQ MAY CHOOSE:
+    the E2M1 code for each element, after error compensation,
+    against that element's already-frozen step
+```
+
+Scales are computed **once from the original weights and never recomputed**.
+This is GPTQ's "static groups" mode, and it closes the ambiguity that would
+otherwise be fatal: **compensation cannot trigger a rescale, so column
+order cannot mutate the grid** — only the rounding decisions on it.
+
+### Parameters
+
+```text
+groupsize     16, static (the codec's own grouping)
+blocksize     128
+damping       0.01 x mean(diag(H))
+act-order     false
+column order  original K order
+error propagation   canonical GPTQ update
+```
+
+### Saturation must be instrumented, not assumed away
+
+`nvfp4-nearest-v1` **cannot** saturate: the group scale is chosen so the
+group's amax lands exactly at `E2M1_MAX`. Fixed-grid GPTQ **can**, because
+compensation moves values against a scale chosen for the originals, and
+`f32_to_e2m1` saturates to ±6 rather than erroring.
+
+This is a real cost of byte-identical scales, not a defect. It is therefore
+**counted and reported**: saturation events per site class, as a fraction of
+elements. If a fixed-grid arm underperforms, that number distinguishes
+"error compensation does not help here" from "compensation was clipped
+away", which are different findings.
+
+### Determinism
+
+Same weights, same calibration pool, same `N` → **byte-identical pack**.
+Any ordering-dependent accumulation must be fixed, not left to a thread
+pool.
+
+### Scale optimisation is a LATER, SEPARATE recipe
+
+Calibration-aware scale selection is a real idea and it is explicitly
+**not** in R4. It would get its own recipe (`nvfp4-gptq-scales-v1`) and its
+own arm, because folding it in here would make a win unattributable between
+better rounding, better group scales and a better tensor scale. Fixed-grid
+answers the causal question first.
+
+## R4.2 — cost benchmark before the N ladder is frozen
+
+Memory is settled; **compute is not**. Dense `H` formation plus Cholesky is
+not free at the 8192-wide site, and cost grows linearly in `N` for `XᵀX`:
+
+```text
+down_proj, per layer, order-of-magnitude
+    N =    458    XᵀX ~0.06 TFLOP   chol ~0.18 TFLOP
+    N =  8,192    XᵀX ~1.10 TFLOP   chol ~0.18 TFLOP
+    N = 65,536    XᵀX ~8.80 TFLOP   chol ~0.18 TFLOP
+```
+
+times 40 layers. So `N = 65,536` must not enter the ladder merely because
+it is statistically comforting.
+
+Before any GPTQ *values* are produced, benchmark on one real Granite
+`down_proj` site: `H` accumulation at `N0`/`N1`/`N2`, plus one `8192²`
+Cholesky and inverse-Cholesky. That is a pure cost measurement — it reveals
+nothing about R4 quality and therefore cannot contaminate the experiment —
+and it decides which rungs of the ladder are feasible at all.
 
 ## Sequence
 
 ```text
-1.  Correct the rank interpretation in the record.            [done, above]
-2.  Freeze the larger disjoint calibration + validation pools,
+1.  Correct the rank interpretation in the record.            [DONE]
+2.  Read quantize_nvfp4 and pin the exact grid.               [DONE]
+3.  Specify nvfp4-gptq-v1 as FIXED-GRID GPTQ.                 [DONE, R4.1]
+4.  Freeze the objective N-selection rule (one-SE, prompt
+    resampling).                                              [DONE]
+5.  Benchmark H construction + factorisation on one real
+    8192-wide down_proj site.                                 [R4.2]
+6.  Freeze the FEASIBLE N ladder from that cost.
+7.  Write the larger disjoint calibration + validation pools,
     with digests and the content-verified zero-overlap gate.
-3.  Specify nvfp4-gptq-v1 exactly (R4.1) and write it here.
-4.  Implement: dense H, one site at a time, sequential
-    candidate-path calibration.
-5.  Determine N from calibration-only evidence (recon on the
-    held-out validation partition). NO Q-BANK OBSERVATION.
-6.  Freeze N.
-7.  Compile R0-GPTQ; assert byte equality with R0-nearest;
+8.  Implement: dense H, one site at a time, sequential
+    candidate-path calibration, static scales.
+9.  Choose N mechanically from held-out reconstruction.
+    NO Q-BANK OBSERVATION.
+10. Freeze N.
+11. Compile R0-GPTQ; assert scale bytes are byte-identical to
+    R0-nearest and total payload equals 2,283,690,080;
     verify it executes and reproduces its own reference.
-8.  Q-BANK exactly ONCE against the frozen control.
-9.  Report the whole response, per-category included.
-10. Only if it wins materially: late5-ffn-GPTQ, late10-ffn-GPTQ,
+12. Q-BANK exactly ONCE against the frozen control.
+13. Report the whole response, per-category and saturation included.
+14. Only if it wins materially: late5-ffn-GPTQ, late10-ffn-GPTQ,
     and the knee-survival question.
 ```
 
-Steps 8 and 10 happen exactly once each. Steps 2–6 involve no Q-BANK
-observation whatsoever; that is what keeps step 8 genuinely one-shot.
+Steps 12 and 14 happen exactly once each. Steps 5–10 involve no Q-BANK
+observation whatsoever; that is what keeps step 12 genuinely one-shot.
+
+Note the ordering of 5 and 6 before 7: there is no point writing 65,536
+positions of calibration corpus if the cost benchmark shows that rung
+cannot be run.
+
+## What a win would mean
+
+If `R0-GPTQ` improves substantially on `R0-nearest` while **every scale
+byte is identical**, the claim is unusually sharp:
+
+> Granite's four-bit representation was not intrinsically that bad. The
+> naive decisions about *which* four-bit values to store were.
+
+That would reinterpret the sensitivity programme's baseline without
+invalidating any of its measurements — each remains a true statement about
+`nvfp4-nearest-v1` — and it would make R5's comparison meaningful, since a
+richer precision vocabulary would then be judged against a competent 4-bit
+encoder rather than an unnecessarily weak one.
