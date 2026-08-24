@@ -52,7 +52,7 @@ use super::weights::{load_weight, LoadedWeight};
 use super::AttentionOperands;
 use crate::error::VindexError;
 
-use super::super::{ComponentOpPlan, NormOp, OutputOp};
+use super::super::{ComponentOpPlan, GatedDeltaOp, LayerAttention, NormOp, OperandRef, OutputOp};
 
 /// Which part of a component's program to prepare.
 ///
@@ -136,13 +136,114 @@ impl PreparedNorm {
 /// One layer's operands, lowered into the backend's execution form.
 pub(super) struct PreparedLayer {
     pub(super) pre_attention: PreparedNorm,
-    pub(super) attention: AttentionOperands,
+    pub(super) attention: PreparedAttention,
     pub(super) post_attention: Option<PreparedNorm>,
     pub(super) pre_ffn: PreparedNorm,
     pub(super) ffn: FfnOperands,
     pub(super) post_ffn: Option<PreparedNorm>,
     /// The layer's output scalar, when the plan carries one.
     pub(super) layer_scale: Option<f32>,
+}
+
+/// Which attention-class operator a prepared layer holds operands for.
+///
+/// An enum, not `Option<AttentionOperands>` and not "softmax unless
+/// proven otherwise": a layer runs exactly one operator, and the
+/// alternative spellings both make "I could not tell" indistinguishable
+/// from "it is softmax". Qwen3.8 is 48 layers where that difference is
+/// the whole model.
+///
+/// Chosen from the op plan's `LayerAttention`, which the op builder
+/// derived from operand EVIDENCE — so the operands loaded here and the
+/// operator dispatched later cannot disagree.
+pub(super) enum PreparedAttention {
+    Softmax(Box<AttentionOperands>),
+    GatedDelta(Box<GatedDeltaOperands>),
+}
+
+impl PreparedAttention {
+    /// Matrix operands for device placement.
+    ///
+    /// A recurrence contributes none: its nine operands are elementwise
+    /// glue and a depthwise convolution, not the matrix traffic a device
+    /// backend holds resident — and no device backend runs this operator
+    /// yet, so placing them would reserve memory nothing reads.
+    fn weight_slices(&self) -> Vec<WeightSlice<'_>> {
+        match self {
+            Self::Softmax(ops) => ops.weight_slices(),
+            Self::GatedDelta(_) => Vec::new(),
+        }
+    }
+
+    /// The softmax operands, or a refusal naming what this layer holds.
+    ///
+    /// The KV-shaped paths still call this; it is the one place they
+    /// learn that a layer is not theirs.
+    pub(super) fn softmax(&self) -> Result<&AttentionOperands, VindexError> {
+        match self {
+            Self::Softmax(ops) => Ok(ops),
+            Self::GatedDelta(_) => Err(VindexError::Parse(
+                "this layer runs a Gated DeltaNet recurrence; it has no softmax operands"
+                    .to_string(),
+            )),
+        }
+    }
+}
+
+/// The nine operands a Gated DeltaNet layer reads, loaded once.
+pub(super) struct GatedDeltaOperands {
+    pub(super) op: GatedDeltaOp,
+    pub(super) in_proj_qkv: Vec<f32>,
+    pub(super) in_proj_a: Vec<f32>,
+    pub(super) in_proj_b: Vec<f32>,
+    pub(super) in_proj_z: Vec<f32>,
+    pub(super) conv1d: Vec<f32>,
+    pub(super) a_log: Vec<f32>,
+    pub(super) dt_bias: Vec<f32>,
+    pub(super) norm: Vec<f32>,
+    pub(super) out_proj: Vec<f32>,
+    pub(super) norm_eps: f32,
+}
+
+impl GatedDeltaOperands {
+    fn load(
+        op: &GatedDeltaOp,
+        store: OperandSource<'_>,
+        norm_eps: f32,
+    ) -> Result<Self, VindexError> {
+        // f32 throughout: the recurrence is elementwise glue and a
+        // convolution, not the matrix traffic a backend picks a format
+        // for. The reference path is the only consumer today.
+        let load = |r: &OperandRef| store.load(r);
+        Ok(Self {
+            op: op.clone(),
+            in_proj_qkv: load(&op.in_proj_qkv)?,
+            in_proj_a: load(&op.in_proj_a)?,
+            in_proj_b: load(&op.in_proj_b)?,
+            in_proj_z: load(&op.in_proj_z)?,
+            conv1d: load(&op.conv1d)?,
+            a_log: load(&op.a_log)?,
+            dt_bias: load(&op.dt_bias)?,
+            norm: load(&op.norm)?,
+            out_proj: load(&op.out_proj)?,
+            norm_eps,
+        })
+    }
+
+    pub(super) fn weights(&self) -> super::gated_delta::GatedDeltaWeights<'_> {
+        super::gated_delta::GatedDeltaWeights {
+            in_proj_qkv: &self.in_proj_qkv,
+            in_proj_a: &self.in_proj_a,
+            in_proj_b: &self.in_proj_b,
+            in_proj_z: &self.in_proj_z,
+            conv1d: &self.conv1d,
+            a_log: &self.a_log,
+            dt_bias: &self.dt_bias,
+            norm: &self.norm,
+            out_proj: &self.out_proj,
+            norm_eps: self.norm_eps,
+        }
+    }
 }
 
 /// A component's operands, lowered once for a given slice and backend.
@@ -200,11 +301,21 @@ impl PreparedOperands {
         for layer in &plan.layers[range] {
             layers.push(PreparedLayer {
                 pre_attention: PreparedNorm::load(&layer.pre_attention_norm, store)?,
-                attention: AttentionOperands::load(
-                    super::softmax_or_refuse(layer)?,
-                    store,
-                    backend.weight_format(MatrixClass::AttentionProjection),
-                )?,
+                // The operator is decided here, from the plan, and the
+                // operands follow it. No layer is prepared as softmax by
+                // default.
+                attention: match &layer.attention {
+                    LayerAttention::Softmax(op) => {
+                        PreparedAttention::Softmax(Box::new(AttentionOperands::load(
+                            op,
+                            store,
+                            backend.weight_format(MatrixClass::AttentionProjection),
+                        )?))
+                    }
+                    LayerAttention::GatedDelta(op) => PreparedAttention::GatedDelta(Box::new(
+                        GatedDeltaOperands::load(op, store, layer.pre_attention_norm.eps as f32)?,
+                    )),
+                },
                 post_attention: layer
                     .post_attention_norm
                     .as_ref()

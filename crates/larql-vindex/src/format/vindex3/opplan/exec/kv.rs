@@ -30,6 +30,7 @@
 //!   a later rung tied to that backend contract.
 
 use super::super::ComponentOpPlan;
+use super::continuation::{LayerContinuationGeometry, RecurrentState};
 
 /// One layer's continuation-state geometry, read from the plan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,7 +91,7 @@ pub fn try_plan_kv_geometry(plan: &ComponentOpPlan) -> Result<Vec<LayerKvGeometr
 /// The decode step appends layer 0..n for position p, then again for
 /// p+1; the batch prefill appends all positions for layer 0, then all
 /// for layer 1 — a provider must not assume one interleaving.
-pub trait KvState {
+pub trait ContinuationProvider {
     /// Announce the traversal's geometry before any append. An
     /// announcement, **not** a reset: a provider already holding rows
     /// (a prefilled state being resumed) keeps them.
@@ -119,7 +120,97 @@ pub trait KvState {
     /// once per consumed position on the decode path, once at the end
     /// of a batch prefill.
     fn set_position(&mut self, position: usize);
+
+    /// Announce the FULL continuation geometry, KV and recurrent alike.
+    ///
+    /// Separate from [`prepare`](Self::prepare) so a provider that holds
+    /// only KV needs no change: the default projects to the KV subset and
+    /// delegates. A provider that holds recurrent buffers overrides this
+    /// and allocates them here.
+    fn prepare_continuation(
+        &mut self,
+        layers: &[LayerContinuationGeometry],
+    ) -> Result<(), ContinuationError> {
+        let kv: Vec<LayerKvGeometry> = layers.iter().filter_map(|g| g.kv().cloned()).collect();
+        // Providers are indexed by ABSOLUTE layer index. Filtering to the
+        // KV subset preserves that only when every layer keeps rows —
+        // true for the KV-only providers this default exists for, and
+        // false the moment a stack is hybrid, which is why a hybrid plan
+        // must have been refused by `recurrent_state` before reaching a
+        // provider that took this default.
+        if kv.len() != layers.len() {
+            return Err(ContinuationError::RecurrentUnsupported {
+                provider: "a KV-only provider",
+                layer: layers.iter().position(|g| g.kv().is_none()).unwrap_or(0),
+            });
+        }
+        self.prepare(&kv);
+        Ok(())
+    }
+
+    /// This layer's durable recurrent buffers.
+    ///
+    /// **Required, and returns a Result rather than an Option.** A
+    /// provider that cannot hold recurrent state must say so — an
+    /// `Option` here would make "I have no buffers" and "this operator
+    /// needs none" the same answer, which is precisely the ambiguity
+    /// [`LayerContinuationGeometry::Stateless`] exists to prevent one
+    /// level down. Every implementor states its position explicitly;
+    /// nothing inherits an answer by omission.
+    fn recurrent_state(&mut self, layer: usize) -> Result<&mut RecurrentState, ContinuationError>;
 }
+
+/// Why a continuation provider could not answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContinuationError {
+    /// This provider holds no recurrent buffers at all. Not a defect in
+    /// the plan — a statement about the provider, which is why it names
+    /// itself: a hybrid model reaching a KV-only serving cache must fail
+    /// closed and say which side is missing.
+    RecurrentUnsupported {
+        provider: &'static str,
+        layer: usize,
+    },
+    /// The provider holds recurrent buffers, but not for this layer —
+    /// a softmax layer was asked for a recurrence, or the reverse.
+    NotRecurrent {
+        provider: &'static str,
+        layer: usize,
+    },
+}
+
+impl std::fmt::Display for ContinuationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RecurrentUnsupported { provider, layer } => write!(
+                f,
+                "continuation provider `{provider}` holds no recurrent state, which layer \
+                 {layer} requires; refusing rather than running the layer stateless"
+            ),
+            Self::NotRecurrent { provider, layer } => write!(
+                f,
+                "layer {layer} is not a recurrent layer in `{provider}`'s geometry; asking \
+                 it for recurrent state is a dispatch bug"
+            ),
+        }
+    }
+}
+
+impl From<ContinuationError> for crate::error::VindexError {
+    fn from(value: ContinuationError) -> Self {
+        Self::Parse(value.to_string())
+    }
+}
+
+/// The seam's previous name.
+///
+/// `KvState` described the runtime model when every layer kept rows. It no
+/// longer does: Qwen3.8 keeps a delta matrix and a convolution history on
+/// 48 of its 64 layers and no rows at all. The alias exists so the serving
+/// stack and its KV-1 bit-identity gate keep compiling through QW-3.6b;
+/// it goes away at STATE-CONSOLIDATE, when `ContinuationState` becomes the
+/// authoritative seam and KV becomes its projection.
+pub use ContinuationProvider as KvState;
 
 /// The default provider: plain per-layer row vectors — exactly the
 /// state [`DecodeSession`](super::decode::DecodeSession) used to own
@@ -128,6 +219,13 @@ pub trait KvState {
 #[derive(Default)]
 pub struct RowKvState {
     layers: Vec<LayerRows>,
+    /// Durable recurrent buffers, one slot per layer, `None` on layers
+    /// that keep rows instead. Allocated by
+    /// [`prepare_continuation`](ContinuationProvider::prepare_continuation)
+    /// from the plan's geometry — never lazily on first use, because a
+    /// buffer conjured mid-traversal would start from zeros in the middle
+    /// of a sequence and look like a working continuation.
+    recurrent: Vec<Option<RecurrentState>>,
     position: usize,
 }
 
@@ -171,6 +269,56 @@ impl KvState for RowKvState {
 
     fn position(&self) -> usize {
         self.position
+    }
+
+    fn prepare_continuation(
+        &mut self,
+        layers: &[LayerContinuationGeometry],
+    ) -> Result<(), ContinuationError> {
+        // KV rows keep their own announcement contract (an announcement,
+        // not a reset), so the recurrent side follows the same rule: a
+        // resumed state keeps its buffers and only their SHAPE is
+        // re-checked.
+        // Sized by the FULL layer count, not the KV subset: this
+        // provider is indexed by absolute layer index, and a stack whose
+        // layer 3 is the only softmax one would otherwise write its rows
+        // at slot 0.
+        if self.layers.is_empty() {
+            self.layers = layers.iter().map(|_| LayerRows::default()).collect();
+        } else {
+            assert_eq!(
+                self.layers.len(),
+                layers.len(),
+                "resumed KV state holds {} layers but the plan declares {}",
+                self.layers.len(),
+                layers.len()
+            );
+        }
+        if self.recurrent.is_empty() {
+            self.recurrent = layers
+                .iter()
+                .map(|g| g.recurrent().map(RecurrentState::zeros))
+                .collect();
+        } else {
+            assert_eq!(
+                self.recurrent.len(),
+                layers.len(),
+                "resumed continuation state holds {} layers but the plan declares {}",
+                self.recurrent.len(),
+                layers.len()
+            );
+        }
+        Ok(())
+    }
+
+    fn recurrent_state(&mut self, layer: usize) -> Result<&mut RecurrentState, ContinuationError> {
+        self.recurrent
+            .get_mut(layer)
+            .and_then(Option::as_mut)
+            .ok_or(ContinuationError::NotRecurrent {
+                provider: "RowKvState",
+                layer,
+            })
     }
 
     fn set_position(&mut self, position: usize) {

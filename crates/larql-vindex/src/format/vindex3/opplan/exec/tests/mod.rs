@@ -19,6 +19,7 @@ mod decode;
 mod device;
 mod gated_delta_parity;
 mod gated_delta_tiny;
+mod hybrid_traversal;
 mod mrope_parity;
 mod output_gate_fused;
 mod plan_fixtures;

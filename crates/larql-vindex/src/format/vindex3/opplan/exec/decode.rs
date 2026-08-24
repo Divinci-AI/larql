@@ -238,7 +238,12 @@ impl<'a, B: PlanBackend> DecodeSession<'a, B> {
             // Attention input is normalised once and handed over; the
             // judged gate reads the same vector (same as the batch path).
             let inputs = [state.pre_attention.apply(self.backend, &h)];
-            let call = state.attention.call(
+            // The decode step is still softmax-only: it appends a KV row
+            // per position, which a recurrence has none of. QW-3.6b wires
+            // the BATCH traversal; the single-position path follows once
+            // the batch one is parity-proven, and until then it refuses
+            // by name rather than running 16 of 64 layers.
+            let call = state.attention.softmax()?.call(
                 super::softmax_or_refuse(layer)?,
                 &inputs,
                 layer.pre_attention_norm.eps,

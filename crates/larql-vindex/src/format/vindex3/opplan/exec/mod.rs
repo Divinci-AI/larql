@@ -44,7 +44,7 @@ use backend::{
 };
 use kv::KvState;
 use operands::OperandSource;
-use prepared::{ExecutionSlice, PreparedLayer, PreparedOperands};
+use prepared::{ExecutionSlice, PreparedAttention, PreparedLayer, PreparedOperands};
 use rayon::prelude::*;
 use reference::ReferenceBackend;
 use weights::{load_weight, LoadedWeight};
@@ -189,15 +189,31 @@ pub fn execute_prepared_streaming<B: PlanBackend + ?Sized>(
     resume: Option<ResumePoint>,
     sink: &mut dyn FnMut(PlaneEvent) -> Result<(), VindexError>,
 ) -> Result<FinalOutput, VindexError> {
-    traverse(
-        plan,
-        ops,
-        tokens,
-        backend,
-        resume,
-        sink,
-        None::<&mut dyn KvState>,
-    )
+    // A one-shot forward owns whatever continuation state the plan needs.
+    //
+    // For a wholly-softmax stack that is nothing: `None` keeps the
+    // existing behaviour exactly, including not materialising KV rows a
+    // caller never asked for. A stack with a recurrence has no such
+    // choice — its layers cannot run without durable buffers — so this
+    // allocates them for the duration of the call. The provider starts at
+    // position 0, which keeps every softmax layer on the batched
+    // attention path it already took.
+    if plan.layers.iter().all(|l| l.attention.softmax().is_some()) {
+        return traverse(
+            plan,
+            ops,
+            tokens,
+            backend,
+            resume,
+            sink,
+            None::<&mut dyn KvState>,
+        );
+    }
+    let mut owned = kv::RowKvState::default();
+    owned.prepare_continuation(
+        &continuation::plan_continuation_geometry(plan).map_err(VindexError::Parse)?,
+    )?;
+    traverse(plan, ops, tokens, backend, resume, sink, Some(&mut owned))
 }
 
 /// Batch prefill (VI3-INF-3): the batch traversal over `tokens`,
@@ -243,7 +259,12 @@ pub fn prefill_prepared<B: PlanBackend + ?Sized>(
     backend: &B,
     kv: &mut dyn KvState,
 ) -> Result<FinalOutput, VindexError> {
-    kv.prepare(&kv::plan_kv_geometry(plan));
+    // The FULL geometry, KV and recurrent alike. `plan_kv_geometry` is
+    // the KV-only adapter and refuses a hybrid plan outright, which was
+    // the right answer while nothing could execute one.
+    kv.prepare_continuation(
+        &continuation::plan_continuation_geometry(plan).map_err(VindexError::Parse)?,
+    )?;
     let base = kv.position();
     let out = traverse(
         plan,
@@ -281,6 +302,34 @@ fn traverse<B: PlanBackend + ?Sized, K: KvState + ?Sized>(
         ))
     })?;
     let hidden = embedding.table.shape[1];
+
+    // **Refuse before any output.** A recurrence needs durable buffers,
+    // and discovering at layer 63 that nobody can hold them would mean
+    // every earlier layer had already been emitted — a caller left
+    // holding 16 of 64 layers cannot tell that from a finished model.
+    // QW-1 put this refusal up front for exactly that reason; the
+    // question it asks has changed (from "can this run at all" to "can
+    // this provider hold the state"), its position must not.
+    for (offset, layer) in plan.layers.iter().enumerate() {
+        if layer.attention.softmax().is_some() {
+            continue;
+        }
+        let Some(provider) = kv.as_mut() else {
+            return Err(VindexError::Parse(format!(
+                "layer {} carries `{}`, which keeps durable continuation state, and this \
+                 traversal was given no provider to hold it",
+                layer.layer,
+                layer.attention.declared_name(),
+            )));
+        };
+        provider.recurrent_state(offset).map_err(|e| {
+            VindexError::Parse(format!(
+                "layer {} carries `{}`: {e}",
+                layer.layer,
+                layer.attention.declared_name(),
+            ))
+        })?;
+    }
 
     let (start_layer, mut h) = match resume {
         Some(point) => {
@@ -433,39 +482,73 @@ fn execute_layer<B: PlanBackend + ?Sized, K: KvState + ?Sized>(
     // sequence it is given, so it cannot serve a prefill that resumes
     // part-way through one. Extending a populated provider therefore
     // still steps.
-    let attention_op = softmax_or_refuse(layer)?;
-    let attn_out = match kv {
-        Some((kv, layer_index)) if kv.position() == 0 => {
-            let out = backend.attention(prepared.attention.call(
-                attention_op,
+    // Dispatch on the OPERATOR the prepared layer holds. There is no
+    // `softmax_or_refuse` here any more: a recurrence is something this
+    // traversal runs, not something it declines. Both arms produce the
+    // attention block's output for every position, and the residual and
+    // FFN below are shared — the operator changes what attention IS, not
+    // what a decoder layer does around it.
+    let attn_out = match &prepared.attention {
+        PreparedAttention::GatedDelta(ops) => {
+            let Some((provider, layer_index)) = kv else {
+                return Err(VindexError::Parse(format!(
+                    "layer {} runs a recurrence, which needs durable continuation state, \
+                     and this traversal was given no provider to hold it",
+                    layer.layer
+                )));
+            };
+            // Resolved BEFORE any arithmetic. A provider that cannot hold
+            // these buffers must not see a half-updated layer — the same
+            // refuse-before-commit contract QW-1 established for the plan.
+            let state = provider.recurrent_state(layer_index)?;
+            gated_delta::layer_forward(
+                &ops.op,
+                &ops.weights(),
                 &inputs,
-                layer.pre_attention_norm.eps,
-                hidden,
-            ))?;
-            for (key, value) in out.keys.into_iter().zip(out.values) {
-                kv.append(layer_index, key, value);
-            }
-            out.outputs
+                state,
+                gated_delta::Mutation::None,
+            )
+            .output
         }
-        Some((kv, layer_index)) => attention_into_kv(
-            attention_op,
-            &prepared.attention,
-            &inputs,
-            layer.pre_attention_norm.eps,
-            hidden,
-            backend,
-            kv,
-            layer_index,
-        )?,
-        None => {
-            backend
-                .attention(prepared.attention.call(
+        PreparedAttention::Softmax(ops) => {
+            let attention_op = layer
+                .attention
+                .softmax()
+                .expect("prepared softmax operands imply a softmax op");
+            match kv {
+                Some((kv, layer_index)) if kv.position() == 0 => {
+                    let out = backend.attention(ops.call(
+                        attention_op,
+                        &inputs,
+                        layer.pre_attention_norm.eps,
+                        hidden,
+                    ))?;
+                    for (key, value) in out.keys.into_iter().zip(out.values) {
+                        kv.append(layer_index, key, value);
+                    }
+                    out.outputs
+                }
+                Some((kv, layer_index)) => attention_into_kv(
                     attention_op,
+                    ops,
                     &inputs,
                     layer.pre_attention_norm.eps,
                     hidden,
-                ))?
-                .outputs
+                    backend,
+                    kv,
+                    layer_index,
+                )?,
+                None => {
+                    backend
+                        .attention(ops.call(
+                            attention_op,
+                            &inputs,
+                            layer.pre_attention_norm.eps,
+                            hidden,
+                        ))?
+                        .outputs
+                }
+            }
         }
     };
     h.par_iter_mut()
