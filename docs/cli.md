@@ -582,6 +582,34 @@ larql show <MODEL>
 Prints layer count, hidden size, dtype, quant format, and each file in
 the vindex with size. Resolves the same way as `run`.
 
+For a quantised vindex it also prints a **precision map**, derived from the
+build's own manifests — which projection got which block format, and the
+effective bits/weight that follows. This is the difference between what a
+build is *called* and what it *is*: the Ollama-compatible Q4_K_M mix is
+neither 4 bits nor uniform.
+
+```
+Precision (from this vindex's own manifests):
+  projection  format          weights           bytes  bits/weight
+  -----------------------------------------------------------------
+  q_proj      Q4_K        178,257,920     100,270,080       4.5000
+  k_proj      Q4_K         89,128,960      50,135,040       4.5000
+  v_proj      Q6_K         89,128,960      73,113,600       6.5625
+  o_proj      Q4_K        178,257,920     100,270,080       4.5000
+  gate_proj   Q4_K        891,289,600     501,350,400       4.5000
+  up_proj     Q4_K        891,289,600     501,350,400       4.5000
+  down_proj   Q6_K        891,289,600     731,136,000       6.5625
+  -----------------------------------------------------------------
+  TOTAL       mixed     3,208,642,560   2,057,625,600       5.1302
+
+  same weights at f16      5.98 GB
+  quantised                1.92 GB   (3.12x)
+```
+
+Rows come from the manifests in layer order and the geometry comes from the
+`quant::registry` dispatch table, so a newly registered format reports here
+with no change to `show`. Float vindexes print no map.
+
 ### `larql rm`
 
 Remove a cached vindex. Cache-only — never downloads.
@@ -1309,8 +1337,13 @@ larql extract google/gemma-3-4b-it -o gemma3-4b.vindex --resume
 
 **`--quant q4k` (alias `--quant kquant`) details:**
 
-- Q/K/O + gate/up: Q4_K (148 bytes per 256 values)
-- V + down: Q6_K (210 bytes per 256 values), or Q4_K with `--down-q4k`
+- Q/K/O + gate/up: Q4_K (144 bytes per 256 values = 4.5 bits/weight)
+- V + down: Q6_K (210 bytes per 256 values = 6.5625 bits/weight), or
+  Q4_K with `--down-q4k`
+- 148 bytes was the pre-2026 Q4_K stride and is **stale** — see
+  `LEGACY_BLOCK_Q4_K_STRIDE` in `quant::registry`. `larql diag` flags a
+  vindex still written that way; `larql show` prints the bits/weight a
+  build actually achieved.
 - Writers emit `attn_weights_kquant.bin`, `interleaved_kquant.bin`,
   `lm_head_kquant.bin` (plus matching `*_manifest.json` sidecars).
   Readers also accept the legacy `*_q4k.bin` / `lm_head_q4.bin`
@@ -1512,6 +1545,9 @@ larql diag <MODEL> [OPTIONS]
 | `<MODEL>` | Vindex dir, `hf://owner/name`, `owner/name`, or cache shorthand | — |
 | `--probe` | Run a real forward pass and print per-stage timings | off |
 | `--probe-tokens <N>` | Token count for `--probe` (caps at 100 to keep the diagnostic snappy) | 5 |
+| `--block <TENSOR>` | Decode one quantised block of TENSOR and print it, then stop | — |
+| `--block-index <N>` | Which block of `--block`'s tensor to decode | 0 |
+| `--against <VINDEX>` | Float vindex to measure `--block`'s quantisation error against | — |
 
 **Examples:**
 
@@ -1521,6 +1557,11 @@ larql diag gemma3-4b-q4k-v2.vindex
 
 # Static check + 50-token probe with per-stage timing breakdown
 larql diag gemma3-4b-q4k-v2.vindex --probe --probe-tokens 50
+
+# Decode one block and measure its error against the float source
+larql diag gemma3-4b-q4k.vindex \
+  --block layers.0.mlp.up_proj.weight \
+  --against gemma3-4b-f16.vindex
 ```
 
 Two-pass output:
@@ -1528,6 +1569,37 @@ Two-pass output:
    stride validation. Doesn't load the vindex; safe for huge models.
 2. **Loaded** — opens via `open_inference_vindex`, reports which kernels
    would actually fire (lm_head fast path, attention fused/per-proj, etc.).
+
+**`--block` — one block, decoded.** Stride validation says the bytes are the
+right *length*; `--block` says what they decode *to*. It's the tool for a
+vindex that passes every structural check and still produces wrong numbers.
+Decoding routes through `QuantFormatInfo::dequantize_block` — the same
+dispatch table the kernels use — and reads at the manifest's recorded offset,
+so a stale vindex decodes exactly as the engine would read it.
+
+`--block` answers and exits; it does not run the kernel-path report. With
+`--against`, the same weights are read from a float vindex built from the same
+checkpoint and the error is measured directly:
+
+```
+  stride      144 bytes / 256 weights  =  4.5000 bits/weight
+  stride ok   ✓ matches canonical geometry
+
+   original      reconstructed          error
+   ----------------------------------------------
+   +0.015076      +0.014552      -0.000524
+   +0.008667      +0.009891      +0.001224
+   +0.008362      +0.009891      +0.001529
+   ...
+  over all 256 weights in this block:
+    distinct values       99 of 256 weights
+    max error             0.004449
+    rms error             0.001604
+```
+
+Note rows 2 and 3: two originals that differed have collapsed onto one
+reconstructed value. `distinct values` counts that loss across the block —
+a 4-bit format cannot keep more than 16 levels per 32-weight sub-block.
 
 ### `larql parity`
 

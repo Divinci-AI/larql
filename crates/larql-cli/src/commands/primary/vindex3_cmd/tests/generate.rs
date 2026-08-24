@@ -53,8 +53,13 @@ fn greedy_decode_runs_end_to_end_on_the_encoded_fixture() {
         dump_layers: None,
         resume: false,
         backend: ExecBackend::Reference,
+        // The reference arm executes canonical bytes and never looks for a
+        // pack, so the source policy cannot affect this fixture.
+        representation_source: "auto".to_string(),
         generate: Some(2),
         logit_dump: None,
+        bank: None,
+        dump_dir: None,
         profile: false,
     }))
     .expect("greedy decode over the fixture must complete");

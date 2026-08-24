@@ -31,6 +31,16 @@ struct SegmentMap {
 /// Operand store over one container.
 pub struct OperandStore {
     segments: BTreeMap<String, SegmentMap>,
+    /// Which representation each object was bound to.
+    selected: BTreeMap<String, SelectedRepresentation>,
+    /// Under `transient`, the encoding each tensor has in the compiled
+    /// pack whose bytes are being ignored — the program the oracle must
+    /// reproduce. Empty when there is no pack, which is R0.
+    precision_map: BTreeMap<String, BTreeMap<String, String>>,
+    /// The container's precision program, when it states one.
+    program: Option<crate::format::vindex3::represent::map::PrecisionMap>,
+    /// Where representations were allowed to come from.
+    source: RepresentationSource,
     /// Process-unique identity — see [`SourceStamp`].
     id: u64,
     /// How many operands have been read out of this store.
@@ -41,23 +51,138 @@ pub struct OperandStore {
     /// test assert the shape directly: prepare, then serve N requests,
     /// then assert the count did not move.
     loads: std::sync::atomic::AtomicU64,
+    /// Tensors quantised at load in this session — see
+    /// [`Self::runtime_quantised`].
+    runtime_quantised: std::sync::atomic::AtomicU64,
+    /// Tensors bound at their stored precision rather than the format the
+    /// backend asked for — see [`Self::bound_at_stored_precision`].
+    stored_precision: std::sync::atomic::AtomicU64,
+}
+
+/// Where an execution representation is allowed to come from.
+///
+/// Deliberately separate from *which* representation execution wants. The
+/// profile says "NVFP4 laid out this way"; this says whether the runtime
+/// may manufacture that now or must find it already compiled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RepresentationSource {
+    /// Use a compiled pack when one exists, otherwise quantise at load.
+    #[default]
+    Auto,
+    /// Forbid manufacturing a representation at load.
+    ///
+    /// Note what this does *not* say: that every object must have a pack.
+    /// A conservative role policy deliberately leaves the embedding, the
+    /// norms and the router at source precision, and binding those
+    /// canonically manufactures nothing. The invariant is about work, not
+    /// about coverage — if the runtime would have to quantise a tensor to
+    /// proceed, the run fails naming it, rather than quietly doing the
+    /// work persistence exists to avoid.
+    Stored,
+    /// Ignore any compiled pack and quantise at load.
+    ///
+    /// Retained permanently, not as a migration aid: it is the oracle the
+    /// compiler is checked against, and an arm that fell through to a
+    /// convenient pack would stop being one.
+    Transient,
+}
+
+/// Which representation an object was bound to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectedRepresentation {
+    /// Encoding of the bytes actually opened.
+    pub encoding: String,
+    /// Whether those bytes came from a compiled pack.
+    pub stored: bool,
 }
 
 impl OperandStore {
     /// Open every canonical segment of every object in the inspection.
     pub fn open(root: &Path, inspection: &SystemInspection) -> Result<Self, VindexError> {
+        Self::open_for(root, inspection, None, RepresentationSource::Auto)
+    }
+
+    /// Open each object at the representation `want` selects, subject to
+    /// `source`.
+    ///
+    /// `want` is the execution encoding a profile asked for. `None` keeps
+    /// every object on its canonical representation, which is what every
+    /// caller predating compiled packs meant.
+    pub fn open_for(
+        root: &Path,
+        inspection: &SystemInspection,
+        want: Option<&str>,
+        source: RepresentationSource,
+    ) -> Result<Self, VindexError> {
         let mut segments = BTreeMap::new();
+        let mut selected = BTreeMap::new();
+        let mut precision_map: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
         for object in &inspection.graph.objects {
-            let Some(representation) = object.representations.first() else {
+            let Some(canonical) = object.representations.first() else {
                 continue;
             };
-            let id = format!(
-                "{}{REPRESENTATION_ID_SEP}{}",
-                object.id, representation.encoding
+
+            // A compiled pack is used only when one was asked for and one
+            // exists. `Transient` never looks, so it stays an oracle.
+            let packed_id = want.map(|enc| format!("{}{REPRESENTATION_ID_SEP}{}", object.id, enc));
+            let stored_entry = match (source, &packed_id) {
+                (RepresentationSource::Transient, _) | (_, None) => None,
+                (_, Some(id)) => inspection.index.representations.get(id).map(|e| (id, e)),
+            };
+
+            // Under `transient` the pack's BYTES are deliberately ignored,
+            // but its DECISIONS are not: which tensors a precision map
+            // quantised is a property of the compiled representation, and
+            // an oracle that re-decided would be measuring a different
+            // program. Read the map from the pack's header even when the
+            // canonical bytes will be bound.
+            if source == RepresentationSource::Transient {
+                if let Some(id) = &packed_id {
+                    if let Some(pack) = inspection.index.representations.get(id) {
+                        if let Ok((header, _)) = read_segment_header(&root.join(&pack.segment)) {
+                            precision_map.insert(
+                                object.id.clone(),
+                                header
+                                    .tensors
+                                    .into_iter()
+                                    .map(|t| (t.name, t.dtype))
+                                    .collect(),
+                            );
+                        }
+                    }
+                }
+            }
+
+            let (id, entry, is_stored) = match stored_entry {
+                Some((id, entry)) => {
+                    // Bytes compiled by another build under a decode
+                    // contract this one may not implement must be refused
+                    // here, before anything reads them.
+                    if let Some(codec) = &entry.codec {
+                        codec.admit()?;
+                    }
+                    (id.clone(), entry, true)
+                }
+                None => {
+                    // No pack for this object. That is not yet a problem —
+                    // it becomes one only if execution asks for a format
+                    // these bytes are not already in, which the load path
+                    // catches by name.
+                    let id = format!("{}{REPRESENTATION_ID_SEP}{}", object.id, canonical.encoding);
+                    let Some(entry) = inspection.index.representations.get(&id) else {
+                        continue;
+                    };
+                    (id, entry, false)
+                }
+            };
+            let _ = &id;
+            selected.insert(
+                object.id.clone(),
+                SelectedRepresentation {
+                    encoding: entry.encoding.clone(),
+                    stored: is_stored,
+                },
             );
-            let Some(entry) = inspection.index.representations.get(&id) else {
-                continue;
-            };
             let path = root.join(&entry.segment);
             let (header, payload_start) = read_segment_header(&path)?;
             segments.insert(
@@ -75,9 +200,110 @@ impl OperandStore {
         }
         Ok(Self {
             segments,
+            selected,
+            precision_map,
+            program: inspection.index.precision_map.clone(),
+            source,
             id: next_identity(),
             loads: std::sync::atomic::AtomicU64::new(0),
+            runtime_quantised: std::sync::atomic::AtomicU64::new(0),
+            stored_precision: std::sync::atomic::AtomicU64::new(0),
         })
+    }
+
+    /// What each object was bound to.
+    pub fn selection(&self) -> &BTreeMap<String, SelectedRepresentation> {
+        &self.selected
+    }
+
+    /// How many tensors this session quantised at load.
+    ///
+    /// Session-scoped rather than process-global so concurrent runs and
+    /// tests cannot contaminate each other's count. Under
+    /// [`RepresentationSource::Stored`] a non-zero value is an invariant
+    /// violation, not a performance observation: it means the runtime
+    /// manufactured a representation the caller required to be already
+    /// compiled.
+    pub fn runtime_quantised(&self) -> u64 {
+        self.runtime_quantised
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Where this store was allowed to source representations from.
+    pub fn representation_source(&self) -> RepresentationSource {
+        self.source
+    }
+
+    /// What encoding a compiled precision map gives this tensor, when the
+    /// store is reproducing one.
+    ///
+    /// `None` means no map is in force — either the store is not the
+    /// transient oracle, or no pack exists — and the caller decides as it
+    /// always did. `Some(enc)` is the compiled program's decision for this
+    /// tensor, and the oracle honours it rather than re-deciding.
+    pub fn mapped_encoding(&self, object: &str, tensor: &str) -> Option<&str> {
+        self.precision_map
+            .get(object)?
+            .get(tensor)
+            .map(String::as_str)
+    }
+
+    /// The container's precision program, when it declares one.
+    pub fn program(&self) -> Option<&crate::format::vindex3::represent::map::PrecisionMap> {
+        self.program.as_ref()
+    }
+
+    /// Whether this object's bytes come from a compiled pack.
+    ///
+    /// Conformance is a claim about a *pack*. Under `transient` the bound
+    /// bytes are the canonical ones by design, and they are expected not to
+    /// match a map describing the pack — checking them against it would
+    /// refuse the oracle for doing exactly its job.
+    pub fn is_stored(&self, object: &str) -> bool {
+        self.selected.get(object).is_some_and(|s| s.stored)
+    }
+
+    /// How many tensors ran at their stored precision instead of the
+    /// format the backend asked for.
+    ///
+    /// A compiled pack is a precision map: it may store `gate_proj` as
+    /// NVFP4 and `q_proj` as BF16 because a policy decided to spend bytes
+    /// there. Backend arms declare a format per *class* — attention, FFN,
+    /// head — which is a coarser instrument than the map, so under
+    /// [`RepresentationSource::Stored`] the stored encoding wins and the
+    /// arm's request acts as a ceiling rather than a demand.
+    ///
+    /// This is never a silent downgrade: honouring the map means running
+    /// *higher* precision than asked, and the count says how often.
+    pub fn bound_at_stored_precision(&self) -> u64 {
+        self.stored_precision
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Record one such binding.
+    pub fn note_stored_precision(&self) {
+        self.stored_precision
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Record that a tensor is about to be quantised at load, and refuse
+    /// under [`RepresentationSource::Stored`].
+    ///
+    /// The refusal is the gate: it makes "no runtime quantisation" an
+    /// invariant the run enforces rather than a timing an operator infers.
+    /// Called by the weight loader, the only place quantisation can happen.
+    pub fn note_runtime_quantisation(&self, tensor: &str) -> Result<(), VindexError> {
+        if self.source == RepresentationSource::Stored {
+            return Err(VindexError::Parse(format!(
+                "tensor `{tensor}` would be quantised at load, and \
+                 `--representation-source stored` forbids manufacturing a \
+                 representation. Compile one with `larql vindex3 represent`, \
+                 or ask for `auto`."
+            )));
+        }
+        self.runtime_quantised
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
     }
 
     /// Load one operand as f32 values.
@@ -325,6 +551,13 @@ impl<'a> OperandSource<'a> {
             base,
             overrides: (!overrides.is_empty()).then_some(overrides),
         }
+    }
+
+    /// The store underneath, for the facts that belong to the session
+    /// rather than to one operand — which representation was selected, and
+    /// how many tensors were quantised at load.
+    pub fn store(&self) -> &OperandStore {
+        self.base
     }
 
     /// This source's identity, for stamping derived artefacts.

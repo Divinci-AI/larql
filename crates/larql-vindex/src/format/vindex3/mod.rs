@@ -56,6 +56,7 @@ pub mod opplan;
 pub mod plan;
 pub mod profile;
 pub mod read;
+pub mod represent;
 /// Conformance fixture A, public so integration tests and future gate arms can
 /// build a real container without duplicating its frozen dimensions.
 pub mod test_support;

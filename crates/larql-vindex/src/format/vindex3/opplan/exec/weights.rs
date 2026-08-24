@@ -17,9 +17,10 @@
 //! the f32 backends and the upstream trace are its judge.
 
 use super::backend::{WeightFormat, WeightSlice};
-use super::operands::OperandSource;
+use super::operands::{OperandSource, RepresentationSource};
 use crate::error::VindexError;
 use crate::format::vindex3::opplan::OperandRef;
+use crate::format::vindex3::represent::nvfp4_pack::DTYPE_NVFP4;
 use larql_models::quant::mxfp4::{e8m0_to_f32, MXFP4_TABLE};
 
 /// Alignment (and length granularity) of f16 weight allocations:
@@ -168,13 +169,73 @@ pub fn load_weight(
         WeightFormat::Mxfp4 => {
             let rows = operand.shape.first().copied().unwrap_or(0);
             let k = operand.shape.get(1).copied().unwrap_or(0);
+            store.store().note_runtime_quantisation(&operand.tensor)?;
             let values = store.load(operand)?;
             quantize_mxfp4(&values, rows, k, &operand.tensor)
         }
         WeightFormat::Nvfp4 => {
             let rows = operand.shape.first().copied().unwrap_or(0);
             let k = operand.shape.get(1).copied().unwrap_or(0);
-            let values = store.load(operand)?;
+            // A compiled pack is already in the grid the kernel wants, so
+            // the whole load is a read: no widening to f32, no requantise,
+            // no arithmetic at all. That is the point of persisting it.
+            let raw = store.load_raw(operand)?;
+            // The map is the authority a pack is supposed to satisfy, so
+            // `stored` checks conformance rather than taking the bytes'
+            // word for what program they implement. A pack that compiled a
+            // tensor the map protects is not a pack for this program, and
+            // silently executing it would mean running something other
+            // than what the container declares.
+            if let (Some(program), true) = (
+                store.store().program(),
+                store.store().is_stored(&operand.object),
+            ) {
+                use crate::format::vindex3::represent::policy::classify;
+                let role = classify(&operand.object, &operand.tensor, &operand.shape);
+                if !program.conforms(role, &operand.tensor, &raw.dtype) {
+                    return Err(VindexError::Parse(format!(
+                        "tensor `{}` is stored as `{}`, which the container's \
+                         precision map `{}` does not permit — the pack does not \
+                         implement the program the container declares",
+                        operand.tensor, raw.dtype, program.name
+                    )));
+                }
+            }
+            if raw.dtype == DTYPE_NVFP4 {
+                return nvfp4_from_stored(&raw.bytes, rows, k, &operand.tensor);
+            }
+            // A compiled pack is a precision map, and a backend arm names a
+            // format per class — attention, FFN, head — which cannot express
+            // one. Under `stored` the map wins: a tensor its policy held at
+            // source precision runs at source precision, which is higher
+            // than the arm asked for and manufactures nothing.
+            let src_policy = store.store().representation_source();
+            // A compiled map protected this tensor: honour that under
+            // `stored` (bind what is there) and under `transient` (bind the
+            // canonical bytes at the same precision, manufacturing nothing).
+            // The two arms must run the same precision program or the
+            // parity claim stops meaning anything the moment a map is mixed.
+            // The declared program is the authority. Only a container
+            // written before the map was explicit falls back to what its
+            // pack's tensor table happens to say.
+            let map_protects = match store.store().program() {
+                Some(program) => {
+                    use crate::format::vindex3::represent::map::Precision;
+                    use crate::format::vindex3::represent::policy::classify;
+                    let role = classify(&operand.object, &operand.tensor, &operand.shape);
+                    matches!(program.resolve(role, &operand.tensor), Precision::Source)
+                }
+                None => matches!(
+                    store.store().mapped_encoding(&operand.object, &operand.tensor),
+                    Some(enc) if enc != DTYPE_NVFP4
+                ),
+            };
+            if src_policy == RepresentationSource::Stored || map_protects {
+                store.store().note_stored_precision();
+                return narrow_to_f16(&raw, &operand.tensor);
+            }
+            store.store().note_runtime_quantisation(&operand.tensor)?;
+            let values = widen_raw(&raw, &operand.tensor)?;
             quantize_nvfp4(&values, rows, k, &operand.tensor)
         }
         WeightFormat::F16 => {
@@ -195,6 +256,56 @@ pub fn load_weight(
             }
         }
     }
+}
+
+/// Bind a compiled NVFP4 pack: copy each region into a page-aligned
+/// buffer the device can take, and read the tensor scale.
+///
+/// No quantisation happens here and none may: if this path ever needed to
+/// compute a scale or round an element, the pack would not have been a
+/// compiled representation.
+fn nvfp4_from_stored(
+    bytes: &[u8],
+    rows: usize,
+    k: usize,
+    name: &str,
+) -> Result<LoadedWeight, VindexError> {
+    use crate::format::vindex3::represent::nvfp4_pack::{split, PackLayout};
+
+    let layout = PackLayout::derive(&[rows, k], name)?;
+    let (packed_src, scales_src, tensor_scale) = split(bytes, &layout, name)?;
+
+    let mut packed = AlignedBytes::zeroed(packed_src.len());
+    packed.as_mut_slice()[..packed_src.len()].copy_from_slice(packed_src);
+    let mut scales = AlignedBytes::zeroed(scales_src.len());
+    scales.as_mut_slice()[..scales_src.len()].copy_from_slice(scales_src);
+
+    Ok(LoadedWeight::Nvfp4 {
+        packed,
+        scales,
+        tensor_scale,
+    })
+}
+
+/// Bind an already-read float operand as f16, the narrowing the F16 arm
+/// performs. Shared so the stored-precision path cannot drift from it.
+fn narrow_to_f16(
+    raw: &super::operands::RawOperand,
+    name: &str,
+) -> Result<LoadedWeight, VindexError> {
+    match raw.dtype.as_str() {
+        DTYPE_BF16 => Ok(LoadedWeight::F16(bf16_bytes_to_f16(&raw.bytes, name)?)),
+        DTYPE_F32 => Ok(LoadedWeight::F16(f32_bytes_to_f16(&raw.bytes, name)?)),
+        other => Err(VindexError::Parse(format!(
+            "tensor `{name}`: no judged f16 narrowing for stored dtype `{other}`"
+        ))),
+    }
+}
+
+/// Widen an already-read raw operand, so the NVFP4 path can inspect the
+/// stored dtype without paying for a second read of the same bytes.
+fn widen_raw(raw: &super::operands::RawOperand, name: &str) -> Result<Vec<f32>, VindexError> {
+    super::operands::widen(&raw.dtype, &raw.bytes, name)
 }
 
 /// Values converted per parallel work item — large enough that the
@@ -512,6 +623,44 @@ mod tests {
 
     fn f32_of_bf16(bits: u16) -> f32 {
         f32::from_bits(u32::from(bits) << 16)
+    }
+
+    /// `logical_len` is the tensor; `as_slice` is the allocation.
+    ///
+    /// Every byte-accounting consumer must use the former. The two are
+    /// equal whenever a size lands on a page boundary — which is why the
+    /// distinction is easy to lose: Granite's NVFP4 allocations are all
+    /// exact multiples, so a ledger built on `as_slice().len()` reads
+    /// correct there and drifts on gpt-oss's 2880-wide shapes.
+    #[test]
+    fn a_page_padded_allocation_reports_the_tensor_not_the_padding() {
+        // gpt-oss [2880, 2880] NVFP4 codes: 180 groups x 8 bytes x 2880 rows.
+        let logical: usize = 2880 * (2880 / 16) * 8;
+        assert!(
+            !logical.is_multiple_of(DEVICE_PAGE_ALIGN),
+            "fixture must not be page-aligned or it cannot detect the bug"
+        );
+
+        let bytes = AlignedBytes::zeroed(logical);
+        assert_eq!(bytes.logical_len(), logical);
+        assert!(
+            bytes.as_slice().len() > logical,
+            "the allocation is padded past the tensor"
+        );
+        assert_eq!(
+            bytes.as_slice().len(),
+            logical.div_ceil(DEVICE_PAGE_ALIGN) * DEVICE_PAGE_ALIGN
+        );
+    }
+
+    /// The aligned case, so the test above cannot be satisfied by an
+    /// implementation that always over-reports.
+    #[test]
+    fn an_exactly_page_sized_allocation_has_no_padding() {
+        let logical = DEVICE_PAGE_ALIGN * 3;
+        let bytes = AlignedBytes::zeroed(logical);
+        assert_eq!(bytes.logical_len(), logical);
+        assert_eq!(bytes.as_slice().len(), logical);
     }
 
     /// Every normal-range bf16 value must convert to f16 exactly.

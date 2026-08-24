@@ -676,15 +676,40 @@ pub trait ModelArchitecture: Send + Sync {
     /// operation, which is a different claim from `Some(1.0)`.
     ///
     /// Canonical name, same reasoning as [`qk_scale_factor`](Self::qk_scale_factor):
-    /// `output_multiplier` (applied to the hidden state) and Granite's
-    /// `logits_scaling` (applied to the resulting logits) are the same
-    /// operation under two spellings — scaling commutes through the
-    /// linear head, so multiplying before or after that one matrix
-    /// multiply produces identical logits.
-    fn output_multiplier(&self) -> Option<f64> {
-        self.config()
-            .output_multiplier
-            .or(self.config().logits_scaling)
+    /// **The multiplicative factor**, already resolved. Callers multiply by
+    /// it; nobody downstream needs to know which spelling produced it.
+    ///
+    /// The two spellings are not interchangeable, which is the trap this
+    /// method exists to close:
+    ///
+    /// ```text
+    /// output_multiplier   x  ->  logits * x        a multiplier
+    /// logits_scaling      d  ->  logits / d        a DIVISOR
+    /// ```
+    ///
+    /// Scaling does commute through the linear head, so "before the vocab
+    /// projection" and "on the logits" are the same number — but only after
+    /// the divisor has been inverted. Passing Granite's `logits_scaling`
+    /// through as a multiplier put its logits out by `d²` (a factor of 100
+    /// at `logits_scaling = 10`), which saturates every softmax built on
+    /// them.
+    ///
+    /// That error is invisible to greedy decoding: a positive scalar cannot
+    /// reorder logits, so argmax, generated ids and every oracle built on
+    /// them agree exactly while the distribution is wrong. Only a
+    /// probability-space measurement — KL, NLL, top-p, temperature — can
+    /// see it, which is how it survived.
+    ///
+    /// A non-finite or zero `logits_scaling` yields `None` rather than an
+    /// infinity that would silently annihilate the head.
+    fn logit_scale(&self) -> Option<f64> {
+        if let Some(m) = self.config().output_multiplier {
+            return Some(m);
+        }
+        match self.config().logits_scaling {
+            Some(d) if d.is_finite() && d != 0.0 => Some(1.0 / d),
+            _ => None,
+        }
     }
 
     /// Residual-stream scaling: the sublayer's own output (attention or
