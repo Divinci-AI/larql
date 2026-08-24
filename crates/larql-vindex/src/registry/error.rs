@@ -74,6 +74,12 @@ pub enum RegistryError {
     #[error("explicit local reference '{path}' does not exist or is not a directory")]
     LocalPathNotFound { path: String },
 
+    #[error(
+        "registry entry for '{name}' variant '{variant}' marks its source hand-attested but \
+         names no one ('by' is empty) — a hand-attestation must say who to ask"
+    )]
+    EmptyAttestationBy { name: String, variant: String },
+
     #[error(transparent)]
     Underlying(#[from] VindexError),
 }

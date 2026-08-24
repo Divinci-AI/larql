@@ -79,7 +79,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use larql_vindex::registry::{
-        Provenance, RegistryArtifactRef, RegistryModel, RegistryVariant, Vindex3Abi,
+        Attestation, Provenance, RegistryArtifactRef, RegistryModel, RegistryVariant, Vindex3Abi,
         REGISTRY_MANIFEST_SCHEMA_VERSION,
     };
 
@@ -100,6 +100,7 @@ mod tests {
                 source: Provenance {
                     repo: "Qwen/Qwen3.8-27B".to_string(),
                     revision: "8c4fdeadbeef".to_string(),
+                    attestation: Attestation::Mechanical,
                 },
             },
         );

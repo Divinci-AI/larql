@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 
 use super::abi::CURRENT_VINDEX3_ABI;
 use super::manifest::{
-    Provenance, RegistryArtifactRef, RegistryManifest, RegistryModel, RegistryVariant,
+    Attestation, Provenance, RegistryArtifactRef, RegistryManifest, RegistryModel, RegistryVariant,
     REGISTRY_MANIFEST_SCHEMA_VERSION,
 };
 
@@ -35,6 +35,7 @@ pub fn tiny_static_registry() -> RegistryManifest {
             source: Provenance {
                 repo: "Qwen/Qwen3.8-27B".to_string(),
                 revision: "8c4fdeadbeef".to_string(),
+                attestation: Attestation::Mechanical,
             },
         },
     );
@@ -49,6 +50,7 @@ pub fn tiny_static_registry() -> RegistryManifest {
             source: Provenance {
                 repo: "Qwen/Qwen3.8-27B".to_string(),
                 revision: "8c4fdeadbeef".to_string(),
+                attestation: Attestation::Mechanical,
             },
         },
     );

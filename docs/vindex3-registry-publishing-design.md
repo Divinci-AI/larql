@@ -312,7 +312,19 @@ inline below.
    marker, or simply accepting the field as-is with a comment/CI note
    until the mechanized path lands. Avoid a silent, indistinguishable
    "looks the same as a verified fact" field.
-   **Deferred to the registry schema's own design pass — not yet built.**
+   **Decided and built (R3A, 2026-08-24): a structural enum, not an
+   optional field.** `Provenance.attestation: Attestation` where
+   `Attestation` is `Mechanical | HandAttested { by: String }`
+   (`#[serde(tag = "kind")]`, `crates/larql-vindex/src/registry/manifest.rs`).
+   Rejected the `Option<String>` shape from the original framing:
+   `None` reads as "not attested" *or* "mechanically verified"
+   depending on which the reader assumes, exactly the silent
+   ambiguity this question warned against. The enum forces every
+   entry's JSON to name `"kind"` explicitly — nothing can omit the
+   field and default to the safer-looking case. `validate()` also
+   refuses a `HandAttested` naming no one (`by` empty or
+   whitespace-only) — a structurally-present but empty attestation
+   would be the same gap one field down.
 
 ## 8. Proposed first milestone target
 
@@ -333,3 +345,45 @@ Success shape, unchanged from the instruction: `larql pull
 real `registry/models/*.json` entry, the artifact lives on HF with a
 pinned revision, the downloaded container validates, `/v1/runtime`
 reports it — no test fixture anywhere in that loop.
+
+**R3A execution (2026-08-24)**: published `larql/granite-4.1-3b`
+(`granite-4.1-3b-deploy.vindex3`, the NVFP4 build — three local
+candidates existed, `-deploy` chosen as newest/deploy-ready) via
+`larql publish` — no slices, no collections, VINDEX3-safe defaults
+downgrade both automatically. Publish target went through two
+redirects before landing: `larql/*` was the original intent, but the
+HF token's account had no orgs at publish time, so the fallback was
+`chrishayuk/granite-4.1-3b`; the `larql` org was created mid-session
+and publishing switched back to it before any data landed under the
+personal namespace (the abandoned `chrishayuk/granite-4.1-3b` shell
+was deleted, never held real bytes).
+
+**A real bug found and fixed during this**: `create_hf_repo`
+(`crates/larql-vindex/src/format/huggingface/publish/remote.rs`)
+stripped the owner off `repo_id` for the repo *name* but never sent an
+`organization` field in the `POST /api/repos/create` body — HF then
+silently defaults repo creation to the *token's own* namespace,
+regardless of what `--repo` named. This "worked" for every prior
+`chrishayuk/*` publish purely because `chrishayuk` is the token
+owner; it broke the very first `larql/*` publish attempt (repo
+created under `chrishayuk`, the next preupload call against
+`larql/granite-4.1-3b` 404'd on a repo that was never actually
+created there). Fixed by deriving `organization` from `repo_id`'s
+owner and always sending it when present; 2 new tests pin the fix
+directly against the pure body-building function
+(`create_hf_repo_body`, made `pub(super)` for the sibling test file
+per this crate's established plain-file-testing convention).
+
+Upstream source provenance for this entry:
+`ibm-granite/granite-4.1-3b`, revision
+`c0650403e44e78ec0262dab1c90914c65b196c4e` — recovered from the local
+HF hub cache's `refs/main` for that repo, and cross-checked against
+the container's own (out-of-schema, pre-dating this initiative)
+`index.json.model`/`derived_from_model` fields, which matched
+character-for-character. Marked `Attestation::HandAttested { by:
+"chrishayuk" }` per §7 item 4 above: this correlation is a real,
+verified fact, but nothing in the `encode` pipeline's own documented
+contract guarantees it (the encode-time gap `Provenance` exists to
+name) — the honest marker is hand-attested, not mechanical, matching
+this section's own "milestone 1 may hand-attest, if visibly marked"
+decision.

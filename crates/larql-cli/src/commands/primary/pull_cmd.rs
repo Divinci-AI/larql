@@ -507,8 +507,8 @@ mod tests {
         abi: larql_vindex::registry::Vindex3Abi,
     ) -> larql_vindex::registry::RegistryManifest {
         use larql_vindex::registry::{
-            Provenance, RegistryArtifactRef, RegistryManifest, RegistryModel, RegistryVariant,
-            REGISTRY_MANIFEST_SCHEMA_VERSION,
+            Attestation, Provenance, RegistryArtifactRef, RegistryManifest, RegistryModel,
+            RegistryVariant, REGISTRY_MANIFEST_SCHEMA_VERSION,
         };
         let mut variants = std::collections::BTreeMap::new();
         variants.insert(
@@ -522,6 +522,7 @@ mod tests {
                 source: Provenance {
                     repo: "Qwen/Qwen3.8-27B".to_string(),
                     revision: "8c4fdeadbeef".to_string(),
+                    attestation: Attestation::Mechanical,
                 },
             },
         );

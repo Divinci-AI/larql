@@ -15,32 +15,31 @@
 //! identity everywhere), so the dispatch moved here, into the one crate
 //! every caller already depends on.
 //!
-//! # The production registry is empty
+//! # Where the production registry's data comes from
 //!
-//! No official VINDEX3 model has been published yet, and where real
-//! registry data will actually come from (embedded? a file? fetched?)
-//! remains a separate, undecided question — out of scope for the
-//! resolver-convergence rung. Returning an empty manifest here means
-//! zero behaviour change for any caller today; the claimed/unclaimed
-//! split (see [`resolve_claimed`]) activates itself correctly the
-//! moment a real entry is added, with no second migration required.
+//! `registry/index.json` + `registry/models/*.json` at the repo root,
+//! embedded into this binary at compile time — see [`super::embedded`]
+//! for the full reasoning (R3A, `docs/vindex3-registry-design.md` §7).
 
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use super::embedded::load_production_registry;
 use super::error::RegistryError;
-use super::manifest::{RegistryManifest, REGISTRY_MANIFEST_SCHEMA_VERSION};
+use super::manifest::RegistryManifest;
 use super::reference::ModelReference;
 use super::resolver::lookup_claimed_variant;
 use crate::VindexError;
 
-/// The production VINDEX3 registry. Empty until an official model is
-/// published — see the module docs.
+/// The production VINDEX3 registry.
+///
+/// Panics only if the checked-in `registry/` files this binary was
+/// built with are malformed — a state R3B's CI conformance gate exists
+/// to catch before merge, the same "fixture serialises" contract
+/// [`super::fixtures::tiny_static_registry_json`] already relies on for
+/// its own embedded data.
 pub fn production_registry() -> RegistryManifest {
-    RegistryManifest {
-        schema_version: REGISTRY_MANIFEST_SCHEMA_VERSION,
-        models: BTreeMap::new(),
-    }
+    load_production_registry()
+        .expect("registry/index.json + registry/models/*.json are checked-in, CI-validated data")
 }
 
 /// The claimed half of [`resolve_claimed`]/[`resolve_claimed_with`],

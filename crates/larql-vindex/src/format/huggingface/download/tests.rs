@@ -342,16 +342,25 @@ fn cached_snapshot_file_returns_snapshot_path_when_present() {
     );
 
     let (path, size) =
-        cached_snapshot_file(RepoKind::Dataset, "owner/repo", None, "file.bin").unwrap();
+        cached_snapshot_file(RepoKind::Dataset, "owner/repo", Some("main"), "file.bin").unwrap();
     assert_eq!(size, 5);
     assert!(path.ends_with("file.bin"));
 }
 
 #[test]
 #[serial]
-fn cached_snapshot_file_returns_blob_when_no_snapshot_link() {
-    // Same blob present, but no snapshot directory linking to the
-    // filename. The function falls back to the raw blob path.
+fn cached_snapshot_file_misses_when_the_pinned_revisions_snapshot_has_no_link() {
+    // The blob's bytes are present (deduped from some other repo or
+    // revision), but the PINNED revision's own snapshot dir has no
+    // symlink for this filename yet. Must miss — not fall back to the
+    // raw blob path or to some other revision's copy — so the caller
+    // falls through to `download_with_progress`, which actually
+    // creates this exact revision's symlink. Regression coverage for
+    // the real bug this rewrite fixed: a `granite-4.1-3b` registry
+    // pull reported `target.embedding.bin` as "cached" via the
+    // now-removed blob-path fallback, no symlink was ever created
+    // under the pinned revision's snapshot dir, and `larql serve`
+    // failed opening the container with a bare, unhelpful IO error.
     let mut server = mockito::Server::new();
     let _g = HfTestEnv::new(&server.url());
     let _m = server
@@ -371,15 +380,25 @@ fn cached_snapshot_file_returns_blob_when_no_snapshot_link() {
         "owner/repo",
         "deadbeef",
         b"abcd",
-        None, // no snapshot dir
+        None, // no snapshot dir for any revision
         "f.bin",
     );
 
-    let (path, size) =
-        cached_snapshot_file(RepoKind::Dataset, "owner/repo", None, "f.bin").unwrap();
-    assert_eq!(size, 4);
-    // No snapshot link → returns the blob path directly.
-    assert!(path.ends_with("blobs/deadbeef"));
+    let result = cached_snapshot_file(RepoKind::Dataset, "owner/repo", Some("pinned"), "f.bin");
+    assert!(
+        result.is_none(),
+        "a bare blob with no symlink under the pinned revision must miss, not silently succeed"
+    );
+}
+
+#[test]
+fn cached_snapshot_file_misses_immediately_on_an_unpinned_revision() {
+    // `revision: None` can name no single snapshot directory
+    // unambiguously — always miss, unconditionally, before even
+    // issuing the HEAD request. No mock server is set up at all: a
+    // network call here would itself be the bug.
+    let result = cached_snapshot_file(RepoKind::Dataset, "owner/repo", None, "f.bin");
+    assert!(result.is_none());
 }
 
 #[test]
@@ -410,7 +429,7 @@ fn cached_snapshot_file_returns_none_on_size_mismatch() {
         "f.bin",
     );
 
-    let result = cached_snapshot_file(RepoKind::Dataset, "owner/repo", None, "f.bin");
+    let result = cached_snapshot_file(RepoKind::Dataset, "owner/repo", Some("main"), "f.bin");
     assert!(result.is_none(), "size mismatch must abort cache hit");
 }
 
@@ -428,7 +447,7 @@ fn cached_snapshot_file_returns_none_when_blob_missing() {
         .create();
 
     // No blob written — straight cache miss.
-    let result = cached_snapshot_file(RepoKind::Dataset, "owner/repo", None, "f.bin");
+    let result = cached_snapshot_file(RepoKind::Dataset, "owner/repo", Some("main"), "f.bin");
     assert!(result.is_none());
 }
 
@@ -461,17 +480,18 @@ fn cached_snapshot_file_works_for_model_prefix() {
     );
 
     let (path, size) =
-        cached_snapshot_file(RepoKind::Model, "owner/repo", None, "config.json").unwrap();
+        cached_snapshot_file(RepoKind::Model, "owner/repo", Some("main"), "config.json").unwrap();
     assert_eq!(size, 4);
     assert!(path.ends_with("config.json"));
 }
 
 #[test]
 #[serial]
-fn cached_snapshot_file_falls_back_through_revision_after_unrelated_snapshot_dir() {
-    // Build a cache where the entries-loop sees a snapshot dir
-    // that DOESN'T contain the filename, then the explicit
-    // `snapshots.join(rev)` fallback (lines ~258-261) succeeds.
+fn cached_snapshot_file_ignores_an_unrelated_revisions_snapshot_dir() {
+    // A DIFFERENT revision's snapshot dir has a file present (`noise`,
+    // for a different filename even) — the pinned-revision-only
+    // contract must not be satisfied by it. Only the pinned revision's
+    // own `snapshots/v7/target.bin` symlink counts.
     let mut server = mockito::Server::new();
     let _g = HfTestEnv::new(&server.url());
     let _m = server
@@ -489,12 +509,11 @@ fn cached_snapshot_file_falls_back_through_revision_after_unrelated_snapshot_dir
     let blobs = repo_dir.join("blobs");
     std::fs::create_dir_all(&blobs).unwrap();
     std::fs::write(blobs.join("rev-fallback"), b"abc").unwrap();
-    // Snapshot dir for `noise` (different filename) — entries loop
-    // visits this but the join misses.
+    // A different revision's snapshot dir, irrelevant to the request.
     let noise_snap = repo_dir.join("snapshots").join("noise");
     std::fs::create_dir_all(&noise_snap).unwrap();
     std::fs::write(noise_snap.join("other.bin"), b"abc").unwrap();
-    // Snapshot dir for the revision we'll request, with the file.
+    // The pinned revision's own snapshot dir, with the file.
     let pinned_snap = repo_dir.join("snapshots").join("v7");
     std::fs::create_dir_all(&pinned_snap).unwrap();
     std::fs::write(pinned_snap.join("target.bin"), b"abc").unwrap();
@@ -526,7 +545,7 @@ fn cached_snapshot_file_returns_none_when_blob_is_directory_not_file() {
     // Create the blob path as a DIRECTORY, not a regular file.
     std::fs::create_dir_all(blobs.join("dir-as-blob")).unwrap();
 
-    let result = cached_snapshot_file(RepoKind::Dataset, "owner/repo", None, "f.bin");
+    let result = cached_snapshot_file(RepoKind::Dataset, "owner/repo", Some("main"), "f.bin");
     assert!(result.is_none(), "blob-is-directory must miss");
 }
 
@@ -620,7 +639,11 @@ fn resolve_hf_vindex_with_progress_uses_cache_when_blob_present() {
     // disk, the function bypasses download_with_progress and goes
     // through the cache-hit branch (progress.init/update/finish
     // called with the [cached] tag). Build the cache + a matching
-    // HEAD response so the cache short-circuit fires.
+    // HEAD response so the cache short-circuit fires. The fast path
+    // only ever fires for a PINNED revision (see cached_snapshot_file's
+    // module docs) — an unpinned `hf://owner/repo` always misses it and
+    // goes through `download_with_progress` instead, so this request
+    // pins `@main` explicitly to exercise the cache-hit branch at all.
     let mut server = mockito::Server::new();
     let _g = HfTestEnv::new(&server.url());
     let body = br#"{"version":2}"#;
@@ -655,7 +678,7 @@ fn resolve_hf_vindex_with_progress_uses_cache_when_blob_present() {
         .with_status(404)
         .create();
 
-    let dir = resolve_hf_vindex_with_progress("hf://owner/repo", |_| NoOpProgress)
+    let dir = resolve_hf_vindex_with_progress("hf://owner/repo@main", |_| NoOpProgress)
         .expect("cache hit path must return Ok");
     assert!(dir.ends_with("main"), "expected snapshot dir under main");
 }

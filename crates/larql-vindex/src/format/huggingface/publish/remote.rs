@@ -117,11 +117,7 @@ pub(super) fn create_hf_repo(
     let resp = client
         .post(&url)
         .header("Authorization", format!("Bearer {token}"))
-        .json(&serde_json::json!({
-            "name": repo_id.split('/').next_back().unwrap_or(repo_id),
-            "type": repo_type,
-            "private": private,
-        }))
+        .json(&create_hf_repo_body(repo_id, repo_type, private))
         .send()
         .map_err(|e| VindexError::Parse(format!("HF API error: {e}")))?;
 
@@ -135,6 +131,33 @@ pub(super) fn create_hf_repo(
             "HF repo create failed ({status}): {body}"
         )))
     }
+}
+
+/// The `POST /api/repos/create` body. `repo_id`'s owner (everything before
+/// the last `/`) becomes `organization` — HF's create-repo API defaults an
+/// omitted `organization` to the *token's own* namespace, never the caller's
+/// intended one. Without this, `--repo larql/granite-4.1-3b` published from
+/// a `chrishayuk`-owned token silently landed under `chrishayuk/granite-4.1-3b`
+/// instead: the create call "succeeded" against the wrong namespace, and the
+/// very next preupload call (which does target the real `repo_id`) 404'd on
+/// a repo that was never actually created. A bare `repo_id` with no `/` (no
+/// owner named at all) omits the field, matching the pre-fix behaviour for
+/// that case — there is no intended namespace to override.
+pub(super) fn create_hf_repo_body(
+    repo_id: &str,
+    repo_type: &str,
+    private: bool,
+) -> serde_json::Value {
+    let name = repo_id.split('/').next_back().unwrap_or(repo_id);
+    let mut body = serde_json::json!({
+        "name": name,
+        "type": repo_type,
+        "private": private,
+    });
+    if let Some((owner, _)) = repo_id.rsplit_once('/') {
+        body["organization"] = serde_json::Value::String(owner.to_string());
+    }
+    body
 }
 
 /// Flip an already-created repo's visibility. Used at RELEASE

@@ -551,8 +551,8 @@ mod resolve_artifact_path_tests {
     use std::collections::BTreeMap;
 
     use larql_vindex::registry::{
-        Provenance, RegistryArtifactRef, RegistryManifest, RegistryModel, RegistryVariant,
-        Vindex3Abi, CURRENT_VINDEX3_ABI, REGISTRY_MANIFEST_SCHEMA_VERSION,
+        Attestation, Provenance, RegistryArtifactRef, RegistryManifest, RegistryModel,
+        RegistryVariant, Vindex3Abi, CURRENT_VINDEX3_ABI, REGISTRY_MANIFEST_SCHEMA_VERSION,
     };
 
     use super::resolve_artifact_path_with;
@@ -570,6 +570,7 @@ mod resolve_artifact_path_tests {
                 source: Provenance {
                     repo: "Qwen/Qwen3.8-27B".to_string(),
                     revision: "8c4fdeadbeef".to_string(),
+                    attestation: Attestation::Mechanical,
                 },
             },
         );
