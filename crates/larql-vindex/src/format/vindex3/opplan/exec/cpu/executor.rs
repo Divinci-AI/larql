@@ -111,6 +111,7 @@ impl CpuExecutor {
         // The SAME site the byte ledger is written, so time and traffic
         // describe one call set rather than two.
         let _t = timed(OpClass::Projection);
+        super::replay::record(weight, x, out_dim);
         let in_dim = x.len();
         let mut out = vec![0.0f32; out_dim];
         let workers = if caller_owns_the_machine() {

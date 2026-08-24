@@ -18,7 +18,9 @@
 use std::time::Instant;
 
 use larql_vindex::format::vindex3::opplan::exec::backend::PlanBackend;
-use larql_vindex::format::vindex3::opplan::exec::cpu::{ledger, PhysicalProjectionPlan, PlanTally};
+use larql_vindex::format::vindex3::opplan::exec::cpu::{
+    self, ledger, PhysicalProjectionPlan, PlanTally,
+};
 use larql_vindex::format::vindex3::opplan::exec::decode::DecodeSession;
 use larql_vindex::format::vindex3::opplan::exec::operands::OperandStore;
 use larql_vindex::format::vindex3::opplan::exec::prepared::{AllocationCensus, ResidencyCensus};
@@ -139,6 +141,9 @@ pub(super) fn run_generate<B: PlanBackend>(
         report_projections(seconds, &tallies);
         report_leaves(seconds);
     }
+    if std::env::var("LARQL_REPLAY_PROJECTIONS").is_ok() {
+        replay_projections(&mut session)?;
+    }
     Ok(())
 }
 
@@ -174,6 +179,62 @@ fn report_residency(census: &ResidencyCensus) {
 /// A path that kept bf16 resident and widened a scratch tile before
 /// computing would satisfy the census and show up here as `blas-f32` at
 /// twice the bytes.
+/// **CPU-PERF-3B.** Replay one steady token's projections against the
+/// operands the model is already holding.
+///
+/// Everything else is removed — no norm, no recurrence, no attention, no
+/// activation — so the only difference from the synthetic shape harness
+/// is that these are the REAL resident operands, 369 of them spanning 27
+/// GB at Q8, rather than one matrix exercised in a loop.
+///
+/// The ordering arms are diagnostic and not proposals: grouped separates
+/// a temporal-locality effect from a cost intrinsic to traversing
+/// hundreds of distinct allocations, and shuffled checks the same thing
+/// from the other side.
+fn replay_projections<B: PlanBackend>(
+    session: &mut DecodeSession<'_, B>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Capture one more step, which the report above has already priced,
+    // so the replay and the ledger describe the same call set.
+    cpu::start_capture();
+    session.step(0)?;
+    let calls = cpu::take_capture();
+    if calls.is_empty() {
+        println!("\nreplay: nothing captured — the step issued no projections");
+        return Ok(());
+    }
+    let bytes = cpu::replay::captured_bytes(&calls);
+    let exec = cpu::shared()?;
+    println!(
+        "\n  projection replay: {} calls, {:.2} GB, against the resident model\n",
+        calls.len(),
+        bytes as f64 / 1e9
+    );
+    // INTERLEAVED, not one arm after another. Run sequentially, a
+    // machine that loads up during the measurement puts its entire drift
+    // on the later arms and manufactures an ordering effect — which is
+    // exactly what a contaminated first attempt produced (532 / 703 / 703
+    // ms, monotonic in run order rather than in arm).
+    let mut best = [f64::INFINITY; cpu::ReplayOrder::ALL.len()];
+    for _ in 0..3 {
+        for (i, order) in cpu::ReplayOrder::ALL.into_iter().enumerate() {
+            // SAFETY: `session` owns the operands for this whole scope,
+            // so every captured address is still resident and unmoved.
+            best[i] = best[i].min(unsafe { cpu::replay(exec, &calls, order) });
+        }
+    }
+    for (i, order) in cpu::ReplayOrder::ALL.into_iter().enumerate() {
+        println!(
+            "  {:<20} {:>8.1} ms   {:>6.1} GB/s",
+            order.name(),
+            best[i] * 1e3,
+            bytes as f64 / best[i] / 1e9
+        );
+    }
+    println!();
+    Ok(())
+}
+
 /// Where the operand allocations landed, as distinct from how big they
 /// are.
 ///
