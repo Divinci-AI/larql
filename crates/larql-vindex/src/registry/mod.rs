@@ -23,12 +23,16 @@
 //! shared claimed/unclaimed dispatch `larql-cli` and `larql-server` both
 //! call. Rung 3A (§11) gave the production registry its first real
 //! data — [`embedded`] embeds `registry/index.json` +
-//! `registry/models/*.json` at compile time. Not a generic model
-//! registry, and VINDEX2 has no representation in this schema at all —
-//! see [`manifest`] and [`resolver`] for where that is enforced
-//! structurally rather than by convention.
+//! `registry/models/*.json` at compile time. Rung 3B added [`check`] —
+//! the filesystem-reading counterpart CI and `larql registry check`
+//! validate a checked-out `registry/` directory with, reusing the same
+//! assembly/validation core rather than a second definition of "valid."
+//! Not a generic model registry, and VINDEX2 has no representation in
+//! this schema at all — see [`manifest`] and [`resolver`] for where
+//! that is enforced structurally rather than by convention.
 
 mod abi;
+mod check;
 mod embedded;
 mod error;
 pub mod fixtures;
@@ -39,6 +43,8 @@ mod resolver;
 
 #[cfg(test)]
 mod abi_tests;
+#[cfg(test)]
+mod check_tests;
 #[cfg(test)]
 mod embedded_tests;
 #[cfg(test)]
@@ -51,6 +57,8 @@ mod reference_tests;
 mod resolver_tests;
 
 pub use abi::{Vindex3Abi, CURRENT_VINDEX3_ABI};
+pub use check::load_registry_from_dir;
+pub use embedded::load_production_registry;
 pub use error::RegistryError;
 pub use manifest::{
     Attestation, Provenance, RegistryArtifactRef, RegistryManifest, RegistryModel, RegistryVariant,

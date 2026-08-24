@@ -792,4 +792,54 @@ pinned revision → miss) and the now-narrower unpinned-revision case.
 and downloaded a complete container; `larql serve granite-4.1-3b`
 loaded it and served a real `/v1/chat/completions` request end to end
 ("The capital of France is" → "Paris."). No fixture registry, no manual
-local path, no floating HF revision, anywhere in that chain.
+local path, no floating HF revision, anywhere in that chain. R3A
+shipped as its own PR (#305), separate from and frozen ahead of R3B.
+
+## 12. Rung 3B — registry CI/conformance (2026-08-24)
+
+Pure conformance, no new model, no promotion command — proving a
+checked-in `registry/` cannot become invalid unnoticed, using the exact
+same Rust code `production_registry()` already trusts, not a parallel
+Python JSON checker that could drift from the runtime's own definition
+of "valid."
+
+**`load_registry_from_dir`** (new `registry/check.rs`) is the
+filesystem-reading counterpart to [`embedded`]'s compile-time
+`include_str!` path — same `assemble_registry` core, same
+`RegistryManifest::validate()`, same error types. `embedded.rs`'s index
+parsing was factored out into a shared `parse_index` so both entry
+points read `index.json`'s shape identically rather than each parsing
+it their own way. A model name the index lists with no matching
+`models/<name>.json` file is reported naming the exact path expected —
+the filename is derived from the index-listed name by construction,
+never read from a separate field inside the model's own JSON, so there
+is no independent "manifest's own name" that could disagree with the
+index (the same single-source-of-truth choice the schema already makes
+for everything else).
+
+**`larql registry check [PATH]`** (new `registry_cmd.rs`, a subcommand
+group deliberately — R3D's future `larql registry promote` joins it
+later, not a bare top-level verb): no `PATH` validates the registry
+*embedded in this binary* — `load_production_registry()`'s own data,
+which for a CI build is exactly the checked-out PR's `registry/` files,
+since `include_str!` embeds whatever was present at compile time. A
+`PATH` reads and validates that directory from disk instead, for R3D's
+promotion workflow (`write model JSON -> larql registry check ->
+git diff -> PR`) to check a *candidate* directory before it's moved
+into place.
+
+**CI wiring**: `.github/workflows/larql-cli.yml`'s existing cross-platform
+`test` job (ubuntu/windows/macos-14) gained a `registry check` step
+right after its existing test step — no new job, since the binary is
+already being built there. Runs on all three OSes deliberately, so a
+platform-specific path bug (the Windows-absolute-path class
+`registry/reference.rs` already hit once, rung 1) would surface here
+too, not just in unit tests.
+
+Gates: larql-vindex 2828 lib tests + all integration binaries (+8 from
+R3A's 2820: `check.rs`'s own tests); larql-cli 775 (+3); clippy
+`-D warnings` and `cargo fmt --check` clean workspace-wide. Coverage
+verified against the real `check_coverage_policy.py` gate: unchanged
+94.30% total, 43 debt baselines (none newly added), `check.rs` 100%
+line coverage, `embedded.rs` 94.12% (both new/changed files clear the
+90% floor).

@@ -51,9 +51,19 @@ const GRANITE_4_1_3B_JSON: &str = include_str!("../../../../registry/models/gran
 /// that type's `models` map holds full bodies; the index only names
 /// them, mirroring the two-file split on disk.
 #[derive(Debug, Deserialize)]
-struct RegistryIndex {
-    schema_version: u32,
-    models: Vec<String>,
+pub(super) struct RegistryIndex {
+    pub(super) schema_version: u32,
+    pub(super) models: Vec<String>,
+}
+
+/// Parse `registry/index.json`'s text alone — shared by [`assemble_registry`]
+/// and [`super::check::load_registry_from_dir`], which both need the
+/// model-name list before they can even know what to read next
+/// (the embedded per-model consts, or `models/<name>.json` on disk).
+pub(super) fn parse_index(index_json: &str) -> Result<RegistryIndex, RegistryError> {
+    serde_json::from_str(index_json).map_err(|e| RegistryError::MalformedManifest {
+        reason: format!("registry/index.json: {e}"),
+    })
 }
 
 /// The embedded JSON text for one `registry/models/<name>.json`, or
@@ -77,7 +87,14 @@ fn embedded_model_json(name: &str) -> Option<&'static str> {
 /// [`RegistryManifest`]. The one function [`super::production::production_registry`]
 /// trusts to have already done all of this by the time a caller sees a
 /// plain, infallible `RegistryManifest`.
-pub(super) fn load_production_registry() -> Result<RegistryManifest, RegistryError> {
+///
+/// Also the non-panicking half of `larql registry check` (R3B) with no
+/// path argument: validates exactly what THIS binary was built with —
+/// for a CI build, that's the PR's own `registry/` files, since
+/// `include_str!` embeds whatever was checked out at compile time. No
+/// separate "is the registry valid" definition to drift from
+/// [`super::production::production_registry`]'s own.
+pub fn load_production_registry() -> Result<RegistryManifest, RegistryError> {
     assemble_registry(INDEX_JSON, embedded_model_json)
 }
 
@@ -91,10 +108,7 @@ pub(super) fn assemble_registry<'a>(
     index_json: &str,
     lookup: impl Fn(&str) -> Option<&'a str>,
 ) -> Result<RegistryManifest, RegistryError> {
-    let index: RegistryIndex =
-        serde_json::from_str(index_json).map_err(|e| RegistryError::MalformedManifest {
-            reason: format!("registry/index.json: {e}"),
-        })?;
+    let index = parse_index(index_json)?;
 
     let mut models = BTreeMap::new();
     for name in index.models {
