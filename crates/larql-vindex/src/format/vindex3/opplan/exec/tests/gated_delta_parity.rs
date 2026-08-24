@@ -16,7 +16,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::format::vindex3::opplan::exec::continuation::RecurrentState;
+use crate::format::vindex3::opplan::exec::continuation::{RecurrentBuffer, RecurrentState};
 use crate::format::vindex3::opplan::exec::gated_delta::{
     layer_forward, recurrence_step, recurrence_step_mutated, state_geometry, GatedDeltaWeights,
     Mutation, RecurrenceStep,
@@ -172,8 +172,10 @@ fn the_recurrence_and_its_state_match_hf_on_real_weights() {
         let tokens = g.len() / VALUE_HEADS;
         assert!(tokens >= 2, "the state chain needs at least two positions");
 
-        let mut state = RecurrentState::zeros(
-            &state_geometry(&op).expect("the fixture declares a state precision"),
+        let mut state = RecurrentBuffer::zeros(
+            &state_geometry(&op)
+                .expect("the fixture declares a state precision")
+                .buffers[crate::format::vindex3::opplan::exec::gated_delta::DELTA_MATRIX],
         );
         for t in 0..tokens {
             let qk = t * per_token_qk..(t + 1) * per_token_qk;
@@ -281,8 +283,10 @@ fn every_deliberate_defect_is_detected() {
         Mutation::NoBeta,
         Mutation::RawGate,
     ] {
-        let mut state = RecurrentState::zeros(
-            &state_geometry(&op).expect("the fixture declares a state precision"),
+        let mut state = RecurrentBuffer::zeros(
+            &state_geometry(&op)
+                .expect("the fixture declares a state precision")
+                .buffers[crate::format::vindex3::opplan::exec::gated_delta::DELTA_MATRIX],
         );
         let mut last_out = Vec::new();
         for t in 0..tokens {
@@ -321,8 +325,10 @@ fn every_deliberate_defect_is_detected() {
     }
 
     // And the unmutated path, for contrast on the same table.
-    let mut state = RecurrentState::zeros(
-        &state_geometry(&op).expect("the fixture declares a state precision"),
+    let mut state = RecurrentBuffer::zeros(
+        &state_geometry(&op)
+            .expect("the fixture declares a state precision")
+            .buffers[crate::format::vindex3::opplan::exec::gated_delta::DELTA_MATRIX],
     );
     let mut last_out = Vec::new();
     for t in 0..tokens {
@@ -478,7 +484,7 @@ fn the_whole_operator_matches_hf_stage_by_stage() {
         }
         check(
             "final state",
-            state.cells(),
+            state.buffer(0).cells(),
             &read_f32(&dir, &format!("L{layer}_t{}_state_f32ref.f32", tokens - 1)),
         );
     }

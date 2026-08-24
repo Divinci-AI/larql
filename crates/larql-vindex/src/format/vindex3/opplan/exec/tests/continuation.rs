@@ -13,7 +13,7 @@
 
 use super::super::continuation::{
     plan_continuation_geometry, ContinuationState, LayerContinuationGeometry,
-    LayerContinuationState, StateInitialization,
+    LayerContinuationState, RecurrentBufferGeometry, StateInitialization,
 };
 use super::super::kv::try_plan_kv_geometry;
 use crate::format::vindex3::opplan::{ComponentOpPlan, GatedDeltaOp, LayerAttention};
@@ -26,6 +26,9 @@ const VALUE_HEADS: usize = 48;
 const KEY_HEADS: usize = 16;
 const HEAD_DIM: usize = 128;
 const CONV_KERNEL: usize = 4;
+/// `2*Hk*Dk + Hv*Dv` — the fused projection's channel count, which the
+/// convolution runs over. 10240 on Qwen3.8.
+const CONV_CHANNELS: usize = 2 * KEY_HEADS * HEAD_DIM + VALUE_HEADS * HEAD_DIM;
 /// Full-attention layers: GQA 24/4 at head_dim 256.
 const FULL_KV_HEADS: usize = 4;
 const FULL_HEAD_DIM: usize = 256;
@@ -92,10 +95,26 @@ fn the_hybrid_topology_resolves_to_the_right_mix() {
     );
 
     let r = geometry[0].recurrent().expect("layer 0 is recurrent");
-    assert_eq!(r.shape, vec![VALUE_HEADS, HEAD_DIM, HEAD_DIM]);
-    assert_eq!(r.dtype, RecurrentStateDtype::Float32);
-    assert_eq!(r.initialization, StateInitialization::Zeros);
-    assert_eq!(r.elements(), STATE_ELEMENTS_PER_LAYER);
+    // TWO buffers, not one. QW-3.6: a DeltaNet layer's durable state is
+    // the delta matrix AND the causal convolution's history, and this
+    // assertion used to describe only the first while calling it the
+    // layer's state.
+    assert_eq!(r.buffers.len(), 2, "delta matrix + conv history");
+
+    let matrix = &r.buffers[0];
+    assert_eq!(matrix.shape, vec![VALUE_HEADS, HEAD_DIM, HEAD_DIM]);
+    assert_eq!(matrix.dtype, RecurrentStateDtype::Float32);
+    assert_eq!(matrix.initialization, StateInitialization::Zeros);
+    assert_eq!(matrix.elements(), STATE_ELEMENTS_PER_LAYER);
+
+    let conv = &r.buffers[1];
+    assert_eq!(conv.shape.len(), 2, "channels x kernel");
+    assert_eq!(conv.shape[1], CONV_KERNEL);
+    assert_eq!(conv.initialization, StateInitialization::Zeros);
+
+    // The layer's total is the sum, and the matrix alone is not it.
+    assert_eq!(r.elements(), matrix.elements() + conv.elements());
+    assert!(r.elements() > STATE_ELEMENTS_PER_LAYER);
 }
 
 /// Claim 1: no fake KV. Claim 2: no phantom recurrence.
@@ -158,13 +177,20 @@ fn only_the_softmax_layers_grow_with_context() {
         "KV should scale linearly in positions"
     );
 
-    // 48 layers x 48*128*128 f32 ~= 144 MB, whatever the context.
-    let bytes = rec_short * 4;
-    assert_eq!(bytes, 48 * STATE_ELEMENTS_PER_LAYER * 4);
+    // 48 layers, whatever the context. The total is the DELTA MATRIX plus
+    // the convolution history — 144 MiB + 7.5 MiB. It used to be asserted
+    // as the matrix alone, which is what a missing buffer looks like from
+    // the outside: a number that adds up against itself.
+    let matrix = 48 * STATE_ELEMENTS_PER_LAYER;
+    let conv = 48 * CONV_CHANNELS * CONV_KERNEL;
+    assert_eq!(rec_short, matrix + conv);
+    let mib = |n: usize| n * 4 / (1024 * 1024);
+    assert_eq!(mib(matrix), 144, "delta matrices");
+    assert_eq!(mib(conv), 7, "convolution histories (7.5 MiB)");
     assert!(
-        (140..=152).contains(&(bytes / 1_000_000)),
-        "recurrent total is {} MB, expected ~144",
-        bytes / 1_000_000
+        (150..=153).contains(&mib(rec_short)),
+        "recurrent total is {} MiB, expected ~151.5",
+        mib(rec_short)
     );
 }
 
@@ -218,11 +244,11 @@ fn recurrent_geometry_does_not_assume_the_operator() {
     ];
     for shape in shapes {
         let expected: usize = shape.iter().product();
-        let g = RecurrentGeometry {
+        let g = RecurrentGeometry::single(RecurrentBufferGeometry {
             shape: shape.clone(),
             dtype: RecurrentStateDtype::Float32,
             initialization: StateInitialization::Zeros,
-        };
+        });
         assert_eq!(g.elements(), expected, "{shape:?}");
         assert_eq!(g.bytes(), expected * 4, "{shape:?}");
 
@@ -269,10 +295,10 @@ fn the_runtime_state_allocates_what_the_geometry_asked_for() {
         match state.layer(index) {
             LayerContinuationState::Recurrent(r) => {
                 recurrent += 1;
-                assert_eq!(r.shape(), [VALUE_HEADS, HEAD_DIM, HEAD_DIM]);
-                assert_eq!(r.cells().len(), STATE_ELEMENTS_PER_LAYER);
+                assert_eq!(r.buffer(0).shape(), [VALUE_HEADS, HEAD_DIM, HEAD_DIM]);
+                assert_eq!(r.buffer(0).cells().len(), STATE_ELEMENTS_PER_LAYER);
                 assert!(
-                    r.cells().iter().all(|c| *c == 0.0),
+                    (0..r.len()).all(|i| r.buffer(i).cells().iter().all(|c| *c == 0.0)),
                     "layer {index} did not start from zeros"
                 );
             }
@@ -300,9 +326,19 @@ fn the_two_kinds_of_state_grow_differently() {
 
     // Nothing has been appended, so only the recurrent buffers exist.
     let resident: usize = (0..LAYERS)
-        .filter_map(|i| state.layer(i).recurrent().map(|r| r.cells().len()))
+        .filter_map(|i| {
+            state.layer(i).recurrent().map(|r| {
+                (0..r.len())
+                    .map(|b| r.buffer(b).cells().len())
+                    .sum::<usize>()
+            })
+        })
         .sum();
-    assert_eq!(resident, 48 * STATE_ELEMENTS_PER_LAYER);
+    assert_eq!(
+        resident,
+        48 * (STATE_ELEMENTS_PER_LAYER + CONV_CHANNELS * CONV_KERNEL),
+        "delta matrices AND convolution histories"
+    );
 
     // Append one position to every KV layer; the recurrent buffers must not
     // move.
@@ -316,7 +352,13 @@ fn the_two_kinds_of_state_grow_differently() {
         }
     }
     let after: usize = (0..LAYERS)
-        .filter_map(|i| state.layer(i).recurrent().map(|r| r.cells().len()))
+        .filter_map(|i| {
+            state.layer(i).recurrent().map(|r| {
+                (0..r.len())
+                    .map(|b| r.buffer(b).cells().len())
+                    .sum::<usize>()
+            })
+        })
         .sum();
     assert_eq!(after, resident, "a KV append resized a recurrent buffer");
     assert_eq!(state.elements_at(1), resident + 16 * width * 2);
@@ -328,13 +370,13 @@ fn the_two_kinds_of_state_grow_differently() {
 /// A recurrent buffer only accepts cells its geometry can hold.
 #[test]
 fn a_recurrent_state_refuses_the_wrong_number_of_cells() {
-    use super::super::continuation::{RecurrentGeometry, RecurrentState};
-    let g = RecurrentGeometry {
+    use super::super::continuation::{RecurrentBuffer, RecurrentBufferGeometry};
+    let g = RecurrentBufferGeometry {
         shape: vec![4, 5],
         dtype: RecurrentStateDtype::Float32,
         initialization: StateInitialization::Zeros,
     };
-    assert!(RecurrentState::from_cells(&g, vec![0.0; 20]).is_ok());
-    let err = RecurrentState::from_cells(&g, vec![0.0; 19]).expect_err("19 != 4*5");
+    assert!(RecurrentBuffer::from_cells(&g, vec![0.0; 20]).is_ok());
+    let err = RecurrentBuffer::from_cells(&g, vec![0.0; 19]).expect_err("19 != 4*5");
     assert!(err.contains("19") && err.contains("20"), "{err}");
 }
