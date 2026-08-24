@@ -76,3 +76,10 @@ bench/dec0/dec0_*.json
 # quant-obs calibration captures — regenerable via `larql dec-bench capture`
 bench/quant-obs/residuals-*/
 bench/quant-obs/*.log
+
+# SENSITIVITY moment captures: ~114 MB each, dominated by the strided
+# `ffn_samples` the down_proj reconstruction needs. Not banked — they are
+# reproducible from the container plus the frozen token bank, and every
+# consequence record carries the capture's `moment_artifact_digest`, so
+# provenance survives without the bytes.
+bench/prompts/quality-bank-1/*-moments-*.json
