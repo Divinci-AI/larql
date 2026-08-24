@@ -162,7 +162,9 @@ mod mutation_table {
         let operands = AttentionOperands::load(
             op,
             (&store).into(),
-            crate::format::vindex3::opplan::exec::backend::WeightFormat::F32,
+            &|_: &crate::format::vindex3::opplan::OperandRef| {
+                crate::format::vindex3::opplan::exec::backend::WeightFormat::F32
+            },
         )
         .unwrap();
         let call = operands.call(op, &inputs, layer.pre_attention_norm.eps, hidden);

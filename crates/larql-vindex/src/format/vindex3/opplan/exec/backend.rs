@@ -27,6 +27,7 @@ use larql_models::config::{
 };
 
 use super::super::super::graph::policy::AttentionSpan;
+use super::cpu::WeightRows;
 use crate::error::VindexError;
 
 /// The numerical representation a backend wants matrix operands in.
@@ -85,6 +86,36 @@ pub enum MatrixClass {
     AttentionProjection,
     FfnProjection,
     OutputHead,
+    /// One stored tensor holding every expert's matrix, sliced at load.
+    ///
+    /// Its own class because it is not one matrix: the bank is split into
+    /// `experts` matrices and may be quantised on the way, so the path has
+    /// already widened to f32 by the time a format could be applied. A
+    /// question about "how big is this matrix" has no answer here, which
+    /// is exactly why answering it as an `FfnProjection` would be wrong.
+    RoutedExpertBank,
+}
+
+/// What the interpreter knows about one matrix operand before loading
+/// it: enough to choose a representation, never enough to reinterpret
+/// the tensor.
+///
+/// The class alone stopped being sufficient at Qwen3.8. Its `48 x 5120`
+/// delta gates and its `10240 x 5120` fused projection are both
+/// attention-class operands separated by a factor of 213 in size, and
+/// the measured answer for one is the wrong answer for the other by
+/// 3.8x. A per-class declaration cannot express that; a per-operand one
+/// can.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct MatrixOperand {
+    pub class: MatrixClass,
+    /// The matrix's element count — `out_dim * in_dim`.
+    pub elements: usize,
+    /// Whether the container holds this operand as bf16 AND it can be
+    /// read unwidened. A physical fact about the checkpoint, not a
+    /// preference: a backend that wants compact bytes where there are
+    /// none would have to quantise to get them.
+    pub stored_bf16: bool,
 }
 
 /// A backend's declared format per matrix class.
@@ -108,7 +139,10 @@ impl WeightFormats {
     pub fn for_class(&self, class: MatrixClass) -> WeightFormat {
         match class {
             MatrixClass::AttentionProjection => self.attention,
-            MatrixClass::FfnProjection => self.ffn,
+            // A device backend places the bank exactly as it places any
+            // other FFN matrix — the distinction the class draws is about
+            // the HOST load path, not about device residency.
+            MatrixClass::FfnProjection | MatrixClass::RoutedExpertBank => self.ffn,
             MatrixClass::OutputHead => self.head,
         }
     }
@@ -159,6 +193,59 @@ impl<'a> WeightSlice<'a> {
                  loaded the wrong representation"
                     .to_string(),
             )),
+        }
+    }
+
+    /// The row-range view a CPU kernel consumes, cut to the matrix's
+    /// real geometry.
+    ///
+    /// **The truncation is load-bearing.** A resident slice may be LONGER
+    /// than `out_dim * in_dim`: `AlignedBytes` pads every allocation up to
+    /// the device page so a Metal buffer can wrap it zero-copy, and the
+    /// padding is zeros. A kernel handed the whole slice would compute
+    /// `len / in_dim` rows — more rows than the matrix has — and the
+    /// executor would partition the wrong total across its workers.
+    ///
+    /// Qwen3.8 cannot show this. Every one of its matrices happens to be
+    /// an exact multiple of the 16 KiB page, so the padded and logical
+    /// lengths coincide and a version of this that forgot to truncate
+    /// would decode the model perfectly. The gate uses a shape that is
+    /// not a page multiple for exactly that reason.
+    pub fn rows(&self, out_dim: usize, in_dim: usize) -> Result<WeightRows<'a>, VindexError> {
+        let want = out_dim * in_dim;
+        let short = |have: usize| {
+            VindexError::Parse(format!(
+                "a {out_dim} x {in_dim} projection needs {want} weights but only {have} are                  resident"
+            ))
+        };
+        match self {
+            WeightSlice::F32(w) => w
+                .get(..want)
+                .map(WeightRows::F32)
+                .ok_or_else(|| short(w.len())),
+            WeightSlice::Bf16(w) => w
+                .get(..want)
+                .map(WeightRows::Bf16)
+                .ok_or_else(|| short(w.len())),
+            other => Err(VindexError::Parse(format!(
+                "no CPU projection kernel consumes {} weights — the backend declared a \
+                 representation only a device can run, so this refuses rather than converting \
+                 mid-decode",
+                other.representation()
+            ))),
+        }
+    }
+
+    /// This slice's representation, for diagnostics. Never dispatched on
+    /// — a backend that branched on the name instead of the variant would
+    /// be one `match` away from silently accepting a format it cannot run.
+    pub fn representation(&self) -> &'static str {
+        match self {
+            WeightSlice::F32(_) => "f32",
+            WeightSlice::Bf16(_) => "bf16",
+            WeightSlice::F16(_) => "f16",
+            WeightSlice::Mxfp4 { .. } => "mxfp4",
+            WeightSlice::Nvfp4 { .. } => "nvfp4",
         }
     }
 
@@ -421,10 +508,10 @@ pub trait PlanBackend: Sync {
         None
     }
 
-    /// The representation this backend wants matrix operands of `class`
-    /// loaded in. A capability, asked per site at load time — not a
-    /// per-call decision.
-    fn weight_format(&self, _class: MatrixClass) -> WeightFormat {
+    /// The representation this backend wants one matrix operand loaded
+    /// in. A capability, asked per operand at load time — not a per-call
+    /// decision, and not a per-model one.
+    fn weight_format(&self, _operand: MatrixOperand) -> WeightFormat {
         WeightFormat::F32
     }
 
@@ -435,7 +522,7 @@ pub trait PlanBackend: Sync {
     /// says nothing gets the reference arithmetic rather than inheriting
     /// somebody else's. The recurrence itself is not selectable — only
     /// the five matrix products around it.
-    fn dense_projector(&self) -> &dyn super::gated_delta::DenseProjector {
+    fn dense_projector(&self) -> &dyn super::gated_delta::DenseProjections {
         &super::gated_delta::ScalarProjections
     }
 

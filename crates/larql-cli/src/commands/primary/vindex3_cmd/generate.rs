@@ -18,8 +18,10 @@
 use std::time::Instant;
 
 use larql_vindex::format::vindex3::opplan::exec::backend::PlanBackend;
+use larql_vindex::format::vindex3::opplan::exec::cpu::{ledger, PhysicalProjectionPlan, PlanTally};
 use larql_vindex::format::vindex3::opplan::exec::decode::DecodeSession;
 use larql_vindex::format::vindex3::opplan::exec::operands::OperandStore;
+use larql_vindex::format::vindex3::opplan::exec::prepared::ResidencyCensus;
 use larql_vindex::format::vindex3::opplan::ComponentOpPlan;
 
 /// The steady-state window is the tail half of the decode steps — after
@@ -40,6 +42,7 @@ pub(super) fn run_generate<B: PlanBackend>(
     let mut session = DecodeSession::new(plan, store, backend)?;
     let load_seconds = loading.elapsed().as_secs_f64();
     eprintln!("weights resident in {load_seconds:.1} s");
+    report_residency(&session.residency_census());
 
     // Prompt ingestion: every position must pass through the stack to
     // fill the KV cache; only the last position's logits are consumed.
@@ -54,6 +57,7 @@ pub(super) fn run_generate<B: PlanBackend>(
 
     let mut ids = prompt.to_vec();
     let mut step_seconds = Vec::with_capacity(new_tokens);
+    let mut priced_step: Option<(f64, Vec<(PhysicalProjectionPlan, PlanTally)>)> = None;
     for step in 0..new_tokens {
         ids.push(next as u32);
         eprintln!(
@@ -64,6 +68,13 @@ pub(super) fn run_generate<B: PlanBackend>(
         if step + 1 == new_tokens {
             break;
         }
+        // Price ONE steady step's weight traffic. Reset immediately
+        // before the step it belongs to: the ledger is process-wide and
+        // has been counting since the prompt.
+        let price_this_step = step + 1 == new_tokens.saturating_sub(1);
+        if price_this_step {
+            ledger().reset();
+        }
         let started = Instant::now();
         let logits = session
             .step(next as u32)?
@@ -71,6 +82,9 @@ pub(super) fn run_generate<B: PlanBackend>(
             .ok_or("plan carries no output head — cannot generate")?;
         (next, value) = argmax(&logits).ok_or("output head produced no logits")?;
         step_seconds.push(started.elapsed().as_secs_f64());
+        if price_this_step {
+            priced_step = Some((*step_seconds.last().expect("just pushed"), read_ledger()));
+        }
     }
 
     println!("engine: {engine}");
@@ -118,7 +132,70 @@ pub(super) fn run_generate<B: PlanBackend>(
             );
         }
     }
+    if let Some((seconds, tallies)) = priced_step {
+        report_projections(seconds, &tallies);
+    }
     Ok(())
+}
+
+/// The prepared image's bytes, site by site.
+///
+/// Site by site because a single total cannot fail usefully: "the model
+/// is smaller" is satisfied just as well by a stack that halved its FFN
+/// and left 11 GB of recurrence widened.
+fn report_residency(census: &ResidencyCensus) {
+    println!(
+        "residency: {:.2} GB total — {:.2} GB compact, {:.2} GB widened f32",
+        census.total() as f64 / 1e9,
+        census.compact() as f64 / 1e9,
+        census.widened_f32() as f64 / 1e9,
+    );
+    for (site, bytes) in census.sites() {
+        if bytes.total() == 0 {
+            continue;
+        }
+        println!(
+            "  {site:<10} {:>8.2} GB  ({:.2} compact / {:.2} widened f32)",
+            bytes.total() as f64 / 1e9,
+            bytes.compact as f64 / 1e9,
+            bytes.widened_f32 as f64 / 1e9,
+        );
+    }
+}
+
+/// What the CPU executor actually ran for one steady step.
+///
+/// The counterpart to the residency census, and not a restatement of it:
+/// residency is what the loader decided, this is what the kernels read.
+/// A path that kept bf16 resident and widened a scratch tile before
+/// computing would satisfy the census and show up here as `blas-f32` at
+/// twice the bytes.
+fn report_projections(seconds: f64, tallies: &[(PhysicalProjectionPlan, PlanTally)]) {
+    let total: u64 = tallies.iter().map(|(_, t)| t.bytes).sum();
+    println!(
+        "projections (one steady step): {:.2} GB over {} calls in {:.0} ms — {:.0} GB/s",
+        total as f64 / 1e9,
+        tallies.iter().map(|(_, t)| t.calls).sum::<u64>(),
+        seconds * 1e3,
+        total as f64 / seconds / 1e9,
+    );
+    for (plan, t) in tallies {
+        if t.calls == 0 {
+            continue;
+        }
+        println!(
+            "  {:<12} {:>8.2} GB over {:>4} calls, {:>5} worker slabs",
+            format!("{plan:?}"),
+            t.bytes as f64 / 1e9,
+            t.calls,
+            t.slabs,
+        );
+    }
+}
+
+/// Snapshot every plan's tally.
+fn read_ledger() -> Vec<(PhysicalProjectionPlan, PlanTally)> {
+    ledger().all().to_vec()
 }
 
 /// Index and value of the largest logit; ties keep the first, matching

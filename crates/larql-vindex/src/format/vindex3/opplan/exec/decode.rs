@@ -178,6 +178,12 @@ impl<'a, B: PlanBackend> DecodeSession<'a, B> {
         })
     }
 
+    /// What this session's operands actually occupy, by site and
+    /// representation — see [`PreparedOperands::residency_census`].
+    pub fn residency_census(&self) -> super::prepared::ResidencyCensus {
+        self.ops.get().residency_census()
+    }
+
     /// Positions consumed so far — read from the continuation state,
     /// which is the single position authority (VI3-INF-3).
     pub fn position(&self) -> usize {
@@ -255,7 +261,7 @@ impl<'a, B: PlanBackend> DecodeSession<'a, B> {
                     let projector = self.backend.dense_projector();
                     let mut planes = super::gated_delta::layer_forward_with(
                         &delta.op,
-                        &delta.weights(),
+                        &delta.weights()?,
                         &inputs,
                         recurrent,
                         super::gated_delta::Mutation::None,

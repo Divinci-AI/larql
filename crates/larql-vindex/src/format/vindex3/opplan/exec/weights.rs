@@ -138,6 +138,35 @@ pub enum LoadedWeight {
 
 impl LoadedWeight {
     /// The borrowed view a call struct carries.
+    /// Bytes this operand OCCUPIES — the allocation, page padding
+    /// included, because that is what the process holds.
+    ///
+    /// Not the matrix's logical size: a census that reported geometry
+    /// would agree with itself no matter how much memory was really in
+    /// use, which is the one thing a residency claim must not do.
+    pub fn resident_bytes(&self) -> usize {
+        match self {
+            LoadedWeight::F32(w) => std::mem::size_of_val(&w[..]),
+            LoadedWeight::Bf16(b) | LoadedWeight::F16(b) => b.as_slice().len(),
+            LoadedWeight::Mxfp4 { packed, scales } => {
+                packed.as_slice().len() + scales.as_slice().len()
+            }
+            LoadedWeight::Nvfp4 { packed, scales, .. } => {
+                packed.as_slice().len() + scales.as_slice().len()
+            }
+        }
+    }
+
+    /// Whether these bytes are the checkpoint's own, or a widened image
+    /// of them.
+    ///
+    /// The distinction the whole rung turns on: `F32` over a bf16
+    /// checkpoint means the loader DOUBLED the model, and no total alone
+    /// can say where that happened.
+    pub fn is_widened_f32(&self) -> bool {
+        matches!(self, LoadedWeight::F32(_))
+    }
+
     pub fn slice(&self) -> WeightSlice<'_> {
         match self {
             LoadedWeight::F32(w) => WeightSlice::F32(w),

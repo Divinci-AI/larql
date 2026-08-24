@@ -26,6 +26,7 @@ use super::continuation::{
     RecurrentBuffer, RecurrentBufferGeometry, RecurrentGeometry, RecurrentState,
     StateInitialization,
 };
+use super::cpu::WeightRows;
 
 /// L2-normalisation epsilon, from the reference kernel's own default.
 const L2NORM_EPS: f32 = 1e-6;
@@ -255,7 +256,8 @@ pub fn recurrence_step_mutated(
     step_inner(op, step, state, mutation)
 }
 
-/// The nine operands as plain f32 slices, in the checkpoint's own layouts.
+/// The nine operands in the representations they are resident as, in the
+/// checkpoint's own layouts.
 ///
 /// Linear weights are `[out, in]` row-major, as PyTorch stores them, so a
 /// projection is `y[o] = sum_i x[i] * w[o][i]`. Nothing here re-derives a
@@ -263,15 +265,24 @@ pub fn recurrence_step_mutated(
 /// `GatedDeltaOp` that QW-1 built, which is the single architecture
 /// authority.
 pub struct GatedDeltaWeights<'a> {
-    pub in_proj_qkv: &'a [f32],
-    pub in_proj_a: &'a [f32],
-    pub in_proj_b: &'a [f32],
-    pub in_proj_z: &'a [f32],
+    /// The five DENSE projections, in whatever representation they are
+    /// resident as. `WeightRows` and not `&[f32]` because the point of
+    /// the rung is that a 100 MB matrix reaches the kernel still compact
+    /// — a widening accessor here would put the whole model back in f32
+    /// while every test still passed.
+    pub in_proj_qkv: WeightRows<'a>,
+    pub in_proj_a: WeightRows<'a>,
+    pub in_proj_b: WeightRows<'a>,
+    pub in_proj_z: WeightRows<'a>,
+    pub out_proj: WeightRows<'a>,
+    /// The elementwise glue and the depthwise convolution, always f32.
+    /// Six MB across the whole model against 11 GB of projection — there
+    /// is no traffic here to halve, and narrowing it would only cost a
+    /// widen per use.
     pub conv1d: &'a [f32],
     pub a_log: &'a [f32],
     pub dt_bias: &'a [f32],
     pub norm: &'a [f32],
-    pub out_proj: &'a [f32],
     pub norm_eps: f32,
 }
 
@@ -306,9 +317,23 @@ pub struct LayerPlanes {
 /// transcription and shares no arithmetic with `larql-compute`. That
 /// independence is what makes it an oracle, so it is never routed
 /// through BLAS however much faster BLAS is.
-pub trait DenseProjector: Sync {
-    /// `y = W x`, with `W` row-major `[out_dim, x.len()]`.
-    fn project(&self, weight: &[f32], x: &[f32], out_dim: usize) -> Vec<f32>;
+///
+/// Named for the five products rather than for one, so it cannot be
+/// confused with `exec::cpu::DenseProjector` — the row-range KERNEL
+/// trait one layer below. This one asks "compute this whole projection";
+/// that one asks "compute these rows", and the executor sits between
+/// them deciding how the rows were cut.
+pub trait DenseProjections: Sync {
+    /// `y = W x`, with `W` row-major `[out_dim, x.len()]` in whatever
+    /// representation it is resident as.
+    ///
+    /// Infallible, and a representation the implementation cannot
+    /// consume PANICS rather than returning an error. The pairing of
+    /// format to kernel is made once, by `PhysicalProjectionPlan`, and
+    /// observed rather than re-derived — so a mismatch here is not a bad
+    /// input, it is that invariant broken, and the same posture the
+    /// kernels below already take.
+    fn project(&self, weight: WeightRows<'_>, x: &[f32], out_dim: usize) -> Vec<f32>;
 }
 
 /// The literal projection: one scalar dot per row.
@@ -317,9 +342,16 @@ pub trait DenseProjector: Sync {
 /// which is why it is the oracle and not the execution strategy.
 pub struct ScalarProjections;
 
-impl DenseProjector for ScalarProjections {
-    fn project(&self, weight: &[f32], x: &[f32], out_dim: usize) -> Vec<f32> {
-        matvec(weight, x, out_dim)
+impl DenseProjections for ScalarProjections {
+    fn project(&self, weight: WeightRows<'_>, x: &[f32], out_dim: usize) -> Vec<f32> {
+        let WeightRows::F32(w) = weight else {
+            panic!(
+                "the reference projection consumes f32 weights only; the reference backend \
+                 declares F32 for every operand, so a compact slab arriving here means the \
+                 format resolver and the backend that answered it have come apart"
+            );
+        };
+        matvec(w, x, out_dim)
     }
 }
 
@@ -372,7 +404,7 @@ pub fn layer_forward_with(
     hidden: &[Vec<f32>],
     state: &mut RecurrentState,
     mutation: Mutation,
-    proj: &dyn DenseProjector,
+    proj: &dyn DenseProjections,
 ) -> LayerPlanes {
     let (hk, hv) = (op.num_key_heads, op.num_value_heads);
     let (dk, dv) = (op.key_head_dim, op.value_head_dim);

@@ -1,6 +1,7 @@
 //! The routed miniature, its carrier variant, and the load/compare
 //! helpers shared by the expert-bank and production-backend gates.
 
+use crate::format::vindex3::opplan::OperandRef;
 use std::path::Path;
 
 use larql_models::config::ExpertFormat;
@@ -340,11 +341,11 @@ pub(super) fn routed(op: &RoutedFfnOp) -> LayerFfn {
 }
 
 pub(super) fn load(op: &RoutedFfnOp, store: &OperandStore, format: WeightFormat) -> FfnOperands {
-    FfnOperands::load(&routed(op), store.into(), format).unwrap()
+    FfnOperands::load(&routed(op), store.into(), &|_: &OperandRef| format, format).unwrap()
 }
 
 pub(super) fn load_err(op: &RoutedFfnOp, store: &OperandStore, format: WeightFormat) -> String {
-    FfnOperands::load(&routed(op), store.into(), format)
+    FfnOperands::load(&routed(op), store.into(), &|_: &OperandRef| format, format)
         .err()
         .expect("loading must refuse")
         .to_string()

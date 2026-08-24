@@ -1,6 +1,35 @@
 //! The persistent worker pool and the partitioning policy.
 
+use std::sync::OnceLock;
+
+use super::ledger::ledger;
+use super::physical::PhysicalProjectionPlan;
 use super::projector::{CpuParallelism, DenseProjector, WeightRows};
+use crate::error::VindexError;
+
+/// The process-wide pool.
+///
+/// One pool for the machine, not one per backend. `ProductionBackend` is
+/// a zero-sized value that dozens of call sites construct freely, and a
+/// pool per instance would put twelve worker threads behind each of them
+/// — the oversubscription this module exists to forbid, arrived at by
+/// OWNERSHIP rather than by nesting. Threads are a property of the
+/// machine, so the machine holds them.
+static SHARED: OnceLock<Result<CpuExecutor, String>> = OnceLock::new();
+
+/// The machine's executor, built once.
+///
+/// Fallible rather than `expect`: the only way this fails is that the OS
+/// refused to spawn threads, and a decode that then ran silently on one
+/// core would report a throughput number that means nothing.
+pub fn shared() -> Result<&'static CpuExecutor, VindexError> {
+    match SHARED.get_or_init(CpuExecutor::new) {
+        Ok(exec) => Ok(exec),
+        Err(e) => Err(VindexError::Parse(format!(
+            "the CPU executor pool is unavailable: {e}"
+        ))),
+    }
+}
 
 /// LARQL's CPU worker pool.
 ///
@@ -12,17 +41,17 @@ pub struct CpuExecutor {
     workers: usize,
 }
 
-/// Below this many bytes a projection is not worth splitting — and,
-/// separately, is not worth keeping compact either: a cache-resident
-/// matrix has no RAM traffic to halve, and the measured `48 x 5120` case
-/// runs 3.8x FASTER through BLAS f32 than through the fused bf16 kernel.
-/// Worker count and format are both policy, and both belong here.
-///
-/// Below this many bytes a projection is not worth splitting.
+/// Below this many RESIDENT bytes a projection is not worth splitting.
 ///
 /// Measured, not guessed: the `48 x 5120` delta projections are ~1 MB,
 /// fit in cache, and ran at 262 GB/s as a single call — there is no
-/// streaming to parallelise, only overhead to add.
+/// streaming to parallelise, only fan-out to add.
+///
+/// Subordinate to the format decision, not a second version of it.
+/// `PhysicalProjectionPlan::choose` only reaches `FusedBf16` at 16 MiB of
+/// f32 — 8 MiB resident — so every compact matrix already clears this by
+/// 2x. It governs what is left: an `ExternalPool` kernel handed a small
+/// matrix, which today means only a hand-built one in a test.
 const MIN_SPLIT_BYTES: usize = 4 * 1024 * 1024;
 
 impl CpuExecutor {
@@ -34,7 +63,7 @@ impl CpuExecutor {
     /// late. Falls back to the total core count where the split is not
     /// reported.
     pub fn new() -> Result<Self, String> {
-        let workers = performance_cores();
+        let workers = workers_from(reported_performance_cores());
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(workers)
             .thread_name(|i| format!("larql-cpu-{i}"))
@@ -78,14 +107,28 @@ impl CpuExecutor {
     ) -> Vec<f32> {
         let in_dim = x.len();
         let mut out = vec![0.0f32; out_dim];
-        let workers = self.workers_for(kernel.parallelism(), weight.bytes());
+        let workers = if caller_owns_the_machine() {
+            1
+        } else {
+            self.workers_for(kernel.parallelism(), weight.bytes())
+        };
         if workers <= 1 || out_dim < workers {
+            ledger().record(
+                PhysicalProjectionPlan::for_resident(weight),
+                weight.bytes(),
+                1,
+            );
             kernel.project_rows(weight, x, &mut out);
             return out;
         }
         // Row-contiguous partitions: each worker streams one unbroken
         // slab of weight, which is what the memory system wants.
         let rows = out_dim.div_ceil(workers);
+        ledger().record(
+            PhysicalProjectionPlan::for_resident(weight),
+            weight.bytes(),
+            out_dim.div_ceil(rows),
+        );
         self.pool.install(|| {
             use rayon::prelude::*;
             out.par_chunks_mut(rows).enumerate().for_each(|(i, slot)| {
@@ -97,21 +140,63 @@ impl CpuExecutor {
     }
 }
 
-/// Performance-core count, or the total where the split is unknown.
-fn performance_cores() -> usize {
+/// Whether some enclosing loop is already parallel over this work.
+///
+/// The batched driver runs whole POSITIONS in parallel and calls the
+/// backend from inside that loop; the decode driver runs one position on
+/// the caller's own thread. Same backend method, opposite ownership — so
+/// the executor asks rather than assumes, and a projection reached from
+/// inside a parallel region runs as one call.
+///
+/// The rule in [`super`] is "at most one layer of parallelism owns the
+/// machine for a primitive". Without this the batched path would nest a
+/// twelve-worker fan-out inside every position of an already-parallel
+/// loop, which is that rule broken from the other end: the seam cannot
+/// stop a caller being parallel, only decline to add a second layer.
+fn caller_owns_the_machine() -> bool {
+    rayon::current_thread_index().is_some()
+}
+
+/// Performance-core count where the machine reports one.
+///
+/// `None` on a machine that does not draw the distinction, which is most
+/// of them — the split is an Apple-silicon fact, not a universal one.
+fn reported_performance_cores() -> Option<usize> {
     #[cfg(target_os = "macos")]
     {
         if let Some(n) = sysctl_usize("hw.perflevel0.logicalcpu") {
-            return n.max(1);
+            return Some(n);
         }
     }
-    std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1)
+    None
 }
 
+/// Turn that into a worker count.
+///
+/// Split out from the query so BOTH answers are reachable from a test on
+/// one machine. The fallback is the branch that matters and the branch a
+/// macOS-only test can never take: every non-Apple target reaches it, and
+/// a `0` from a machine that reports nonsense must not produce a pool of
+/// no workers.
+pub(super) fn workers_from(reported: Option<usize>) -> usize {
+    match reported {
+        Some(n) if n >= 1 => n,
+        // Reported zero, or not reported at all: the total core count is
+        // the honest answer, and one is the floor.
+        _ => std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1),
+    }
+}
+
+/// One integer `sysctl`, or `None` where the machine does not report it.
+///
+/// Shared with [`super::physical`] so the worker count and the format
+/// threshold read the machine through one path — they are two questions
+/// about the same hardware, and two spellings of the query is how they
+/// start disagreeing about which machine they are on.
 #[cfg(target_os = "macos")]
-fn sysctl_usize(name: &str) -> Option<usize> {
+pub(super) fn sysctl_usize(name: &str) -> Option<usize> {
     std::process::Command::new("sysctl")
         .args(["-n", name])
         .output()

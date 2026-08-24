@@ -11,6 +11,7 @@
 //! and unsupported-activation FFN arms. Each test here drives one of
 //! those arms directly and asserts what the arm is *for*.
 
+use crate::format::vindex3::opplan::exec::backend::MatrixOperand;
 use std::sync::{Arc, Mutex};
 
 use larql_compute::backend::MatMul;
@@ -667,7 +668,11 @@ fn an_nvfp4_device_backend_executes_and_decodes_the_dense_plan() {
         WeightFormats::uniform(WeightFormat::Nvfp4),
     );
     assert_eq!(
-        backend.weight_format(MatrixClass::FfnProjection),
+        backend.weight_format(MatrixOperand {
+            class: MatrixClass::FfnProjection,
+            elements: 0,
+            stored_bf16: false,
+        }),
         WeightFormat::Nvfp4
     );
     let on_device: ExecutionTrace = execute_plan(&plan, &store, &DENSE_TOKENS, &backend).unwrap();

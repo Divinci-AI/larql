@@ -14,6 +14,7 @@
 //! recurrence with a wrong state update produces a perfectly plausible
 //! first position and a wrong second one.
 
+use crate::format::vindex3::opplan::exec::cpu::WeightRows;
 use std::path::{Path, PathBuf};
 
 use crate::format::vindex3::opplan::exec::continuation::{RecurrentBuffer, RecurrentState};
@@ -365,15 +366,15 @@ const NORM_EPS: f32 = 1e-6;
 
 fn weights<'a>(store: &'a [Vec<f32>]) -> GatedDeltaWeights<'a> {
     GatedDeltaWeights {
-        in_proj_qkv: &store[0],
-        in_proj_a: &store[1],
-        in_proj_b: &store[2],
-        in_proj_z: &store[3],
+        in_proj_qkv: WeightRows::F32(&store[0]),
+        in_proj_a: WeightRows::F32(&store[1]),
+        in_proj_b: WeightRows::F32(&store[2]),
+        in_proj_z: WeightRows::F32(&store[3]),
         conv1d: &store[4],
         a_log: &store[5],
         dt_bias: &store[6],
         norm: &store[7],
-        out_proj: &store[8],
+        out_proj: WeightRows::F32(&store[8]),
         norm_eps: NORM_EPS,
     }
 }

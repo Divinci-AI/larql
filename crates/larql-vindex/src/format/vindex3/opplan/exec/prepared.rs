@@ -45,7 +45,9 @@
 //! seam the decoupled surfaces grow from, and preparation refuses a
 //! slice the plan cannot satisfy rather than silently preparing less.
 
-use super::backend::{MatrixClass, NormCall, PlanBackend, WeightSlice};
+use super::backend::{
+    MatrixClass, MatrixOperand, NormCall, PlanBackend, WeightFormat, WeightSlice,
+};
 use super::experts::FfnOperands;
 use super::operands::{OperandSource, SourceStamp};
 use super::weights::{load_weight, LoadedWeight};
@@ -145,6 +147,18 @@ pub(super) struct PreparedLayer {
     pub(super) layer_scale: Option<f32>,
 }
 
+impl PreparedLayer {
+    /// This layer's norm weights — f32 glue, counted so the census adds
+    /// up to the whole image rather than to the parts that were easy.
+    fn glue_bytes(&self) -> usize {
+        let norm = |n: &PreparedNorm| std::mem::size_of_val(&n.weight[..]);
+        norm(&self.pre_attention)
+            + norm(&self.pre_ffn)
+            + self.post_attention.as_ref().map_or(0, norm)
+            + self.post_ffn.as_ref().map_or(0, norm)
+    }
+}
+
 /// Which attention-class operator a prepared layer holds operands for.
 ///
 /// An enum, not `Option<AttentionOperands>` and not "softmax unless
@@ -177,59 +191,146 @@ impl PreparedAttention {
 }
 
 /// The nine operands a Gated DeltaNet layer reads, loaded once.
+///
+/// The five projections carry a `LoadedWeight` and the four glue
+/// operands a `Vec<f32>`, which is the split the measurements draw: 11.1
+/// GB of matrix against 6 MB of convolution kernel, gate bias and norm.
 pub(super) struct GatedDeltaOperands {
     pub(super) op: GatedDeltaOp,
-    pub(super) in_proj_qkv: Vec<f32>,
-    pub(super) in_proj_a: Vec<f32>,
-    pub(super) in_proj_b: Vec<f32>,
-    pub(super) in_proj_z: Vec<f32>,
-    pub(super) conv1d: Vec<f32>,
-    pub(super) a_log: Vec<f32>,
-    pub(super) dt_bias: Vec<f32>,
-    pub(super) norm: Vec<f32>,
-    pub(super) out_proj: Vec<f32>,
-    pub(super) norm_eps: f32,
+    in_proj_qkv: LoadedWeight,
+    in_proj_a: LoadedWeight,
+    in_proj_b: LoadedWeight,
+    in_proj_z: LoadedWeight,
+    out_proj: LoadedWeight,
+    conv1d: Vec<f32>,
+    a_log: Vec<f32>,
+    dt_bias: Vec<f32>,
+    norm: Vec<f32>,
+    norm_eps: f32,
 }
 
 impl GatedDeltaOperands {
     fn load(
         op: &GatedDeltaOp,
         store: OperandSource<'_>,
+        format: FormatFor<'_>,
         norm_eps: f32,
     ) -> Result<Self, VindexError> {
-        // f32 throughout: the recurrence is elementwise glue and a
-        // convolution, not the matrix traffic a backend picks a format
-        // for. The reference path is the only consumer today.
-        let load = |r: &OperandRef| store.load(r);
+        // Per operand, and the answers differ WITHIN this layer: at
+        // Qwen3.8's shapes `in_proj_qkv` is 105 MB and stays compact
+        // while `in_proj_a` is 0.5 MB and does not. A single format for
+        // the layer could not express that, and the version of this that
+        // loaded everything f32 is what left 48 of 64 layers widened.
+        let matrix = |r: &OperandRef| load_weight(store, r, format(r));
+        let glue = |r: &OperandRef| store.load(r);
         Ok(Self {
             op: op.clone(),
-            in_proj_qkv: load(&op.in_proj_qkv)?,
-            in_proj_a: load(&op.in_proj_a)?,
-            in_proj_b: load(&op.in_proj_b)?,
-            in_proj_z: load(&op.in_proj_z)?,
-            conv1d: load(&op.conv1d)?,
-            a_log: load(&op.a_log)?,
-            dt_bias: load(&op.dt_bias)?,
-            norm: load(&op.norm)?,
-            out_proj: load(&op.out_proj)?,
+            in_proj_qkv: matrix(&op.in_proj_qkv)?,
+            in_proj_a: matrix(&op.in_proj_a)?,
+            in_proj_b: matrix(&op.in_proj_b)?,
+            in_proj_z: matrix(&op.in_proj_z)?,
+            out_proj: matrix(&op.out_proj)?,
+            conv1d: glue(&op.conv1d)?,
+            a_log: glue(&op.a_log)?,
+            dt_bias: glue(&op.dt_bias)?,
+            norm: glue(&op.norm)?,
             norm_eps,
         })
     }
 
-    pub(super) fn weights(&self) -> super::gated_delta::GatedDeltaWeights<'_> {
-        super::gated_delta::GatedDeltaWeights {
-            in_proj_qkv: &self.in_proj_qkv,
-            in_proj_a: &self.in_proj_a,
-            in_proj_b: &self.in_proj_b,
-            in_proj_z: &self.in_proj_z,
+    /// The five matrices, for residency ACCOUNTING — not for device
+    /// placement, which [`PreparedAttention::weight_slices`] still
+    /// declines to offer for a recurrence no device kernel runs.
+    pub(super) fn loaded_matrices(&self) -> [&LoadedWeight; 5] {
+        [
+            &self.in_proj_qkv,
+            &self.in_proj_a,
+            &self.in_proj_b,
+            &self.in_proj_z,
+            &self.out_proj,
+        ]
+    }
+
+    /// The four f32 operands that are not matrix traffic.
+    pub(super) fn glue_bytes(&self) -> usize {
+        [&self.conv1d, &self.a_log, &self.dt_bias, &self.norm]
+            .iter()
+            .map(|v| std::mem::size_of_val(&v[..]))
+            .sum()
+    }
+
+    pub(super) fn weights(&self) -> Result<super::gated_delta::GatedDeltaWeights<'_>, VindexError> {
+        // Geometry from the op, never from the slice length: a resident
+        // slab is page-padded and can be longer than the matrix.
+        Ok(super::gated_delta::GatedDeltaWeights {
+            in_proj_qkv: matrix_rows(&self.in_proj_qkv, &self.op.in_proj_qkv)?,
+            in_proj_a: matrix_rows(&self.in_proj_a, &self.op.in_proj_a)?,
+            in_proj_b: matrix_rows(&self.in_proj_b, &self.op.in_proj_b)?,
+            in_proj_z: matrix_rows(&self.in_proj_z, &self.op.in_proj_z)?,
+            out_proj: matrix_rows(&self.out_proj, &self.op.out_proj)?,
             conv1d: &self.conv1d,
             a_log: &self.a_log,
             dt_bias: &self.dt_bias,
             norm: &self.norm,
-            out_proj: &self.out_proj,
             norm_eps: self.norm_eps,
-        }
+        })
     }
+}
+
+/// A resident matrix as row ranges, cut to the geometry the op declares.
+///
+/// The geometry comes from the OP and never from the slice length: a
+/// resident slab is page-padded, so `len / in_dim` can exceed the number
+/// of rows the matrix has.
+fn matrix_rows<'a>(
+    w: &'a LoadedWeight,
+    r: &OperandRef,
+) -> Result<super::cpu::WeightRows<'a>, VindexError> {
+    let (out_dim, in_dim) = two_dims(r)?;
+    w.slice().rows(out_dim, in_dim)
+}
+
+/// A matrix operand's `[out, in]` geometry.
+///
+/// Fails closed on anything else: a projection is two-dimensional, and a
+/// caller that inferred `out_dim` from a slice length instead would read
+/// page padding as extra rows.
+fn two_dims(r: &OperandRef) -> Result<(usize, usize), VindexError> {
+    match r.shape.as_slice() {
+        [out_dim, in_dim] => Ok((*out_dim, *in_dim)),
+        other => Err(VindexError::Parse(format!(
+            "operand `{}` has shape {other:?}; a dense projection is `[out, in]`",
+            r.tensor
+        ))),
+    }
+}
+
+/// Resolves the load format for ONE matrix operand.
+///
+/// A function rather than a value because the question is now per matrix
+/// and not per class: a layer hands its q/k/v/o — or its five delta
+/// projections — to the same resolver and can get different answers, which
+/// is what lets a `48 x 5120` gate stay f32 inside a stack whose `10240 x
+/// 5120` projections do not.
+pub(super) type FormatFor<'a> = &'a dyn Fn(&OperandRef) -> WeightFormat;
+
+/// Ask the backend about one operand, with the physical facts attached.
+///
+/// The backend still cannot reach the bytes — it is told the element
+/// count and what the checkpoint holds, and answers with a
+/// representation. Handing it the `OperandRef` would let it resolve
+/// operands by name, which is the one thing the seam forbids.
+fn resolve<B: PlanBackend + ?Sized>(
+    backend: &B,
+    store: OperandSource<'_>,
+    class: MatrixClass,
+    op: &OperandRef,
+) -> WeightFormat {
+    backend.weight_format(MatrixOperand {
+        class,
+        elements: op.shape.iter().product(),
+        stored_bf16: store.is_stored_bf16(op),
+    })
 }
 
 /// A component's operands, lowered once for a given slice and backend.
@@ -281,6 +382,20 @@ impl PreparedOperands {
             None
         };
 
+        // One resolver per matrix class, each answering per operand.
+        let attention_format =
+            |op: &OperandRef| resolve(backend, store, MatrixClass::AttentionProjection, op);
+        let ffn_format = |op: &OperandRef| resolve(backend, store, MatrixClass::FfnProjection, op);
+        // The bank is asked once, for the class: it is one stored tensor
+        // holding every expert's matrix, so there is no per-matrix size to
+        // answer about.
+        let bank_format = backend.weight_format(MatrixOperand {
+            class: MatrixClass::RoutedExpertBank,
+            elements: 0,
+            stored_bf16: false,
+        });
+        let head_format = |op: &OperandRef| resolve(backend, store, MatrixClass::OutputHead, op);
+
         let range = slice.layers(plan);
         let first_layer = range.start;
         let mut layers = Vec::with_capacity(range.len());
@@ -291,16 +406,17 @@ impl PreparedOperands {
                 // operands follow it. No layer is prepared as softmax by
                 // default.
                 attention: match &layer.attention {
-                    LayerAttention::Softmax(op) => {
-                        PreparedAttention::Softmax(Box::new(AttentionOperands::load(
+                    LayerAttention::Softmax(op) => PreparedAttention::Softmax(Box::new(
+                        AttentionOperands::load(op, store, &attention_format)?,
+                    )),
+                    LayerAttention::GatedDelta(op) => {
+                        PreparedAttention::GatedDelta(Box::new(GatedDeltaOperands::load(
                             op,
                             store,
-                            backend.weight_format(MatrixClass::AttentionProjection),
+                            &attention_format,
+                            layer.pre_attention_norm.eps as f32,
                         )?))
                     }
-                    LayerAttention::GatedDelta(op) => PreparedAttention::GatedDelta(Box::new(
-                        GatedDeltaOperands::load(op, store, layer.pre_attention_norm.eps as f32)?,
-                    )),
                 },
                 post_attention: layer
                     .post_attention_norm
@@ -308,11 +424,7 @@ impl PreparedOperands {
                     .map(|op| PreparedNorm::load(op, store))
                     .transpose()?,
                 pre_ffn: PreparedNorm::load(&layer.pre_ffn_norm, store)?,
-                ffn: FfnOperands::load(
-                    &layer.ffn,
-                    store,
-                    backend.weight_format(MatrixClass::FfnProjection),
-                )?,
+                ffn: FfnOperands::load(&layer.ffn, store, &ffn_format, bank_format)?,
                 post_ffn: layer
                     .post_ffn_norm
                     .as_ref()
@@ -340,11 +452,7 @@ impl PreparedOperands {
                 .map(|op| {
                     Ok::<_, VindexError>((
                         op.clone(),
-                        load_weight(
-                            store,
-                            &op.projection,
-                            backend.weight_format(MatrixClass::OutputHead),
-                        )?,
+                        load_weight(store, &op.projection, head_format(&op.projection))?,
                     ))
                 })
                 .transpose()?
@@ -378,6 +486,50 @@ impl PreparedOperands {
             weights.push(projection.slice());
         }
         backend.prepare(&weights);
+    }
+
+    /// **What this image actually occupies, by site and representation.**
+    ///
+    /// Site by site rather than one total, because a total cannot fail
+    /// usefully. The claim CPU-2A makes is not "the model is smaller" but
+    /// "every streaming matrix kept the checkpoint's own bytes" — and a
+    /// single number is satisfied just as well by a stack that halved its
+    /// FFN and left 11 GB of recurrence widened.
+    ///
+    /// The embedding table is the one f32 population that is EXPECTED:
+    /// decode gathers a single row from it per token, so it is residency
+    /// without traffic, and no kernel here consumes a compact one.
+    pub fn residency_census(&self) -> ResidencyCensus {
+        let mut census = ResidencyCensus::default();
+        if let Some(table) = &self.embed_table {
+            census.embedding.widened_f32 += std::mem::size_of_val(&table[..]);
+        }
+        for layer in &self.layers {
+            match &layer.attention {
+                PreparedAttention::Softmax(ops) => {
+                    for w in ops.loaded_matrices() {
+                        census.attention.add(w);
+                    }
+                }
+                PreparedAttention::GatedDelta(ops) => {
+                    for w in ops.loaded_matrices() {
+                        census.delta.add(w);
+                    }
+                    census.glue.widened_f32 += ops.glue_bytes();
+                }
+            }
+            for w in layer.ffn.loaded_matrices() {
+                census.ffn.add(w);
+            }
+            census.glue.widened_f32 += layer.glue_bytes();
+        }
+        if let Some(norm) = &self.final_norm {
+            census.glue.widened_f32 += std::mem::size_of_val(&norm.weight[..]);
+        }
+        if let Some((_, projection)) = &self.output {
+            census.head.add(projection);
+        }
+        census
     }
 
     /// The slice this image was prepared for.
@@ -449,5 +601,68 @@ impl PreparedOperands {
 
     pub(super) fn output(&self) -> Option<&(OutputOp, LoadedWeight)> {
         self.output.as_ref()
+    }
+}
+
+/// One site's resident bytes, split by whether the loader widened.
+#[derive(Default, Clone, Copy, Debug)]
+pub struct SiteResidency {
+    /// Bytes held as f32 — doubled, when the checkpoint stored bf16.
+    pub widened_f32: usize,
+    /// Bytes held exactly as the checkpoint holds them.
+    pub compact: usize,
+}
+
+impl SiteResidency {
+    fn add(&mut self, w: &LoadedWeight) {
+        if w.is_widened_f32() {
+            self.widened_f32 += w.resident_bytes();
+        } else {
+            self.compact += w.resident_bytes();
+        }
+    }
+
+    pub fn total(&self) -> usize {
+        self.widened_f32 + self.compact
+    }
+}
+
+/// Where a prepared image's bytes are, and in which representation.
+#[derive(Default, Clone, Copy, Debug)]
+pub struct ResidencyCensus {
+    pub embedding: SiteResidency,
+    pub attention: SiteResidency,
+    pub delta: SiteResidency,
+    pub ffn: SiteResidency,
+    pub head: SiteResidency,
+    /// Norms, biases, the depthwise convolution, gate biases — always
+    /// f32, and small enough that widening them costs nothing worth
+    /// recovering.
+    pub glue: SiteResidency,
+}
+
+impl ResidencyCensus {
+    /// Every site, in the order a decode reads them.
+    pub fn sites(&self) -> [(&'static str, SiteResidency); 6] {
+        [
+            ("embedding", self.embedding),
+            ("attention", self.attention),
+            ("delta", self.delta),
+            ("ffn", self.ffn),
+            ("head", self.head),
+            ("glue", self.glue),
+        ]
+    }
+
+    pub fn total(&self) -> usize {
+        self.sites().iter().map(|(_, s)| s.total()).sum()
+    }
+
+    pub fn widened_f32(&self) -> usize {
+        self.sites().iter().map(|(_, s)| s.widened_f32).sum()
+    }
+
+    pub fn compact(&self) -> usize {
+        self.sites().iter().map(|(_, s)| s.compact).sum()
     }
 }

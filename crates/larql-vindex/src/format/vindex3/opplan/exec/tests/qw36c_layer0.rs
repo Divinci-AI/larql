@@ -25,6 +25,7 @@
 
 use crate::format::vindex3::inspect::inspect_container;
 use crate::format::vindex3::opplan::exec::continuation::RecurrentState;
+use crate::format::vindex3::opplan::exec::cpu::WeightRows;
 use crate::format::vindex3::opplan::exec::gated_delta::{layer_forward, state_geometry, Mutation};
 use crate::format::vindex3::opplan::exec::operands::OperandStore;
 use crate::format::vindex3::opplan::{plan_component_ops, LayerAttention};
@@ -109,15 +110,15 @@ fn the_first_recurrent_layer_matches_hf_on_the_real_container() {
         load(&op.out_proj),
     );
     let weights = crate::format::vindex3::opplan::exec::gated_delta::GatedDeltaWeights {
-        in_proj_qkv: &qkv,
-        in_proj_a: &a,
-        in_proj_b: &b,
-        in_proj_z: &z,
+        in_proj_qkv: WeightRows::F32(&qkv),
+        in_proj_a: WeightRows::F32(&a),
+        in_proj_b: WeightRows::F32(&b),
+        in_proj_z: WeightRows::F32(&z),
         conv1d: &conv,
         a_log: &alog,
         dt_bias: &dt,
         norm: &nrm,
-        out_proj: &outp,
+        out_proj: WeightRows::F32(&outp),
         norm_eps: plan.layers[0].pre_attention_norm.eps as f32,
     };
     let mut state = RecurrentState::zeros(&state_geometry(op).unwrap());

@@ -20,6 +20,7 @@
 
 mod fixture;
 
+use crate::format::vindex3::opplan::OperandRef;
 use larql_models::config::{
     Activation, ExpertFormat, MoeRouterKind, NormType, ParameterFreeQkNorm, PositionPolicy,
     QkNormScope,
@@ -267,7 +268,13 @@ fn a_gate_less_dense_op_binds_two_operands_and_runs_ungated() {
     let mut op = plan.layers[0].ffn.dense().expect("dense layer").clone();
     op.gate = None;
     let ffn = LayerFfn::Dense(Box::new(op));
-    let operands = FfnOperands::load(&ffn, (&store).into(), WeightFormat::F32).unwrap();
+    let operands = FfnOperands::load(
+        &ffn,
+        (&store).into(),
+        &|_: &OperandRef| WeightFormat::F32,
+        WeightFormat::F32,
+    )
+    .unwrap();
     assert_eq!(operands.weight_slices().len(), 2, "up and down only");
     let x = norm_values(super::HIDDEN, INPUT_SEED);
     let production = operands
@@ -505,8 +512,13 @@ fn gemma4_routing_is_refused_and_a_missing_router_bias_adds_nothing() {
 }
 
 /// A decode step whose output projection arrives in a representation the
-/// backend did not declare fails closed after projection — the error names
-/// the representation mismatch rather than converting.
+/// backend cannot run fails closed AT the projection — the error names the
+/// representation it was handed rather than converting mid-decode.
+///
+/// Asserts on the representation's own name, not on a fixed sentence: the
+/// claim is that the refusal identifies what arrived, and a message this
+/// test pinned word-for-word would keep passing after it stopped saying
+/// anything useful.
 #[test]
 fn a_decode_step_fails_closed_on_a_non_f32_output_projection() {
     let inputs = vec![lcg_values(HEAD_DIM, INPUT_SEED)];
@@ -523,7 +535,8 @@ fn a_decode_step_fails_closed_on_a_non_f32_output_projection() {
         .err()
         .expect("a non-f32 output projection must refuse")
         .to_string();
-    assert!(err.contains("declared f32 weights"), "{err}");
+    assert!(err.contains("f16"), "{err}");
+    assert!(err.contains("no CPU projection kernel"), "{err}");
 }
 
 /// A dense FFN call over the tiny diagonal weights.

@@ -41,7 +41,7 @@ use super::{AttentionOp, ComponentOpPlan, LayerPlan};
 use crate::error::VindexError;
 use backend::{
     AttentionCall, AttentionStepCall, BiasCall, GateCall, NormCall, PlanBackend, ProjectCall,
-    QkNormCall, SinkCall, WeightFormat,
+    QkNormCall, SinkCall,
 };
 use kv::KvState;
 use operands::OperandSource;
@@ -504,7 +504,7 @@ fn execute_layer<B: PlanBackend + ?Sized, K: KvState + ?Sized>(
             let state = provider.recurrent_state(layer_index)?;
             gated_delta::layer_forward_with(
                 &ops.op,
-                &ops.weights(),
+                &ops.weights()?,
                 &inputs,
                 state,
                 gated_delta::Mutation::None,
@@ -622,7 +622,7 @@ impl AttentionOperands {
     pub(super) fn load(
         op: &AttentionOp,
         store: OperandSource<'_>,
-        format: WeightFormat,
+        format: prepared::FormatFor<'_>,
     ) -> Result<Self, VindexError> {
         // A K≡V layer names the K operand as `v`: the value projection is
         // the raw K projection (before the key's norm and rotation), which
@@ -630,16 +630,20 @@ impl AttentionOperands {
         // V before conditioning Q/K, and apply the parameter-free V norm
         // to it when the op carries one.
         Ok(Self {
-            w_q: load_weight(store, &op.q, format)?,
-            w_k: load_weight(store, &op.k, format)?,
-            w_v: load_weight(store, &op.v, format)?,
-            w_o: load_weight(store, &op.o, format)?,
+            w_q: load_weight(store, &op.q, format(&op.q))?,
+            w_k: load_weight(store, &op.k, format(&op.k))?,
+            w_v: load_weight(store, &op.v, format(&op.v))?,
+            w_o: load_weight(store, &op.o, format(&op.o))?,
             qk_weights: match &op.qk_norm {
                 Some(qk) => Some((store.load(&qk.q)?, store.load(&qk.k)?)),
                 None => None,
             },
             gate: match &op.output_gate {
-                Some(gate) => Some(load_weight(store, &gate.projection, format)?),
+                Some(gate) => Some(load_weight(
+                    store,
+                    &gate.projection,
+                    format(&gate.projection),
+                )?),
                 None => None,
             },
             biases: match (&op.q_bias, &op.k_bias, &op.v_bias, &op.o_bias) {
@@ -669,6 +673,15 @@ impl AttentionOperands {
 
     /// Every matrix operand this attention holds, for residency
     /// preparation.
+    /// Every matrix operand, for residency accounting.
+    pub(super) fn loaded_matrices(&self) -> Vec<&LoadedWeight> {
+        let mut all = vec![&self.w_q, &self.w_k, &self.w_v, &self.w_o];
+        if let Some(gate) = &self.gate {
+            all.push(gate);
+        }
+        all
+    }
+
     pub(super) fn weight_slices(&self) -> Vec<backend::WeightSlice<'_>> {
         let mut slices = vec![
             self.w_q.slice(),

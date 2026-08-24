@@ -48,7 +48,7 @@ use larql_models::config::{Activation, GateActivation, GateCombine, GatePlacemen
 
 use super::backend::{
     AttentionCall, AttentionOut, AttentionStepCall, AttentionStepOut, DispatchStats, FfnCall,
-    GateCall, MatrixClass, NormCall, PlanBackend, ProjectCall, ProjectedQkv, RoutedFfnCall,
+    GateCall, MatrixOperand, NormCall, PlanBackend, ProjectCall, ProjectedQkv, RoutedFfnCall,
     WeightFormat, WeightFormats, WeightSlice,
 };
 use super::production::{
@@ -339,8 +339,13 @@ impl<M: MatMul + Send> PlanBackend for DevicePlanBackend<M> {
         })
     }
 
-    fn weight_format(&self, class: MatrixClass) -> WeightFormat {
-        self.formats.for_class(class)
+    /// Per class, and deliberately not per operand: a device backend's
+    /// format is about what its kernels can execute and what stays
+    /// resident in device memory, and neither of those turns on a host
+    /// cache boundary. The operand's size is available and ignored on
+    /// purpose.
+    fn weight_format(&self, operand: MatrixOperand) -> WeightFormat {
+        self.formats.for_class(operand.class)
     }
 
     fn prepare(&self, weights: &[WeightSlice<'_>]) {

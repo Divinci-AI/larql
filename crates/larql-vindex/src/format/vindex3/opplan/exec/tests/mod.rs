@@ -12,6 +12,7 @@
 mod attention_kv_parity;
 mod bf16_gemv_bench;
 mod bf16_residency;
+mod compact_consumption;
 mod continuation;
 mod controls;
 mod coverage_backend_decode;
@@ -39,6 +40,7 @@ mod observe;
 mod overrides;
 mod parity;
 mod residency;
+mod residency_census;
 mod routed;
 mod seam;
 mod sinks_bias;

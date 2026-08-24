@@ -36,29 +36,12 @@ use larql_compute::MoeGateRule;
 
 use super::super::super::graph::policy::AttentionSpan;
 use super::backend::{
-    AttentionCall, AttentionOut, AttentionStepCall, AttentionStepOut, FfnCall, GateCall, NormCall,
-    PlanBackend, ProjectCall, ProjectedQkv, QkNormCall, RoutedFfnCall,
+    AttentionCall, AttentionOut, AttentionStepCall, AttentionStepOut, FfnCall, GateCall,
+    MatrixClass, MatrixOperand, NormCall, PlanBackend, ProjectCall, ProjectedQkv, QkNormCall,
+    RoutedFfnCall, WeightFormat,
 };
-/// Gated DeltaNet's dense projections through `larql-compute`, which
-/// dispatches to BLAS `sgemv` (Accelerate on macOS, OpenBLAS on
-/// Linux/FreeBSD, scalar on Windows by deliberate choice).
-///
-/// Measured against the scalar transcription on Qwen3.8's real shapes:
-/// 18.5x at 10240x5120, 19.2x at 6144x5120, 20.8x at 5120x6144, and
-/// 46.9x at the tiny 48x5120 — BLAS call overhead never lost, so all
-/// five projections route here rather than only the large ones.
-///
-/// NOT bit-identical: sgemv reassociates the sum, measured at rel_rms
-/// ~1.3e-6 against the scalar path. The existing parity gates are what
-/// judge that, and the reference implementation stays independent.
-struct BlasProjections;
-
-impl super::gated_delta::DenseProjector for BlasProjections {
-    fn project(&self, weight: &[f32], x: &[f32], out_dim: usize) -> Vec<f32> {
-        matmul_vec(x, weight, out_dim, x.len())
-    }
-}
-
+use super::cpu::physical::{project_matrix, ExecutorProjections};
+use super::cpu::PhysicalProjectionPlan;
 use super::kernels::{
     gather_fused_half, mrope_rotate_scaled, rope_rotate, rope_rotate_scaled, FusedHalf,
 };
@@ -535,13 +518,13 @@ impl ProductionBackend {
             Some(GateSource::FusedQueryProjection)
         );
         let mut q = if fused_gate {
-            let full = matmul_vec(pre, call.w_q.as_f32()?, q_rows * 2, call.hidden);
+            let full = project_matrix(&call.w_q, pre, q_rows * 2, call.hidden)?;
             gather_fused_half(&full, call.num_q_heads, head_dim, FusedHalf::Query)
         } else {
-            matmul_vec(pre, call.w_q.as_f32()?, q_rows, call.hidden)
+            project_matrix(&call.w_q, pre, q_rows, call.hidden)?
         };
-        let mut k = matmul_vec(pre, call.w_k.as_f32()?, kv_rows, call.hidden);
-        let mut v = matmul_vec(pre, call.w_v.as_f32()?, kv_rows, call.hidden);
+        let mut k = project_matrix(&call.w_k, pre, kv_rows, call.hidden)?;
+        let mut v = project_matrix(&call.w_v, pre, kv_rows, call.hidden)?;
         add_projection_biases(call, &mut q, &mut k, &mut v);
         condition_v_in_place(call, &mut v);
         condition_qk_in_place(call, position, &mut q, &mut k)?;
@@ -569,10 +552,10 @@ impl ProductionBackend {
             let GatePlacement::AfterAggregationBeforeOutputProjection = spec.placement;
             let gate_values = match spec.source {
                 GateSource::AttentionInput => {
-                    matmul_vec(gate_input, weight.as_f32()?, q_rows, call.hidden)
+                    project_matrix(weight, gate_input, q_rows, call.hidden)?
                 }
                 GateSource::FusedQueryProjection => {
-                    let full = matmul_vec(gate_input, weight.as_f32()?, q_rows * 2, call.hidden);
+                    let full = project_matrix(weight, gate_input, q_rows * 2, call.hidden)?;
                     gather_fused_half(&full, call.num_q_heads, call.head_dim, FusedHalf::Gate)
                 }
             };
@@ -581,15 +564,32 @@ impl ProductionBackend {
             }
         }
 
-        let mut out = matmul_vec(&concat, call.w_o.as_f32()?, call.hidden, q_rows);
+        let mut out = project_matrix(&call.w_o, &concat, call.hidden, q_rows)?;
         add_output_bias(call, &mut out);
         Ok(out)
     }
 }
 
 impl PlanBackend for ProductionBackend {
-    fn dense_projector(&self) -> &dyn super::gated_delta::DenseProjector {
-        &BlasProjections
+    fn dense_projector(&self) -> &dyn super::gated_delta::DenseProjections {
+        &ExecutorProjections
+    }
+
+    /// **The policy.** One decision per matrix, producing the format here
+    /// and the kernel at [`project_rows`] — see
+    /// [`PhysicalProjectionPlan`].
+    fn weight_format(&self, operand: MatrixOperand) -> WeightFormat {
+        match operand.class {
+            // The packed bank is widened to f32 on the way in and sliced
+            // into per-expert matrices; there are no stored bytes left to
+            // keep by the time a format could apply.
+            MatrixClass::RoutedExpertBank => WeightFormat::F32,
+            MatrixClass::AttentionProjection
+            | MatrixClass::FfnProjection
+            | MatrixClass::OutputHead => {
+                PhysicalProjectionPlan::choose(operand.elements, operand.stored_bf16).format()
+            }
+        }
     }
 
     fn name(&self) -> &str {
@@ -621,12 +621,7 @@ impl PlanBackend for ProductionBackend {
     }
 
     fn project(&self, call: ProjectCall<'_>) -> Result<Vec<f32>, VindexError> {
-        Ok(matmul_vec(
-            call.x,
-            call.weight.as_f32()?,
-            call.out_dim,
-            call.in_dim,
-        ))
+        project_matrix(&call.weight, call.x, call.out_dim, call.in_dim)
     }
 
     fn attention(&self, call: AttentionCall<'_>) -> Result<AttentionOut, VindexError> {
@@ -704,15 +699,10 @@ impl PlanBackend for ProductionBackend {
 
     fn ffn(&self, call: FfnCall<'_>) -> Result<Vec<f32>, VindexError> {
         require_plain_gate("production", call.gate_policy)?;
-        let up = matmul_vec(call.x, call.up.as_f32()?, call.intermediate, call.hidden);
+        let up = project_matrix(&call.up, call.x, call.intermediate, call.hidden)?;
         let inner: Vec<f32> = match call.gate {
             Some(gate_weight) => {
-                let gate = matmul_vec(
-                    call.x,
-                    gate_weight.as_f32()?,
-                    call.intermediate,
-                    call.hidden,
-                );
+                let gate = project_matrix(&gate_weight, call.x, call.intermediate, call.hidden)?;
                 match call.activation {
                     Activation::Silu => geglu_silu_alloc(&gate, &up),
                     // The served Gemma gate/up kernel (tanh-approximated
@@ -731,12 +721,7 @@ impl PlanBackend for ProductionBackend {
                 other => return Err(unsupported_activation("ungated", other)),
             },
         };
-        Ok(matmul_vec(
-            &inner,
-            call.down.as_f32()?,
-            call.hidden,
-            call.intermediate,
-        ))
+        project_matrix(&call.down, &inner, call.hidden, call.intermediate)
     }
 
     fn routed_ffn(&self, call: RoutedFfnCall<'_>) -> Result<Vec<f32>, VindexError> {
@@ -777,7 +762,7 @@ impl PlanBackend for ProductionBackend {
         multiplier: Option<f64>,
         softcapping: Option<f32>,
     ) -> Result<Vec<f32>, VindexError> {
-        let mut logits = matmul_vec(x, projection.as_f32()?, vocab, hidden);
+        let mut logits = project_matrix(&projection, x, vocab, hidden)?;
         for logit in &mut logits {
             if let Some(multiplier) = multiplier {
                 *logit *= multiplier as f32;

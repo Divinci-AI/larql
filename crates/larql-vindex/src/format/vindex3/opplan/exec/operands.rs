@@ -97,6 +97,21 @@ impl OperandStore {
         self.loads.load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// The dtype the container stores this operand as — tensor-table
+    /// metadata only, no payload read.
+    ///
+    /// Separate from [`Self::load_raw`] because the residency policy has
+    /// to know what a 100 MB matrix is BEFORE deciding how to hold it,
+    /// and a query that read the matrix to answer would load the model
+    /// twice.
+    pub fn stored_dtype(&self, operand: &OperandRef) -> Option<&str> {
+        self.segments
+            .get(&operand.object)?
+            .tensors
+            .get(&operand.tensor)
+            .map(|t| t.dtype.as_str())
+    }
+
     /// Load one operand's stored bytes and dtype, unwidened — for a
     /// caller that converts to a representation other than f32 (and for
     /// [`Self::load`] itself, so there is exactly one resolution path).
@@ -342,6 +357,26 @@ impl<'a> OperandSource<'a> {
             overrides.apply(operand, &mut values)?;
         }
         Ok(values)
+    }
+
+    /// Whether this operand can be held in the checkpoint's own compact
+    /// bytes.
+    ///
+    /// Two conditions, and the second is easy to forget: the container
+    /// must store bf16, AND no overlay edit may stand in the way. An edit
+    /// is an f32-space fact with no representation in stored bytes, so an
+    /// edited operand has to be widened to be honoured at all — see
+    /// [`Self::load_raw`], which refuses it.
+    ///
+    /// False on anything it cannot establish. This decides how many bytes
+    /// a weight occupies, never what it means, so an unknown answers
+    /// "widen it" and the load path reports any real problem a moment
+    /// later with the tensor's name.
+    pub fn is_stored_bf16(&self, operand: &OperandRef) -> bool {
+        if self.overrides.is_some_and(|o| o.is_overridden(operand)) {
+            return false;
+        }
+        self.base.stored_dtype(operand) == Some(DTYPE_BF16)
     }
 
     /// Load one operand's stored bytes unwidened. Overlay edits are

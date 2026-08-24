@@ -47,7 +47,7 @@ pub trait DenseProjector: Sync {
 /// finding was that widening to a scratch matrix first costs more than
 /// the traffic it saves — 27.3 GB/s against 122.0 — so a compact format
 /// must reach the kernel still compact and be decoded into registers.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum WeightRows<'a> {
     F32(&'a [f32]),
     /// Big-endian-agnostic bf16 code units: each is the top 16 bits of the
