@@ -71,6 +71,38 @@ fn a_relative_slash_path_is_also_explicit_local() {
     );
 }
 
+// A native Windows absolute path (`C:\Users\...`) contains no `/` at
+// all, so the slash check alone can't catch it — it used to fall
+// through to `parse_registry`, split on the drive letter's `:`, and
+// refuse with a bogus "model name 'C' must be lowercase..." error
+// (caught by Windows CI on a real tempdir path). `#[cfg(windows)]`
+// because `PathBuf::is_absolute` only understands drive-letter syntax
+// when compiled for Windows — on other hosts this string is just an
+// oddly-shaped relative path, already exercised by the malformed-name
+// cases below.
+#[test]
+#[cfg(windows)]
+fn a_windows_drive_absolute_path_is_also_explicit_local() {
+    let r = ModelReference::parse(r"C:\Users\runner\AppData\Local\Temp\some-vindex").unwrap();
+    assert_eq!(
+        r,
+        ModelReference::Explicit(ExplicitReference::Local(
+            r"C:\Users\runner\AppData\Local\Temp\some-vindex".into()
+        ))
+    );
+}
+
+// The Windows-absolute check must not swallow a short, otherwise-valid
+// registry name that happens to contain a `:` — `x:foo` has no root
+// after the colon, so Windows path semantics call it "drive-relative"
+// rather than absolute, and it keeps resolving as `name:variant`.
+#[test]
+#[cfg(windows)]
+fn a_drive_relative_string_without_a_root_is_still_a_registry_reference() {
+    let r = ModelReference::parse("x:foo").unwrap();
+    assert!(matches!(r, ModelReference::Registry { .. }), "{r:?}");
+}
+
 // ── Malformed references refuse by name ─────────────────────────────────
 
 #[test]

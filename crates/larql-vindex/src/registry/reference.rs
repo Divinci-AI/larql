@@ -22,6 +22,13 @@
 //! `owner/name` HF shorthand; this grammar has no such guess to make — a
 //! shorthand HF reference is written `hf://owner/name`, never inferred
 //! from a stray slash.
+//!
+//! `/` alone under-covers one real shape: a native Windows absolute path
+//! (`C:\Users\...`) contains no `/` at all, so on Windows the local-path
+//! check also accepts anything [`std::path::Path::is_absolute`] agrees
+//! with — a drive-relative string like `C:foo` (no root) still isn't
+//! absolute there, so it can't collide with a short registry name that
+//! happens to contain a `:`.
 
 use std::path::PathBuf;
 
@@ -154,7 +161,7 @@ impl ModelReference {
         if is_hf_path(raw) {
             return parse_hf(raw);
         }
-        if raw.contains('/') {
+        if raw.contains('/') || PathBuf::from(raw).is_absolute() {
             return Ok(Self::Explicit(ExplicitReference::Local(PathBuf::from(raw))));
         }
         parse_registry(raw)

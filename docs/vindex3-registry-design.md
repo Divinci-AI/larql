@@ -201,8 +201,9 @@ decision most worth confirming before writing the schema.
 - **No org/namespace enforcement exists anywhere.** `is_hf_path` is a
   bare `"hf://"` prefix check. `chrishayuk/*-vindex` appears
   throughout docs/tests purely as the author's personal example, never
-  checked or allow-listed in code. There is no `LARQL_HF_ORG`-style
-  config. An official short-name → HF-repo mapping is greenfield.
+  checked or allow-listed in code. There is no LARQL_HF_ORG-style
+  environment-variable config. An official short-name → HF-repo
+  mapping is greenfield.
 - Sibling/preset conventions (`{repo}-{preset}`, `client`/`attn`/
   `embed`/`server`/`browse`) exist only because `larql slice` can
   carve V2 vindexes — `slice` explicitly refuses VINDEX3 containers.
@@ -557,7 +558,7 @@ download list with a new VINDEX3 hardcoded download list** — that
 would recreate the exact failure mode one generation later. 2C does two
 things together: (1) kill `pull_cmd`'s independent HF/name heuristic,
 routing it through the same claimed/unclaimed dispatch 2A/2B share; (2)
-make the actual HF downloader generation-aware, deriving VINDEX3
+turn the actual HF downloader generation-aware, deriving VINDEX3
 completeness from the container's own structure rather than a second
 guessed list.
 
