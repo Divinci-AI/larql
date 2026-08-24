@@ -10,6 +10,7 @@
 //! placement, RoPE convention, residual order — not shared arithmetic.
 
 mod attention_kv_parity;
+mod bf16_gemv_bench;
 mod continuation;
 mod controls;
 mod coverage_backend_decode;
