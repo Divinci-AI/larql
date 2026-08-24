@@ -9,10 +9,14 @@
 use super::super::ledger::{ledger, ProjectionLedger};
 use super::super::physical::PhysicalProjectionPlan;
 
-const PLANS: [PhysicalProjectionPlan; 3] = [
+/// Every plan the ledger has a slot for. Adding a plan without adding it
+/// here would leave the new slot untested, so `all_enumerates_every_plan`
+/// checks the two agree in length as well as in content.
+const PLANS: [PhysicalProjectionPlan; 4] = [
     PhysicalProjectionPlan::ScalarF32,
     PhysicalProjectionPlan::BlasF32,
     PhysicalProjectionPlan::FusedBf16,
+    PhysicalProjectionPlan::FusedQ8,
 ];
 
 #[test]
@@ -42,15 +46,16 @@ fn all_enumerates_every_plan() {
         l.record(*plan, i + 1, 1);
     }
     let seen: Vec<_> = l.all().iter().map(|(p, t)| (*p, t.bytes)).collect();
+    let want: Vec<_> = PLANS
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (*p, (i + 1) as u64))
+        .collect();
     assert_eq!(
-        seen,
-        vec![
-            (PhysicalProjectionPlan::ScalarF32, 1),
-            (PhysicalProjectionPlan::BlasF32, 2),
-            (PhysicalProjectionPlan::FusedBf16, 3),
-        ]
+        seen, want,
+        "`all` and the test's plan list disagree — a plan with a ledger slot and no test is a          tally nothing checks"
     );
-    assert_eq!(l.total_bytes(), 6);
+    assert_eq!(l.total_bytes(), (1..=PLANS.len() as u64).sum::<u64>());
 }
 
 /// Reset zeroes every plan, not just the one that was busiest.
@@ -64,7 +69,7 @@ fn reset_clears_every_plan() {
     for plan in PLANS {
         l.record(plan, 7, 3);
     }
-    assert_eq!(l.total_bytes(), 21);
+    assert_eq!(l.total_bytes(), 7 * PLANS.len() as u64);
     l.reset();
     for plan in PLANS {
         assert_eq!(
@@ -80,4 +85,39 @@ fn reset_clears_every_plan() {
 #[test]
 fn the_shared_ledger_is_one_ledger() {
     assert!(std::ptr::eq(ledger(), ledger()));
+}
+
+/// A plan the policy cannot yet produce still has a working slot.
+///
+/// `FusedQ8` is reachable by OBSERVATION before it is reachable by
+/// `choose`, so nothing in a decode writes to its tally yet. Without this
+/// the slot would be untested until the day it was first used, which is
+/// the worst day to discover it aliases another.
+#[test]
+fn a_slot_works_before_the_policy_can_reach_it() {
+    // `new` rather than `default`: it is what the process static is
+    // built from, so a test that only ever used `default` would leave the
+    // constructor the shipped ledger actually uses unexercised.
+    let l = ProjectionLedger::new();
+    assert_eq!(l.total_bytes(), 0, "a fresh ledger has counted nothing");
+    l.record(PhysicalProjectionPlan::FusedQ8, 4_096, 6);
+    assert_eq!(
+        l.get(PhysicalProjectionPlan::FusedQ8),
+        crate::format::vindex3::opplan::exec::cpu::PlanTally {
+            calls: 1,
+            bytes: 4_096,
+            slabs: 6,
+        }
+    );
+    for other in [
+        PhysicalProjectionPlan::ScalarF32,
+        PhysicalProjectionPlan::BlasF32,
+        PhysicalProjectionPlan::FusedBf16,
+    ] {
+        assert_eq!(
+            l.get(other),
+            Default::default(),
+            "{other:?} was written by a FusedQ8 record — the slots alias"
+        );
+    }
 }

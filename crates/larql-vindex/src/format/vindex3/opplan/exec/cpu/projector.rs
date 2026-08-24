@@ -50,6 +50,24 @@ pub trait DenseProjector: Sync {
 #[derive(Clone, Copy, Debug)]
 pub enum WeightRows<'a> {
     F32(&'a [f32]),
+    /// Symmetric int8 with one f32 scale per `block` elements along the
+    /// INPUT axis: `w[r][i] = codes[r][i] * scales[r][i / block]`.
+    ///
+    /// Blocked rather than per row because the scale is what a row's
+    /// dynamic range costs everyone in it — one outlier in 5120 weights
+    /// would flatten the rest to a handful of levels. Blocked along the
+    /// input axis specifically so a kernel accumulates a block, scales
+    /// once, and moves on, instead of scaling every element.
+    ///
+    /// Unlike [`Self::Bf16`] this is LOSSY: it changes the values the
+    /// checkpoint stores. The kernel below only has to consume the format
+    /// faithfully; whether the format is good enough is a separate
+    /// question with its own gates.
+    Q8 {
+        codes: &'a [i8],
+        scales: &'a [f32],
+        block: usize,
+    },
     /// Big-endian-agnostic bf16 code units: each is the top 16 bits of the
     /// f32 it denotes, so widening is `(bits as u32) << 16` — exact, no
     /// rounding, no table.
@@ -62,6 +80,7 @@ impl WeightRows<'_> {
         match self {
             Self::F32(w) => w.len() / in_dim,
             Self::Bf16(w) => w.len() / in_dim,
+            Self::Q8 { codes, .. } => codes.len() / in_dim,
         }
     }
 
@@ -71,6 +90,22 @@ impl WeightRows<'_> {
         match self {
             Self::F32(w) => Self::F32(&w[a..b]),
             Self::Bf16(w) => Self::Bf16(&w[a..b]),
+            // The scales are sliced ALONGSIDE the codes. A partition that
+            // cut one and not the other would hand a worker the right
+            // weights under another row's scales — finite, plausible
+            // numbers, entirely wrong.
+            Self::Q8 {
+                codes,
+                scales,
+                block,
+            } => {
+                let per_row = in_dim.div_ceil(*block);
+                Self::Q8 {
+                    codes: &codes[a..b],
+                    scales: &scales[start * per_row..(start + count) * per_row],
+                    block: *block,
+                }
+            }
         }
     }
 
@@ -80,6 +115,10 @@ impl WeightRows<'_> {
         match self {
             Self::F32(w) => w.len() * 4,
             Self::Bf16(w) => w.len() * 2,
+            // Scales counted, because they are read too. A Q8 rate that
+            // ignored its own metadata would flatter the format by the
+            // exact amount the metadata costs.
+            Self::Q8 { codes, scales, .. } => codes.len() + scales.len() * 4,
         }
     }
 }

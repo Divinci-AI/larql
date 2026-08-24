@@ -66,6 +66,7 @@ pub struct ProjectionLedger {
     scalar: Tally,
     blas: Tally,
     fused: Tally,
+    fused_q8: Tally,
 }
 
 impl ProjectionLedger {
@@ -74,6 +75,7 @@ impl ProjectionLedger {
             PhysicalProjectionPlan::ScalarF32 => &self.scalar,
             PhysicalProjectionPlan::BlasF32 => &self.blas,
             PhysicalProjectionPlan::FusedBf16 => &self.fused,
+            PhysicalProjectionPlan::FusedQ8 => &self.fused_q8,
         }
     }
 
@@ -92,11 +94,12 @@ impl ProjectionLedger {
     /// Every plan, so a reader enumerates rather than remembers. A caller
     /// that listed the plans itself would stop covering a new one on the
     /// day it was added.
-    pub fn all(&self) -> [(PhysicalProjectionPlan, PlanTally); 3] {
+    pub fn all(&self) -> [(PhysicalProjectionPlan, PlanTally); 4] {
         [
             PhysicalProjectionPlan::ScalarF32,
             PhysicalProjectionPlan::BlasF32,
             PhysicalProjectionPlan::FusedBf16,
+            PhysicalProjectionPlan::FusedQ8,
         ]
         .map(|p| (p, self.get(p)))
     }
@@ -114,26 +117,30 @@ impl ProjectionLedger {
         self.scalar.reset();
         self.blas.reset();
         self.fused.reset();
+        self.fused_q8.reset();
     }
 }
 
-static LEDGER: ProjectionLedger = ProjectionLedger {
-    scalar: Tally {
-        calls: AtomicU64::new(0),
-        bytes: AtomicU64::new(0),
-        slabs: AtomicU64::new(0),
-    },
-    blas: Tally {
-        calls: AtomicU64::new(0),
-        bytes: AtomicU64::new(0),
-        slabs: AtomicU64::new(0),
-    },
-    fused: Tally {
-        calls: AtomicU64::new(0),
-        bytes: AtomicU64::new(0),
-        slabs: AtomicU64::new(0),
-    },
-};
+impl ProjectionLedger {
+    /// An empty ledger. `const` so the process one is a static, and so a
+    /// test can hold its own rather than race the shared counters.
+    pub(crate) const fn new() -> Self {
+        #[allow(clippy::declare_interior_mutable_const)]
+        const ZERO: Tally = Tally {
+            calls: AtomicU64::new(0),
+            bytes: AtomicU64::new(0),
+            slabs: AtomicU64::new(0),
+        };
+        Self {
+            scalar: ZERO,
+            blas: ZERO,
+            fused: ZERO,
+            fused_q8: ZERO,
+        }
+    }
+}
+
+static LEDGER: ProjectionLedger = ProjectionLedger::new();
 
 /// The process's projection ledger.
 pub fn ledger() -> &'static ProjectionLedger {

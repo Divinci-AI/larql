@@ -19,7 +19,7 @@
 //! the observation, and a projection helper that sat somewhere else would
 //! be one refactor away from choosing its own kernel again.
 
-use super::kernels::{BlasF32, FusedBf16, ScalarF32};
+use super::kernels::{BlasF32, FusedBf16, FusedQ8, ScalarF32};
 use super::projector::{DenseProjector, WeightRows};
 use crate::error::VindexError;
 use crate::format::vindex3::opplan::exec::backend::{WeightFormat, WeightSlice};
@@ -39,6 +39,14 @@ pub enum PhysicalProjectionPlan {
     /// The literal scalar transcription over f32. The oracle: chosen by
     /// the reference backend, never by the policy.
     ScalarF32,
+    /// Q8 resident, widened and scaled in registers, executor-threaded.
+    ///
+    /// Reachable by OBSERVATION but not yet by [`Self::choose`]: the
+    /// kernel is proven and the loader cannot make a Q8 operand resident
+    /// yet, and a policy that answered `Q8` today would refuse at load.
+    /// Listed here so `for_resident` stays total — the moment it needed a
+    /// fallback arm it would be guessing.
+    FusedQ8,
     /// f32 resident, BLAS `sgemv`, threaded by the library.
     ///
     /// The right answer for a matrix whose widened image still fits
@@ -57,6 +65,10 @@ impl PhysicalProjectionPlan {
         match self {
             Self::ScalarF32 | Self::BlasF32 => WeightFormat::F32,
             Self::FusedBf16 => WeightFormat::Bf16,
+            // No `WeightFormat` names Q8 yet; declaring one before the
+            // loader can honour it would let the policy pick a format
+            // that fails at load.
+            Self::FusedQ8 => WeightFormat::Bf16,
         }
     }
 
@@ -66,6 +78,7 @@ impl PhysicalProjectionPlan {
             Self::ScalarF32 => &ScalarF32,
             Self::BlasF32 => &BlasF32,
             Self::FusedBf16 => &FusedBf16,
+            Self::FusedQ8 => &FusedQ8,
         }
     }
 
@@ -102,6 +115,7 @@ impl PhysicalProjectionPlan {
         match rows {
             WeightRows::F32(_) => Self::BlasF32,
             WeightRows::Bf16(_) => Self::FusedBf16,
+            WeightRows::Q8 { .. } => Self::FusedQ8,
         }
     }
 }

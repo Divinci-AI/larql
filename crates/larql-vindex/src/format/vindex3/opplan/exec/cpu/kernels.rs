@@ -99,6 +99,119 @@ impl DenseProjector for FusedBf16 {
     }
 }
 
+/// **Fused Q8.** Load the packed codes, widen and scale in REGISTERS,
+/// accumulate f32, discard.
+///
+/// The same architecture as [`FusedBf16`] and for the same measured
+/// reason: CPU-1B priced widen-a-tile-into-scratch-then-`sgemv` at 27.3
+/// GB/s against a fused kernel's 122.0 — slower than plain f32 while
+/// reading half the bytes. A compact format that materialises before it
+/// computes has residency and nothing else, and Q8 would pay that twice
+/// over.
+///
+/// The scale applies once per BLOCK, not once per element: the block's
+/// integer dot is accumulated in f32 and multiplied at the end, so the
+/// per-element work is a widen and an FMA regardless of block size.
+///
+/// **This one is lossy**, unlike every kernel beside it. `FusedBf16`
+/// changes representation and no value; this changes the values, and the
+/// numbers it produces are only as good as the quantiser that made the
+/// codes. That judgement belongs to whoever chooses the format — here the
+/// only claim is that the kernel computes what the format DENOTES, which
+/// `the_q8_kernel_computes_what_the_format_denotes` pins against a scalar
+/// definition.
+pub struct FusedQ8;
+
+impl DenseProjector for FusedQ8 {
+    fn parallelism(&self) -> CpuParallelism {
+        CpuParallelism::ExternalPool
+    }
+
+    fn project_rows(&self, weight_rows: WeightRows<'_>, x: &[f32], out: &mut [f32]) {
+        let WeightRows::Q8 {
+            codes,
+            scales,
+            block,
+        } = weight_rows
+        else {
+            panic!("the fused q8 kernel consumes q8 weights only");
+        };
+        let in_dim = x.len();
+        let per_row = in_dim.div_ceil(block);
+        for (o, slot) in out.iter_mut().enumerate() {
+            let row = &codes[o * in_dim..(o + 1) * in_dim];
+            let row_scales = &scales[o * per_row..(o + 1) * per_row];
+            *slot = q8_dot(row, row_scales, block, x);
+        }
+    }
+}
+
+/// One row's dot product: per-block integer accumulation, scaled once.
+#[inline]
+pub(super) fn q8_dot(codes: &[i8], scales: &[f32], block: usize, x: &[f32]) -> f32 {
+    let mut acc = 0.0f32;
+    for (b, scale) in scales.iter().enumerate() {
+        let lo = b * block;
+        let hi = (lo + block).min(codes.len());
+        if lo >= hi {
+            break;
+        }
+        acc += scale * q8_block_dot(&codes[lo..hi], &x[lo..hi]);
+    }
+    acc
+}
+
+/// The unscaled dot of one block.
+#[inline]
+fn q8_block_dot(codes: &[i8], x: &[f32]) -> f32 {
+    #[cfg(target_arch = "aarch64")]
+    {
+        // SAFETY: NEON is baseline on aarch64; the loop reads only within
+        // `codes` and `x`, which are equal length by the caller.
+        return unsafe { q8_block_dot_neon(codes, x) };
+    }
+    #[allow(unreachable_code)]
+    q8_block_dot_portable(codes, x)
+}
+
+/// The portable definition the NEON version must agree with.
+pub(super) fn q8_block_dot_portable(codes: &[i8], x: &[f32]) -> f32 {
+    codes.iter().zip(x).map(|(c, v)| *c as f32 * v).sum()
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn q8_block_dot_neon(codes: &[i8], x: &[f32]) -> f32 {
+    use std::arch::aarch64::*;
+    let n = codes.len().min(x.len());
+    let (cp, xp) = (codes.as_ptr(), x.as_ptr());
+    let (mut a0, mut a1) = (vdupq_n_f32(0.0), vdupq_n_f32(0.0));
+    let (mut a2, mut a3) = (vdupq_n_f32(0.0), vdupq_n_f32(0.0));
+    let mut i = 0usize;
+    while i + 16 <= n {
+        // i8x16 -> two i16x8 -> four i32x4 -> four f32x4. The widen is
+        // exact at every step; only the final multiply rounds.
+        let c = vld1q_s8(cp.add(i));
+        let lo = vmovl_s8(vget_low_s8(c));
+        let hi = vmovl_s8(vget_high_s8(c));
+        let f0 = vcvtq_f32_s32(vmovl_s16(vget_low_s16(lo)));
+        let f1 = vcvtq_f32_s32(vmovl_s16(vget_high_s16(lo)));
+        let f2 = vcvtq_f32_s32(vmovl_s16(vget_low_s16(hi)));
+        let f3 = vcvtq_f32_s32(vmovl_s16(vget_high_s16(hi)));
+        a0 = vfmaq_f32(a0, f0, vld1q_f32(xp.add(i)));
+        a1 = vfmaq_f32(a1, f1, vld1q_f32(xp.add(i + 4)));
+        a2 = vfmaq_f32(a2, f2, vld1q_f32(xp.add(i + 8)));
+        a3 = vfmaq_f32(a3, f3, vld1q_f32(xp.add(i + 12)));
+        i += 16;
+    }
+    let mut acc = vaddvq_f32(vaddq_f32(vaddq_f32(a0, a1), vaddq_f32(a2, a3)));
+    while i < n {
+        acc += *codes.get_unchecked(i) as f32 * *x.get_unchecked(i);
+        i += 1;
+    }
+    acc
+}
+
 /// One row's dot product, widening in registers.
 #[inline]
 pub(super) fn bf16_dot(w: &[u16], x: &[f32]) -> f32 {
