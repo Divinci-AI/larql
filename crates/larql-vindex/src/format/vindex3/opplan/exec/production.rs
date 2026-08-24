@@ -36,12 +36,16 @@ use larql_compute::MoeGateRule;
 
 use super::super::super::graph::policy::AttentionSpan;
 use super::backend::{
-    AttentionCall, AttentionOut, AttentionStepCall, AttentionStepOut, FfnCall, GateCall, NormCall,
-    PlanBackend, ProjectCall, ProjectedQkv, QkNormCall, RoutedFfnCall,
+    AttentionCall, AttentionOut, AttentionStepCall, AttentionStepOut, FfnCall, GateCall,
+    MatrixClass, MatrixOperand, NormCall, PlanBackend, ProjectCall, ProjectedQkv, QkNormCall,
+    RoutedFfnCall, WeightFormat,
 };
+use super::cpu::physical::{project_matrix, ExecutorProjections};
+use super::cpu::PhysicalProjectionPlan;
 use super::kernels::{
     gather_fused_half, mrope_rotate_scaled, rope_rotate, rope_rotate_scaled, FusedHalf,
 };
+use super::timing::{timed, OpClass};
 use larql_compute::attention::rope::{
     rope_freq_plan, rope_freq_plan_proportional, RopeFreqScaling,
 };
@@ -155,6 +159,10 @@ pub(super) fn condition_qk_in_place(
         Some((scope, offset, q_w, k_w)) => (scope, offset, Some(q_w), Some(k_w)),
         None => (larql_models::config::QkNormScope::PerHead, 0.0, None, None),
     };
+    // Two leaves, not one: QK normalisation and position encoding are
+    // different operations that happen to be adjacent, and "conditioning
+    // cost 9 ms" would not say which to look at.
+    let norm = timed(OpClass::Norm);
     qk_norm_in_place(
         q,
         q_w.map(|w| (w, offset)),
@@ -179,6 +187,9 @@ pub(super) fn condition_qk_in_place(
             *value *= query_scale as f32;
         }
     }
+    drop(norm);
+
+    let _t = timed(OpClass::Rope);
     match call.position {
         PositionPolicy::Rope { theta } => {
             for head in q.chunks_exact_mut(head_dim) {
@@ -289,6 +300,7 @@ pub(super) fn condition_qk_in_place(
 /// for the production and device backends, applied right after the
 /// projection biases and before V is cached.
 pub(super) fn condition_v_in_place(call: &AttentionCall<'_>, v: &mut [f32]) {
+    let _t = timed(OpClass::Norm);
     if call.parameter_free_qk_norm.v {
         let normed = rms_norm_heads_no_weight_eps(
             &as_row(v),
@@ -459,6 +471,7 @@ pub(super) fn aggregate_heads<'k>(
         // component's own geometry here rather than this fallthrough.
         (AttentionSpan::Windowed, _) => 0,
     };
+    let _t = timed(OpClass::AttentionCore);
     let mut concat = vec![0.0f32; q_rows];
     for q_head in 0..call.num_q_heads {
         let kv_head = q_head / group;
@@ -496,14 +509,30 @@ pub(super) fn aggregate_heads<'k>(
     concat
 }
 
+/// One position's projections, plus the gate half when it came out of
+/// the same product.
+///
+/// Private to this backend: `ProjectedQkv` is the shared seam type and
+/// the reference backend deliberately still projects the gate a second
+/// time — it is the literal transcription, and the oracle's value is that
+/// it does the obvious thing. That the two agree to 4e-7 is what licenses
+/// this sharing.
+pub(super) struct ProjectedAttention {
+    pub(super) qkv: ProjectedQkv,
+    /// The gate's values when the plan said they are the other half of
+    /// the query projection. `None` for a gate with its own operand, and
+    /// for a layer with no gate at all.
+    pub(super) gate: Option<Vec<f32>>,
+}
+
 impl ProductionBackend {
     /// One position's Q/K/V projections through the production matvec,
     /// conditioned by the shared glue.
-    fn project_position(
+    pub(super) fn project_position(
         call: &AttentionCall<'_>,
         position: usize,
         pre: &[f32],
-    ) -> Result<ProjectedQkv, VindexError> {
+    ) -> Result<ProjectedAttention, VindexError> {
         let head_dim = call.head_dim;
         let q_rows = call.num_q_heads * head_dim;
         let kv_rows = call.num_kv_heads * head_dim;
@@ -514,28 +543,53 @@ impl ProductionBackend {
             call.gate.as_ref().map(|g| g.spec.source),
             Some(GateSource::FusedQueryProjection)
         );
-        let mut q = if fused_gate {
-            let full = matmul_vec(pre, call.w_q.as_f32()?, q_rows * 2, call.hidden);
-            gather_fused_half(&full, call.num_q_heads, head_dim, FusedHalf::Query)
+        // **Both halves come out of one product.**
+        //
+        // `FusedQueryProjection` says the gate IS the other half of this
+        // projection, over this same activation. Projecting again to
+        // collect it read Qwen3.8's `12288 x 5120` q_proj a second time
+        // per layer — 2.01 GB/token, 3.8% of every token's traffic, for a
+        // vector already computed and discarded.
+        //
+        // The gather is per HEAD, not a contiguous range: head 0's query
+        // rows, then head 0's gate rows, then head 1's. Taking the first
+        // or second `q_rows` would have the right shape and the wrong
+        // tensor.
+        let (mut q, gate) = if fused_gate {
+            let full = project_matrix(&call.w_q, pre, q_rows * 2, call.hidden)?;
+            (
+                gather_fused_half(&full, call.num_q_heads, head_dim, FusedHalf::Query),
+                Some(gather_fused_half(
+                    &full,
+                    call.num_q_heads,
+                    head_dim,
+                    FusedHalf::Gate,
+                )),
+            )
         } else {
-            matmul_vec(pre, call.w_q.as_f32()?, q_rows, call.hidden)
+            (project_matrix(&call.w_q, pre, q_rows, call.hidden)?, None)
         };
-        let mut k = matmul_vec(pre, call.w_k.as_f32()?, kv_rows, call.hidden);
-        let mut v = matmul_vec(pre, call.w_v.as_f32()?, kv_rows, call.hidden);
+        let mut k = project_matrix(&call.w_k, pre, kv_rows, call.hidden)?;
+        let mut v = project_matrix(&call.w_v, pre, kv_rows, call.hidden)?;
         add_projection_biases(call, &mut q, &mut k, &mut v);
         condition_v_in_place(call, &mut v);
         condition_qk_in_place(call, position, &mut q, &mut k)?;
-        Ok((q, k, v))
+        Ok(ProjectedAttention {
+            qkv: (q, k, v),
+            gate,
+        })
     }
 
     /// Aggregation plus this backend's own gate and output matmuls.
-    fn attend_position<'k>(
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn attend_position<'k>(
         call: &AttentionCall<'_>,
         position: usize,
         query: &[f32],
         key_of: impl Fn(usize) -> &'k [f32],
         value_of: impl Fn(usize) -> &'k [f32],
         gate_input: &[f32],
+        projected_gate: Option<&[f32]>,
     ) -> Result<Vec<f32>, VindexError> {
         let q_rows = call.num_q_heads * call.head_dim;
         let mut concat = aggregate_heads(call, position, query, key_of, value_of);
@@ -547,32 +601,65 @@ impl ProductionBackend {
             let GateActivation::Sigmoid = spec.activation;
             let GateCombine::ElementwiseMultiply = spec.combine;
             let GatePlacement::AfterAggregationBeforeOutputProjection = spec.placement;
-            let gate_values = match spec.source {
-                GateSource::AttentionInput => {
-                    matmul_vec(gate_input, weight.as_f32()?, q_rows, call.hidden)
-                }
-                GateSource::FusedQueryProjection => {
-                    let full = matmul_vec(gate_input, weight.as_f32()?, q_rows * 2, call.hidden);
+            let gate_values = match (spec.source, projected_gate) {
+                // Already computed: the projection that produced the
+                // queries produced these in the same pass.
+                (GateSource::FusedQueryProjection, Some(values)) => values.to_vec(),
+                // A fused gate with nothing handed over — the batched
+                // path before it threads one through, or a caller that
+                // reached here another way. Correct, and reads the
+                // operand a second time; the ledger shows it as an extra
+                // call rather than hiding it.
+                (GateSource::FusedQueryProjection, None) => {
+                    let full = project_matrix(weight, gate_input, q_rows * 2, call.hidden)?;
                     gather_fused_half(&full, call.num_q_heads, call.head_dim, FusedHalf::Gate)
                 }
+                // Its own matrix over its own activation: nothing to
+                // share, and sharing would be wrong.
+                (GateSource::AttentionInput, _) => {
+                    project_matrix(weight, gate_input, q_rows, call.hidden)?
+                }
             };
+            let _t = timed(OpClass::OutputGate);
             for (c, g) in concat.iter_mut().zip(&gate_values) {
                 *c *= 1.0 / (1.0 + (-g).exp());
             }
         }
 
-        let mut out = matmul_vec(&concat, call.w_o.as_f32()?, call.hidden, q_rows);
+        let mut out = project_matrix(&call.w_o, &concat, call.hidden, q_rows)?;
         add_output_bias(call, &mut out);
         Ok(out)
     }
 }
 
 impl PlanBackend for ProductionBackend {
+    fn dense_projector(&self) -> &dyn super::gated_delta::DenseProjections {
+        &ExecutorProjections
+    }
+
+    /// **The policy.** One decision per matrix, producing the format here
+    /// and the kernel at [`project_rows`] — see
+    /// [`PhysicalProjectionPlan`].
+    fn weight_format(&self, operand: MatrixOperand) -> WeightFormat {
+        match operand.class {
+            // The packed bank is widened to f32 on the way in and sliced
+            // into per-expert matrices; there are no stored bytes left to
+            // keep by the time a format could apply.
+            MatrixClass::RoutedExpertBank => WeightFormat::F32,
+            MatrixClass::AttentionProjection
+            | MatrixClass::FfnProjection
+            | MatrixClass::OutputHead => {
+                PhysicalProjectionPlan::choose(operand.elements, operand.stored_bf16).format()
+            }
+        }
+    }
+
     fn name(&self) -> &str {
         NAME
     }
 
     fn embed(&self, table: &[f32], hidden: usize, token: u32, scale: Option<f32>) -> Vec<f32> {
+        let _t = timed(OpClass::Embed);
         let row = &table[token as usize * hidden..(token as usize + 1) * hidden];
         match scale {
             Some(scale) => row.iter().map(|v| v * scale).collect(),
@@ -581,6 +668,7 @@ impl PlanBackend for ProductionBackend {
     }
 
     fn norm(&self, call: NormCall<'_>) -> Vec<f32> {
+        let _t = timed(OpClass::Norm);
         let weight = (!call.weight.is_empty()).then(|| call.weight.to_vec());
         let normed = match call.kind {
             NormType::RmsNorm => rms_norm_eps(
@@ -597,19 +685,14 @@ impl PlanBackend for ProductionBackend {
     }
 
     fn project(&self, call: ProjectCall<'_>) -> Result<Vec<f32>, VindexError> {
-        Ok(matmul_vec(
-            call.x,
-            call.weight.as_f32()?,
-            call.out_dim,
-            call.in_dim,
-        ))
+        project_matrix(&call.weight, call.x, call.out_dim, call.in_dim)
     }
 
     fn attention(&self, call: AttentionCall<'_>) -> Result<AttentionOut, VindexError> {
         // Positions are independent, so projection runs in parallel with
         // each position's arithmetic untouched — bit-identical to the
         // serial order.
-        let projected: Vec<(Vec<f32>, Vec<f32>, Vec<f32>)> = call
+        let projected: Vec<ProjectedAttention> = call
             .inputs
             .par_iter()
             .enumerate()
@@ -618,10 +701,19 @@ impl PlanBackend for ProductionBackend {
         let mut queries = Vec::with_capacity(projected.len());
         let mut keys = Vec::with_capacity(projected.len());
         let mut values = Vec::with_capacity(projected.len());
-        for (q, k, v) in projected {
+        // The gate halves travel with their positions: the batched path
+        // shares the projection exactly as the step path does, so the two
+        // do not differ in how many times they read `w_q`.
+        let mut gates: Vec<Option<Vec<f32>>> = Vec::with_capacity(projected.len());
+        for ProjectedAttention {
+            qkv: (q, k, v),
+            gate,
+        } in projected
+        {
             queries.push(q);
             keys.push(k);
             values.push(v);
+            gates.push(gate);
         }
 
         // Each query position reads every position's K/V but writes only
@@ -637,6 +729,7 @@ impl PlanBackend for ProductionBackend {
                     |p| keys[p].as_slice(),
                     |p| values[p].as_slice(),
                     &call.inputs[position],
+                    gates[position].as_deref(),
                 )
             })
             .collect::<Result<_, VindexError>>()?;
@@ -650,7 +743,10 @@ impl PlanBackend for ProductionBackend {
     fn attention_step(&self, step: AttentionStepCall<'_>) -> Result<AttentionStepOut, VindexError> {
         let call = &step.op;
         let pre = &call.inputs[0];
-        let (q, k, v) = Self::project_position(call, step.position, pre)?;
+        let ProjectedAttention {
+            qkv: (q, k, v),
+            gate,
+        } = Self::project_position(call, step.position, pre)?;
         let output = Self::attend_position(
             call,
             step.position,
@@ -670,6 +766,7 @@ impl PlanBackend for ProductionBackend {
                 }
             },
             pre,
+            gate.as_deref(),
         )?;
         Ok(AttentionStepOut {
             key: k,
@@ -680,17 +777,19 @@ impl PlanBackend for ProductionBackend {
 
     fn ffn(&self, call: FfnCall<'_>) -> Result<Vec<f32>, VindexError> {
         require_plain_gate("production", call.gate_policy)?;
-        let up = matmul_vec(call.x, call.up.as_f32()?, call.intermediate, call.hidden);
-        let inner: Vec<f32> = match call.gate {
-            Some(gate_weight) => {
-                let gate = matmul_vec(
-                    call.x,
-                    gate_weight.as_f32()?,
-                    call.intermediate,
-                    call.hidden,
-                );
+        let up = project_matrix(&call.up, call.x, call.intermediate, call.hidden)?;
+        let gate = match call.gate {
+            Some(w) => Some(project_matrix(&w, call.x, call.intermediate, call.hidden)?),
+            None => None,
+        };
+        // The activation ONLY. The three projections around it are timed
+        // by the executor, and a timer that spanned them would make this
+        // class the whole FFN.
+        let activation = timed(OpClass::FfnActivation);
+        let inner: Vec<f32> = match &gate {
+            Some(gate) => {
                 match call.activation {
-                    Activation::Silu => geglu_silu_alloc(&gate, &up),
+                    Activation::Silu => geglu_silu_alloc(gate, &up),
                     // The served Gemma gate/up kernel (tanh-approximated
                     // GELU on the gate, times up).
                     Activation::GeluTanh => gate
@@ -707,12 +806,8 @@ impl PlanBackend for ProductionBackend {
                 other => return Err(unsupported_activation("ungated", other)),
             },
         };
-        Ok(matmul_vec(
-            &inner,
-            call.down.as_f32()?,
-            call.hidden,
-            call.intermediate,
-        ))
+        drop(activation);
+        project_matrix(&call.down, &inner, call.hidden, call.intermediate)
     }
 
     fn routed_ffn(&self, call: RoutedFfnCall<'_>) -> Result<Vec<f32>, VindexError> {
@@ -753,7 +848,11 @@ impl PlanBackend for ProductionBackend {
         multiplier: Option<f64>,
         softcapping: Option<f32>,
     ) -> Result<Vec<f32>, VindexError> {
-        let mut logits = matmul_vec(x, projection.as_f32()?, vocab, hidden);
+        let mut logits = project_matrix(&projection, x, vocab, hidden)?;
+        // The vocabulary pass only — 248320 elements of multiplier and
+        // softcap, which is real work and nothing to do with the matmul
+        // that produced them.
+        let _t = timed(OpClass::Logits);
         for logit in &mut logits {
             if let Some(multiplier) = multiplier {
                 *logit *= multiplier as f32;
@@ -766,6 +865,7 @@ impl PlanBackend for ProductionBackend {
     }
 
     fn residual_add(&self, acc: &mut [f32], delta: &[f32]) {
+        let _t = timed(OpClass::Residual);
         for (a, b) in acc.iter_mut().zip(delta) {
             *a += b;
         }

@@ -113,15 +113,25 @@ fn a_hybrid_plan_is_refused_before_any_layer_output() {
             Ok(())
         });
 
-    let err = result.expect_err("a plan carrying a recurrence must not execute");
+    let err = result.expect_err("a plan naming operands the container lacks must not execute");
+    // The claim this test has always made, unchanged: nothing is emitted
+    // before the refusal. The recurrence is in the LAST layer, so a lazy
+    // refusal would have committed three layers first.
     assert!(
         events.is_empty(),
         "refused only AFTER committing output: {events:?}"
     );
+    // What CHANGED at QW-3.6b: a recurrence is no longer refused for
+    // being a recurrence — the traversal runs them. This fixture injects
+    // a `GatedDelta` op into a plan whose container holds no
+    // `linear_attn.*` tensors, so what is now wrong with it is the
+    // disagreement between plan and operands, and the refusal names that.
+    // The recurrence-execution claims moved to
+    // `tests::hybrid_traversal`, which runs a real encoded hybrid stack.
     let message = err.to_string();
     assert!(
-        message.contains("linear_attention"),
-        "the refusal must name the unsupported semantic, not a downstream \
+        message.contains("in_proj_qkv"),
+        "the refusal must name the operand it could not find, not a downstream \
          symptom; got: {message}"
     );
 }
@@ -132,8 +142,8 @@ fn a_hybrid_plan_is_refused_before_any_layer_output() {
 fn the_one_shot_entry_point_refuses_too() {
     let (_container, plan, store) = hybrid_plan();
     let err = execute_plan(&plan, &store, &[1u32, 2, 3], &ReferenceBackend)
-        .expect_err("a plan carrying a recurrence must not execute");
-    assert!(err.to_string().contains("linear_attention"), "{err}");
+        .expect_err("a plan naming operands the container lacks must not execute");
+    assert!(err.to_string().contains("in_proj_qkv"), "{err}");
 }
 
 /// The regression half: an unmodified softmax plan still runs. Without

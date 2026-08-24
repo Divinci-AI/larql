@@ -22,6 +22,7 @@ use super::super::continuation::RecurrentState;
 use super::super::gated_delta::{layer_forward, state_geometry, GatedDeltaWeights, Mutation};
 use super::qw2_tiny_fixture as fx;
 use crate::format::vindex3::fixtures::lcg_values;
+use crate::format::vindex3::opplan::exec::cpu::WeightRows;
 use crate::format::vindex3::opplan::{GatedDeltaOp, OperandRef};
 
 /// Generated through HF's own ops in f32, so only arithmetic order differs.
@@ -88,15 +89,15 @@ fn store() -> Store {
 
 fn weights(s: &Store) -> GatedDeltaWeights<'_> {
     GatedDeltaWeights {
-        in_proj_qkv: &s.qkv,
-        in_proj_a: &s.a,
-        in_proj_b: &s.b,
-        in_proj_z: &s.z,
+        in_proj_qkv: WeightRows::F32(&s.qkv),
+        in_proj_a: WeightRows::F32(&s.a),
+        in_proj_b: WeightRows::F32(&s.b),
+        in_proj_z: WeightRows::F32(&s.z),
         conv1d: &s.conv,
         a_log: &s.a_log,
         dt_bias: &s.dt_bias,
         norm: &s.norm,
-        out_proj: &s.out,
+        out_proj: WeightRows::F32(&s.out),
         norm_eps: fx::NORM_EPS,
     }
 }

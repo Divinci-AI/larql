@@ -27,6 +27,7 @@ use larql_models::config::{
 };
 
 use super::super::super::graph::policy::AttentionSpan;
+use super::cpu::WeightRows;
 use crate::error::VindexError;
 
 /// The numerical representation a backend wants matrix operands in.
@@ -40,6 +41,35 @@ use crate::error::VindexError;
 pub enum WeightFormat {
     /// Widened f32 — the constitutional representation.
     F32,
+    /// Stored bf16, kept EXACTLY as the checkpoint holds it.
+    ///
+    /// Not a conversion and not a quantisation: bf16 is the top 16 bits
+    /// of the f32 it denotes, so a consumer widens with `(bits as u32) <<
+    /// 16` — no rounding, no table, no loss. Declaring this removes the
+    /// artificial F32 materialisation (107.6 GB resident against a 53.8
+    /// GB checkpoint) rather than introducing a new numeric format.
+    ///
+    /// Only worth declaring for matrices large enough to STREAM. A
+    /// cache-resident matrix has no RAM traffic to halve, and the
+    /// measured `48 x 5120` case runs 3.8x faster through BLAS f32 — see
+    /// `exec::cpu::kernels::FusedBf16`.
+    Bf16,
+    /// Symmetric int8, one f32 scale per [`Q8_BLOCK`] elements along the
+    /// input axis.
+    ///
+    /// **The first LOSSY residency format.** `Bf16` keeps the
+    /// checkpoint's own bytes and changes no value; this one quantises at
+    /// load and the model it decodes is not quite the model that was
+    /// stored. Everything about it is therefore judged on logits, KL, a
+    /// trajectory and recurrent-state drift, not on residency alone.
+    ///
+    /// Blocked along the input axis so a kernel accumulates a block and
+    /// scales once. 8.5 bits/weight with the scales counted.
+    ///
+    /// Worth declaring only where the BF16 image is too big for cache —
+    /// measured, `1024 x 5120` runs 0.81x through Q8 because at 10.5 MB
+    /// it is already L2-resident and the extra unpacking is pure cost.
+    Q8,
     /// IEEE 754 half, little-endian. Exactly representable from stored
     /// bf16 for all normal-range values (bf16's 7 mantissa bits fit in
     /// f16's 10); conversion fails closed on overflow. A device backend
@@ -72,6 +102,36 @@ pub enum MatrixClass {
     AttentionProjection,
     FfnProjection,
     OutputHead,
+    /// One stored tensor holding every expert's matrix, sliced at load.
+    ///
+    /// Its own class because it is not one matrix: the bank is split into
+    /// `experts` matrices and may be quantised on the way, so the path has
+    /// already widened to f32 by the time a format could be applied. A
+    /// question about "how big is this matrix" has no answer here, which
+    /// is exactly why answering it as an `FfnProjection` would be wrong.
+    RoutedExpertBank,
+}
+
+/// What the interpreter knows about one matrix operand before loading
+/// it: enough to choose a representation, never enough to reinterpret
+/// the tensor.
+///
+/// The class alone stopped being sufficient at Qwen3.8. Its `48 x 5120`
+/// delta gates and its `10240 x 5120` fused projection are both
+/// attention-class operands separated by a factor of 213 in size, and
+/// the measured answer for one is the wrong answer for the other by
+/// 3.8x. A per-class declaration cannot express that; a per-operand one
+/// can.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct MatrixOperand {
+    pub class: MatrixClass,
+    /// The matrix's element count — `out_dim * in_dim`.
+    pub elements: usize,
+    /// Whether the container holds this operand as bf16 AND it can be
+    /// read unwidened. A physical fact about the checkpoint, not a
+    /// preference: a backend that wants compact bytes where there are
+    /// none would have to quantise to get them.
+    pub stored_bf16: bool,
 }
 
 /// A backend's declared format per matrix class.
@@ -95,7 +155,10 @@ impl WeightFormats {
     pub fn for_class(&self, class: MatrixClass) -> WeightFormat {
         match class {
             MatrixClass::AttentionProjection => self.attention,
-            MatrixClass::FfnProjection => self.ffn,
+            // A device backend places the bank exactly as it places any
+            // other FFN matrix — the distinction the class draws is about
+            // the HOST load path, not about device residency.
+            MatrixClass::FfnProjection | MatrixClass::RoutedExpertBank => self.ffn,
             MatrixClass::OutputHead => self.head,
         }
     }
@@ -108,6 +171,14 @@ impl WeightFormats {
 #[derive(Clone, Copy)]
 pub enum WeightSlice<'a> {
     F32(&'a [f32]),
+    /// Stored bf16 code units, still compact.
+    Bf16(&'a [u16]),
+    /// Symmetric int8 codes and their per-block f32 scales.
+    Q8 {
+        codes: &'a [i8],
+        scales: &'a [f32],
+        block: usize,
+    },
     /// Little-endian IEEE f16 bytes.
     F16(&'a [u8]),
     /// MXFP4: packed e2m1 codes (`[n, k/32, 16]`, lo nibble first) and
@@ -130,16 +201,104 @@ impl<'a> WeightSlice<'a> {
     /// The f32 view a CPU backend computes with. A backend that declared
     /// `F32` can never legitimately receive `F16`, so this is fail-closed
     /// evidence of an interpreter bug, not a conversion point.
+    /// The stored bf16 code units, when that is what was loaded.
+    ///
+    /// Deliberately NOT a widening accessor. A `Bf16` variant whose only
+    /// consumer called `as_f32()` would give a tidy type and zero
+    /// benefit: the whole point is that the compact bytes reach a kernel
+    /// still compact.
+    pub fn as_bf16(&self) -> Result<&'a [u16], VindexError> {
+        match self {
+            WeightSlice::Bf16(w) => Ok(w),
+            _ => Err(VindexError::Parse(
+                "backend declared bf16 weights but was handed another format — interpreter \
+                 loaded the wrong representation"
+                    .to_string(),
+            )),
+        }
+    }
+
+    /// The row-range view a CPU kernel consumes, cut to the matrix's
+    /// real geometry.
+    ///
+    /// **The truncation is load-bearing.** A resident slice may be LONGER
+    /// than `out_dim * in_dim`: `AlignedBytes` pads every allocation up to
+    /// the device page so a Metal buffer can wrap it zero-copy, and the
+    /// padding is zeros. A kernel handed the whole slice would compute
+    /// `len / in_dim` rows — more rows than the matrix has — and the
+    /// executor would partition the wrong total across its workers.
+    ///
+    /// Qwen3.8 cannot show this. Every one of its matrices happens to be
+    /// an exact multiple of the 16 KiB page, so the padded and logical
+    /// lengths coincide and a version of this that forgot to truncate
+    /// would decode the model perfectly. The gate uses a shape that is
+    /// not a page multiple for exactly that reason.
+    pub fn rows(&self, out_dim: usize, in_dim: usize) -> Result<WeightRows<'a>, VindexError> {
+        let want = out_dim * in_dim;
+        let short = |have: usize| {
+            VindexError::Parse(format!(
+                "a {out_dim} x {in_dim} projection needs {want} weights but only {have} are                  resident"
+            ))
+        };
+        match self {
+            WeightSlice::F32(w) => w
+                .get(..want)
+                .map(WeightRows::F32)
+                .ok_or_else(|| short(w.len())),
+            WeightSlice::Bf16(w) => w
+                .get(..want)
+                .map(WeightRows::Bf16)
+                .ok_or_else(|| short(w.len())),
+            WeightSlice::Q8 {
+                codes,
+                scales,
+                block,
+            } => {
+                let per_row = in_dim.div_ceil(*block);
+                match (codes.get(..want), scales.get(..out_dim * per_row)) {
+                    (Some(codes), Some(scales)) => Ok(WeightRows::Q8 {
+                        codes,
+                        scales,
+                        block: *block,
+                    }),
+                    _ => Err(short(codes.len())),
+                }
+            }
+            other => Err(VindexError::Parse(format!(
+                "no CPU projection kernel consumes {} weights — the backend declared a \
+                 representation only a device can run, so this refuses rather than converting \
+                 mid-decode",
+                other.representation()
+            ))),
+        }
+    }
+
+    /// This slice's representation, for diagnostics. Never dispatched on
+    /// — a backend that branched on the name instead of the variant would
+    /// be one `match` away from silently accepting a format it cannot run.
+    pub fn representation(&self) -> &'static str {
+        match self {
+            WeightSlice::F32(_) => "f32",
+            WeightSlice::Bf16(_) => "bf16",
+            WeightSlice::Q8 { .. } => "q8",
+            WeightSlice::F16(_) => "f16",
+            WeightSlice::Mxfp4 { .. } => "mxfp4",
+            WeightSlice::Nvfp4 { .. } => "nvfp4",
+        }
+    }
+
     pub fn as_f32(&self) -> Result<&'a [f32], VindexError> {
         match self {
             WeightSlice::F32(w) => Ok(w),
-            WeightSlice::F16(_) | WeightSlice::Mxfp4 { .. } | WeightSlice::Nvfp4 { .. } => {
-                Err(VindexError::Parse(
-                    "backend declared f32 weights but was handed another format — interpreter \
+            WeightSlice::Bf16(_)
+            | WeightSlice::Q8 { .. }
+            | WeightSlice::F16(_)
+            | WeightSlice::Mxfp4 { .. }
+            | WeightSlice::Nvfp4 { .. } => Err(VindexError::Parse(
+                "backend declared f32 weights but was handed another format — interpreter \
                  loaded the wrong representation"
-                        .to_string(),
-                ))
-            }
+                    .to_string(),
+            )),
         }
     }
 }
@@ -388,11 +547,22 @@ pub trait PlanBackend: Sync {
         None
     }
 
-    /// The representation this backend wants matrix operands of `class`
-    /// loaded in. A capability, asked per site at load time — not a
-    /// per-call decision.
-    fn weight_format(&self, _class: MatrixClass) -> WeightFormat {
+    /// The representation this backend wants one matrix operand loaded
+    /// in. A capability, asked per operand at load time — not a per-call
+    /// decision, and not a per-model one.
+    fn weight_format(&self, _operand: MatrixOperand) -> WeightFormat {
         WeightFormat::F32
+    }
+
+    /// How this backend performs a Gated DeltaNet layer's dense
+    /// projections.
+    ///
+    /// Defaults to the literal scalar transcription, so a backend that
+    /// says nothing gets the reference arithmetic rather than inheriting
+    /// somebody else's. The recurrence itself is not selectable — only
+    /// the five matrix products around it.
+    fn dense_projector(&self) -> &dyn super::gated_delta::DenseProjections {
+        &super::gated_delta::ScalarProjections
     }
 
     /// Residency hint before a decode run: every matrix operand the

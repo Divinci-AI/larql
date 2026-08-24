@@ -61,6 +61,18 @@ impl KvState for RecordingKvState {
     fn set_position(&mut self, position: usize) {
         self.inner.set_position(position);
     }
+
+    /// A KV-only recorder: it records rows, so it says so.
+    fn recurrent_state(
+        &mut self,
+        layer: usize,
+    ) -> Result<&mut super::super::continuation::RecurrentState, super::super::kv::ContinuationError>
+    {
+        Err(super::super::kv::ContinuationError::RecurrentUnsupported {
+            provider: "RecordingKvState",
+            layer,
+        })
+    }
 }
 
 #[test]

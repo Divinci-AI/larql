@@ -11,6 +11,31 @@ use crate::config::{
 };
 use crate::tensor_keys::{attn_bias, moe_experts, qk_norm};
 
+/// Model types whose RMSNorm stores the weight as an OFFSET FROM ONE.
+///
+/// `Qwen3_5RMSNorm` initialises its weight to **zeros** and applies
+/// `x_normed * (1.0 + weight)`. `Qwen3RMSNorm` initialises to **ones** and
+/// applies `weight * x_normed`. Same family name, opposite conventions,
+/// and the saved tensors are not interchangeable.
+///
+/// Qwen3.8 is the evidence: its `input_layernorm` weight has norm 3.83,
+/// and HF's normed output has norm 75.5 — only reachable through
+/// `(1 + w)`, since `w * x_normed` would land near 3.83. Applying the
+/// weight directly made every decoder norm wrong and put the model's
+/// first diverging plane at layer 0.
+///
+/// Read from the upstream classes rather than inferred: `qwen3`,
+/// `qwen3_moe` and `qwen3_vl` are ones-initialised and stay at offset 0.
+/// `qwen3_next` shares Qwen3.5's convention.
+const PLUS_ONE_NORM_FAMILIES: &[&str] = &["qwen3_5", "qwen3_next"];
+
+/// Whether this model type's saved norm weights are offsets from one.
+fn stores_norm_weight_as_offset(model_type: &str) -> bool {
+    PLUS_ONE_NORM_FAMILIES
+        .iter()
+        .any(|family| model_type.starts_with(family))
+}
+
 pub struct QwenArch {
     config: ModelConfig,
 }
@@ -60,6 +85,24 @@ impl ModelArchitecture for QwenArch {
                 combine: GateCombine::ElementwiseMultiply,
                 placement: GatePlacement::AfterAggregationBeforeOutputProjection,
             })
+    }
+
+    /// See [`PLUS_ONE_NORM_FAMILIES`]. Covers the decoder norms and the
+    /// final norm, which are the same class upstream.
+    fn norm_weight_offset(&self) -> f32 {
+        if stores_norm_weight_as_offset(&self.config.model_type) {
+            1.0
+        } else {
+            0.0
+        }
+    }
+
+    /// The per-head Q/K norms are that same class too — `Qwen3_5Attention`
+    /// builds them as `Qwen3_5RMSNorm(head_dim)` — so they share the
+    /// convention. Declared separately because the two offsets are
+    /// independent facts and a family could differ.
+    fn qk_norm_weight_offset(&self) -> f32 {
+        self.norm_weight_offset()
     }
 
     // ── MoE (Qwen3-MoE, Qwen2-MoE) ──

@@ -20,31 +20,37 @@
 
 pub mod backend;
 pub mod continuation;
+pub mod cpu;
 pub mod decode;
 pub mod device;
 mod experts;
 pub mod gated_delta;
 pub mod kernels;
 pub mod kv;
+pub mod narrow;
 pub mod observe;
 pub mod operands;
 pub mod prepared;
 pub mod production;
+pub mod quantise;
 pub mod reference;
+pub mod timing;
 pub mod weights;
 
 #[cfg(test)]
 mod tests;
 
+use larql_models::config::GateSource;
+
 use super::{AttentionOp, ComponentOpPlan, LayerPlan};
 use crate::error::VindexError;
 use backend::{
     AttentionCall, AttentionStepCall, BiasCall, GateCall, NormCall, PlanBackend, ProjectCall,
-    QkNormCall, SinkCall, WeightFormat,
+    QkNormCall, SinkCall,
 };
 use kv::KvState;
 use operands::OperandSource;
-use prepared::{ExecutionSlice, PreparedLayer, PreparedOperands};
+use prepared::{ExecutionSlice, PreparedAttention, PreparedLayer, PreparedOperands};
 use rayon::prelude::*;
 use reference::ReferenceBackend;
 use weights::{load_weight, LoadedWeight};
@@ -189,15 +195,31 @@ pub fn execute_prepared_streaming<B: PlanBackend + ?Sized>(
     resume: Option<ResumePoint>,
     sink: &mut dyn FnMut(PlaneEvent) -> Result<(), VindexError>,
 ) -> Result<FinalOutput, VindexError> {
-    traverse(
-        plan,
-        ops,
-        tokens,
-        backend,
-        resume,
-        sink,
-        None::<&mut dyn KvState>,
-    )
+    // A one-shot forward owns whatever continuation state the plan needs.
+    //
+    // For a wholly-softmax stack that is nothing: `None` keeps the
+    // existing behaviour exactly, including not materialising KV rows a
+    // caller never asked for. A stack with a recurrence has no such
+    // choice — its layers cannot run without durable buffers — so this
+    // allocates them for the duration of the call. The provider starts at
+    // position 0, which keeps every softmax layer on the batched
+    // attention path it already took.
+    if plan.layers.iter().all(|l| l.attention.softmax().is_some()) {
+        return traverse(
+            plan,
+            ops,
+            tokens,
+            backend,
+            resume,
+            sink,
+            None::<&mut dyn KvState>,
+        );
+    }
+    let mut owned = kv::RowKvState::default();
+    owned.prepare_continuation(
+        &continuation::plan_continuation_geometry(plan).map_err(VindexError::Parse)?,
+    )?;
+    traverse(plan, ops, tokens, backend, resume, sink, Some(&mut owned))
 }
 
 /// Batch prefill (VI3-INF-3): the batch traversal over `tokens`,
@@ -243,7 +265,12 @@ pub fn prefill_prepared<B: PlanBackend + ?Sized>(
     backend: &B,
     kv: &mut dyn KvState,
 ) -> Result<FinalOutput, VindexError> {
-    kv.prepare(&kv::plan_kv_geometry(plan));
+    // The FULL geometry, KV and recurrent alike. `plan_kv_geometry` is
+    // the KV-only adapter and refuses a hybrid plan outright, which was
+    // the right answer while nothing could execute one.
+    kv.prepare_continuation(
+        &continuation::plan_continuation_geometry(plan).map_err(VindexError::Parse)?,
+    )?;
     let base = kv.position();
     let out = traverse(
         plan,
@@ -281,6 +308,34 @@ fn traverse<B: PlanBackend + ?Sized, K: KvState + ?Sized>(
         ))
     })?;
     let hidden = embedding.table.shape[1];
+
+    // **Refuse before any output.** A recurrence needs durable buffers,
+    // and discovering at layer 63 that nobody can hold them would mean
+    // every earlier layer had already been emitted — a caller left
+    // holding 16 of 64 layers cannot tell that from a finished model.
+    // QW-1 put this refusal up front for exactly that reason; the
+    // question it asks has changed (from "can this run at all" to "can
+    // this provider hold the state"), its position must not.
+    for (offset, layer) in plan.layers.iter().enumerate() {
+        if layer.attention.softmax().is_some() {
+            continue;
+        }
+        let Some(provider) = kv.as_mut() else {
+            return Err(VindexError::Parse(format!(
+                "layer {} carries `{}`, which keeps durable continuation state, and this \
+                 traversal was given no provider to hold it",
+                layer.layer,
+                layer.attention.declared_name(),
+            )));
+        };
+        provider.recurrent_state(offset).map_err(|e| {
+            VindexError::Parse(format!(
+                "layer {} carries `{}`: {e}",
+                layer.layer,
+                layer.attention.declared_name(),
+            ))
+        })?;
+    }
 
     let (start_layer, mut h) = match resume {
         Some(point) => {
@@ -433,39 +488,74 @@ fn execute_layer<B: PlanBackend + ?Sized, K: KvState + ?Sized>(
     // sequence it is given, so it cannot serve a prefill that resumes
     // part-way through one. Extending a populated provider therefore
     // still steps.
-    let attention_op = softmax_or_refuse(layer)?;
-    let attn_out = match kv {
-        Some((kv, layer_index)) if kv.position() == 0 => {
-            let out = backend.attention(prepared.attention.call(
-                attention_op,
+    // Dispatch on the OPERATOR the prepared layer holds. There is no
+    // `softmax_or_refuse` here any more: a recurrence is something this
+    // traversal runs, not something it declines. Both arms produce the
+    // attention block's output for every position, and the residual and
+    // FFN below are shared — the operator changes what attention IS, not
+    // what a decoder layer does around it.
+    let attn_out = match &prepared.attention {
+        PreparedAttention::GatedDelta(ops) => {
+            let Some((provider, layer_index)) = kv else {
+                return Err(VindexError::Parse(format!(
+                    "layer {} runs a recurrence, which needs durable continuation state, \
+                     and this traversal was given no provider to hold it",
+                    layer.layer
+                )));
+            };
+            // Resolved BEFORE any arithmetic. A provider that cannot hold
+            // these buffers must not see a half-updated layer — the same
+            // refuse-before-commit contract QW-1 established for the plan.
+            let state = provider.recurrent_state(layer_index)?;
+            gated_delta::layer_forward_with(
+                &ops.op,
+                &ops.weights()?,
                 &inputs,
-                layer.pre_attention_norm.eps,
-                hidden,
-            ))?;
-            for (key, value) in out.keys.into_iter().zip(out.values) {
-                kv.append(layer_index, key, value);
-            }
-            out.outputs
+                state,
+                gated_delta::Mutation::None,
+                backend.dense_projector(),
+            )
+            .output
         }
-        Some((kv, layer_index)) => attention_into_kv(
-            attention_op,
-            &prepared.attention,
-            &inputs,
-            layer.pre_attention_norm.eps,
-            hidden,
-            backend,
-            kv,
-            layer_index,
-        )?,
-        None => {
-            backend
-                .attention(prepared.attention.call(
+        PreparedAttention::Softmax(ops) => {
+            let attention_op = layer
+                .attention
+                .softmax()
+                .expect("prepared softmax operands imply a softmax op");
+            match kv {
+                Some((kv, layer_index)) if kv.position() == 0 => {
+                    let out = backend.attention(ops.call(
+                        attention_op,
+                        &inputs,
+                        layer.pre_attention_norm.eps,
+                        hidden,
+                    ))?;
+                    for (key, value) in out.keys.into_iter().zip(out.values) {
+                        kv.append(layer_index, key, value);
+                    }
+                    out.outputs
+                }
+                Some((kv, layer_index)) => attention_into_kv(
                     attention_op,
+                    ops,
                     &inputs,
                     layer.pre_attention_norm.eps,
                     hidden,
-                ))?
-                .outputs
+                    backend,
+                    kv,
+                    layer_index,
+                )?,
+                None => {
+                    backend
+                        .attention(ops.call(
+                            attention_op,
+                            &inputs,
+                            layer.pre_attention_norm.eps,
+                            hidden,
+                        ))?
+                        .outputs
+                }
+            }
         }
     };
     h.par_iter_mut()
@@ -537,7 +627,7 @@ impl AttentionOperands {
     pub(super) fn load(
         op: &AttentionOp,
         store: OperandSource<'_>,
-        format: WeightFormat,
+        format: prepared::FormatFor<'_>,
     ) -> Result<Self, VindexError> {
         // A K≡V layer names the K operand as `v`: the value projection is
         // the raw K projection (before the key's norm and rotation), which
@@ -545,17 +635,32 @@ impl AttentionOperands {
         // V before conditioning Q/K, and apply the parameter-free V norm
         // to it when the op carries one.
         Ok(Self {
-            w_q: load_weight(store, &op.q, format)?,
-            w_k: load_weight(store, &op.k, format)?,
-            w_v: load_weight(store, &op.v, format)?,
-            w_o: load_weight(store, &op.o, format)?,
+            w_q: load_weight(store, &op.q, format(&op.q))?,
+            w_k: load_weight(store, &op.k, format(&op.k))?,
+            w_v: load_weight(store, &op.v, format(&op.v))?,
+            w_o: load_weight(store, &op.o, format(&op.o))?,
             qk_weights: match &op.qk_norm {
                 Some(qk) => Some((store.load(&qk.q)?, store.load(&qk.k)?)),
                 None => None,
             },
+            // **One physical projection, two consumers.**
+            //
+            // A `FusedQueryProjection` gate names the QUERY operand — the
+            // op builder binds `OperandRole::AttnQ` for it — so loading it
+            // here would hold Qwen3.8's `12288 x 5120` q_proj twice: 2.01
+            // GB of the same bytes under two names. The call builder hands
+            // both consumers the one slice instead.
+            //
+            // Keyed on the judged gate SOURCE rather than on the two
+            // operands resolving to the same tensor. The source is what
+            // the plan asserts; pointer identity would make this an
+            // optimisation that silently stopped applying the day an
+            // unrelated loader change broke the aliasing.
             gate: match &op.output_gate {
-                Some(gate) => Some(load_weight(store, &gate.projection, format)?),
-                None => None,
+                Some(gate) if gate.spec.source != GateSource::FusedQueryProjection => Some(
+                    load_weight(store, &gate.projection, format(&gate.projection))?,
+                ),
+                _ => None,
             },
             biases: match (&op.q_bias, &op.k_bias, &op.v_bias, &op.o_bias) {
                 (Some(q), Some(k), Some(v), Some(o)) => Some([
@@ -584,6 +689,15 @@ impl AttentionOperands {
 
     /// Every matrix operand this attention holds, for residency
     /// preparation.
+    /// Every matrix operand, for residency accounting.
+    pub(super) fn loaded_matrices(&self) -> Vec<&LoadedWeight> {
+        let mut all = vec![&self.w_q, &self.w_k, &self.w_v, &self.w_o];
+        if let Some(gate) = &self.gate {
+            all.push(gate);
+        }
+        all
+    }
+
     pub(super) fn weight_slices(&self) -> Vec<backend::WeightSlice<'_>> {
         let mut slices = vec![
             self.w_q.slice(),
@@ -618,10 +732,22 @@ impl AttentionOperands {
             _ => None,
         };
         let gate = match (&op.output_gate, &self.gate) {
+            // Its own operand: an `AttentionInput` gate is a separate
+            // matrix read over a separate activation.
             (Some(gate), Some(weight)) => Some(GateCall {
                 spec: gate.spec,
                 weight: weight.slice(),
             }),
+            // The other half of the query projection — the same slice,
+            // not a copy of it. A backend that computes both halves at
+            // once reads these bytes once; one that projects again is
+            // still CORRECT, because the operand really is `w_q`.
+            (Some(gate), None) if gate.spec.source == GateSource::FusedQueryProjection => {
+                Some(GateCall {
+                    spec: gate.spec,
+                    weight: self.w_q.slice(),
+                })
+            }
             _ => None,
         };
         let bias = self.biases.as_ref().map(|[q, k, v, o]| BiasCall {
@@ -734,26 +860,5 @@ fn project<B: PlanBackend + ?Sized>(
         out_dim,
         in_dim,
         x,
-    })
-}
-
-/// This layer's softmax attention op, or a refusal naming what it carries
-/// instead.
-///
-/// Support or refuse, never invisibility (rung M3). A Gated DeltaNet layer
-/// has no per-position keys or values to hand a softmax backend and keeps
-/// no KV row, so there is nothing here to execute *as attention* — and on
-/// a hybrid checkpoint that is not an edge case: Qwen3.8-27B declares 48
-/// of its 64 layers that way. Running the plan anyway would execute a
-/// different model and report a number for it, which is the one outcome
-/// this engine refuses.
-pub(crate) fn softmax_or_refuse(layer: &LayerPlan) -> Result<&AttentionOp, VindexError> {
-    layer.attention.softmax().ok_or_else(|| {
-        VindexError::Parse(format!(
-            "layer {} carries `{}`, which this executor cannot run: it has \
-             no softmax attention and keeps no KV row",
-            layer.layer,
-            layer.attention.declared_name(),
-        ))
     })
 }

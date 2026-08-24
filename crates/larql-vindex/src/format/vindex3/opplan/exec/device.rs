@@ -48,7 +48,7 @@ use larql_models::config::{Activation, GateActivation, GateCombine, GatePlacemen
 
 use super::backend::{
     AttentionCall, AttentionOut, AttentionStepCall, AttentionStepOut, DispatchStats, FfnCall,
-    GateCall, MatrixClass, NormCall, PlanBackend, ProjectCall, ProjectedQkv, RoutedFfnCall,
+    GateCall, MatrixOperand, NormCall, PlanBackend, ProjectCall, ProjectedQkv, RoutedFfnCall,
     WeightFormat, WeightFormats, WeightSlice,
 };
 use super::production::{
@@ -135,7 +135,21 @@ impl<M: MatMul + Send> DevicePlanBackend<M> {
     ) -> Result<Vec<f32>, VindexError> {
         let started = std::time::Instant::now();
         let device = self.device.lock().expect("device dispatch lock");
+        // No device kernel consumes stored bf16 yet; refusing names the
+        // gap rather than silently widening 50 GB on the host.
+        if matches!(weight, WeightSlice::Bf16(_) | WeightSlice::Q8 { .. }) {
+            return Err(VindexError::Parse(format!(
+                "the device backend has no {} kernel; declare F16 or F32 for it",
+                weight.representation()
+            )));
+        }
         let result = match weight {
+            WeightSlice::Bf16(_) | WeightSlice::Q8 { .. } => {
+                return Err(VindexError::Parse(format!(
+                    "the device backend has no {} kernel; declare F16 or F32 for it",
+                    weight.representation()
+                )))
+            }
             WeightSlice::F32(w) => {
                 let view = ArrayView2::from_shape((out_dim, in_dim), w).map_err(|e| {
                     VindexError::Parse(format!(
@@ -327,8 +341,13 @@ impl<M: MatMul + Send> PlanBackend for DevicePlanBackend<M> {
         })
     }
 
-    fn weight_format(&self, class: MatrixClass) -> WeightFormat {
-        self.formats.for_class(class)
+    /// Per class, and deliberately not per operand: a device backend's
+    /// format is about what its kernels can execute and what stays
+    /// resident in device memory, and neither of those turns on a host
+    /// cache boundary. The operand's size is available and ignored on
+    /// purpose.
+    fn weight_format(&self, operand: MatrixOperand) -> WeightFormat {
+        self.formats.for_class(operand.class)
     }
 
     fn prepare(&self, weights: &[WeightSlice<'_>]) {
@@ -340,6 +359,10 @@ impl<M: MatMul + Send> PlanBackend for DevicePlanBackend<M> {
         let mut streams: Vec<&[u8]> = Vec::with_capacity(weights.len() * 2);
         for w in weights {
             match w {
+                // A residency hint computes nothing and must change no
+                // number, so an unplaceable format is skipped here; the
+                // refusal that matters fires where it would be USED.
+                WeightSlice::Bf16(_) | WeightSlice::Q8 { .. } => continue,
                 WeightSlice::F16(bytes) => streams.push(bytes),
                 WeightSlice::Mxfp4 { packed, scales }
                 | WeightSlice::Nvfp4 { packed, scales, .. } => {

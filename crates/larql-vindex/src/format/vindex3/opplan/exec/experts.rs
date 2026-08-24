@@ -14,11 +14,9 @@ use larql_models::config::ExpertFormat;
 use larql_models::quant::mxfp4::{dequantize_expert, MXFP4_GROUP_BYTES, MXFP4_GROUP_ELEMS};
 
 use super::backend::{FfnCall, NormCall, RoutedFfnCall, WeightFormat, WeightSlice};
+use super::narrow::{bf16_bytes_to_f16, f32_bytes_to_f16};
 use super::operands::{widen, OperandSource};
-use super::weights::{
-    bf16_bytes_to_f16, f32_bytes_to_f16, load_weight, quantize_mxfp4, quantize_nvfp4, AlignedBytes,
-    LoadedWeight,
-};
+use super::weights::{load_weight, quantize_mxfp4, quantize_nvfp4, AlignedBytes, LoadedWeight};
 use crate::error::VindexError;
 use crate::format::vindex3::opplan::{FfnOp, LayerFfn, NormOp, PackedProjection, RoutedFfnOp};
 
@@ -98,18 +96,32 @@ impl FfnOperands {
     pub(super) fn load(
         ffn: &LayerFfn,
         store: OperandSource<'_>,
-        format: WeightFormat,
+        format: super::prepared::FormatFor<'_>,
+        bank: WeightFormat,
     ) -> Result<Self, VindexError> {
         match ffn {
             LayerFfn::Dense(op) => Ok(Self::Dense(DenseOperands::load(op, store, format)?)),
-            LayerFfn::Routed(op) => Ok(Self::Routed(RoutedOperands::load(op, store, format)?)),
+            LayerFfn::Routed(op) => Ok(Self::Routed(RoutedOperands::load(op, store, bank)?)),
             LayerFfn::Hybrid(op) => Ok(Self::Hybrid(Box::new(HybridOperands {
                 dense: DenseOperands::load(&op.dense, store, format)?,
-                routed: RoutedOperands::load(&op.routed, store, format)?,
+                routed: RoutedOperands::load(&op.routed, store, bank)?,
                 pre_experts_norm: LoadedNormWeight::load(&op.pre_experts_norm, store)?,
                 post_dense_norm: LoadedNormWeight::load(&op.post_dense_norm, store)?,
                 post_experts_norm: LoadedNormWeight::load(&op.post_experts_norm, store)?,
             }))),
+        }
+    }
+
+    /// Every matrix operand, for residency accounting.
+    pub(super) fn loaded_matrices(&self) -> Vec<&LoadedWeight> {
+        match self {
+            Self::Dense(dense) => dense.loaded_matrices(),
+            Self::Routed(routed) => routed.loaded_matrices(),
+            Self::Hybrid(hybrid) => {
+                let mut all = hybrid.dense.loaded_matrices();
+                all.extend(hybrid.routed.loaded_matrices());
+                all
+            }
         }
     }
 
@@ -197,16 +209,24 @@ impl DenseOperands {
     fn load(
         op: &FfnOp,
         store: OperandSource<'_>,
-        format: WeightFormat,
+        format: super::prepared::FormatFor<'_>,
     ) -> Result<Self, VindexError> {
         Ok(Self {
             gate: match &op.gate {
-                Some(gate) => Some(load_weight(store, gate, format)?),
+                Some(gate) => Some(load_weight(store, gate, format(gate))?),
                 None => None,
             },
-            up: load_weight(store, &op.up, format)?,
-            down: load_weight(store, &op.down, format)?,
+            up: load_weight(store, &op.up, format(&op.up))?,
+            down: load_weight(store, &op.down, format(&op.down))?,
         })
+    }
+
+    fn loaded_matrices(&self) -> Vec<&LoadedWeight> {
+        let mut all = vec![&self.up, &self.down];
+        if let Some(gate) = &self.gate {
+            all.push(gate);
+        }
+        all
     }
 
     fn weight_slices(&self) -> Vec<WeightSlice<'_>> {
@@ -238,6 +258,12 @@ impl DenseOperands {
 }
 
 impl RoutedOperands {
+    /// Every expert matrix, for residency accounting. The router itself
+    /// is f32 glue and is counted with the norms.
+    fn loaded_matrices(&self) -> Vec<&LoadedWeight> {
+        self.gate_up.iter().chain(&self.down).collect()
+    }
+
     fn weight_slices(&self) -> Vec<WeightSlice<'_>> {
         self.gate_up
             .iter()
@@ -420,6 +446,15 @@ fn from_f32(
         }
         WeightFormat::Mxfp4 => quantize_mxfp4(&values, rows, k, name),
         WeightFormat::Nvfp4 => quantize_nvfp4(&values, rows, k, name),
+        // This path has already widened to f32 (packed expert banks
+        // arrive that way), and narrowing back would ROUND — bf16
+        // residency means the stored bytes are the resident bytes, and
+        // there are no stored bytes left here to keep. Refuse rather
+        // than quietly return something the format does not promise.
+        WeightFormat::Bf16 | WeightFormat::Q8 => Err(VindexError::Parse(format!(
+            "tensor `{name}`: compact residency needs the stored bytes, and this expert path \
+             has already widened to f32"
+        ))),
     }
 }
 

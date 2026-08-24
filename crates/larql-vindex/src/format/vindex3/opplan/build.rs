@@ -1085,6 +1085,10 @@ mod tests {
             hybrid: false,
             moe: None,
             v_from_k: false,
+            // Softmax by default: these fixtures predate the hybrid
+            // ladder, and a recurrent default would silently retarget
+            // every one of them at the operator they were not written for.
+            recurrent: false,
         }
     }
 
@@ -1264,6 +1268,9 @@ mod tests {
             num_q_heads: 4,
             num_kv_heads: 2,
             qk_scope: larql_models::config::QkNormScope::PerHead,
+            // Ordinary width: a fused query/gate projection is twice this,
+            // and the fixtures that exercise that say so themselves.
+            q_proj_rows: 32,
             linear,
         }
     }

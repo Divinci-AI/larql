@@ -24,7 +24,7 @@
 //! [`attention_step`]: super::backend::PlanBackend::attention_step
 
 use super::backend::{AttentionStepCall, NormCall, PlanBackend};
-use super::kv::{plan_kv_geometry, KvState, RowKvState};
+use super::kv::{KvState, RowKvState};
 use super::observe::{NoopObserver, StepEvent, StepObserver};
 use super::operands::OperandSource;
 use super::prepared::{ExecutionSlice, PreparedOperands};
@@ -164,13 +164,29 @@ impl<'a, B: PlanBackend> DecodeSession<'a, B> {
         backend: &'a B,
         mut kv: KvSlot<'a>,
     ) -> Result<Self, VindexError> {
-        kv.state_mut().prepare(&plan_kv_geometry(plan));
+        // The FULL continuation geometry, KV and recurrent alike.
+        // `plan_kv_geometry` is the KV-only adapter and refuses a hybrid
+        // plan; a session over one needs both forms announced.
+        kv.state_mut().prepare_continuation(
+            &super::continuation::plan_continuation_geometry(plan).map_err(VindexError::Parse)?,
+        )?;
         Ok(Self {
             plan,
             backend,
             ops,
             kv,
         })
+    }
+
+    /// What this session's operands actually occupy, by site and
+    /// representation — see [`PreparedOperands::residency_census`].
+    pub fn residency_census(&self) -> super::prepared::ResidencyCensus {
+        self.ops.get().residency_census()
+    }
+
+    /// Where this session's operand allocations landed.
+    pub fn allocation_census(&self) -> super::prepared::AllocationCensus {
+        self.ops.get().allocation_census()
     }
 
     /// Positions consumed so far — read from the continuation state,
@@ -238,27 +254,57 @@ impl<'a, B: PlanBackend> DecodeSession<'a, B> {
             // Attention input is normalised once and handed over; the
             // judged gate reads the same vector (same as the batch path).
             let inputs = [state.pre_attention.apply(self.backend, &h)];
+            // The sensitivity tap from main, kept ahead of the operator
+            // dispatch: it observes the attention INPUT, which both
+            // operators read, so it belongs to neither branch.
             observer.operand_input(
                 index,
                 super::observe::InputSite::Attention,
                 inputs[0].as_slice(),
             );
-            let call = state.attention.call(
-                super::softmax_or_refuse(layer)?,
-                &inputs,
-                layer.pre_attention_norm.eps,
-                hidden,
-            );
-            let out = self.backend.attention_step(AttentionStepCall {
-                op: call,
-                position,
-                keys: self.kv.state().keys(index),
-                values: self.kv.state().values(index),
-            })?;
-            self.kv.state_mut().append(index, out.key, out.value);
+            // One position, either operator. A recurrence appends no KV
+            // row — it rewrites its own buffers in place, which is only
+            // correct because those buffers are DURABLE: the convolution
+            // history spans the step boundary, and a single-position call
+            // that reconstructed it from the batch would see a window of
+            // one. That is the whole point of QW-3.6a.
+            let raw_attn = match &state.attention {
+                super::prepared::PreparedAttention::GatedDelta(delta) => {
+                    let recurrent = self.kv.state_mut().recurrent_state(index)?;
+                    let projector = self.backend.dense_projector();
+                    let mut planes = super::gated_delta::layer_forward_with(
+                        &delta.op,
+                        &delta.weights()?,
+                        &inputs,
+                        recurrent,
+                        super::gated_delta::Mutation::None,
+                        projector,
+                    );
+                    planes.output.remove(0)
+                }
+                super::prepared::PreparedAttention::Softmax(sops) => {
+                    let call = sops.call(
+                        layer
+                            .attention
+                            .softmax()
+                            .expect("prepared softmax operands imply a softmax op"),
+                        &inputs,
+                        layer.pre_attention_norm.eps,
+                        hidden,
+                    );
+                    let out = self.backend.attention_step(AttentionStepCall {
+                        op: call,
+                        position,
+                        keys: self.kv.state().keys(index),
+                        values: self.kv.state().values(index),
+                    })?;
+                    self.kv.state_mut().append(index, out.key, out.value);
+                    out.output
+                }
+            };
             let mut attn_out = match &state.post_attention {
-                Some(norm) => norm.apply(self.backend, &out.output),
-                None => out.output,
+                Some(norm) => norm.apply(self.backend, &raw_attn),
+                None => raw_attn,
             };
             super::scale_residual_delta(layer.residual_scale, &mut attn_out);
             self.backend.residual_add(&mut h, &attn_out);

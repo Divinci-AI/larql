@@ -1,6 +1,7 @@
 //! The routed miniature, its carrier variant, and the load/compare
 //! helpers shared by the expert-bank and production-backend gates.
 
+use crate::format::vindex3::opplan::OperandRef;
 use std::path::Path;
 
 use larql_models::config::ExpertFormat;
@@ -340,11 +341,11 @@ pub(super) fn routed(op: &RoutedFfnOp) -> LayerFfn {
 }
 
 pub(super) fn load(op: &RoutedFfnOp, store: &OperandStore, format: WeightFormat) -> FfnOperands {
-    FfnOperands::load(&routed(op), store.into(), format).unwrap()
+    FfnOperands::load(&routed(op), store.into(), &|_: &OperandRef| format, format).unwrap()
 }
 
 pub(super) fn load_err(op: &RoutedFfnOp, store: &OperandStore, format: WeightFormat) -> String {
-    FfnOperands::load(&routed(op), store.into(), format)
+    FfnOperands::load(&routed(op), store.into(), &|_: &OperandRef| format, format)
         .err()
         .expect("loading must refuse")
         .to_string()
@@ -389,11 +390,11 @@ pub(super) fn mxfp4_bytes(operands: &FfnOperands) -> Vec<(Vec<u8>, Vec<u8>)> {
         .collect()
 }
 
+/// The representation's name, for a panic message.
+///
+/// Delegates rather than matching again: this used to be a second copy of
+/// the same table, and a copy is one variant away from disagreeing with
+/// the one the refusals print.
 pub(super) fn slice_kind(slice: &WeightSlice<'_>) -> &'static str {
-    match slice {
-        WeightSlice::F32(_) => "f32",
-        WeightSlice::F16(_) => "f16",
-        WeightSlice::Mxfp4 { .. } => "mxfp4",
-        WeightSlice::Nvfp4 { .. } => "nvfp4",
-    }
+    slice.representation()
 }

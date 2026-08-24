@@ -147,13 +147,17 @@ fn both_realisations<B: PlanBackend>(
         .map(|row| prepared.pre_attention.apply(backend, row))
         .collect();
 
+    // This probe is about the KV realisations of SOFTMAX attention, so
+    // it takes the softmax operands directly and would not compile for a
+    // recurrence — which is the honest shape: a recurrence keeps no rows
+    // and has no batched-vs-stepped KV question to answer.
+    let super::super::prepared::PreparedAttention::Softmax(attn_ops) = &prepared.attention else {
+        panic!("this probe is for softmax layers");
+    };
+
     // Realisation A: one batched call over every position.
     let out = backend
-        .attention(
-            prepared
-                .attention
-                .call(layer.attention.softmax().unwrap(), &inputs, eps, width),
-        )
+        .attention(attn_ops.call(layer.attention.softmax().unwrap(), &inputs, eps, width))
         .unwrap();
     let batched = Realisation {
         outputs: out.outputs,
@@ -172,7 +176,7 @@ fn both_realisations<B: PlanBackend>(
         values: Vec::with_capacity(inputs.len()),
     };
     for offset in 0..inputs.len() {
-        let call = prepared.attention.call(
+        let call = attn_ops.call(
             layer.attention.softmax().unwrap(),
             &inputs[offset..=offset],
             eps,
@@ -259,8 +263,11 @@ fn stepping_the_same_position_twice_yields_identical_rows() {
         .map(|row| prepared.pre_attention.apply(&backend, row))
         .collect();
 
+    let super::super::prepared::PreparedAttention::Softmax(attn_ops) = &prepared.attention else {
+        panic!("this probe is for softmax layers");
+    };
     let step = |position: usize| {
-        let call = prepared.attention.call(
+        let call = attn_ops.call(
             layer.attention.softmax().unwrap(),
             &inputs[position..=position],
             layer.pre_attention_norm.eps,

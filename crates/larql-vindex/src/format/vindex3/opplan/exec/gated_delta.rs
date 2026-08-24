@@ -26,6 +26,8 @@ use super::continuation::{
     RecurrentBuffer, RecurrentBufferGeometry, RecurrentGeometry, RecurrentState,
     StateInitialization,
 };
+use super::cpu::WeightRows;
+use super::timing::{timed, OpClass};
 
 /// L2-normalisation epsilon, from the reference kernel's own default.
 const L2NORM_EPS: f32 = 1e-6;
@@ -75,8 +77,16 @@ const _: fn() = || {
     let _: Option<StateDtype> = None::<StateDtype>;
 };
 
-/// Index of one state cell in the flat buffer, `[head][k][v]` row-major.
-fn cell(op: &GatedDeltaOp, head: usize, k: usize, v: usize) -> usize {
+/// Flat index of one state cell, and the layout authority the hoisted
+/// [`step_inner`] slices by.
+///
+/// `#[cfg(test)]` because the shipped path no longer indexes cell by
+/// cell — that was the cost CPU-2D1 removed. It stays as the written form
+/// of the layout, with `the_head_block_is_the_cell_formula` pinning that
+/// `h * dk * dv + kk * dv + vv` really is what this computes; the hoist's
+/// correctness rests on exactly that identity.
+#[cfg(test)]
+pub(super) fn cell(op: &GatedDeltaOp, head: usize, k: usize, v: usize) -> usize {
     (head * op.key_head_dim + k) * op.value_head_dim + v
 }
 
@@ -165,7 +175,133 @@ pub enum Mutation {
     TiledHeadExpansion,
 }
 
+/// The delta rule, with the geometry and the state slice lifted OUT of
+/// the inner loops.
+///
+/// Same arithmetic, same order, same rounding — [`step_inner_literal`] is
+/// kept beside it and `the_hoisted_recurrence_is_bit_identical` asserts
+/// both the output and the STATE match exactly. Nothing here is a
+/// numerical decision.
+///
+/// **What changed is what the compiler can see.** The literal form reads
+/// `dk`/`dv` from a `&GatedDeltaOp` and reaches every element through
+/// `state.cells_mut()[cell(op, h, kk, vv)]`, so each of the four sweeps
+/// is an indexed access through a reborrow with a bound the optimiser
+/// cannot prove loop-invariant. Lifting the head's own `dk * dv` block
+/// into a slice and walking it as `chunks_exact(dv)` says the same thing
+/// in a form that vectorises: the rows are contiguous, the length is
+/// known, and there is no aliasing question left to answer.
+///
+/// A transcription of this loop with compile-time dimensions ran 1.92x
+/// faster than one with runtime dimensions and the accessor — same
+/// arithmetic, same machine, same process. That gap is what this
+/// function exists to close, and it is why the rung is a REFACTOR and
+/// hand-written SIMD is a later, separate question.
+///
+/// `kv`, `delta`, `q` and `k` are allocated once for the layer instead of
+/// once per head — 192 allocations per layer at Qwen3.8's 48 heads — for
+/// the same reason: it is bookkeeping, not arithmetic.
 fn step_inner(
+    op: &GatedDeltaOp,
+    step: &RecurrenceStep<'_>,
+    state: &mut RecurrentBuffer,
+    mutation: Mutation,
+) -> Vec<f32> {
+    let (hv, dk, dv) = (op.num_value_heads, op.key_head_dim, op.value_head_dim);
+    let mut out = vec![0.0f32; hv * dv];
+    // The reference L2-normalises inside the kernel and applies the query
+    // scale AFTERWARDS. Scaling first would rescale the normalisation and
+    // is a different function.
+    let scale = 1.0 / (dk as f32).sqrt();
+
+    let cells = state.cells_mut();
+    let (mut q, mut k) = (vec![0.0f32; dk], vec![0.0f32; dk]);
+    let (mut kv, mut delta) = (vec![0.0f32; dv], vec![0.0f32; dv]);
+
+    for h in 0..hv {
+        q.copy_from_slice(&step.query[h * dk..(h + 1) * dk]);
+        k.copy_from_slice(&step.key[h * dk..(h + 1) * dk]);
+        if mutation == Mutation::ScaleBeforeNorm {
+            for x in q.iter_mut() {
+                *x *= scale;
+            }
+        }
+        l2_normalise(&mut q);
+        l2_normalise(&mut k);
+        if mutation != Mutation::ScaleBeforeNorm {
+            for x in q.iter_mut() {
+                *x *= scale;
+            }
+        }
+        let v = &step.value[h * dv..(h + 1) * dv];
+        let decay = match mutation {
+            Mutation::NoDecay => 1.0,
+            Mutation::RawGate => step.g[h],
+            _ => step.g[h].exp(),
+        };
+        let beta = if mutation == Mutation::NoBeta {
+            1.0
+        } else {
+            step.beta[h]
+        };
+
+        // `cell(op, h, kk, vv)` is `h * dk * dv + kk * dv + vv`, so this
+        // head owns one contiguous block and each `kk` is one contiguous
+        // row of `dv`.
+        let head = &mut cells[h * dk * dv..(h + 1) * dk * dv];
+
+        for row in head.chunks_exact_mut(dv) {
+            for cell in row.iter_mut() {
+                *cell *= decay;
+            }
+        }
+        // kv = sum over the KEY axis, weighted by k.
+        kv.fill(0.0);
+        for (kk, row) in head.chunks_exact(dv).enumerate() {
+            let kw = k[kk];
+            for (vv, cell) in row.iter().enumerate() {
+                kv[vv] += *cell * kw;
+            }
+        }
+        for vv in 0..dv {
+            delta[vv] = (v[vv] - kv[vv]) * beta;
+        }
+
+        let out_row = &mut out[h * dv..(h + 1) * dv];
+        let read = |head: &[f32], out_row: &mut [f32]| {
+            for (kk, row) in head.chunks_exact(dv).enumerate() {
+                let qw = q[kk];
+                for (vv, cell) in row.iter().enumerate() {
+                    out_row[vv] += *cell * qw;
+                }
+            }
+        };
+        if mutation == Mutation::ReadBeforeWrite {
+            read(head, out_row);
+        }
+        for (kk, row) in head.chunks_exact_mut(dv).enumerate() {
+            let kw = k[kk];
+            for (vv, cell) in row.iter_mut().enumerate() {
+                *cell += kw * delta[vv];
+            }
+        }
+        if mutation != Mutation::ReadBeforeWrite {
+            read(head, out_row);
+        }
+    }
+    out
+}
+
+/// The literal delta rule, kept as a permanent ORACLE.
+///
+/// Not dead code and not history: a recurrence can produce a plausible
+/// output while corrupting the state every following token reads, so the
+/// optimised form needs something to be exactly equal TO. This is the
+/// version that reads line by line beside the operator spec, and
+/// `the_hoisted_recurrence_is_bit_identical` is what makes keeping it
+/// worth the lines.
+#[cfg(test)]
+pub(super) fn step_inner_literal(
     op: &GatedDeltaOp,
     step: &RecurrenceStep<'_>,
     state: &mut RecurrentBuffer,
@@ -255,7 +391,8 @@ pub fn recurrence_step_mutated(
     step_inner(op, step, state, mutation)
 }
 
-/// The nine operands as plain f32 slices, in the checkpoint's own layouts.
+/// The nine operands in the representations they are resident as, in the
+/// checkpoint's own layouts.
 ///
 /// Linear weights are `[out, in]` row-major, as PyTorch stores them, so a
 /// projection is `y[o] = sum_i x[i] * w[o][i]`. Nothing here re-derives a
@@ -263,15 +400,24 @@ pub fn recurrence_step_mutated(
 /// `GatedDeltaOp` that QW-1 built, which is the single architecture
 /// authority.
 pub struct GatedDeltaWeights<'a> {
-    pub in_proj_qkv: &'a [f32],
-    pub in_proj_a: &'a [f32],
-    pub in_proj_b: &'a [f32],
-    pub in_proj_z: &'a [f32],
+    /// The five DENSE projections, in whatever representation they are
+    /// resident as. `WeightRows` and not `&[f32]` because the point of
+    /// the rung is that a 100 MB matrix reaches the kernel still compact
+    /// — a widening accessor here would put the whole model back in f32
+    /// while every test still passed.
+    pub in_proj_qkv: WeightRows<'a>,
+    pub in_proj_a: WeightRows<'a>,
+    pub in_proj_b: WeightRows<'a>,
+    pub in_proj_z: WeightRows<'a>,
+    pub out_proj: WeightRows<'a>,
+    /// The elementwise glue and the depthwise convolution, always f32.
+    /// Six MB across the whole model against 11 GB of projection — there
+    /// is no traffic here to halve, and narrowing it would only cost a
+    /// widen per use.
     pub conv1d: &'a [f32],
     pub a_log: &'a [f32],
     pub dt_bias: &'a [f32],
     pub norm: &'a [f32],
-    pub out_proj: &'a [f32],
     pub norm_eps: f32,
 }
 
@@ -292,6 +438,56 @@ pub struct LayerPlanes {
     pub core: Vec<Vec<f32>>,
     /// `[T][hidden]`.
     pub output: Vec<Vec<f32>>,
+}
+
+/// How a Gated DeltaNet layer performs its DENSE projections.
+///
+/// The seam exists so a backend can accelerate the five matrix products
+/// around the recurrence **without touching the recurrence**. Everything
+/// QW-2/QW-2E proved stage-by-stage against HF — the convolution, the
+/// head expansion, the gates, the delta rule, the gated norm — is below
+/// this trait and identical for every implementation.
+///
+/// `ReferenceBackend` keeps [`ScalarProjections`], which is the literal
+/// transcription and shares no arithmetic with `larql-compute`. That
+/// independence is what makes it an oracle, so it is never routed
+/// through BLAS however much faster BLAS is.
+///
+/// Named for the five products rather than for one, so it cannot be
+/// confused with `exec::cpu::DenseProjector` — the row-range KERNEL
+/// trait one layer below. This one asks "compute this whole projection";
+/// that one asks "compute these rows", and the executor sits between
+/// them deciding how the rows were cut.
+pub trait DenseProjections: Sync {
+    /// `y = W x`, with `W` row-major `[out_dim, x.len()]` in whatever
+    /// representation it is resident as.
+    ///
+    /// Infallible, and a representation the implementation cannot
+    /// consume PANICS rather than returning an error. The pairing of
+    /// format to kernel is made once, by `PhysicalProjectionPlan`, and
+    /// observed rather than re-derived — so a mismatch here is not a bad
+    /// input, it is that invariant broken, and the same posture the
+    /// kernels below already take.
+    fn project(&self, weight: WeightRows<'_>, x: &[f32], out_dim: usize) -> Vec<f32>;
+}
+
+/// The literal projection: one scalar dot per row.
+///
+/// Measured at a flat 5.6 GB/s across every Qwen3.8 projection shape —
+/// which is why it is the oracle and not the execution strategy.
+pub struct ScalarProjections;
+
+impl DenseProjections for ScalarProjections {
+    fn project(&self, weight: WeightRows<'_>, x: &[f32], out_dim: usize) -> Vec<f32> {
+        let WeightRows::F32(w) = weight else {
+            panic!(
+                "the reference projection consumes f32 weights only; the reference backend \
+                 declares F32 for every operand, so a compact slab arriving here means the \
+                 format resolver and the backend that answered it have come apart"
+            );
+        };
+        matvec(w, x, out_dim)
+    }
 }
 
 fn matvec(w: &[f32], x: &[f32], out_dim: usize) -> Vec<f32> {
@@ -331,6 +527,20 @@ pub fn layer_forward(
     state: &mut RecurrentState,
     mutation: Mutation,
 ) -> LayerPlanes {
+    layer_forward_with(op, w, hidden, state, mutation, &ScalarProjections)
+}
+
+/// [`layer_forward`] with a chosen projection strategy. The public entry
+/// point above always passes [`ScalarProjections`], so the reference
+/// path is unchanged and the oracle stays independent.
+pub fn layer_forward_with(
+    op: &GatedDeltaOp,
+    w: &GatedDeltaWeights<'_>,
+    hidden: &[Vec<f32>],
+    state: &mut RecurrentState,
+    mutation: Mutation,
+    proj: &dyn DenseProjections,
+) -> LayerPlanes {
     let (hk, hv) = (op.num_key_heads, op.num_value_heads);
     let (dk, dv) = (op.key_head_dim, op.value_head_dim);
     let (key_dim, value_dim) = (hk * dk, hv * dv);
@@ -342,7 +552,7 @@ pub fn layer_forward(
     // Stage 1: the fused projection, per position.
     let mixed: Vec<Vec<f32>> = hidden
         .iter()
-        .map(|h| matvec(w.in_proj_qkv, h, conv_dim))
+        .map(|h| proj.project(w.in_proj_qkv, h, conv_dim))
         .collect();
 
     // Stage 2: depthwise causal convolution, then SiLU.
@@ -366,6 +576,7 @@ pub fn layer_forward(
         history[c * kernel + slot]
     };
     let mut conv: Vec<Vec<f32>> = vec![vec![0.0; conv_dim]; t_len];
+    let convolution = timed(OpClass::DeltaConv);
     for c in 0..conv_dim {
         let taps = &w.conv1d[c * kernel..(c + 1) * kernel];
         for t in 0..t_len {
@@ -406,9 +617,11 @@ pub fn layer_forward(
             };
         }
     }
+    drop(convolution);
 
     for t in 0..t_len {
         // Stage 3/4: split, then expand q/k from Hk heads to Hv.
+        let expand = timed(OpClass::DeltaHeadExpand);
         let mut q = vec![0.0f32; hv * dk];
         let mut k = vec![0.0f32; hv * dk];
         for e in 0..hv {
@@ -423,17 +636,22 @@ pub fn layer_forward(
             }
         }
         let value = conv[t][key_dim * 2..key_dim * 2 + value_dim].to_vec();
+        drop(expand);
 
-        // Stage 5: the gates.
-        let a = matvec(w.in_proj_a, &hidden[t], hv);
-        let b = matvec(w.in_proj_b, &hidden[t], hv);
-        let z = matvec(w.in_proj_z, &hidden[t], value_dim);
+        // Stage 5: the gates. The three projections are timed by the
+        // executor; only the elementwise part is this leaf.
+        let a = proj.project(w.in_proj_a, &hidden[t], hv);
+        let b = proj.project(w.in_proj_b, &hidden[t], hv);
+        let z = proj.project(w.in_proj_z, &hidden[t], value_dim);
+        let gates = timed(OpClass::DeltaGates);
         let beta: Vec<f32> = b.iter().map(|x| 1.0 / (1.0 + (-x).exp())).collect();
         let g: Vec<f32> = (0..hv)
             .map(|h| -w.a_log[h].exp() * softplus(a[h] + w.dt_bias[h]))
             .collect();
+        drop(gates);
 
         // Stage 6: the proven recurrence.
+        let recurrence = timed(OpClass::DeltaRecurrence);
         let core = step_inner(
             op,
             &RecurrenceStep {
@@ -447,8 +665,11 @@ pub fn layer_forward(
             mutation,
         );
 
+        drop(recurrence);
+
         // Stage 7: gated RMSNorm, per value head over Dv. Norm, then the
         // weight, then the SiLU'd gate — that order is the reference's.
+        let gated_norm = timed(OpClass::DeltaGatedNorm);
         let mut normed = vec![0.0f32; value_dim];
         for h in 0..hv {
             let row = &core[h * dv..(h + 1) * dv];
@@ -459,10 +680,12 @@ pub fn layer_forward(
             }
         }
 
+        drop(gated_norm);
+
         // Stage 8: back into the residual stream.
         planes
             .output
-            .push(matvec(w.out_proj, &normed, hidden[t].len()));
+            .push(proj.project(w.out_proj, &normed, hidden[t].len()));
         planes.query.push(q);
         planes.key.push(k);
         planes.value.push(value);

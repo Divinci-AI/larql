@@ -231,4 +231,30 @@ impl KvState for CanonicalKvState {
     fn set_position(&mut self, position: usize) {
         self.cache.next_position = position;
     }
+
+    /// **Explicitly unsupported, not absent.**
+    ///
+    /// The canonical cache holds per-position K/V rows and nothing else,
+    /// so a hybrid stack reaching the serving path fails closed here and
+    /// names which side is missing. Returning `None` would make this
+    /// indistinguishable from "this layer needs no state" and let a
+    /// 48-recurrent-layer model serve from zeroed buffers — a different
+    /// model, reported as this one.
+    ///
+    /// SERVE-HYBRID replaces this with real buffers and re-establishes
+    /// serving parity; until then the refusal is the correct answer.
+    fn recurrent_state(
+        &mut self,
+        layer: usize,
+    ) -> Result<
+        &mut larql_vindex::format::vindex3::opplan::exec::continuation::RecurrentState,
+        larql_vindex::format::vindex3::opplan::exec::kv::ContinuationError,
+    > {
+        Err(
+            larql_vindex::format::vindex3::opplan::exec::kv::ContinuationError::RecurrentUnsupported {
+                provider: "CanonicalKvState",
+                layer,
+            },
+        )
+    }
 }
