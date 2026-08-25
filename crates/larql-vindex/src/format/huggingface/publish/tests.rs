@@ -439,6 +439,114 @@ fn publish_vindex_with_opts_happy_path_invokes_callbacks() {
 
 #[test]
 #[serial]
+fn publish_then_candidate_end_to_end_against_a_mocked_hf_endpoint() {
+    // R3C's own acceptance gate, run for real rather than asserted
+    // piecewise: publish against a mocked HF endpoint, let it return a
+    // pinned commit, build a registry candidate from THAT exact
+    // publish result (never a hand-typed stand-in revision), and prove
+    // the candidate carries the real values and validates through the
+    // real registry schema — the same `RegistryManifest::validate()`
+    // `production_registry()` trusts, called inside `build_candidate`
+    // itself.
+    let mut server = mockito::Server::new();
+    let _base = EnvGuard::set(protocol::TEST_BASE_ENV, &server.url());
+    let _tok = EnvGuard::set("HF_TOKEN", "tok");
+
+    let _create = server
+        .mock("POST", "/api/repos/create")
+        .with_status(200)
+        .with_body("{}")
+        .expect_at_least(1)
+        .create();
+    let _preupload = server
+        .mock("POST", "/api/models/larql/granite-4.1-3b/preupload/main")
+        .with_status(200)
+        .with_body(r#"{"files":[{"path":"index.json","uploadMode":"regular"}]}"#)
+        .expect_at_least(1)
+        .create();
+    let _commit = server
+        .mock("POST", "/api/models/larql/granite-4.1-3b/commit/main")
+        .with_status(200)
+        .with_body("{}")
+        .expect_at_least(1)
+        .create();
+    let _head = mock_repo_head_sha(
+        &mut server,
+        "larql/granite-4.1-3b",
+        "1048a8eb2fec5812a698e76d7e603527d0475c17",
+    );
+
+    let tmp = tempfile::tempdir().unwrap();
+    make_minimal_vindex(tmp.path());
+
+    let published = publish_vindex_with_opts(
+        tmp.path(),
+        "larql/granite-4.1-3b",
+        &PublishOptions::default(),
+        &mut SilentPublishCallbacks,
+    )
+    .expect("mocked publish must succeed");
+    assert_eq!(
+        published.revision,
+        "1048a8eb2fec5812a698e76d7e603527d0475c17"
+    );
+
+    let model = crate::registry::build_candidate(crate::registry::CandidateInputs {
+        name: "granite-4.1-3b".to_string(),
+        variant: "bf16".to_string(),
+        // The published artifact's own repo/revision — "larql/granite-4.1-3b"
+        // is the same string this test passed to `publish_vindex_with_opts`
+        // above, `published.revision` is what the MOCKED HF endpoint
+        // actually returned, not re-typed.
+        artifact_repo: "larql/granite-4.1-3b".to_string(),
+        artifact_revision: published.revision.clone(),
+        abi: None,
+        source_repo: "ibm-granite/granite-4.1-3b".to_string(),
+        source_revision: "c0650403e44e78ec0262dab1c90914c65b196c4e".to_string(),
+        attested_by: "chrishayuk".to_string(),
+    })
+    .expect("a candidate built from real inputs must pass real registry validation");
+
+    let variant = model.variants.get("bf16").expect("bf16 variant present");
+    assert_eq!(variant.artifact.repo, "larql/granite-4.1-3b");
+    assert_eq!(
+        variant.artifact.revision, "1048a8eb2fec5812a698e76d7e603527d0475c17",
+        "the candidate's artifact.revision must be the pinned commit the \
+         MOCKED HF endpoint actually returned, not a guessed or hand-typed value"
+    );
+    assert_eq!(variant.source.repo, "ibm-granite/granite-4.1-3b");
+    assert_eq!(
+        variant.source.revision,
+        "c0650403e44e78ec0262dab1c90914c65b196c4e"
+    );
+    assert_eq!(
+        variant.source.attestation,
+        crate::registry::Attestation::HandAttested {
+            by: "chrishayuk".to_string()
+        }
+    );
+
+    // Missing provenance inputs fail rather than being guessed —
+    // R3C's own invariant, proven against the same real publish result
+    // rather than synthetic data.
+    let refused = crate::registry::build_candidate(crate::registry::CandidateInputs {
+        name: "granite-4.1-3b".to_string(),
+        variant: "bf16".to_string(),
+        artifact_repo: "larql/granite-4.1-3b".to_string(),
+        artifact_revision: published.revision,
+        abi: None,
+        source_repo: "ibm-granite/granite-4.1-3b".to_string(),
+        source_revision: "c0650403e44e78ec0262dab1c90914c65b196c4e".to_string(),
+        attested_by: String::new(),
+    });
+    assert!(
+        refused.is_err(),
+        "an empty attestation must refuse, never silently build a candidate"
+    );
+}
+
+#[test]
+#[serial]
 fn publish_fails_when_the_pinned_revision_cannot_be_fetched() {
     // Every file uploaded successfully, but the final "what's main's
     // HEAD now" call fails — this must fail the whole publish, not

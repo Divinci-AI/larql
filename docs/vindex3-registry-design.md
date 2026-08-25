@@ -843,3 +843,77 @@ verified against the real `check_coverage_policy.py` gate: unchanged
 94.30% total, 43 debt baselines (none newly added), `check.rs` 100%
 line coverage, `embedded.rs` 94.12% (both new/changed files clear the
 90% floor).
+
+## 13. Rung 3C — publish emits a candidate, never writes the registry (2026-08-24)
+
+One thing, narrowly: **turn a successful `larql publish` into a
+deterministic candidate registry record.** Not `registry/models/`
+itself (R3D), not a promotion command, not the NVFP4 runtime gap
+([[project_vindex3_nvfp4_attention_widening_gap]] in memory) — that's
+a separate programme.
+
+**The one invariant, enforced structurally**: candidate generation must
+never invent information. `CandidateInputs` (new `registry/candidate.rs`)
+names each field by where it came from — `artifact.repo`/
+`artifact.revision` are mechanically known (the *real* publish result's
+own `{repo, revision}`, never re-derived or guessed), `abi` is an
+explicit policy default (`CURRENT_VINDEX3_ABI` — the one value this
+binary actually implements, not invented), and `source.repo`/
+`source.revision`/`attested_by` are explicit caller input only — never
+derived from `--repo`, a filename, or an HF cache path. Missing any
+required input is a refusal before any candidate is built, never a
+guess.
+
+`build_candidate` validates through the **real** schema: it wraps its
+one model into a one-entry `RegistryManifest` and calls
+`.validate()` — the exact code `production_registry()` trusts and
+`registry check` (R3B) calls — before returning anything. A candidate
+that would fail real registry validation (floating revision, empty
+attestation) is refused at generation time, not discovered later by
+whoever eventually runs `registry check` on it.
+
+**`larql publish --emit-registry-candidate`** (new
+`publish_cmd/registry_candidate.rs`) is opt-in and additive only —
+plain `larql publish` takes no new code path at all
+(`parse_candidate_request` returns `Ok(None)` immediately when the
+flag is absent). When passed, it requires `--registry-name`,
+`--registry-variant`, `--source-repo`, `--source-revision`, and
+`--attested-by` — checked up front, before any network call, so a
+missing companion flag is reported immediately rather than after
+paying for a real publish. Incompatible with `--no-full` (a candidate
+names the full artifact's own revision, which doesn't exist without
+publishing it). `--registry-candidate-out PATH` writes the JSON there;
+omitted, it prints to stdout. The candidate body is exactly what would
+live at `registry/models/<name>.json` — no `name` field inside it (the
+name lives in the index and the filename, the same single-source-of-
+truth choice `check.rs` already makes) — a caller feeds it straight
+into `larql registry check` once R3D exists to consume it.
+
+**Acceptance gate, run for real, not asserted piecewise**: a new test
+(`format::huggingface::publish::tests::publish_then_candidate_end_to_end_against_a_mocked_hf_endpoint`)
+publishes against a mocked HF endpoint, lets it return a pinned commit,
+builds a candidate from *that exact* publish result, and asserts the
+candidate's `artifact.revision` is the mocked endpoint's own returned
+value (never a hand-typed stand-in) plus exact `source.repo`/
+`source.revision`/`attestation` — then separately proves an empty
+attestation refuses rather than silently building. Plain `larql
+publish` behaviour is unchanged (all 36 pre-existing `publish_cmd`
+tests pass unmodified; the flag-omitted path returns `Ok(None)`
+before any of the new logic runs).
+
+Gates: larql-vindex 2908 lib tests + all integration binaries (+80 net
+over R3B's 2828 — includes unrelated work merged to `main` between R3B
+and R3C, plus `candidate.rs`'s own 7 tests and the new end-to-end
+acceptance test); larql-cli 787 (+7 from R3B's 775 net of the same
+merged-in delta, plus `registry_candidate.rs`'s own tests); clippy
+`-D warnings` and `cargo fmt --check` clean workspace-wide. Coverage
+verified against the real `check_coverage_policy.py` gate: 94.30%
+total, 43 debt baselines unchanged; `registry/candidate.rs` 100% line
+coverage; `format/huggingface/publish/mod.rs` (a pre-existing 74.0%
+debt baseline) now measures 90.29%, ratcheted further above its floor.
+
+**Per explicit instruction, stopped here**: does not write into
+`registry/models/`, does not touch `registry/index.json`, not
+committed, no PR opened. R3D (promotion — re-fetch the pinned artifact,
+re-validate, run whatever gates exist, write the registry entry) is
+next, deliberately not bundled in.
