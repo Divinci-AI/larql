@@ -172,6 +172,38 @@ unsafe fn q4_sdot_row(packed: &[u8], scales: &[f32], qx: &[i8], in_dim: usize) -
     acc
 }
 
+/// Portable counterpart to the aarch64 intrinsic above — same nibble
+/// unpack, unbias, multiply-accumulate, just without SIMD. Exists so
+/// `q4_sdot_row` is a real symbol on every architecture, not only
+/// aarch64: `q8_float_against_q8_integer` below calls it unconditionally
+/// (behind a runtime `QW_SDOT=1` opt-in, not a `cfg`), so the crate must
+/// still *compile* it everywhere even though the benchmark itself only
+/// measures something meaningful on aarch64. This is the exact scalar
+/// definition `the_q4_integer_kernel_computes_what_the_format_denotes`
+/// checks the intrinsic version against, given the shared name here —
+/// not a stub, the real computation.
+///
+/// `unsafe` to match the intrinsic version's signature, so the call
+/// sites' `unsafe { q4_sdot_row(...) }` stays correct (not an
+/// unnecessary-unsafe lint) on every target this compiles for.
+#[cfg(not(target_arch = "aarch64"))]
+unsafe fn q4_sdot_row(packed: &[u8], scales: &[f32], qx: &[i8], in_dim: usize) -> f32 {
+    let mut acc = 0.0f32;
+    for (b, scale) in scales.iter().enumerate() {
+        let lo = b * BLOCK;
+        let hi = (lo + BLOCK).min(in_dim);
+        let half = (hi - lo) / 2;
+        let mut sum = 0i32;
+        for j in 0..half {
+            let byte = packed[lo / 2 + j];
+            sum += ((byte & 0x0f) as i32 - 8) * qx[lo + j] as i32;
+            sum += ((byte >> 4) as i32 - 8) * qx[lo + j + half] as i32;
+        }
+        acc += scale * sum as f32;
+    }
+    acc
+}
+
 /// The portable definition, and what runs where `dotprod` is absent.
 fn sdot_row_portable(codes: &[i8], scales: &[f32], qx: &[i8], in_dim: usize) -> f32 {
     let mut acc = 0.0f32;
