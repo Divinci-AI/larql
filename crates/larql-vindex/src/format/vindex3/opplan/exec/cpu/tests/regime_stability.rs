@@ -161,6 +161,11 @@ struct Fixtures {
     codes: Vec<i8>,
     scales: Vec<f32>,
     x: Vec<f32>,
+    // Read only by `sdot_once`'s `#[cfg(target_arch = "aarch64")]` arm
+    // below — real usage on the architecture this bench actually
+    // measures, not dead weight; the non-aarch64 arm is a `*cell = 0.0`
+    // no-op by design (this whole bench measures nothing off-target).
+    #[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
     qx: Vec<i8>,
     workers: usize,
     pool: rayon::ThreadPool,
@@ -170,12 +175,16 @@ impl Fixtures {
     fn sdot_once(&self) {
         use rayon::prelude::*;
         let per = OUT.div_ceil(self.workers);
+        // Same story as the `qx` field above: read only on aarch64.
+        #[cfg_attr(not(target_arch = "aarch64"), allow(unused_variables))]
         let per_row = IN.div_ceil(BLOCK);
         let mut out = vec![0.0f32; OUT];
         self.pool.install(|| {
             out.par_chunks_mut(per).enumerate().for_each(|(i, slot)| {
                 let start = i * per;
                 for (o, cell) in slot.iter_mut().enumerate() {
+                    // Read only by the aarch64 arm below.
+                    #[cfg_attr(not(target_arch = "aarch64"), allow(unused_variables))]
                     let r = start + o;
                     #[cfg(target_arch = "aarch64")]
                     {
