@@ -369,6 +369,17 @@ impl EncoderRecipe {
         }
     }
 
+    /// Fixed-grid GPTQ: only E2M1 code nibbles may differ from
+    /// `nearest_v1`; every scale byte is byte-identical by construction.
+    /// Frozen in `bench/prompts/quality-bank-1/ENCODER-R4.md` (R4.1); the
+    /// algorithm lives in [`super::gptq`].
+    pub fn gptq_v1() -> Self {
+        Self {
+            algorithm: "nvfp4-gptq".into(),
+            revision: 1,
+        }
+    }
+
     /// The recipe this build compiles with.
     pub fn current() -> Self {
         Self::nearest_v1()
@@ -387,5 +398,35 @@ impl EncoderRecipe {
     /// behaviour rather than by bytes.
     pub fn is_reproducible_by_this_build(&self) -> bool {
         *self == Self::current()
+    }
+}
+
+#[cfg(test)]
+mod encoder_recipe_tests {
+    use super::EncoderRecipe;
+
+    #[test]
+    fn gptq_v1_names_and_algorithm_are_distinct_from_nearest() {
+        let gptq = EncoderRecipe::gptq_v1();
+        let nearest = EncoderRecipe::nearest_v1();
+        assert_eq!(gptq.name(), "nvfp4-gptq-v1");
+        assert_eq!(nearest.name(), "nvfp4-nearest-v1");
+        assert_ne!(gptq, nearest);
+    }
+
+    #[test]
+    fn current_is_still_nearest_v1() {
+        // This build's REPRESENT dispatch does not yet select gptq_v1 —
+        // see `ENCODER-R4.md` Sequence step 8's remaining scope. When
+        // that changes this assertion is exactly what should fail first.
+        assert_eq!(EncoderRecipe::current(), EncoderRecipe::nearest_v1());
+    }
+
+    #[test]
+    fn gptq_v1_is_not_reproducible_by_this_build() {
+        // Accurate today: nothing routes REPRESENT through gptq_v1 yet,
+        // so a pack claiming that recipe cannot be reproduced by this
+        // build's `current()` dispatch.
+        assert!(!EncoderRecipe::gptq_v1().is_reproducible_by_this_build());
     }
 }

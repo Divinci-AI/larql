@@ -1115,6 +1115,117 @@ run), and ultimately whether Hessian-aware code selection recovers
 meaningful Q-BANK quality at identical bytes — which R4 still has a
 genuine chance to answer either way.
 
+## R4.1 implementation — milestone 1 (one tensor) CLOSED, 2026-08-26
+
+The user's own framing for this step, quoted because it is the scope
+boundary the module below was built to: "the next milestone should
+simply be: Produce the first deterministic `nvfp4-gptq-v1` tensor that
+passes the zero-compensation and scale-identity oracles. Then expand
+from one tensor → one layer → sequential full model." This closes the
+first of those three.
+
+`crates/larql-vindex/src/format/vindex3/represent/gptq/` — a new
+module beside `nvfp4_pack.rs`, not a new crate:
+
+```text
+hessian.rs     the dead/alive column partition and the reduced
+               (alive-only) sub-matrix GPTQ actually factorises —
+               the exact H[j,j]==0 rule, checked before damping
+sequential.rs  the sequential column-elimination core: Cholesky(H_λ)
+               → H⁻¹ → Cholesky(H⁻¹), then one row at a time
+pack.rs        orchestration: nearest-v1's own frozen scale/code pass,
+               merged with GPTQ's codes on the alive columns
+mod.rs         module docs, public re-exports
+```
+
+Deliberately narrow, matching the milestone: this takes a raw
+calibration Hessian *directly*, as an `Array2<f64>` argument — it does
+not yet capture calibration activations itself (the sequential
+candidate-path forward-pass harness is still unbuilt), does not wire
+into the VINDEX3 REPRESENT dispatch (`EncoderRecipe::gptq_v1()` exists
+as a named recipe; `compile_representation`'s dispatch still hardcodes
+`nearest_v1`), and uses the existing hand-rolled
+`larql_compute::cpu::ops::linalg::{cholesky, cholesky_inverse}` rather
+than the LAPACK/Accelerate backend R4.2 benchmarked — every synthetic
+fixture this milestone tests is small enough that the scalar path is
+fast and already proven (MEMIT depends on it), so no new dependency was
+owed yet. All three are the explicitly deferred "one layer → sequential
+full model" expansion, not oversights.
+
+**A design simplification worth recording, because it was not assumed
+going in.** The frozen dead-coordinate rule reads as a special case
+("`Wwork[:,j]` remains `W0[:,j]`... no error propagated from or into
+`j`"). It is possible to show that adding uniform ridge damping to a
+*full* Hessian and running one undivided elimination reproduces this
+behaviour automatically for an exactly-zero-diagonal column, because
+`H[j,j]=0` (a sum of squares) forces `H[j,m]=0` for every other `m`
+too, which block-decouples `j` from the rest of the matrix — in exact
+floating-point arithmetic, not merely in principle, since every
+operation on an exact `0.0` is itself exact. That emergent-decoupling
+route was considered and rejected in favour of the more literal one:
+`hessian.rs` explicitly gathers only the alive columns into a reduced
+sub-matrix, so "no error propagated from or into a dead column" is a
+structural guarantee of what got fed to the linear algebra, not a
+numerical property a reader has to trust holds throughout an
+accelerated backend swap later. Slightly more code; a claim that does
+not depend on floating-point subtlety to stay true.
+
+**The four implementation oracles, run and passing** (`cargo test -p
+larql-vindex gptq`, 23 new tests, all files ≥ 90% line coverage, `cargo
+clippy -p larql-vindex --all-targets -- -D warnings` clean, `cargo fmt
+--check` clean):
+
+```text
+1. zero compensation
+   An all-zero calibration Hessian makes every column dead by the
+   exact rule, so the whole matrix falls back to nearest rounding.
+   Verified byte-for-byte against nvfp4-nearest-v1: tensor scale,
+   every group scale, and the ENTIRE packed payload — not just the
+   scales.
+
+2. normal GPTQ
+   A single-group (k=16) fixture with two correlated alive columns
+   and fourteen dead ones: scale bytes stay byte-identical to
+   nearest regardless of H; every dead column's code matches
+   nearest's exactly; the alive pair's codes are shown to differ
+   from independent per-element nearest rounding (payload nibbles
+   only, nothing else).
+
+3. determinism
+   Same weights + same Hessian, run twice: byte-identical pack,
+   byte-identical scales, identical alive/saturation counts.
+
+4. stored decode
+   Decoding the pack and re-quantising under the same frozen grid
+   (no scales recomputed) reproduces exactly the codes that were
+   stored, for every element.
+```
+
+Two of these were hand-derived and checked by exact arithmetic before
+being written as assertions, not just eyeballed against test output:
+with `H = [[2,1],[1,2]]` and `ridge = 0`, `chol(H) → H⁻¹ → chol(H⁻¹)`
+has a closed form making the propagation factor from column 0 into
+column 1 exactly `+0.5 * err[0]`, independent of `err[0]`'s magnitude
+(full derivation in `gptq/tests/sequential.rs`'s own module doc). That
+gave two exact, non-approximate test cases: `w0 = [0.24, 0.24]` flips
+column 1 from nearest's code 0 (0.0) to GPTQ's code 1 (0.5), and
+`w0 = [5.0, 5.6]` makes column 1 saturate (past the E2M1 grid top)
+purely from propagated compensation, even though 5.6 alone would not
+saturate. Saturation is instrumented (`saturated_elements`,
+per-element) exactly as R4.1 requires — nearest-v1 cannot produce it;
+fixed-grid GPTQ can, because compensation moves values against a scale
+chosen for the originals.
+
+**Still open, for the next expansion**: real calibration-activation
+capture per site (qkv / gate_up / down all need their own raw `H`, not
+just `down_proj`'s — `estimate_ffn_covariance` only covers the latter
+today); the sequential candidate-path forward pass (layer `L+1`
+calibrated from layer `0..L`'s already-candidate-encoded output, per
+the frozen algorithm above); the LAPACK-accelerated Cholesky path for
+a real `d = 8192` site; and REPRESENT dispatch wiring. None of these
+are implied by milestone 1 passing — they are Sequence step 8's
+remaining scope.
+
 ## Sequence
 
 ```text
@@ -1141,7 +1252,11 @@ genuine chance to answer either way.
 7.  Write the larger disjoint calibration + validation pools,
     with digests and the content-verified zero-overlap gate.        [R4.0-CAL-A]
 8.  Implement: dense H, one site at a time, sequential
-    candidate-path calibration, static scales.            [R4.1/R4.2 IMPLEMENTATION]
+    candidate-path calibration, static scales.       [R4.1/R4.2 IMPLEMENTATION
+    IN PROGRESS — milestone 1 (single tensor, given H directly, all four
+    implementation oracles passing) CLOSED; still open: real per-site
+    Hessian capture for qkv/gate_up/down, the sequential candidate-path
+    forward pass, LAPACK acceleration at d=8192, REPRESENT dispatch.]
 9.  Choose N mechanically from held-out reconstruction.
     NO Q-BANK OBSERVATION.                                          [R4.0-CAL-B]
 10. Freeze N.                                                        [R4.0-CAL-B]
