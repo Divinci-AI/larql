@@ -45,6 +45,7 @@
 //! [`super::variants`] already states, and the reason a compiler is needed
 //! at all: a profile cannot turn one encoding's bytes into another's.
 
+pub mod gptq;
 pub mod map;
 pub mod nvfp4_pack;
 pub mod policy;
