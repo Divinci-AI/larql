@@ -116,6 +116,91 @@ zero-overlap gate. Pack provenance records **which calibration and which N**
 chose the values — as metadata beside the recipe, not crammed into the
 recipe string.
 
+### R4.0-CAL-A CLOSED, 2026-08-26 — pools frozen, no encoder touched
+
+`bench/prompts/quality-bank-1/r4_cal_a_build.py` (`build` / `verify`),
+outputs `r4-cal-a-calibration-pool.json` / `r4-cal-a-validation-pool.json`.
+
+**Calibration extends the existing frozen `N0` bank, unchanged, rather
+than replacing it.** `N0 = 458` is literally
+`calibration-disjoint.json`'s 12 prompts — not reproduced or
+re-verified here, just taken as a fixed prefix. Every larger rung
+appends more prompts, in one fixed deterministic order, so every
+smaller `N`'s prompt list is a strict prefix of every larger `N`'s:
+
+```text
+N =    458    12 prompts    (unchanged existing bank)
+N =  2,048    16 prompts    achieved 2,134 positions
+N =  8,192    27 prompts    achieved 8,893 positions
+N = 32,768    68 prompts    achieved 32,994 positions
+N = 65,536   122 prompts    achieved 65,972 positions
+```
+
+**Source: real public-domain text, decided explicitly, not defaulted
+into.** The existing Q-BANK-1 / SENSITIVITY-1B' banks are hand-authored
+by design, at a scale (69 / 12 prompts) that stays practical to write
+by hand — R4's ladder needs ~40x that many positions, where genuine
+prose gives more realistic activation statistics than the same volume
+of synthetic writing would. Calibration draws from *Walden* (Thoreau)
+and *On the Origin of Species* (Darwin), interleaved prompt-by-prompt
+so every rung — not just the largest — gets a mix of both, not all of
+one source before any of the other. Validation draws from *Pride and
+Prejudice* (Austen) and *Twenty Thousand Leagues Under the Sea*
+(Verne) — **different books entirely from calibration**, so cross-pool
+content overlap is impossible by construction, not merely checked for
+after the fact (it is also checked, exactly: 0 exact-text overlap, 0
+substring overlap, both directions, against both Q-BANK-1 and each
+other). All four sources are Project Gutenberg, sha256-pinned in the
+build script so `verify` refuses rather than silently rebuilding a
+different pool if the hosted text ever changes.
+
+**Validation is deliberately over-provisioned for prompt-level power,
+not for position count.** 683 independent prompts, 176,879 positions —
+about 10x Q-BANK-1's own prompt count. The one-SE rule resamples
+*prompts*, not positions (positions inside one prompt aren't
+independent), so what makes the eventual uncertainty estimate
+meaningful is prompt count, not token count — a validation set with a
+handful of very long prompts would give a confident-looking but
+statistically hollow standard error. Not every one of the 683 has to
+be used in every R4.0-CAL-B evaluation; having the full frozen pool to
+draw from is the safe direction to over-provision in.
+
+**A real data-quality catch, worth recording so it doesn't recur.**
+The first extraction pass let two pathologies through: a table-of-
+contents block (Walden ships its chapter list as one long paragraph
+with no blank lines, so it read as legitimate prose by a length-only
+filter) and, more subtly, *On the Origin of Species*'s per-chapter
+opening "argument" lists — dense runs of short topic-sentence
+fragments, each properly period-terminated, so a naive
+periods-per-length check missed them too. Caught by inspection, not by
+either filter — fixed by requiring both the average *and the median*
+sentence length in a candidate paragraph to look like real prose (a
+few genuinely long sentences can drag an average up while the block is
+still mostly fragments; the median doesn't move the same way). Re-ran
+end to end after the fix; every sampled chunk checked clean afterward.
+Worth naming because it's exactly the kind of contamination a
+"looks fine, has periods, is long enough" check would let straight
+into a supposedly-frozen calibration corpus.
+
+**Disjointness, mechanically verified, not asserted:**
+
+```text
+calibration vs Q-BANK-1     exact_overlap=0  substring_hits=0
+validation  vs Q-BANK-1     exact_overlap=0  substring_hits=0
+calibration vs validation   exact_overlap=0  substring_hits=0
+```
+
+**What R4.0-CAL-A does NOT do**: no `nvfp4-gptq-v1` pack, no `Q_N(W)`
+for any `N`, no reconstruction error, no Q-BANK observation. There is
+nothing here for the encoder to have contaminated, because the encoder
+was never invoked — this step froze inputs and rules, nothing that
+depends on the thing it will later evaluate.
+
+**Next is R4.1/R4.2's own implementation** (Sequence step 8) — dense
+`H`, one site at a time, sequential candidate-path calibration, static
+scales, drawing on these now-frozen pools. R4.0-CAL-B (choosing `N`
+from held-out reconstruction) cannot run before that exists.
+
 ## Calibration-sufficiency gate — decided without Q-BANK
 
 Run the *fixed* `nvfp4-gptq-v1` at each `N`, and measure on the held-out
