@@ -209,9 +209,14 @@ empirical question — which is what the sufficiency gate measures.
 Peak memory is bounded by a single site, not the stack:
 
 ```text
-attention / FFN input   2560 x 2560     25 MB
-down_proj input         8192 x 8192    256 MB   (128 MB triangular)
+attention / FFN input   2560 x 2560     25 MB   (f32)
+down_proj input         8192 x 8192    256 MB   (128 MB triangular)   (f32)
 ```
+
+These are **f32** figures. Numerical precision for this machinery is not
+decided yet — see "Numerical precision is part of the recipe" under
+R4.1 — and f64 roughly doubles both. R4.2 restates this table rather
+than the assumption going stale.
 
 The ~10.7 GB figure quoted earlier applies only to holding all 40 layers
 at once, which the streaming order below never does.
@@ -430,6 +435,91 @@ own arm, because folding it in here would make a win unattributable between
 better rounding, better group scales and a better tensor scale. Fixed-grid
 answers the causal question first.
 
+### Dead coordinates — an exact rule, not a threshold
+
+GPTQ's textbook behaviour for a zero-variance input coordinate — after
+damping folds a small constant onto every diagonal entry — is silently
+well-defined but semantically wrong here: damping would manufacture a
+correlation for a coordinate the calibration data never informed at all.
+Freezing an epsilon threshold ("small enough to count as dead") would
+smuggle a tuned parameter into what is supposed to be a fixed-grid,
+one-variable experiment, so the rule is exact and checked on the RAW
+Hessian, before damping:
+
+```text
+dead coordinate j:
+    detected from raw H[j,j] == 0 before damping
+    Wwork[:,j] remains W0[:,j]
+    encode using ordinary fixed-grid nearest E2M1
+    no error propagated from or into j
+```
+
+No epsilon. `H[j,j] == 0` in exact arithmetic means that input channel
+carried zero energy across the entire calibration pass — its row and
+column in the raw Hessian are exactly zero — so there is nothing for GPTQ
+to compensate with or against. Column `j` is encoded with ordinary
+nearest rounding against the already-frozen grid, exactly as it would be
+under `nvfp4-nearest-v1`, and it neither contributes to nor receives
+error propagation. This preserves the one-variable contract: a dead
+coordinate falls back to the control's own behaviour rather than
+introducing a new one. Tested on a tiny synthetic matrix with a
+manufactured dead column before the encoder ships.
+
+### The zero-compensation oracle
+
+A weaker version of this already appears in the Sequence below (step 11:
+scale bytes byte-identical). This oracle is stronger, and it runs first,
+before any real calibration data touches the encoder:
+
+```text
+nvfp4-gptq-v1 with compensation/update disabled
+==
+nvfp4-nearest-v1
+
+    tensor scale bytes      identical
+    all E4M3 group scales   identical
+    all E2M1 nibbles        identical
+    entire payload          identical
+```
+
+Not "the scales match" — the entire byte stream matches, including every
+E2M1 nibble. If the GPTQ code path produces so much as one nibble
+different from nearest when its own compensation term is forced to zero,
+the infrastructure has changed something other than the one variable it
+is meant to isolate — a code-selection order dependency, a rounding mode
+picked up from a different code path, a layout bug — and that has to be
+found and fixed before real calibration data is ever used. This runs on
+every build of the encoder, not once.
+
+### Numerical precision is part of the recipe, chosen by R4.2
+
+H accumulation, damping, Cholesky factorisation, inverse-factor
+construction, and the compensation arithmetic are all part of
+`nvfp4-gptq-v1`, not a free implementation choice — two implementations
+differing only in precision are not the same recipe, because they can
+select different E2M1 codes at the numerical margins. One precision is
+frozen, and it is frozen by R4.2's cost/stability benchmark, before any
+GPTQ pack exists — **not** decided here as "f64, because it's the boring
+safe choice." That framing is tempting and wrong: it treats a question
+with a real, cheaply measurable answer (does f32 factorise this site
+reliably? does f64 fit the memory envelope at every feasible `N`? does
+the existing hand-rolled Cholesky even finish in reasonable time at
+`d = 8192`?) as a matter of taste rather than a measurement.
+
+That last question is not rhetorical. The only Cholesky/inverse
+machinery in this workspace today (`larql_compute::cpu::ops::linalg`,
+built for MEMIT's covariance solve — same H-accumulate → damp →
+Cholesky → solve shape, at far smaller `d`) is a hand-rolled, f64-only,
+unblocked triple-nested loop — **not** LAPACK-accelerated. The `X^T X`
+accumulation is BLAS/Accelerate-backed (AMX-fast, via `ndarray`'s
+`.dot()`); the factorisation is not. At `d = 8192` that's on the order of
+`8192³/6 ≈ 9.2×10¹⁰` scalar FLOPs for Cholesky alone, before the second
+factorisation GPTQ needs for the inverse-Cholesky form. Whether that
+finishes in a benchmarkable time, or whether R4.2 needs to add a real
+LAPACK binding (`ndarray-linalg` or `lapack-src`, both currently absent
+from the dependency graph) before a `d = 8192` site is even attemptable,
+is exactly what R4.2 measures — not assumed in either direction here.
+
 ## R4.2 — cost benchmark before the N ladder is frozen
 
 Memory is settled; **compute is not**. Dense `H` formation plus Cholesky is
@@ -451,6 +541,495 @@ Cholesky and inverse-Cholesky. That is a pure cost measurement — it reveals
 nothing about R4 quality and therefore cannot contaminate the experiment —
 and it decides which rungs of the ladder are feasible at all.
 
+### The protocol — small, deliberately non-scientific
+
+```text
+one real Granite down_proj site, d = 8192
+
+measure separately:
+A. H accumulation
+   N = 458 / 2,048 / 8,192 / 32,768 / 65,536
+   (shape/cost only — larger N may use deterministic synthetic/tiled X;
+    this step is about H's cost as a function of N, not about the
+    encoder's quality, so a real calibration corpus buys nothing here)
+B. damping
+C. Cholesky(H)
+D. the inverse / inverse-Cholesky form GPTQ actually needs
+
+for f32 and f64, each of A-D:
+   wall time
+   peak memory
+   success / failure
+   NaN / Inf
+   factorisation residual  (‖H_λ − L Lᵀ‖ / ‖H_λ‖, not just "it returned")
+```
+
+The separation matters because the two costs scale differently:
+`H` construction is `O(N·d²)`; factorisation is `O(d³)` and does not
+depend on `N` at all. So step A is measured across the whole `N` ladder,
+but steps C and D only need to run a handful of times against the same
+`d = 8192` matrix — **the future calibration corpus does not need to
+exist yet to learn whether the numerical path is affordable.** Building
+32,768 or 65,536 positions of real calibration text before this benchmark
+runs would be spending real effort on a question the benchmark answers
+for free.
+
+**Use the path the encoder will actually run, not a NumPy proxy** — a
+Python timing tells you little if the eventual Rust implementation takes
+a different BLAS/LAPACK route entirely. Concretely, that means:
+
+```text
+H = X^T X   ->  TWO existing paths, not one, and R4.2 measures both
+                rather than asserting either is "the" path:
+
+                (a) estimate_ffn_covariance (trace.rs:289) — the
+                    function MEMIT already uses for exactly this
+                    quantity (down_proj's input covariance) at
+                    EXTRACT time. Streams K^T K in a scalar double
+                    loop, bounded memory regardless of N (never
+                    holds the full [N, 8192] activation matrix at
+                    once) — the more directly relevant precedent,
+                    but not GEMM-accelerated.
+
+                (b) capture_ffn_activation_matrix (trace.rs:237) per
+                    prompt, concatenated into one [N, 8192] buffer,
+                    then ndarray's BLAS-backed .dot() (Accelerate/AMX
+                    on this machine, same GEMM idiom already proven
+                    in ridge_decomposition_solve, linalg.rs:124) —
+                    faster per FLOP, but holds all N activations in
+                    memory at once (~2.1 GB at N=65,536, d=8192, f32).
+
+                Which one the encoder should actually use is a real
+                design question this benchmark answers, not a premise
+                it starts from: streaming-but-scalar vs
+                batched-but-BLAS is exactly the kind of tradeoff R4.2
+                exists to measure rather than assume.
+
+Cholesky, solve, inverse
+            ->  larql_compute::cpu::ops::linalg::{cholesky,
+                cholesky_solve, cholesky_inverse} — the existing,
+                f64-only, hand-rolled (NOT LAPACK-accelerated) machinery
+                MEMIT already ships and tests, same H-accumulate ->
+                damp -> Cholesky -> solve shape at far smaller d.
+                GPTQ's inverse-Cholesky needs a SECOND cholesky() call
+                on the H^-1 that cholesky_inverse() returns — pin that
+                two-call composition now so R4.2's benchmark and the
+                eventual encoder implementation cannot silently disagree
+                about which primitive combination produces H^-1's
+                Cholesky factor.
+
+f32 variant ->  no f32 path exists today (linalg.rs is f64-only by
+                design, "the MEMIT covariance inverse is ill-conditioned
+                at f32 for ffn_dim > 2048"). Benchmarking f32 means
+                writing a parallel f32 cholesky/cholesky_solve, mirroring
+                ridge_decomposition_solve's f32-in/f64-Gram/f32-out cast
+                pattern (linalg.rs:121-128) but keeping the factorisation
+                itself in f32 — not casting the whole pipeline and
+                calling that "the f32 arm."
+```
+
+Reusing the existing `linalg.rs` functions is deliberate, not a
+convenience: it is proven code (MEMIT depends on it today) rather than a
+new, unvalidated implementation whose own bugs could be mistaken for a
+GPTQ finding. What it is **not** is fast — it has no blocking, no SIMD,
+no LAPACK call, so its wall-clock at `d = 8192` is a real open question,
+not an assumption either direction. If it does not finish in reasonable
+time, the honest conclusion is "R4.2 needs a LAPACK binding first" —
+`ndarray-linalg` or `lapack-src` with an Accelerate backend, both
+currently absent from the dependency graph — not "reduce `d`" or "skip
+the benchmark."
+
+### Feasibility rule — frozen before any timing happens
+
+```text
+R4.2 passes if at least one precision:
+    - factorises the real 8192-wide site reliably
+    - fits comfortably in the intended offline-compiler memory envelope
+    - makes at least N0/N1/N2 practically runnable
+
+The feasible N ladder is truncated based only on measured cost.
+No reconstruction, GPTQ codes, or Q-BANK are observed at this stage.
+```
+
+`N4 = 65,536` does not survive merely because it was written down above.
+If it takes absurdly long or does not fit in memory, dropping it now —
+before the encoder exists, on a pure cost measurement — is experimental
+design, not tuning after seeing a result. The same applies to any other
+rung the benchmark shows is impractical.
+
+### R4.2 partial result, 2026-08-26 — an implementation-backend finding, not an R4.2 verdict
+
+First real measurement, on `granite-4.1-3b`, layer 20, `down_proj`
+(`d = 8192`), `N0 = 458` real calibration positions
+(`larql-probes/examples/encoder_r4/r4_2_cholesky_cost.rs`, path-dep
+build against `worktree-encoder-r4`, not yet committed/pushed):
+
+```text
+real covariance accumulation (estimate_ffn_covariance, path (a)):
+    21.811 s  (458 samples, ~21.0 samples/s)
+
+existing hand-written Cholesky (larql_compute::cpu::ops::linalg::cholesky):
+    > 6 minutes CPU, N0 rung, did not complete
+    manually terminated — no output row was ever produced
+```
+
+**What this establishes:** the existing scalar/hand-rolled `linalg.rs`
+path is not a viable implementation for an 8192-wide GPTQ factorisation.
+That is an *implementation-backend* finding.
+
+**What this does NOT establish** — explicitly, so it cannot be
+misremembered as more than it is:
+
+```text
+NOT established:
+    dense-H GPTQ itself is too expensive
+    f32 vs f64
+    feasible calibration N
+    inverse / inverse-Cholesky cost
+    whether an accelerated backend changes any of the above
+```
+
+This is an **incomplete R4.2 measurement**, not the R4.2 verdict. Per its
+own feasibility rule above ("R4.2 passes if *at least one* precision..."),
+a hand-rolled scalar loop failing to finish in six minutes says nothing
+about whether an accelerated implementation can — that is a different,
+still-open question, answered below.
+
+**A second warning came along with the first**: 21.8 seconds to
+accumulate `H` from only 458 samples is itself expensive, naively
+extrapolated per site —
+
+```text
+N =    458    ~22 sec
+N =  2,048    ~98 sec
+N =  8,192    ~6.5 min
+N = 32,768    ~26 min
+N = 65,536    ~52 min
+```
+
+— across 40 `down_proj` sites, once factorisation is accelerated this
+becomes the dominant cost, not a rounding error next to it. `H = XᵀX` is
+exactly a GEMM, so the next probe accelerates **both** steps together —
+accelerating only the factorisation and leaving the scalar covariance
+loop in place would just trade one bottleneck for the other and still
+misreport the real economics.
+
+**What the sequential update actually needs, so the next probe targets
+the right quantity.** The canonical GPTQ update (Frantar et al.) reads
+row `i` of the upper-triangular Cholesky factor of `H⁻¹` to propagate
+column `i`'s quantisation error onto every remaining column in one shot
+— it needs that factor materialised, not merely triangular solves against
+`L`, which is why every reference implementation computes exactly
+`Cholesky(H) → H⁻¹ → Cholesky(H⁻¹)`. The two-Cholesky shape this probe
+already targets is the right one. What should change is the *middle*
+step: LAPACK's fused Cholesky-inverse routine (`dpotri`/`spotri` —
+"invert a matrix given its own Cholesky factor," what `torch.cholesky_
+inverse` calls) replaces a generic dense solve-against-identity, cheaper
+and numerically cleaner, and it is what every real GPTQ implementation
+actually calls. Confirm this is available (`ndarray-linalg` or a direct
+`lapack`/`lapack-src` binding, both currently absent from the dependency
+graph) before assuming the accelerated probe's shape.
+
+**Next probe, not yet run:** same real `H` (or freshly accumulated via
+an accelerated GEMM), same `d = 8192` site, `Cholesky(H) → dpotri-style
+inverse → Cholesky(H⁻¹)`, via Accelerate/LAPACK rather than `linalg.rs`,
+for both f32 and f64 — wall time, peak memory, factorisation residual,
+NaN/Inf, deterministic repeatability. No E2M1 codes, no reconstruction,
+no Q-BANK — same "pure cost, cannot contaminate the experiment" rule as
+the rest of R4.2.
+
+### R4.2 result, 2026-08-26 — dense-H GPTQ is tractable; `linalg.rs` was the bottleneck
+
+Ran the accelerated probe (`larql-probes/examples/encoder_r4/
+r4_2_accelerated_cholesky_cost.rs`) against the same real
+`granite-4.1-3b` layer-20 `down_proj` site (`d = 8192`, `N0 = 458`),
+via raw `dpotrf`/`dpotri`/`spotrf` LAPACK calls against Accelerate
+(`lapack-sys`, no `ndarray-linalg` — it has no Accelerate feature).
+**Validated against `linalg.rs`'s own reference Cholesky on synthetic
+SPD matrices first** (`n = 4, 8, 33`; rel. error `2.8e-16` to
+`3.3e-15` — the row-major/column-major transpose trick is correct, not
+assumed) before trusting it at `d = 8192`.
+
+```text
+H-accumulation:
+  scalar streaming (estimate_ffn_covariance, path a)   22.099 s
+  capture + BLAS GEMM (path b)                          2.663 s   (8.3x)
+
+f64:
+  Cholesky(H)                                           5.227 s
+  dpotri (fused inverse) + Cholesky(H^-1)               1.063 s
+  factorisation residual                                1.6e-15
+  NaN/Inf                                               none
+
+f32:
+  Cholesky(H)                                           0.328 s
+  factorisation residual                                2.8e-6
+  NaN/Inf                                               none
+  (inverse not yet wired — spotri exists, not called in this run)
+```
+
+**This resolves the open question the partial result above left
+hanging.** Dense-H GPTQ at `d = 8192` is computationally tractable — the
+entire accelerated pipeline (load, both H-accumulation paths, f64
+Cholesky+inverse+inverse-Cholesky, f32 Cholesky) finished in well under a
+minute of wall time, against a hand-rolled implementation that hadn't
+produced one result after 6+ minutes. The negative was real and worth
+finding, but it was about `linalg.rs`, never about the algorithm or the
+matrix size.
+
+**What's now established:**
+```text
+dense-H GPTQ at d=8192            tractable, seconds not minutes
+f64 Cholesky + fused inverse       both fast, exact to 1e-15
+GEMM-based H-accumulation          8.3x over the scalar streaming path
+```
+
+**What's still open** — deliberately not decided by this result:
+```text
+f32 vs f64, chosen for production   f64 is proven correct+fast; f32's
+                                     Cholesky alone is faster and still
+                                     accurate to 2.8e-6, but its inverse
+                                     path isn't measured yet (spotri is
+                                     declared, not called, in this run)
+feasible calibration N               re-extrapolate below with the GEMM
+                                     rate, not the scalar one
+peak memory                          not instrumented in this run —
+                                     wall time and residual only
+```
+
+**The N-ladder extrapolation changes with the accelerated H-accumulation
+rate** (2.663 s at `N0 = 458`, not 22.1 s) — factorisation cost is
+`O(d³)` and independent of `N` either way (confirmed: both the earlier
+partial result and this one used the same `d = 8192`, and the
+factorisation time here doesn't depend on which `N` produced `H`).
+
+**SUPERSEDED by actual measurement, not extrapolation — see the "R4.2
+CLOSED" section below.** The table originally here extrapolated
+`N0`'s 2.663 s linearly across the ladder (~381 s at `N4`, ~4.2 hr
+across 40 layers) — exactly the mistake a later note in this same
+section warns against ("an optimised GEMM may scale differently
+enough that the extrapolation is misleading"). It did. The real,
+directly-benchmarked GEMM cost is dramatically cheaper and sublinear in
+`N` — `N4 = 65,536` costs ~79 s across all 40 layers, not ~4.2 hours.
+Left here struck through in spirit rather than deleted, per this
+programme's own "don't delete, mark superseded" convention: whether a
+number is worth spending remains separate from whether it's possible —
+this section's *shape* of reasoning was right, its *numbers* were an
+extrapolation this document itself later corrected.
+
+**Remaining before R4.2 can be called complete:** wire `spotri` for the
+f32 inverse arm (declared, unused — flagged by the compiler, not
+silently skipped), and add peak-memory instrumentation. Neither blocks
+moving forward — f64's full pipeline already answers the tractability
+question this rung exists to settle.
+
+### The f32/f64 production-precision decision, frozen before the f32 inverse arm runs
+
+Not "2.8e-6 looks probably good enough" — a mechanical acceptance
+condition, written before the missing measurement exists, so the
+measurement can only pass or fail it, not retroactively justify a
+threshold picked after seeing the number:
+
+```text
+f32 is production precision iff, ALL of:
+
+1. POTRF and POTRI both complete with no NaN/Inf.
+
+2. Factorisation residual ‖H_λ − L Lᵀ‖ / ‖H_λ‖  <=  1e-4.
+
+3. Deterministic update-vector probes agree with the f64 reference
+   within max relative difference <= 1e-3 (see below for what a
+   "probe" is).
+
+4. Repeat runs on the same H are BYTE-IDENTICAL, not merely close —
+   LAPACK's blocked algorithms have no data-dependent branching for a
+   fixed matrix and fixed thread count, so this is an equality check,
+   not a tolerance.
+
+If f32 fails any of these, f64 is production precision. f64 is always
+the numerical oracle/reference regardless — these criteria decide
+production, not correctness.
+```
+
+Where do `1e-4` and `1e-3` come from, so they don't read as arbitrary:
+the standard Cholesky backward-error bound (Higham) is on the order of
+`n * u` for an `n`-wide well-conditioned SPD matrix at unit roundoff
+`u`. At `d = 8192`, f32 (`u ≈ 1.19e-7`) gives a textbook worst case of
+`8192 * 1.19e-7 ≈ 9.8e-4`. `1e-4` is inside that bound by about an
+order of magnitude — a real margin, not the day's observed 2.8e-6
+worked backwards into a threshold. `1e-3` for the update-vector probe
+is the same order, loosened slightly because that quantity compounds
+through *two* sequential factorisations (`H → H⁻¹ → Cholesky(H⁻¹)`)
+plus a division by a diagonal entry, each of which can add its own
+rounding rather than cancel it.
+
+**What a "deterministic update-vector probe" is.** No quantised weight,
+no E2M1 code, no reconstruction — this checks the numerical machinery
+alone, not GPTQ's output, so it cannot contaminate the experiment any
+more than the residual check above does. Fix a small set of probe
+columns spanning the matrix (e.g. `q ∈ {0, 100, 4096, 8000, 8191}`) and
+a fixed synthetic per-column error scalar (not derived from any real
+weight or quantisation — just a constant, e.g. `1.0`). For each `q`,
+compute the propagated update vector the real GPTQ step would compute
+— `(err_q / Hinv_chol[q,q]) * Hinv_chol[q, q:]` — once from the f32
+pipeline's `Hinv_chol` and once from f64's (upcast to f64 for the
+comparison), and compare. This is closer to what GPTQ actually
+*consumes* than the residual check alone: the residual asks "does
+`L Lᵀ` reconstruct `H`", this asks "does the row of the factor GPTQ
+would actually read and scale agree across precisions."
+
+### R4.2 CLOSED, 2026-08-26 — gate run, memory measured, GEMM ladder actually benchmarked
+
+**Precision gate result** (`r4_2_precision_and_memory.rs --mode compare`,
+same real `d = 8192` site, `spotri` now wired):
+
+```text
+precision   chol+inv(s)   inv-chol(s)   residual     nan/inf
+f64         4.252         1.189         1.611e-15    false
+f32         1.537         0.330         2.794e-6     false
+
+update-vector probe (5 probe columns, err=1):
+  max relative difference: 6.050e1
+  RMS difference:          6.704e-6
+
+f64 determinism (repeat run, byte-identical): true
+
+frozen gate:
+  1. no NaN/Inf (f32)                    pass
+  2. residual <= 1e-4                    pass  (2.794e-6)
+  3. update-vector max-rel <= 1e-3       FAIL  (6.050e1)
+  4. deterministic repeat                pass
+
+VERDICT: production precision = f64
+```
+
+**f32 fails the frozen gate on criterion 3 — production precision is
+f64.** Worth recording honestly, not smoothed over: `max-rel` (60.5) and
+`RMS` (6.7e-6) tell very different stories, which means the failure is
+concentrated in at least one entry where the true (f64) value is close
+to zero — a small absolute difference divided by a near-zero
+denominator explodes relatively while the bulk of the vector agrees to
+~6.7e-6. That is a real, disclosed property of *this metric* on a
+quantity (a Cholesky factor's off-diagonal entries, which decay in
+magnitude away from the pivot) that spans many orders of magnitude —
+not a retroactive excuse to overturn the verdict. The gate was frozen
+before this run specifically so an inconvenient number doesn't get
+argued around; f64 stands as production precision. A *future*,
+separately pre-registered gate revision (e.g. an absolute+relative
+hybrid tolerance) could reasonably be proposed before its own run, not
+after this one's.
+
+**Peak memory — measured, and it doesn't discriminate the way it might
+seem to.** Two isolated process invocations (`--mode memory-f64` /
+`--mode memory-f32`, each wrapped externally with `/usr/bin/time -l`,
+never both precisions in one process — RSS high-water-marks don't go
+down, so running both together would let whichever runs first inflate
+the other's reading):
+
+```text
+f64: maximum resident set size  15,430,139,904 B  (14.370 GiB)
+f32: maximum resident set size  15,430,057,984 B  (14.370 GiB)
+```
+
+Essentially identical. **This is dominated by loading the whole 3B
+model plus one layer's activation capture (~14 GiB), not by the
+d=8192 linalg** — `H`/`L`/`H⁻¹`/inverse-Cholesky at f64 are ~512 MiB
+each (four such buffers ≈ 2 GiB, f32 about half that), invisible
+against a 14 GiB baseline. This is a property of *this probe's* design
+(load one whole model to capture one layer), not evidence that a real
+per-site compiler pass needs 14 GiB — a production encoder that
+streams one layer's weights at a time rather than holding the whole
+model resident would have a much smaller, more informative peak to
+measure. Recorded honestly rather than allowed to imply "GPTQ needs 14
+GiB/site," which this measurement does not show.
+
+**GEMM ladder — actually benchmarked, not extrapolated, and the
+extrapolation earlier in this doc was wrong.** Deterministic synthetic
+`X` at each candidate `N` (`--mode gemm-ladder`, no model load, pure
+GEMM cost):
+
+```text
+N          GEMM(s)/site   x40 layers
+458        0.214           8.6 s
+2,048      0.236           9.4 s
+8,192      0.397          15.9 s
+32,768     1.063          42.5 s
+65,536     1.969          78.8 s
+```
+
+Sublinear in `N` (143x more data, N0→N4, only 9.2x more GEMM time) —
+larger batches amortise better on this hardware, exactly the "an
+optimised GEMM may scale differently enough that the extrapolation is
+misleading" the earlier scalar-rate-based table (elsewhere in this
+document) fell into. **`N4 = 65,536` costs ~79 seconds of GEMM across
+all 40 layers, not the ~4.2 hours the earlier extrapolation implied.**
+Nothing about the GEMM step disqualifies any ladder rung on cost
+grounds.
+
+**What this does NOT cover, and is explicitly out of scope for R4.2
+closing**: `X` here is synthetic because GEMM cost only depends on
+shape, not content — but *real* `X` requires actually running the
+forward pass to capture calibration activations, which is a separate
+cost this rung doesn't benchmark. The one real measurement available
+(458 real positions captured in ~2.4s at one layer) suggests capture
+dominates the real end-to-end per-site cost far more than GEMM does,
+and — per R4.1's already-frozen "sequential candidate-path calibration"
+— activations have to be captured layer-by-layer as encoding proceeds,
+not as 40 independent whole-model passes, which is a genuinely
+different cost shape than either the GEMM ladder or a naive
+per-layer-independent estimate would suggest. That characterisation
+belongs to step 8 ("Implement: dense H, one site at a time, sequential
+candidate-path calibration"), not to R4.2's feasibility gate.
+
+**R4.2 RESULT**
+
+```text
+scalar linalg (larql_compute::cpu::ops::linalg):
+    REJECTED as implementation backend — did not complete one
+    d=8192 factorisation in 6+ minutes.
+
+accelerated dense H (Accelerate/LAPACK via lapack-sys, validated
+against the scalar reference on synthetic matrices first):
+    PASS.
+
+real Granite d=8192 site (granite-4.1-3b, layer 20, down_proj):
+    H accumulation (GEMM)        2.66 s   (8.3x over scalar streaming)
+    f64 Cholesky + fused inverse  5.44 s  residual 1.6e-15
+    f64 inverse-Cholesky          1.19 s
+    f32 Cholesky + fused inverse  1.87 s  residual 2.8e-6
+    peak memory                  14.37 GiB (dominated by model
+                                  residency, not d=8192 linalg —
+                                  see above)
+
+numeric precision:
+    production = f64  (f32 failed the frozen update-vector-probe gate,
+                        criterion 3, by the rule written before this
+                        measurement ran)
+    reference  = f64
+
+feasible N ladder (GEMM-cost basis only):
+    all five rungs (458 / 2,048 / 8,192 / 32,768 / 65,536) survive on
+    GEMM cost alone — nothing here truncates the ladder. Real
+    calibration-capture cost is a separate, still-open question for
+    the implementation step, not this gate.
+
+No:
+    GPTQ codes computed
+    reconstruction inspected
+    Q-BANK observed
+```
+
+R4.2 is closed. Full-Hessian, fixed-grid GPTQ at Granite's scale has
+gone from "possibly too expensive to belong in VINDEX3" to "a
+practical offline-compiler operation" — no low-rank approximation, no
+block-diagonal `H`, no weakened GPTQ was needed to make this runnable.
+The scientifically clean version is the one being tested. The
+remaining unknowns move from "can we afford this" to "does it help":
+calibration sufficiency (the N-selection rule, already frozen, not yet
+run), and ultimately whether Hessian-aware code selection recovers
+meaningful Q-BANK quality at identical bytes — which R4 still has a
+genuine chance to answer either way.
+
 ## Sequence
 
 ```text
@@ -460,20 +1039,32 @@ and it decides which rungs of the ladder are feasible at all.
 4.  Freeze the objective N-selection rule (one-SE, prompt
     resampling).                                              [DONE]
 5.  Benchmark H construction + factorisation on one real
-    8192-wide down_proj site.                                 [R4.2]
-6.  Freeze the FEASIBLE N ladder from that cost.
+    8192-wide down_proj site.                                 [DONE, R4.2
+    CLOSED — linalg.rs rejected as implementation backend (6+ min,
+    incomplete); Accelerate/LAPACK PASS (seconds, f64 residual
+    1.6e-15); production precision = f64 (f32 fails the frozen
+    update-vector gate); peak memory measured (dominated by model
+    residency in this probe, not d=8192 linalg); GEMM ladder actually
+    benchmarked (not extrapolated) — all 5 rungs cheap.]
+6.  Freeze the FEASIBLE N ladder from that cost.                [DONE,
+    R4.2 — GEMM cost doesn't disqualify any rung (458/2,048/8,192/
+    32,768/65,536 all survive). Real calibration-CAPTURE cost (running
+    the forward pass to get real activations, as opposed to GEMM's
+    synthetic-X cost) is a separate, not-yet-measured question for
+    step 8's sequential candidate-path calibration — not resolved by
+    this step, not blocking it either.]
 7.  Write the larger disjoint calibration + validation pools,
-    with digests and the content-verified zero-overlap gate.
+    with digests and the content-verified zero-overlap gate.        [R4.0-CAL-A]
 8.  Implement: dense H, one site at a time, sequential
-    candidate-path calibration, static scales.
+    candidate-path calibration, static scales.            [R4.1/R4.2 IMPLEMENTATION]
 9.  Choose N mechanically from held-out reconstruction.
-    NO Q-BANK OBSERVATION.
-10. Freeze N.
+    NO Q-BANK OBSERVATION.                                          [R4.0-CAL-B]
+10. Freeze N.                                                        [R4.0-CAL-B]
 11. Compile R0-GPTQ; assert scale bytes are byte-identical to
     R0-nearest and total payload equals 2,283,690,080;
-    verify it executes and reproduces its own reference.
-12. Q-BANK exactly ONCE against the frozen control.
-13. Report the whole response, per-category and saturation included.
+    verify it executes and reproduces its own reference.                  [R4.3]
+12. Q-BANK exactly ONCE against the frozen control.                        [R4.3]
+13. Report the whole response, per-category and saturation included.      [R4.3]
 14. Only if it wins materially: late5-ffn-GPTQ, late10-ffn-GPTQ,
     and the knee-survival question.
 ```
@@ -484,6 +1075,26 @@ observation whatsoever; that is what keeps step 12 genuinely one-shot.
 Note the ordering of 5 and 6 before 7: there is no point writing 65,536
 positions of calibration corpus if the cost benchmark shows that rung
 cannot be run.
+
+**"R4.0-CAL" is not one step — it is two, on opposite sides of
+implementation, and that split is load-bearing, not cosmetic.** Step 7
+(**R4.0-CAL-A**) freezes everything that can be decided *without*
+`nvfp4-gptq-v1` existing: the pools, the disjointness gate, the nested
+`N` prefixes, the one-SE prompt-bootstrap rule, the site-family
+aggregation, all digests. Step 9-10 (**R4.0-CAL-B**) is a different
+kind of step — it runs the *now-implemented* encoder independently at
+each frozen `N` and measures held-out reconstruction of `Q_N(W)`, which
+does not exist as a quantity until step 8 has produced it. **The
+sufficiency statistic is reconstruction error of the encoder's own
+output — there is nothing to compute a ladder over before the encoder
+that produces `Q_N(W)` exists.** Writing "R4.0-CAL" as a single label
+anywhere (a summary, a memory note, a status line) invites exactly the
+error of treating it as one step that could run before step 8; it
+cannot. R4.2's own closing result (cost is not a constraint on any
+ladder rung) answers a different question than R4.0-CAL-B answers
+(which rung, if any, is *statistically* enough) — R4.2 closes the
+economic question, R4.0-CAL-B is the still-open statistical one, and
+the encoder has to exist first for either half of R4.0-CAL-B to run.
 
 ## What a win would mean
 
