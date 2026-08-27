@@ -34,7 +34,16 @@ jobs:
   test:
     name: test · macos-14
     runs-on: macos-14
-    timeout-minutes: 45
+    # 45 was below this job's own runtime. Observed durations across
+    # 2026-08-26/27: 41, 44, 44, 48, 51 and 64 minutes — so the limit sat
+    # in the middle of the distribution and cancelled runs at random,
+    # mid-test, before the coverage policy step it exists to gate ever
+    # executed. A cancelled run also renders as a failed check, so the
+    # signal was indistinguishable from a real regression. The suite is
+    # genuinely slow (llvm-cov instrumentation, --test-threads=1 to
+    # serialise the env-sensitive GPU tests); this is headroom over the
+    # worst observed run, not an invitation to grow into it.
+    timeout-minutes: 90
 
     steps:
       - uses: actions/checkout@v7
