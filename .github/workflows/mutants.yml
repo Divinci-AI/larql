@@ -1,0 +1,132 @@
+# Mutation testing on the PR diff — a SIGNAL, never a gate.
+#
+# Split out of `quality.yml` on 2026-08-27, and the reason is the whole
+# point of the file. The job is declared `continue-on-error: true`
+# because a mutation run is advisory. But `continue-on-error` only
+# covers a job that FAILS: a job killed by `timeout-minutes` is
+# CANCELLED, and one cancelled job makes the entire workflow run
+# conclude `cancelled` regardless. So while this lived in `quality.yml`,
+# a mutation run that ran out of clock turned the whole quality check
+# red even though MSRV, cargo-deny, cargo-audit, buf lint and doc-links
+# had all passed.
+#
+# That was not hypothetical and not rare. It fired on the PRs with the
+# largest diffs — the ones mutation testing takes longest on, and the
+# ones most worth gating: three runs cancelled at exactly 45m across
+# #313 and #316, while a 61m run on a smaller diff passed. The quality
+# signal was least trustworthy exactly where it mattered most.
+#
+# Alone in its own workflow, a timeout here reports as a timeout here
+# and poisons nothing. Read a timed-out run as INCOMPLETE, never as
+# clean — see the notes on the step below.
+
+name: mutants
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  mutants:
+    name: cargo-mutants${{ matrix.label }} (informational)
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    # PR-only: --in-diff needs a base to diff against, and a full-workspace
+    # mutation run is many hours of compute.
+    if: github.event_name == 'pull_request'
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      # Same shape as `msrv` above, and for the same underlying reason:
+      # larql-compute-metal "compiles to an empty crate on non-macOS
+      # hosts" (its own doc comment) — every line inside its
+      # `#[cfg(target_os = "macos")]` modules is structurally invisible to
+      # a ubuntu runner, for every PR, forever. The macos-14 leg, scoped
+      # to `-p larql-compute-metal`, is the only way this workspace's
+      # mutation testing ever sees that code at all.
+      matrix:
+        include:
+          - os: ubuntu-latest
+            label: ""
+            package_args: ""
+            diff_paths: "."
+            openblas: true
+          - os: macos-14
+            label: " · larql-compute-metal"
+            package_args: "-p larql-compute-metal"
+            diff_paths: "crates/larql-compute-metal"
+            openblas: false
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      # Computed before any install so an empty diff (e.g. a PR that
+      # never touches crates/larql-compute-metal, on the macOS leg) skips
+      # the toolchain/cargo-mutants install entirely — macOS runner
+      # minutes cost roughly 10x a Linux minute, and most PRs will not
+      # touch this specific crate.
+      - name: Compute PR diff
+        id: diff
+        run: |
+          git diff "origin/${{ github.base_ref }}...HEAD" -- ${{ matrix.diff_paths }} > /tmp/pr.diff
+          lines=$(wc -l < /tmp/pr.diff)
+          echo "diff is $lines lines"
+          echo "has_changes=$([ "$lines" -gt 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+      - name: Install stable Rust
+        if: steps.diff.outputs.has_changes == 'true'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-mutants
+        if: steps.diff.outputs.has_changes == 'true'
+        uses: taiki-e/install-action@cargo-mutants
+
+      - name: Install OpenBLAS
+        if: steps.diff.outputs.has_changes == 'true' && matrix.openblas
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libopenblas-dev pkg-config
+
+      # This job is a signal, not a gate, and it is capped twice over:
+      # `--in-diff` restricts mutants to lines the PR touched, and
+      # `timeout-minutes: 45` bounds the job.
+      #
+      # Read a *timed-out* run as "incomplete", never as "clean". If the job
+      # hits the wall clock the runner kills this step and the summary below
+      # never prints — the only evidence is the job's own timeout status.
+      # `--no-shuffle` at least makes the mutants it did get through a
+      # deterministic prefix rather than a random sample, and the report
+      # upload runs `if: always()` so partial results survive.
+      #
+      # Exit-status interpretation lives in scripts/check_mutants_exit_status.sh
+      # — shared by both matrix legs so they can't drift out of sync. See
+      # that script for why exit 4 gets its own, louder treatment: this
+      # exact job hit it (841, then 1317 candidate mutants, zero ever run)
+      # across two pushes while moe_zero_copy.rs broke the ubuntu build
+      # (chrishayuk/larql#244), and still showed a plain green
+      # "cargo-mutants (informational) success" in the PR checks tab.
+      - name: Mutation-test the diff
+        if: steps.diff.outputs.has_changes == 'true'
+        run: |
+          set +e
+          cargo mutants ${{ matrix.package_args }} --in-diff /tmp/pr.diff --timeout 120 --no-shuffle
+          status=$?
+          echo "cargo-mutants exit status: $status"
+          bash scripts/check_mutants_exit_status.sh "$status"
+          exit 0
+
+      - name: No changes in scope
+        if: steps.diff.outputs.has_changes == 'false'
+        run: echo "No changes under '${{ matrix.diff_paths }}' — skipping mutation testing for this leg."
+
+      - name: Upload mutants report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: mutants-report-${{ matrix.os }}
+          path: mutants.out/
+          if-no-files-found: ignore
