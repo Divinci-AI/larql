@@ -400,3 +400,6 @@ fn resolve_timestamps(sb: &metal::CounterSampleBufferRef, n: usize) -> Option<Ve
         Some(slice.to_vec())
     })
 }
+
+#[cfg(test)]
+mod tests;
