@@ -1,12 +1,23 @@
 [
   {
+    "key": "model.embed_tokens.weight",
+    "kind": "tensor",
+    "shape": [
+      512,
+      128
+    ],
+    "offset": 0,
+    "length": 262144,
+    "file": "model_weights.bin"
+  },
+  {
     "key": "layers.0.self_attn.q_proj.weight",
     "kind": "tensor",
     "shape": [
       128,
       128
     ],
-    "offset": 0,
+    "offset": 262144,
     "length": 65536,
     "file": "model_weights.bin"
   },
@@ -17,7 +28,7 @@
       64,
       128
     ],
-    "offset": 65536,
+    "offset": 327680,
     "length": 32768,
     "file": "model_weights.bin"
   },
@@ -28,7 +39,7 @@
       64,
       128
     ],
-    "offset": 98304,
+    "offset": 360448,
     "length": 32768,
     "file": "model_weights.bin"
   },
@@ -39,7 +50,7 @@
       128,
       128
     ],
-    "offset": 131072,
+    "offset": 393216,
     "length": 65536,
     "file": "model_weights.bin"
   },
@@ -50,7 +61,7 @@
       256,
       128
     ],
-    "offset": 196608,
+    "offset": 458752,
     "length": 131072,
     "file": "model_weights.bin"
   },
@@ -61,7 +72,7 @@
       256,
       128
     ],
-    "offset": 327680,
+    "offset": 589824,
     "length": 131072,
     "file": "model_weights.bin"
   },
@@ -72,7 +83,7 @@
       128,
       256
     ],
-    "offset": 458752,
+    "offset": 720896,
     "length": 131072,
     "file": "model_weights.bin"
   },
@@ -82,7 +93,7 @@
     "shape": [
       128
     ],
-    "offset": 589824,
+    "offset": 851968,
     "length": 512,
     "file": "model_weights.bin"
   },
@@ -92,7 +103,7 @@
     "shape": [
       128
     ],
-    "offset": 590336,
+    "offset": 852480,
     "length": 512,
     "file": "model_weights.bin"
   },
@@ -103,7 +114,7 @@
       128,
       128
     ],
-    "offset": 590848,
+    "offset": 852992,
     "length": 65536,
     "file": "model_weights.bin"
   },
@@ -114,7 +125,7 @@
       64,
       128
     ],
-    "offset": 656384,
+    "offset": 918528,
     "length": 32768,
     "file": "model_weights.bin"
   },
@@ -125,7 +136,7 @@
       64,
       128
     ],
-    "offset": 689152,
+    "offset": 951296,
     "length": 32768,
     "file": "model_weights.bin"
   },
@@ -136,7 +147,7 @@
       128,
       128
     ],
-    "offset": 721920,
+    "offset": 984064,
     "length": 65536,
     "file": "model_weights.bin"
   },
@@ -147,7 +158,7 @@
       256,
       128
     ],
-    "offset": 787456,
+    "offset": 1049600,
     "length": 131072,
     "file": "model_weights.bin"
   },
@@ -158,7 +169,7 @@
       256,
       128
     ],
-    "offset": 918528,
+    "offset": 1180672,
     "length": 131072,
     "file": "model_weights.bin"
   },
@@ -169,7 +180,7 @@
       128,
       256
     ],
-    "offset": 1049600,
+    "offset": 1311744,
     "length": 131072,
     "file": "model_weights.bin"
   },
@@ -179,7 +190,7 @@
     "shape": [
       128
     ],
-    "offset": 1180672,
+    "offset": 1442816,
     "length": 512,
     "file": "model_weights.bin"
   },
@@ -189,7 +200,7 @@
     "shape": [
       128
     ],
-    "offset": 1181184,
+    "offset": 1443328,
     "length": 512,
     "file": "model_weights.bin"
   },
@@ -200,7 +211,7 @@
       128,
       128
     ],
-    "offset": 1181696,
+    "offset": 1443840,
     "length": 65536,
     "file": "model_weights.bin"
   },
@@ -211,7 +222,7 @@
       64,
       128
     ],
-    "offset": 1247232,
+    "offset": 1509376,
     "length": 32768,
     "file": "model_weights.bin"
   },
@@ -222,7 +233,7 @@
       64,
       128
     ],
-    "offset": 1280000,
+    "offset": 1542144,
     "length": 32768,
     "file": "model_weights.bin"
   },
@@ -233,7 +244,7 @@
       128,
       128
     ],
-    "offset": 1312768,
+    "offset": 1574912,
     "length": 65536,
     "file": "model_weights.bin"
   },
@@ -244,7 +255,7 @@
       256,
       128
     ],
-    "offset": 1378304,
+    "offset": 1640448,
     "length": 131072,
     "file": "model_weights.bin"
   },
@@ -255,7 +266,7 @@
       256,
       128
     ],
-    "offset": 1509376,
+    "offset": 1771520,
     "length": 131072,
     "file": "model_weights.bin"
   },
@@ -266,7 +277,7 @@
       128,
       256
     ],
-    "offset": 1640448,
+    "offset": 1902592,
     "length": 131072,
     "file": "model_weights.bin"
   },
@@ -276,7 +287,7 @@
     "shape": [
       128
     ],
-    "offset": 1771520,
+    "offset": 2033664,
     "length": 512,
     "file": "model_weights.bin"
   },
@@ -286,7 +297,7 @@
     "shape": [
       128
     ],
-    "offset": 1772032,
+    "offset": 2034176,
     "length": 512,
     "file": "model_weights.bin"
   },
@@ -297,7 +308,7 @@
       128,
       128
     ],
-    "offset": 1772544,
+    "offset": 2034688,
     "length": 65536,
     "file": "model_weights.bin"
   },
@@ -308,7 +319,7 @@
       64,
       128
     ],
-    "offset": 1838080,
+    "offset": 2100224,
     "length": 32768,
     "file": "model_weights.bin"
   },
@@ -319,7 +330,7 @@
       64,
       128
     ],
-    "offset": 1870848,
+    "offset": 2132992,
     "length": 32768,
     "file": "model_weights.bin"
   },
@@ -330,7 +341,7 @@
       128,
       128
     ],
-    "offset": 1903616,
+    "offset": 2165760,
     "length": 65536,
     "file": "model_weights.bin"
   },
@@ -341,7 +352,7 @@
       256,
       128
     ],
-    "offset": 1969152,
+    "offset": 2231296,
     "length": 131072,
     "file": "model_weights.bin"
   },
@@ -352,7 +363,7 @@
       256,
       128
     ],
-    "offset": 2100224,
+    "offset": 2362368,
     "length": 131072,
     "file": "model_weights.bin"
   },
@@ -363,7 +374,7 @@
       128,
       256
     ],
-    "offset": 2231296,
+    "offset": 2493440,
     "length": 131072,
     "file": "model_weights.bin"
   },
@@ -373,7 +384,7 @@
     "shape": [
       128
     ],
-    "offset": 2362368,
+    "offset": 2624512,
     "length": 512,
     "file": "model_weights.bin"
   },
@@ -383,7 +394,7 @@
     "shape": [
       128
     ],
-    "offset": 2362880,
+    "offset": 2625024,
     "length": 512,
     "file": "model_weights.bin"
   },
@@ -394,7 +405,7 @@
       128,
       128
     ],
-    "offset": 2363392,
+    "offset": 2625536,
     "length": 65536,
     "file": "model_weights.bin"
   },
@@ -405,7 +416,7 @@
       64,
       128
     ],
-    "offset": 2428928,
+    "offset": 2691072,
     "length": 32768,
     "file": "model_weights.bin"
   },
@@ -416,7 +427,7 @@
       64,
       128
     ],
-    "offset": 2461696,
+    "offset": 2723840,
     "length": 32768,
     "file": "model_weights.bin"
   },
@@ -427,7 +438,7 @@
       128,
       128
     ],
-    "offset": 2494464,
+    "offset": 2756608,
     "length": 65536,
     "file": "model_weights.bin"
   },
@@ -438,7 +449,7 @@
       256,
       128
     ],
-    "offset": 2560000,
+    "offset": 2822144,
     "length": 131072,
     "file": "model_weights.bin"
   },
@@ -449,7 +460,7 @@
       256,
       128
     ],
-    "offset": 2691072,
+    "offset": 2953216,
     "length": 131072,
     "file": "model_weights.bin"
   },
@@ -460,7 +471,7 @@
       128,
       256
     ],
-    "offset": 2822144,
+    "offset": 3084288,
     "length": 131072,
     "file": "model_weights.bin"
   },
@@ -470,7 +481,7 @@
     "shape": [
       128
     ],
-    "offset": 2953216,
+    "offset": 3215360,
     "length": 512,
     "file": "model_weights.bin"
   },
@@ -480,7 +491,7 @@
     "shape": [
       128
     ],
-    "offset": 2953728,
+    "offset": 3215872,
     "length": 512,
     "file": "model_weights.bin"
   },
@@ -491,7 +502,7 @@
       128,
       128
     ],
-    "offset": 2954240,
+    "offset": 3216384,
     "length": 65536,
     "file": "model_weights.bin"
   },
@@ -502,7 +513,7 @@
       64,
       128
     ],
-    "offset": 3019776,
+    "offset": 3281920,
     "length": 32768,
     "file": "model_weights.bin"
   },
@@ -513,7 +524,7 @@
       64,
       128
     ],
-    "offset": 3052544,
+    "offset": 3314688,
     "length": 32768,
     "file": "model_weights.bin"
   },
@@ -524,7 +535,7 @@
       128,
       128
     ],
-    "offset": 3085312,
+    "offset": 3347456,
     "length": 65536,
     "file": "model_weights.bin"
   },
@@ -535,7 +546,7 @@
       256,
       128
     ],
-    "offset": 3150848,
+    "offset": 3412992,
     "length": 131072,
     "file": "model_weights.bin"
   },
@@ -546,7 +557,7 @@
       256,
       128
     ],
-    "offset": 3281920,
+    "offset": 3544064,
     "length": 131072,
     "file": "model_weights.bin"
   },
@@ -557,7 +568,7 @@
       128,
       256
     ],
-    "offset": 3412992,
+    "offset": 3675136,
     "length": 131072,
     "file": "model_weights.bin"
   },
@@ -567,7 +578,7 @@
     "shape": [
       128
     ],
-    "offset": 3544064,
+    "offset": 3806208,
     "length": 512,
     "file": "model_weights.bin"
   },
@@ -577,7 +588,7 @@
     "shape": [
       128
     ],
-    "offset": 3544576,
+    "offset": 3806720,
     "length": 512,
     "file": "model_weights.bin"
   },
@@ -588,7 +599,7 @@
       128,
       128
     ],
-    "offset": 3545088,
+    "offset": 3807232,
     "length": 65536,
     "file": "model_weights.bin"
   },
@@ -599,7 +610,7 @@
       64,
       128
     ],
-    "offset": 3610624,
+    "offset": 3872768,
     "length": 32768,
     "file": "model_weights.bin"
   },
@@ -610,7 +621,7 @@
       64,
       128
     ],
-    "offset": 3643392,
+    "offset": 3905536,
     "length": 32768,
     "file": "model_weights.bin"
   },
@@ -621,7 +632,7 @@
       128,
       128
     ],
-    "offset": 3676160,
+    "offset": 3938304,
     "length": 65536,
     "file": "model_weights.bin"
   },
@@ -632,7 +643,7 @@
       256,
       128
     ],
-    "offset": 3741696,
+    "offset": 4003840,
     "length": 131072,
     "file": "model_weights.bin"
   },
@@ -643,7 +654,7 @@
       256,
       128
     ],
-    "offset": 3872768,
+    "offset": 4134912,
     "length": 131072,
     "file": "model_weights.bin"
   },
@@ -654,7 +665,7 @@
       128,
       256
     ],
-    "offset": 4003840,
+    "offset": 4265984,
     "length": 131072,
     "file": "model_weights.bin"
   },
@@ -664,7 +675,7 @@
     "shape": [
       128
     ],
-    "offset": 4134912,
+    "offset": 4397056,
     "length": 512,
     "file": "model_weights.bin"
   },
@@ -674,7 +685,7 @@
     "shape": [
       128
     ],
-    "offset": 4135424,
+    "offset": 4397568,
     "length": 512,
     "file": "model_weights.bin"
   },
@@ -685,7 +696,7 @@
       128,
       128
     ],
-    "offset": 4135936,
+    "offset": 4398080,
     "length": 65536,
     "file": "model_weights.bin"
   },
@@ -696,7 +707,7 @@
       64,
       128
     ],
-    "offset": 4201472,
+    "offset": 4463616,
     "length": 32768,
     "file": "model_weights.bin"
   },
@@ -707,7 +718,7 @@
       64,
       128
     ],
-    "offset": 4234240,
+    "offset": 4496384,
     "length": 32768,
     "file": "model_weights.bin"
   },
@@ -718,7 +729,7 @@
       128,
       128
     ],
-    "offset": 4267008,
+    "offset": 4529152,
     "length": 65536,
     "file": "model_weights.bin"
   },
@@ -729,7 +740,7 @@
       256,
       128
     ],
-    "offset": 4332544,
+    "offset": 4594688,
     "length": 131072,
     "file": "model_weights.bin"
   },
@@ -740,7 +751,7 @@
       256,
       128
     ],
-    "offset": 4463616,
+    "offset": 4725760,
     "length": 131072,
     "file": "model_weights.bin"
   },
@@ -751,7 +762,7 @@
       128,
       256
     ],
-    "offset": 4594688,
+    "offset": 4856832,
     "length": 131072,
     "file": "model_weights.bin"
   },
@@ -761,7 +772,7 @@
     "shape": [
       128
     ],
-    "offset": 4725760,
+    "offset": 4987904,
     "length": 512,
     "file": "model_weights.bin"
   },
@@ -771,17 +782,17 @@
     "shape": [
       128
     ],
-    "offset": 4726272,
+    "offset": 4988416,
     "length": 512,
     "file": "model_weights.bin"
   },
   {
-    "key": "norm.weight",
+    "key": "model.norm.weight",
     "kind": "vector",
     "shape": [
       128
     ],
-    "offset": 4726784,
+    "offset": 4988928,
     "length": 512,
     "file": "model_weights.bin"
   },
@@ -792,7 +803,7 @@
       512,
       128
     ],
-    "offset": 4727296,
+    "offset": 4989440,
     "length": 262144,
     "file": "model_weights.bin"
   }

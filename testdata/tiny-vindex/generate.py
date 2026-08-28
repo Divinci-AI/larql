@@ -32,7 +32,14 @@ VOCAB      = 512
 Q_HEADS    = 4
 KV_HEADS   = 2
 HEAD_DIM   = 32
-FEATURES   = 32   # features per layer in the vindex
+# Features per layer in the vindex. This MUST equal INTER: a vindex feature
+# *is* an FFN intermediate channel, so the gate-vector table and the MLP's
+# gate/up/down projections are indexed by the same axis. The fixture used to
+# declare 32 here against intermediate_size=256, which loads and serves
+# DESCRIBE/WALK fine but blows up in the dense FFN as
+# "ShapeError/IncompatibleShape" — silu_gate_up multiplying a 32-wide gate by
+# a 256-wide up. That is what made INFER unusable on this fixture.
+FEATURES   = INTER
 DOWN_TOP_K = 10
 
 rng = np.random.default_rng(SEED)
@@ -61,18 +68,34 @@ for li in range(NUM_LAYERS):
         gate[li, fi] = norm(gate[li, fi])
 write_f32(os.path.join(OUT, "gate_vectors.bin"), gate)
 
-# ── down_meta.bin  (NUM_LAYERS × FEATURES × DOWN_TOP_K × 2 f32) ────────────
-# larql expects [token_id_as_f32, logit] pairs for top-k entries
-down_meta = np.zeros((NUM_LAYERS, FEATURES, DOWN_TOP_K, 2), dtype=np.float32)
-for li in range(NUM_LAYERS):
-    for fi in range(FEATURES):
-        ids   = rng.choice(VOCAB, DOWN_TOP_K, replace=False)
-        logits = rng.standard_normal(DOWN_TOP_K).astype(np.float32)
-        logits = np.exp(logits - logits.max())
-        logits /= logits.sum()
-        down_meta[li, fi, :, 0] = ids.astype(np.float32)
-        down_meta[li, fi, :, 1] = logits
-write_f32(os.path.join(OUT, "down_meta.bin"), down_meta)
+# ── down_meta.bin  (binary "DMET" format) ──────────────────────────────────
+# Mirrors larql_vindex::format::down_meta::write_binary. This used to emit a
+# bare f32 array with no header, which the reader has rejected since the
+# format grew one — the committed fixture was unloadable ("invalid
+# down_meta.bin magic"). Keep this in step with that writer.
+#
+#   Header (16 bytes): magic u32, version u32, num_layers u32, top_k u32
+#   Per layer:  num_features u32
+#   Per feature: top_token_id u32, c_score f32,
+#                then top_k × (token_id u32, logit f32)
+DOWN_META_MAGIC   = 0x444D4554  # "DMET"
+DOWN_META_VERSION = 1
+
+with open(os.path.join(OUT, "down_meta.bin"), "wb") as fh:
+    fh.write(struct.pack("<IIII", DOWN_META_MAGIC, DOWN_META_VERSION,
+                         NUM_LAYERS, DOWN_TOP_K))
+    for li in range(NUM_LAYERS):
+        fh.write(struct.pack("<I", FEATURES))
+        for fi in range(FEATURES):
+            ids    = rng.choice(VOCAB, DOWN_TOP_K, replace=False)
+            logits = rng.standard_normal(DOWN_TOP_K).astype(np.float32)
+            logits = np.exp(logits - logits.max())
+            logits /= logits.sum()
+            # top_token_id is the highest-scoring entry, and c_score its logit.
+            best = int(np.argmax(logits))
+            fh.write(struct.pack("<If", int(ids[best]), float(logits[best])))
+            for k in range(DOWN_TOP_K):
+                fh.write(struct.pack("<If", int(ids[k]), float(logits[k])))
 
 # ── model_weights.bin  (all attention + FFN + norm tensors) ─────────────────
 tensors = {}
@@ -94,19 +117,27 @@ for n in range(NUM_LAYERS):
 t("model.norm.weight", (HIDDEN,))
 t("lm_head.weight",    (VOCAB, HIDDEN))
 
-# Pack all tensors: [u64 offset][u64 length] header, then raw bytes
-#   weight_manifest.json records {name: {offset, length, shape, dtype}}
-manifest = {}
+# Pack all tensors into one blob; weight_manifest.json is a LIST of entries
+# matching larql_vindex::format::weights::WeightEntry:
+#   {key, kind, shape, offset, length, file}
+#
+# It used to be a {name: {...}} map, which the loader rejects outright
+# ("invalid type: map, expected a sequence"). `kind` distinguishes a 2D
+# tensor from a 1D vector (norms) — the loader routes on it, and a norm
+# mislabelled "tensor" would fail the Array2 reshape.
+manifest = []
 blob_parts = []
 offset = 0
 for name, arr in tensors.items():
     raw = arr.tobytes()
-    manifest[name] = {
+    manifest.append({
+        "key":    name,
+        "kind":   "tensor" if arr.ndim == 2 else "vector",
+        "shape":  list(arr.shape),
         "offset": offset,
         "length": len(raw),
-        "shape":  list(arr.shape),
-        "dtype":  "f32",
-    }
+        "file":   "model_weights.bin",
+    })
     blob_parts.append(raw)
     offset += len(raw)
 

@@ -2,8 +2,14 @@
   "version": 2,
   "model": "test/tiny-vindex",
   "family": "llama",
-  "source": null,
-  "checksums": null,
+  "source": {
+    "huggingface_repo": "test/tiny-vindex",
+    "huggingface_revision": null,
+    "safetensors_sha256": null,
+    "extracted_at": "2026-04-19T00:00:00Z",
+    "larql_version": "0.1.0"
+  },
+  "checksums": {},
   "num_layers": 8,
   "hidden_size": 128,
   "intermediate_size": 256,
@@ -28,54 +34,54 @@
   "layers": [
     {
       "layer": 0,
-      "num_features": 32,
+      "num_features": 256,
       "offset": 0,
-      "length": 16384
+      "length": 131072
     },
     {
       "layer": 1,
-      "num_features": 32,
-      "offset": 16384,
-      "length": 16384
+      "num_features": 256,
+      "offset": 131072,
+      "length": 131072
     },
     {
       "layer": 2,
-      "num_features": 32,
-      "offset": 32768,
-      "length": 16384
+      "num_features": 256,
+      "offset": 262144,
+      "length": 131072
     },
     {
       "layer": 3,
-      "num_features": 32,
-      "offset": 49152,
-      "length": 16384
+      "num_features": 256,
+      "offset": 393216,
+      "length": 131072
     },
     {
       "layer": 4,
-      "num_features": 32,
-      "offset": 65536,
-      "length": 16384
+      "num_features": 256,
+      "offset": 524288,
+      "length": 131072
     },
     {
       "layer": 5,
-      "num_features": 32,
-      "offset": 81920,
-      "length": 16384
+      "num_features": 256,
+      "offset": 655360,
+      "length": 131072
     },
     {
       "layer": 6,
-      "num_features": 32,
-      "offset": 98304,
-      "length": 16384
+      "num_features": 256,
+      "offset": 786432,
+      "length": 131072
     },
     {
       "layer": 7,
-      "num_features": 32,
-      "offset": 114688,
-      "length": 16384
+      "num_features": 256,
+      "offset": 917504,
+      "length": 131072
     }
   ],
-  "down_top_k": 5,
+  "down_top_k": 10,
   "has_model_weights": true,
   "model_config": {
     "model_type": "llama",
