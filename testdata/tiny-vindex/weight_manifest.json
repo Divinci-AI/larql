@@ -1,0 +1,799 @@
+[
+  {
+    "key": "layers.0.self_attn.q_proj.weight",
+    "kind": "tensor",
+    "shape": [
+      128,
+      128
+    ],
+    "offset": 0,
+    "length": 65536,
+    "file": "model_weights.bin"
+  },
+  {
+    "key": "layers.0.self_attn.k_proj.weight",
+    "kind": "tensor",
+    "shape": [
+      64,
+      128
+    ],
+    "offset": 65536,
+    "length": 32768,
+    "file": "model_weights.bin"
+  },
+  {
+    "key": "layers.0.self_attn.v_proj.weight",
+    "kind": "tensor",
+    "shape": [
+      64,
+      128
+    ],
+    "offset": 98304,
+    "length": 32768,
+    "file": "model_weights.bin"
+  },
+  {
+    "key": "layers.0.self_attn.o_proj.weight",
+    "kind": "tensor",
+    "shape": [
+      128,
+      128
+    ],
+    "offset": 131072,
+    "length": 65536,
+    "file": "model_weights.bin"
+  },
+  {
+    "key": "layers.0.mlp.gate_proj.weight",
+    "kind": "tensor",
+    "shape": [
+      256,
+      128
+    ],
+    "offset": 196608,
+    "length": 131072,
+    "file": "model_weights.bin"
+  },
+  {
+    "key": "layers.0.mlp.up_proj.weight",
+    "kind": "tensor",
+    "shape": [
+      256,
+      128
+    ],
+    "offset": 327680,
+    "length": 131072,
+    "file": "model_weights.bin"
+  },
+  {
+    "key": "layers.0.mlp.down_proj.weight",
+    "kind": "tensor",
+    "shape": [
+      128,
+      256
+    ],
+    "offset": 458752,
+    "length": 131072,
+    "file": "model_weights.bin"
+  },
+  {
+    "key": "layers.0.input_layernorm.weight",
+    "kind": "vector",
+    "shape": [
+      128
+    ],
+    "offset": 589824,
+    "length": 512,
+    "file": "model_weights.bin"
+  },
+  {
+    "key": "layers.0.post_attention_layernorm.weight",
+    "kind": "vector",
+    "shape": [
+      128
+    ],
+    "offset": 590336,
+    "length": 512,
+    "file": "model_weights.bin"
+  },
+  {
+    "key": "layers.1.self_attn.q_proj.weight",
+    "kind": "tensor",
+    "shape": [
+      128,
+      128
+    ],
+    "offset": 590848,
+    "length": 65536,
+    "file": "model_weights.bin"
+  },
+  {
+    "key": "layers.1.self_attn.k_proj.weight",
+    "kind": "tensor",
+    "shape": [
+      64,
+      128
+    ],
+    "offset": 656384,
+    "length": 32768,
+    "file": "model_weights.bin"
+  },
+  {
+    "key": "layers.1.self_attn.v_proj.weight",
+    "kind": "tensor",
+    "shape": [
+      64,
+      128
+    ],
+    "offset": 689152,
+    "length": 32768,
+    "file": "model_weights.bin"
+  },
+  {
+    "key": "layers.1.self_attn.o_proj.weight",
+    "kind": "tensor",
+    "shape": [
+      128,
+      128
+    ],
+    "offset": 721920,
+    "length": 65536,
+    "file": "model_weights.bin"
+  },
+  {
+    "key": "layers.1.mlp.gate_proj.weight",
+    "kind": "tensor",
+    "shape": [
+      256,
+      128
+    ],
+    "offset": 787456,
+    "length": 131072,
+    "file": "model_weights.bin"
+  },
+  {
+    "key": "layers.1.mlp.up_proj.weight",
+    "kind": "tensor",
+    "shape": [
+      256,
+      128
+    ],
+    "offset": 918528,
+    "length": 131072,
+    "file": "model_weights.bin"
+  },
+  {
+    "key": "layers.1.mlp.down_proj.weight",
+    "kind": "tensor",
+    "shape": [
+      128,
+      256
+    ],
+    "offset": 1049600,
+    "length": 131072,
+    "file": "model_weights.bin"
+  },
+  {
+    "key": "layers.1.input_layernorm.weight",
+    "kind": "vector",
+    "shape": [
+      128
+    ],
+    "offset": 1180672,
+    "length": 512,
+    "file": "model_weights.bin"
+  },
+  {
+    "key": "layers.1.post_attention_layernorm.weight",
+    "kind": "vector",
+    "shape": [
+      128
+    ],
+    "offset": 1181184,
+    "length": 512,
+    "file": "model_weights.bin"
+  },
+  {
+    "key": "layers.2.self_attn.q_proj.weight",
+    "kind": "tensor",
+    "shape": [
+      128,
+      128
+    ],
+    "offset": 1181696,
+    "length": 65536,
+    "file": "model_weights.bin"
+  },
+  {
+    "key": "layers.2.self_attn.k_proj.weight",
+    "kind": "tensor",
+    "shape": [
+      64,
+      128
+    ],
+    "offset": 1247232,
+    "length": 32768,
+    "file": "model_weights.bin"
+  },
+  {
+    "key": "layers.2.self_attn.v_proj.weight",
+    "kind": "tensor",
+    "shape": [
+      64,
+      128
+    ],
+    "offset": 1280000,
+    "length": 32768,
+    "file": "model_weights.bin"
+  },
+  {
+    "key": "layers.2.self_attn.o_proj.weight",
+    "kind": "tensor",
+    "shape": [
+      128,
+      128
+    ],
+    "offset": 1312768,
+    "length": 65536,
+    "file": "model_weights.bin"
+  },
+  {
+    "key": "layers.2.mlp.gate_proj.weight",
+    "kind": "tensor",
+    "shape": [
+      256,
+      128
+    ],
+    "offset": 1378304,
+    "length": 131072,
+    "file": "model_weights.bin"
+  },
+  {
+    "key": "layers.2.mlp.up_proj.weight",
+    "kind": "tensor",
+    "shape": [
+      256,
+      128
+    ],
+    "offset": 1509376,
+    "length": 131072,
+    "file": "model_weights.bin"
+  },
+  {
+    "key": "layers.2.mlp.down_proj.weight",
+    "kind": "tensor",
+    "shape": [
+      128,
+      256
+    ],
+    "offset": 1640448,
+    "length": 131072,
+    "file": "model_weights.bin"
+  },
+  {
+    "key": "layers.2.input_layernorm.weight",
+    "kind": "vector",
+    "shape": [
+      128
+    ],
+    "offset": 1771520,
+    "length": 512,
+    "file": "model_weights.bin"
+  },
+  {
+    "key": "layers.2.post_attention_layernorm.weight",
+    "kind": "vector",
+    "shape": [
+      128
+    ],
+    "offset": 1772032,
+    "length": 512,
+    "file": "model_weights.bin"
+  },
+  {
+    "key": "layers.3.self_attn.q_proj.weight",
+    "kind": "tensor",
+    "shape": [
+      128,
+      128
+    ],
+    "offset": 1772544,
+    "length": 65536,
+    "file": "model_weights.bin"
+  },
+  {
+    "key": "layers.3.self_attn.k_proj.weight",
+    "kind": "tensor",
+    "shape": [
+      64,
+      128
+    ],
+    "offset": 1838080,
+    "length": 32768,
+    "file": "model_weights.bin"
+  },
+  {
+    "key": "layers.3.self_attn.v_proj.weight",
+    "kind": "tensor",
+    "shape": [
+      64,
+      128
+    ],
+    "offset": 1870848,
+    "length": 32768,
+    "file": "model_weights.bin"
+  },
+  {
+    "key": "layers.3.self_attn.o_proj.weight",
+    "kind": "tensor",
+    "shape": [
+      128,
+      128
+    ],
+    "offset": 1903616,
+    "length": 65536,
+    "file": "model_weights.bin"
+  },
+  {
+    "key": "layers.3.mlp.gate_proj.weight",
+    "kind": "tensor",
+    "shape": [
+      256,
+      128
+    ],
+    "offset": 1969152,
+    "length": 131072,
+    "file": "model_weights.bin"
+  },
+  {
+    "key": "layers.3.mlp.up_proj.weight",
+    "kind": "tensor",
+    "shape": [
+      256,
+      128
+    ],
+    "offset": 2100224,
+    "length": 131072,
+    "file": "model_weights.bin"
+  },
+  {
+    "key": "layers.3.mlp.down_proj.weight",
+    "kind": "tensor",
+    "shape": [
+      128,
+      256
+    ],
+    "offset": 2231296,
+    "length": 131072,
+    "file": "model_weights.bin"
+  },
+  {
+    "key": "layers.3.input_layernorm.weight",
+    "kind": "vector",
+    "shape": [
+      128
+    ],
+    "offset": 2362368,
+    "length": 512,
+    "file": "model_weights.bin"
+  },
+  {
+    "key": "layers.3.post_attention_layernorm.weight",
+    "kind": "vector",
+    "shape": [
+      128
+    ],
+    "offset": 2362880,
+    "length": 512,
+    "file": "model_weights.bin"
+  },
+  {
+    "key": "layers.4.self_attn.q_proj.weight",
+    "kind": "tensor",
+    "shape": [
+      128,
+      128
+    ],
+    "offset": 2363392,
+    "length": 65536,
+    "file": "model_weights.bin"
+  },
+  {
+    "key": "layers.4.self_attn.k_proj.weight",
+    "kind": "tensor",
+    "shape": [
+      64,
+      128
+    ],
+    "offset": 2428928,
+    "length": 32768,
+    "file": "model_weights.bin"
+  },
+  {
+    "key": "layers.4.self_attn.v_proj.weight",
+    "kind": "tensor",
+    "shape": [
+      64,
+      128
+    ],
+    "offset": 2461696,
+    "length": 32768,
+    "file": "model_weights.bin"
+  },
+  {
+    "key": "layers.4.self_attn.o_proj.weight",
+    "kind": "tensor",
+    "shape": [
+      128,
+      128
+    ],
+    "offset": 2494464,
+    "length": 65536,
+    "file": "model_weights.bin"
+  },
+  {
+    "key": "layers.4.mlp.gate_proj.weight",
+    "kind": "tensor",
+    "shape": [
+      256,
+      128
+    ],
+    "offset": 2560000,
+    "length": 131072,
+    "file": "model_weights.bin"
+  },
+  {
+    "key": "layers.4.mlp.up_proj.weight",
+    "kind": "tensor",
+    "shape": [
+      256,
+      128
+    ],
+    "offset": 2691072,
+    "length": 131072,
+    "file": "model_weights.bin"
+  },
+  {
+    "key": "layers.4.mlp.down_proj.weight",
+    "kind": "tensor",
+    "shape": [
+      128,
+      256
+    ],
+    "offset": 2822144,
+    "length": 131072,
+    "file": "model_weights.bin"
+  },
+  {
+    "key": "layers.4.input_layernorm.weight",
+    "kind": "vector",
+    "shape": [
+      128
+    ],
+    "offset": 2953216,
+    "length": 512,
+    "file": "model_weights.bin"
+  },
+  {
+    "key": "layers.4.post_attention_layernorm.weight",
+    "kind": "vector",
+    "shape": [
+      128
+    ],
+    "offset": 2953728,
+    "length": 512,
+    "file": "model_weights.bin"
+  },
+  {
+    "key": "layers.5.self_attn.q_proj.weight",
+    "kind": "tensor",
+    "shape": [
+      128,
+      128
+    ],
+    "offset": 2954240,
+    "length": 65536,
+    "file": "model_weights.bin"
+  },
+  {
+    "key": "layers.5.self_attn.k_proj.weight",
+    "kind": "tensor",
+    "shape": [
+      64,
+      128
+    ],
+    "offset": 3019776,
+    "length": 32768,
+    "file": "model_weights.bin"
+  },
+  {
+    "key": "layers.5.self_attn.v_proj.weight",
+    "kind": "tensor",
+    "shape": [
+      64,
+      128
+    ],
+    "offset": 3052544,
+    "length": 32768,
+    "file": "model_weights.bin"
+  },
+  {
+    "key": "layers.5.self_attn.o_proj.weight",
+    "kind": "tensor",
+    "shape": [
+      128,
+      128
+    ],
+    "offset": 3085312,
+    "length": 65536,
+    "file": "model_weights.bin"
+  },
+  {
+    "key": "layers.5.mlp.gate_proj.weight",
+    "kind": "tensor",
+    "shape": [
+      256,
+      128
+    ],
+    "offset": 3150848,
+    "length": 131072,
+    "file": "model_weights.bin"
+  },
+  {
+    "key": "layers.5.mlp.up_proj.weight",
+    "kind": "tensor",
+    "shape": [
+      256,
+      128
+    ],
+    "offset": 3281920,
+    "length": 131072,
+    "file": "model_weights.bin"
+  },
+  {
+    "key": "layers.5.mlp.down_proj.weight",
+    "kind": "tensor",
+    "shape": [
+      128,
+      256
+    ],
+    "offset": 3412992,
+    "length": 131072,
+    "file": "model_weights.bin"
+  },
+  {
+    "key": "layers.5.input_layernorm.weight",
+    "kind": "vector",
+    "shape": [
+      128
+    ],
+    "offset": 3544064,
+    "length": 512,
+    "file": "model_weights.bin"
+  },
+  {
+    "key": "layers.5.post_attention_layernorm.weight",
+    "kind": "vector",
+    "shape": [
+      128
+    ],
+    "offset": 3544576,
+    "length": 512,
+    "file": "model_weights.bin"
+  },
+  {
+    "key": "layers.6.self_attn.q_proj.weight",
+    "kind": "tensor",
+    "shape": [
+      128,
+      128
+    ],
+    "offset": 3545088,
+    "length": 65536,
+    "file": "model_weights.bin"
+  },
+  {
+    "key": "layers.6.self_attn.k_proj.weight",
+    "kind": "tensor",
+    "shape": [
+      64,
+      128
+    ],
+    "offset": 3610624,
+    "length": 32768,
+    "file": "model_weights.bin"
+  },
+  {
+    "key": "layers.6.self_attn.v_proj.weight",
+    "kind": "tensor",
+    "shape": [
+      64,
+      128
+    ],
+    "offset": 3643392,
+    "length": 32768,
+    "file": "model_weights.bin"
+  },
+  {
+    "key": "layers.6.self_attn.o_proj.weight",
+    "kind": "tensor",
+    "shape": [
+      128,
+      128
+    ],
+    "offset": 3676160,
+    "length": 65536,
+    "file": "model_weights.bin"
+  },
+  {
+    "key": "layers.6.mlp.gate_proj.weight",
+    "kind": "tensor",
+    "shape": [
+      256,
+      128
+    ],
+    "offset": 3741696,
+    "length": 131072,
+    "file": "model_weights.bin"
+  },
+  {
+    "key": "layers.6.mlp.up_proj.weight",
+    "kind": "tensor",
+    "shape": [
+      256,
+      128
+    ],
+    "offset": 3872768,
+    "length": 131072,
+    "file": "model_weights.bin"
+  },
+  {
+    "key": "layers.6.mlp.down_proj.weight",
+    "kind": "tensor",
+    "shape": [
+      128,
+      256
+    ],
+    "offset": 4003840,
+    "length": 131072,
+    "file": "model_weights.bin"
+  },
+  {
+    "key": "layers.6.input_layernorm.weight",
+    "kind": "vector",
+    "shape": [
+      128
+    ],
+    "offset": 4134912,
+    "length": 512,
+    "file": "model_weights.bin"
+  },
+  {
+    "key": "layers.6.post_attention_layernorm.weight",
+    "kind": "vector",
+    "shape": [
+      128
+    ],
+    "offset": 4135424,
+    "length": 512,
+    "file": "model_weights.bin"
+  },
+  {
+    "key": "layers.7.self_attn.q_proj.weight",
+    "kind": "tensor",
+    "shape": [
+      128,
+      128
+    ],
+    "offset": 4135936,
+    "length": 65536,
+    "file": "model_weights.bin"
+  },
+  {
+    "key": "layers.7.self_attn.k_proj.weight",
+    "kind": "tensor",
+    "shape": [
+      64,
+      128
+    ],
+    "offset": 4201472,
+    "length": 32768,
+    "file": "model_weights.bin"
+  },
+  {
+    "key": "layers.7.self_attn.v_proj.weight",
+    "kind": "tensor",
+    "shape": [
+      64,
+      128
+    ],
+    "offset": 4234240,
+    "length": 32768,
+    "file": "model_weights.bin"
+  },
+  {
+    "key": "layers.7.self_attn.o_proj.weight",
+    "kind": "tensor",
+    "shape": [
+      128,
+      128
+    ],
+    "offset": 4267008,
+    "length": 65536,
+    "file": "model_weights.bin"
+  },
+  {
+    "key": "layers.7.mlp.gate_proj.weight",
+    "kind": "tensor",
+    "shape": [
+      256,
+      128
+    ],
+    "offset": 4332544,
+    "length": 131072,
+    "file": "model_weights.bin"
+  },
+  {
+    "key": "layers.7.mlp.up_proj.weight",
+    "kind": "tensor",
+    "shape": [
+      256,
+      128
+    ],
+    "offset": 4463616,
+    "length": 131072,
+    "file": "model_weights.bin"
+  },
+  {
+    "key": "layers.7.mlp.down_proj.weight",
+    "kind": "tensor",
+    "shape": [
+      128,
+      256
+    ],
+    "offset": 4594688,
+    "length": 131072,
+    "file": "model_weights.bin"
+  },
+  {
+    "key": "layers.7.input_layernorm.weight",
+    "kind": "vector",
+    "shape": [
+      128
+    ],
+    "offset": 4725760,
+    "length": 512,
+    "file": "model_weights.bin"
+  },
+  {
+    "key": "layers.7.post_attention_layernorm.weight",
+    "kind": "vector",
+    "shape": [
+      128
+    ],
+    "offset": 4726272,
+    "length": 512,
+    "file": "model_weights.bin"
+  },
+  {
+    "key": "norm.weight",
+    "kind": "vector",
+    "shape": [
+      128
+    ],
+    "offset": 4726784,
+    "length": 512,
+    "file": "model_weights.bin"
+  },
+  {
+    "key": "lm_head.weight",
+    "kind": "tensor",
+    "shape": [
+      512,
+      128
+    ],
+    "offset": 4727296,
+    "length": 262144,
+    "file": "model_weights.bin"
+  }
+]

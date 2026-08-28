@@ -13,7 +13,9 @@
 //! All trait impls (`WeightFfn`, `SparseFfn`, `RemoteWalkBackend`, MoE
 //! backends) stay here because they pull in inference-side topology.
 
+pub mod ablating;
 pub mod graph_backend;
+pub mod injecting;
 pub mod local_moe;
 pub mod moe_backend;
 pub mod moe_bound;
@@ -34,6 +36,8 @@ pub use larql_compute::ffn::{
 
 // ── Re-exports ──
 
+pub use ablating::LastPositionAblatingFfn;
+pub use injecting::LastPositionInjectingFfn;
 pub use local_moe::LocalMoeFfn;
 pub use moe_backend::{
     InProcessMoeBackend, MoeBackendError, MoeExpertBackend, MoeFailurePolicy, MoeRoute,

@@ -49,6 +49,10 @@ build/
 *.hdf5
 *.vindex
 
+# ...except the tiny-vindex CI fixture: the isolation-harness workflow
+# serves it, so these four small binaries are tracked deliberately.
+!testdata/tiny-vindex/*.bin
+
 # Nix
 result
 result-*

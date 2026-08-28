@@ -54,6 +54,7 @@ pub mod attention;
 pub mod capture;
 pub mod chat;
 pub mod decode_stages;
+pub mod edit;
 pub mod error;
 pub mod experts;
 pub mod ffn;
@@ -188,7 +189,8 @@ pub use ffn::graph_backend::{GateIndex, IndexBuildCallbacks, SilentIndexCallback
 pub use ffn::{
     decode_q8k_batch_response_entries, decode_single_response, encode_binary_request,
     encode_binary_request_as, encode_q8k_batch_request, expert_weights_resolvable, BackendFfn,
-    ExpertWeightFfn, FfnBackend, LayerFfnRouter, LayerShardedBackend, MoeRouterWeights,
+    ExpertWeightFfn, FfnBackend, LastPositionAblatingFfn, LastPositionInjectingFfn,
+    LayerFfnRouter, LayerShardedBackend, MoeRouterWeights,
     PackedExpertWeightFfn, RemoteFfnConfig, RemoteFfnError, RemoteLatencyStats, RemoteMoeBackend,
     RemoteMoeError, RemoteWalkBackend, ShardConfig, SparseFfn, WeightFfn, WireFormat,
     WirePreference, BINARY_CT, F16_CT, I8_CT, Q8K_BATCH_CT,

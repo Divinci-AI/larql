@@ -562,6 +562,14 @@ pub trait ModelArchitecture: Send + Sync {
         self.config().num_q_heads
     }
 
+    /// FFN intermediate width for a given layer. Models with per-layer
+    /// variable MLP width (e.g. Gemma 4 `use_double_wide_mlp` — KV-shared
+    /// layers widen to 2x base) override this.
+    /// Default: `config.intermediate_size`.
+    fn intermediate_size_for_layer(&self, _layer: usize) -> usize {
+        self.config().intermediate_size
+    }
+
     /// Fraction of head_dim to apply RoPE to (0.0–1.0).
     /// Models with partial rotary embedding (e.g., 0.25) override per layer.
     /// Default: 1.0 (full rotation).

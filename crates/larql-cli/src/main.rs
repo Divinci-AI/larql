@@ -244,6 +244,18 @@ enum DevCommand {
     /// Extract edges from FFN weights. Zero forward passes.
     WeightExtract(weight_walk_cmd::WeightWalkArgs),
 
+    /// Discover the crown layer band for a fact (RFC-0001 Phase A).
+    Crown(crown_cmd::CrownArgs),
+
+    /// Rank-1 mechanistic fact edit; emits a .vlp/.bin edit patch (RFC-0001 Phase B).
+    Edit(edit_cmd::EditArgs),
+
+    /// Apply a previously computed edit patch to model weights (RFC-0001 Phase B).
+    ApplyPatch(apply_patch_cmd::ApplyPatchArgs),
+
+    /// Batch mechanistic fact editing over many facts (RFC-0001 Phase C).
+    Memit(memit_cmd::MemitArgs),
+
     /// Extract routing edges from attention OV circuits. Zero forward passes.
     AttentionExtract(attention_walk_cmd::AttentionWalkArgs),
 
@@ -706,6 +718,10 @@ fn run_dev(cmd: DevCommand) -> Result<(), Box<dyn std::error::Error>> {
         DevCommand::EmbeddingJump(a) => embedding_jump_cmd::run(a),
         DevCommand::Bfs(a) => bfs_cmd::run(a),
         DevCommand::FfnLatency(a) => ffn_latency_cmd::run(a),
+        DevCommand::Crown(a) => crown_cmd::run(a),
+        DevCommand::Edit(a) => edit_cmd::run(a),
+        DevCommand::ApplyPatch(a) => apply_patch_cmd::run(a),
+        DevCommand::Memit(a) => memit_cmd::run(a),
     }
 }
 

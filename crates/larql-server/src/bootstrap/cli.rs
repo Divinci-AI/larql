@@ -303,7 +303,11 @@ pub struct Cli {
     pub no_docs: bool,
 
     /// API key for authentication (clients send Authorization: Bearer <key>).
-    #[arg(long)]
+    ///
+    /// Also readable from the `LARQL_API_KEY` env var so Cloud Run /
+    /// container deployments can inject it as a secret without putting
+    /// the key on the command line.
+    #[arg(long, env = "LARQL_API_KEY")]
     pub api_key: Option<String>,
 
     /// Rate limit per IP (e.g., "100/min", "10/sec").
