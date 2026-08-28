@@ -13,12 +13,12 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use clap::Args;
+use larql_inference::ndarray::Array1;
 use larql_inference::{
     edit::{compute_rank1, write_patch, PatchProvenance},
     forward::{capture_ffn_activation_matrix, predict_with_ffn},
     InferenceModel, LastPositionAblatingFfn, LastPositionInjectingFfn, WeightFfn,
 };
-use larql_inference::ndarray::Array1;
 
 #[derive(Args)]
 pub struct EditArgs {
@@ -186,7 +186,9 @@ pub fn run(args: EditArgs) -> Result<(), Box<dyn std::error::Error>> {
                 break;
             }
         }
-        chosen.ok_or("scale search exhausted without flipping to new_token — try a larger --scales range")?
+        chosen.ok_or(
+            "scale search exhausted without flipping to new_token — try a larger --scales range",
+        )?
     };
     eprintln!("  → chosen scale: {chosen_scale}");
 
@@ -253,7 +255,11 @@ fn scan_crown_layer(
     for layer in start_layer..=end_layer {
         let ffn = LastPositionAblatingFfn::new(&weight_ffn, layer);
         let r = predict_with_ffn(weights, model.tokenizer(), tokens, top_k, &ffn);
-        let top = r.predictions.first().map(|(t, _)| t.trim().to_string()).unwrap_or_default();
+        let top = r
+            .predictions
+            .first()
+            .map(|(t, _)| t.trim().to_string())
+            .unwrap_or_default();
         let expect_prob = prob_of(&r.predictions, expect);
         let delta = expect_prob - baseline_expect;
         let flipped = !top.eq_ignore_ascii_case(expect.trim());
@@ -262,16 +268,17 @@ fn scan_crown_layer(
             delta,
             if flipped { "  ← flipped" } else { "" }
         );
-        if flipped {
-            if best_flipped.map_or(true, |(_, d)| delta < d) {
-                best_flipped = Some((layer, delta));
-            }
+        if flipped && best_flipped.is_none_or(|(_, d)| delta < d) {
+            best_flipped = Some((layer, delta));
         }
-        if best.as_ref().map_or(true, |(_, d, _)| delta < *d) {
+        if best.as_ref().is_none_or(|(_, d, _)| delta < *d) {
             best = Some((layer, delta, top));
         }
     }
-    Ok(best_flipped.map(|(l, _)| l).or(best.map(|(l, _, _)| l)).unwrap_or(start_layer))
+    Ok(best_flipped
+        .map(|(l, _)| l)
+        .or(best.map(|(l, _, _)| l))
+        .unwrap_or(start_layer))
 }
 
 fn prob_of(predictions: &[(String, f64)], target: &str) -> f64 {

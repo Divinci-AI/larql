@@ -18,6 +18,12 @@ const PATCH_INLINE_NAME: &str = "inline-patch";
 
 #[derive(Deserialize)]
 pub struct ApplyPatchRequest {
+    /// Name to file the patch under. This is the key `GET /v1/patches`
+    /// reports and `DELETE /v1/patches/{name}` accepts, so a caller that
+    /// supplies it can revert without first listing to discover what the
+    /// server chose to call the patch.
+    #[serde(default)]
+    pub name: Option<String>,
     #[serde(default)]
     pub url: Option<String>,
     #[serde(default)]
@@ -25,16 +31,29 @@ pub struct ApplyPatchRequest {
 }
 
 /// Resolve a patch from the request body (inline or URL).
+///
+/// The returned name is also stamped into `patch.description`, because that
+/// field — not the name we hand back to the caller — is what the patch stack
+/// is keyed on. Returning one name while filing the patch under another is
+/// what made `DELETE /v1/patches/{name}` 404 for callers that had done
+/// nothing wrong: the response said `applied: "my-patch"` and the stack held
+/// `"unnamed"`.
 fn resolve_patch(
     req: &ApplyPatchRequest,
 ) -> Result<(larql_vindex::VindexPatch, String), ServerError> {
     if let Some(ref patch) = req.patch {
+        // An explicit `name` wins: it is the caller stating the key it
+        // intends to revert by. `url` stays ahead of the patch's own
+        // description to preserve the pre-existing precedence.
         let name = req
-            .url
+            .name
             .clone()
+            .or_else(|| req.url.clone())
             .or_else(|| patch.description.clone())
             .unwrap_or_else(|| PATCH_INLINE_NAME.into());
-        return Ok((patch.clone(), name));
+        let mut patch = patch.clone();
+        patch.description = Some(name.clone());
+        return Ok((patch, name));
     }
 
     if let Some(ref url) = req.url {
@@ -52,9 +71,11 @@ fn resolve_patch(
         } else {
             std::path::PathBuf::from(url)
         };
-        let patch = larql_vindex::VindexPatch::load(&path)
+        let mut patch = larql_vindex::VindexPatch::load(&path)
             .map_err(|e| ServerError::Internal(format!("failed to load patch: {e}")))?;
-        return Ok((patch, url.clone()));
+        let name = req.name.clone().unwrap_or_else(|| url.clone());
+        patch.description = Some(name.clone());
+        return Ok((patch, name));
     }
 
     Err(ServerError::BadRequest(

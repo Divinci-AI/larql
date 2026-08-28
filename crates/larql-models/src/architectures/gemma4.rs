@@ -148,7 +148,8 @@ impl ModelArchitecture for Gemma4Arch {
         //   use_double_wide_mlp = config.use_double_wide_mlp and is_kv_shared_layer
         //   self.intermediate_size = config.intermediate_size * (2 if use_double_wide_mlp else 1)
         let base = self.config.intermediate_size;
-        if self.config.use_double_wide_mlp.unwrap_or(false) && self.kv_shared_source_layer(layer).is_some()
+        if self.config.use_double_wide_mlp.unwrap_or(false)
+            && self.kv_shared_source_layer(layer).is_some()
         {
             base * 2
         } else {

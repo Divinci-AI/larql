@@ -88,8 +88,7 @@ pub fn write_patch(path: impl AsRef<Path>, patch: &EditPatch) -> std::io::Result
         delta_w: Vec::new(),
         ..patch.clone()
     };
-    let meta_json = serde_json::to_vec(&meta)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    let meta_json = serde_json::to_vec(&meta).map_err(std::io::Error::other)?;
     w.write_all(&(meta_json.len() as u32).to_le_bytes())?;
     w.write_all(&meta_json)?;
 
@@ -152,15 +151,15 @@ pub fn read_patch(path: impl AsRef<Path>) -> std::io::Result<EditPatch> {
             patch.d = read_f32s(&mut r, d_len)?;
             let k_len = read_u32(&mut r)? as usize;
             patch.k_norm = read_f32s(&mut r, k_len)?;
-            if patch.d.len() != patch.hidden_size
-                || patch.k_norm.len() != patch.intermediate_size
-            {
+            if patch.d.len() != patch.hidden_size || patch.k_norm.len() != patch.intermediate_size {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
                     format!(
                         "rank_one shape mismatch: d={} (hidden={}), k={} (intermediate={})",
-                        patch.d.len(), patch.hidden_size,
-                        patch.k_norm.len(), patch.intermediate_size
+                        patch.d.len(),
+                        patch.hidden_size,
+                        patch.k_norm.len(),
+                        patch.intermediate_size
                     ),
                 ));
             }
@@ -172,7 +171,11 @@ pub fn read_patch(path: impl AsRef<Path>) -> std::io::Result<EditPatch> {
             if patch.delta_w.len() != expected {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
-                    format!("dense len {} != hidden*intermediate {}", patch.delta_w.len(), expected),
+                    format!(
+                        "dense len {} != hidden*intermediate {}",
+                        patch.delta_w.len(),
+                        expected
+                    ),
                 ));
             }
         }

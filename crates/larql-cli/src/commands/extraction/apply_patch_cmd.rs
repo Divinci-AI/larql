@@ -63,7 +63,10 @@ pub fn run(args: ApplyPatchArgs) -> Result<(), Box<dyn std::error::Error>> {
 
         // SAFETY: we mutate ModelWeights in-place via the public field.
         apply_patch(model.weights_mut(), &patch).map_err(|e| format!("apply_patch: {e}"))?;
-        eprintln!("  applied{}.", if args.reverse { " (reversed)" } else { "" });
+        eprintln!(
+            "  applied{}.",
+            if args.reverse { " (reversed)" } else { "" }
+        );
     }
 
     if let Some(prompt) = args.prompt {

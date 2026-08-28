@@ -26,7 +26,7 @@ use std::time::Instant;
 
 use clap::Args;
 use larql_inference::{
-    InferenceModel, LastPositionAblatingFfn, WeightFfn, predict, predict_with_ffn,
+    predict, predict_with_ffn, InferenceModel, LastPositionAblatingFfn, WeightFfn,
 };
 
 #[derive(Args)]
@@ -101,10 +101,9 @@ pub fn run(args: CrownArgs) -> Result<(), Box<dyn std::error::Error>> {
     let start_layer = args.start_layer.unwrap_or((num_layers * 3) / 5);
     let end_layer = args.end_layer.unwrap_or(num_layers.saturating_sub(2));
     if start_layer > end_layer {
-        return Err(format!(
-            "start_layer ({start_layer}) must be <= end_layer ({end_layer})"
-        )
-        .into());
+        return Err(
+            format!("start_layer ({start_layer}) must be <= end_layer ({end_layer})").into(),
+        );
     }
 
     // Tokenize the prompt.
@@ -145,8 +144,7 @@ pub fn run(args: CrownArgs) -> Result<(), Box<dyn std::error::Error>> {
     for layer in start_layer..=end_layer {
         let ffn = LastPositionAblatingFfn::new(&weight_ffn, layer);
         let t = Instant::now();
-        let result =
-            predict_with_ffn(weights, model.tokenizer(), &token_ids, args.top_k, &ffn);
+        let result = predict_with_ffn(weights, model.tokenizer(), &token_ids, args.top_k, &ffn);
         let elapsed = t.elapsed().as_secs_f64();
         let (top_token, top_prob) = result
             .predictions
@@ -180,10 +178,16 @@ pub fn run(args: CrownArgs) -> Result<(), Box<dyn std::error::Error>> {
         let pick = scan
             .iter()
             .filter(|r| r.flipped)
-            .min_by(|a, b| a.delta_expect_prob.partial_cmp(&b.delta_expect_prob).unwrap())
+            .min_by(|a, b| {
+                a.delta_expect_prob
+                    .partial_cmp(&b.delta_expect_prob)
+                    .unwrap()
+            })
             .or_else(|| {
                 scan.iter().min_by(|a, b| {
-                    a.delta_expect_prob.partial_cmp(&b.delta_expect_prob).unwrap()
+                    a.delta_expect_prob
+                        .partial_cmp(&b.delta_expect_prob)
+                        .unwrap()
                 })
             });
         (
@@ -194,12 +198,8 @@ pub fn run(args: CrownArgs) -> Result<(), Box<dyn std::error::Error>> {
     };
 
     eprintln!();
-    if let (Some(layer), Some(delta), Some(top)) =
-        (crown_layer, crown_delta, crown_top.as_ref())
-    {
-        eprintln!(
-            "Crown layer: L{layer}  (Δexpect_prob = {delta:+.4}, top after = {top:?})"
-        );
+    if let (Some(layer), Some(delta), Some(top)) = (crown_layer, crown_delta, crown_top.as_ref()) {
+        eprintln!("Crown layer: L{layer}  (Δexpect_prob = {delta:+.4}, top after = {top:?})");
     } else {
         eprintln!("No crown layer found in scan range (all deltas were zero).");
     }

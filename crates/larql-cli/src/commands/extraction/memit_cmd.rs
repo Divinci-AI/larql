@@ -82,8 +82,8 @@ pub fn run(args: MemitArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     let edits_json = fs::read_to_string(&args.edits)
         .map_err(|e| format!("failed to read {}: {e}", args.edits.display()))?;
-    let edits: Vec<EditSpec> = serde_json::from_str(&edits_json)
-        .map_err(|e| format!("edits.json parse: {e}"))?;
+    let edits: Vec<EditSpec> =
+        serde_json::from_str(&edits_json).map_err(|e| format!("edits.json parse: {e}"))?;
     eprintln!("Loaded {} edit specs", edits.len());
 
     // Build MemitFacts. Each needs prompt_tokens, target_token_id, layer.
@@ -97,15 +97,16 @@ pub fn run(args: MemitArgs) -> Result<(), Box<dyn std::error::Error>> {
             .map_err(|e| format!("tokenize target '{}': {e}", edit.new_token))?
             .get_ids()
             .to_vec();
-        let target_token_id = *target_tokens.first().ok_or_else(|| {
-            format!("new_token '{}' tokenized to empty id list", edit.new_token)
-        })?;
+        let target_token_id = *target_tokens
+            .first()
+            .ok_or_else(|| format!("new_token '{}' tokenized to empty id list", edit.new_token))?;
 
         let layer = match edit.layer {
             Some(l) => l,
             None => {
                 eprintln!("  [{}] discovering crown layer...", edit.label);
-                let l = scan_crown_layer(&model, &prompt_tokens, edit.new_token.trim(), args.top_k)?;
+                let l =
+                    scan_crown_layer(&model, &prompt_tokens, edit.new_token.trim(), args.top_k)?;
                 eprintln!("  [{}] crown = L{l}", edit.label);
                 l
             }
@@ -158,9 +159,7 @@ pub fn run(args: MemitArgs) -> Result<(), Box<dyn std::error::Error>> {
             created_at: now_iso(),
         };
         let patch = compute_dense(delta, result.layer, provenance);
-        let path = args
-            .output
-            .join(format!("memit_L{}.lqpatch", result.layer));
+        let path = args.output.join(format!("memit_L{}.lqpatch", result.layer));
         write_patch(&path, &patch)?;
         let mb = (patch.delta_w.len() * 4) as f64 / (1024.0 * 1024.0);
         eprintln!(
@@ -196,10 +195,7 @@ pub fn run(args: MemitArgs) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn tokenize(
-    model: &InferenceModel,
-    text: &str,
-) -> Result<Vec<u32>, Box<dyn std::error::Error>> {
+fn tokenize(model: &InferenceModel, text: &str) -> Result<Vec<u32>, Box<dyn std::error::Error>> {
     let encoding = model
         .tokenizer()
         .encode(text, true)
@@ -233,10 +229,10 @@ fn scan_crown_layer(
         let expect_prob = prob_of(&r.predictions, expect);
         let delta = expect_prob - baseline_expect;
         let flipped = !top.eq_ignore_ascii_case(expect);
-        if flipped && best_flipped.map_or(true, |(_, d)| delta < d) {
+        if flipped && best_flipped.is_none_or(|(_, d)| delta < d) {
             best_flipped = Some((layer, delta));
         }
-        if best.map_or(true, |(_, d)| delta < d) {
+        if best.is_none_or(|(_, d)| delta < d) {
             best = Some((layer, delta));
         }
     }

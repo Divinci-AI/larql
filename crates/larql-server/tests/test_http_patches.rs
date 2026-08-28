@@ -151,3 +151,171 @@ async fn http_patches_multi_model_apply_not_found_returns_404() {
     .await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
+
+// ══════════════════════════════════════════════════════════════
+// Top-level `name` on POST /v1/patches/apply
+//
+// The body shape real clients send is `{"name": ..., "patch": {...}}` with
+// no `description` inside the patch. `name` used to be dropped by serde, so
+// the patch landed in the stack as "unnamed" while the response reported the
+// caller's name back — and the matching DELETE then 404'd. These pin the
+// round trip: whatever `applied` says is the key that lists and deletes.
+// ══════════════════════════════════════════════════════════════
+
+/// A patch body in the shape a client sends: name at the top level, no
+/// `description` inside the patch itself.
+fn named_patch_no_description(name: &str) -> serde_json::Value {
+    serde_json::json!({
+        "name": name,
+        "patch": {
+            "version": 1,
+            "base_model": "test",
+            "base_checksum": null,
+            "created_at": "2026-08-28",
+            "description": null,
+            "author": null,
+            "tags": [],
+            "operations": [
+                {"op": "delete", "layer": 0, "feature": 2}
+            ]
+        }
+    })
+}
+
+#[tokio::test]
+async fn http_patches_apply_honors_top_level_name() {
+    let app = single_model_router(state(vec![model("test")]));
+    let resp = post_json(
+        app,
+        "/v1/patches/apply",
+        named_patch_no_description("wl-42"),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp.into_body()).await;
+    assert_eq!(body["applied"], "wl-42");
+}
+
+#[tokio::test]
+async fn http_patches_list_shows_top_level_name_not_unnamed() {
+    let st = state(vec![model("test")]);
+    let app1 = single_model_router(st.clone());
+    post_json(
+        app1,
+        "/v1/patches/apply",
+        named_patch_no_description("wl-listed"),
+    )
+    .await;
+
+    let app2 = single_model_router(st.clone());
+    let body = body_json(get(app2, "/v1/patches").await.into_body()).await;
+    let patches = body["patches"].as_array().unwrap();
+    assert!(
+        patches.iter().any(|p| p["name"] == "wl-listed"),
+        "expected the supplied name in the stack, got {patches:?}"
+    );
+}
+
+#[tokio::test]
+async fn http_patches_delete_by_top_level_name_succeeds() {
+    let st = state(vec![model("test")]);
+    let app1 = single_model_router(st.clone());
+    post_json(
+        app1,
+        "/v1/patches/apply",
+        named_patch_no_description("wl-revert"),
+    )
+    .await;
+
+    // The revert a client issues: DELETE the name it was told was applied,
+    // with no intervening GET /v1/patches to discover the real key.
+    let app2 = single_model_router(st.clone());
+    let resp = delete(app2, "/v1/patches/wl-revert").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp.into_body()).await;
+    assert_eq!(body["removed"], "wl-revert");
+
+    let app3 = single_model_router(st.clone());
+    let body = body_json(get(app3, "/v1/patches").await.into_body()).await;
+    assert!(body["patches"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn http_patches_two_named_patches_delete_the_right_one() {
+    // The case the caller-side "list, and if there is exactly one, delete it"
+    // workaround cannot serve: two patches active at once.
+    let st = state(vec![model("test")]);
+    for name in ["wl-first", "wl-second"] {
+        let app = single_model_router(st.clone());
+        post_json(app, "/v1/patches/apply", named_patch_no_description(name)).await;
+    }
+
+    let app = single_model_router(st.clone());
+    assert_eq!(
+        delete(app, "/v1/patches/wl-first").await.status(),
+        StatusCode::OK
+    );
+
+    let app = single_model_router(st.clone());
+    let body = body_json(get(app, "/v1/patches").await.into_body()).await;
+    let patches = body["patches"].as_array().unwrap();
+    assert_eq!(patches.len(), 1);
+    assert_eq!(patches[0]["name"], "wl-second");
+}
+
+#[tokio::test]
+async fn http_patches_top_level_name_overrides_patch_description() {
+    let st = state(vec![model("test")]);
+    let mut body = inline_delete_patch("from-description");
+    body["name"] = serde_json::json!("from-name");
+
+    let app1 = single_model_router(st.clone());
+    let resp = body_json(post_json(app1, "/v1/patches/apply", body).await.into_body()).await;
+    assert_eq!(resp["applied"], "from-name");
+
+    let app2 = single_model_router(st.clone());
+    let listed = body_json(get(app2, "/v1/patches").await.into_body()).await;
+    assert_eq!(listed["patches"][0]["name"], "from-name");
+}
+
+#[tokio::test]
+async fn http_patches_session_delete_by_top_level_name_succeeds() {
+    let st = state(vec![model("test")]);
+    let m = st.model(None).unwrap();
+    st.sessions.get_or_create("sid-named", &m).await;
+
+    let app1 = single_model_router(st.clone());
+    post_json_h(
+        app1,
+        "/v1/patches/apply",
+        named_patch_no_description("sess-revert"),
+        ("x-session-id", "sid-named"),
+    )
+    .await;
+
+    let app2 = single_model_router(st.clone());
+    let listed = body_json(
+        get_h(app2, "/v1/patches", ("x-session-id", "sid-named"))
+            .await
+            .into_body(),
+    )
+    .await;
+    assert!(listed["patches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|p| p["name"] == "sess-revert"));
+}
+
+#[tokio::test]
+async fn http_patches_apply_without_name_still_falls_back() {
+    // No `name`, no `description` — the old fallback must survive so bodies
+    // that never carried a name keep working.
+    let app = single_model_router(state(vec![model("test")]));
+    let mut body = named_patch_no_description("ignored");
+    body.as_object_mut().unwrap().remove("name");
+    let resp = post_json(app, "/v1/patches/apply", body).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp.into_body()).await;
+    assert_eq!(body["applied"], "inline-patch");
+}

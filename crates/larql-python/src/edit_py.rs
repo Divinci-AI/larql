@@ -7,18 +7,20 @@
 
 use std::path::PathBuf;
 
+use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAnyMethods, PyDict, PyList};
-use pyo3::exceptions::{PyRuntimeError, PyValueError};
 
+use larql_inference::ndarray::Array1;
 use larql_inference::{
-    edit::{apply_patch as apply_patch_rust, compute_dense, compute_rank1, read_patch,
-            write_patch, EditPatch, PatchProvenance},
-    forward::{capture_ffn_activation_matrix, predict, predict_with_ffn},
+    edit::{
+        apply_patch as apply_patch_rust, compute_dense, compute_rank1, read_patch, write_patch,
+        EditPatch, PatchProvenance,
+    },
     forward::memit::{run_memit, MemitFact},
+    forward::{capture_ffn_activation_matrix, predict, predict_with_ffn},
     InferenceModel, LastPositionAblatingFfn, LastPositionInjectingFfn, WeightFfn,
 };
-use larql_inference::ndarray::Array1;
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
@@ -114,10 +116,8 @@ pub fn crown(
     let scan = scan_crown(&m, &tokens, expect, start, end, top_k);
 
     let crown_layer = pick_crown(&scan);
-    let crown_delta = crown_layer
-        .and_then(|c| scan.iter().find(|r| r.0 == c).map(|r| r.1));
-    let crown_top = crown_layer
-        .and_then(|c| scan.iter().find(|r| r.0 == c).map(|r| r.2.clone()));
+    let crown_delta = crown_layer.and_then(|c| scan.iter().find(|r| r.0 == c).map(|r| r.1));
+    let crown_top = crown_layer.and_then(|c| scan.iter().find(|r| r.0 == c).map(|r| r.2.clone()));
 
     let out = PyDict::new(py);
     out.set_item("crown_layer", crown_layer)?;
@@ -152,6 +152,10 @@ pub fn crown(
 /// Returns a dict: { "layer": int, "scale": float, "output": str, "d_norm": float }
 #[pyfunction]
 #[pyo3(signature = (model, src, tgt, new_token, output, layer=None, scales=None, fixed_scale=None, top_k=100, label=None))]
+// The argument list is the Python signature: these are keyword arguments with
+// defaults on the Python side, so grouping them into a struct would only move
+// the same surface behind an extra type the binding has to unpack.
+#[allow(clippy::too_many_arguments)]
 pub fn edit(
     py: Python<'_>,
     model: &str,
@@ -176,10 +180,15 @@ pub fn edit(
         Some(l) => l,
         None => {
             let n = m.num_layers();
-            let scan = scan_crown(&m, &src_tokens, new_token.trim(), (n * 3) / 5,
-                                   n.saturating_sub(2), top_k);
-            pick_crown(&scan)
-                .ok_or_else(|| py_err("crown scan returned no candidate layer"))?
+            let scan = scan_crown(
+                &m,
+                &src_tokens,
+                new_token.trim(),
+                (n * 3) / 5,
+                n.saturating_sub(2),
+                top_k,
+            );
+            pick_crown(&scan).ok_or_else(|| py_err("crown scan returned no candidate layer"))?
         }
     };
     // Per-layer FFN width (Gemma 4 double-wide MLP has 2× intermediate on KV-shared layers).
@@ -211,7 +220,10 @@ pub fn edit(
     } else if w_down.shape() == [intermediate, hidden] {
         k_diff.view().dot(&w_view)
     } else {
-        return Err(py_err(format!("unexpected W_down shape {:?}", w_down.shape())));
+        return Err(py_err(format!(
+            "unexpected W_down shape {:?}",
+            w_down.shape()
+        )));
     };
     let d_base_vec = d_base.to_vec();
 
@@ -226,7 +238,9 @@ pub fn edit(
             let scaled: Vec<f32> = d_base_vec.iter().map(|&v| v * s).collect();
             let ffn = LastPositionInjectingFfn::new(&weight_ffn, chosen_layer, scaled);
             let r = predict_with_ffn(weights, m.tokenizer(), &src_tokens, 5, &ffn);
-            let top = r.predictions.first()
+            let top = r
+                .predictions
+                .first()
                 .map(|(t, _)| t.trim().to_string())
                 .unwrap_or_default();
             if top.eq_ignore_ascii_case(new_token.trim()) {
@@ -243,12 +257,21 @@ pub fn edit(
         old_token: String::new(),
         new_token: new_token.to_string(),
         crown_delta: 0.0,
-        created_at: format!("epoch-{}",
+        created_at: format!(
+            "epoch-{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs()).unwrap_or(0)),
+                .map(|d| d.as_secs())
+                .unwrap_or(0)
+        ),
     };
-    let patch = compute_rank1(&k_src.to_vec(), &d_base_vec, chosen_scale, chosen_layer, provenance);
+    let patch = compute_rank1(
+        &k_src.to_vec(),
+        &d_base_vec,
+        chosen_scale,
+        chosen_layer,
+        provenance,
+    );
     write_patch(output, &patch).map_err(py_err)?;
     let d_norm: f32 = patch.d.iter().map(|v| v * v).sum::<f32>().sqrt();
 
@@ -257,7 +280,9 @@ pub fn edit(
     out.set_item("scale", chosen_scale)?;
     out.set_item("output", output)?;
     out.set_item("d_norm", d_norm as f64)?;
-    if let Some(l) = label { out.set_item("label", l)?; }
+    if let Some(l) = label {
+        out.set_item("label", l)?;
+    }
     Ok(out.into())
 }
 
@@ -282,8 +307,12 @@ pub fn apply_patch(
     for path in &patches {
         let mut patch: EditPatch = read_patch(path).map_err(py_err)?;
         if reverse {
-            for v in patch.d.iter_mut() { *v = -*v; }
-            for v in patch.delta_w.iter_mut() { *v = -*v; }
+            for v in patch.d.iter_mut() {
+                *v = -*v;
+            }
+            for v in patch.delta_w.iter_mut() {
+                *v = -*v;
+            }
         }
         apply_patch_rust(m.weights_mut(), &patch).map_err(py_err)?;
     }
@@ -330,32 +359,55 @@ pub fn memit(
     let mut facts: Vec<MemitFact> = Vec::with_capacity(edits.len());
     for item in edits.iter() {
         let d = item.cast::<PyDict>()?;
-        let label: String = d.get_item("label")?.ok_or_else(|| PyValueError::new_err("missing label"))?.extract()?;
-        let src: String = d.get_item("src")?.ok_or_else(|| PyValueError::new_err("missing src"))?.extract()?;
-        let new_token: String = d.get_item("new_token")?.ok_or_else(|| PyValueError::new_err("missing new_token"))?.extract()?;
+        let label: String = d
+            .get_item("label")?
+            .ok_or_else(|| PyValueError::new_err("missing label"))?
+            .extract()?;
+        let src: String = d
+            .get_item("src")?
+            .ok_or_else(|| PyValueError::new_err("missing src"))?
+            .extract()?;
+        let new_token: String = d
+            .get_item("new_token")?
+            .ok_or_else(|| PyValueError::new_err("missing new_token"))?
+            .extract()?;
         let layer_opt: Option<usize> = match d.get_item("layer")? {
             Some(v) => v.extract().ok(),
             None => None,
         };
 
         let prompt_tokens = tokenize(&m, &src)?;
-        let target_tokens = m.tokenizer().encode(new_token.as_str(), false)
+        let target_tokens = m
+            .tokenizer()
+            .encode(new_token.as_str(), false)
             .map_err(|e| py_err(format!("tokenize target: {e}")))?
-            .get_ids().to_vec();
-        let target_token_id = *target_tokens.first()
+            .get_ids()
+            .to_vec();
+        let target_token_id = *target_tokens
+            .first()
             .ok_or_else(|| py_err("new_token tokenised to empty list"))?;
 
         let layer = match layer_opt {
             Some(l) => l,
             None => {
                 let n = m.num_layers();
-                let scan = scan_crown(&m, &prompt_tokens, new_token.trim(),
-                                      (n * 3) / 5, n.saturating_sub(2), top_k);
-                pick_crown(&scan)
-                    .ok_or_else(|| py_err(format!("crown scan failed for {label}")))?
+                let scan = scan_crown(
+                    &m,
+                    &prompt_tokens,
+                    new_token.trim(),
+                    (n * 3) / 5,
+                    n.saturating_sub(2),
+                    top_k,
+                );
+                pick_crown(&scan).ok_or_else(|| py_err(format!("crown scan failed for {label}")))?
             }
         };
-        facts.push(MemitFact { prompt_tokens, target_token_id, layer, label });
+        facts.push(MemitFact {
+            prompt_tokens,
+            target_token_id,
+            layer,
+            label,
+        });
     }
 
     let results = run_memit(weights, &facts, ridge, target_alpha, m.tokenizer())
@@ -369,12 +421,19 @@ pub fn memit(
             src_prompt: String::new(),
             tgt_prompt: String::new(),
             old_token: String::new(),
-            new_token: format!("MEMIT batch ({} facts @ L{})", result.fact_results.len(), result.layer),
+            new_token: format!(
+                "MEMIT batch ({} facts @ L{})",
+                result.fact_results.len(),
+                result.layer
+            ),
             crown_delta: 0.0,
-            created_at: format!("epoch-{}",
+            created_at: format!(
+                "epoch-{}",
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs()).unwrap_or(0)),
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0)
+            ),
         };
         let patch = compute_dense(&result.delta_w, result.layer, prov);
         let path = PathBuf::from(output_dir).join(format!("memit_L{}.lqpatch", result.layer));
