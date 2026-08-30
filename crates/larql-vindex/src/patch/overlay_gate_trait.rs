@@ -76,8 +76,22 @@ impl GateLookup for PatchedVindex {
         // path, which `PatchedVindex::gate_knn` overrides correctly.
         // Returns the union of selected feature indices across all
         // rows, deduplicated.
-        if !self.overrides_gate.has_layer(layer) {
-            // No overrides at this layer — base path is correct.
+        // The guard must match `gate_walk`'s above: a layer is patched when
+        // it carries a gate override **or a tombstone**. Testing only
+        // `overrides_gate` missed DELETE entirely — DELETE writes to
+        // `deleted` and *removes* the slot from `overrides_gate`, so a
+        // delete-only patch left this predicate false, delegated to the
+        // base index, and the base index has never heard of tombstones.
+        // The deleted features stayed in the candidate set and kept
+        // contributing to the FFN, so suppressing a feature changed
+        // nothing about the model's output. It was invisible because the
+        // per-row `gate_knn` *does* filter tombstones: DESCRIBE and the
+        // /v1/explain-infer trace showed the feature correctly gone while
+        // /v1/infer returned bit-identical predictions.
+        let layer_is_patched =
+            self.overrides_gate.has_layer(layer) || self.deleted.iter().any(|&(l, _)| l == layer);
+        if !layer_is_patched {
+            // Genuinely unpatched at this layer — base path is correct.
             return self.base.gate_knn_batch(layer, x, top_k);
         }
         let mut selected = std::collections::BTreeSet::<usize>::new();
@@ -108,8 +122,25 @@ impl PatchOverrides for PatchedVindex {
         self.overrides_gate.get(layer, feature)
     }
 
+    /// True when `layer` carries anything an override-blind path would get
+    /// wrong: a gate override, a base up/down override, **or a tombstone**.
+    ///
+    /// The tombstone arm is what routes a suppressed layer away from the
+    /// whole-layer rungs. `WalkFfn`'s planner admits `Exact` and friends
+    /// purely on storage availability (`Exact` needs `has_down_features()`),
+    /// and every one of them recomputes the layer from the base weights
+    /// without consulting feature selection at all. So on a vindex that has
+    /// down features, a DELETE-only patch used to be planned onto an
+    /// override-blind rung and vanish — the fix in `gate_knn_batch` below
+    /// never even gets consulted there, because those rungs do not select.
+    ///
+    /// `override_slots_at` already unions the tombstones in, so the two were
+    /// inconsistent: the summary predicate called a layer clean while the
+    /// detail enumerated its tombstones.
     fn has_overrides_at(&self, layer: usize) -> bool {
-        self.overrides_gate.has_layer(layer) || self.base.has_overrides_at(layer)
+        self.overrides_gate.has_layer(layer)
+            || self.deleted.iter().any(|&(l, _)| l == layer)
+            || self.base.has_overrides_at(layer)
     }
 
     /// Union of the base's up/down override slots, the overlay's gate
@@ -424,5 +455,75 @@ mod tests {
         );
         // Unpatched layer → empty enumeration, not None.
         assert_eq!(p.override_slots_at(1), Some(Vec::new()));
+    }
+
+    // ---- Tombstone visibility to the FFN's selection path ------------
+    //
+    // These pin the two predicates that a DELETE-only patch has to move.
+    // Both used to test `overrides_gate` alone, which a DELETE never
+    // populates (it writes `deleted` and *removes* the gate slot), so
+    // suppressing a feature changed nothing about inference: the walk FFN
+    // kept selecting the deleted feature and kept summing its
+    // contribution. `gate_walk` above already had its tombstone pin —
+    // these two did not, which is why the gap survived 3000+ tests.
+
+    #[test]
+    fn gate_knn_batch_excludes_tombstoned_feature() {
+        let mut p = make_scored_patched();
+        // Feature 0 has the largest gate dot along e0, so an unpatched
+        // selection must rank it first.
+        let x = Array2::from_shape_vec((1, 4), vec![1.0_f32, 0.0, 0.0, 0.0]).unwrap();
+        let before = <PatchedVindex as GateLookup>::gate_knn_batch(&p, 0, &x, 3);
+        assert!(
+            before.contains(&0),
+            "unpatched selection must include the top feature"
+        );
+
+        p.delete_feature(0, 0);
+        let after = <PatchedVindex as GateLookup>::gate_knn_batch(&p, 0, &x, 3);
+        assert!(
+            !after.contains(&0),
+            "a tombstoned feature must not be selected: it is fed straight \
+             into the FFN's sparse sum, so leaving it in makes DELETE a no-op \
+             on inference while DESCRIBE still shows it gone"
+        );
+        // The base index is untouched and still returns it — proving the
+        // filtering is the overlay's job and cannot be delegated away.
+        assert!(p.base.gate_knn_batch(0, &x, 3).contains(&0));
+        // A sibling layer with no tombstone still takes the base path.
+        assert!(<PatchedVindex as GateLookup>::gate_knn_batch(&p, 1, &x, 3).contains(&0));
+    }
+
+    #[test]
+    fn has_overrides_at_true_for_tombstone_only_layer() {
+        let mut p = make_scored_patched();
+        assert!(!p.has_overrides_at(0));
+
+        p.delete_feature(0, 0);
+        assert!(
+            p.has_overrides_at(0),
+            "a tombstoned layer must report overrides: the WalkFfn planner \
+             uses this to route away from the whole-layer rungs, every one of \
+             which recomputes the layer from base weights and never consults \
+             feature selection"
+        );
+        assert!(!p.has_overrides_at(1), "sibling layer stays clean");
+    }
+
+    /// The summary predicate and the detail enumeration must agree —
+    /// they disagreed before, `override_slots_at` counting tombstones
+    /// while `has_overrides_at` did not.
+    #[test]
+    fn has_overrides_at_agrees_with_override_slots_at() {
+        let mut p = make_scored_patched();
+        p.delete_feature(0, 2);
+        for layer in 0..2 {
+            let slots = p.override_slots_at(layer).expect("overlay enumerates");
+            assert_eq!(
+                p.has_overrides_at(layer),
+                !slots.is_empty(),
+                "layer {layer}: summary predicate and enumeration disagree"
+            );
+        }
     }
 }
