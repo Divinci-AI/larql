@@ -4,17 +4,13 @@
   "padding": null,
   "added_tokens": [],
   "normalizer": null,
-  "pre_tokenizer": null,
+  "pre_tokenizer": {
+    "type": "WhitespaceSplit"
+  },
   "post_processor": null,
   "decoder": null,
   "model": {
-    "type": "BPE",
-    "dropout": null,
-    "unk_token": "[UNK]",
-    "continuing_subword_prefix": null,
-    "end_of_word_suffix": null,
-    "fuse_unk": false,
-    "byte_fallback": false,
+    "type": "WordLevel",
     "vocab": {
       "[0]": 0,
       "[1]": 1,
@@ -527,9 +523,8 @@
       "[508]": 508,
       "[509]": 509,
       "[510]": 510,
-      "[511]": 511,
-      "[UNK]": 0
+      "[UNK]": 511
     },
-    "merges": []
+    "unk_token": "[UNK]"
   }
 }

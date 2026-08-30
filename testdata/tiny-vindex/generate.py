@@ -148,28 +148,50 @@ with open(os.path.join(OUT, "model_weights.bin"), "wb") as f:
 with open(os.path.join(OUT, "weight_manifest.json"), "w") as f:
     json.dump(manifest, f, indent=2)
 
-# ── tokenizer.json  (minimal HF tokenizer schema) ───────────────────────────
-vocab_map = {f"[{i}]": i for i in range(VOCAB)}
-vocab_map["[UNK]"] = 0
+# ── tokenizer.json  (minimal HF tokenizer schema) ───────────────────────
+# WordLevel + WhitespaceSplit, NOT BPE.
+#
+# This fixture previously declared a BPE model with an empty `merges` list and
+# `pre_tokenizer: None`. With no merges there is nothing to merge, so BPE fell
+# back to single characters; no single character is in a vocab whose keys are
+# all of the form "[N]", so every character became `unk`. And `unk_token` was
+# "[UNK]" mapped to id 0 — colliding with the *real* token "[0]".
+#
+# Net effect: EVERY prompt encoded to a run of zeros. "the" -> [0,0,0].
+# The model's output was therefore identical for every input, which made the
+# fixture useless for any test that needs the output to depend on the input —
+# it could still detect a crash, but not a wrong answer. A walk-vs-dense
+# comparison on it agreed trivially because both paths were fed the same
+# constant, not because they compute the same function.
+#
+# WordLevel + WhitespaceSplit makes the mapping exact and legible: the prompt
+# "[12] [34]" encodes to token ids [12, 34], so a test can drive precise
+# token sequences as plain text and get input-dependent output.
+#
+# The pre-tokenizer must be `WhitespaceSplit`, not `Whitespace`: the latter is
+# the regex \w+|[^\w\s]+, which treats the brackets as their own tokens and
+# shreds "[12]" into "[", "12", "]" — three unks. `WhitespaceSplit` splits on
+# whitespace only, keeping "[12]" intact so it can match the vocab key.
+# `unk` needs its own id, distinct from every real token, or an unknown word
+# silently impersonates token 0. It also has to stay *inside* the embedding
+# table: the id is used to index `embeddings.bin`, which has exactly VOCAB
+# rows, so an out-of-range unk id would read past the end. So the last slot is
+# reserved for unk and the real tokens run [0]..[VOCAB-2].
+vocab_map = {f"[{i}]": i for i in range(VOCAB - 1)}
+vocab_map["[UNK]"] = VOCAB - 1
 tok = {
     "version": "1.0",
     "truncation": None,
     "padding": None,
     "added_tokens": [],
     "normalizer": None,
-    "pre_tokenizer": None,
+    "pre_tokenizer": {"type": "WhitespaceSplit"},
     "post_processor": None,
     "decoder": None,
     "model": {
-        "type": "BPE",
-        "dropout": None,
-        "unk_token": "[UNK]",
-        "continuing_subword_prefix": None,
-        "end_of_word_suffix": None,
-        "fuse_unk": False,
-        "byte_fallback": False,
+        "type": "WordLevel",
         "vocab": vocab_map,
-        "merges": [],
+        "unk_token": "[UNK]",
     },
 }
 with open(os.path.join(OUT, "tokenizer.json"), "w") as f:
