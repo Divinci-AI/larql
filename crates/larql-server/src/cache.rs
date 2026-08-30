@@ -29,9 +29,32 @@ impl DescribeCache {
 
     /// Build a cache key from describe parameters.
     pub fn key(model_id: &str, entity: &str, band: &str, limit: usize, min_score: f32) -> String {
+        Self::key_scoped(None, model_id, entity, band, limit, min_score)
+    }
+
+    /// Cache key including the session scope.
+    ///
+    /// DESCRIBE answers from a session's patch overlay when one is supplied,
+    /// so the session is part of the identity of the cached value. Omitting it
+    /// would let a hit computed under one session answer another session's
+    /// request — one tenant's suppressions served to another, with no error
+    /// and nothing in the logs to show it happened.
+    pub fn key_scoped(
+        session_id: Option<&str>,
+        model_id: &str,
+        entity: &str,
+        band: &str,
+        limit: usize,
+        min_score: f32,
+    ) -> String {
         format!(
-            "{}:{}:{}:{}:{}",
-            model_id, entity, band, limit, min_score as u32
+            "{}:{}:{}:{}:{}:{}",
+            session_id.unwrap_or("-"),
+            model_id,
+            entity,
+            band,
+            limit,
+            min_score as u32
         )
     }
 
@@ -121,5 +144,35 @@ mod tests {
         let k3 = DescribeCache::key("model", "France", "syntax", 20, 5.0);
         assert_ne!(k1, k2);
         assert_ne!(k1, k3);
+    }
+
+    /// The session is part of the cached value's identity, because DESCRIBE
+    /// answers from that session's patch overlay. Two sessions asking the same
+    /// question must not share an entry: the first tenant to warm the cache
+    /// would otherwise decide what every other tenant sees, and a suppression
+    /// applied by one would surface in another's browse view.
+    #[test]
+    fn key_scoped_separates_sessions_and_global() {
+        let global = DescribeCache::key_scoped(None, "m", "Paris", "all", 20, 0.0);
+        let a = DescribeCache::key_scoped(Some("tenant-a"), "m", "Paris", "all", 20, 0.0);
+        let b = DescribeCache::key_scoped(Some("tenant-b"), "m", "Paris", "all", 20, 0.0);
+        assert_ne!(a, b, "two sessions must not share a cache entry");
+        assert_ne!(a, global, "a session must not share the global entry");
+        assert_ne!(b, global);
+        // Same session + same question is still a hit, or the cache is pointless.
+        assert_eq!(
+            a,
+            DescribeCache::key_scoped(Some("tenant-a"), "m", "Paris", "all", 20, 0.0)
+        );
+    }
+
+    /// `key` is the unscoped spelling of `key_scoped(None, ..)`; if they ever
+    /// diverge, existing global callers silently miss the cache forever.
+    #[test]
+    fn key_matches_key_scoped_with_no_session() {
+        assert_eq!(
+            DescribeCache::key("m", "Paris", "all", 20, 0.0),
+            DescribeCache::key_scoped(None, "m", "Paris", "all", 20, 0.0)
+        );
     }
 }

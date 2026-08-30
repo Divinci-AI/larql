@@ -47,8 +47,17 @@ fn default_min_score() -> f32 {
     5.0
 }
 
-fn describe_entity(
+/// Describe an entity's edges against `patched`.
+///
+/// The overlay is passed in rather than read from `model` so the caller
+/// decides scope: a request carrying `X-Session-Id` must be answered from that
+/// session's overlay, not the global one. DESCRIBE is how the product measures
+/// an edit (the gate score before/after), so if it stayed global-only while
+/// patches became session-scoped, every edit would report "no change" — the
+/// measurement would silently stop tracking the thing it measures.
+fn describe_entity_with(
     model: &LoadedModel,
+    patched: &larql_vindex::PatchedVindex,
     params: &DescribeParams,
 ) -> Result<serde_json::Value, ServerError> {
     let start = std::time::Instant::now();
@@ -88,7 +97,6 @@ fn describe_entity(
 
     let bands = get_layer_bands(model);
 
-    let patched = model.patched.blocking_read();
     let all_layers = patched.loaded_layers();
 
     let scan_layers = filter_layers_by_band(all_layers, &params.band, &bands);
@@ -219,9 +227,19 @@ async fn describe_with_cache(
     headers: &HeaderMap,
     params: DescribeParams,
 ) -> Result<Response, ServerError> {
+    // Session scope. A request with `X-Session-Id` is answered from that
+    // session's overlay; without one it reads global state, as before.
+    let sid = crate::session::extract_session_id(headers);
+
     // Check cache.
+    //
+    // The session id is part of the key. It has to be: the cached value is a
+    // *patched* view, so sharing one entry across sessions would serve one
+    // tenant's suppressions to another — a cross-tenant leak dressed up as a
+    // cache hit, and invisible in every log.
     let cache_key = if state.describe_cache.is_enabled() {
-        let key = crate::cache::DescribeCache::key(
+        let key = crate::cache::DescribeCache::key_scoped(
+            sid.as_deref(),
             &model.id,
             &params.entity,
             &params.band,
@@ -246,9 +264,23 @@ async fn describe_with_cache(
     };
 
     let model = Arc::clone(model);
-    let result = tokio::task::spawn_blocking(move || describe_entity(&model, &params))
-        .await
-        .map_err(|e| ServerError::Internal(e.to_string()))??;
+    let task_state = Arc::clone(state);
+    let result = tokio::task::spawn_blocking(move || {
+        // Same lock discipline as `infer`: take a reader on the sessions map,
+        // and fall back to global state for an unknown or never-patched
+        // session so an expired session reads like a clean model rather than
+        // erroring.
+        if let Some(sid) = sid.as_deref() {
+            let sessions = task_state.sessions.sessions_blocking_read();
+            if let Some(patched) = sessions.get(sid).and_then(|s| s.patched()) {
+                return describe_entity_with(&model, patched, &params);
+            }
+        }
+        let patched = model.patched.blocking_read();
+        describe_entity_with(&model, &patched, &params)
+    })
+    .await
+    .map_err(|e| ServerError::Internal(e.to_string()))??;
 
     // Store in cache.
     if let Some(key) = cache_key {
