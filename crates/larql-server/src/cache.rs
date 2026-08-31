@@ -133,8 +133,13 @@ mod tests {
 
     #[test]
     fn key_format() {
+        // The leading `-` is the session slot, held by a placeholder for the
+        // global (sessionless) entry. It is not decoration: without a slot,
+        // a global lookup for model "x" and a session named "x" asking about
+        // the same entity would collide, and DESCRIBE would answer one
+        // tenant's browse out of another's overlay.
         let key = DescribeCache::key("gemma-3-4b-it", "France", "knowledge", 20, 5.0);
-        assert_eq!(key, "gemma-3-4b-it:France:knowledge:20:5");
+        assert_eq!(key, "-:gemma-3-4b-it:France:knowledge:20:5");
     }
 
     #[test]

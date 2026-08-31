@@ -94,7 +94,7 @@ fn resolve_patch(
 const LEGACY_FEATURE_SLOT_SPACE: usize = 10240;
 
 /// Synthesise a gate vector from entity embedding when the client didn't provide one.
-fn enrich_patch_ops(model: &crate::state::LoadedModel, patch: &mut larql_vindex::VindexPatch) {
+pub(crate) fn enrich_patch_ops(model: &crate::state::LoadedModel, patch: &mut larql_vindex::VindexPatch) {
     let hidden = model.embeddings.shape()[1];
     for op in &mut patch.operations {
         if let larql_vindex::PatchOp::Insert {

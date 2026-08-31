@@ -245,6 +245,38 @@ pub mod schemas {
         pub patch: Option<serde_json::Value>,
     }
 
+    /// Request body for `POST /v1/patches/apply_measured`. Applies a patch
+    /// and reads the model either side of it, inside one request on one
+    /// instance — so the difference between the two readings is the patch and
+    /// not the load balancer.
+    #[derive(Serialize, ToSchema)]
+    pub struct ApplyMeasuredBody {
+        /// Name to file the patch under, as with `/v1/patches/apply`.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub name: Option<String>,
+        /// Inline patch payload. Required — there is no `url` form here.
+        pub patch: serde_json::Value,
+        /// What to read on either side: `prompt`, optional `top`, and an
+        /// optional `entity` + `target` pair for the gate-score half.
+        pub measure: serde_json::Value,
+    }
+
+    /// Response for `POST /v1/patches/apply_measured`.
+    #[derive(Serialize, ToSchema)]
+    pub struct ApplyMeasuredResponse {
+        pub applied: String,
+        pub operations: usize,
+        pub active_patches: usize,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub session: Option<String>,
+        /// What the caller may conclude from the pair of readings.
+        pub atomic_scope: String,
+        /// `{ prompt, before: { predictions, gate_score }, after: { … } }`.
+        /// `gate_score` is `null` when the target has no edge — absent, which
+        /// is not the same as scoring zero.
+        pub measured: serde_json::Value,
+    }
+
     #[derive(Serialize, ToSchema)]
     pub struct ApplyPatchResponse {
         pub applied: String,
@@ -661,6 +693,7 @@ pub mod schemas {
         crate::routes::sessions::handle_delete_session,
         // patches
         crate::routes::patches::handle_apply_patch,
+        crate::routes::measure::handle_apply_measured,
         crate::routes::patches::handle_list_patches,
         crate::routes::patches::handle_remove_patch,
         // admin
@@ -701,6 +734,7 @@ pub mod schemas {
         crate::routes::explain::handle_explain_multi,
         crate::routes::insert::handle_insert_multi,
         crate::routes::patches::handle_apply_patch_multi,
+        crate::routes::measure::handle_apply_measured_multi,
         crate::routes::patches::handle_list_patches_multi,
         crate::routes::patches::handle_remove_patch_multi,
         crate::routes::embed::handle_embed_multi,
@@ -742,6 +776,8 @@ pub mod schemas {
         crate::routes::warmup::WarmupResponse,
         // patches
         schemas::ApplyPatchBody,
+        schemas::ApplyMeasuredBody,
+        schemas::ApplyMeasuredResponse,
         schemas::ApplyPatchResponse,
         schemas::PatchEntry,
         schemas::ListPatchesResponse,

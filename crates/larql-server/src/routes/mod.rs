@@ -7,6 +7,7 @@ pub mod explain;
 pub mod health;
 pub mod infer;
 pub mod insert;
+pub mod measure;
 pub mod models;
 pub mod openai;
 pub mod patches;
@@ -49,6 +50,7 @@ const INFER: &str = "/v1/infer";
 const SESSIONS: &str = "/v1/sessions";
 const SESSION_BY_ID: &str = "/v1/sessions/{session_id}";
 const PATCHES_APPLY: &str = "/v1/patches/apply";
+const PATCHES_APPLY_MEASURED: &str = "/v1/patches/apply_measured";
 const PATCHES: &str = "/v1/patches";
 const PATCH_BY_NAME: &str = "/v1/patches/{name}";
 const WALK_FFN: &str = "/v1/walk-ffn";
@@ -87,6 +89,7 @@ const M_RELATIONS: &str = "/v1/{model_id}/relations";
 const M_STATS: &str = "/v1/{model_id}/stats";
 const M_INFER: &str = "/v1/{model_id}/infer";
 const M_PATCHES_APPLY: &str = "/v1/{model_id}/patches/apply";
+const M_PATCHES_APPLY_MEASURED: &str = "/v1/{model_id}/patches/apply_measured";
 const M_PATCHES: &str = "/v1/{model_id}/patches";
 const M_PATCH_BY_NAME: &str = "/v1/{model_id}/patches/{name}";
 const M_EXPLAIN_INFER: &str = "/v1/{model_id}/explain-infer";
@@ -112,6 +115,10 @@ pub fn single_model_router(state: Arc<AppState>) -> Router {
             get(sessions::handle_get_session).delete(sessions::handle_delete_session),
         )
         .route(PATCHES_APPLY, post(patches::handle_apply_patch))
+        .route(
+            PATCHES_APPLY_MEASURED,
+            post(measure::handle_apply_measured),
+        )
         .route(PATCHES, get(patches::handle_list_patches))
         .route(PATCH_BY_NAME, delete(patches::handle_remove_patch))
         .route(WALK_FFN, post(walk_ffn::handle_walk_ffn))
@@ -198,6 +205,10 @@ pub fn multi_model_router(state: Arc<AppState>) -> Router {
             get(sessions::handle_get_session).delete(sessions::handle_delete_session),
         )
         .route(M_PATCHES_APPLY, post(patches::handle_apply_patch_multi))
+        .route(
+            M_PATCHES_APPLY_MEASURED,
+            post(measure::handle_apply_measured_multi),
+        )
         .route(M_PATCHES, get(patches::handle_list_patches_multi))
         .route(M_PATCH_BY_NAME, delete(patches::handle_remove_patch_multi))
         .route(M_EXPLAIN_INFER, post(explain::handle_explain_multi))

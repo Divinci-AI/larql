@@ -55,7 +55,7 @@ fn default_min_score() -> f32 {
 /// an edit (the gate score before/after), so if it stayed global-only while
 /// patches became session-scoped, every edit would report "no change" — the
 /// measurement would silently stop tracking the thing it measures.
-fn describe_entity_with(
+pub(crate) fn describe_entity_with(
     model: &LoadedModel,
     patched: &larql_vindex::PatchedVindex,
     params: &DescribeParams,
