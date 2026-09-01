@@ -695,6 +695,7 @@ mod tests {
                 1,
                 4,
             )))),
+            overlay_cache: crate::overlay_cache::OverlayCache::with_env_capacity(),
             embeddings,
             embed_scale: 1.0,
             tokenizer: functional_tokenizer(),

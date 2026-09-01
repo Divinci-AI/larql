@@ -154,6 +154,7 @@ fn make_minimal_model(layer_bands: Option<LayerBands>) -> Arc<LoadedModel> {
             bitnet_layout: None,
         },
         patched: std::sync::Arc::new(tokio::sync::RwLock::new(patched)),
+        overlay_cache: larql_server::overlay_cache::OverlayCache::with_env_capacity(),
         embeddings: Array2::<f32>::zeros((4, hidden)),
         embed_scale: 1.0,
         tokenizer,

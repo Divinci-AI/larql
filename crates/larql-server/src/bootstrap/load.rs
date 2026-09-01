@@ -413,6 +413,7 @@ pub fn load_single_vindex(
         path,
         config,
         patched: Arc::new(RwLock::new(patched)),
+        overlay_cache: crate::overlay_cache::OverlayCache::with_env_capacity(),
         embeddings,
         embed_scale,
         tokenizer,

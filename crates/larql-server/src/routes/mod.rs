@@ -103,7 +103,10 @@ const M_TOKEN_DECODE: &str = "/v1/{model_id}/token/decode";
 /// Build the router for single-model serving.
 pub fn single_model_router(state: Arc<AppState>) -> Router {
     Router::new()
-        .route(DESCRIBE, get(describe::handle_describe))
+        .route(
+            DESCRIBE,
+            get(describe::handle_describe).post(describe::handle_describe_post),
+        )
         .route(WALK, get(walk::handle_walk))
         .route(SELECT, post(select::handle_select))
         .route(RELATIONS, get(relations::handle_relations))
@@ -193,7 +196,10 @@ pub fn multi_model_router(state: Arc<AppState>) -> Router {
         .route(HEALTH, get(health::handle_health))
         .route(RUNTIME, get(runtime::handle_runtime))
         .route(MODELS, get(models::handle_models))
-        .route(M_DESCRIBE, get(describe::handle_describe_multi))
+        .route(
+            M_DESCRIBE,
+            get(describe::handle_describe_multi).post(describe::handle_describe_post_multi),
+        )
         .route(M_WALK, get(walk::handle_walk_multi))
         .route(M_SELECT, post(select::handle_select_multi))
         .route(M_RELATIONS, get(relations::handle_relations_multi))

@@ -25,6 +25,14 @@ pub struct LoadedModel {
     pub config: VindexConfig,
     /// Base index with patch overlay (starts with no patches).
     pub patched: Arc<RwLock<PatchedVindex>>,
+    /// Compiled overlays keyed by the content hash of their patch set.
+    ///
+    /// Lives on the model rather than on `AppState` so that unloading a model
+    /// drops its overlays with it. A cache keyed only by patch-set hash and held
+    /// globally could otherwise serve an overlay compiled against a replaced
+    /// artifact — the same operations, the wrong base, and no symptom beyond
+    /// plausible-looking output. See [`crate::overlay_cache`].
+    pub overlay_cache: crate::overlay_cache::OverlayCache,
     /// Embeddings matrix + scale factor, loaded once.
     pub embeddings: Array2<f32>,
     pub embed_scale: f32,
@@ -333,6 +341,7 @@ mod loaded_model_tests {
             path: PathBuf::from("/nonexistent"),
             config: tiny_config(quant),
             patched: std::sync::Arc::new(tokio::sync::RwLock::new(patched)),
+            overlay_cache: crate::overlay_cache::OverlayCache::with_env_capacity(),
             embeddings: Array2::<f32>::zeros((4, hidden)),
             embed_scale: 1.0,
             tokenizer,

@@ -22,6 +22,13 @@ pub struct InferRequest {
     /// Inference mode: `walk` (default), `dense`, or `compare`.
     #[serde(default = "default_mode")]
     pub mode: String,
+    /// The patch set to answer from, if the caller carries one.
+    ///
+    /// Present, this request is instance-independent: it states which overlay it
+    /// wants rather than depending on whichever one this instance was told about
+    /// earlier. Absent, the legacy session/global resolution applies unchanged.
+    #[serde(default)]
+    pub patch_set: Option<crate::overlay_cache::PatchSetRef>,
 }
 
 fn default_top() -> usize {
@@ -132,35 +139,15 @@ fn run_infer(
     };
 
     if use_walk {
-        let pred = if let Some(sid) = session_id {
-            // Session-scoped walk inference.
-            //
-            // Lock discipline: take a *reader* on the sessions map (not
-            // a writer) so concurrent sessioned `/v1/infer` requests do
-            // not serialize globally, and so an in-flight forward pass
-            // does not deadlock against a concurrent `apply_patch`
-            // arriving on another worker.  The previous implementation
-            // held `sessions.write()` across the multi-second
-            // `run_walk(&session.patched)` call, which on the
-            // multi-thread tokio runtime stalled every other handler
-            // touching `sessions` (including `GET /v1/stats` and
-            // `GET /v1/walk-ffn`).  This mirrors the fix already
-            // applied in `session.rs::apply_patch`.
-            let sessions = state.sessions.sessions_blocking_read();
-            // A session with no overlay has never been patched, so it
-            // reads exactly like the global state — same fallback as an
-            // unknown session id.
-            if let Some(patched) = sessions.get(sid).and_then(|s| s.patched()) {
-                run_walk(patched)
-            } else {
-                drop(sessions);
-                let patched = model.patched.blocking_read();
-                run_walk(&patched)
-            }
-        } else {
-            let patched = model.patched.blocking_read();
-            run_walk(&patched)
-        };
+        // One resolution rule for every read path, so `infer`, `describe` and a
+        // measured apply cannot disagree about which overlay a request means.
+        let pred = crate::overlay_cache::with_overlay(
+            state,
+            model,
+            session_id,
+            req.patch_set.as_ref(),
+            run_walk,
+        )?;
 
         let predictions = format_predictions(&pred.predictions);
         if let Some(ovr) = &pred.knn_override {

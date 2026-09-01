@@ -28,6 +28,7 @@ fn model_functional_with_labels(id: &str) -> Arc<LoadedModel> {
         path: PathBuf::from("/nonexistent"),
         config: test_config(),
         patched: std::sync::Arc::new(tokio::sync::RwLock::new(PatchedVindex::new(test_index()))),
+        overlay_cache: larql_server::overlay_cache::OverlayCache::with_env_capacity(),
         embeddings: {
             let mut e = Array2::<f32>::zeros((8, 4));
             e[[0, 0]] = 1.0;

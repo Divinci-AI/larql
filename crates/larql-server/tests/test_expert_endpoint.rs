@@ -306,6 +306,7 @@ fn make_loaded_model(
         path: PathBuf::from("/nonexistent"),
         config,
         patched: std::sync::Arc::new(tokio::sync::RwLock::new(patched)),
+        overlay_cache: larql_server::overlay_cache::OverlayCache::with_env_capacity(),
         embeddings: Array2::zeros((VOCAB, HIDDEN)),
         embed_scale: 1.0,
         tokenizer,

@@ -222,6 +222,7 @@ pub(crate) fn describe_entity_with(
 }
 
 async fn describe_with_cache(
+    patch_set: Option<crate::overlay_cache::PatchSetRef>,
     state: &Arc<AppState>,
     model: &Arc<LoadedModel>,
     headers: &HeaderMap,
@@ -233,13 +234,23 @@ async fn describe_with_cache(
 
     // Check cache.
     //
-    // The session id is part of the key. It has to be: the cached value is a
-    // *patched* view, so sharing one entry across sessions would serve one
-    // tenant's suppressions to another — a cross-tenant leak dressed up as a
-    // cache hit, and invisible in every log.
+    // Whatever identifies the OVERLAY is part of the key. It has to be: the
+    // cached value is a *patched* view, so sharing one entry across overlays
+    // would serve one tenant's suppressions to another — a cross-tenant leak
+    // dressed up as a cache hit, and invisible in every log.
+    //
+    // That used to mean the session id, and when a request began carrying its
+    // own patch set instead, the session slot went empty for every such caller.
+    // Two workspaces with different edits would then have collided on one key.
+    // The scope is therefore the patch set's own key when there is one, and the
+    // session id only when there is not.
+    let scope = match patch_set.as_ref() {
+        Some(ps) => Some(ps.key(&model.id)),
+        None => sid.clone(),
+    };
     let cache_key = if state.describe_cache.is_enabled() {
         let key = crate::cache::DescribeCache::key_scoped(
-            sid.as_deref(),
+            scope.as_deref(),
             &model.id,
             &params.entity,
             &params.band,
@@ -270,14 +281,13 @@ async fn describe_with_cache(
         // and fall back to global state for an unknown or never-patched
         // session so an expired session reads like a clean model rather than
         // erroring.
-        if let Some(sid) = sid.as_deref() {
-            let sessions = task_state.sessions.sessions_blocking_read();
-            if let Some(patched) = sessions.get(sid).and_then(|s| s.patched()) {
-                return describe_entity_with(&model, patched, &params);
-            }
-        }
-        let patched = model.patched.blocking_read();
-        describe_entity_with(&model, &patched, &params)
+        crate::overlay_cache::with_overlay(
+            &task_state,
+            &model,
+            sid.as_deref(),
+            patch_set.as_ref(),
+            |patched| describe_entity_with(&model, patched, &params),
+        )?
     })
     .await
     .map_err(|e| ServerError::Internal(e.to_string()))??;
@@ -315,7 +325,7 @@ pub async fn handle_describe(
 ) -> Result<Response, ServerError> {
     state.bump_requests();
     let model = state.model_or_err(None)?;
-    describe_with_cache(&state, &model, &headers, params).await
+    describe_with_cache(None, &state, &model, &headers, params).await
 }
 
 #[utoipa::path(
@@ -342,5 +352,105 @@ pub async fn handle_describe_multi(
 ) -> Result<Response, ServerError> {
     state.bump_requests();
     let model = state.model_or_err(Some(&model_id))?;
-    describe_with_cache(&state, &model, &headers, params).await
+    describe_with_cache(None, &state, &model, &headers, params).await
+}
+
+// ═══════════════════════════════════════════════════════════════
+// POST /v1/describe — the same browse, carrying its own patch set
+// ═══════════════════════════════════════════════════════════════
+
+/// Body for `POST /v1/describe`.
+///
+/// A patch set cannot travel in a query string: it is unbounded in size, and
+/// putting a tenant's edits in a URL would write them into every access log and
+/// proxy along the way. So the content-addressed form of DESCRIBE is a POST with
+/// the same semantics as the GET, plus `patch_set`.
+///
+/// The GET keeps working untouched, which is what lets a client migrate one call
+/// site at a time.
+#[derive(Deserialize, utoipa::ToSchema)]
+pub struct DescribeBody {
+    pub entity: String,
+    #[serde(default = "default_band")]
+    pub band: String,
+    #[serde(default)]
+    pub verbose: bool,
+    #[serde(default = "default_limit")]
+    pub limit: usize,
+    #[serde(default = "default_min_score")]
+    pub min_score: f32,
+    /// The overlay to answer from. Omitted, this behaves exactly like the GET.
+    #[serde(default)]
+    pub patch_set: Option<crate::overlay_cache::PatchSetRef>,
+}
+
+impl DescribeBody {
+    fn split(self) -> (DescribeParams, Option<crate::overlay_cache::PatchSetRef>) {
+        let DescribeBody {
+            entity,
+            band,
+            verbose,
+            limit,
+            min_score,
+            patch_set,
+        } = self;
+        (
+            DescribeParams {
+                entity,
+                band,
+                verbose,
+                limit,
+                min_score,
+            },
+            patch_set,
+        )
+    }
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/describe",
+    tag = "browse",
+    request_body = DescribeBody,
+    responses(
+        (status = 200, body = crate::openapi::schemas::DescribeResponse),
+        (status = 400, body = crate::error::ErrorBody),
+        (status = 409, description = "patch_set_unknown — retry with `patches` inline",
+         body = crate::error::ErrorBody),
+        (status = 500, body = crate::error::ErrorBody),
+    ),
+)]
+pub async fn handle_describe_post(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<DescribeBody>,
+) -> Result<Response, ServerError> {
+    state.bump_requests();
+    let model = state.model_or_err(None)?;
+    let (params, patch_set) = body.split();
+    describe_with_cache(patch_set, &state, &model, &headers, params).await
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/{model_id}/describe",
+    tag = "browse",
+    params(("model_id" = String, Path, description = "Id of a loaded vindex.")),
+    request_body = DescribeBody,
+    responses(
+        (status = 200, body = crate::openapi::schemas::DescribeResponse),
+        (status = 404, body = crate::error::ErrorBody),
+        (status = 409, body = crate::error::ErrorBody),
+    ),
+)]
+pub async fn handle_describe_post_multi(
+    State(state): State<Arc<AppState>>,
+    Path(model_id): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<DescribeBody>,
+) -> Result<Response, ServerError> {
+    state.bump_requests();
+    let model = state.model_or_err(Some(&model_id))?;
+    let (params, patch_set) = body.split();
+    describe_with_cache(patch_set, &state, &model, &headers, params).await
 }
