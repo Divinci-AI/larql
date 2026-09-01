@@ -109,7 +109,7 @@ async fn two_patch_sets_get_distinct_cache_scopes() {
     let b: PatchSetRef =
         serde_json::from_value(serde_json::json!({ "patches": [delete_op(7, 0)] })).unwrap();
 
-    assert_ne!(a.key("test"), b.key("test"));
+    assert_ne!(a.key("test", None), b.key("test", None));
 
     // And both are served, so the scoping is exercised rather than merely
     // derivable.
@@ -121,6 +121,66 @@ async fn two_patch_sets_get_distinct_cache_scopes() {
         let r = post_json(app.clone(), "/v1/describe", describe_body(Some(ps))).await;
         assert_eq!(r.status(), StatusCode::OK);
     }
+}
+
+// The security boundary, exercised over HTTP rather than only at the key.
+//
+// Two callers send the SAME sha with DIFFERENT patches — which a caller is free
+// to do, because the sha is taken as the key and the patches as the value with
+// nothing tying them together. Scoped by caller, each gets its own overlay.
+// Unscoped, the second would have overwritten the first for everyone.
+#[tokio::test]
+async fn one_caller_cannot_file_content_under_another_callers_hash() {
+    let app = single_model_router(state(vec![model("test")]));
+    let sha = "collide";
+
+    let a = post_json_h(
+        app.clone(),
+        "/v1/describe",
+        describe_body(Some(
+            serde_json::json!({ "sha": sha, "patches": [delete_op(1, 150)] }),
+        )),
+        ("x-session-id", "wl:tenant-a"),
+    )
+    .await;
+    assert_eq!(a.status(), StatusCode::OK);
+
+    let b = post_json_h(
+        app.clone(),
+        "/v1/describe",
+        describe_body(Some(
+            serde_json::json!({ "sha": sha, "patches": [delete_op(7, 0)] }),
+        )),
+        ("x-session-id", "wl:tenant-b"),
+    )
+    .await;
+    assert_eq!(b.status(), StatusCode::OK);
+
+    // A asks by hash alone. It must resolve — A compiled that hash itself — and
+    // it must be A's entry, not the one B filed under the same hash.
+    let a2 = post_json_h(
+        app.clone(),
+        "/v1/describe",
+        describe_body(Some(serde_json::json!({ "sha": sha }))),
+        ("x-session-id", "wl:tenant-a"),
+    )
+    .await;
+    assert_eq!(a2.status(), StatusCode::OK);
+
+    // And a caller who never compiled that hash gets 409 rather than whatever
+    // someone else happens to have left under it.
+    let c = post_json_h(
+        app,
+        "/v1/describe",
+        describe_body(Some(serde_json::json!({ "sha": sha }))),
+        ("x-session-id", "wl:tenant-c"),
+    )
+    .await;
+    assert_eq!(
+        c.status(),
+        StatusCode::CONFLICT,
+        "tenant-c reached an overlay it never compiled"
+    );
 }
 
 #[tokio::test]

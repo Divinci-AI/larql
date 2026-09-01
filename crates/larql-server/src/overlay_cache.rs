@@ -187,13 +187,28 @@ pub struct OverlayCacheStats {
 
 /// Cache key for one compiled overlay.
 ///
-/// The patch-set hash alone is not enough. It identifies the *operations*, and
-/// an overlay is those operations applied to a specific base — so a key without
-/// the model would let a reloaded artifact be served an overlay compiled against
-/// the one it replaced, silently and with plausible-looking output. The cache is
-/// per-model as well, which makes this belt and braces; both are cheap.
-pub fn overlay_key(model_id: &str, patch_set_sha: &str) -> String {
-    format!("{model_id}:{patch_set_sha}")
+/// Three parts, and each excludes a specific wrong answer.
+///
+/// **model** — an overlay is operations applied to a specific base. Without
+/// this, a reloaded artifact could be served an overlay compiled against the one
+/// it replaced: same operations, wrong base, no symptom but plausible output.
+///
+/// **scope** — the caller. This is a SECURITY boundary, not a nicety. The sha a
+/// request supplies is taken as the key while the patches it supplies become the
+/// value, and nothing ties the two together, so a caller can file arbitrary
+/// content under any hash it likes. Unscoped, that is cross-tenant cache
+/// poisoning: `sha256("[]")` is the same constant every workspace with no edits
+/// sends, so poisoning that one key once would serve one caller's overlay to all
+/// of them. Scoping by caller confines a poisoned entry to whoever poisoned it.
+///
+/// Residual, stated rather than hidden: within one scope a caller that pairs a
+/// stale sha with fresh patches still files the wrong content under its own key
+/// and will read it back. That is a caller bug with a blast radius of one
+/// tenant, which is a different class from the above.
+///
+/// **sha** — the patch set itself.
+pub fn overlay_key(model_id: &str, scope: Option<&str>, patch_set_sha: &str) -> String {
+    format!("{model_id}:{}:{patch_set_sha}", scope.unwrap_or("-"))
 }
 
 /// Canonical hash of a patch set.
@@ -280,7 +295,41 @@ mod tests {
     // The bug this key exists to prevent: two models, same edits, one overlay.
     #[test]
     fn the_key_separates_models() {
-        assert_ne!(overlay_key("gemma-4", "abc"), overlay_key("gemma-3", "abc"));
+        assert_ne!(
+            overlay_key("gemma-4", None, "abc"),
+            overlay_key("gemma-3", None, "abc")
+        );
+    }
+
+    // Cross-tenant cache poisoning, excluded structurally.
+    //
+    // The supplied sha becomes the key and the supplied patches become the
+    // value, with nothing tying them together — so a caller CAN file arbitrary
+    // content under any hash. Scoping is what stops that being everyone else's
+    // problem.
+    #[test]
+    fn the_key_separates_callers_sharing_a_hash() {
+        assert_ne!(
+            overlay_key("m", Some("wl:tenant-a"), "abc"),
+            overlay_key("m", Some("wl:tenant-b"), "abc")
+        );
+    }
+
+    // The sharpest case: every workspace with no edits sends the hash of an
+    // empty set, which is one fixed constant. Unscoped, poisoning that single
+    // key would reach every un-edited tenant at once.
+    #[test]
+    fn the_empty_patch_set_is_not_one_shared_key() {
+        let empty = patch_set_sha(&[]);
+        assert_ne!(
+            overlay_key("m", Some("wl:tenant-a"), &empty),
+            overlay_key("m", Some("wl:tenant-b"), &empty)
+        );
+    }
+
+    #[test]
+    fn a_caller_scope_is_distinct_from_no_scope() {
+        assert_ne!(overlay_key("m", None, "abc"), overlay_key("m", Some("wl:a"), "abc"));
     }
 
     // ── LRU ───────────────────────────────────────────────────────────
@@ -375,13 +424,13 @@ pub struct PatchSetRef {
 
 impl PatchSetRef {
     /// The key this request's overlay is filed under.
-    pub fn key(&self, model_id: &str) -> String {
+    pub fn key(&self, model_id: &str, scope: Option<&str>) -> String {
         let sha = match (&self.sha, &self.patches) {
             (Some(s), _) => s.clone(),
             (None, Some(p)) => patch_set_sha(p),
             (None, None) => patch_set_sha(&[]),
         };
-        overlay_key(model_id, &sha)
+        overlay_key(model_id, scope, &sha)
     }
 }
 
@@ -403,8 +452,9 @@ impl PatchSetRef {
 pub fn resolve_overlay(
     model: &crate::state::LoadedModel,
     req: &PatchSetRef,
+    scope: Option<&str>,
 ) -> Result<Arc<PatchedVindex>, crate::error::ServerError> {
-    let key = req.key(&model.id);
+    let key = req.key(&model.id, scope);
 
     if let Some(hit) = model.overlay_cache.get(&key) {
         return Ok(hit);
@@ -452,7 +502,10 @@ pub fn with_overlay<R>(
     f: impl FnOnce(&PatchedVindex) -> R,
 ) -> Result<R, crate::error::ServerError> {
     if let Some(req) = patch_set {
-        let overlay = resolve_overlay(model, req)?;
+        // The session id doubles as the cache scope — see `overlay_key`. It is
+        // the same value that already isolates the legacy session path, so a
+        // caller cannot reach another caller's entries by either route.
+        let overlay = resolve_overlay(model, req, session_id)?;
         return Ok(f(&overlay));
     }
 

@@ -55,7 +55,7 @@ fn default_min_score() -> f32 {
 /// an edit (the gate score before/after), so if it stayed global-only while
 /// patches became session-scoped, every edit would report "no change" — the
 /// measurement would silently stop tracking the thing it measures.
-pub(crate) fn describe_entity_with(
+pub fn describe_entity_with(
     model: &LoadedModel,
     patched: &larql_vindex::PatchedVindex,
     params: &DescribeParams,
@@ -245,7 +245,7 @@ async fn describe_with_cache(
     // The scope is therefore the patch set's own key when there is one, and the
     // session id only when there is not.
     let scope = match patch_set.as_ref() {
-        Some(ps) => Some(ps.key(&model.id)),
+        Some(ps) => Some(ps.key(&model.id, sid.as_deref())),
         None => sid.clone(),
     };
     let cache_key = if state.describe_cache.is_enabled() {

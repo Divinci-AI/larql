@@ -13,7 +13,7 @@
 
 mod cli;
 mod listeners;
-mod load;
+pub mod load;
 
 #[cfg(test)]
 mod tests;
