@@ -46,9 +46,33 @@ use larql_vindex::{PatchedVindex, VindexPatch};
 
 /// Default number of compiled overlays held per model.
 ///
-/// Small deliberately: each entry carries its own warm gate caches. Raise via
-/// `LARQL_OVERLAY_CACHE_ENTRIES` on a box with headroom and many active tenants.
-pub const DEFAULT_OVERLAY_CACHE_ENTRIES: usize = 8;
+/// Derived, not guessed. It was 8 by judgement until the footprint was measured
+/// on 2026-09-01, and 8 does not survive the arithmetic.
+///
+/// What an overlay costs, measured against testdata/tiny-vindex with
+/// `cargo test --test mem_probe -- --ignored --nocapture`:
+///
+///   - COLD: ~28 KB. Gate data is mmap-backed — 0 of 8 layers heap-resident —
+///     so `base().clone()` shares the artifact by refcount and copies nothing
+///     of consequence. This is the reassuring half.
+///   - WARM: unbounded per overlay, and this is the half that matters.
+///     `GateStore::clone` resets `f16_decode_cache` and `warmed_gates`, and each
+///     refills as layers are touched. One warmed layer costs
+///     `features_in_layer × hidden × 4` bytes.
+///
+/// For the served Gemma-4-E2B artifact (337,920 features over 35 layers, hidden
+/// 1536) that is ~59 MB per warmed layer and ~2.08 GB for a fully warmed
+/// overlay. Against a 32 GiB limit already holding a ~10 GiB base:
+///
+///   8 overlays -> ~27.3 GB   no headroom; this service has been OOM-killed before
+///   4 overlays -> ~19.0 GB   room to spare
+///
+/// Hence 4. Nothing enforces the per-overlay bound today: the container runs
+/// without `--max-gate-cache-layers`, so `gate_cache_max_layers` is 0, meaning
+/// unlimited. Capping that is the better lever if this ever gets tight, because
+/// it bounds each overlay rather than counting them — raise this constant only
+/// alongside it.
+pub const DEFAULT_OVERLAY_CACHE_ENTRIES: usize = 4;
 
 pub fn cache_entries_from_env() -> usize {
     std::env::var("LARQL_OVERLAY_CACHE_ENTRIES")
