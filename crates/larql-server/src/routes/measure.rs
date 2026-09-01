@@ -198,6 +198,12 @@ fn read_against(
                 verbose: false,
                 limit: spec.limit,
                 min_score: spec.min_score,
+                // Deliberately off. Measurement matches an edge by its target
+                // string, and relabelling would rename the very thing being
+                // matched — an edit would report "no change" because the label
+                // moved, not because the gate did.
+                coherence: false,
+                min_coherence: 0.0,
             };
             let described = describe_entity_with(model, patched, &params)?;
             gate_score_for_target(&described, target)

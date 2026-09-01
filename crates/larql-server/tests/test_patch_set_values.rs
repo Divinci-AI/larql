@@ -88,6 +88,8 @@ fn targets(model: &LoadedModel, ps: Option<&PatchSetRef>, scope: Option<&str>) -
         verbose: false,
         limit: 10,
         min_score: 0.0,
+        coherence: false,
+        min_coherence: 0.0,
     };
     let extract = |patched: &larql_vindex::PatchedVindex| {
         let v = larql_server::routes::describe::describe_entity_with(model, patched, &params)
@@ -240,4 +242,129 @@ fn eviction_costs_latency_and_not_correctness() {
     }
 
     assert_eq!(first, targets(&m, Some(&ps), Some("wl:t")));
+}
+
+// ══════════════════════════════════════════════════════════════
+// Coherence: a rendering change, and it must stay opt-in
+// ══════════════════════════════════════════════════════════════
+
+fn describe_raw(
+    model: &LoadedModel,
+    coherence: bool,
+    min_coherence: f32,
+) -> serde_json::Value {
+    let params = larql_server::routes::describe::DescribeParams {
+        entity: "[5]".to_string(),
+        band: "all".to_string(),
+        verbose: false,
+        limit: 10,
+        min_score: 0.0,
+        coherence,
+        min_coherence,
+    };
+    larql_server::routes::describe::describe_entity_with(
+        model,
+        &model.patched.blocking_read(),
+        &params,
+    )
+    .expect("describe must succeed")
+}
+
+#[test]
+fn coherence_off_is_byte_identical_to_before() {
+    let Some(m) = tiny() else { return };
+
+    // The whole safety argument for shipping this is that it is opt-in. If the
+    // default path changed at all, every stored edit keyed to a target label
+    // would be at risk — so this compares the entire document, not just the
+    // targets.
+    let a = describe_raw(&m, false, 0.0);
+    let b = describe_raw(&m, false, 0.0);
+    assert_eq!(a["edges"], b["edges"], "describe is not deterministic");
+
+    for edge in a["edges"].as_array().expect("edges") {
+        assert!(
+            edge.get("coherence").is_none(),
+            "coherence leaked into the default response: {edge}"
+        );
+        assert!(edge.get("label_source").is_none(), "label_source leaked: {edge}");
+    }
+}
+
+#[test]
+fn coherence_on_reports_a_score_for_every_edge() {
+    let Some(m) = tiny() else { return };
+    let out = describe_raw(&m, true, 0.0);
+    let edges = out["edges"].as_array().expect("edges").clone();
+    assert!(!edges.is_empty(), "fixture produced nothing to score");
+
+    for edge in &edges {
+        // Present on every edge, and `null` where it could not be computed —
+        // "unmeasured" must stay distinguishable from "measured badly".
+        assert!(edge.get("coherence").is_some(), "missing coherence: {edge}");
+        let src = edge["label_source"].as_str().unwrap_or_default();
+        assert!(
+            src == "centroid" || src == "argmax",
+            "label_source must say where the label came from, got {src:?}"
+        );
+        if let Some(c) = edge["coherence"].as_f64() {
+            assert!((-1.0..=1.0).contains(&c), "coherence out of range: {c}");
+        }
+    }
+}
+
+#[test]
+fn a_threshold_only_ever_removes_edges() {
+    let Some(m) = tiny() else { return };
+
+    // Filtering must be a subset operation. If raising the bar could ADD an
+    // edge, the score would not be ordering anything and the whole mechanism
+    // would be noise dressed as a measurement.
+    let all = describe_raw(&m, true, 0.0);
+    let strict = describe_raw(&m, true, 0.99);
+
+    let key = |v: &serde_json::Value| {
+        v["edges"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .map(|e| format!("{}@{}", e["target"], e["layer"]))
+                    .collect::<std::collections::HashSet<_>>()
+            })
+            .unwrap_or_default()
+    };
+    let (a, s) = (key(&all), key(&strict));
+    assert!(s.len() <= a.len(), "a threshold grew the result: {} -> {}", a.len(), s.len());
+    for k in &s {
+        assert!(a.contains(k), "threshold introduced an edge that was not there: {k}");
+    }
+}
+
+#[test]
+fn random_embeddings_score_near_zero_and_not_near_one() {
+    let Some(m) = tiny() else { return };
+
+    // The fixture is a NEGATIVE CONTROL. Its embeddings are synthetic, and
+    // random vectors in high dimensions are near-orthogonal, so the honest
+    // answer for every feature here is "no coherence". Pinning that catches the
+    // failure mode this measure is most likely to have: a bug that returns a
+    // flattering constant (1.0 from a self-similarity, or a norm that cancels)
+    // would sail through every other test in this file, and would then be read
+    // in production as "every feature is coherent".
+    let out = describe_raw(&m, true, 0.0);
+    let scores: Vec<f64> = out["edges"]
+        .as_array()
+        .expect("edges")
+        .iter()
+        .filter_map(|e| e["coherence"].as_f64())
+        .collect();
+
+    assert!(!scores.is_empty(), "nothing was scored; the assertion below is vacuous");
+    for c in &scores {
+        assert!(
+            c.abs() < 0.5,
+            "random embeddings scored {c}, which is not near-orthogonal — \
+             the measure is reporting structure that is not in the data"
+        );
+    }
 }

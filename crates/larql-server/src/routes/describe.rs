@@ -35,6 +35,18 @@ pub struct DescribeParams {
     /// Minimum gate score to include an edge.
     #[serde(default = "default_min_score")]
     pub min_score: f32,
+    /// Score each feature's top-k for coherence, and label it from the whole
+    /// cluster instead of the logit argmax.
+    ///
+    /// Off by default: it changes what `target` says, and callers have stored
+    /// edits keyed to the old labels. See `crate::coherence`.
+    #[serde(default)]
+    pub coherence: bool,
+    /// Drop edges whose coherence falls below this. Only read when `coherence`
+    /// is set. 0.0 reports without filtering, which is how it should be
+    /// measured before it is trusted.
+    #[serde(default)]
+    pub min_coherence: f32,
 }
 
 fn default_band() -> String {
@@ -112,6 +124,8 @@ pub fn describe_entity_with(
         also: Vec<String>,
         best_layer: usize,
         best_feature: usize,
+        coherence: Option<f32>,
+        relabelled: bool,
     }
 
     let entity_lower = params.entity.to_lowercase();
@@ -123,7 +137,40 @@ pub fn describe_entity_with(
                 continue;
             }
 
-            let tok = &hit.meta.top_token;
+            // Coherence, when asked for. The candidates are the positively
+            // weighted top-k: a token the feature pushes DOWN is not part of
+            // what the feature is about, and letting it into the centroid would
+            // drag a perfectly coherent feature's score toward zero.
+            let verdict = if params.coherence {
+                let cands: Vec<crate::coherence::Candidate<'_>> = hit
+                    .meta
+                    .top_k
+                    .iter()
+                    .filter(|t| t.logit > 0.0 && !t.token.trim().is_empty())
+                    .map(|t| crate::coherence::Candidate {
+                        token: t.token.trim(),
+                        token_id: t.token_id,
+                    })
+                    .collect();
+                crate::coherence::score_feature(&model.embeddings, &cands)
+            } else {
+                None
+            };
+
+            // A feature we could not score has not passed the bar; it has not
+            // been measured at all. Dropping it only when a bar was actually
+            // set keeps `min_coherence = 0` a pure reporting mode.
+            if params.coherence && params.min_coherence > 0.0 {
+                match verdict.as_ref() {
+                    Some(v) if v.coherence >= params.min_coherence => {}
+                    _ => continue,
+                }
+            }
+
+            let relabelled_to = verdict.as_ref().and_then(|v| v.label.clone());
+            let tok: &str = relabelled_to
+                .as_deref()
+                .unwrap_or(hit.meta.top_token.as_str());
             let tok_trimmed = tok.trim();
             if tok_trimmed.is_empty() || tok_trimmed.len() < 2 {
                 continue;
@@ -156,12 +203,20 @@ pub fn describe_entity_with(
                 original: tok_trimmed.to_string(),
                 also,
                 best_layer: *layer_idx,
+                coherence: verdict.as_ref().map(|v| v.coherence),
+                relabelled: relabelled_to.is_some(),
             });
 
             if hit.gate_score > entry.gate {
                 entry.gate = hit.gate_score;
                 entry.best_layer = *layer_idx;
                 entry.best_feature = hit.feature;
+                // The reported coherence must describe the feature the rest of
+                // the edge describes. Keeping the first one seen while gate,
+                // layer and feature move to a different hit would attach a
+                // score to a feature it was never computed from.
+                entry.coherence = verdict.as_ref().map(|v| v.coherence);
+                entry.relabelled = relabelled_to.is_some();
             }
             if !entry.layers.contains(layer_idx) {
                 entry.layers.push(*layer_idx);
@@ -207,6 +262,22 @@ pub fn describe_entity_with(
 
             if !info.also.is_empty() {
                 edge["also"] = serde_json::json!(info.also);
+            }
+
+            if params.coherence {
+                edge["coherence"] = match info.coherence {
+                    Some(c) => serde_json::json!((c * 1000.0).round() / 1000.0),
+                    // Explicitly null rather than absent: "could not be scored"
+                    // is a different statement from "scored zero", and a
+                    // consumer that cannot tell them apart will treat an
+                    // unmeasured feature as a measured-bad one.
+                    None => serde_json::Value::Null,
+                };
+                edge["label_source"] = serde_json::json!(if info.relabelled {
+                    "centroid"
+                } else {
+                    "argmax"
+                });
             }
 
             edge
@@ -256,6 +327,8 @@ async fn describe_with_cache(
             &params.band,
             params.limit,
             params.min_score,
+            params.coherence,
+            params.min_coherence,
         );
         if let Some(cached) = state.describe_cache.get(&key) {
             let etag = crate::etag::compute_etag(&cached);
@@ -379,6 +452,12 @@ pub struct DescribeBody {
     pub limit: usize,
     #[serde(default = "default_min_score")]
     pub min_score: f32,
+    /// See `DescribeParams::coherence`.
+    #[serde(default)]
+    pub coherence: bool,
+    /// See `DescribeParams::min_coherence`.
+    #[serde(default)]
+    pub min_coherence: f32,
     /// The overlay to answer from. Omitted, this behaves exactly like the GET.
     #[serde(default)]
     pub patch_set: Option<crate::overlay_cache::PatchSetRef>,
@@ -392,6 +471,8 @@ impl DescribeBody {
             verbose,
             limit,
             min_score,
+            coherence,
+            min_coherence,
             patch_set,
         } = self;
         (
@@ -401,6 +482,8 @@ impl DescribeBody {
                 verbose,
                 limit,
                 min_score,
+                coherence,
+                min_coherence,
             },
             patch_set,
         )
