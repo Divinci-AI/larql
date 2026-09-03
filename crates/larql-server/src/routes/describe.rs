@@ -129,6 +129,14 @@ pub fn describe_entity_with(
     }
 
     let entity_lower = params.entity.to_lowercase();
+    // Label features in the script the caller wrote the entity in. A feature
+    // that is plainly "Japan" was being labelled 일본 for a caller who typed
+    // "Tokyo" — right cluster, unreadable spelling. `Other` (digits, symbols)
+    // expresses no preference rather than an unsatisfiable one.
+    let prefer = match crate::coherence::script_of(&params.entity) {
+        crate::coherence::Script::Other => None,
+        s => Some(s),
+    };
     let mut edges: HashMap<String, EdgeInfo> = HashMap::new();
 
     for (layer_idx, hits) in &trace.layers {
@@ -152,7 +160,7 @@ pub fn describe_entity_with(
                         token_id: t.token_id,
                     })
                     .collect();
-                crate::coherence::score_feature(&model.embeddings, &cands)
+                crate::coherence::score_feature(&model.embeddings, &cands, prefer)
             } else {
                 None
             };

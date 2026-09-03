@@ -39,6 +39,9 @@ impl DescribeCache {
     /// would let a hit computed under one session answer another session's
     /// request — one tenant's suppressions served to another, with no error
     /// and nothing in the logs to show it happened.
+    // Every argument is a dimension of the answer; folding them into a struct
+    // would move the same eight names one line down without removing any.
+    #[allow(clippy::too_many_arguments)]
     pub fn key_scoped(
         session_id: Option<&str>,
         model_id: &str,
