@@ -275,6 +275,7 @@ fn describe_limited(
     min_coherence: f32,
     relabel: bool,
     limit: usize,
+    window: usize,
 ) -> serde_json::Value {
     let params = larql_server::routes::describe::DescribeParams {
         entity: "[5]".to_string(),
