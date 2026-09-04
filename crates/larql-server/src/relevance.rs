@@ -28,9 +28,15 @@
 //!
 //! # Which background
 //!
-//! Two panels are kept, selectable per request (`background=`):
+//! Three panels are kept, selectable per request (`background=`); the
+//! default is `LARQL_RELEVANCE_BACKGROUND` at load, else `entities`:
 //!
-//! * `entities` (default since 2026-09-04): [`ENTITY_PANEL`], a hundred or so
+//! * `corpus`: [`corpus_names`], ~2000 English Wikipedia article titles
+//!   ranked by how many sampled days (2024–2026) they were in the daily
+//!   top-1000 — the durably looked-up population of things, built by
+//!   `scripts/build-entity-corpus.py`. Same construction as `entities`,
+//!   eighteen times the rows.
+//! * `entities`: [`ENTITY_PANEL`], a hundred or so
 //!   real-world names — places, people, companies, works, foods, sciences —
 //!   tokenised and averaged like any DESCRIBE entity. This is the population
 //!   a browse is actually drawn from, so "surprising" means "surprising for
@@ -61,27 +67,56 @@ pub const PANEL_SIZE: usize = 64;
 /// Which panel a request's relevance is measured against. See the module doc.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Background {
+    Corpus,
     Entities,
     Vocabulary,
 }
 
 impl Background {
+    /// What a model uses when neither the request nor the environment says.
     pub const DEFAULT: Background = Background::Entities;
+    pub const ENV: &'static str = "LARQL_RELEVANCE_BACKGROUND";
 
     pub fn parse(s: &str) -> Option<Background> {
         match s {
+            "corpus" => Some(Background::Corpus),
             "entities" | "entity" => Some(Background::Entities),
             "vocabulary" | "vocab" => Some(Background::Vocabulary),
             _ => None,
         }
     }
 
+    /// The deployment's default: `LARQL_RELEVANCE_BACKGROUND`, or
+    /// [`Background::DEFAULT`]. An unparseable value is a loud fallback,
+    /// not a silent one.
+    pub fn from_env() -> Background {
+        match std::env::var(Self::ENV) {
+            Ok(v) => Background::parse(&v).unwrap_or_else(|| {
+                tracing::warn!("{}={v:?} is not a background; using {}", Self::ENV, Self::DEFAULT.as_str());
+                Self::DEFAULT
+            }),
+            Err(_) => Self::DEFAULT,
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
+            Background::Corpus => "corpus",
             Background::Entities => "entities",
             Background::Vocabulary => "vocabulary",
         }
     }
+}
+
+/// The corpus panel's names, compiled in from `assets/entity-corpus.txt`
+/// (one per line, `#` comments). The measurement entities are held out by
+/// the builder script; see the file header for provenance.
+pub fn corpus_names() -> Vec<&'static str> {
+    include_str!("../assets/entity-corpus.txt")
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .collect()
 }
 
 /// The entity panel. Chosen for spread across kinds (place, person, company,
@@ -285,6 +320,7 @@ pub struct RelevanceStats {
     /// DESCRIBE query. A background whose panel could not be built (no
     /// tokenizer, no embeddings) has an empty matrix and yields no relevance.
     panels: HashMap<Background, Array2<f32>>,
+    default: Background,
     per_layer: RwLock<HashMap<(Background, usize), Arc<LayerStats>>>,
 }
 
@@ -356,24 +392,40 @@ impl RelevanceStats {
         );
         RelevanceStats {
             panels,
+            // A fixture has only this panel, so it is also the only default
+            // under which a fixture's `relevance` means anything.
+            default: Background::Vocabulary,
             per_layer: RwLock::new(HashMap::new()),
         }
     }
 
-    /// Both panels: the entity panel from `names` through `tokenizer`, and
-    /// the vocabulary panel from the embedding table.
+    /// All three panels: `entities` from `names` and `corpus` from
+    /// `corpus` through `tokenizer`, and `vocabulary` from the embedding
+    /// table. `default` is what a request that names no background gets.
     pub fn from_entities(
         embeddings: &Array2<f32>,
         embed_scale: f32,
         tokenizer: &larql_vindex::tokenizers::Tokenizer,
         names: &[&str],
+        corpus: &[&str],
+        default: Background,
     ) -> RelevanceStats {
         let mut r = RelevanceStats::from_embeddings(embeddings, embed_scale);
         r.panels.insert(
             Background::Entities,
             entity_panel(embeddings, embed_scale, tokenizer, names),
         );
+        r.panels.insert(
+            Background::Corpus,
+            entity_panel(embeddings, embed_scale, tokenizer, corpus),
+        );
+        r.default = default;
         r
+    }
+
+    /// The background a request gets when it names none.
+    pub fn default_background(&self) -> Background {
+        self.default
     }
 
     pub fn panel_size(&self, background: Background) -> usize {
@@ -511,10 +563,24 @@ mod tests {
 
     #[test]
     fn background_names_round_trip() {
-        for b in [Background::Entities, Background::Vocabulary] {
+        for b in [Background::Corpus, Background::Entities, Background::Vocabulary] {
             assert_eq!(Background::parse(b.as_str()), Some(b));
         }
-        assert_eq!(Background::parse("corpus"), None);
+        assert_eq!(Background::parse("wikipedia"), None);
         assert_eq!(Background::DEFAULT, Background::Entities);
+    }
+
+    #[test]
+    fn the_corpus_is_large_clean_and_holds_out_the_measurement_entities() {
+        let names = corpus_names();
+        assert!(names.len() >= 1500, "corpus has only {} names", names.len());
+        for held_out in ["Paris", "France", "Tokyo", "Einstein", "Albert Einstein", "Amazon", "Beethoven"] {
+            assert!(!names.iter().any(|n| n.eq_ignore_ascii_case(held_out)), "{held_out} is in the corpus");
+        }
+        assert!(names.iter().all(|n| !n.contains('_') && !n.starts_with('#') && n.len() >= 3));
+        let mut sorted = names.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), names.len(), "corpus has duplicates");
     }
 }

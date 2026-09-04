@@ -93,7 +93,7 @@ fn targets(model: &LoadedModel, ps: Option<&PatchSetRef>, scope: Option<&str>) -
         min_coherence: 0.0,
         relabel: false,
         relevance: true,
-        background: "vocabulary".into(),
+        background: Some("vocabulary".into()),
         query: "embedding".into(),
         baseline: None,
     };
@@ -325,7 +325,7 @@ fn describe_against(
         min_coherence,
         relabel,
         relevance,
-        background: background.into(),
+        background: Some(background.into()),
         query: "embedding".into(),
         baseline: None,
     };
@@ -551,7 +551,7 @@ fn residual_mode_either_runs_the_model_or_says_why_it_cannot() {
         min_coherence: 0.0,
         relabel: false,
         relevance: true,
-        background: "vocabulary".into(),
+        background: Some("vocabulary".into()),
         query: "residual".into(),
         baseline: None,
     };
@@ -595,7 +595,7 @@ fn an_unknown_query_mode_is_rejected_not_defaulted() {
         min_coherence: 0.0,
         relabel: false,
         relevance: true,
-        background: "vocabulary".into(),
+        background: Some("vocabulary".into()),
         query: "activations".into(),
         baseline: None,
     };
@@ -627,7 +627,7 @@ fn contrasting_an_entity_with_itself_scores_nothing() {
         min_coherence: 0.0,
         relabel: false,
         relevance: true,
-        background: "vocabulary".into(),
+        background: Some("vocabulary".into()),
         query: "residual".into(),
         baseline: Some("[5]".into()),
     };
@@ -786,9 +786,9 @@ fn the_two_backgrounds_are_two_rankings_of_one_set() {
 #[test]
 fn an_unknown_background_is_a_bad_request_not_a_silent_default() {
     let Some(m) = tiny() else { return };
-    match describe_against(&m, false, 0.0, false, 50, true, "corpus") {
+    match describe_against(&m, false, 0.0, false, 50, true, "wikipedia") {
         Err(larql_server::error::ServerError::BadRequest(msg)) => {
-            assert!(msg.contains("corpus"), "{msg}")
+            assert!(msg.contains("wikipedia"), "{msg}")
         }
         other => panic!("expected BadRequest, got {other:?}"),
     }
@@ -800,4 +800,43 @@ fn relevance_off_ignores_the_background_entirely() {
     let v = describe_against(&m, false, 0.0, false, 50, false, "entities").unwrap();
     assert!(v.get("relevance_background").is_none());
     assert!(v.get("relevance_panel").is_none());
+}
+
+#[test]
+fn the_corpus_panel_is_built_through_the_real_loader_and_is_the_largest() {
+    let Some(m) = tiny() else { return };
+    let v = describe_against(&m, false, 0.0, false, 50, true, "corpus").unwrap();
+    assert_eq!(v["relevance_background"], "corpus");
+    let corpus = v["relevance_panel"].as_u64().unwrap();
+    let ent = describe_against(&m, false, 0.0, false, 50, true, "entities").unwrap()["relevance_panel"].as_u64().unwrap();
+    assert!(corpus > ent * 5, "corpus panel {corpus} is not much larger than the entity panel {ent}");
+    for e in v["edges"].as_array().unwrap() {
+        assert!(e["relevance"].as_f64().unwrap().is_finite());
+    }
+}
+
+#[test]
+fn an_absent_background_takes_the_models_default_and_names_it() {
+    let Some(m) = tiny() else { return };
+    let mut params = larql_server::routes::describe::DescribeParams {
+        entity: "[5]".to_string(),
+        band: "all".to_string(),
+        verbose: false,
+        limit: 50,
+        window: 50,
+        min_score: 0.0,
+        coherence: false,
+        min_coherence: 0.0,
+        relabel: false,
+        relevance: true,
+        background: None,
+        query: "embedding".into(),
+        baseline: None,
+    };
+    let v = larql_server::routes::describe::describe_entity_with(&m, &m.patched.blocking_read(), &params).unwrap();
+    let default = m.relevance.default_background().as_str();
+    assert_eq!(v["relevance_background"], default, "absent background must resolve to the model's default");
+    params.background = Some(default.into());
+    let w = larql_server::routes::describe::describe_entity_with(&m, &m.patched.blocking_read(), &params).unwrap();
+    assert_eq!(v["edges"], w["edges"], "naming the default must be byte-identical to omitting it");
 }

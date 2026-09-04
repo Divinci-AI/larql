@@ -383,11 +383,15 @@ pub fn load_single_vindex(
         embed_scale,
         &tokenizer,
         crate::relevance::ENTITY_PANEL,
+        &crate::relevance::corpus_names(),
+        crate::relevance::Background::from_env(),
     );
     info!(
-        "  Relevance panels: {} entities, {} vocabulary",
+        "  Relevance panels: {} corpus, {} entities, {} vocabulary; default {}",
+        relevance.panel_size(crate::relevance::Background::Corpus),
         relevance.panel_size(crate::relevance::Background::Entities),
         relevance.panel_size(crate::relevance::Background::Vocabulary),
+        relevance.default_background().as_str(),
     );
 
     let probe_labels = load_probe_labels(&path);

@@ -25,7 +25,7 @@ fn probe() {
                 min_coherence: 0.0,
                 relabel: false,
                 relevance: true,
-                background: "vocabulary".into(),
+                background: Some("vocabulary".into()),
                 query: q.into(),
                 baseline: None,
             };

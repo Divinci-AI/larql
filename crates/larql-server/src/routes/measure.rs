@@ -209,7 +209,7 @@ fn read_against(
                 min_coherence: 0.0,
                 relabel: true,
                 relevance: true,
-                background: crate::relevance::Background::DEFAULT.as_str().into(),
+                background: None,
                 query: "embedding".into(),
                 baseline: None,
             };

@@ -78,12 +78,14 @@ pub struct DescribeParams {
     /// and `min_score` still applies to it.
     #[serde(default = "default_true")]
     pub relevance: bool,
-    /// Which panel relevance is measured against: `entities` (default) or
-    /// `vocabulary`. See `crate::relevance::Background`. Kept selectable so
-    /// the two can be compared on one deployment; the response reports the
-    /// one used and its size as `relevance_background` / `relevance_panel`.
-    #[serde(default = "default_background")]
-    pub background: String,
+    /// Which panel relevance is measured against: `corpus`, `entities` or
+    /// `vocabulary`. See `crate::relevance::Background`. Absent, the
+    /// deployment's default (`LARQL_RELEVANCE_BACKGROUND`, else `entities`).
+    /// Kept selectable so the panels can be compared on one deployment; the
+    /// response reports the one used and its size as
+    /// `relevance_background` / `relevance_panel`.
+    #[serde(default)]
+    pub background: Option<String>,
     /// What the gates are scored against.
     ///
     /// `embedding` (default): the entity's raw input embedding, averaged over
@@ -119,9 +121,6 @@ pub const QUERY_RESIDUAL: &str = "residual";
 
 fn default_query() -> String {
     QUERY_EMBEDDING.into()
-}
-fn default_background() -> String {
-    crate::relevance::Background::DEFAULT.as_str().into()
 }
 
 fn default_band() -> String {
@@ -183,12 +182,14 @@ pub fn describe_entity_with(
     )
     .ok_or_else(|| ServerError::Internal("entity produced no query".into()))?;
 
-    let background = crate::relevance::Background::parse(&params.background).ok_or_else(|| {
-        ServerError::BadRequest(format!(
-            "background must be `entities` or `vocabulary`, got `{}`",
-            params.background
-        ))
-    })?;
+    let background = match params.background.as_deref() {
+        None => model.relevance.default_background(),
+        Some(s) => crate::relevance::Background::parse(s).ok_or_else(|| {
+            ServerError::BadRequest(format!(
+                "background must be `corpus`, `entities` or `vocabulary`, got `{s}`"
+            ))
+        })?,
+    };
 
     let bands = get_layer_bands(model);
 
@@ -592,7 +593,14 @@ async fn describe_with_cache(
             params.min_coherence,
             params.relabel,
             params.relevance,
-            &params.background,
+            // The RESOLVED background: an absent one takes the deployment's
+            // default, and if that default changes the old entries must miss.
+            params
+                .background
+                .as_deref()
+                .and_then(crate::relevance::Background::parse)
+                .unwrap_or(model.relevance.default_background())
+                .as_str(),
             &match params.baseline.as_deref() {
                 Some(b) => format!("{}~{b}", params.query),
                 None => params.query.clone(),
@@ -736,8 +744,8 @@ pub struct DescribeBody {
     #[serde(default = "default_true")]
     pub relevance: bool,
     /// See `DescribeParams::background`.
-    #[serde(default = "default_background")]
-    pub background: String,
+    #[serde(default)]
+    pub background: Option<String>,
     /// See `DescribeParams::query`.
     #[serde(default = "default_query")]
     pub query: String,
