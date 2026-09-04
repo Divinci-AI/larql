@@ -354,6 +354,7 @@ mod tests {
             },
             patched: Arc::new(tokio::sync::RwLock::new(patched)),
             overlay_cache: crate::overlay_cache::OverlayCache::with_env_capacity(),
+            relevance: crate::relevance::RelevanceStats::from_embeddings(&larql_vindex::ndarray::Array2::<f32>::zeros((0, 0)), 1.0),
             embeddings: Array2::<f32>::zeros((4, hidden)),
             embed_scale: 1.0,
             tokenizer,

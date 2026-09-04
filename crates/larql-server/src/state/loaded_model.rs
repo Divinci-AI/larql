@@ -33,6 +33,9 @@ pub struct LoadedModel {
     /// artifact — the same operations, the wrong base, and no symptom beyond
     /// plausible-looking output. See [`crate::overlay_cache`].
     pub overlay_cache: crate::overlay_cache::OverlayCache,
+    /// Per-feature gate-score backgrounds for the relevance ranking, built
+    /// lazily per layer on first DESCRIBE. See [`crate::relevance`].
+    pub relevance: crate::relevance::RelevanceStats,
     /// Embeddings matrix + scale factor, loaded once.
     pub embeddings: Array2<f32>,
     pub embed_scale: f32,
@@ -342,6 +345,7 @@ mod loaded_model_tests {
             config: tiny_config(quant),
             patched: std::sync::Arc::new(tokio::sync::RwLock::new(patched)),
             overlay_cache: crate::overlay_cache::OverlayCache::with_env_capacity(),
+            relevance: crate::relevance::RelevanceStats::from_embeddings(&larql_vindex::ndarray::Array2::<f32>::zeros((0, 0)), 1.0),
             embeddings: Array2::<f32>::zeros((4, hidden)),
             embed_scale: 1.0,
             tokenizer,

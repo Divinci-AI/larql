@@ -24,6 +24,7 @@ pub mod memcheck;
 pub mod metrics;
 pub mod openapi;
 pub mod ratelimit;
+pub mod relevance;
 pub mod response_kv;
 pub mod response_store;
 pub mod routes;

@@ -208,6 +208,7 @@ fn read_against(
                 coherence: true,
                 min_coherence: 0.0,
                 relabel: true,
+                relevance: true,
                 query: "embedding".into(),
                 baseline: None,
             };

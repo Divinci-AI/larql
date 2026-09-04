@@ -496,6 +496,31 @@ impl PatchedVindex {
         }
     }
 
+    /// The base layer's gate matrix `[features × hidden]` as an owned dense
+    /// array, from the heap when the index holds it and by decoding the mmap
+    /// slice otherwise. Overrides and tombstones are NOT applied: this is the
+    /// artifact's own gates, for callers computing statistics over them.
+    /// `None` when the layer is absent or empty.
+    pub fn base_gate_matrix(&self, layer: usize) -> Option<ndarray::Array2<f32>> {
+        if let Some(g) = self.base.gate_vectors_at(layer) {
+            return Some(g.clone());
+        }
+        let view = self.base.storage.gate_layer_view(layer)?;
+        if view.slice.num_features == 0 {
+            return None;
+        }
+        let bpf = crate::config::dtype::bytes_per_float(view.dtype);
+        let byte_offset = view.slice.float_offset * bpf;
+        let byte_count = view.slice.num_features * self.base.hidden_size * bpf;
+        let byte_end = byte_offset + byte_count;
+        let mmap: &[u8] = view.bytes.as_ref();
+        if byte_end > mmap.len() {
+            return None;
+        }
+        let floats = crate::config::dtype::decode_floats(&mmap[byte_offset..byte_end], view.dtype);
+        ndarray::Array2::from_shape_vec((view.slice.num_features, self.base.hidden_size), floats).ok()
+    }
+
     /// Flatten all patches into the base, producing a new clean VectorIndex (heap mode).
     pub fn bake_down(&self) -> VectorIndex {
         let mut new_gate = Vec::new();

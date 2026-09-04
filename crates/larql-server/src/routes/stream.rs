@@ -696,6 +696,7 @@ mod tests {
                 4,
             )))),
             overlay_cache: crate::overlay_cache::OverlayCache::with_env_capacity(),
+            relevance: crate::relevance::RelevanceStats::from_embeddings(&embeddings, 1.0),
             embeddings,
             embed_scale: 1.0,
             tokenizer: functional_tokenizer(),

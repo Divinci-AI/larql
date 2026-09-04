@@ -92,6 +92,7 @@ fn targets(model: &LoadedModel, ps: Option<&PatchSetRef>, scope: Option<&str>) -
         coherence: false,
         min_coherence: 0.0,
         relabel: false,
+        relevance: true,
         query: "embedding".into(),
         baseline: None,
     };
@@ -276,6 +277,17 @@ fn describe_limited(
     relabel: bool,
     limit: usize,
 ) -> serde_json::Value {
+    describe_ranked(model, coherence, min_coherence, relabel, limit, true)
+}
+
+fn describe_ranked(
+    model: &LoadedModel,
+    coherence: bool,
+    min_coherence: f32,
+    relabel: bool,
+    limit: usize,
+    relevance: bool,
+) -> serde_json::Value {
     let params = larql_server::routes::describe::DescribeParams {
         entity: "[5]".to_string(),
         band: "all".to_string(),
@@ -288,6 +300,7 @@ fn describe_limited(
         coherence,
         min_coherence,
         relabel,
+        relevance,
         query: "embedding".into(),
         baseline: None,
     };
@@ -474,6 +487,7 @@ fn residual_mode_either_runs_the_model_or_says_why_it_cannot() {
         coherence: false,
         min_coherence: 0.0,
         relabel: false,
+        relevance: true,
         query: "residual".into(),
         baseline: None,
     };
@@ -513,6 +527,7 @@ fn an_unknown_query_mode_is_rejected_not_defaulted() {
         coherence: false,
         min_coherence: 0.0,
         relabel: false,
+        relevance: true,
         query: "activations".into(),
         baseline: None,
     };
@@ -536,6 +551,7 @@ fn contrasting_an_entity_with_itself_scores_nothing() {
         coherence: false,
         min_coherence: 0.0,
         relabel: false,
+        relevance: true,
         query: "residual".into(),
         baseline: Some("[5]".into()),
     };
@@ -553,4 +569,41 @@ fn contrasting_an_entity_with_itself_scores_nothing() {
         }
         Err(e) => assert!(format!("{e:?}").contains("weights"), "{e:?}"),
     }
+}
+
+// ══════════════════════════════════════════════════════════════
+// Relevance: a ranking key, never a filter
+// ══════════════════════════════════════════════════════════════
+
+#[test]
+fn relevance_off_ranks_by_gate_score_exactly_as_before() {
+    let Some(m) = tiny() else { return };
+    let v = describe_ranked(&m, false, 0.0, false, 50, false);
+    let scores: Vec<f64> = v["edges"].as_array().unwrap().iter().map(|e| e["gate_score"].as_f64().unwrap()).collect();
+    assert!(scores.windows(2).all(|w| w[0] >= w[1]), "not sorted by gate: {scores:?}");
+    for e in v["edges"].as_array().unwrap() {
+        assert!(e.get("relevance").is_none(), "relevance leaked into the raw mode: {e}");
+    }
+}
+
+#[test]
+fn relevance_on_reports_a_score_and_ranks_by_it() {
+    let Some(m) = tiny() else { return };
+    let v = describe_ranked(&m, false, 0.0, false, 50, true);
+    let edges = v["edges"].as_array().unwrap();
+    assert!(!edges.is_empty());
+    let zs: Vec<f64> = edges.iter().map(|e| e["relevance"].as_f64().expect("relevance must be a number on this fixture")).collect();
+    assert!(zs.windows(2).all(|w| w[0] >= w[1]), "not sorted by relevance: {zs:?}");
+    assert!(zs.iter().all(|z| z.is_finite()));
+}
+
+#[test]
+fn relevance_changes_order_but_not_membership() {
+    let Some(m) = tiny() else { return };
+    // Same universe either way: relevance re-orders, it never adds or drops.
+    let raw = describe_ranked(&m, false, 0.0, false, 10_000, false);
+    let rel = describe_ranked(&m, false, 0.0, false, 10_000, true);
+    let set = |v: &serde_json::Value| v["edges"].as_array().unwrap().iter()
+        .map(|e| format!("{}@{}", e["target"], e["layer"])).collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(set(&raw), set(&rel));
 }

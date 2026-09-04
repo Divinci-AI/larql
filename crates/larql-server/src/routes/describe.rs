@@ -69,6 +69,15 @@ pub struct DescribeParams {
     /// depending on the label at all.
     #[serde(default = "default_true")]
     pub relabel: bool,
+    /// Rank by relevance — the gate score's z-score against the feature's
+    /// background over a panel of unrelated queries — instead of by the raw
+    /// gate score. On by default since 2026-09-04: features that fire for
+    /// every input (`especially`, `either`, `role`, `mode`) are coherent, so
+    /// the coherence filter keeps them, and on raw score they crowd out the
+    /// entity's own. See `crate::relevance`. `gate_score` is still reported
+    /// and `min_score` still applies to it.
+    #[serde(default = "default_true")]
+    pub relevance: bool,
     /// What the gates are scored against.
     ///
     /// `embedding` (default): the entity's raw input embedding, averaged over
@@ -291,6 +300,9 @@ pub fn describe_entity_with(
         best_feature: usize,
         coherence: Option<f32>,
         relabelled: bool,
+        /// Best z over the hits folded into this edge; `None` when no layer
+        /// background was available for any of them.
+        relevance: Option<f32>,
     }
 
     let entity_lower = params.entity.to_lowercase();
@@ -305,6 +317,11 @@ pub fn describe_entity_with(
     let mut edges: HashMap<String, EdgeInfo> = HashMap::new();
 
     for (layer_idx, hits) in &trace.layers {
+        let layer_stats = if params.relevance {
+            model.relevance.layer(patched, *layer_idx)
+        } else {
+            None
+        };
         for hit in hits {
             if hit.gate_score < params.min_score {
                 continue;
@@ -344,6 +361,10 @@ pub fn describe_entity_with(
             // The label only moves when asked. Scoring on its own must leave
             // every `target` byte-identical, or "adopt the filter" would
             // silently mean "rename the targets" as well.
+            let z = layer_stats
+                .as_ref()
+                .and_then(|st| st.z(hit.feature, hit.gate_score));
+
             let relabelled_to = if params.relabel {
                 verdict.as_ref().and_then(|v| v.label.clone())
             } else {
@@ -386,7 +407,15 @@ pub fn describe_entity_with(
                 best_layer: *layer_idx,
                 coherence: verdict.as_ref().map(|v| v.coherence),
                 relabelled: relabelled_to.is_some(),
+                relevance: z,
             });
+
+            // Relevance is a max over the folded hits, independent of which
+            // hit wins on gate: the edge is as surprising as its most
+            // surprising feature.
+            if let Some(zz) = z {
+                entry.relevance = Some(entry.relevance.map_or(zz, |cur| cur.max(zz)));
+            }
 
             if hit.gate_score > entry.gate {
                 entry.gate = hit.gate_score;
@@ -408,9 +437,24 @@ pub fn describe_entity_with(
 
     let mut ranked: Vec<&EdgeInfo> = edges.values().collect();
     ranked.sort_by(|a, b| {
-        b.gate
-            .partial_cmp(&a.gate)
-            .unwrap_or(std::cmp::Ordering::Equal)
+        // Relevance first when asked for; an edge without a background sorts
+        // below every edge with one, and ties (including the raw-score mode)
+        // fall through to gate score.
+        let by_rel = if params.relevance {
+            match (b.relevance, a.relevance) {
+                (Some(x), Some(y)) => x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => std::cmp::Ordering::Equal,
+            }
+        } else {
+            std::cmp::Ordering::Equal
+        };
+        by_rel.then_with(|| {
+            b.gate
+                .partial_cmp(&a.gate)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
     });
     ranked.truncate(params.limit);
 
@@ -448,6 +492,13 @@ pub fn describe_entity_with(
 
             if !info.also.is_empty() {
                 edge["also"] = serde_json::json!(info.also);
+            }
+
+            if params.relevance {
+                edge["relevance"] = match info.relevance {
+                    Some(z) => serde_json::json!((z * 100.0).round() / 100.0),
+                    None => serde_json::Value::Null,
+                };
             }
 
             if params.coherence || params.relabel || params.min_coherence > 0.0 {
@@ -526,6 +577,7 @@ async fn describe_with_cache(
             params.coherence,
             params.min_coherence,
             params.relabel,
+            params.relevance,
             &match params.baseline.as_deref() {
                 Some(b) => format!("{}~{b}", params.query),
                 None => params.query.clone(),
@@ -665,6 +717,9 @@ pub struct DescribeBody {
     /// See `DescribeParams::relabel`.
     #[serde(default = "default_true")]
     pub relabel: bool,
+    /// See `DescribeParams::relevance`.
+    #[serde(default = "default_true")]
+    pub relevance: bool,
     /// See `DescribeParams::query`.
     #[serde(default = "default_query")]
     pub query: String,
@@ -688,6 +743,7 @@ impl DescribeBody {
             coherence,
             min_coherence,
             relabel,
+            relevance,
             query,
             baseline,
             patch_set,
@@ -703,6 +759,7 @@ impl DescribeBody {
                 coherence,
                 min_coherence,
                 relabel,
+                relevance,
                 query,
                 baseline,
             },
