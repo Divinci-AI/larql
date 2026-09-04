@@ -90,6 +90,7 @@ fn targets(model: &LoadedModel, ps: Option<&PatchSetRef>, scope: Option<&str>) -
         min_score: 0.0,
         coherence: false,
         min_coherence: 0.0,
+        relabel: false,
     };
     let extract = |patched: &larql_vindex::PatchedVindex| {
         let v = larql_server::routes::describe::describe_entity_with(model, patched, &params)
@@ -253,14 +254,34 @@ fn describe_raw(
     coherence: bool,
     min_coherence: f32,
 ) -> serde_json::Value {
+    describe_with(model, coherence, min_coherence, false)
+}
+
+fn describe_with(
+    model: &LoadedModel,
+    coherence: bool,
+    min_coherence: f32,
+    relabel: bool,
+) -> serde_json::Value {
+    describe_limited(model, coherence, min_coherence, relabel, 10)
+}
+
+fn describe_limited(
+    model: &LoadedModel,
+    coherence: bool,
+    min_coherence: f32,
+    relabel: bool,
+    limit: usize,
+) -> serde_json::Value {
     let params = larql_server::routes::describe::DescribeParams {
         entity: "[5]".to_string(),
         band: "all".to_string(),
         verbose: false,
-        limit: 10,
+        limit,
         min_score: 0.0,
         coherence,
         min_coherence,
+        relabel,
     };
     larql_server::routes::describe::describe_entity_with(
         model,
@@ -366,5 +387,64 @@ fn random_embeddings_score_near_zero_and_not_near_one() {
             "random embeddings scored {c}, which is not near-orthogonal — \
              the measure is reporting structure that is not in the data"
         );
+    }
+}
+
+// ══════════════════════════════════════════════════════════════
+// The split: scoring is information, relabelling is a change
+// ══════════════════════════════════════════════════════════════
+
+#[test]
+fn scoring_alone_leaves_every_target_byte_identical() {
+    let Some(m) = tiny() else { return };
+    let raw = describe_raw(&m, false, 0.0);
+    let scored = describe_with(&m, true, 0.0, false);
+    let t = |v: &serde_json::Value| {
+        v["edges"].as_array().unwrap().iter().map(|e| e["target"].clone()).collect::<Vec<_>>()
+    };
+    // This is the property that makes the score adoptable on its own: a
+    // caller can read it, or filter on it, without a single stored edit's
+    // target changing underneath it.
+    assert_eq!(t(&raw), t(&scored));
+    for e in scored["edges"].as_array().unwrap() {
+        assert!(e.get("coherence").is_some(), "scored but not reported: {e}");
+        assert_eq!(e["label_source"], "argmax", "scoring alone must not relabel: {e}");
+    }
+}
+
+#[test]
+fn relabel_is_what_moves_the_label_and_it_implies_scoring() {
+    let Some(m) = tiny() else { return };
+    let scored = describe_with(&m, true, 0.0, false);
+    let relabelled = describe_with(&m, false, 0.0, true);
+    let t = |v: &serde_json::Value| {
+        v["edges"].as_array().unwrap().iter().map(|e| e["target"].clone()).collect::<Vec<_>>()
+    };
+    assert_ne!(t(&scored), t(&relabelled), "relabel changed nothing on a fixture where it must");
+    for e in relabelled["edges"].as_array().unwrap() {
+        // relabel without coherence=true still reports the score it used.
+        assert!(e.get("coherence").is_some(), "relabel must report the score it relied on: {e}");
+    }
+}
+
+#[test]
+fn a_threshold_filters_without_relabelling() {
+    let Some(m) = tiny() else { return };
+    // Untruncated baseline: with a limit, dropping edges promotes lower-ranked
+    // ones into the window, which is correct and not a rename. The subset
+    // claim is about the universe of edges, not the top ten.
+    let raw = describe_limited(&m, false, 0.0, false, 10_000);
+    let filtered = describe_with(&m, false, 0.01, false);
+    let targets = |v: &serde_json::Value| {
+        v["edges"].as_array().unwrap().iter()
+            .map(|e| e["target"].as_str().unwrap().to_string())
+            .collect::<std::collections::HashSet<_>>()
+    };
+    let (r, f) = (targets(&raw), targets(&filtered));
+    // Every surviving target is one the raw answer already had, under the
+    // same name: the filter removed edges and renamed none.
+    for k in &f { assert!(r.contains(k), "filter introduced or renamed a target: {k}"); }
+    for e in filtered["edges"].as_array().unwrap() {
+        assert_eq!(e["label_source"], "argmax");
     }
 }

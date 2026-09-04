@@ -654,6 +654,23 @@ pub async fn delete(app: axum::Router, path: &str) -> axum::http::Response<Body>
     .unwrap()
 }
 
+pub async fn delete_h(
+    app: axum::Router,
+    path: &str,
+    h: (&str, &str),
+) -> axum::http::Response<Body> {
+    app.oneshot(
+        Request::builder()
+            .method("DELETE")
+            .uri(path)
+            .header(h.0, h.1)
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap()
+}
+
 // ══════════════════════════════════════════════════════════════
 // Patch helpers
 // ══════════════════════════════════════════════════════════════

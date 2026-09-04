@@ -219,13 +219,32 @@ pub mod schemas {
         pub latency_ms: f64,
     }
 
+    /// One `(layer, feature)` slot an insert claimed.
+    #[derive(Serialize, ToSchema)]
+    pub struct InsertSlot {
+        pub layer: usize,
+        pub feature: usize,
+    }
+
     #[derive(Serialize, ToSchema)]
     pub struct InsertResponse {
-        pub success: bool,
         pub entity: String,
         pub relation: String,
         pub target: String,
-        pub layers_written: Vec<usize>,
+        /// Number of features written (one per insert layer).
+        pub inserted: usize,
+        /// `constellation` (trace-guided gate) or `embedding` (fallback).
+        pub mode: String,
+        pub alpha: f32,
+        pub session: Option<String>,
+        /// Name the insert is filed under in the patch stack. Listed by
+        /// `GET /v1/patches`; revert with `DELETE /v1/patches/{name}`.
+        pub applied: String,
+        pub active_patches: usize,
+        pub slots: Vec<InsertSlot>,
+        /// The installed patch, vectors included. Re-applying it through
+        /// `POST /v1/patches/apply` reproduces the insert on any instance.
+        pub patch: serde_json::Value,
         pub latency_ms: f64,
     }
 
@@ -772,6 +791,7 @@ pub mod schemas {
         schemas::ExplainResponse,
         crate::routes::insert::InsertRequest,
         schemas::InsertResponse,
+        schemas::InsertSlot,
         crate::routes::warmup::WarmupRequest,
         crate::routes::warmup::WarmupResponse,
         // patches

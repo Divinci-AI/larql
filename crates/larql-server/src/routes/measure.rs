@@ -204,6 +204,7 @@ fn read_against(
                 // moved, not because the gate did.
                 coherence: false,
                 min_coherence: 0.0,
+                relabel: false,
             };
             let described = describe_entity_with(model, patched, &params)?;
             gate_score_for_target(&described, target)

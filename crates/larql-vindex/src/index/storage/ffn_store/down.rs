@@ -22,10 +22,37 @@ impl VectorIndex {
             ));
         }
         let file = std::fs::File::open(&path)?;
+        // Every accessor below addresses this file as f32 `[features × hidden]`
+        // per layer. A file of any other size is not "partially usable": an
+        // f16 file (half the size) reads as f32 garbage for the first half of
+        // the layers and `None` for the rest, and the walk FFN then serves
+        // those numbers as the model's down projection. A Gemma-4-E2B vindex
+        // shipped exactly that file — `down_features.bin` written at f16 by
+        // an out-of-tree converter — and every walk-mode reading on it was
+        // nonsense while dense stayed correct. Refuse the file instead.
+        let expected = self.expected_down_features_bytes();
+        let actual = file.metadata()?.len() as usize;
+        if expected != 0 && actual != expected {
+            return Err(VindexError::Parse(format!(
+                "down_features.bin is {actual} bytes but this vindex needs {expected} \
+                 (f32, [features x hidden] per layer, {} layers, hidden {}). \
+                 A file half that size is f16 — rebuild it as f32 with: \
+                 cargo run --release -p larql-vindex --example build_down_features -- <vindex>",
+                self.num_layers, self.hidden_size,
+            )));
+        }
         // Demand-paged: only the activated feature vectors are read per token.
         let mmap = Arc::new(unsafe { mmap_demand_paged(&file)? });
         Arc::make_mut(&mut self.storage).set_down_features(mmap);
         Ok(())
+    }
+
+    /// Byte length a well-formed `down_features.bin` has for this index:
+    /// one f32 `[num_features(layer) × hidden]` block per layer.
+    pub fn expected_down_features_bytes(&self) -> usize {
+        (0..self.num_layers)
+            .map(|l| self.num_features(l) * self.hidden_size * 4)
+            .sum()
     }
 
     /// Whether feature-major down vectors are loaded.
@@ -109,6 +136,14 @@ mod tests {
         v
     }
 
+    /// Mmap `dir/down_features.bin` onto `v` without the size guard, for
+    /// tests of the accessors' own bounds checks.
+    fn attach_down_features_unchecked(v: &mut VectorIndex, dir: &std::path::Path) {
+        let file = std::fs::File::open(dir.join(DOWN_FEATURES_BIN)).unwrap();
+        let mmap = Arc::new(unsafe { mmap_demand_paged(&file).unwrap() });
+        Arc::make_mut(&mut v.storage).set_down_features(mmap);
+    }
+
     /// Write `floats` as raw f32 bytes into `dir/down_features.bin`.
     fn write_down_features(dir: &std::path::Path, floats: &[f32]) {
         let bytes: Vec<u8> = floats.iter().flat_map(|f| f.to_le_bytes()).collect();
@@ -123,6 +158,27 @@ mod tests {
             .load_down_features(tmp.path())
             .expect_err("missing file errors");
         assert!(err.to_string().contains("down_features.bin"));
+    }
+
+    #[test]
+    fn load_down_features_refuses_a_file_of_the_wrong_size() {
+        // 1 layer, intermediate=2, hidden=4 → 8 f32 = 32 bytes. An f16 file of
+        // the same matrix is 16 bytes; reading it as f32 is garbage, not a
+        // degraded answer, so the load must fail rather than mmap it.
+        let tmp = tempfile::tempdir().unwrap();
+        let half: Vec<u8> = (0..16u8).collect();
+        std::fs::write(tmp.path().join(DOWN_FEATURES_BIN), &half).unwrap();
+
+        let mut v = vindex_with_layer_features(1, 2, 4);
+        assert_eq!(v.expected_down_features_bytes(), 32);
+        let err = v
+            .load_down_features(tmp.path())
+            .expect_err("half-size file must be refused");
+        let msg = err.to_string();
+        assert!(msg.contains("16 bytes"), "{msg}");
+        assert!(msg.contains("needs 32"), "{msg}");
+        assert!(msg.contains("f16"), "{msg}");
+        assert!(!v.has_down_features());
     }
 
     #[test]
@@ -189,7 +245,10 @@ mod tests {
         write_down_features(tmp.path(), &[1.0, 2.0, 3.0, 4.0]); // 16 bytes
 
         let mut v = vindex_with_layer_features(1, 4, 4);
-        v.load_down_features(tmp.path()).unwrap();
+        // `load_down_features` now refuses a short file outright; the
+        // accessors' own bounds checks are what this test is about, so
+        // attach the mmap directly.
+        attach_down_features_unchecked(&mut v, tmp.path());
         // feature 0 fits; feature 3 does not.
         assert!(v.down_feature_vector(0, 0).is_some());
         assert!(v.down_feature_vector(0, 3).is_none());
@@ -231,7 +290,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         write_down_features(tmp.path(), &[1.0, 2.0]); // 8 bytes
         let mut v = vindex_with_layer_features(1, 4, 4);
-        v.load_down_features(tmp.path()).unwrap();
+        attach_down_features_unchecked(&mut v, tmp.path());
         assert!(v.down_layer_matrix(0).is_none());
     }
 

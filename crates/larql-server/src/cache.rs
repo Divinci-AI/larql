@@ -29,7 +29,7 @@ impl DescribeCache {
 
     /// Build a cache key from describe parameters.
     pub fn key(model_id: &str, entity: &str, band: &str, limit: usize, min_score: f32) -> String {
-        Self::key_scoped(None, model_id, entity, band, limit, min_score, false, 0.0)
+        Self::key_scoped(None, model_id, entity, band, limit, min_score, false, 0.0, false)
     }
 
     /// Cache key including the session scope.
@@ -51,6 +51,7 @@ impl DescribeCache {
         min_score: f32,
         coherence: bool,
         min_coherence: f32,
+        relabel: bool,
     ) -> String {
         // Anything that changes the ANSWER belongs in the key. Coherence
         // renames targets and can drop edges, so a key without it would serve a
@@ -58,7 +59,7 @@ impl DescribeCache {
         // class of bug as sharing one entry across two overlays, and just as
         // invisible in a log.
         format!(
-            "{}:{}:{}:{}:{}:{}:{}:{}",
+            "{}:{}:{}:{}:{}:{}:{}:{}:{}",
             session_id.unwrap_or("-"),
             model_id,
             entity,
@@ -66,7 +67,8 @@ impl DescribeCache {
             limit,
             min_score as u32,
             coherence as u8,
-            (min_coherence * 1000.0) as i32
+            (min_coherence * 1000.0) as i32,
+            relabel as u8
         )
     }
 
@@ -154,7 +156,7 @@ mod tests {
         // Trailing `0:0` is coherence-off with no threshold, i.e. the raw
         // argmax rendering. It is pinned here so that turning coherence on can
         // never quietly reuse this entry.
-        assert_eq!(key, "-:gemma-3-4b-it:France:knowledge:20:5:0:0");
+        assert_eq!(key, "-:gemma-3-4b-it:France:knowledge:20:5:0:0:0");
     }
 
     #[test]
@@ -172,29 +174,32 @@ mod tests {
     /// would otherwise decide what every other tenant sees, and a suppression
     /// applied by one would surface in another's browse view.
     #[test]
-    #[test]
     fn coherence_is_part_of_the_key() {
         // Same question, different rendering of the answer. Sharing one entry
         // would hand a relabelled result to a caller that asked for the raw one.
-        let raw = DescribeCache::key_scoped(None, "m", "Paris", "all", 20, 0.0, false, 0.0);
-        let coh = DescribeCache::key_scoped(None, "m", "Paris", "all", 20, 0.0, true, 0.0);
-        let filt = DescribeCache::key_scoped(None, "m", "Paris", "all", 20, 0.0, true, 0.3);
+        let raw = DescribeCache::key_scoped(None, "m", "Paris", "all", 20, 0.0, false, 0.0, false);
+        let coh = DescribeCache::key_scoped(None, "m", "Paris", "all", 20, 0.0, true, 0.0, false);
+        let filt = DescribeCache::key_scoped(None, "m", "Paris", "all", 20, 0.0, true, 0.3, false);
         assert_ne!(raw, coh, "coherence on/off must not share an entry");
         assert_ne!(coh, filt, "two thresholds must not share an entry");
+        // Relabelling renames targets; a scored-only answer and a relabelled
+        // one are different documents and must not share a slot.
+        let rel = DescribeCache::key_scoped(None, "m", "Paris", "all", 20, 0.0, true, 0.0, true);
+        assert_ne!(coh, rel, "relabel on/off must not share an entry");
     }
 
     #[test]
     fn key_scoped_separates_sessions_and_global() {
-        let global = DescribeCache::key_scoped(None, "m", "Paris", "all", 20, 0.0, false, 0.0);
-        let a = DescribeCache::key_scoped(Some("tenant-a"), "m", "Paris", "all", 20, 0.0, false, 0.0);
-        let b = DescribeCache::key_scoped(Some("tenant-b"), "m", "Paris", "all", 20, 0.0, false, 0.0);
+        let global = DescribeCache::key_scoped(None, "m", "Paris", "all", 20, 0.0, false, 0.0, false);
+        let a = DescribeCache::key_scoped(Some("tenant-a"), "m", "Paris", "all", 20, 0.0, false, 0.0, false);
+        let b = DescribeCache::key_scoped(Some("tenant-b"), "m", "Paris", "all", 20, 0.0, false, 0.0, false);
         assert_ne!(a, b, "two sessions must not share a cache entry");
         assert_ne!(a, global, "a session must not share the global entry");
         assert_ne!(b, global);
         // Same session + same question is still a hit, or the cache is pointless.
         assert_eq!(
             a,
-            DescribeCache::key_scoped(Some("tenant-a"), "m", "Paris", "all", 20, 0.0, false, 0.0)
+            DescribeCache::key_scoped(Some("tenant-a"), "m", "Paris", "all", 20, 0.0, false, 0.0, false)
         );
     }
 
@@ -204,7 +209,7 @@ mod tests {
     fn key_matches_key_scoped_with_no_session() {
         assert_eq!(
             DescribeCache::key("m", "Paris", "all", 20, 0.0),
-            DescribeCache::key_scoped(None, "m", "Paris", "all", 20, 0.0, false, 0.0)
+            DescribeCache::key_scoped(None, "m", "Paris", "all", 20, 0.0, false, 0.0, false)
         );
     }
 }

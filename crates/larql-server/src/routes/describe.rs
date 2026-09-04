@@ -35,18 +35,29 @@ pub struct DescribeParams {
     /// Minimum gate score to include an edge.
     #[serde(default = "default_min_score")]
     pub min_score: f32,
-    /// Score each feature's top-k for coherence, and label it from the whole
-    /// cluster instead of the logit argmax.
+    /// Score each feature's top-k for coherence and report it on the edge.
     ///
-    /// Off by default: it changes what `target` says, and callers have stored
-    /// edits keyed to the old labels. See `crate::coherence`.
+    /// Scoring never changes `target`: with this alone the labels are exactly
+    /// what they are without it. That is what lets the score be adopted —
+    /// as a filter, or just as information — without touching stored edits,
+    /// which are keyed to the current labels. See `crate::coherence`.
     #[serde(default)]
     pub coherence: bool,
-    /// Drop edges whose coherence falls below this. Only read when `coherence`
-    /// is set. 0.0 reports without filtering, which is how it should be
-    /// measured before it is trusted.
+    /// Drop edges whose coherence falls below this. Implies `coherence`.
+    /// 0.0 reports without filtering, which is how it should be measured
+    /// before it is trusted.
     #[serde(default)]
     pub min_coherence: f32,
+    /// Label each feature from its cluster (centroid-nearest, preferring the
+    /// entity's script) instead of the logit argmax. Implies `coherence`.
+    ///
+    /// Separate from scoring because the evidence is separate: measured
+    /// 2026-09-01/03 on production, the score cleanly separates real features
+    /// from noise, while relabelling is an improvement on the coherent ones
+    /// and a coin-flip inside the noise. A caller can adopt the filter
+    /// without renaming the targets its edits point at.
+    #[serde(default)]
+    pub relabel: bool,
 }
 
 fn default_band() -> String {
@@ -149,7 +160,8 @@ pub fn describe_entity_with(
             // weighted top-k: a token the feature pushes DOWN is not part of
             // what the feature is about, and letting it into the centroid would
             // drag a perfectly coherent feature's score toward zero.
-            let verdict = if params.coherence {
+            let scoring = params.coherence || params.relabel || params.min_coherence > 0.0;
+            let verdict = if scoring {
                 let cands: Vec<crate::coherence::Candidate<'_>> = hit
                     .meta
                     .top_k
@@ -168,14 +180,21 @@ pub fn describe_entity_with(
             // A feature we could not score has not passed the bar; it has not
             // been measured at all. Dropping it only when a bar was actually
             // set keeps `min_coherence = 0` a pure reporting mode.
-            if params.coherence && params.min_coherence > 0.0 {
+            if params.min_coherence > 0.0 {
                 match verdict.as_ref() {
                     Some(v) if v.coherence >= params.min_coherence => {}
                     _ => continue,
                 }
             }
 
-            let relabelled_to = verdict.as_ref().and_then(|v| v.label.clone());
+            // The label only moves when asked. Scoring on its own must leave
+            // every `target` byte-identical, or "adopt the filter" would
+            // silently mean "rename the targets" as well.
+            let relabelled_to = if params.relabel {
+                verdict.as_ref().and_then(|v| v.label.clone())
+            } else {
+                None
+            };
             let tok: &str = relabelled_to
                 .as_deref()
                 .unwrap_or(hit.meta.top_token.as_str());
@@ -272,7 +291,7 @@ pub fn describe_entity_with(
                 edge["also"] = serde_json::json!(info.also);
             }
 
-            if params.coherence {
+            if params.coherence || params.relabel || params.min_coherence > 0.0 {
                 edge["coherence"] = match info.coherence {
                     Some(c) => serde_json::json!((c * 1000.0).round() / 1000.0),
                     // Explicitly null rather than absent: "could not be scored"
@@ -337,6 +356,7 @@ async fn describe_with_cache(
             params.min_score,
             params.coherence,
             params.min_coherence,
+            params.relabel,
         );
         if let Some(cached) = state.describe_cache.get(&key) {
             let etag = crate::etag::compute_etag(&cached);
@@ -466,6 +486,9 @@ pub struct DescribeBody {
     /// See `DescribeParams::min_coherence`.
     #[serde(default)]
     pub min_coherence: f32,
+    /// See `DescribeParams::relabel`.
+    #[serde(default)]
+    pub relabel: bool,
     /// The overlay to answer from. Omitted, this behaves exactly like the GET.
     #[serde(default)]
     pub patch_set: Option<crate::overlay_cache::PatchSetRef>,
@@ -481,6 +504,7 @@ impl DescribeBody {
             min_score,
             coherence,
             min_coherence,
+            relabel,
             patch_set,
         } = self;
         (
@@ -492,6 +516,7 @@ impl DescribeBody {
                 min_score,
                 coherence,
                 min_coherence,
+                relabel,
             },
             patch_set,
         )

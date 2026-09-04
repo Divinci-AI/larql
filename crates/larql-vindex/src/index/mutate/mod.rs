@@ -70,6 +70,19 @@ impl VectorIndex {
             .insert((layer, feature), vector);
     }
 
+    /// Drop the down vector override for a feature, if any, so the slot
+    /// reads the model's own down weight row again. Used when a patch that
+    /// installed the override is removed from an overlay.
+    pub fn clear_down_vector(&mut self, layer: usize, feature: usize) {
+        self.metadata.down_overrides.remove(&(layer, feature));
+    }
+
+    /// Drop the up vector override for a feature, if any. Mirrors
+    /// [`Self::clear_down_vector`].
+    pub fn clear_up_vector(&mut self, layer: usize, feature: usize) {
+        self.metadata.up_overrides.remove(&(layer, feature));
+    }
+
     /// All in-memory down vector overrides keyed by `(layer, feature)`.
     /// Used by `COMPILE INTO VINDEX` to bake the overrides into a fresh
     /// copy of `down_weights.bin`.

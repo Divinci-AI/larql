@@ -230,7 +230,21 @@ impl PatchedVindex {
     /// Remove the last applied patch and rebuild overrides.
     pub fn remove_patch(&mut self, index: usize) {
         if index < self.patches.len() {
-            self.patches.remove(index);
+            let removed = self.patches.remove(index);
+            // Gate and meta overrides are rebuilt from scratch below, but
+            // up/down vector overrides live on the cloned base and would
+            // otherwise outlive the patch that installed them: a reverted
+            // INSERT kept pushing its target through the slot's down row.
+            // Clear the removed patch's slots first; the rebuild re-installs
+            // whatever the remaining patches set on the same keys.
+            for op in &removed.operations {
+                if let (PatchOp::Insert { .. } | PatchOp::Update { .. }, Some((layer, feature))) =
+                    (op, op.key())
+                {
+                    self.base.clear_down_vector(layer, feature);
+                    self.base.clear_up_vector(layer, feature);
+                }
+            }
             self.rebuild_overrides();
         }
     }
@@ -469,6 +483,53 @@ mod tests {
         assert_eq!(pv.patches.len(), 2);
         assert!(pv.overrides_meta.contains_key(&(0, 0)));
         assert!(pv.overrides_meta.contains_key(&(0, 1)));
+    }
+
+    #[test]
+    fn remove_patch_clears_the_removed_patches_vector_overrides() {
+        let mut pv = PatchedVindex::new(VectorIndex::new(
+            vec![Some(crate::ndarray::Array2::<f32>::zeros((8, 4)))],
+            vec![Some(vec![None; 8])],
+            1,
+            4,
+        ));
+        let down = encode_gate_vector(&[1.0, 2.0, 3.0, 4.0]);
+        let mine = make_patch(vec![PatchOp::Insert {
+            layer: 0,
+            feature: 5,
+            relation: None,
+            entity: "Mars".into(),
+            target: "Olympus".into(),
+            confidence: None,
+            gate_vector_b64: Some(encode_gate_vector(&[1.0, 0.0, 0.0, 0.0])),
+            up_vector_b64: Some(down.clone()),
+            down_vector_b64: Some(down.clone()),
+            down_meta: None,
+        }]);
+        let theirs = make_patch(vec![PatchOp::Insert {
+            layer: 0,
+            feature: 6,
+            relation: None,
+            entity: "Venus".into(),
+            target: "Ishtar".into(),
+            confidence: None,
+            gate_vector_b64: None,
+            up_vector_b64: None,
+            down_vector_b64: Some(down),
+            down_meta: None,
+        }]);
+        pv.apply_patch(mine);
+        pv.apply_patch(theirs);
+        assert!(pv.base().down_override_at(0, 5).is_some());
+        assert!(pv.base().up_override_at(0, 5).is_some());
+
+        pv.remove_patch(0);
+
+        // The reverted insert's slot reads the model's own rows again …
+        assert!(pv.base().down_override_at(0, 5).is_none());
+        assert!(pv.base().up_override_at(0, 5).is_none());
+        // … while the surviving patch's override is re-installed by the rebuild.
+        assert!(pv.base().down_override_at(0, 6).is_some());
     }
 
     #[test]
