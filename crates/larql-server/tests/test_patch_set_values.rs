@@ -275,13 +275,15 @@ fn describe_limited(
     min_coherence: f32,
     relabel: bool,
     limit: usize,
-    window: usize,
 ) -> serde_json::Value {
     let params = larql_server::routes::describe::DescribeParams {
         entity: "[5]".to_string(),
         band: "all".to_string(),
         verbose: false,
         limit,
+        // The pre-2026-09-04 semantics, where the window WAS the limit: these
+        // tests reason about the returned set, not the candidate pool.
+        window: limit,
         min_score: 0.0,
         coherence,
         min_coherence,

@@ -150,7 +150,7 @@ async fn http_walk_multi_model_not_found() {
 #[tokio::test]
 async fn http_describe_functional_returns_edges() {
     let app = single_model_router(state(vec![model_functional("test")]));
-    let resp = get(app, "/v1/describe?entity=France&min_score=0").await;
+    let resp = get(app, "/v1/describe?entity=France&min_score=0&min_coherence=0&relabel=false").await;
     assert_eq!(resp.status(), StatusCode::OK);
     let body = body_json(resp.into_body()).await;
     let edges = body["edges"].as_array().unwrap();
@@ -163,7 +163,7 @@ async fn http_describe_functional_returns_edges() {
 #[tokio::test]
 async fn http_describe_functional_paris_edge() {
     let app = single_model_router(state(vec![model_functional("test")]));
-    let resp = get(app, "/v1/describe?entity=France&min_score=0").await;
+    let resp = get(app, "/v1/describe?entity=France&min_score=0&min_coherence=0&relabel=false").await;
     assert_eq!(resp.status(), StatusCode::OK);
     let body = body_json(resp.into_body()).await;
     let edges = body["edges"].as_array().unwrap();
@@ -330,7 +330,7 @@ async fn http_describe_with_probe_label_includes_relation_and_source() {
     // Same: probe label on (0,0) → "capital". Describe for France should produce
     // an edge for Paris with relation="capital" and source="probe".
     let app = single_model_router(state(vec![model_functional_with_labels("test")]));
-    let resp = get(app, "/v1/describe?entity=France&min_score=0").await;
+    let resp = get(app, "/v1/describe?entity=France&min_score=0&min_coherence=0&relabel=false").await;
     assert_eq!(resp.status(), StatusCode::OK);
     let body = body_json(resp.into_body()).await;
     let edges = body["edges"].as_array().unwrap();
@@ -561,12 +561,12 @@ async fn http_describe_functional_cache_hit_same_etag() {
     // Two requests to same entity → same etag (cache hit).
     let st = state_with_cache(vec![model_functional("test")], 100);
     let app1 = single_model_router(st.clone());
-    let r1 = get(app1, "/v1/describe?entity=France&min_score=0").await;
+    let r1 = get(app1, "/v1/describe?entity=France&min_score=0&min_coherence=0&relabel=false").await;
     assert_eq!(r1.status(), StatusCode::OK);
     let etag1 = r1.headers()["etag"].to_str().unwrap().to_string();
 
     let app2 = single_model_router(st.clone());
-    let r2 = get(app2, "/v1/describe?entity=France&min_score=0").await;
+    let r2 = get(app2, "/v1/describe?entity=France&min_score=0&min_coherence=0&relabel=false").await;
     assert_eq!(r2.status(), StatusCode::OK);
     let etag2 = r2.headers()["etag"].to_str().unwrap().to_string();
 
