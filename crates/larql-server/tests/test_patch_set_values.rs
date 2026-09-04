@@ -93,6 +93,7 @@ fn targets(model: &LoadedModel, ps: Option<&PatchSetRef>, scope: Option<&str>) -
         min_coherence: 0.0,
         relabel: false,
         relevance: true,
+        background: "vocabulary".into(),
         query: "embedding".into(),
         baseline: None,
     };
@@ -175,7 +176,10 @@ fn carrying_a_patch_set_leaves_the_base_untouched() {
 #[test]
 fn an_empty_patch_set_reads_like_the_base() {
     let Some(m) = tiny() else { return };
-    assert_eq!(targets(&m, None, None), targets(&m, Some(&patch_set(vec![])), None));
+    assert_eq!(
+        targets(&m, None, None),
+        targets(&m, Some(&patch_set(vec![])), None)
+    );
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -194,7 +198,10 @@ fn two_callers_get_their_own_overlays() {
     let ta2 = targets(&m, Some(&a), Some("wl:tenant-a"));
 
     assert!(!ta1.contains(&"[124]".to_string()), "A: {ta1:?}");
-    assert!(tb.contains(&"[124]".to_string()), "B must be unaffected: {tb:?}");
+    assert!(
+        tb.contains(&"[124]".to_string()),
+        "B must be unaffected: {tb:?}"
+    );
     // A after B: a shared cache entry would show up as A inheriting B's answer.
     assert_eq!(ta1, ta2, "A's second read disagreed with its first");
 }
@@ -253,11 +260,7 @@ fn eviction_costs_latency_and_not_correctness() {
 // Coherence: a rendering change, and it must stay opt-in
 // ══════════════════════════════════════════════════════════════
 
-fn describe_raw(
-    model: &LoadedModel,
-    coherence: bool,
-    min_coherence: f32,
-) -> serde_json::Value {
+fn describe_raw(model: &LoadedModel, coherence: bool, min_coherence: f32) -> serde_json::Value {
     describe_with(model, coherence, min_coherence, false)
 }
 
@@ -288,6 +291,27 @@ fn describe_ranked(
     limit: usize,
     relevance: bool,
 ) -> serde_json::Value {
+    describe_against(
+        model,
+        coherence,
+        min_coherence,
+        relabel,
+        limit,
+        relevance,
+        "vocabulary",
+    )
+    .expect("vocabulary background is always valid")
+}
+
+fn describe_against(
+    model: &LoadedModel,
+    coherence: bool,
+    min_coherence: f32,
+    relabel: bool,
+    limit: usize,
+    relevance: bool,
+    background: &str,
+) -> Result<serde_json::Value, larql_server::error::ServerError> {
     let params = larql_server::routes::describe::DescribeParams {
         entity: "[5]".to_string(),
         band: "all".to_string(),
@@ -301,6 +325,7 @@ fn describe_ranked(
         min_coherence,
         relabel,
         relevance,
+        background: background.into(),
         query: "embedding".into(),
         baseline: None,
     };
@@ -309,7 +334,6 @@ fn describe_ranked(
         &model.patched.blocking_read(),
         &params,
     )
-    .expect("describe must succeed")
 }
 
 #[test]
@@ -329,7 +353,10 @@ fn coherence_off_is_byte_identical_to_before() {
             edge.get("coherence").is_none(),
             "coherence leaked into the default response: {edge}"
         );
-        assert!(edge.get("label_source").is_none(), "label_source leaked: {edge}");
+        assert!(
+            edge.get("label_source").is_none(),
+            "label_source leaked: {edge}"
+        );
     }
 }
 
@@ -376,9 +403,17 @@ fn a_threshold_only_ever_removes_edges() {
             .unwrap_or_default()
     };
     let (a, s) = (key(&all), key(&strict));
-    assert!(s.len() <= a.len(), "a threshold grew the result: {} -> {}", a.len(), s.len());
+    assert!(
+        s.len() <= a.len(),
+        "a threshold grew the result: {} -> {}",
+        a.len(),
+        s.len()
+    );
     for k in &s {
-        assert!(a.contains(k), "threshold introduced an edge that was not there: {k}");
+        assert!(
+            a.contains(k),
+            "threshold introduced an edge that was not there: {k}"
+        );
     }
 }
 
@@ -401,7 +436,10 @@ fn random_embeddings_score_near_zero_and_not_near_one() {
         .filter_map(|e| e["coherence"].as_f64())
         .collect();
 
-    assert!(!scores.is_empty(), "nothing was scored; the assertion below is vacuous");
+    assert!(
+        !scores.is_empty(),
+        "nothing was scored; the assertion below is vacuous"
+    );
     for c in &scores {
         assert!(
             c.abs() < 0.5,
@@ -421,7 +459,12 @@ fn scoring_alone_leaves_every_target_byte_identical() {
     let raw = describe_raw(&m, false, 0.0);
     let scored = describe_with(&m, true, 0.0, false);
     let t = |v: &serde_json::Value| {
-        v["edges"].as_array().unwrap().iter().map(|e| e["target"].clone()).collect::<Vec<_>>()
+        v["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["target"].clone())
+            .collect::<Vec<_>>()
     };
     // This is the property that makes the score adoptable on its own: a
     // caller can read it, or filter on it, without a single stored edit's
@@ -429,7 +472,10 @@ fn scoring_alone_leaves_every_target_byte_identical() {
     assert_eq!(t(&raw), t(&scored));
     for e in scored["edges"].as_array().unwrap() {
         assert!(e.get("coherence").is_some(), "scored but not reported: {e}");
-        assert_eq!(e["label_source"], "argmax", "scoring alone must not relabel: {e}");
+        assert_eq!(
+            e["label_source"], "argmax",
+            "scoring alone must not relabel: {e}"
+        );
     }
 }
 
@@ -439,12 +485,24 @@ fn relabel_is_what_moves_the_label_and_it_implies_scoring() {
     let scored = describe_with(&m, true, 0.0, false);
     let relabelled = describe_with(&m, false, 0.0, true);
     let t = |v: &serde_json::Value| {
-        v["edges"].as_array().unwrap().iter().map(|e| e["target"].clone()).collect::<Vec<_>>()
+        v["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["target"].clone())
+            .collect::<Vec<_>>()
     };
-    assert_ne!(t(&scored), t(&relabelled), "relabel changed nothing on a fixture where it must");
+    assert_ne!(
+        t(&scored),
+        t(&relabelled),
+        "relabel changed nothing on a fixture where it must"
+    );
     for e in relabelled["edges"].as_array().unwrap() {
         // relabel without coherence=true still reports the score it used.
-        assert!(e.get("coherence").is_some(), "relabel must report the score it relied on: {e}");
+        assert!(
+            e.get("coherence").is_some(),
+            "relabel must report the score it relied on: {e}"
+        );
     }
 }
 
@@ -457,14 +515,19 @@ fn a_threshold_filters_without_relabelling() {
     let raw = describe_limited(&m, false, 0.0, false, 10_000);
     let filtered = describe_with(&m, false, 0.01, false);
     let targets = |v: &serde_json::Value| {
-        v["edges"].as_array().unwrap().iter()
+        v["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
             .map(|e| e["target"].as_str().unwrap().to_string())
             .collect::<std::collections::HashSet<_>>()
     };
     let (r, f) = (targets(&raw), targets(&filtered));
     // Every surviving target is one the raw answer already had, under the
     // same name: the filter removed edges and renamed none.
-    for k in &f { assert!(r.contains(k), "filter introduced or renamed a target: {k}"); }
+    for k in &f {
+        assert!(r.contains(k), "filter introduced or renamed a target: {k}");
+    }
     for e in filtered["edges"].as_array().unwrap() {
         assert_eq!(e["label_source"], "argmax");
     }
@@ -488,6 +551,7 @@ fn residual_mode_either_runs_the_model_or_says_why_it_cannot() {
         min_coherence: 0.0,
         relabel: false,
         relevance: true,
+        background: "vocabulary".into(),
         query: "residual".into(),
         baseline: None,
     };
@@ -502,7 +566,10 @@ fn residual_mode_either_runs_the_model_or_says_why_it_cannot() {
             // been scored against a captured residual. A silent partial
             // answer is the failure this field exists to expose.
             assert_eq!(v["query"], "residual");
-            assert_eq!(v["residual_layers"], v["scanned_layers"], "layers missing residuals: {v}");
+            assert_eq!(
+                v["residual_layers"], v["scanned_layers"],
+                "layers missing residuals: {v}"
+            );
         }
         Err(e) => {
             // Without weights the only acceptable answer is a refusal that
@@ -528,11 +595,19 @@ fn an_unknown_query_mode_is_rejected_not_defaulted() {
         min_coherence: 0.0,
         relabel: false,
         relevance: true,
+        background: "vocabulary".into(),
         query: "activations".into(),
         baseline: None,
     };
-    let r = larql_server::routes::describe::describe_entity_with(&m, &m.patched.blocking_read(), &params);
-    assert!(r.is_err(), "a typo in `query` must not silently mean `embedding`");
+    let r = larql_server::routes::describe::describe_entity_with(
+        &m,
+        &m.patched.blocking_read(),
+        &params,
+    );
+    assert!(
+        r.is_err(),
+        "a typo in `query` must not silently mean `embedding`"
+    );
 }
 
 #[test]
@@ -552,16 +627,24 @@ fn contrasting_an_entity_with_itself_scores_nothing() {
         min_coherence: 0.0,
         relabel: false,
         relevance: true,
+        background: "vocabulary".into(),
         query: "residual".into(),
         baseline: Some("[5]".into()),
     };
-    let r = larql_server::routes::describe::describe_entity_with(&m, &m.patched.blocking_read(), &params);
+    let r = larql_server::routes::describe::describe_entity_with(
+        &m,
+        &m.patched.blocking_read(),
+        &params,
+    );
     match r {
         Ok(v) => {
             assert_eq!(v["contrasted_layers"], v["scanned_layers"], "{v}");
             // And never more than scanned: the count is over the layers that
             // were scored, not every layer the forward pass captured.
-            assert!(v["contrasted_layers"].as_u64() <= v["scanned_layers"].as_u64(), "{v}");
+            assert!(
+                v["contrasted_layers"].as_u64() <= v["scanned_layers"].as_u64(),
+                "{v}"
+            );
             for e in v["edges"].as_array().unwrap() {
                 let s = e["gate_score"].as_f64().unwrap();
                 assert!(s.abs() < 1e-6, "self-contrast left a non-zero score: {e}");
@@ -579,10 +662,21 @@ fn contrasting_an_entity_with_itself_scores_nothing() {
 fn relevance_off_ranks_by_gate_score_exactly_as_before() {
     let Some(m) = tiny() else { return };
     let v = describe_ranked(&m, false, 0.0, false, 50, false);
-    let scores: Vec<f64> = v["edges"].as_array().unwrap().iter().map(|e| e["gate_score"].as_f64().unwrap()).collect();
-    assert!(scores.windows(2).all(|w| w[0] >= w[1]), "not sorted by gate: {scores:?}");
+    let scores: Vec<f64> = v["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["gate_score"].as_f64().unwrap())
+        .collect();
+    assert!(
+        scores.windows(2).all(|w| w[0] >= w[1]),
+        "not sorted by gate: {scores:?}"
+    );
     for e in v["edges"].as_array().unwrap() {
-        assert!(e.get("relevance").is_none(), "relevance leaked into the raw mode: {e}");
+        assert!(
+            e.get("relevance").is_none(),
+            "relevance leaked into the raw mode: {e}"
+        );
     }
 }
 
@@ -592,8 +686,18 @@ fn relevance_on_reports_a_score_and_ranks_by_it() {
     let v = describe_ranked(&m, false, 0.0, false, 50, true);
     let edges = v["edges"].as_array().unwrap();
     assert!(!edges.is_empty());
-    let zs: Vec<f64> = edges.iter().map(|e| e["relevance"].as_f64().expect("relevance must be a number on this fixture")).collect();
-    assert!(zs.windows(2).all(|w| w[0] >= w[1]), "not sorted by relevance: {zs:?}");
+    let zs: Vec<f64> = edges
+        .iter()
+        .map(|e| {
+            e["relevance"]
+                .as_f64()
+                .expect("relevance must be a number on this fixture")
+        })
+        .collect();
+    assert!(
+        zs.windows(2).all(|w| w[0] >= w[1]),
+        "not sorted by relevance: {zs:?}"
+    );
     assert!(zs.iter().all(|z| z.is_finite()));
 }
 
@@ -603,7 +707,97 @@ fn relevance_changes_order_but_not_membership() {
     // Same universe either way: relevance re-orders, it never adds or drops.
     let raw = describe_ranked(&m, false, 0.0, false, 10_000, false);
     let rel = describe_ranked(&m, false, 0.0, false, 10_000, true);
-    let set = |v: &serde_json::Value| v["edges"].as_array().unwrap().iter()
-        .map(|e| format!("{}@{}", e["target"], e["layer"])).collect::<std::collections::BTreeSet<_>>();
+    let set = |v: &serde_json::Value| {
+        v["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| format!("{}@{}", e["target"], e["layer"]))
+            .collect::<std::collections::BTreeSet<_>>()
+    };
     assert_eq!(set(&raw), set(&rel));
+}
+
+// ══════════════════════════════════════════════════════════════
+// Relevance background: entities by default, vocabulary on request
+// ══════════════════════════════════════════════════════════════
+
+#[test]
+fn the_loaded_model_has_an_entity_panel_and_reports_it() {
+    let Some(m) = tiny() else { return };
+    let v = describe_against(&m, false, 0.0, false, 50, true, "entities").unwrap();
+    assert_eq!(v["relevance_background"], "entities");
+    let panel = v["relevance_panel"].as_u64().unwrap();
+    assert!(
+        panel >= 2,
+        "entity panel too small to give a background: {panel}"
+    );
+    let edges = v["edges"].as_array().unwrap();
+    assert!(!edges.is_empty());
+    for e in edges {
+        let z = e["relevance"]
+            .as_f64()
+            .expect("every edge carries a relevance under the entity panel");
+        assert!(z.is_finite());
+    }
+}
+
+#[test]
+fn the_two_backgrounds_are_two_rankings_of_one_set() {
+    let Some(m) = tiny() else { return };
+    let ent = describe_against(&m, false, 0.0, false, 10_000, true, "entities").unwrap();
+    let voc = describe_against(&m, false, 0.0, false, 10_000, true, "vocabulary").unwrap();
+    assert_eq!(voc["relevance_background"], "vocabulary");
+    let set = |v: &serde_json::Value| {
+        v["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| format!("{}@{}", e["target"], e["layer"]))
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    assert_eq!(
+        set(&ent),
+        set(&voc),
+        "a background re-orders; it never adds or drops"
+    );
+    // And they are genuinely different backgrounds, not one panel under two
+    // names: at least one edge's relevance differs.
+    let z = |v: &serde_json::Value| {
+        v["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| {
+                (
+                    format!("{}@{}", e["target"], e["layer"]),
+                    e["relevance"].as_f64().unwrap(),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    let (ze, zv) = (z(&ent), z(&voc));
+    assert!(
+        ze.iter().any(|(k, a)| (a - zv[k]).abs() > 1e-3),
+        "both backgrounds gave identical z for every edge"
+    );
+}
+
+#[test]
+fn an_unknown_background_is_a_bad_request_not_a_silent_default() {
+    let Some(m) = tiny() else { return };
+    match describe_against(&m, false, 0.0, false, 50, true, "corpus") {
+        Err(larql_server::error::ServerError::BadRequest(msg)) => {
+            assert!(msg.contains("corpus"), "{msg}")
+        }
+        other => panic!("expected BadRequest, got {other:?}"),
+    }
+}
+
+#[test]
+fn relevance_off_ignores_the_background_entirely() {
+    let Some(m) = tiny() else { return };
+    let v = describe_against(&m, false, 0.0, false, 50, false, "entities").unwrap();
+    assert!(v.get("relevance_background").is_none());
+    assert!(v.get("relevance_panel").is_none());
 }

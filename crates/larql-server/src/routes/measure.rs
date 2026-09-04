@@ -209,6 +209,7 @@ fn read_against(
                 min_coherence: 0.0,
                 relabel: true,
                 relevance: true,
+                background: crate::relevance::Background::DEFAULT.as_str().into(),
                 query: "embedding".into(),
                 baseline: None,
             };
@@ -251,9 +252,7 @@ fn gate_score_for_target(described: &serde_json::Value, target: &str) -> Option<
 ///
 /// A reading that fails becomes `(null, Some(why))` rather than an early
 /// return, so the apply still happens. See the module docs.
-fn split_reading(
-    r: Result<serde_json::Value, ServerError>,
-) -> (serde_json::Value, Option<String>) {
+fn split_reading(r: Result<serde_json::Value, ServerError>) -> (serde_json::Value, Option<String>) {
     match r {
         Ok(v) => (v, None),
         Err(e) => (serde_json::Value::Null, Some(e.to_string())),
@@ -432,7 +431,10 @@ mod tests {
 
     #[test]
     fn empty_or_malformed_describe_is_none() {
-        assert_eq!(gate_score_for_target(&described(serde_json::json!([])), "Gates"), None);
+        assert_eq!(
+            gate_score_for_target(&described(serde_json::json!([])), "Gates"),
+            None
+        );
         assert_eq!(
             gate_score_for_target(&serde_json::json!({"entity": "Paris"}), "Gates"),
             None

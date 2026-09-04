@@ -78,6 +78,12 @@ pub struct DescribeParams {
     /// and `min_score` still applies to it.
     #[serde(default = "default_true")]
     pub relevance: bool,
+    /// Which panel relevance is measured against: `entities` (default) or
+    /// `vocabulary`. See `crate::relevance::Background`. Kept selectable so
+    /// the two can be compared on one deployment; the response reports the
+    /// one used and its size as `relevance_background` / `relevance_panel`.
+    #[serde(default = "default_background")]
+    pub background: String,
     /// What the gates are scored against.
     ///
     /// `embedding` (default): the entity's raw input embedding, averaged over
@@ -113,6 +119,9 @@ pub const QUERY_RESIDUAL: &str = "residual";
 
 fn default_query() -> String {
     QUERY_EMBEDDING.into()
+}
+fn default_background() -> String {
+    crate::relevance::Background::DEFAULT.as_str().into()
 }
 
 fn default_band() -> String {
@@ -164,23 +173,22 @@ pub fn describe_entity_with(
         }));
     }
 
-    let hidden = model.embeddings.shape()[1];
-    let query = if token_ids.len() == 1 {
-        model
-            .embeddings
-            .row(token_ids[0] as usize)
-            .mapv(|v| v * model.embed_scale)
-    } else {
-        let mut avg = larql_vindex::ndarray::Array1::<f32>::zeros(hidden);
-        for &tok in &token_ids {
-            avg += &model
-                .embeddings
-                .row(tok as usize)
-                .mapv(|v| v * model.embed_scale);
-        }
-        avg /= token_ids.len() as f32;
-        avg
-    };
+    // The same construction the relevance panel uses, so a query and its
+    // background are on one footing.
+    let query = crate::relevance::entity_query(
+        &model.embeddings,
+        model.embed_scale,
+        &model.tokenizer,
+        params.entity.as_str(),
+    )
+    .ok_or_else(|| ServerError::Internal("entity produced no query".into()))?;
+
+    let background = crate::relevance::Background::parse(&params.background).ok_or_else(|| {
+        ServerError::BadRequest(format!(
+            "background must be `entities` or `vocabulary`, got `{}`",
+            params.background
+        ))
+    })?;
 
     let bands = get_layer_bands(model);
 
@@ -274,7 +282,9 @@ pub fn describe_entity_with(
 
             let mut layers = Vec::with_capacity(scan_layers.len());
             for &layer in &scan_layers {
-                let Some(res) = by_layer.get(&layer) else { continue };
+                let Some(res) = by_layer.get(&layer) else {
+                    continue;
+                };
                 let r = larql_vindex::ndarray::Array1::from(res.clone());
                 let t = patched.walk(&r, &[layer], params.window);
                 layers.extend(t.layers);
@@ -318,7 +328,7 @@ pub fn describe_entity_with(
 
     for (layer_idx, hits) in &trace.layers {
         let layer_stats = if params.relevance {
-            model.relevance.layer(patched, *layer_idx)
+            model.relevance.layer(patched, background, *layer_idx)
         } else {
             None
         };
@@ -527,6 +537,10 @@ pub fn describe_entity_with(
         "edges": edge_json,
         "latency_ms": elapsed_ms(start),
     });
+    if params.relevance {
+        out["relevance_background"] = serde_json::json!(background.as_str());
+        out["relevance_panel"] = serde_json::json!(model.relevance.panel_size(background));
+    }
     if params.query != QUERY_EMBEDDING {
         out["query"] = serde_json::json!(params.query);
         out["residual_layers"] = serde_json::json!(residual_layers);
@@ -578,6 +592,7 @@ async fn describe_with_cache(
             params.min_coherence,
             params.relabel,
             params.relevance,
+            &params.background,
             &match params.baseline.as_deref() {
                 Some(b) => format!("{}~{b}", params.query),
                 None => params.query.clone(),
@@ -720,6 +735,9 @@ pub struct DescribeBody {
     /// See `DescribeParams::relevance`.
     #[serde(default = "default_true")]
     pub relevance: bool,
+    /// See `DescribeParams::background`.
+    #[serde(default = "default_background")]
+    pub background: String,
     /// See `DescribeParams::query`.
     #[serde(default = "default_query")]
     pub query: String,
@@ -744,6 +762,7 @@ impl DescribeBody {
             min_coherence,
             relabel,
             relevance,
+            background,
             query,
             baseline,
             patch_set,
@@ -760,6 +779,7 @@ impl DescribeBody {
                 min_coherence,
                 relabel,
                 relevance,
+                background,
                 query,
                 baseline,
             },

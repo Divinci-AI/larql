@@ -378,6 +378,18 @@ pub fn load_single_vindex(
     let tokenizer = load_vindex_tokenizer(&path)?;
     let patched = PatchedVindex::new(index);
 
+    let relevance = crate::relevance::RelevanceStats::from_entities(
+        &embeddings,
+        embed_scale,
+        &tokenizer,
+        crate::relevance::ENTITY_PANEL,
+    );
+    info!(
+        "  Relevance panels: {} entities, {} vocabulary",
+        relevance.panel_size(crate::relevance::Background::Entities),
+        relevance.panel_size(crate::relevance::Background::Vocabulary),
+    );
+
     let probe_labels = load_probe_labels(&path);
     if !probe_labels.is_empty() {
         info!("  Labels: {} probe-confirmed", probe_labels.len());
@@ -414,7 +426,7 @@ pub fn load_single_vindex(
         config,
         patched: Arc::new(RwLock::new(patched)),
         overlay_cache: crate::overlay_cache::OverlayCache::with_env_capacity(),
-        relevance: crate::relevance::RelevanceStats::from_embeddings(&embeddings, embed_scale),
+        relevance,
         embeddings,
         embed_scale,
         tokenizer,
