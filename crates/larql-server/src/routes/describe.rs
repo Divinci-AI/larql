@@ -73,6 +73,19 @@ pub struct DescribeParams {
     /// which is what inference does. Needs model weights in the vindex.
     #[serde(default = "default_query")]
     pub query: String,
+    /// Residual mode only: a neutral prompt whose per-layer residual is
+    /// subtracted from the entity's before scoring.
+    ///
+    /// Measured 2026-09-04 on production at min_score 0, the plain residual
+    /// query returns the same six features for Paris, France, Einstein,
+    /// Tokyo and "Paris is the capital of": the normed last-token residual
+    /// carries a large component shared by every input, and the gates most
+    /// aligned with it win the dot product regardless of direction. Those
+    /// features genuinely fire for everything. What a browse needs is what
+    /// fires *unusually* for this input, and subtracting a neutral baseline
+    /// is the smallest version of that question.
+    #[serde(default)]
+    pub baseline: Option<String>,
 }
 
 pub const QUERY_EMBEDDING: &str = "embedding";
@@ -151,6 +164,7 @@ pub fn describe_entity_with(
     // absent from the answer and a caller comparing modes must be able to
     // see that.
     let mut residual_layers: Option<usize> = None;
+    let mut contrasted_layers: usize = 0;
 
     let trace = match params.query.as_str() {
         QUERY_EMBEDDING => patched.walk(&query, &scan_layers, params.limit),
@@ -187,8 +201,41 @@ pub fn describe_entity_with(
                 1,
                 &larql_inference::KnnRouteMode::from_env(),
             );
-            let by_layer: std::collections::HashMap<usize, Vec<f32>> =
+            let mut by_layer: std::collections::HashMap<usize, Vec<f32>> =
                 run.residuals.into_iter().collect();
+
+            if let Some(baseline) = params.baseline.as_deref() {
+                let benc = model
+                    .tokenizer
+                    .encode(baseline, true)
+                    .map_err(|e| ServerError::Internal(format!("tokenize error: {e}")))?;
+                let bids: Vec<u32> = benc.get_ids().to_vec();
+                let brun = larql_inference::infer_patched(
+                    weights,
+                    &model.tokenizer,
+                    patched,
+                    Some(&patched.knn_store),
+                    &bids,
+                    1,
+                    &larql_inference::KnnRouteMode::from_env(),
+                );
+                let base: std::collections::HashMap<usize, Vec<f32>> =
+                    brun.residuals.into_iter().collect();
+                // Contrast per layer. A layer the baseline did not capture is
+                // left as-is rather than dropped: the answer is then a plain
+                // residual for that layer, which the caller can see from
+                // `contrasted_layers`.
+                for (layer, v) in by_layer.iter_mut() {
+                    if let Some(b) = base.get(layer) {
+                        if b.len() == v.len() {
+                            for (x, y) in v.iter_mut().zip(b.iter()) {
+                                *x -= *y;
+                            }
+                            contrasted_layers += 1;
+                        }
+                    }
+                }
+            }
 
             let mut layers = Vec::with_capacity(scan_layers.len());
             for &layer in &scan_layers {
@@ -402,6 +449,9 @@ pub fn describe_entity_with(
         out["query"] = serde_json::json!(params.query);
         out["residual_layers"] = serde_json::json!(residual_layers);
         out["scanned_layers"] = serde_json::json!(scan_layers.len());
+        if params.baseline.is_some() {
+            out["contrasted_layers"] = serde_json::json!(contrasted_layers);
+        }
     }
     Ok(out)
 }
@@ -444,7 +494,10 @@ async fn describe_with_cache(
             params.coherence,
             params.min_coherence,
             params.relabel,
-            &params.query,
+            &match params.baseline.as_deref() {
+                Some(b) => format!("{}~{b}", params.query),
+                None => params.query.clone(),
+            },
         );
         if let Some(cached) = state.describe_cache.get(&key) {
             let etag = crate::etag::compute_etag(&cached);
@@ -580,6 +633,9 @@ pub struct DescribeBody {
     /// See `DescribeParams::query`.
     #[serde(default = "default_query")]
     pub query: String,
+    /// See `DescribeParams::baseline`.
+    #[serde(default)]
+    pub baseline: Option<String>,
     /// The overlay to answer from. Omitted, this behaves exactly like the GET.
     #[serde(default)]
     pub patch_set: Option<crate::overlay_cache::PatchSetRef>,
@@ -597,6 +653,7 @@ impl DescribeBody {
             min_coherence,
             relabel,
             query,
+            baseline,
             patch_set,
         } = self;
         (
@@ -610,6 +667,7 @@ impl DescribeBody {
                 min_coherence,
                 relabel,
                 query,
+                baseline,
             },
             patch_set,
         )

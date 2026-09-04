@@ -92,6 +92,7 @@ fn targets(model: &LoadedModel, ps: Option<&PatchSetRef>, scope: Option<&str>) -
         min_coherence: 0.0,
         relabel: false,
         query: "embedding".into(),
+        baseline: None,
     };
     let extract = |patched: &larql_vindex::PatchedVindex| {
         let v = larql_server::routes::describe::describe_entity_with(model, patched, &params)
@@ -284,6 +285,7 @@ fn describe_limited(
         min_coherence,
         relabel,
         query: "embedding".into(),
+        baseline: None,
     };
     larql_server::routes::describe::describe_entity_with(
         model,
@@ -468,6 +470,7 @@ fn residual_mode_either_runs_the_model_or_says_why_it_cannot() {
         min_coherence: 0.0,
         relabel: false,
         query: "residual".into(),
+        baseline: None,
     };
     let r = larql_server::routes::describe::describe_entity_with(
         &m,
@@ -505,7 +508,39 @@ fn an_unknown_query_mode_is_rejected_not_defaulted() {
         min_coherence: 0.0,
         relabel: false,
         query: "activations".into(),
+        baseline: None,
     };
     let r = larql_server::routes::describe::describe_entity_with(&m, &m.patched.blocking_read(), &params);
     assert!(r.is_err(), "a typo in `query` must not silently mean `embedding`");
+}
+
+#[test]
+fn contrasting_an_entity_with_itself_scores_nothing() {
+    let Some(m) = tiny() else { return };
+    // residual(x) - residual(x) is the zero vector at every layer; every gate
+    // dot product is then exactly 0. If anything scores above zero here, the
+    // baseline was not subtracted from the same vector it was meant to cancel.
+    let params = larql_server::routes::describe::DescribeParams {
+        entity: "[5]".to_string(),
+        band: "all".to_string(),
+        verbose: false,
+        limit: 10,
+        min_score: 0.0,
+        coherence: false,
+        min_coherence: 0.0,
+        relabel: false,
+        query: "residual".into(),
+        baseline: Some("[5]".into()),
+    };
+    let r = larql_server::routes::describe::describe_entity_with(&m, &m.patched.blocking_read(), &params);
+    match r {
+        Ok(v) => {
+            assert_eq!(v["contrasted_layers"], v["scanned_layers"], "{v}");
+            for e in v["edges"].as_array().unwrap() {
+                let s = e["gate_score"].as_f64().unwrap();
+                assert!(s.abs() < 1e-6, "self-contrast left a non-zero score: {e}");
+            }
+        }
+        Err(e) => assert!(format!("{e:?}").contains("weights"), "{e:?}"),
+    }
 }

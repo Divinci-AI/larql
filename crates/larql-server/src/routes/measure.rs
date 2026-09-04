@@ -206,6 +206,7 @@ fn read_against(
                 min_coherence: 0.0,
                 relabel: false,
                 query: "embedding".into(),
+                baseline: None,
             };
             let described = describe_entity_with(model, patched, &params)?;
             gate_score_for_target(&described, target)
