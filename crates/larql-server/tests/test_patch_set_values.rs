@@ -536,6 +536,9 @@ fn contrasting_an_entity_with_itself_scores_nothing() {
     match r {
         Ok(v) => {
             assert_eq!(v["contrasted_layers"], v["scanned_layers"], "{v}");
+            // And never more than scanned: the count is over the layers that
+            // were scored, not every layer the forward pass captured.
+            assert!(v["contrasted_layers"].as_u64() <= v["scanned_layers"].as_u64(), "{v}");
             for e in v["edges"].as_array().unwrap() {
                 let s = e["gate_score"].as_f64().unwrap();
                 assert!(s.abs() < 1e-6, "self-contrast left a non-zero score: {e}");

@@ -225,14 +225,20 @@ pub fn describe_entity_with(
                 // left as-is rather than dropped: the answer is then a plain
                 // residual for that layer, which the caller can see from
                 // `contrasted_layers`.
-                for (layer, v) in by_layer.iter_mut() {
-                    if let Some(b) = base.get(layer) {
-                        if b.len() == v.len() {
-                            for (x, y) in v.iter_mut().zip(b.iter()) {
-                                *x -= *y;
-                            }
-                            contrasted_layers += 1;
+                // Only the layers that will be scored count. The forward
+                // pass captures every layer of the model, and counting all of
+                // them reported 35 contrasted against 14 scanned in
+                // production — true, and useless to a caller checking
+                // whether the answer it got was fully contrasted.
+                for &layer in &scan_layers {
+                    let (Some(v), Some(b)) = (by_layer.get_mut(&layer), base.get(&layer)) else {
+                        continue;
+                    };
+                    if b.len() == v.len() {
+                        for (x, y) in v.iter_mut().zip(b.iter()) {
+                            *x -= *y;
                         }
+                        contrasted_layers += 1;
                     }
                 }
             }
