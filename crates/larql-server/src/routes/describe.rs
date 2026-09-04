@@ -58,6 +58,28 @@ pub struct DescribeParams {
     /// without renaming the targets its edits point at.
     #[serde(default)]
     pub relabel: bool,
+    /// What the gates are scored against.
+    ///
+    /// `embedding` (default): the entity's raw input embedding, averaged over
+    /// its tokens, scored against every layer. That is the historical
+    /// behaviour and it is lexical: it finds features that respond to the
+    /// token itself, and cannot find a relation. Measured 2026-09-03 on
+    /// production, "Paris" in every casing surfaces zero France features and
+    /// "Eiffel" surfaces nothing Parisian, while "France" and "Paris, France"
+    /// surface a French feature — only because the token is in the query.
+    ///
+    /// `residual`: run the model over the entity and score each layer's gates
+    /// against the residual the FFN actually sees at that layer (last token),
+    /// which is what inference does. Needs model weights in the vindex.
+    #[serde(default = "default_query")]
+    pub query: String,
+}
+
+pub const QUERY_EMBEDDING: &str = "embedding";
+pub const QUERY_RESIDUAL: &str = "residual";
+
+fn default_query() -> String {
+    QUERY_EMBEDDING.into()
 }
 
 fn default_band() -> String {
@@ -124,7 +146,66 @@ pub fn describe_entity_with(
 
     let scan_layers = filter_layers_by_band(all_layers, &params.band, &bands);
 
-    let trace = patched.walk(&query, &scan_layers, params.limit);
+    // How many layers were scored against a real residual (residual mode
+    // only). Reported, because a layer with no captured residual is silently
+    // absent from the answer and a caller comparing modes must be able to
+    // see that.
+    let mut residual_layers: Option<usize> = None;
+
+    let trace = match params.query.as_str() {
+        QUERY_EMBEDDING => patched.walk(&query, &scan_layers, params.limit),
+        QUERY_RESIDUAL => {
+            if !model.config.has_model_weights {
+                return Err(ServerError::InferenceUnavailable(
+                    "query=residual needs model weights in the vindex; rebuild with --include-weights"
+                        .into(),
+                ));
+            }
+            let weights_guard = model
+                .get_or_load_weights()
+                .map_err(ServerError::InferenceUnavailable)?;
+            let weights: &larql_inference::ModelWeights = &weights_guard;
+
+            // Same tokenization as INFER (with BOS): the residual at the last
+            // token is only meaningful for the sequence the model was
+            // actually run on.
+            let enc = model
+                .tokenizer
+                .encode(params.entity.as_str(), true)
+                .map_err(|e| ServerError::Internal(format!("tokenize error: {e}")))?;
+            let ids: Vec<u32> = enc.get_ids().to_vec();
+
+            // The production inference path. Its per-layer residuals are the
+            // vector each layer's gates were scored against for the last
+            // position — exactly what DESCRIBE should be scoring against.
+            let run = larql_inference::infer_patched(
+                weights,
+                &model.tokenizer,
+                patched,
+                Some(&patched.knn_store),
+                &ids,
+                1,
+                &larql_inference::KnnRouteMode::from_env(),
+            );
+            let by_layer: std::collections::HashMap<usize, Vec<f32>> =
+                run.residuals.into_iter().collect();
+
+            let mut layers = Vec::with_capacity(scan_layers.len());
+            for &layer in &scan_layers {
+                let Some(res) = by_layer.get(&layer) else { continue };
+                let r = larql_vindex::ndarray::Array1::from(res.clone());
+                let t = patched.walk(&r, &[layer], params.limit);
+                layers.extend(t.layers);
+            }
+            residual_layers = Some(layers.len());
+            larql_vindex::WalkTrace { layers }
+        }
+        other => {
+            return Err(ServerError::BadRequest(format!(
+                "query must be `{QUERY_EMBEDDING}` or `{QUERY_RESIDUAL}`, got `{other}`"
+            )))
+        }
+    };
 
     // Aggregate edges by target token (same logic as LQL DESCRIBE).
     struct EdgeInfo {
@@ -311,12 +392,18 @@ pub fn describe_entity_with(
         })
         .collect();
 
-    Ok(serde_json::json!({
+    let mut out = serde_json::json!({
         "entity": params.entity,
         "model": model.config.model,
         "edges": edge_json,
         "latency_ms": elapsed_ms(start),
-    }))
+    });
+    if params.query != QUERY_EMBEDDING {
+        out["query"] = serde_json::json!(params.query);
+        out["residual_layers"] = serde_json::json!(residual_layers);
+        out["scanned_layers"] = serde_json::json!(scan_layers.len());
+    }
+    Ok(out)
 }
 
 async fn describe_with_cache(
@@ -357,6 +444,7 @@ async fn describe_with_cache(
             params.coherence,
             params.min_coherence,
             params.relabel,
+            &params.query,
         );
         if let Some(cached) = state.describe_cache.get(&key) {
             let etag = crate::etag::compute_etag(&cached);
@@ -489,6 +577,9 @@ pub struct DescribeBody {
     /// See `DescribeParams::relabel`.
     #[serde(default)]
     pub relabel: bool,
+    /// See `DescribeParams::query`.
+    #[serde(default = "default_query")]
+    pub query: String,
     /// The overlay to answer from. Omitted, this behaves exactly like the GET.
     #[serde(default)]
     pub patch_set: Option<crate::overlay_cache::PatchSetRef>,
@@ -505,6 +596,7 @@ impl DescribeBody {
             coherence,
             min_coherence,
             relabel,
+            query,
             patch_set,
         } = self;
         (
@@ -517,6 +609,7 @@ impl DescribeBody {
                 coherence,
                 min_coherence,
                 relabel,
+                query,
             },
             patch_set,
         )

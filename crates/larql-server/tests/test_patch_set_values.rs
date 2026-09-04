@@ -91,6 +91,7 @@ fn targets(model: &LoadedModel, ps: Option<&PatchSetRef>, scope: Option<&str>) -
         coherence: false,
         min_coherence: 0.0,
         relabel: false,
+        query: "embedding".into(),
     };
     let extract = |patched: &larql_vindex::PatchedVindex| {
         let v = larql_server::routes::describe::describe_entity_with(model, patched, &params)
@@ -282,6 +283,7 @@ fn describe_limited(
         coherence,
         min_coherence,
         relabel,
+        query: "embedding".into(),
     };
     larql_server::routes::describe::describe_entity_with(
         model,
@@ -447,4 +449,63 @@ fn a_threshold_filters_without_relabelling() {
     for e in filtered["edges"].as_array().unwrap() {
         assert_eq!(e["label_source"], "argmax");
     }
+}
+
+// ══════════════════════════════════════════════════════════════
+// query=residual: the model's own residual, or an honest refusal
+// ══════════════════════════════════════════════════════════════
+
+#[test]
+fn residual_mode_either_runs_the_model_or_says_why_it_cannot() {
+    let Some(m) = tiny() else { return };
+    let params = larql_server::routes::describe::DescribeParams {
+        entity: "[5]".to_string(),
+        band: "all".to_string(),
+        verbose: false,
+        limit: 10,
+        min_score: 0.0,
+        coherence: false,
+        min_coherence: 0.0,
+        relabel: false,
+        query: "residual".into(),
+    };
+    let r = larql_server::routes::describe::describe_entity_with(
+        &m,
+        &m.patched.blocking_read(),
+        &params,
+    );
+    match r {
+        Ok(v) => {
+            // If the fixture carries weights, every scanned layer must have
+            // been scored against a captured residual. A silent partial
+            // answer is the failure this field exists to expose.
+            assert_eq!(v["query"], "residual");
+            assert_eq!(v["residual_layers"], v["scanned_layers"], "layers missing residuals: {v}");
+        }
+        Err(e) => {
+            // Without weights the only acceptable answer is a refusal that
+            // says so — never a fallback to the embedding query dressed up as
+            // the residual one.
+            let msg = format!("{e:?}");
+            assert!(msg.contains("weights"), "refusal did not say why: {msg}");
+        }
+    }
+}
+
+#[test]
+fn an_unknown_query_mode_is_rejected_not_defaulted() {
+    let Some(m) = tiny() else { return };
+    let params = larql_server::routes::describe::DescribeParams {
+        entity: "[5]".to_string(),
+        band: "all".to_string(),
+        verbose: false,
+        limit: 10,
+        min_score: 0.0,
+        coherence: false,
+        min_coherence: 0.0,
+        relabel: false,
+        query: "activations".into(),
+    };
+    let r = larql_server::routes::describe::describe_entity_with(&m, &m.patched.blocking_read(), &params);
+    assert!(r.is_err(), "a typo in `query` must not silently mean `embedding`");
 }
