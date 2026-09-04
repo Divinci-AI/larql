@@ -29,34 +29,45 @@ pub struct DescribeParams {
     /// Include low-score edges in the response.
     #[serde(default)]
     pub verbose: bool,
-    /// Maximum number of edges to return.
+    /// Maximum number of edges to return, after filtering.
     #[serde(default = "default_limit")]
     pub limit: usize,
+    /// Per-layer candidate window: how many gate hits each layer contributes
+    /// before coherence filtering and the final `limit`.
+    ///
+    /// This used to be `limit` itself, so a browse of 20 pooled the top 20 of
+    /// every layer's top 20 by raw gate score. Measured 2026-09-04 on
+    /// production, the Paris→France feature (L27 `French`) sits at rank 29 of
+    /// a 300-wide window with score 8.2, under incoherent features scoring up
+    /// to 18.7; at a window of 20 it could never appear. With the window
+    /// wide and the coherence filter on it is #6.
+    #[serde(default = "default_window")]
+    pub window: usize,
     /// Minimum gate score to include an edge.
     #[serde(default = "default_min_score")]
     pub min_score: f32,
     /// Score each feature's top-k for coherence and report it on the edge.
     ///
-    /// Scoring never changes `target`: with this alone the labels are exactly
-    /// what they are without it. That is what lets the score be adopted —
-    /// as a filter, or just as information — without touching stored edits,
-    /// which are keyed to the current labels. See `crate::coherence`.
-    #[serde(default)]
+    /// On by default since 2026-09-04. Scoring never changes `target` on its
+    /// own; `relabel` does that. See `crate::coherence`.
+    #[serde(default = "default_true")]
     pub coherence: bool,
     /// Drop edges whose coherence falls below this. Implies `coherence`.
-    /// 0.0 reports without filtering, which is how it should be measured
-    /// before it is trusted.
-    #[serde(default)]
+    /// Default 0.35: measured 2026-09-01 on 80 associations, the population
+    /// above it is one-concept features and the population below is noise,
+    /// with the boundary around 0.3. 0.0 reports without filtering.
+    #[serde(default = "default_min_coherence")]
     pub min_coherence: f32,
     /// Label each feature from its cluster (centroid-nearest, preferring the
     /// entity's script) instead of the logit argmax. Implies `coherence`.
     ///
-    /// Separate from scoring because the evidence is separate: measured
-    /// 2026-09-01/03 on production, the score cleanly separates real features
-    /// from noise, while relabelling is an improvement on the coherent ones
-    /// and a coin-flip inside the noise. A caller can adopt the filter
-    /// without renaming the targets its edits point at.
-    #[serde(default)]
+    /// On by default since 2026-09-04. Every path that has to agree on a
+    /// label — DESCRIBE, the measurement DESCRIBE in `measure.rs`, and the
+    /// caller's resolution of a target — must use the same setting, or a
+    /// target shown by one is unknown to another. Edges now also carry
+    /// `feature`, so a caller can resolve by `(layer, feature)` and stop
+    /// depending on the label at all.
+    #[serde(default = "default_true")]
     pub relabel: bool,
     /// What the gates are scored against.
     ///
@@ -100,6 +111,15 @@ fn default_band() -> String {
 }
 fn default_limit() -> usize {
     20
+}
+fn default_window() -> usize {
+    300
+}
+fn default_true() -> bool {
+    true
+}
+fn default_min_coherence() -> f32 {
+    0.35
 }
 fn default_min_score() -> f32 {
     5.0
@@ -167,7 +187,7 @@ pub fn describe_entity_with(
     let mut contrasted_layers: usize = 0;
 
     let trace = match params.query.as_str() {
-        QUERY_EMBEDDING => patched.walk(&query, &scan_layers, params.limit),
+        QUERY_EMBEDDING => patched.walk(&query, &scan_layers, params.window),
         QUERY_RESIDUAL => {
             if !model.config.has_model_weights {
                 return Err(ServerError::InferenceUnavailable(
@@ -247,7 +267,7 @@ pub fn describe_entity_with(
             for &layer in &scan_layers {
                 let Some(res) = by_layer.get(&layer) else { continue };
                 let r = larql_vindex::ndarray::Array1::from(res.clone());
-                let t = patched.walk(&r, &[layer], params.limit);
+                let t = patched.walk(&r, &[layer], params.window);
                 layers.extend(t.layers);
             }
             residual_layers = Some(layers.len());
@@ -404,6 +424,11 @@ pub fn describe_entity_with(
                 "target": info.original,
                 "gate_score": (info.gate * 10.0).round() / 10.0,
                 "layer": info.best_layer,
+                // The vindex coordinate behind the label. A caller that
+                // resolves an edit by this pair is immune to the label
+                // changing under it — which, with relabelling on by
+                // default, it can.
+                "feature": info.best_feature,
             });
 
             // Probe-confirmed relation label.
@@ -496,6 +521,7 @@ async fn describe_with_cache(
             &params.entity,
             &params.band,
             params.limit,
+            params.window,
             params.min_score,
             params.coherence,
             params.min_coherence,
@@ -625,16 +651,19 @@ pub struct DescribeBody {
     pub verbose: bool,
     #[serde(default = "default_limit")]
     pub limit: usize,
+    /// See `DescribeParams::window`.
+    #[serde(default = "default_window")]
+    pub window: usize,
     #[serde(default = "default_min_score")]
     pub min_score: f32,
     /// See `DescribeParams::coherence`.
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub coherence: bool,
     /// See `DescribeParams::min_coherence`.
-    #[serde(default)]
+    #[serde(default = "default_min_coherence")]
     pub min_coherence: f32,
     /// See `DescribeParams::relabel`.
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub relabel: bool,
     /// See `DescribeParams::query`.
     #[serde(default = "default_query")]
@@ -654,6 +683,7 @@ impl DescribeBody {
             band,
             verbose,
             limit,
+            window,
             min_score,
             coherence,
             min_coherence,
@@ -668,6 +698,7 @@ impl DescribeBody {
                 band,
                 verbose,
                 limit,
+                window,
                 min_score,
                 coherence,
                 min_coherence,

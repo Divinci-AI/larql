@@ -11,7 +11,7 @@ fn probe() {
     for entity in ["[5]", "[124]", "[5] [124] [69]"] {
         for q in ["embedding", "residual"] {
             let params = larql_server::routes::describe::DescribeParams {
-                entity: entity.into(), band: "all".into(), verbose: true, limit: 20,
+                entity: entity.into(), band: "all".into(), verbose: true, limit: 20, window: 20,
                 min_score: 0.0, coherence: false, min_coherence: 0.0, relabel: false, query: q.into(), baseline: None,
             };
             let r = larql_server::routes::describe::describe_entity_with(&m, &m.patched.blocking_read(), &params);

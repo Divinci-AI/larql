@@ -197,14 +197,17 @@ fn read_against(
                 band: spec.band.clone(),
                 verbose: false,
                 limit: spec.limit,
+                window: spec.limit.max(300),
                 min_score: spec.min_score,
-                // Deliberately off. Measurement matches an edge by its target
-                // string, and relabelling would rename the very thing being
-                // matched — an edit would report "no change" because the label
-                // moved, not because the gate did.
-                coherence: false,
+                // Deliberately the SAME rendering as a browse. Measurement
+                // matches an edge by its target string, so the label here must
+                // be the label the caller saw when it chose the target. With
+                // relabelling on by default (2026-09-04), pinning this off
+                // would make every edit created from a browse report "no such
+                // edge" — the label moved, not the gate.
+                coherence: true,
                 min_coherence: 0.0,
-                relabel: false,
+                relabel: true,
                 query: "embedding".into(),
                 baseline: None,
             };
