@@ -223,6 +223,11 @@ fn ensure_residual_panel(
 }
 
 pub const QUERY_EMBEDDING: &str = "embedding";
+/// Both queries, merged: every hit ranked by z against its own background.
+/// The embedding side keeps its raw-score window and `min_score`; the
+/// residual side takes the surprise window and no score floor, since its
+/// gate scores are on another scale. Needs `relevance`.
+pub const QUERY_UNION: &str = "union";
 pub const QUERY_RESIDUAL: &str = "residual";
 
 fn default_query() -> String {
@@ -237,10 +242,14 @@ fn default_prompt() -> String {
 /// panel's 114 names are each run through.
 fn check_prompt(template: &str) -> Result<(), ServerError> {
     if !template.contains("{entity}") {
-        return Err(ServerError::BadRequest("prompt must contain `{entity}`".into()));
+        return Err(ServerError::BadRequest(
+            "prompt must contain `{entity}`".into(),
+        ));
     }
     if template.chars().count() > 200 {
-        return Err(ServerError::BadRequest("prompt must be at most 200 characters".into()));
+        return Err(ServerError::BadRequest(
+            "prompt must be at most 200 characters".into(),
+        ));
     }
     Ok(())
 }
@@ -360,8 +369,33 @@ pub fn describe_entity_with(
             "prompt applies to query=residual only".into(),
         ));
     }
-    let mut trace = match params.query.as_str() {
-        QUERY_EMBEDDING => {
+    let union = params.query == QUERY_UNION;
+    if union && !params.relevance {
+        return Err(ServerError::BadRequest(
+            "query=union ranks both sides by relevance; it needs relevance=true".into(),
+        ));
+    }
+    let want_emb = matches!(params.query.as_str(), QUERY_EMBEDDING | QUERY_UNION);
+    let want_res = matches!(params.query.as_str(), QUERY_RESIDUAL | QUERY_UNION);
+    if !want_emb && !want_res {
+        return Err(ServerError::BadRequest(format!(
+            "query must be `{QUERY_EMBEDDING}`, `{QUERY_RESIDUAL}` or `{QUERY_UNION}`, got `{}`",
+            params.query
+        )));
+    }
+    // The residual side of a union is always windowed by surprise: measured
+    // 2026-09-04 (research log §22), its raw-score window is junk.
+    let res_surprise = window_by_relevance || union;
+    let res_k = |layer: usize| {
+        if res_surprise {
+            patched.num_features(layer).max(params.window)
+        } else {
+            params.window
+        }
+    };
+
+    let mut emb_trace: Option<larql_vindex::WalkTrace> = if want_emb {
+        Some({
             if window_by_relevance {
                 let mut layers = Vec::with_capacity(scan_layers.len());
                 for &layer in &scan_layers {
@@ -371,8 +405,12 @@ pub fn describe_entity_with(
             } else {
                 patched.walk(&query, &scan_layers, params.window)
             }
-        }
-        QUERY_RESIDUAL => {
+        })
+    } else {
+        None
+    };
+    let mut res_trace: Option<larql_vindex::WalkTrace> = if want_res {
+        Some({
             if !model.config.has_model_weights {
                 return Err(ServerError::InferenceUnavailable(
                     "query=residual needs model weights in the vindex; rebuild with --include-weights"
@@ -428,40 +466,61 @@ pub fn describe_entity_with(
                     continue;
                 };
                 let r = larql_vindex::ndarray::Array1::from(res.clone());
-                let t = patched.walk(&r, &[layer], walk_k(layer));
+                let t = patched.walk(&r, &[layer], res_k(layer));
                 layers.extend(t.layers);
             }
             residual_layers = Some(layers.len());
             larql_vindex::WalkTrace { layers }
-        }
-        other => {
-            return Err(ServerError::BadRequest(format!(
-                "query must be `{QUERY_EMBEDDING}` or `{QUERY_RESIDUAL}`, got `{other}`"
-            )))
-        }
+        })
+    } else {
+        None
     };
 
     // Window by surprise: z-score every hit against the layer's background
     // and keep the `window` largest. A layer with no background keeps its
     // raw-score window (the first `window` hits, which is what walk gave).
-    if window_by_relevance {
+    let surprise_window = |trace: &mut larql_vindex::WalkTrace, residual: bool| {
         for (layer_idx, hits) in trace.layers.iter_mut() {
-            let stats = if params.query == QUERY_RESIDUAL {
-                model.relevance.residual_layer(patched, background, &params.prompt, *layer_idx)
+            let stats = if residual {
+                model
+                    .relevance
+                    .residual_layer(patched, background, &params.prompt, *layer_idx)
             } else {
                 model.relevance.layer(patched, background, *layer_idx)
             };
             if let Some(stats) = stats {
                 let mut scored: Vec<(f32, larql_vindex::WalkHit)> = hits
                     .drain(..)
-                    .map(|h| (stats.z(h.feature, h.gate_score).unwrap_or(f32::NEG_INFINITY), h))
+                    .map(|h| {
+                        (
+                            stats
+                                .z(h.feature, h.gate_score)
+                                .unwrap_or(f32::NEG_INFINITY),
+                            h,
+                        )
+                    })
                     .collect();
                 scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
                 hits.extend(scored.into_iter().map(|(_, h)| h));
             }
             hits.truncate(params.window);
         }
+    };
+    if window_by_relevance {
+        if let Some(t) = emb_trace.as_mut() {
+            surprise_window(t, false);
+        }
     }
+    if res_surprise {
+        if let Some(t) = res_trace.as_mut() {
+            surprise_window(t, true);
+        }
+    }
+    let sources: Vec<(&larql_vindex::WalkTrace, bool)> = emb_trace
+        .iter()
+        .map(|t| (t, false))
+        .chain(res_trace.iter().map(|t| (t, true)))
+        .collect();
 
     // Aggregate edges by target token (same logic as LQL DESCRIBE).
     struct EdgeInfo {
@@ -477,6 +536,9 @@ pub fn describe_entity_with(
         /// Best z over the hits folded into this edge; `None` when no layer
         /// background was available for any of them.
         relevance: Option<f32>,
+        /// Which query found the most surprising hit: `embedding` or
+        /// `residual`. Meaningful for a union; constant otherwise.
+        source: &'static str,
     }
 
     let entity_lower = params.entity.to_lowercase();
@@ -490,126 +552,140 @@ pub fn describe_entity_with(
     };
     let mut edges: HashMap<String, EdgeInfo> = HashMap::new();
 
-    for (layer_idx, hits) in &trace.layers {
-        let layer_stats = if params.relevance && params.query == QUERY_RESIDUAL {
-            model
-                .relevance
-                .residual_layer(patched, background, &params.prompt, *layer_idx)
-        } else if params.relevance {
-            model.relevance.layer(patched, background, *layer_idx)
+    for (trace, residual) in &sources {
+        let residual = *residual;
+        let source = if residual {
+            QUERY_RESIDUAL
         } else {
-            None
+            QUERY_EMBEDDING
         };
-        for hit in hits {
-            if hit.gate_score < params.min_score {
-                continue;
-            }
+        for (layer_idx, hits) in &trace.layers {
+            let layer_stats = if params.relevance && residual {
+                model
+                    .relevance
+                    .residual_layer(patched, background, &params.prompt, *layer_idx)
+            } else if params.relevance {
+                model.relevance.layer(patched, background, *layer_idx)
+            } else {
+                None
+            };
+            for hit in hits {
+                // `min_score` is an embedding-scale floor; a union's residual
+                // hits are on another scale and are ranked by z instead.
+                if hit.gate_score < params.min_score && !(union && residual) {
+                    continue;
+                }
 
-            // Coherence, when asked for. The candidates are the positively
-            // weighted top-k: a token the feature pushes DOWN is not part of
-            // what the feature is about, and letting it into the centroid would
-            // drag a perfectly coherent feature's score toward zero.
-            let scoring = params.coherence || params.relabel || params.min_coherence > 0.0;
-            let verdict = if scoring {
-                let cands: Vec<crate::coherence::Candidate<'_>> = hit
+                // Coherence, when asked for. The candidates are the positively
+                // weighted top-k: a token the feature pushes DOWN is not part of
+                // what the feature is about, and letting it into the centroid would
+                // drag a perfectly coherent feature's score toward zero.
+                let scoring = params.coherence || params.relabel || params.min_coherence > 0.0;
+                let verdict = if scoring {
+                    let cands: Vec<crate::coherence::Candidate<'_>> = hit
+                        .meta
+                        .top_k
+                        .iter()
+                        .filter(|t| t.logit > 0.0 && !t.token.trim().is_empty())
+                        .map(|t| crate::coherence::Candidate {
+                            token: t.token.trim(),
+                            token_id: t.token_id,
+                        })
+                        .collect();
+                    crate::coherence::score_feature(&model.embeddings, &cands, prefer)
+                } else {
+                    None
+                };
+
+                // A feature we could not score has not passed the bar; it has not
+                // been measured at all. Dropping it only when a bar was actually
+                // set keeps `min_coherence = 0` a pure reporting mode.
+                if params.min_coherence > 0.0 {
+                    match verdict.as_ref() {
+                        Some(v) if v.coherence >= params.min_coherence => {}
+                        _ => continue,
+                    }
+                }
+
+                // The label only moves when asked. Scoring on its own must leave
+                // every `target` byte-identical, or "adopt the filter" would
+                // silently mean "rename the targets" as well.
+                let z = layer_stats
+                    .as_ref()
+                    .and_then(|st| st.z(hit.feature, hit.gate_score));
+
+                let relabelled_to = if params.relabel {
+                    verdict.as_ref().and_then(|v| v.label.clone())
+                } else {
+                    None
+                };
+                let tok: &str = relabelled_to
+                    .as_deref()
+                    .unwrap_or(hit.meta.top_token.as_str());
+                let tok_trimmed = tok.trim();
+                if tok_trimmed.is_empty() || tok_trimmed.len() < 2 {
+                    continue;
+                }
+                if tok_trimmed.to_lowercase() == entity_lower {
+                    continue;
+                }
+
+                let also: Vec<String> = hit
                     .meta
                     .top_k
                     .iter()
-                    .filter(|t| t.logit > 0.0 && !t.token.trim().is_empty())
-                    .map(|t| crate::coherence::Candidate {
-                        token: t.token.trim(),
-                        token_id: t.token_id,
+                    .filter(|t| {
+                        let tt = t.token.trim();
+                        tt.to_lowercase() != tok.to_lowercase()
+                            && tt.to_lowercase() != entity_lower
+                            && tt.len() >= 2
+                            && t.logit > 0.0
                     })
+                    .take(3)
+                    .map(|t| t.token.trim().to_string())
                     .collect();
-                crate::coherence::score_feature(&model.embeddings, &cands, prefer)
-            } else {
-                None
-            };
 
-            // A feature we could not score has not passed the bar; it has not
-            // been measured at all. Dropping it only when a bar was actually
-            // set keeps `min_coherence = 0` a pure reporting mode.
-            if params.min_coherence > 0.0 {
-                match verdict.as_ref() {
-                    Some(v) if v.coherence >= params.min_coherence => {}
-                    _ => continue,
+                let key = tok.to_lowercase();
+                let entry = edges.entry(key).or_insert_with(|| EdgeInfo {
+                    gate: 0.0,
+                    layers: Vec::new(),
+                    best_feature: hit.feature,
+                    count: 0,
+                    original: tok_trimmed.to_string(),
+                    also,
+                    best_layer: *layer_idx,
+                    coherence: verdict.as_ref().map(|v| v.coherence),
+                    relabelled: relabelled_to.is_some(),
+                    relevance: z,
+                    source,
+                });
+
+                // Relevance is a max over the folded hits, independent of which
+                // hit wins on gate: the edge is as surprising as its most
+                // surprising feature — and the source follows it.
+                if let Some(zz) = z {
+                    if entry.relevance.is_none_or(|cur| zz > cur) {
+                        entry.source = source;
+                    }
+                    entry.relevance = Some(entry.relevance.map_or(zz, |cur| cur.max(zz)));
                 }
-            }
 
-            // The label only moves when asked. Scoring on its own must leave
-            // every `target` byte-identical, or "adopt the filter" would
-            // silently mean "rename the targets" as well.
-            let z = layer_stats
-                .as_ref()
-                .and_then(|st| st.z(hit.feature, hit.gate_score));
-
-            let relabelled_to = if params.relabel {
-                verdict.as_ref().and_then(|v| v.label.clone())
-            } else {
-                None
-            };
-            let tok: &str = relabelled_to
-                .as_deref()
-                .unwrap_or(hit.meta.top_token.as_str());
-            let tok_trimmed = tok.trim();
-            if tok_trimmed.is_empty() || tok_trimmed.len() < 2 {
-                continue;
+                if hit.gate_score > entry.gate {
+                    entry.gate = hit.gate_score;
+                    entry.best_layer = *layer_idx;
+                    entry.best_feature = hit.feature;
+                    // The reported coherence must describe the feature the rest of
+                    // the edge describes. Keeping the first one seen while gate,
+                    // layer and feature move to a different hit would attach a
+                    // score to a feature it was never computed from.
+                    entry.coherence = verdict.as_ref().map(|v| v.coherence);
+                    entry.relabelled = relabelled_to.is_some();
+                }
+                if !entry.layers.contains(layer_idx) {
+                    entry.layers.push(*layer_idx);
+                }
+                entry.count += 1;
             }
-            if tok_trimmed.to_lowercase() == entity_lower {
-                continue;
-            }
-
-            let also: Vec<String> = hit
-                .meta
-                .top_k
-                .iter()
-                .filter(|t| {
-                    let tt = t.token.trim();
-                    tt.to_lowercase() != tok.to_lowercase()
-                        && tt.to_lowercase() != entity_lower
-                        && tt.len() >= 2
-                        && t.logit > 0.0
-                })
-                .take(3)
-                .map(|t| t.token.trim().to_string())
-                .collect();
-
-            let key = tok.to_lowercase();
-            let entry = edges.entry(key).or_insert_with(|| EdgeInfo {
-                gate: 0.0,
-                layers: Vec::new(),
-                best_feature: hit.feature,
-                count: 0,
-                original: tok_trimmed.to_string(),
-                also,
-                best_layer: *layer_idx,
-                coherence: verdict.as_ref().map(|v| v.coherence),
-                relabelled: relabelled_to.is_some(),
-                relevance: z,
-            });
-
-            // Relevance is a max over the folded hits, independent of which
-            // hit wins on gate: the edge is as surprising as its most
-            // surprising feature.
-            if let Some(zz) = z {
-                entry.relevance = Some(entry.relevance.map_or(zz, |cur| cur.max(zz)));
-            }
-
-            if hit.gate_score > entry.gate {
-                entry.gate = hit.gate_score;
-                entry.best_layer = *layer_idx;
-                entry.best_feature = hit.feature;
-                // The reported coherence must describe the feature the rest of
-                // the edge describes. Keeping the first one seen while gate,
-                // layer and feature move to a different hit would attach a
-                // score to a feature it was never computed from.
-                entry.coherence = verdict.as_ref().map(|v| v.coherence);
-                entry.relabelled = relabelled_to.is_some();
-            }
-            if !entry.layers.contains(layer_idx) {
-                entry.layers.push(*layer_idx);
-            }
-            entry.count += 1;
         }
     }
 
@@ -652,6 +728,9 @@ pub fn describe_entity_with(
                 // default, it can.
                 "feature": info.best_feature,
             });
+            if params.query == QUERY_UNION {
+                edge["source"] = serde_json::json!(info.source);
+            }
 
             // Probe-confirmed relation label.
             if let Some(label) = model
@@ -708,10 +787,17 @@ pub fn describe_entity_with(
     if params.relevance {
         out["relevance_background"] = serde_json::json!(background.as_str());
         out["relevance_panel"] = serde_json::json!(if params.query == QUERY_RESIDUAL {
-            model.relevance.residual_panel_size(background, &params.prompt)
+            model
+                .relevance
+                .residual_panel_size(background, &params.prompt)
         } else {
             model.relevance.panel_size(background)
         });
+        if params.query == QUERY_UNION {
+            out["residual_panel"] = serde_json::json!(model
+                .relevance
+                .residual_panel_size(background, &params.prompt));
+        }
         // Which population the z is against: the panel's embeddings or its
         // residuals. A caller comparing modes must see which it got.
         out["relevance_query"] = serde_json::json!(params.query);

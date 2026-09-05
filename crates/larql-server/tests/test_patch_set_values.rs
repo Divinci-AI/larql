@@ -990,9 +990,13 @@ fn residual_relevance_refuses_a_background_with_no_residual_panel() {
 // window_by=relevance: the window is the most surprising, not the largest
 // ══════════════════════════════════════════════════════════════
 
-fn describe_window_by(model: &LoadedModel, query: &str, window_by: &str, relevance: bool, window: usize)
-    -> Result<serde_json::Value, larql_server::error::ServerError>
-{
+fn describe_window_by(
+    model: &LoadedModel,
+    query: &str,
+    window_by: &str,
+    relevance: bool,
+    window: usize,
+) -> Result<serde_json::Value, larql_server::error::ServerError> {
     let params = larql_server::routes::describe::DescribeParams {
         entity: "[5]".to_string(),
         band: "all".to_string(),
@@ -1032,30 +1036,61 @@ fn a_surprise_window_is_the_top_z_of_the_whole_layer() {
     for e in two_edges {
         *per_layer.entry(e["layer"].as_u64().unwrap()).or_default() += 1;
     }
-    assert!(per_layer.values().all(|&n| n <= 2), "a layer exceeded its window: {per_layer:?}");
-    let mut all_z: Vec<f64> = all_edges.iter().map(|e| e["relevance"].as_f64().unwrap()).collect();
+    assert!(
+        per_layer.values().all(|&n| n <= 2),
+        "a layer exceeded its window: {per_layer:?}"
+    );
+    let mut all_z: Vec<f64> = all_edges
+        .iter()
+        .map(|e| e["relevance"].as_f64().unwrap())
+        .collect();
     all_z.sort_by(|a, b| b.partial_cmp(a).unwrap());
-    let two_z: Vec<f64> = two_edges.iter().map(|e| e["relevance"].as_f64().unwrap()).collect();
-    assert!((two_z[0] - all_z[0]).abs() < 1e-6, "the most surprising feature must survive: {} vs {}", two_z[0], all_z[0]);
+    let two_z: Vec<f64> = two_edges
+        .iter()
+        .map(|e| e["relevance"].as_f64().unwrap())
+        .collect();
+    assert!(
+        (two_z[0] - all_z[0]).abs() < 1e-6,
+        "the most surprising feature must survive: {} vs {}",
+        two_z[0],
+        all_z[0]
+    );
     let median = all_z[all_z.len() / 2];
-    assert!(two_z.iter().all(|&z| z >= median), "a below-median z got into a surprise window: {two_z:?} median {median}");
+    assert!(
+        two_z.iter().all(|&z| z >= median),
+        "a below-median z got into a surprise window: {two_z:?} median {median}"
+    );
     // And it is a different selection from the raw-score window when the
     // two disagree — otherwise the flag would be a no-op on this fixture.
     let raw = describe_window_by(&m, "embedding", "score", true, 2).unwrap();
-    let key = |v: &serde_json::Value| v["edges"].as_array().unwrap().iter()
-        .map(|e| format!("{}@{}", e["feature"], e["layer"])).collect::<std::collections::BTreeSet<_>>();
-    eprintln!("surprise window {:?} vs score window {:?}", key(&two), key(&raw));
+    let key = |v: &serde_json::Value| {
+        v["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| format!("{}@{}", e["feature"], e["layer"]))
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    eprintln!(
+        "surprise window {:?} vs score window {:?}",
+        key(&two),
+        key(&raw)
+    );
 }
 
 #[test]
 fn a_surprise_window_needs_relevance_and_a_known_name() {
     let Some(m) = tiny() else { return };
     match describe_window_by(&m, "embedding", "relevance", false, 10) {
-        Err(larql_server::error::ServerError::BadRequest(msg)) => assert!(msg.contains("relevance"), "{msg}"),
+        Err(larql_server::error::ServerError::BadRequest(msg)) => {
+            assert!(msg.contains("relevance"), "{msg}")
+        }
         other => panic!("expected BadRequest, got {other:?}"),
     }
     match describe_window_by(&m, "embedding", "surprise", true, 10) {
-        Err(larql_server::error::ServerError::BadRequest(msg)) => assert!(msg.contains("surprise"), "{msg}"),
+        Err(larql_server::error::ServerError::BadRequest(msg)) => {
+            assert!(msg.contains("surprise"), "{msg}")
+        }
         other => panic!("expected BadRequest, got {other:?}"),
     }
 }
@@ -1065,7 +1100,10 @@ fn a_surprise_window_works_for_residual_queries_too() {
     let Some(m) = tiny() else { return };
     let v = match describe_window_by(&m, "residual", "relevance", true, 3) {
         Ok(v) => v,
-        Err(e) => { assert!(format!("{e:?}").contains("weights"), "{e:?}"); return; }
+        Err(e) => {
+            assert!(format!("{e:?}").contains("weights"), "{e:?}");
+            return;
+        }
     };
     assert_eq!(v["window_by"], "relevance");
     assert_eq!(v["relevance_query"], "residual");
@@ -1074,14 +1112,21 @@ fn a_surprise_window_works_for_residual_queries_too() {
         *per_layer.entry(e["layer"].as_u64().unwrap()).or_default() += 1;
         assert!(e["relevance"].as_f64().unwrap().is_finite());
     }
-    assert!(per_layer.values().all(|&n| n <= 3), "a layer exceeded its window: {per_layer:?}");
+    assert!(
+        per_layer.values().all(|&n| n <= 3),
+        "a layer exceeded its window: {per_layer:?}"
+    );
 }
 
 // ══════════════════════════════════════════════════════════════
 // prompt: a template around the entity, with its own panel
 // ══════════════════════════════════════════════════════════════
 
-fn describe_prompt(model: &LoadedModel, query: &str, prompt: &str) -> Result<serde_json::Value, larql_server::error::ServerError> {
+fn describe_prompt(
+    model: &LoadedModel,
+    query: &str,
+    prompt: &str,
+) -> Result<serde_json::Value, larql_server::error::ServerError> {
     let params = larql_server::routes::describe::DescribeParams {
         entity: "[5]".to_string(),
         band: "all".to_string(),
@@ -1108,26 +1153,104 @@ fn a_prompt_builds_its_own_residual_panel_and_is_reported() {
     let Some(m) = tiny() else { return };
     let v = match describe_prompt(&m, "residual", "{entity} [6]") {
         Ok(v) => v,
-        Err(e) => { assert!(format!("{e:?}").contains("weights"), "{e:?}"); return; }
+        Err(e) => {
+            assert!(format!("{e:?}").contains("weights"), "{e:?}");
+            return;
+        }
     };
     assert_eq!(v["prompt"], "{entity} [6]");
-    assert!(m.relevance.has_residual_panel(larql_server::relevance::Background::Entities, "{entity} [6]"));
+    assert!(m.relevance.has_residual_panel(
+        larql_server::relevance::Background::Entities,
+        "{entity} [6]"
+    ));
     assert!(v["relevance_panel"].as_u64().unwrap() >= 2);
     // The bare panel is a separate background: asking for it does not reuse this one.
     let bare = describe_prompt(&m, "residual", "{entity}").unwrap();
-    assert!(bare.get("prompt").is_none(), "the default template is not reported");
-    assert!(m.relevance.has_residual_panel(larql_server::relevance::Background::Entities, "{entity}"));
+    assert!(
+        bare.get("prompt").is_none(),
+        "the default template is not reported"
+    );
+    assert!(m
+        .relevance
+        .has_residual_panel(larql_server::relevance::Background::Entities, "{entity}"));
 }
 
 #[test]
 fn a_prompt_must_name_the_entity_and_is_residual_only() {
     let Some(m) = tiny() else { return };
     match describe_prompt(&m, "residual", "the capital of") {
-        Err(larql_server::error::ServerError::BadRequest(msg)) => assert!(msg.contains("{entity}"), "{msg}"),
+        Err(larql_server::error::ServerError::BadRequest(msg)) => {
+            assert!(msg.contains("{entity}"), "{msg}")
+        }
         other => panic!("expected BadRequest, got {other:?}"),
     }
     match describe_prompt(&m, "embedding", "{entity} is") {
-        Err(larql_server::error::ServerError::BadRequest(msg)) => assert!(msg.contains("residual"), "{msg}"),
+        Err(larql_server::error::ServerError::BadRequest(msg)) => {
+            assert!(msg.contains("residual"), "{msg}")
+        }
         other => panic!("expected BadRequest, got {other:?}"),
+    }
+}
+
+// ══════════════════════════════════════════════════════════════
+// union: both queries, each hit against its own background
+// ══════════════════════════════════════════════════════════════
+
+fn describe_query(model: &LoadedModel, query: &str, relevance: bool) -> Result<serde_json::Value, larql_server::error::ServerError> {
+    let params = larql_server::routes::describe::DescribeParams {
+        entity: "[5]".to_string(),
+        band: "all".to_string(),
+        verbose: false,
+        limit: 10_000,
+        window: 10_000,
+        min_score: 0.0,
+        coherence: false,
+        min_coherence: 0.0,
+        relabel: false,
+        relevance,
+        background: Some("entities".into()),
+        window_by: "score".into(),
+        query: query.into(),
+        prompt: "{entity}".into(),
+        baseline: None,
+    };
+    let patched = model.patched.blocking_read();
+    larql_server::routes::describe::describe_entity_with(model, &patched, &params)
+}
+
+#[test]
+fn a_union_is_both_sides_and_says_which_side_each_edge_came_from() {
+    let Some(m) = tiny() else { return };
+    let u = match describe_query(&m, "union", true) {
+        Ok(v) => v,
+        Err(e) => { assert!(format!("{e:?}").contains("weights"), "{e:?}"); return; }
+    };
+    assert_eq!(u["query"], "union");
+    assert_eq!(u["relevance_query"], "union");
+    assert!(u["residual_panel"].as_u64().unwrap() >= 2);
+    let edges = u["edges"].as_array().unwrap();
+    assert!(!edges.is_empty());
+    let sources: std::collections::BTreeSet<&str> = edges.iter().map(|e| e["source"].as_str().unwrap()).collect();
+    assert!(sources.iter().all(|s| *s == "embedding" || *s == "residual"), "{sources:?}");
+    // Every edge of either side is in the union (folded by label), and the
+    // union is sorted by relevance.
+    let key = |v: &serde_json::Value| v["edges"].as_array().unwrap().iter()
+        .map(|e| e["target"].as_str().unwrap().to_lowercase()).collect::<std::collections::BTreeSet<_>>();
+    let emb = describe_query(&m, "embedding", true).unwrap();
+    let res = describe_query(&m, "residual", true).unwrap();
+    let uk = key(&u);
+    assert!(key(&emb).is_subset(&uk), "an embedding edge is missing from the union");
+    assert!(key(&res).is_subset(&uk), "a residual edge is missing from the union");
+    let zs: Vec<f64> = edges.iter().map(|e| e["relevance"].as_f64().unwrap()).collect();
+    assert!(zs.windows(2).all(|w| w[0] >= w[1]), "union not sorted by relevance: {zs:?}");
+}
+
+#[test]
+fn a_union_needs_relevance() {
+    let Some(m) = tiny() else { return };
+    match describe_query(&m, "union", false) {
+        Err(larql_server::error::ServerError::BadRequest(msg)) => assert!(msg.contains("relevance"), "{msg}"),
+        Err(e) => assert!(format!("{e:?}").contains("weights"), "{e:?}"),
+        Ok(_) => panic!("a union without relevance has no common ranking key and must be refused"),
     }
 }
