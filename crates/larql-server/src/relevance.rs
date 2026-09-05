@@ -47,6 +47,19 @@
 //!   coherent features that no vocabulary-spread panel row excites, but that
 //!   every proper-noun query does a little.
 //!
+//! # Residual queries
+//!
+//! `query=residual` scores each layer's gates against the residual the FFN
+//! actually sees, and those residuals share a large component across every
+//! input (research log §6): six features topped every entity's list. The
+//! same background idea applies, over a different population: the panel
+//! entities are run through the model once and their per-layer residuals
+//! become the panel for that layer. Built on first use per background,
+//! since it costs one forward pass per panel name; installed by the
+//! describe route, which owns inference. Only the `entities` panel is
+//! offered for residual queries — 2048 forward passes for the corpus is not
+//! a first-request cost.
+//!
 //! # Cost
 //!
 //! The panel scores for a layer are one decode of that layer's gate matrix
@@ -318,6 +331,9 @@ impl LayerStats {
     }
 }
 
+/// `[names × hidden]` residuals per layer, for one background.
+type ResidualPanel = HashMap<usize, Array2<f32>>;
+
 /// Lazily computed per-layer backgrounds for one model, one set per panel.
 pub struct RelevanceStats {
     /// `[panel × hidden]` per background, each row already built like a
@@ -326,6 +342,13 @@ pub struct RelevanceStats {
     panels: HashMap<Background, Array2<f32>>,
     default: Background,
     per_layer: RwLock<HashMap<(Background, usize), Arc<LayerStats>>>,
+    /// Residual panels, `[panel × hidden]` per layer, installed by the
+    /// route that can run the model. See the module doc.
+    residual_panels: RwLock<HashMap<Background, Arc<ResidualPanel>>>,
+    residual_per_layer: RwLock<HashMap<(Background, usize), Arc<LayerStats>>>,
+    /// Held while a residual panel is being built, so concurrent first
+    /// requests do not each run the panel through the model.
+    pub residual_build: std::sync::Mutex<()>,
 }
 
 fn stack(rows: Vec<Array1<f32>>, hidden: usize) -> Array2<f32> {
@@ -400,6 +423,9 @@ impl RelevanceStats {
             // under which a fixture's `relevance` means anything.
             default: Background::Vocabulary,
             per_layer: RwLock::new(HashMap::new()),
+            residual_panels: RwLock::new(HashMap::new()),
+            residual_per_layer: RwLock::new(HashMap::new()),
+            residual_build: std::sync::Mutex::new(()),
         }
     }
 
@@ -434,6 +460,68 @@ impl RelevanceStats {
 
     pub fn panel_size(&self, background: Background) -> usize {
         self.panels.get(&background).map_or(0, |p| p.nrows())
+    }
+
+    /// The names a residual panel for `background` is built from, or `None`
+    /// when that background is not offered for residual queries.
+    pub fn residual_panel_names(background: Background) -> Option<&'static [&'static str]> {
+        match background {
+            Background::Entities => Some(ENTITY_PANEL),
+            Background::Corpus | Background::Vocabulary => None,
+        }
+    }
+
+    pub fn has_residual_panel(&self, background: Background) -> bool {
+        self.residual_panels
+            .read()
+            .map(|p| p.contains_key(&background))
+            .unwrap_or(false)
+    }
+
+    /// Rows in the residual panel for `background` (any layer; they are all
+    /// built from the same names), or 0 when none is installed.
+    pub fn residual_panel_size(&self, background: Background) -> usize {
+        self.residual_panels
+            .read()
+            .ok()
+            .and_then(|p| p.get(&background).and_then(|m| m.values().next().map(|a| a.nrows())))
+            .unwrap_or(0)
+    }
+
+    /// Install the per-layer residuals of the panel names: `per_layer[l]`
+    /// is `[names × hidden]`. Replaces any earlier panel and drops the
+    /// stats derived from it.
+    pub fn install_residual_panel(&self, background: Background, per_layer: ResidualPanel) {
+        if let Ok(mut p) = self.residual_panels.write() {
+            p.insert(background, Arc::new(per_layer));
+        }
+        if let Ok(mut s) = self.residual_per_layer.write() {
+            s.retain(|(b, _), _| *b != background);
+        }
+    }
+
+    /// The residual background for `layer`, computing it on first use.
+    /// `None` until a residual panel is installed, or when the panel has
+    /// no rows for this layer, or the layer has no gates.
+    pub fn residual_layer(
+        &self,
+        patched: &PatchedVindex,
+        background: Background,
+        layer: usize,
+    ) -> Option<Arc<LayerStats>> {
+        let key = (background, layer);
+        if let Some(s) = self.residual_per_layer.read().ok()?.get(&key) {
+            return Some(Arc::clone(s));
+        }
+        let panels = Arc::clone(self.residual_panels.read().ok()?.get(&background)?);
+        let panel = panels.get(&layer)?;
+        if panel.nrows() < 2 {
+            return None;
+        }
+        let gates = patched.base_gate_matrix(layer)?;
+        let stats = Arc::new(LayerStats::from_gates(&gates, panel));
+        self.residual_per_layer.write().ok()?.insert(key, Arc::clone(&stats));
+        Some(stats)
     }
 
     /// The `background` for `layer`, computing it on first use.
@@ -578,6 +666,20 @@ mod tests {
             ENTITY_PANEL.len() >= PANEL_SIZE,
             "panel too small for a stable std"
         );
+    }
+
+    #[test]
+    fn a_residual_panel_is_absent_until_installed_and_then_scores() {
+        let r = RelevanceStats::from_embeddings(&arr2(&[[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]]), 1.0);
+        assert!(!r.has_residual_panel(Background::Entities));
+        assert_eq!(r.residual_panel_size(Background::Entities), 0);
+        let mut per_layer = HashMap::new();
+        per_layer.insert(0usize, arr2(&[[1.0, 0.2], [1.0, -0.2], [0.9, 0.1]]));
+        r.install_residual_panel(Background::Entities, per_layer);
+        assert!(r.has_residual_panel(Background::Entities));
+        assert_eq!(r.residual_panel_size(Background::Entities), 3);
+        assert!(RelevanceStats::residual_panel_names(Background::Corpus).is_none());
+        assert!(RelevanceStats::residual_panel_names(Background::Entities).is_some());
     }
 
     #[test]

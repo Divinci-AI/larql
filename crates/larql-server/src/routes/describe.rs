@@ -116,6 +116,83 @@ pub struct DescribeParams {
     pub baseline: Option<String>,
 }
 
+/// Per-layer last-token residuals for `text`, tokenised as INFER does (with
+/// BOS). One place, so the entity, a baseline and the relevance panel are
+/// all run the same way — a panel built one way and a query another would
+/// measure the difference between the two.
+fn residuals_for(
+    model: &LoadedModel,
+    weights: &larql_inference::ModelWeights,
+    patched: &larql_vindex::PatchedVindex,
+    text: &str,
+) -> Result<std::collections::HashMap<usize, Vec<f32>>, ServerError> {
+    let enc = model
+        .tokenizer
+        .encode(text, true)
+        .map_err(|e| ServerError::Internal(format!("tokenize error: {e}")))?;
+    let ids: Vec<u32> = enc.get_ids().to_vec();
+    let run = larql_inference::infer_patched(
+        weights,
+        &model.tokenizer,
+        patched,
+        Some(&patched.knn_store),
+        &ids,
+        1,
+        &larql_inference::KnnRouteMode::from_env(),
+    );
+    Ok(run.residuals.into_iter().collect())
+}
+
+/// Build and install the residual relevance panel for `background` unless
+/// one is already there. One forward pass per panel name; concurrent first
+/// requests wait on the build lock rather than each running the panel.
+fn ensure_residual_panel(
+    model: &LoadedModel,
+    weights: &larql_inference::ModelWeights,
+    patched: &larql_vindex::PatchedVindex,
+    background: crate::relevance::Background,
+) -> Result<(), ServerError> {
+    let names = crate::relevance::RelevanceStats::residual_panel_names(background).ok_or_else(|| {
+        ServerError::BadRequest(format!(
+            "background `{}` is not offered for residual queries; use `entities`",
+            background.as_str()
+        ))
+    })?;
+    if model.relevance.has_residual_panel(background) {
+        return Ok(());
+    }
+    let _build = model.relevance.residual_build.lock().map_err(|_| ServerError::Internal("panel lock".into()))?;
+    if model.relevance.has_residual_panel(background) {
+        return Ok(());
+    }
+    let start = std::time::Instant::now();
+    let mut rows: std::collections::HashMap<usize, Vec<Vec<f32>>> = std::collections::HashMap::new();
+    for name in names {
+        for (layer, r) in residuals_for(model, weights, patched, name)? {
+            rows.entry(layer).or_default().push(r);
+        }
+    }
+    let hidden = model.embeddings.ncols();
+    let mut per_layer = std::collections::HashMap::new();
+    for (layer, rs) in rows {
+        let ok: Vec<&Vec<f32>> = rs.iter().filter(|r| r.len() == hidden).collect();
+        let mut m = larql_vindex::ndarray::Array2::<f32>::zeros((ok.len(), hidden));
+        for (i, r) in ok.iter().enumerate() {
+            m.row_mut(i).assign(&larql_vindex::ndarray::Array1::from((*r).clone()));
+        }
+        per_layer.insert(layer, m);
+    }
+    tracing::info!(
+        "residual relevance panel `{}`: {} names, {} layers, {:.1}s",
+        background.as_str(),
+        names.len(),
+        per_layer.len(),
+        start.elapsed().as_secs_f32()
+    );
+    model.relevance.install_residual_panel(background, per_layer);
+    Ok(())
+}
+
 pub const QUERY_EMBEDDING: &str = "embedding";
 pub const QUERY_RESIDUAL: &str = "residual";
 
@@ -218,47 +295,20 @@ pub fn describe_entity_with(
                 .map_err(ServerError::InferenceUnavailable)?;
             let weights: &larql_inference::ModelWeights = &weights_guard;
 
-            // Same tokenization as INFER (with BOS): the residual at the last
-            // token is only meaningful for the sequence the model was
-            // actually run on.
-            let enc = model
-                .tokenizer
-                .encode(params.entity.as_str(), true)
-                .map_err(|e| ServerError::Internal(format!("tokenize error: {e}")))?;
-            let ids: Vec<u32> = enc.get_ids().to_vec();
+            // The relevance background for residual scores is the panel's
+            // residuals, not its embeddings; built here on first use since
+            // this route owns inference.
+            if params.relevance {
+                ensure_residual_panel(model, weights, patched, background)?;
+            }
 
             // The production inference path. Its per-layer residuals are the
             // vector each layer's gates were scored against for the last
             // position — exactly what DESCRIBE should be scoring against.
-            let run = larql_inference::infer_patched(
-                weights,
-                &model.tokenizer,
-                patched,
-                Some(&patched.knn_store),
-                &ids,
-                1,
-                &larql_inference::KnnRouteMode::from_env(),
-            );
-            let mut by_layer: std::collections::HashMap<usize, Vec<f32>> =
-                run.residuals.into_iter().collect();
+            let mut by_layer = residuals_for(model, weights, patched, params.entity.as_str())?;
 
             if let Some(baseline) = params.baseline.as_deref() {
-                let benc = model
-                    .tokenizer
-                    .encode(baseline, true)
-                    .map_err(|e| ServerError::Internal(format!("tokenize error: {e}")))?;
-                let bids: Vec<u32> = benc.get_ids().to_vec();
-                let brun = larql_inference::infer_patched(
-                    weights,
-                    &model.tokenizer,
-                    patched,
-                    Some(&patched.knn_store),
-                    &bids,
-                    1,
-                    &larql_inference::KnnRouteMode::from_env(),
-                );
-                let base: std::collections::HashMap<usize, Vec<f32>> =
-                    brun.residuals.into_iter().collect();
+                let base = residuals_for(model, weights, patched, baseline)?;
                 // Contrast per layer. A layer the baseline did not capture is
                 // left as-is rather than dropped: the answer is then a plain
                 // residual for that layer, which the caller can see from
@@ -328,7 +378,9 @@ pub fn describe_entity_with(
     let mut edges: HashMap<String, EdgeInfo> = HashMap::new();
 
     for (layer_idx, hits) in &trace.layers {
-        let layer_stats = if params.relevance {
+        let layer_stats = if params.relevance && params.query == QUERY_RESIDUAL {
+            model.relevance.residual_layer(patched, background, *layer_idx)
+        } else if params.relevance {
             model.relevance.layer(patched, background, *layer_idx)
         } else {
             None
@@ -540,7 +592,14 @@ pub fn describe_entity_with(
     });
     if params.relevance {
         out["relevance_background"] = serde_json::json!(background.as_str());
-        out["relevance_panel"] = serde_json::json!(model.relevance.panel_size(background));
+        out["relevance_panel"] = serde_json::json!(if params.query == QUERY_RESIDUAL {
+            model.relevance.residual_panel_size(background)
+        } else {
+            model.relevance.panel_size(background)
+        });
+        // Which population the z is against: the panel's embeddings or its
+        // residuals. A caller comparing modes must see which it got.
+        out["relevance_query"] = serde_json::json!(params.query);
     }
     if params.query != QUERY_EMBEDDING {
         out["query"] = serde_json::json!(params.query);
