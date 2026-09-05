@@ -1,5 +1,6 @@
 # 2048 titles; en.wikipedia daily top-1000, 1st+15th of each month 2024-01..2026-08,
-# ranked by days present (max 64). Built by scripts/build-entity-corpus.py.
+# top 20000 by days present (max 64), classified by Wikidata instance-of and filled to
+# per-kind quotas: place 409, person 514, organisation 307, work 307, event 204, other 307. Built by scripts/build-entity-corpus.py --stratify.
 YouTube
 Napoleon
 Barack Obama
@@ -39,7 +40,6 @@ World War II
 2024 United States presidential election
 Arnold Schwarzenegger
 Australia
-Freddie Mercury
 Japan
 Jeffrey Dahmer
 Joe Biden
@@ -51,11 +51,11 @@ Canada
 LeBron James
 Michael Jordan
 Scarlett Johansson
-2026 FIFA World Cup
 Brad Pitt
 Franklin D. Roosevelt
+Freddie Mercury
 Mia Khalifa
-2026 FIFA World Cup qualification
+2026 FIFA World Cup
 Germany
 Israel
 Abraham Lincoln
@@ -64,1395 +64,1026 @@ Leonardo DiCaprio
 Ronald Reagan
 WhatsApp
 Ariana Grande
-Dua Lipa
 Limonene
 Sabrina Carpenter
 Turkey
 Vietnam War
 Vladimir Putin
-Zendaya
 Game of Thrones
 The Beatles
-Anne Hathaway
+Zendaya
+Dua Lipa
 Dwayne Johnson
-George VI
 George W. Bush
 Timothée Chalamet
 .xxx
+George VI
 Henry VIII
 Manchester United F.C.
 OnlyFans
 Soviet Union
 Ted Bundy
+Anne Hathaway
 Joseph Stalin
-Marilyn Monroe
+Premier League
+2026 FIFA World Cup qualification
 Angelina Jolie
 George Washington
+Marilyn Monroe
 Nicole Kidman
-Premier League
 Robert F. Kennedy Jr.
-TikTok
 Ottoman Empire
+TikTok
 Pakistan
 The Holocaust
 Winston Churchill
 Yellowstone
-Dakota Johnson
 Eminem
-Heath Ledger
 Jesus
 Lady Gaga
-Opinion polling for the next United Kingdom general election
 Ryan Reynolds
 Taiwan
-Bob Dylan
 David Bowie
-Jeffrey Epstein
-Neatsville, Kentucky
+Opinion polling for the next United Kingdom general election
+Real Madrid CF
 Steve Jobs
-Sylvester Stallone
-George V
+Bob Dylan
+Dakota Johnson
 JD Vance
 Jason Statham
+Neatsville, Kentucky
 Philippines
-Real Madrid CF
 Roblox
-Generation Z
-Lisa Marie Presley
+Sylvester Stallone
+Heath Ledger
+Jeffrey Epstein
 Z-Library
 Alexander the Great
-Ben Affleck
 Billie Eilish
+Generation Z
+Twitter
+UEFA Champions League
+Earth
+George V
+Harry Potter
 Kanye West
 Madonna
-Nicolas Cage
-The Rookie
-Twitter
-American Civil War
-Earth
-Jennifer Aniston
 MrBeast
-Theodore Roosevelt
-UEFA Champions League
+The Rookie
+American Civil War
+Ben Affleck
 Bill Clinton
 Chernobyl disaster
 English language
-Millie Bobby Brown
-Prince
+Jennifer Aniston
 The Pirate Bay
+Theodore Roosevelt
+FC Barcelona
+Lisa Marie Presley
+Nicolas Cage
+Prince
 XHamster
 Artificial intelligence
-Edward VIII
-FC Barcelona
-Harry Potter
-Interstellar
-Jennifer Lopez
-Johnny Depp
-Robert De Niro
-Tom Holland
-Benjamin Netanyahu
-Chelsea F.C.
 Dark web
-Harrison Ford
-Indonesia
-Iran
-Peter Thiel
+Edward VIII
+Jennifer Lopez
 Russian invasion of Ukraine
 Russo-Ukrainian War
 United Arab Emirates
-Anya Taylor-Joy
-Arsenal F.C.
-Kobe Bryant
+Chelsea F.C.
+Harrison Ford
+Indonesia
+Iran
+Johnny Depp
 Kylian Mbappé
-Margaret Qualley
-Periodic table
-Wicked
-Windows 10 version history
+Millie Bobby Brown
+Peter Thiel
+Robert De Niro
+Arsenal F.C.
+Benjamin Netanyahu
+Kobe Bryant
 Liverpool F.C.
 Melania Trump
+Periodic table
 Stranger Things
-Tom Hanks
+Tom Holland
 William Shakespeare
-Jason Momoa
-Jeff Bezos
-Keir Starmer
-Oppenheimer
+Windows 10 version history
+Margaret Qualley
 Pedro Pascal
+Chappell Roan
+Jason Momoa
+Keir Starmer
+Snapchat
+Tom Hanks
+Anya Taylor-Joy
+Charlie Kirk
+Jeff Bezos
+Oppenheimer
 Rihanna
 Ryan Gosling
-Chappell Roan
-Charlie Kirk
-Emily Blunt
-Netflix
-Paul McCartney
-Snapchat
-Tom Brady
-Dune
-Netherlands
 Sean Combs
-The World's Billionaires
-Val Kilmer
 Ana de Armas
-Diana, Princess of Wales
-FIFA World Cup
-J. Robert Oppenheimer
+Emily Blunt
 Jennifer Lawrence
+Netflix
+Netherlands
+Paul McCartney
+President of the United States
+Selena Gomez
+Tom Brady
+Val Kilmer
+Dune
+George H. W. Bush
 John Cena
 John Lennon
 Julia Roberts
-Lewis Hamilton
-Liam Neeson
-Manchester City F.C.
-Mexico
-President of the United States
-Selena Gomez
-2020 United States presidential election
-George H. W. Bush
 Katy Perry
-Lamine Yamal
+Lewis Hamilton
 Mahatma Gandhi
+Manchester City F.C.
 Marvel Cinematic Universe
-Matthew McConaughey
+Mexico
+The World's Billionaires
 Virat Kohli
+2020 United States presidential election
+Blake Lively
+Diana, Princess of Wales
+Lamine Yamal
+Liam Neeson
+FIFA World Cup
+Matthew McConaughey
+O. J. Simpson
+Osama bin Laden
+Richard Nixon
+Stephen Curry
+Tupac Shakur
 Andrew Tate
 Barry Keoghan
-Blake Lively
+Elizabeth I
 Glen Powell
+Justin Bieber
+Kylie Jenner
 Mark Wahlberg
-Narendra Modi
-O. J. Simpson
-Olivia Rodrigo
+Muhammad
+Muhammad Ali
 Shaquille O'Neal
-Stephen Curry
 Telegram
-Tupac Shakur
+The Odyssey
 Wikimedia Foundation
-Zohran Mamdani
 Biggest ball of twine
 Cillian Murphy
 Demi Moore
-Emma Stone
 Henry Cavill
 Jimmy Carter
-Kylie Jenner
-Meryl Streep
-Muhammad
-Muhammad Ali
-Richard Nixon
+Narendra Modi
+Neymar
+Olivia Rodrigo
 Robert F. Kennedy
-Sinners
 Slow Horses
-The Odyssey
+The Pitt
+Titanic
+Zohran Mamdani
 Alia Bhatt
-Callum Turner
+Cat
+Emma Stone
 Florence Pugh
 Grey's Anatomy
 Jenna Ortega
-Justin Bieber
-Osama bin Laden
-The Pitt
-Cat
-Elizabeth I
+Meryl Streep
 Minecraft
-Neymar
 Pete Hegseth
 QR code
-Raindrop cake
-Severance
+Seven deadly sins
 Taylor Sheridan
-Titanic
+Callum Turner
+Erling Haaland
+Hailee Steinfeld
+New Zealand
+Phil Collins
+Raindrop cake
+Ralph Fiennes
+Saudi Arabia
+Superman
 2 Girls 1 Cup
 Aaron Taylor-Johnson
 Amy Winehouse
+Charli XCX
+Deadpool & Wolverine
+Emma Watson
+Karoline Leavitt
+Macaulay Culkin
+Ted Lasso
+Tom Hardy
+Bangladesh
+Brazil
 Cher
 Christopher Nolan
-Deadpool & Wolverine
 Dynatrace
-Erling Haaland
-Hailee Steinfeld
 Jacob Elordi
-Macaulay Culkin
-New Zealand
-Null
-Phil Collins
-Ralph Fiennes
-Saudi Arabia
+South Africa
 Spain
 Steven Spielberg
-Superman
-Ted Lasso
+The White Lotus
 Zoe Saldaña
-Brazil
-Emma Watson
-House of the Dragon
-KPop Demon Hunters
-Karoline Leavitt
-Project Hail Mary
-Seven deadly sins
-South Africa
-Stephen Hawking
-The Boys
-Tom Hardy
-Wuthering Heights
-Al Pacino
+2025 Formula One World Championship
 Atomic bombings of Hiroshima and Nagasaki
 Beyoncé
-Charli XCX
+Fascism
+House of the Dragon
+Jim Carrey
+KPop Demon Hunters
+Project 2025
+Project Hail Mary
+Stephen Hawking
+Weapons
+Wuthering Heights
+Al Pacino
+Charlie Sheen
 Euphoria
 Fallout
-Fascism
-Jeremy Allen White
-Jim Carrey
-John Wayne Gacy
-Kirsten Dunst
-The Bear
-The White Lotus
-Weapons
-Bangladesh
-Carlos Alcaraz
-Charlie Sheen
 Genghis Khan
 Hong Kong
 Hunter Schafer
-Jake Gyllenhaal
 Jannik Sinner
+Jeremy Allen White
+Josh Brolin
+Kendrick Lamar
+Kirsten Dunst
+Sam Altman
+Sex position
+1989 Tiananmen Square protests and massacre
+Adam Sandler
+Bonnie Blue
+Bruno Mars
+Carlos Alcaraz
+Israel–Hamas war
+Jake Gyllenhaal
+John Wayne Gacy
+Katseye
 Matt Damon
 Mia Goth
-Project 2025
-Robert Downey Jr.
-Sex position
+Natalie Portman
+Nosferatu
+Pierce Brosnan
+Shakira
 Zoë Kravitz
-2025 Formula One World Championship
-Adam Sandler
+1337x
 Anthony Bourdain
-Bob Marley
+Benson Boone
 Bruce Lee
-Bruno Mars
-Google Chrome
-Israel–Hamas war
-Josh Brolin
-Katseye
-One Battle After Another
-Priscilla Presley
-Sam Altman
-Shōgun
-Wade Wilson
-28 Years Later
-Bonnie Blue
 Caitlin Clark
 Channing Tatum
 Dakota Fanning
 David Beckham
 Dick Van Dyke
 Dwight D. Eisenhower
+Google Chrome
+Jamie Lee Curtis
+Kristi Noem
+Madeira
+Max Verstappen
+One Battle After Another
+Pope Leo XIV
+Robert Downey Jr.
+Shōgun
+Vanessa Kirby
+Wade Wilson
+1xBet
+28 Years Later
+Bob Marley
+Gaza war
+HTTP 404
 Harry Kane
 Hugh Jackman
-Jamie Lee Curtis
+It Ends with Us
 Jennifer Garner
-Kristi Noem
-Pierce Brosnan
-Pope Leo XIV
+Jesse Plemons
+Kash Patel
+Nazi Germany
+Pirates of the Caribbean
+Priscilla Presley
+Priyanka Chopra
+Rule 34
 Russo-Ukrainian war
 Sandra Bullock
-Shakira
+Snoop Dogg
+The Last of Us
 The Traitors
-Vanessa Kirby
-1989 Tiananmen Square protests and massacre
-1xBet
+Walton Goggins
+Alexander Skarsgård
 Bradley Cooper
+Bridgerton
 Charles Manson
-Chris Hemsworth
+Conor McGregor
+Cynthia Erivo
+Denzel Washington
 Ed Gein
 Edward VII
 Frankenstein
 Gavin Newsom
+George Clooney
 Ghislaine Maxwell
-Gmail
-It Ends with Us
-Jesse Plemons
-Judy Garland
-Kash Patel
-Kate Hudson
-Kendrick Lamar
-Natalie Portman
-Nazi Germany
-Nosferatu
-Pirates of the Caribbean
-Priyanka Chopra
-Rachel McAdams
-Republican Party
-Rule 34
-The Housemaid
-1337x
-2024 Summer Olympics
-Alexander Skarsgård
-Benson Boone
-Bridgerton
-Civil War
-Conor McGregor
-Denzel Washington
-Elle Fanning
-Eva Mendes
-Gaza war
 Gladiator II
-HTTP 404
-HTTP cookie
-Italy
+Gmail
+Judy Garland
 Julius Caesar
-Kim Kardashian
-Madeira
-Margot Robbie
-Max Verstappen
+Kate Hudson
+Marco Rubio
 Mike Tyson
-Novak Djokovic
 OpenAI
 Pablo Escobar
-Snoop Dogg
-Switzerland
-The Eras Tour
-The Long Walk
-Tottenham Hotspur F.C.
-True Detective
-Walton Goggins
+Rachel McAdams
+Roman Empire
+Saddam Hussein
+Thunderbolts*
+2024 Summer Olympics
+2024–25 UEFA Champions League
 2025–26 UEFA Champions League
-2026 United States elections
 Aaron Hernandez
 Afghanistan
+Benny Blanco
 Bill Skarsgård
 Bruce Springsteen
-Cynthia Erivo
+Casualties of the Russo-Ukrainian War
+Chris Hemsworth
 DuckDuckGo
-From
+Elle Fanning
+Eva Mendes
 Gary Oldman
-George Clooney
-Hamas
-Hermann Göring
-Jason Bateman
+HTTP cookie
+Italy
 Joaquin Phoenix
-John Krasinski
+Jon Hamm
 Jonathan Bailey
-Jurassic World Rebirth
 Kelly Reilly
-Marco Rubio
+Kim Kardashian
+Margot Robbie
 Mel Gibson
 Michael J. Fox
 Morena Baccarin
-Mount Takahe
-Ozzy Osbourne
+Novak Djokovic
 Paul Mescal
-Roman Empire
-Saddam Hussein
-Shohei Ohtani
-Travis Kelce
+Rebecca Ferguson
+Switzerland
+Syria
+The Eras Tour
+The Handmaid's Tale
+Tottenham Hotspur F.C.
+True Detective
 Ukraine
 Whitney Houston
-2024 Indian general election
+2026 United States elections
 Alan Ritchson
 Anora
+Apple Inc.
 Barron Trump
 Billy Bob Thornton
-Bugonia
 Cameron Diaz
 Cardi B
-Casualties of the Russo-Ukrainian War
-Christopher Reeve
+Chris Martin
 David Attenborough
-Democratic Party
-Dexter
+Eric Dane
+Goldie Hawn
+Hamas
+Heretic
+Hermann Göring
+High Potential
+John Krasinski
+Jurassic World Rebirth
+Kamala Harris
+Marie Antoinette
+Mariska Hargitay
+Mount Takahe
+Noah Wyle
+Ozzy Osbourne
+Paradise
+Shah Rukh Khan
+Shohei Ohtani
+Silo
+Travis Kelce
+Tulsi Gabbard
+Utrecht
+William, Prince of Wales
+2026 United States Senate elections
+Apple Network Server
+Brooklyn
+Bugonia
+Chris Pratt
+Christopher Reeve
+Durrës
 Elizabeth Taylor
 Emmanuel Macron
-Eric Dane
+Generation X
 George III
-Goldie Hawn
-Heretic
-High Potential
-Invincible
-Jon Hamm
-Kamala Harris
+Indian Premier League
+Jason Bateman
+Kevin Costner
 Kieran Culkin
 Kurt Russell
+Lockheed Martin F-35 Lightning II
 Madame Web
-Mariska Hargitay
-Noah Wyle
+Marlon Brando
+Ne Zha 2
 Olivia Dean
+Pam Bondi
 Pamela Anderson
-Rebecca Ferguson
-Shah Rukh Khan
-Thunderbolts*
+Post Malone
 Will Smith
-William, Prince of Wales
 Winona Ryder
-2024–25 UEFA Champions League
-2026 United States Senate elections
-Apple Inc.
-Apple Network Server
+2024 Indian general election
 Assassination of Charlie Kirk
 Bad Bunny
-Benny Blanco
 Brigitte Macron
-California
-Charlize Theron
-Chris Martin
-Europe
-Generation X
-Gracie Abrams
-Illuminati
-Indian Premier League
-Jack Nicholson
-José Mourinho
-Kaitlin Olson
-Kepler's Supernova
-Kevin Costner
-Landman
-Lockheed Martin F-35 Lightning II
-Marie Antoinette
-Marlon Brando
-Mckenna Grace
-Paradise
-Paul Thomas Anderson
-Silo
-The Last of Us
-Tulsi Gabbard
-UEFA Euro 2024
-Utrecht
-Victor Wembanyama
-Young Sheldon
-Anna's Archive
-Breaking Bad
-Brenda Song
-Brooklyn
 Candace Owens
-Chris Pratt
-Dhurandhar
-Drake
-Durrës
+Charlize Theron
 Emilia Clarke
-Eurovision Song Contest 2026
+Europe
+Gracie Abrams
 Greenland
 Hannah Waddingham
 IShowSpeed
-Ivana Trump
+Illuminati
+José Mourinho
+Kaitlin Olson
+Kepler's Supernova
+Liam Payne
+Lily Collins
+Lyndon B. Johnson
+Mariah Carey
+Mckenna Grace
+Michael Schumacher
+Palestine
+Patrick Mahomes
+Paul Thomas Anderson
+Peaky Blinders
+Royal Rumble
+Serena Williams
+Stellan Skarsgård
+Stranger Things season 5
+U.S. state
+UEFA Euro 2024
+Victor Wembanyama
+Vietnam
+Young Sheldon
+2024 Formula One World Championship
+Aaron Rodgers
+Adolescence
+Anna's Archive
+Breaking Bad
+Brenda Song
+California
+Colman Domingo
+Conclave
+Dhurandhar
+Eurovision Song Contest 2026
+Formula One
+Gladiator
+Gypsy-Rose Blanchard
+Inside Out 2
+Jack Antonoff
+Jack Nicholson
 Jacqueline Kennedy Onassis
 Jude Bellingham
 Justin Trudeau
-Liam Payne
-Lily Collins
+Ku Klux Klan
+London
 Longlegs
-Lyndon B. Johnson
-Mariah Carey
+Luigi Mangione
+Lyle and Erik Menendez
 Marty Supreme
 Matthew Rhys
 Michael Caine
-Ne Zha 2
-Pam Bondi
-Peaky Blinders
-Post Malone
-Rishi Sunak
-Royal Rumble
-Sandy Hook Elementary School shooting
-Serena Williams
-Skibidi Toilet
-Stanley Tucci
-State of Palestine
-Stellan Skarsgård
-Stranger Things season 5
-Syria
-Teyana Taylor
-The Handmaid's Tale
-The Iron Claw
-The Running Man
-U.S. state
-Von Erich family
-Zionism
-2024 ICC Men's T20 World Cup
-Aaron Rodgers
-Algebraic notation
-Ballon d'Or
-Brittany Murphy
-Caroline Kennedy
-Chris Evans
-Ella Purnell
-Elliot Page
-Erika Kirk
-Formula One
-Gladiator
-Godzilla Minus One
-Gypsy-Rose Blanchard
-Harry Styles
-Inside Out 2
-Jack Antonoff
-James Marsden
-Jennifer Connelly
-John F. Kennedy Jr.
-Kalki 2898 AD
-Ku Klux Klan
-London
-Malaysia Airlines Flight 370
-Martin Luther King Jr.
-Milly Alcock
 National Basketball Association
 Nick Fuentes
 Olivia Munn
-Palestine
-Patrick Mahomes
 Pope Francis
 Quentin Tarantino
-Squid Game
-Stephen King
-TNT Sports
+Rishi Sunak
+Rory McIlroy
+Sam Elliott
+Sandy Hook Elementary School shooting
+Sean Penn
+Skibidi Toilet
+Sonic the Hedgehog 3
+Stanley Tucci
+State of Palestine
+Teyana Taylor
 Thailand
 The Batman
-The Gentlemen
 The Substance
 Usha Vance
-Vietnam
-Zootopia 2
-2022 FIFA World Cup
-2024 Formula One World Championship
-2025 New York City mayoral election
-Academy Awards
-Adolescence
+Von Erich family
+Zionism
+2024 ICC Men's T20 World Cup
+Adria Arjona
 Alec Baldwin
 Alexandra Daddario
+Alexandria Ocasio-Cortez
 Ali Larter
-Aryna Sabalenka
 Aubrey Plaza
 Audrey Hepburn
 BRICS
+Babygirl
+Ballon d'Or
 Ben Stiller
-Che Guevara
-Colman Domingo
-Columbine High School massacre
-Conclave
-Dennis Quaid
-Dennis Rader
-England national football team
-Ethan Hawke
-Fleetwood Mac
+Brittany Murphy
+Caroline Kennedy
+Ella Purnell
+Elliot Page
+Erika Kirk
 Fred Trump
-Georgia
-Halloween
+Godzilla Minus One
+Grand Theft Auto VI
+Harry Styles
 Hilary Duff
+Ivana Trump
+Jack Black
+James Marsden
+Jennifer Connelly
+John Candy
+John F. Kennedy Jr.
+Jon Bernthal
+Kalki 2898 AD
+Kate Winslet
+Khabib Nurmagomedov
+Leo Woodall
+Lindsay Lohan
+Malaysia Airlines Flight 370
+Mark Carney
+Mark Zuckerberg
+Mauritius
+Milly Alcock
+NATO phonetic alphabet
+Rachel Zegler
+Rosamund Pike
+Solo Leveling
+Squid Game
+The Lord of the Rings
+Unit 731
+Viktor Gyökeres
+Zootopia 2
+2022 FIFA World Cup
+2025 FIFA Club World Cup
+2025 New York City mayoral election
+Academy Awards
+Animal
+Aryna Sabalenka
+Austin Butler
+Celine Dion
+Che Guevara
+Christa Pike
+Columbine High School massacre
+Czech Republic
+Dennis Rader
+Dolly Parton
+Donald Trump Jr.
+Ethan Hawke
+Frank Sinatra
+Freemasonry
 How to Train Your Dragon
 Jaafar Jackson
 Jake Bongiovi
 Jeffrey Manchester
 Jodie Foster
-John Candy
-Jon Bernthal
-Kate Winslet
-Khabib Nurmagomedov
+Joseph Quinn
+Judith Barsi
+Kaley Cuoco
 Kingdom of the Planet of the Apes
-Leo Woodall
-Lindsay Lohan
+Kraven the Hunter
 Lok Sabha
-Luigi Mangione
 Luka Dončić
-Mauritius
+Martin Luther King Jr.
 Megan Fox
-Michael Schumacher
 Miley Cyrus
 Neil Diamond
 Nicholas Galitzine
 North Korea
+Once Upon a Time in Hollywood
+Orlando Bloom
 Planet of the Apes
 Rafael Nadal
-Rory McIlroy
-Rosamund Pike
-Sam Elliott
-Sean Penn
-Solo Leveling
-Sonic the Hedgehog 3
+Rosé
+Rowan Atkinson
+Ruby Franke
+Scottie Scheffler
+Stephen King
+Stephen Miller
 Talulah Riley
-The Lord of the Rings
-Unit 731
-Viktor Gyökeres
+The Day of the Jackal
 Virginia Giuffre
 Zac Efron
 .xyz
+2016 United States presidential election
 2026 Men's T20 World Cup
 2030 FIFA World Cup
-Adria Arjona
-Alien
-Animal
-Austin Butler
-Babygirl
-Backrooms
-Bharatiya Janata Party
-Britney Spears
-Celine Dion
-Christa Pike
-Czech Republic
-Donald Trump Jr.
-Ejae
-FC Bayern Munich
-Frank Sinatra
-Freemasonry
-Grand Theft Auto VI
-Guy Ritchie
-Hamnet
-Heated Rivalry
-Inter Miami CF
-Jack Black
-Jake Paul
-Javier Bardem
-Joe Keery
-Judith Barsi
-Kaley Cuoco
-Kimberly Guilfoyle
-Kraven the Hunter
-Lyle and Erik Menendez
-Mark Carney
-Mark Zuckerberg
-Michael
-Millennials
-NATO phonetic alphabet
-Orlando Bloom
-Poor Things
-Raye
-Riley Keough
-Robbie Williams
-Roger Federer
-Rowan Atkinson
-Ruby Franke
-Salman Khan
-Speak No Evil
-Stephen Miller
-Stevie Nicks
-The Devil Wears Prada 2
-Trap
-Twisters
-Wedding anniversary
-2016 United States presidential election
-2026 Iran war
-28 Days Later
 Alexander Hamilton
-Alexandria Ocasio-Cortez
-Amanda Seyfried
-BTS
-Bill Belichick
-Brendan Fraser
-Cailee Spaeny
+Bharatiya Janata Party
+Blackpink
+Britney Spears
 Catherine O'Hara
-Catherine, Princess of Wales
-Clavicular
 Colin Farrell
+Cyprus
 Danny Masterson
-Disclosure Day
-Dolly Parton
+Dennis Quaid
 Ed and Lorraine Warren
-Elton John
+Ejae
+England national football team
+Eurovision Song Contest 2025
 Eva Longoria
-FIFA Men's World Ranking
-Fighter
-Fuck
-George Soros
+FC Bayern Munich
+Fleetwood Mac
 Georgie & Mandy's First Marriage
 Giancarlo Esposito
+Guy Ritchie
 Gwyneth Paltrow
-Hudson Williams
-I Know What You Did Last Summer
-Ilhan Omar
-Israeli–Palestinian conflict
+Halloween
+Heated Rivalry
+Hulk Hogan
+Inter Miami CF
+Isabela Merced
+Islam Makhachev
 Ivanka Trump
-Jack O'Connell
+Jake Paul
+Javier Bardem
 Jayne Mansfield
 Jeff Goldblum
-Joseph Quinn
-Josh Allen
+Joe Keery
+John Travolta
 Keira Knightley
-Labubu
+Kimberly Guilfoyle
 Lisa Bonet
 Luka Modrić
-Malaysia
+Marla Maples
 Megan Thee Stallion
+Michael B. Jordan
 Michelle Trachtenberg
-Mikey Madison
 Mohamed Salah
 Morgan Freeman
-NBC Sports
 Naomi Watts
-Naughty America
 Nicholas Hoult
 Nicole Scherzinger
-Nuremberg
-Once Upon a Time in Hollywood
-Patrick Swayze
-Pep Guardiola
-Pluribus
-Rachel Zegler
-Road House
-Rosé
-Saltburn
+Poor Things
+Raye
+Robbie Williams
+Roger Federer
 Scott Bessent
-Scottie Scheffler
-Sean Connery
-Send Help
 Shia LaBeouf
-Shrinking
-Sofía Vergara
-Sophie Turner
-Supergirl
+Snow White
 Tate McRae
 Teddy Swims
-The Beekeeper
-The Brutalist
-The Day of the Jackal
+The Devil Wears Prada 2
 The Fall Guy
-The Menu
-The Ministry of Ungentlemanly Warfare
-The Super Mario Galaxy Movie
 Theo James
 Tiger Woods
-Vinícius Júnior
+Wedding anniversary
 Wrexham A.F.C.
-X-Men '97
 Xabi Alonso
 Xi Jinping
-Zara Larsson
 2024 NFL draft
-2025 FIFA Club World Cup
 2025 ICC Champions Trophy
-2026 Formula One World Championship
-2026 Winter Olympics
+2026 Iran war
 2028 United States presidential election
-3I/ATLAS
-Abigail
-Adam Scott
+28 Days Later
+A Minecraft Movie
 Alan Cumming
+Alan Rickman
 Ali Khamenei
-Anyone but You
+Amanda Seyfried
+Andor
 Ayrton Senna
-Barbarian
+BTS
+Barbra Streisand
 Beetlejuice Beetlejuice
-Blackpink
-Bring Her Back
-Brittney Griner
-Carey Mulligan
-Charles Leclerc
+Bella Ramsey
+Brendan Fraser
+CD-ROM
+Catherine, Princess of Wales
 Charlie Chaplin
-Chase Infiniti
+Cheryl Hines
 Chester Bennington
-Cody Rhodes
-Connor Storrie
-Cyprus
+Clavicular
 Daniel Craig
 Deadpool
 Deion Sanders
 Despicable Me 4
-Diane Keaton
-Dolores O'Riordan
-Ella Langley
-Epstein files
+Disclosure Day
+Elton John
+Emilia Pérez
 Eurovision Song Contest 2024
-Eurovision Song Contest 2025
-For All Mankind
-GAZ Sobol
-Google Maps
-Google Translate
+FIFA Men's World Ranking
+Fuck
+George Soros
 Halle Berry
 Harvey Weinstein
 Helen Mirren
-Helena Bonham Carter
-Hulk Hogan
-Human penis
-Iga Świątek
-Independence Day
-Isabela Merced
-Islam Makhachev
+Hudson Williams
+I Know What You Did Last Summer
+Ilhan Omar
+Israeli–Palestinian conflict
 Italian brainrot
 Jack Quaid
-Jake Paul vs. Mike Tyson
-James Franco
-James Talarico
-Jana Nayagan
 Jared Kushner
-Jessica Alba
 JoJo Siwa
-John Travolta
-Josh O'Connor
-Kevin Von Erich
+Josh Allen
+Julie Andrews
 La Liga
-Lando Norris
+Labubu
 Lilo & Stitch
 Linkin Park
-Mark Kerr
-Marla Maples
-Martin Scorsese
-Martin Sheen
-Matthew Perry
-Maya Hawke
-Mean Girls
-Michael B. Jordan
+Malaysia
+Marcus Rashford
+Mikey Madison
+Millennials
 Moana 2
-Monica Barbaro
-Naomi Osaka
+NBC Sports
+Natalia Grace
+Naughty America
 Nick Saban
-One Piece
-Ousmane Dembélé
-Palantir Technologies
-Pat McAfee
-Philip Seymour Hoffman
-Presumed Innocent
-Reba McEntire
-Reese Witherspoon
-Robert Pattinson
-Roy Cohn
-Sadie Sink
-Scream
+Nuremberg
+Patrick Swayze
+Pep Guardiola
+Riley Keough
+Roman Reigns
+Salman Khan
+Sean Connery
+Send Help
 Shai Gilgeous-Alexander
-Sharvari
-Snow White
+Sofía Vergara
+Sophie Turner
+Stevie Nicks
+Supergirl
+The Brutalist
+The Crow
+The Ministry of Ungentlemanly Warfare
+The Super Mario Galaxy Movie
+The Wild Robot
+Tulsa King
+Until Dawn
+Vanessa Trump
+Vinícius Júnior
+X-Men '97
+Zara Larsson
+2008 United States presidential election
+2012 United States presidential election
+2024–25 Premier League
+2025 Canadian federal election
+2026 Formula One World Championship
+2026 Winter Olympics
+3I/ATLAS
+Aadhaar
+Abigail
+Adam Scott
+Ahmed al-Sharaa
+Anna Kendrick
+Anyone but You
+Barbarian
+Bashar al-Assad
+Bill Belichick
+Billy Joel
+Bring Her Back
+Brittney Griner
+Cailee Spaeny
+Carey Mulligan
+Carlo Ancelotti
+Charles Leclerc
+Chase Infiniti
+Cody Rhodes
+Connor Storrie
+Epstein files
+Final Destination
+Final Destination Bloodlines
+GAZ Sobol
+Gaza Strip
+Google Maps
+Google Translate
+Hawaii
+Human penis
+Jana Nayagan
+Maharaja
+Mean Girls
+MobLand
+Monaco
+NATO
+One Piece
+Palantir Technologies
+Paris Saint-Germain FC
 Song Sung Blue
-Sophie Cunningham
-Sophie Rain
 Suicide methods
 SummerSlam
 The Backrooms
 The Big Bang Theory
-The Crow
 The Godfather
 The Naked Gun
-The Summer I Turned Pretty
-The Wild Robot
-Tim Curry
-Tulsa King
-Twitch
-Vanessa Trump
+The Sopranos
 Weather
-Woody Allen
 X-Men
-2008 United States presidential election
-2012 United States presidential election
 2019 Indian general election
 2024 United Kingdom general election
-2024–25 Premier League
-2025 Africa Cup of Nations
+2025 Indian Premier League
 2025–26 Premier League
 2027 Cricket World Cup
 6-7 meme
 A Complete Unknown
 A Knight of the Seven Kingdoms
-A Minecraft Movie
-Aadhaar
 Africa Cup of Nations
-Ahmed al-Sharaa
-Alison Brie
-Andie MacDowell
-Andor
-Andrew Garfield
-Angus Cloud
 Anthropic
 Argentina
 Argentina national football team
 Assassination of John F. Kennedy
 Avatar
+Baby Reindeer
 Barbie
-Barbra Streisand
 Beef
 Beetlejuice
-Bernard Arnault
-Billy Crudup
-Billy Joel
 BlackRock
 Brazil national football team
-Brooke Shields
-Bryan Cranston
-CD-ROM
-Cape Fear
-Carlo Ancelotti
-Charlotte of Mecklenburg-Strelitz
-Cheryl Hines
-Christian Bale
-Colin Jost
-Companion
-Dario Amodei
+Doctor Who
 Doordarshan
-Drew Barrymore
 Dungeon Crawler Carl
-Emilia Pérez
-Emma D'Arcy
-Emma Thompson
 England
-Ethan Slater
-Ewan McGregor
-Final Destination Bloodlines
+European Union
+FIFA Club World Cup
 Flipkart
 France national football team
 Fritzl case
-Gaza Strip
-George Harrison
-George Michael
 Germany national football team
-Grimes
-Hasan Piker
-Hawaii
+Gulf War
 Hazbin Hotel
 Hezbollah
-Hugh Grant
-Industry
-Jack Schlossberg
-Jackie Chan
-James A. Garfield
-James Gandolfini
-Jelly Roll
-Jessie Buckley
-Joe Jackson
-Joe Rogan
-John Mulaney
-Jon Bon Jovi
+Home Alone
+Jake Paul vs. Mike Tyson
 Jujutsu Kaisen
-Julia Garner
-Julie Andrews
-Justin Timberlake
-Jürgen Klopp
-Kathy Bates
 Kazakhstan
-Kerry Von Erich
-Kevin Durant
 Killers of the Flower Moon
-King Von
 Kung Fu Panda 4
-Kurt Cobain
-Lana Del Rey
-Larry Ellison
-Lauren Sánchez
 Lebanon
-Lewis Pullman
-Lisa
-Maharaja
-Marcus Rashford
-Marianne Bachmeier
-Mark Ruffalo
-Marty Reisman
 Materialists
-Maya Rudolph
-Meg Ryan
+Megalopolis
 Meta Platforms
-Michael Douglas
-Monaco
-Monica Bellucci
-NATO
-Natalia Grace
-Natasha Richardson
-National Football League
-Nicki Minaj
+Mount Everest
+Nvidia
 Oasis
-One Day
 Only Murders in the Building
-Paris Jackson
 Ramadan
-Rami Malek
-Reacher
-Renée Zellweger
-Rodney Alcala
-Roman Reigns
-Ronaldinho
 Ronaldo
-Rose Byrne
+Rothschild family
 Scream 7
-Shane Gillis
 South Korea
 Squid Game season 2
-Sreeleela
-Sunita Williams
-Taron Egerton
-Taylor Dearden
-Tesla, Inc.
+Star Wars
 The Greatest of All Time
-The Penguin
-The Sopranos
-The Three-Body Problem
+The Life of Chuck
 The Tortured Poets Department
-Thomas Müller
-Tim Walz
-Travis Scott
 UEFA European Championship
-Uma Thurman
-Until Dawn
 Venezuela
-Vijay
-Vivek Ramaswamy
-Willem Dafoe
-Woody Guthrie
-Yellowjackets
 YouTube Shorts
-Your Friends & Neighbors
+2004 Indian Ocean earthquake and tsunami
 2006 FIFA World Cup
 2010 FIFA World Cup
 2014 FIFA World Cup
+2017 Las Vegas shooting
 2018 FIFA World Cup
 2024 Andhra Pradesh Legislative Assembly election
-2025 Canadian federal election
+2025 Africa Cup of Nations
 2026 Indian Premier League
 2026 West Bengal Legislative Assembly election
-3 Body Problem
-Aamir Khan
-Aaron Judge
-Adam Brody
-Adrien Brody
+ABBA
 Al Nassr FC
-Alan Rickman
-Alex Pereira
-Alexander Zverev
-Andy Murray
-Anna Kendrick
-Annette Bening
-Anthony Edwards
 Argylle
-Ayo Edebiri
-Baby Reindeer
+Aston Villa F.C.
 Ballerina
-Bella Ramsey
-Benny Safdie
-Better Man
-Britt Lower
-Canelo Álvarez
+Blink Twice
 Cape Verde
-Carrie Coon
-Challengers
-Chevy Chase
+Chhaava
 Chinese New Year
-Christopher Walken
-Cole Hauser
 Company
-Conan O'Brien
 Coolie
-Curt Cignetti
-Dani Olmo
-Daniil Medvedev
-David Harbour
-David Lynch
-Doctor Who
-Ed Sheeran
-Eddington
-Edmund Kemper
-European Union
-Fargo
-Final Destination
-Gillian Anderson
-Good Boy
-Home Alone
-Hoppers
-I, Robot
-Idris Elba
-Ilia Topuria
-Indira Gandhi
-Iron Lung
-Jamie Vardy
-Jason Kelce
+Fast & Furious
+Hacks
+Housefull 5
+Islamic State
 Jeffrey Epstein client list
-Jeremy Clarkson
-Jermaine Jackson
-Jerome Powell
-Jimmy Savile
-John Kiriakou
-Josh Hartnett
-Justin Theroux
-Karl Urban
-Katherine Jackson
-Katherine LaNasa
-Keke Palmer
 Ketamine
-Kim Jong Un
-Kristen Bell
-Leighton Meester
-Luis Suárez
 Manjummel Boys
-Mary Steenburgen
 Masters of the Universe
-Megalopolis
-Mel Brooks
-Melanie Lynskey
 Men's T20 World Cup
-Michael C. Hall
-Michelle Monaghan
-Moana
-MobLand
-Mohammad Reza Pahlavi
+Mickey 17
 Morocco
 Nahui Ollin
-Nationwide opinion polling for the 2024 United States presidential election
-Nayib Bukele
-Nigel Farage
-Nikki Haley
+National Football League
 North America
-Nvidia
-Obsession
-Odessa A'zion
 Odyssey
-Olivia Cooke
-Olivia Wilde
 Outlook.com
-Paris Saint-Germain FC
-Patricia Arquette
-Prince Harry, Duke of Sussex
-Reneé Rapp
-Richard Gadd
-Richard Gere
-River Phoenix
-Rohit Sharma
-Rothschild family
-Ruhollah Khomeini
-Sacha Baron Cohen
-Saiyaara
-Saturday Night Live
+Poland
+Qatar
 Scary Movie
-Selena
 Spain national football team
 Squid Game season 3
-Steve Carell
-Sutton Foster
+Star
+Syrian civil war
+Tesla, Inc.
 Thanksgiving
-The Apprentice
-The Devil Wears Prada
-The Diplomat
-The Drama
+The Conjuring Universe
 The Gilded Age
-The Life of Chuck
 The Mandalorian and Grogu
 The Marvels
-The Watchers
-The Weeknd
-The Zone of Interest
-Thierry Henry
+The White Lotus season 3
+The Wizard of Oz
 Train Dreams
-Tyson Fury
 UEFA Euro 2020
 Valentine's Day
 Wake Up Dead Man
-Warren Buffett
+Warfare
 Washington, D.C.
 Wednesday
 Widow's Bay
-Wonka
-Yungblud
-Zach Cregger
-Zinedine Zidane
-Zlatan Ibrahimović
 2000 United States presidential election
 2002 FIFA World Cup
-2004 Indian Ocean earthquake and tsunami
 2004 United States presidential election
-2017 Las Vegas shooting
 2023–24 UEFA Champions League
 2024 Indian Premier League
 2024–25 UEFA Europa League
 2025 Bihar Legislative Assembly election
-2025 Indian Premier League
 2026 Tamil Nadu Legislative Assembly election
 2026–27 UEFA Champions League
 28 Weeks Later
 A Real Pain
-ABBA
 Academy Award for Best Picture
-Aditya Dhar
-Alexander Isak
-Amanda Knox
-American Fiction
 Anatomy of a Fall
-Andy Burnham
-Antony Starr
-Apt.
 Aquaman and the Lost Kingdom
-Arch Manning
-Arman Tsarukyan
-Armie Hammer
-Ashton Kutcher
-Aston Villa F.C.
-Bashar al-Assad
-Belle Gibson
-Benito Mussolini
-Benjamin Šeško
+Azerbaijan
 Bigg Boss (Hindi TV series) season 19
-Blink Twice
 Border 2
-Brandon Sklenar
-Brett Goldstein
-Brittany Snow
-Bryce Dallas Howard
-Carlo Acutis
-Cary Grant
-Cassie Ventura
-Charlie McDowell
 Chaturbate
-Chhaava
-Claire Danes
-Claudia Winkleman
-Coco Gauff
-Cole Palmer
-Connie Nielsen
 Cricket World Cup
-Curry Barker
-David Corenswet
+Crystal Palace F.C.
+DC Universe
 Democratic Republic of the Congo
-Donald Glover
-Elizabeth Olsen
-Emma Raducanu
-Emma Roberts
-Erin Moriarty
 Eternity
-FIFA Club World Cup
-Fast & Furious
-Finn Wolfhard
-Florian Wirtz
-Francis Ford Coppola
-François Arnaud
-Gabriel Basso
-Gal Gadot
-Geena Davis
-Glenn Close
 Goat
 Gorillaz
-Greta Thunberg
-Gulf War
-Hailey Bieber
 Hillbilly Elegy
-Housefull 5
-Hugo Ekitike
+I, Robot
 Ides of March
-Inde Navarrette
 Indian Super League
-Inna Lillahi wa inna ilayhi raji'un
+Islamic Revolutionary Guard Corps
 It – Welcome to Derry
 JSON-LD
 Jackson family
-Jadon Sancho
-James Gunn
-Janet Jackson
-Jay-Z
-Jayden Daniels
-Jeffrey Dean Morgan
-Jeffrey Jones
-Jim Harbaugh
-Joan Baez
-Joker
-Jon Jones
-Jude Law
 Jurassic Park
-Justin Baldoni
-Kai Trump
-Kannappa
-Kate Beckinsale
-Kemi Badenoch
-Keri Russell
-Kim Soo-hyun
 Knives Out
 Late Night with the Devil
-Laura Loomer
-Lauryn Hill
-Leave the World Behind
 Lee Cronin's The Mummy
-Lee Radziwill
-Liev Schreiber
-Lily Allen
-Linda Cardellini
-Lioness
-Liza Minnelli
-Logan Paul
-Louis Partridge
-Lupita Nyong'o
-M. Night Shyamalan
 MKUltra
 MaXXXine
 Mad Max
-Maggie Smith
-Marisa Tomei
-Marjorie Taylor Greene
-Mark Cuban
+Malta
 Marshals
-Martin Short
-Mary, Queen of Scots
-Masoud Pezeshkian
-Meghann Fahy
-Melanie Griffith
-Michael Johnston
-Michael Olise
-Michelle Pfeiffer
-Mickey 17
-Microdata
 Microsoft Office
-Mike Von Erich
-Miles Teller
-Mitch McConnell
-Mojtaba Khamenei
-Monkey Man
-Morgan Wallen
-Mount Everest
-Muammar Gaddafi
-Natalia Dyer
-Natasha Lyonne
-Nico Williams
-Noah Schnapp
+Nigeria
 Off Campus
-Oleksandr Usyk
-Oscar Isaac
-Oscar Piastri
 Pan Am Flight 103
 Panasonic
-Past Lives
-Paul Pogba
 Percy Jackson and the Olympians
-Pete Davidson
-Peyton Manning
-Poland
 Portugal national football team
 Puerto Rico
 PwC
 RDFa
-Rashmika Mandanna
-Ready or Not
 Reform UK
 Resident Evil
-Rob Gronkowski
-Robert Lewandowski
-Robin Wright
-Rod Stewart
-Rodri
-Ron Howard
-Russell Wilson
 Russian war crimes
-Sara Arjun
-Sarah Jessica Parker
-Scooter Braun
+Saturday Night Live
+Scientology
+Second cabinet of Donald Trump
 Sentimental Value
-Shannen Doherty
-Shivaji
-Simone Ashley
+Sitaare Zameen Par
 Smiling Friends
-Sofia Carson
-Star
-Star Wars
-Steve Martin
-Sting
 Strait of Hormuz
 Stree 2
 Super Bowl
+The Accountant 2
 The Bikeriders
-The Conjuring Universe
 The Monkey
 The Night Agent
 The Night Manager
 The Sandman
 The Sheep Detectives
 The Testaments
-The Wizard of Oz
-Together
+The Wheel of Time
 Toy Story 5
 Troy
 UEFA Euro 2028
 UEFA Europa League
+UFC rankings
 US Airways Flight 1549
 United States House of Representatives
 Uruguayan Air Force Flight 571
-Wayne Rooney
-Will Ferrell
-Willie Nelson
 Wonder Man
-Wyatt Russell
+WrestleMania 41
 Yandex
+Yemen
 YouTube Kids
-Zodiac Killer
 12th Fail
 1994 FIFA World Cup
 1win
@@ -1463,307 +1094,129 @@ Zodiac Killer
 2026 United States House of Representatives elections
 2026 elections in India
 27 Club
-50 Cent
 96th Academy Awards
 A Good Girl's Guide to Murder
 A Quiet Place
+A Working Man
 AC Milan
-Aaliyah
-Aavesham
 Achelousaurus
-Aditi Rao Hydari
 Agatha All Along
-Ajit Doval
-Alicia Silverstone
-Alix Earle
 All Her Fault
-Alysa Liu
-Amanda Bynes
-Amar Singh Chamkila
-Amber Heard
 Anaconda
-Anne Boleyn
-Antoine Semenyo
-Azerbaijan
-Bernie Sanders
 Bhooth Bangla
-Bianca Censori
-Big Brother 27
-Bigg Boss
+Bigg Boss (Hindi TV series) season 18
 Bigg Boss (Tamil TV series) season 8
 Bigg Boss (Tamil TV series) season 9
-Bill Murray
-Bronny James
+Borussia Dortmund
 Bundesliga
-Caroline Flack
-Carolyn Bessette Kennedy
-Carrie Fisher
-Cate Blanchett
-Catherine Zeta-Jones
-Charlie Heaton
-Charlie Hunnam
 Chinese zodiac
-Chiwetel Ejiofor
-Christoph Waltz
-Cosmo Jarvis
-Crime 101
-Crystal Palace F.C.
-DC Universe
 Dancing with the Stars (American TV series) season 34
 Dandadan
-Daniel Radcliffe
-Dave Bautista
-David Von Erich
-Dawood Ibrahim
 Death of Jeffrey Epstein
-Debbie Rowe
-Dennis Schröder
 Department of Government Efficiency
 Dept. Q
-Diana Ross
 Disappearance of Nancy Guthrie
-Doechii
 Dog
-Donald J. Harris
-Donte DiVincenzo
-Doug Emhoff
-Ebon Moss-Bachrach
-Eden
-Edwin Schlossberg
-Elena Rybakina
-Elisabeth Moss
-Elizabeth Banks
+Dubai
 Evil
-Fabián Ruiz
 Family of Donald Trump
 Father's Day
-Fernando Mendoza
-Flight Risk
-Flow
+Flag of Ireland
 Fly Me to the Moon
-Gareth Southgate
-Gavin Casalegno
 Gen V
-Gene Hackman
-George R. R. Martin
-Georgina Rodríguez
-Gerard Butler
-Gianluigi Donnarumma
-Gigi Hadid
-Giorgia Meloni
 Godzilla
-Griselda Blanco
 Groundhog Day
-Guillermo del Toro
-Gwen Stefani
-Hacks
-Halo
 Happy Gilmore 2
-Harlan Coben
-Harris Dickinson
-Hayley Atwell
-Helen Keller
-Hillary Clinton
 Hit Man
 House
 ICC Men's T20 World Cup
 If I Had Legs I'd Kick You
-Ike Barinholtz
-Ilona Maher
 Immaculate
 India national cricket team
 Indian National Congress
+Inna Lillahi wa inna ilayhi raji'un
 Interview with the Vampire
-Islamic Revolutionary Guard Corps
-Islamic State
+Iranian Revolution
+Iran–Iraq War
+Iraq
 Italy national football team
-J. K. Rowling
-Jack the Ripper
-Jackie Robinson
-Jalen Brunson
-Jamal Musiala
-James VI and I
-Jann Mardenborough
-Jared Leto
-Jasmine Crockett
-Jawaharlal Nehru
-Jennie
-Jennifer Coolidge
-Jensen Ackles
-Jeremy Renner
-Joey King
-Josh Shapiro
-Julian McMahon
+Jaat
 Juneteenth
+Juror No. 2
 KYUR
-Karl-Anthony Towns
-Karla Sofía Gascón
-Katie Holmes
-Ke Huy Quan
-Ken Miles
-Kerry Condon
-Kevin O'Leary
-Kevin Spacey
-Khamzat Chimaev
-Kim Ji-won
 Kinds of Kindness
-Kriti Sanon
-Lainey Wilson
-Larry David
-Laura Dern
-Leonard Bernstein
-Liam Gallagher
 LinkedIn
+Love Actually
 Love Island (American TV series) season 6
-Luis Enrique
-MS Dhoni
-Mae Martin
-Mahmood Mamdani
-Maika Monroe
-Malcolm X
-Malta
-Mamitha Baiju
-Marc Cucurella
-Maria Callas
+Maldives
 Masters of the Air
-Matt Smith
-Max Holloway
 Mayor of Kingstown
-Michelle Obama
-Michelle Williams
-Michelle Yeoh
-Migration
-Mike Tomlin
-Mike Vrabel
-Mikel Arteta
-Minka Kelly
-Minnie Driver
-Mira Nair
 Murder of Junko Furuta
 Murder of Reena Virk
-Nancy Pelosi
 Nanjing Massacre
-Nathan Fillion
-Nelson Mandela
-Nick Jonas
-Nicola Coughlan
-Nicolás Maduro
-Nigeria
+New York Knicks
 No Way Up
-Noah Kahan
-Noni Madueke
 Norovirus
 Northrop B-2 Spirit
 Nuremberg trials
 October 7 attacks
-Peacemaker
+Opinion polling for the 2025 Canadian federal election
 Pillion
 Premalu
-Prince Philip, Duke of Edinburgh
 Prometheus
 Queen of Tears
-Quincy Jones
-Rachel Brosnahan
-Rachel Weisz
-Raheem Sterling
 Regretting You
-Rehman Dakait
 Resident Alien
-Rita Ora
-Robert Redford
-Rohan Marley
+Rivals
 Roofman
-Ryan Coogler
-Ryan Seacrest
-Sam Darnold
-Sam Rockwell
-Sanju Samson
-Sarah Paulson
-Scientology
-Sean Strickland
-Second cabinet of Donald Trump
 Semaglutide
 Sex worker
 Shaitaan
-Sigourney Weaver
-Sikandar
-Sitaare Zameen Par
-Sophie Thatcher
+Smile 2
 Space Shuttle Challenger disaster
 Space Shuttle Columbia disaster
-Spencer Pratt
 Spice Girls
 Sri Lanka
-Stephen Graham
-Steve Irwin
-Steve Witkoff
 Stranger Things season 4
 Stripchat
 Sun
-Super Bowl LIX
 Tarot
-Taskmaster
-Tatiana Schlossberg
-Ted Danson
 Tehran
-Tell Me Lies
 The Addams Family
 The Amazing Digital Circus
-The Beast in Me
-The Boy and the Heron
 The Color Purple
 The Garfield Movie
 The Goat Life
 The Holdovers
-The Madison
-The Smashing Machine
-The Studio
-The White Lotus season 3
-Theo Von
-Thomas Brodie-Sangster
-Thomas Matthew Crooks
-Thomas Tuchel
-Tim Burton
-Timothy Olyphant
-Tina Turner
-Triptii Dimri
-Tyler, the Creator
-UEFA Nations League
-UFC rankings
+The Last of Us season 2
+The Lincoln Lawyer
+The Righteous Gemstones
+The White Lotus season 1
+The White Lotus season 2
+The Woman in the Yard
 United States Senate
 United States men's national soccer team
 Utsuro-bune
-Vaibhav Sooryavanshi
-Venus Williams
 Video
-Vikrant Massey
 Viral video
-Vivian Wilson
 Voice of Vietnam
-Wamiqa Gabbi
-War 2
-Warfare
+WWE
 Watts family murders
 We Live in Time
-William Shatner
-William the Conqueror
 Wimbledon Championships
 Wish
-Woody Harrelson
+Woman of the Hour
+World War III
 World Wide Web
-WrestleMania 41
 WrestleMania 42
 WrestleMania XL
-Yemen
-Zack Polanski
-1992 United States presidential election
 2018 Horizon Air Bombardier Q400 incident
 2021 West Bengal Legislative Assembly election
 2023–24 Premier League
 2024 Atlantic hurricane season
-2024 Indian general election in Maharashtra
-2024 elections in India
 2025 Asia Cup
+2025 NFL draft
+2025–26 UEFA Europa League
 2026 FIFA World Cup squads
 2026 Kerala Legislative Assembly election
 2028 Summer Olympics
@@ -1771,280 +1224,828 @@ Zack Polanski
 97th Academy Awards
 98th Academy Awards
 A Song of Ice and Fire
-Achraf Hakimi
-Ahn Hyo-seop
-Aimee Lou Wood
+AC/DC
 Air India Flight 171
-Alan Turing
-Alex de Minaur
-Alexander Volkanovski
-Alexandra Grant
-Alfred Molina
-Alina Habba
-Amad Diallo
-Amanda Anisimova
-Amanda Peet
+Al Jazeera
 American Horror Story
-Amy Adams
-Amy Madigan
-Andrea Kimi Antonelli
-Andrew Cuomo
-Andrew Mountbatten-Windsor
-Andy Reid
 Angine de Poitrine
-Anna Faris
-Anna Paulina Luna
-Anna Sawai
-Anne, Princess Royal
-Anthony Albanese
-Anthony Kiedis
-Antoine Griezmann
-Arden Cho
 Artemis II
 Arthur the King
 Association football
+Attempted assassination of Donald Trump in Pennsylvania
 BBC
 Back to Black
 Bahrain
 Baháʼí Faith
-Baker Mayfield
 Bayer 04 Leverkusen
 Bee Gees
-Benjamin Franklin
-Bhad Bhabie
 Bhool Bhulaiyaa 3
-Big Brother 26
 Big Ten Network
-Bigg Boss (Hindi TV series) season 18
-Bill Pullman
-Blue Film
-Bradley Barcola
+Bigg Boss
+Black Mirror
 Bramayugam
-Brandon Lee
-Brian Wilson
-Brie Larson
 British Post Office scandal
-Brock Lesnar
-Brock Purdy
-Bryan Johnson
-C. Joseph Vijay
-CM Punk
-Caitlyn Jenner
-Calypso
-Cam Newton
-Camila Morrone
-Caracalla
-Carolyn Bessette-Kennedy
-Chad Michael Murray
 Chad Powers
-Chalino Sánchez
-Chris Kyle
-Chris Von Erich
-Christopher Briney
-Christopher Columbus
-Christopher Guest
-Christopher Lee
-Claire Sardina
-Claudia Jessie
-Cooper Flagg
-Cooper Manning
+Christmas
 Copa América
 Copa del Rey
 Coral Castle
-Corey Mylchreest
-Cris Collinsworth
-Cristin Milioti
-Crown Jewel
-D4vd
 DTF St. Louis
-Damsel
 Dancing with the Stars (American TV series) season 33
-Daniel Day-Lewis
-Dave Franco
 Daylight saving time
-Declan Rice
-Deepika Padukone
-Dichen Lachman
+Death of a Unicorn
 Die My Love
-Diego Maradona
-Diogo Jota
-Diwali
-Doctor Doom
-Dolours Price
-Don Johnson
-Drake Maye
+Dragon
 Drake–Kendrick Lamar feud
 Druze
-Dubai
-Dunki
-Dustin Poirier
 Dutton Ranch
 EFL Championship
 EFL League Two
-Eddie Murphy
+Easter
+Economy of India
 Egypt
 Eid al-Fitr
-Eiza González
+Elevation
 Elimination Chamber
-Elizabeth Debicki
-Elizabeth Holmes
-Elizabeth Yu
-Emilio Estevez
-Emma Corrin
-Emma Myers
-Empress Elisabeth of Austria
 Enteritis
-Enzo Ferrari
-Enzo Maresca
-Ethel Kennedy
 Evil Dead Burn
 Exhuma
 FIFA
 Fallout season 2
 Family of Kamala Harris
-Fernando Alonso
-Foundation
-Frankie Muniz
 Freakier Friday
-Freddie Freeman
 Friday the 13th
-Fritz Von Erich
-Félix Auger-Aliassime
 GAZelle
-Gaten Matarazzo
 Geeta and Sanjay Chopra kidnapping case
-George Santos
-Gerald Ford
-Gerard Piqué
-Gervonta Davis
 Ghosts
-Gianni Infantino
-Giannis Antetokounmpo
 Gladiator 2
 Gladiators
+Good American Family
 Google Search
 Government shutdowns in the United States
-Graham Platner
 Groypers
-Hannah Einbinder
 Hanu-Man
 Hard Rock Stadium
-Hardik Pandya
-Hayley Williams
 Helen of Troy
-Him
 Homeland
 House of Guinness
-Howard Lutnick
 Human penis size
 I Saw the TV Glow
-I Swear
 ICC Champions Trophy
+Incel
 Indian 2
 Inter Milan
 International Space Station
-Iranian Revolution
-Iran–Iraq War
-Iraq
-Isa Briones
-Isaac Newton
-Israel Adesanya
-Iñaki Williams
-J. J. McCarthy
-JB Pritzker
-Jack Draper
-Jacob Fatu
-James Norton
-Jamie Campbell Bower
-Jane Austen
-Jason Sudeikis
-Javier Milei
-Jawan
-Jean Smart
-Jennifer Love Hewitt
-Jensen Huang
-Jerry Jones
-Jessica Biel
-Jillian Michaels
-Joe Burrow
-Joe Flacco
-John Wilkes Booth
-Johnny Cash
-Jon Stewart
-Jon Voight
 Jonas Brothers
-Jonathan Owens
-Jordan Chiles
-Juno Temple
-Juror No. 2
-Justin Hartley
-Kai Cenat
-Kaitlan Collins
-Kaitlyn Dever
-Kalen DeBoer
-Kamal Haasan
-Kane Parsons
-Karen Carney
-Karuppu
-Katharine Ross
-Katherine Schwarzenegger
-Katie Ledecky
-Katt Williams
-Kaya Scodelario
-Kayadu Lohar
-Kelly Brook
-Kevin Hart
-Kid Rock
-Kill
-Kim Porter
-Kirk Herbstreit
-Korean War
-Kristen Stewart
-Kumail Nanjiani
+Jonestown
+Killing of JonBenét Ramsey
 Laapataa Ladies
 Labor Day
 Labour Day
-Lara Trump
 Led Zeppelin
-Lee Byung-hun
-Lee Harvey Oswald
-Lena Dunham
-Lenny Kravitz
-Lily Gladstone
-Lindsey Graham
 Little House on the Prairie
 Little Saint James
-Lloyd Austin
-Lola Tung
 Los Angeles
-Love Actually
-Love Story
-Lucy Letby
-Luis Díaz
-Luis de la Fuente
-Luke Littler
-Luke Thompson
+Lucky Baskhar
 MLB Network
 MSG Western New York
 Mahavatar Narsimha
 Malcolm in the Middle
-Maldives
-Marc Guéhi
-Marco
-Marcus Aurelius
-Margaret Thatcher
-Marvin Gaye
-Mason Greenwood
 MasterChef Australia series 17
-Matlock
-Mauricio Pochettino
-Maye Musk
-Meenakshi Chaudhary
-Megyn Kelly
 Metallica
 Mexico national football team
-Michael Carrick
-Michael Keaton
-Mick Jagger
-Mike McDaniel
-Mike Vining
+Miss Universe 2024
+Monster
+Mortal Kombat II
+Mother's Day
+Munjya
+Murder of Dominic Russo and Davion Flanagan
+My Chemical Romance
+Myanmar
+NBA Cup
+NBA TV
+NFL Network
+NXT Stand & Deliver
+Nasdaq-100
+Next United Kingdom general election
+Night of Champions
+No Other Choice
+Nobody 2
+Oasis Live '25 Tour
+Opinion polling for the 2024 Indian general election
+PDC World Darts Championship
+PGA Championship
+Parasite
+Perplexity AI
+Portugal
+Pro Kabaddi League
+Retro
+Rooster
+Sagrada Família
+Satoshi Nakamoto
+Serbia
+Sherri Papini kidnapping hoax
+Shogun
+Sistas
+Six Nations Championship
+Smile
+Summer Olympic Games
+Super Bowl LIX
+Super Bowl LVIII
+Super Bowl LX
+Supreme Leader of Iran
+TVG Network
+The Open Championship
+The Rip
+Titan submersible implosion
+Toxic
+Trial of Alex Murdaugh
+UEFA Euro 2016
+UEFA Nations League
+1980 United States presidential election
+1992 United States presidential election
+1996 United States presidential election
+1999 Martha's Vineyard plane crash
+2008 Mumbai attacks
+2018 Horizon Air Q400 incident
+2020 Summer Olympics
+2022 FIFA World Cup final
+2024 Indian general election in Maharashtra
+2024 Iran–Israel conflict
+2024 United States Senate elections
+2024 United States elections
+2024 United States presidential debates
+2024 elections in India
+2025 Australian federal election
+2025 Delhi Legislative Assembly election
+2025 German federal election
+2025 India–Pakistan conflict
+2025 NBA playoffs
+2025 United States federal government shutdown
+2025–2026 Iranian protests
+2026 Assam Legislative Assembly election
+2026 California gubernatorial election
+2026 FIFA World Cup qualification – UEFA second round
+2026 Lebanon war
+4chan
+AFC Asian Cup
+Al Hilal SFC
+Alternative for Germany
+American Revolutionary War
+Anniversary
+Athletic Bilbao
+Attempted assassination of Donald Trump
+Australian Open
+Ballistic missile
+Belgium
+Belgium national football team
+Berlin
+Big Ten Conference
+Bihar Legislative Assembly
+Bitcoin
+Black Sabbath
+Bohemian Grove
+Boots
+Boston Marathon bombing
+Brothers Home
+Burj Khalifa
+Burkina Faso
+CONCACAF
+CapCut
+Cape Verde national football team
+Casablanca
+Christina piercing
+Clash in Paris
+Cockroach Janta Party
+Creature Commandos
+Crew
+Croatia
+Curaçao
+Daman, India
+Dark Matter
+Death of Michael Jackson
+Diwali
+Donald Trump sexual misconduct allegations
+Drop bear
+Dude
+Fantastic Four
+Ferrari
+French Open
+Friendship
+Google Scholar
+Haiti
+Hawk tuah
+Haymarket affair
+Hokum
+Homelander
+Houthi movement
+India at the 2024 Summer Olympics
+Indian Airlines Flight 814
+International Workers' Day
+Iran–Israel proxy conflict
+Iran–Israel relations
+Iran–Israel war
+Iron Dome
+Israeli Air Force
+Ivy League
+January 6 United States Capitol attack
+Japan national football team
+Jeju Air Flight 2216
+Jerusalem
+Juventus FC
+Kennedy family
+Killing of Brian Thompson
+Killing of Iryna Zarutska
+King and Queen of the Ring
+Korean War
+Kosovo
+Krampus
+Kumbh Mela
+Lyle and Erik Menéndez
+MS-13
+Magna Carta
+Mar-a-Lago
+Miss Universe 2025
+Mossad
+Municipal history of Quebec
+Murdaugh family
+Murder of Dee Dee Blanchard
+Murder of Ella Bennett
+Murder of Laci Peterson
+Murder of Laken Riley
+Murder of XXXTentacion
+NXT Battleground
+NXT Deadline
+NXT Vengeance Day
+National Democratic Alliance
+Nottingham Forest F.C.
+Novocaine
+Olympic Games
+OpenClaw
+Pac-12 Conference
+Parkland high school shooting
+Pearl
+Philosophy
+Pope
+Primate
+Punjab Kings
+Queer
+Saint Patrick's Day
+Senegal national football team
+Solar eclipse
+Solar eclipse of April 8, 2024
+SpaceX
+Steak and Blowjob Day
+Sullivan's Crossing
+Sunderland A.F.C.
+Super Bowl LVII
+Three-body problem
+Tires
+Trans woman
+Trojan War
+Turning Point USA
+UEFA Euro 2008
+UEFA Euro 2012
+UEFA Euro 2020 final
+UEFA Euro 2024 squads
+UEFA Europa Conference League
+Uruguay national football team
+Vecna
+Verity
+West Bengal Legislative Assembly
+Woke
+Wolverine
+Women's National Basketball Association
+YouTube Premium
+Your Honor
+Yugoslavia
+Zeus
+100 metres
+123Movies
+1968 United States presidential election
+1976 United States presidential election
+1984 United States presidential election
+1988 United States presidential election
+2014 FIFA World Cup final
+2020 Bihar Legislative Assembly election
+2020 United States elections
+2021 Tamil Nadu Legislative Assembly election
+2022 University of Idaho murders
+2024 ATP Tour
+2024 French legislative election
+2024 Indian general election in Karnataka
+2024 Indian general election in Tamil Nadu
+2024 Indian general election in Uttar Pradesh
+2024 Israeli invasion of Lebanon
+2024 Maharashtra Legislative Assembly election
+2024 NBA playoffs
+2024 Pakistani general election
+2024 Summer Paralympics
+2024 Wimbledon Championships – Men's singles
+2024–25 UEFA Conference League qualifying phase and play-off round
+2025 French Open – Men's singles
+2025 Liberal Party of Canada leadership election
+2025 Tour de France
+2025 Women's Cricket World Cup
+2026 Clacton by-election
+2026 FIFA World Cup broadcasting rights
+2026 FIFA World Cup final
+2026 FIFA World Cup knockout stage
+2026 Hungarian parliamentary election
+2026 Makerfield by-election
+2026 Strait of Hormuz crisis
+2032 Summer Olympics
+24 Hours of Le Mans
+76th Primetime Emmy Awards
+Absolution
+Achilles
+Agamemnon
+Agenda 47
+Al-Nassr FC
+Albania
+Algeria
+Alpha
+Apollo 13
+Apple Cider Vinegar
+April 1
+April 15
+April Fools' Day
+Army Day
+Ash Wednesday
+Asia Cup
+Assassination of Julius Caesar
+Assumption of Mary
+Astroworld Festival crowd crush
+Atlas
+Atlético Madrid
+Australia men's national soccer team
+Balochistan, Pakistan
+Battle of Koregaon
+Blue Moon
+Bluesky
+Board of Peace
+Bonnie and Clyde
+Bosnia and Herzegovina
+Brighton & Hove Albion F.C.
+ByteDance
+CONCACAF Champions Cup
+CONCACAF Gold Cup
+Carnival
+Celtic F.C.
+Chennai Super Kings
+Chess World Cup 2025
+Coachella
+Cold War
+Commonwealth Bank
+Croatia national football team
+DR Congo national football team
+Denmark
+Ecuador
+Ecuador national football team
+Emmy Awards
+Empire State Building
+FA Cup
+FIFA Women's World Cup
+Finland
+Godhra train burning
+Green Day
+Gulf of Mexico
+Hillsborough disaster
+Holi
+Hurricane Katrina
+ICC World Test Championship
+Iceland
+Indian Wells Open
+Indian Wells, California
+India–Pakistan cricket rivalry
+Ipswich Town F.C.
+Islamic Republic of Iran Air Force
+JSDelivr
+Jordan
+Kansas City Chiefs
+Khmer Rouge
+Kiribati
+Leicester City F.C.
+Liechtenstein
+Little Saint James, U.S. Virgin Islands
+Los Angeles Dodgers
+Major League Baseball
+Makar Sankranti
+Masters Tournament
+Mercedes-Benz Stadium
+MetLife Stadium
+Minnesota Timberwolves
+Montenegro
+Morocco national football team
+Mughal Empire
+Murder of Henry Nowak
+NBA play-in tournament
+NCAA Division I men's basketball tournament
+Namibia
+National Hockey League
+Netherlands national football team
+New 7 Wonders of the World
+Newcastle United F.C.
+Normandy landings
+Norway national football team
+Nutty Putty Cave
+Oklahoma City bombing
+Oman
+Pakistan Super League
+Paris Saint-Germain F.C.
+Presidential Medal of Freedom
+Raj & DK
+Ram Mandir
+Ransom Canyon
+Reddit
+Rosetta Stone
+Rwanda
+SS Edmund Fitzgerald
+San Francisco 49ers
+Schengen Area
+Schutzstaffel
+Scotland
+Scottish Premiership
+Senegal
+Sex.com
+Six-Day War
+Slovakia
+Stonewall riots
+Sugar
+Sweden men's national football team
+Tel Aviv
+Temu
+Twix
+UEFA
+UEFA Conference League
+UEFA Euro 1996
+UEFA Euro 2000
+UEFA Euro 2004
+Ultimate Fighting Championship
+Uruguay
+Vishu
+West Indies
+Women's Cricket World Cup
+Yandex.Zen
+1960 United States presidential election
+1964 United States presidential election
+1972 United States presidential election
+2011 Tōhoku earthquake and tsunami
+2014 Indian general election
+2018 FIFA World Cup final
+2019 Andhra Pradesh Legislative Assembly election
+2019 Pulwama attack
+2019 United Kingdom general election
+2020 NBA draft
+2020 Singaporean general election
+2022 Idaho student murders
+2022 Winter Olympics
+2022–23 UEFA Champions League
+2023 NFL Draft
+2024 NBA draft
+2024 UEFA Champions League final
+2025 NBA draft
+2026 Peruvian general election
+2026 United Kingdom local elections
+AFC Bournemouth
+Abby and Brittany Hensel
+Abu Dhabi
+Achaemenid Empire
+Air Force One
+Al Ahly SC
+Al-Qaeda
+Alaska
+Alawites
+Algeria national football team
+Anti-Muslim propaganda on Facebook
+Antilia
+Armenia
+Ashley Madison
+Atalanta BC
+Augusta National Golf Club
+Bad Boy Records
+Bali Nine
+Balochistan Liberation Army
+Bangladesh Premier League
+Baramulla
+Barbados
+Bata, Equatorial Guinea
+Ben & Jerry's
+Bene Gesserit
+Benin
+Bihar
+Boeing
+Bosnia and Herzegovina national football team
+Brunei
+Buenos Aires
+Canada men's national soccer team
+Casualties of the Israel–Hamas war
+Catholic Church
+Celebrity Cricket League
+Citadel
+Coca-Cola
+Colombia
+Cuba
+Curaçao national football team
+Dallas Cowboys
+Dallas Mavericks
+Darién Gap
+Deep state in the United States
+DeepSeek
+Detroit Lions
+Discord
+Dortmund
+Dr Pepper
+East Rutherford, New Jersey
+Edmonton Oilers
+Eiffel Tower
+El Salvador
+Email
+Equatorial Guinea
+Eritrea
+Esplugues de Llobregat
+Eswatini
+Everton F.C.
+FK Bodø/Glimt
+Falkland Islands
+Faroe Islands
+Fenerbahçe S.K.
+Fifth Harmony
+Flock Safety
+Florida Panthers
+French Polynesia
+Gibraltar
+GitHub
+Glass
+Golan Heights
+Guadeloupe
+Guinness
+Guyana
+HDFC Bank
+Heera Mandi
+Hungary
+I-35W Mississippi River bridge
+IndiGo
+Internet
+Iraq national football team
+Ireland
+Istanbul
+Ivory Coast
+Ivory Coast national football team
+Jamaica
+Kharg Island
+Kyle Field
+Kyrgyzstan
+Lake Baikal
+Le Sserafim
+Leeds United F.C.
+Liga MX
+Little Mix
+Lok Janshakti Party
+Los Angeles Lakers
+Lumen Field
+Major League Soccer
+Mali
+Marshall and Ross Von Erich
+Mass shootings in the United States
+Mayotte
+Melungeon
+Miami Hurricanes football
+Michigan–Ohio State football rivalry
+Microsoft
+Middle East
+Millwall F.C.
+Minnesota
+Moon
+Mumbai Indians
+Mumbai Police
+NSYNC
+National Payments Corporation of India
+National Rally
+Nebraska
+Nepal
+Nepal Premier League
+Neuralink
+New York Giants
+New York Yankees
+NewJeans
+Norway
+Notre Dame Fighting Irish football
+Ohio State Buckeyes football
+Oracle Corporation
+PBS
+Persian language
+Philadelphia
+Philadelphia Eagles
+Pittsburgh Steelers
+Powerball
+Primetime Emmy Awards
+Qarabağ FK
+Rochdale
+Savi
+Slovenia
+Somalia
+Somaliland
+South Sudan
+Special Air Service
+Sudan
+Temperature
+Transnistria
+Turkmenistan
+Vatican City
+Virgin River
+Western Sahara
+1938 Yellow River flood
+2021 New York City mayoral election
+2024 United Kingdom local elections
+2025 United Kingdom local elections
+2026 state visit by Donald Trump to China
+Abkhazia
+Africa
+Alang, Iran
+Albert Park Circuit
+Alberta
+Alcatraz Island
+Aleppo
+Alluri Sitarama Raju International Airport
+Amsterdam
+Anaconda, Montana
+Anchorage, Alaska
+Andaman Islands
+Appalachian culture
+Area 51
+Aruba
+Arunachal Pradesh
+Asheville, North Carolina
+Atlanta
+Austin, Texas
+Autonomous Administration of North and East Syria
+Ayodhya
+BAPS Hindu Mandir Abu Dhabi
+Ba'athist Syria
+Babylon
+Baku
+Balochistan
+Bat Yam
+Beaufort Castle, Lebanon
+Beirut
+Beith
+Belarus
+Belaya air base
+Bethel Park, Pennsylvania
+Bhutan
+Biafra
+Biltmore Estate
+Blenheim Palace
+Blue moon
+Bodø
+Bogo, Cebu
+Boji
+Bolivia
+Bombing of Yawata
+Botswana
+Bourbon Street
+Bratislava
+Brentwood, Los Angeles
+British Raj
+Broad Peak
+Budva
+Bulgaria
+Burj Al Arab
+Butler, Pennsylvania
+Byzantine Empire
+Caesars Superdome
+Cambodia
+Camping World Stadium
+Cape Town
+Cape verde
+Capital punishment in Utah
+Cappadocia
+Carriacou
+Central Europe
+Ceuta
+Charybdis
+Chicago
+Chile
+Coeur d'Alene, Idaho
+Cologne
+Colorado's 1st congressional district
+Corby
+Cortina d'Ampezzo
+Crans-Montana
+Crichel House
+Crimea
+Cruz de Clavos
+Curacao
+Cycling in China
+Czechoslovakia
+DPR Of Korea
+Dade-Collier Training and Transition Airport
+Dagestan
+Damascus
+Danish Realm
+Death Valley
+Death and state funeral of Jimmy Carter
+Death and state funeral of Ruhollah Khomeini
+Demographics of Iran
+Demographics of Japan
+Detroit
+Diego Garcia
+Disney, Oklahoma
+Dominican Republic
+Dordogne's 2nd constituency
+Dormition Cathedral, Kyiv Pechersk Lavra
+Dubai International Airport
+East Timor
+East Wing
+Education in Dublin
+Ekana Cricket Stadium
+El Helicoide
+El Ojo
+Elections in France
+Elisabeth Park
+Eve Cone
+Far side of the Moon
+Federal Prison Camp, Bryan
+Flag of England
+Flag of Kagoshima Prefecture
+Fleishhacker Pool
+Florence, Oregon
+Flores
+Florida's 1st congressional district
+Florida's 6th congressional district
+Food in ancient Rome
+Ford Field
+Forestiere Underground Gardens
+Fort Bridger
+Francis Scott Key Bridge collapse
+Ghana
+Global Sumud Flotilla
+Government of Maharashtra
+Government of West Bengal
+Grand Central Tower
+Grand Egyptian Museum
+Great Chicago Fire
+Greece
+Grenada
+Guantanamo Bay Naval Base
+Guinea-Bissau
+Gun laws of Australia
+Hahausen
+Handlová
+Havana
+Hawaiian Islands
+Herzegovina
+Highmark Stadium
+Hispaniola
+History of Iran
+History of Ukraine
+Holland
+Holy Roman Empire
+Home of the Daughters of Jacob
+Honduras
+Huajiang Canyon Bridge
+Imperial State of Iran
+Inaccessible Island
+Internet censorship in South Korea
+Iowa
+Ishikawa Prefecture
+Islamic Republic of Iran
+Izmail
+Jaffa
+Jamnagar
+Jeddah Tower
+Jericho
+Jharkhand
+Jharkhand Legislative Assembly
+Juneau, Alaska
+Jupiter
+Kamchatka Peninsula
+Kansas
+Kansas City, Missouri
+Kashmir
+Katchatheevu
+Kerala Legislative Assembly
+Kerch Strait Bridge
+Kheibar
+Kingdom of the Netherlands
+Kinshasa
+Kirkby
+Kiryas Joel, New York
+Kowloon Walled City
+Kursk
+Kuwait
+LGBT rights in Algeria
+La Palma
+Lake Peigneur
+Lake Superior
+Lakshadweep
+Latveria
+Lesotho
+Leverkusen
+Lewiston, Idaho
+Limerick
+Litani River
+Lithuania
+Logan County, Ohio
+Louisiana
