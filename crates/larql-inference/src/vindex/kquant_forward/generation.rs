@@ -29,6 +29,8 @@ pub fn is_end_of_turn(token: &str) -> bool {
             | "<|end_of_turn|>"
             | "<end_of_turn>"
             | "<|eot_id|>"
+            // Gemma 4's end-of-turn marker.
+            | "<turn|>"
     )
 }
 

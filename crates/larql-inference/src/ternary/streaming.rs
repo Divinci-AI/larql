@@ -174,6 +174,7 @@ pub fn infer_bitnet_walk(
     crate::forward::InferPatchedResult {
         predictions,
         model_top1,
+        model_top1_id: None,
         knn_override,
         residuals,
         walk_ms,

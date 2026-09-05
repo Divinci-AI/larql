@@ -2,6 +2,7 @@
 //! the blocking generation loop, and logprobs/finish-reason shaping.
 
 use axum::extract::State;
+use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use std::sync::Arc;
@@ -45,9 +46,11 @@ use super::{CHAT_COMPLETION_OBJECT, DEFAULT_MAX_TOKENS};
 )]
 pub async fn handle_chat_completions(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(req): Json<ChatCompletionsRequest>,
 ) -> Result<Response, OpenAIError> {
     state.bump_requests();
+    let session_id = crate::session::extract_session_id(&headers);
 
     if req.n.unwrap_or(1) > 1 {
         return Err(OpenAIError::invalid_request(
@@ -179,6 +182,37 @@ pub async fn handle_chat_completions(
     let model_arc = model.clone();
     let messages = req.messages;
 
+    // A request that names a session is answered through that session's
+    // overlay (see `patched.rs`); the base-index generator below cannot
+    // see edits. Every sessioned turn takes the same decoding path whether
+    // or not the overlay holds patches yet, so "before" and "after" an edit
+    // differ only in the overlay — and the walk path is the one that
+    // works on a vindex without Q4K attention slices. Requests without the
+    // header keep the base generator.
+    if let Some(sid) = session_id {
+        if req.stream.unwrap_or(false) {
+            return Err(OpenAIError::invalid_request(
+                "stream=true is not supported for an edited session (X-Session-Id with patches)",
+            ));
+        }
+        if constrained_schema.is_some() {
+            return Err(OpenAIError::invalid_request(
+                "tools / response_format are not supported for an edited session (X-Session-Id with patches)",
+            ));
+        }
+        return run_patched_chat(
+            state,
+            model_arc,
+            sid,
+            messages,
+            max_tokens,
+            stop_strings,
+            model_id,
+            req.logprobs.unwrap_or(false),
+        )
+        .await;
+    }
+
     if req.stream.unwrap_or(false) {
         return Ok(stream_chat_completion(
             model_arc,
@@ -281,6 +315,84 @@ pub async fn handle_chat_completions(
             index: 0,
             message,
             finish_reason,
+            logprobs,
+        }],
+        usage: ChatUsage {
+            prompt_tokens: output.prompt_tokens,
+            completion_tokens: output.completion_tokens,
+            total_tokens: output.prompt_tokens + output.completion_tokens,
+        },
+    })
+    .into_response())
+}
+
+/// Buffered chat completion through a session's overlay. Same timeout
+/// discipline as the base path; the walk pass holds a read guard on the
+/// weights, so other readers proceed.
+#[allow(clippy::too_many_arguments)]
+async fn run_patched_chat(
+    state: Arc<AppState>,
+    model: Arc<LoadedModel>,
+    session_id: String,
+    messages: Vec<ChatMessage>,
+    max_tokens: usize,
+    stop_strings: Vec<String>,
+    model_id: String,
+    logprobs_requested: bool,
+) -> Result<Response, OpenAIError> {
+    let started = std::time::Instant::now();
+    let _gen_guard = Arc::clone(&state.runtime).enter_generation();
+    let state_for_task = Arc::clone(&state);
+    let handle = tokio::task::spawn_blocking(move || -> Result<_, ServerError> {
+        super::patched::run_chat_completion_patched(
+            &state_for_task,
+            &model,
+            &session_id,
+            &messages,
+            max_tokens,
+            &stop_strings,
+        )
+    });
+    let timeout = state.infer_timeout;
+    let output = if timeout.is_zero() {
+        handle
+            .await
+            .map_err(|e| ServerError::Internal(e.to_string()))??
+    } else {
+        match tokio::time::timeout(timeout, handle).await {
+            Ok(join_result) => join_result.map_err(|e| ServerError::Internal(e.to_string()))??,
+            Err(_elapsed) => {
+                tracing::warn!(
+                    target: "larql_server::openai::chat",
+                    "edited-session chat completion timed out after {:.1}s; responding 504",
+                    started.elapsed().as_secs_f64(),
+                );
+                return Err(OpenAIError::from(ServerError::Timeout(format!(
+                    "chat completion exceeded server-side timeout of {}s",
+                    timeout.as_secs(),
+                ))));
+            }
+        }
+    };
+
+    let logprobs = if logprobs_requested {
+        Some(build_chat_logprobs(&output.tokens))
+    } else {
+        None
+    };
+    Ok(Json(ChatCompletionsResponse {
+        id: format!("chatcmpl-{}", new_id_suffix()),
+        object: CHAT_COMPLETION_OBJECT,
+        created: unix_now(),
+        model: model_id,
+        choices: vec![ChatChoice {
+            index: 0,
+            message: ChatChoiceMessage {
+                role: ASSISTANT_ROLE,
+                content: Some(output.text),
+                tool_calls: None,
+            },
+            finish_reason: output.finish_reason,
             logprobs,
         }],
         usage: ChatUsage {

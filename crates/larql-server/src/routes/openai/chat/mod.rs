@@ -57,6 +57,7 @@
 //! ```
 
 mod handler;
+mod patched;
 mod stream;
 mod tools;
 mod types;

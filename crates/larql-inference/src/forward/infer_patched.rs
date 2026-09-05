@@ -90,6 +90,12 @@ pub struct InferPatchedResult {
     /// applied. This lets display layers show what the model path produced
     /// before an unmaterialized retrieval sidecar changed the answer.
     pub model_top1: Option<(String, f64)>,
+    /// Token id of `model_top1`, when the walk FFN's own lm_head produced it.
+    /// `None` on an early exit (the lm_head never ran) and on paths that only
+    /// carry surface strings. A decoding loop needs the id: single-token
+    /// `decode` drops the leading space of a word piece, so re-encoding the
+    /// string would splice the wrong token into the next step's prompt.
+    pub model_top1_id: Option<u32>,
     /// Metadata on the KNN override for callers that want to surface it
     /// (e.g. the LQL display layer prints `"KNN override, cos=X, L{layer}"`).
     pub knn_override: Option<KnnOverride>,
@@ -120,12 +126,14 @@ pub fn infer_patched(
 
     let start = std::time::Instant::now();
     let PredictResult {
-        predictions: raw, ..
+        predictions: raw,
+        token_ids: raw_ids,
     } = predict_with_ffn(weights, tokenizer, token_ids, top_k, &walk_ffn);
     let walk_ms = start.elapsed().as_secs_f64() * 1000.0;
 
     let residuals = walk_ffn.take_residuals();
     let model_top1 = raw.first().cloned();
+    let model_top1_id = raw_ids.first().copied();
     let (predictions, knn_override) = route_knn_override(
         raw, &residuals, knn_store, top_k, route_mode, tokenizer, token_ids,
     );
@@ -133,6 +141,7 @@ pub fn infer_patched(
     InferPatchedResult {
         predictions,
         model_top1,
+        model_top1_id,
         knn_override,
         residuals,
         walk_ms,
@@ -210,6 +219,8 @@ pub fn infer_patched_early_exit(
         InferPatchedResult {
             predictions,
             model_top1,
+            // The early-exit predictor carries surface strings only.
+            model_top1_id: None,
             knn_override: fired,
             residuals,
             walk_ms,
@@ -246,13 +257,15 @@ pub fn infer_patched_q4k(
     // ever threaded through this path it fails loudly instead of answering
     // with a token the route declined to compute.
     let PredictResult {
-        predictions: raw, ..
+        predictions: raw,
+        token_ids: raw_ids,
     } = predict_kquant_with_ffn(weights, tokenizer, token_ids, top_k, index, &walk_ffn)
         .expect("WalkFfn cannot refuse a layer; a refusal here needs a real error channel");
     let walk_ms = start.elapsed().as_secs_f64() * 1000.0;
 
     let residuals = walk_ffn.take_residuals();
     let model_top1 = raw.first().cloned();
+    let model_top1_id = raw_ids.first().copied();
     let (predictions, knn_override) = route_knn_override(
         raw, &residuals, knn_store, top_k, route_mode, tokenizer, token_ids,
     );
@@ -260,6 +273,7 @@ pub fn infer_patched_q4k(
     InferPatchedResult {
         predictions,
         model_top1,
+        model_top1_id,
         knn_override,
         residuals,
         walk_ms,
@@ -333,6 +347,8 @@ pub fn infer_patched_q4k_early_exit(
         InferPatchedResult {
             predictions,
             model_top1,
+            // The early-exit predictor carries surface strings only.
+            model_top1_id: None,
             knn_override: fired,
             residuals,
             walk_ms,

@@ -84,6 +84,24 @@ impl TurnRenderer for GemmaRenderer {
     }
 }
 
+/// Gemma 4 chat template. Same role naming as Gemma 3 ("model" for the
+/// assistant) with the new turn markers: `<|turn>role\n…<turn|>\n`.
+pub struct Gemma4Renderer;
+
+impl TurnRenderer for Gemma4Renderer {
+    fn render(&self, role: &str, text: &str) -> String {
+        let role = if role == roles::ASSISTANT {
+            "model"
+        } else {
+            role
+        };
+        format!("<|turn>{role}\n{text}<turn|>\n")
+    }
+    fn assistant_open(&self) -> String {
+        "<|turn>model\n".to_string()
+    }
+}
+
 /// ChatML — used by Qwen, OpenAI base, and a few finetunes.
 pub struct ChatMLRenderer;
 

@@ -30,8 +30,8 @@ pub use generate::{
     generate_with_sampling, lm_head_topk, try_generate, try_generate_constrained,
     try_generate_constrained_streaming, try_generate_constrained_streaming_sampled,
     try_generate_streaming, try_generate_with_sampling, ChatMLRenderer, ChatSession, Detokenizer,
-    EosConfig, GemmaRenderer, GenerateError, GenerateResult, Llama3Renderer, Sampler,
-    SamplingConfig, StageTimings, TurnRenderer,
+    EosConfig, Gemma4Renderer, GemmaRenderer, GenerateError, GenerateResult, Llama3Renderer,
+    Sampler, SamplingConfig, StageTimings, TurnRenderer,
 };
 
 use ndarray::Array2;

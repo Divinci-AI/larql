@@ -18,7 +18,8 @@ pub mod sampling;
 mod types;
 
 pub use chat_session::{
-    ChatMLRenderer, ChatSession, GemmaRenderer, Llama3Renderer, TurnRenderer, DEFAULT_MAX_CONTEXT,
+    ChatMLRenderer, ChatSession, Gemma4Renderer, GemmaRenderer, Llama3Renderer, TurnRenderer,
+    DEFAULT_MAX_CONTEXT,
 };
 pub use constrained::{
     generate_constrained, generate_constrained_streaming, generate_constrained_streaming_sampled,
