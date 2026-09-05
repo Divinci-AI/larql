@@ -1,0 +1,982 @@
+{
+ "when": "2026-09-05T08:47:08Z",
+ "endpoint": "https://api.divinci.app ws=6a312a5b8ad8bd2a0833344a",
+ "params": [],
+ "metrics": {
+  "chance_hit@10": 0.10873015873015873,
+  "entities": 36,
+  "errors": 0,
+  "hit@1": 0.2777777777777778,
+  "hit@5": 0.5,
+  "hit@10": 0.5833333333333334,
+  "mrr": 0.3727716727716728,
+  "hits_top10_mean": 1.1111111111111112,
+  "generic_share_top10": 0.027777777777777776,
+  "func_share_top10": 0.013888888888888888,
+  "latency_s_median": 1.5
+ },
+ "by_kind": {
+  "city": {
+   "n": 6,
+   "hit@10": 0.67,
+   "mrr": 0.53
+  },
+  "country": {
+   "n": 6,
+   "hit@10": 0.67,
+   "mrr": 0.58
+  },
+  "person": {
+   "n": 10,
+   "hit@10": 0.7,
+   "mrr": 0.36
+  },
+  "company": {
+   "n": 5,
+   "hit@10": 1.0,
+   "mrr": 0.57
+  },
+  "work": {
+   "n": 4,
+   "hit@10": 0.0,
+   "mrr": 0.02
+  },
+  "other": {
+   "n": 5,
+   "hit@10": 0.2,
+   "mrr": 0.05
+  }
+ },
+ "rows": [
+  {
+   "query": "Paris",
+   "kind": "city",
+   "n": 20,
+   "latency_s": 59.8,
+   "first_rank": 1,
+   "first_label": "French",
+   "first_matched": "french",
+   "hits_top10": 2,
+   "generic_top10": 2,
+   "func_top10": 1,
+   "top8": [
+    "French",
+    "realista",
+    "among",
+    "mode",
+    "what",
+    "treating",
+    "Origin",
+    "hangi"
+   ],
+   "meta": {
+    "relevance_background": "entities",
+    "relevance_panel": 114
+   }
+  },
+  {
+   "query": "Tokyo",
+   "kind": "city",
+   "n": 20,
+   "latency_s": 1.5,
+   "first_rank": 1,
+   "first_label": "Jepang",
+   "first_matched": "jepang",
+   "hits_top10": 3,
+   "generic_top10": 0,
+   "func_top10": 0,
+   "top8": [
+    "Jepang",
+    "Japan",
+    "Anime",
+    "Japanese",
+    "arrow",
+    "until",
+    "Remote",
+    "inside"
+   ],
+   "meta": {
+    "relevance_background": "entities",
+    "relevance_panel": 114
+   }
+  },
+  {
+   "query": "Kyoto",
+   "kind": "city",
+   "n": 20,
+   "latency_s": 1.4,
+   "first_rank": 1,
+   "first_label": "Jepang",
+   "first_matched": "jepang",
+   "hits_top10": 4,
+   "generic_top10": 0,
+   "func_top10": 0,
+   "top8": [
+    "Jepang",
+    "co",
+    "Japan",
+    "crisis",
+    "scheme",
+    "day",
+    "Japanese",
+    "pair"
+   ],
+   "meta": {
+    "relevance_background": "entities",
+    "relevance_panel": 114
+   }
+  },
+  {
+   "query": "Lisbon",
+   "kind": "city",
+   "n": 20,
+   "latency_s": 1.2,
+   "first_rank": null,
+   "first_label": null,
+   "first_matched": null,
+   "hits_top10": 0,
+   "generic_top10": 0,
+   "func_top10": 0,
+   "top8": [
+    "proper",
+    "license",
+    "Penalty",
+    "visit",
+    "additional",
+    "hearing",
+    "`#",
+    "subscription"
+   ],
+   "meta": {
+    "relevance_background": "entities",
+    "relevance_panel": 114
+   }
+  },
+  {
+   "query": "Vienna",
+   "kind": "city",
+   "n": 20,
+   "latency_s": 1.4,
+   "first_rank": 6,
+   "first_label": "Austria",
+   "first_matched": "austriaca",
+   "hits_top10": 1,
+   "generic_top10": 0,
+   "func_top10": 0,
+   "top8": [
+    "--",
+    "UN",
+    "system",
+    "musik",
+    "School",
+    "Austria",
+    "when",
+    "what"
+   ],
+   "meta": {
+    "relevance_background": "entities",
+    "relevance_panel": 114
+   }
+  },
+  {
+   "query": "Havana",
+   "kind": "city",
+   "n": 20,
+   "latency_s": 1.5,
+   "first_rank": null,
+   "first_label": null,
+   "first_matched": null,
+   "hits_top10": 0,
+   "generic_top10": 0,
+   "func_top10": 0,
+   "top8": [
+    "Help",
+    "more",
+    "year",
+    "vattabbo",
+    "acostumbr",
+    "keine",
+    "you",
+    "welcome"
+   ],
+   "meta": {
+    "relevance_background": "entities",
+    "relevance_panel": 114
+   }
+  },
+  {
+   "query": "France",
+   "kind": "country",
+   "n": 20,
+   "latency_s": 1.5,
+   "first_rank": 1,
+   "first_label": "French",
+   "first_matched": "french",
+   "hits_top10": 1,
+   "generic_top10": 0,
+   "func_top10": 0,
+   "top8": [
+    "French",
+    "Frame",
+    "ursprünglich",
+    "unusual",
+    "impossible",
+    "constantly",
+    "honoring",
+    "Color"
+   ],
+   "meta": {
+    "relevance_background": "entities",
+    "relevance_panel": 114
+   }
+  },
+  {
+   "query": "Japan",
+   "kind": "country",
+   "n": 20,
+   "latency_s": 1.3,
+   "first_rank": 1,
+   "first_label": "Japanese",
+   "first_matched": "japanse",
+   "hits_top10": 2,
+   "generic_top10": 1,
+   "func_top10": 0,
+   "top8": [
+    "Japanese",
+    "Jepang",
+    "Anime",
+    "Accessibility",
+    "technical",
+    "individual",
+    "respectivement",
+    "getting"
+   ],
+   "meta": {
+    "relevance_background": "entities",
+    "relevance_panel": 114
+   }
+  },
+  {
+   "query": "Kenya",
+   "kind": "country",
+   "n": 20,
+   "latency_s": 1.5,
+   "first_rank": 2,
+   "first_label": "Nigeria",
+   "first_matched": "africa",
+   "hits_top10": 1,
+   "generic_top10": 0,
+   "func_top10": 0,
+   "top8": [
+    "Nigerian",
+    "Nigeria",
+    "()",
+    "JavaScript",
+    "]).",
+    "Brief",
+    "particip",
+    "have"
+   ],
+   "meta": {
+    "relevance_background": "entities",
+    "relevance_panel": 114
+   }
+  },
+  {
+   "query": "Peru",
+   "kind": "country",
+   "n": 20,
+   "latency_s": 1.7,
+   "first_rank": null,
+   "first_label": null,
+   "first_matched": null,
+   "hits_top10": 0,
+   "generic_top10": 1,
+   "func_top10": 1,
+   "top8": [
+    "remain",
+    "který",
+    "untuk",
+    "która",
+    "what",
+    "through",
+    "quando",
+    "renal"
+   ],
+   "meta": {
+    "relevance_background": "entities",
+    "relevance_panel": 114
+   }
+  },
+  {
+   "query": "Norway",
+   "kind": "country",
+   "n": 20,
+   "latency_s": 1.6,
+   "first_rank": null,
+   "first_label": null,
+   "first_matched": null,
+   "hits_top10": 0,
+   "generic_top10": 0,
+   "func_top10": 0,
+   "top8": [
+    "berry",
+    "Have",
+    "Nine",
+    "week",
+    "However",
+    "Despite",
+    "four",
+    "when"
+   ],
+   "meta": {
+    "relevance_background": "entities",
+    "relevance_panel": 114
+   }
+  },
+  {
+   "query": "Thailand",
+   "kind": "country",
+   "n": 20,
+   "latency_s": 1.7,
+   "first_rank": 1,
+   "first_label": "Thai",
+   "first_matched": "thai",
+   "hits_top10": 2,
+   "generic_top10": 0,
+   "func_top10": 0,
+   "top8": [
+    "Thai",
+    "Indonesian",
+    "Malaysia",
+    "translate",
+    "Needs",
+    "Demand",
+    "Republic",
+    "spectrum"
+   ],
+   "meta": {
+    "relevance_background": "entities",
+    "relevance_panel": 114
+   }
+  },
+  {
+   "query": "Einstein",
+   "kind": "person",
+   "n": 20,
+   "latency_s": 1.6,
+   "first_rank": 1,
+   "first_label": "science",
+   "first_matched": "sciences",
+   "hits_top10": 3,
+   "generic_top10": 1,
+   "func_top10": 1,
+   "top8": [
+    "science",
+    "identify",
+    "conservation",
+    "Above",
+    "White",
+    "innovation",
+    "work",
+    "dependent"
+   ],
+   "meta": {
+    "relevance_background": "entities",
+    "relevance_panel": 114
+   }
+  },
+  {
+   "query": "Beethoven",
+   "kind": "person",
+   "n": 20,
+   "latency_s": 1.5,
+   "first_rank": null,
+   "first_label": null,
+   "first_matched": null,
+   "hits_top10": 0,
+   "generic_top10": 0,
+   "func_top10": 0,
+   "top8": [
+    "Instrument",
+    "careful",
+    "Weight",
+    "noise",
+    "hearing",
+    "teaching",
+    "CD",
+    "Have"
+   ],
+   "meta": {
+    "relevance_background": "entities",
+    "relevance_panel": 114
+   }
+  },
+  {
+   "query": "Charles Dickens",
+   "kind": "person",
+   "n": 20,
+   "latency_s": 1.4,
+   "first_rank": 6,
+   "first_label": "readers",
+   "first_matched": "author",
+   "hits_top10": 2,
+   "generic_top10": 0,
+   "func_top10": 0,
+   "top8": [
+    "nếu",
+    "quotes",
+    "vigorously",
+    "link",
+    "Long",
+    "readers",
+    "Pollution",
+    "pequeña"
+   ],
+   "meta": {
+    "relevance_background": "entities",
+    "relevance_panel": 114
+   }
+  },
+  {
+   "query": "Nikola Tesla",
+   "kind": "person",
+   "n": 16,
+   "latency_s": 1.5,
+   "first_rank": 3,
+   "first_label": "innovation",
+   "first_matched": "inventore",
+   "hits_top10": 1,
+   "generic_top10": 0,
+   "func_top10": 0,
+   "top8": [
+    "voltage",
+    "network",
+    "innovation",
+    "exists",
+    "brackets",
+    "cars",
+    "download",
+    "Driver"
+   ],
+   "meta": {
+    "relevance_background": "entities",
+    "relevance_panel": 114
+   }
+  },
+  {
+   "query": "Vincent van Gogh",
+   "kind": "person",
+   "n": 20,
+   "latency_s": 1.5,
+   "first_rank": 3,
+   "first_label": "paint",
+   "first_matched": "painting",
+   "hits_top10": 2,
+   "generic_top10": 0,
+   "func_top10": 0,
+   "top8": [
+    "Dutch",
+    "Vehicle",
+    "paint",
+    "Painting",
+    "However",
+    "voiture",
+    "Driver",
+    "returning"
+   ],
+   "meta": {
+    "relevance_background": "entities",
+    "relevance_panel": 114
+   }
+  },
+  {
+   "query": "Lionel Messi",
+   "kind": "person",
+   "n": 20,
+   "latency_s": 1.3,
+   "first_rank": 2,
+   "first_label": "fútbol",
+   "first_matched": "fútbol",
+   "hits_top10": 2,
+   "generic_top10": 1,
+   "func_top10": 0,
+   "top8": [
+    "border",
+    "fútbol",
+    "test",
+    "III",
+    "sports",
+    "spoiler",
+    "role",
+    "that"
+   ],
+   "meta": {
+    "relevance_background": "entities",
+    "relevance_panel": 114
+   }
+  },
+  {
+   "query": "Barack Obama",
+   "kind": "person",
+   "n": 13,
+   "latency_s": 1.3,
+   "first_rank": null,
+   "first_label": null,
+   "first_matched": null,
+   "hits_top10": 0,
+   "generic_top10": 0,
+   "func_top10": 0,
+   "top8": [
+    "box",
+    "Furthermore",
+    "first",
+    "Thank",
+    "use",
+    "Turn",
+    "Check",
+    "About"
+   ],
+   "meta": {
+    "relevance_background": "entities",
+    "relevance_panel": 114
+   }
+  },
+  {
+   "query": "Freddie Mercury",
+   "kind": "person",
+   "n": 7,
+   "latency_s": 1.2,
+   "first_rank": 4,
+   "first_label": "program",
+   "first_matched": "progresif",
+   "hits_top10": 1,
+   "generic_top10": 0,
+   "func_top10": 0,
+   "top8": [
+    "death",
+    "Benefits",
+    "page",
+    "program",
+    "pada",
+    "order",
+    "Moon"
+   ],
+   "meta": {
+    "relevance_background": "entities",
+    "relevance_panel": 114
+   }
+  },
+  {
+   "query": "Serena Williams",
+   "kind": "person",
+   "n": 12,
+   "latency_s": 1.8,
+   "first_rank": null,
+   "first_label": null,
+   "first_matched": null,
+   "hits_top10": 0,
+   "generic_top10": 1,
+   "func_top10": 0,
+   "top8": [
+    "very",
+    "once",
+    "border",
+    "resides",
+    "avoid",
+    "no",
+    "way",
+    "Senior"
+   ],
+   "meta": {
+    "relevance_background": "entities",
+    "relevance_panel": 114
+   }
+  },
+  {
+   "query": "Hayao Miyazaki",
+   "kind": "person",
+   "n": 20,
+   "latency_s": 1.6,
+   "first_rank": 1,
+   "first_label": "Manager",
+   "first_matched": "director",
+   "hits_top10": 3,
+   "generic_top10": 0,
+   "func_top10": 0,
+   "top8": [
+    "Manager",
+    "Feed",
+    "Japan",
+    "Avoid",
+    "from",
+    "patients",
+    "Jepang",
+    "Discount"
+   ],
+   "meta": {
+    "relevance_background": "entities",
+    "relevance_panel": 114
+   }
+  },
+  {
+   "query": "Amazon",
+   "kind": "company",
+   "n": 20,
+   "latency_s": 1.6,
+   "first_rank": 2,
+   "first_label": "Shopping",
+   "first_matched": "电子商务",
+   "hits_top10": 1,
+   "generic_top10": 0,
+   "func_top10": 0,
+   "top8": [
+    "store",
+    "Shopping",
+    "Delivery",
+    "example",
+    "questa",
+    "landscaping",
+    "fulfillment",
+    "remote"
+   ],
+   "meta": {
+    "relevance_background": "entities",
+    "relevance_panel": 114
+   }
+  },
+  {
+   "query": "Netflix",
+   "kind": "company",
+   "n": 20,
+   "latency_s": 1.5,
+   "first_rank": 1,
+   "first_label": "film",
+   "first_matched": "phim",
+   "hits_top10": 2,
+   "generic_top10": 0,
+   "func_top10": 0,
+   "top8": [
+    "film",
+    "content",
+    "shown",
+    "stories",
+    "reality",
+    "television",
+    "iclass",
+    "episode"
+   ],
+   "meta": {
+    "relevance_background": "entities",
+    "relevance_panel": 114
+   }
+  },
+  {
+   "query": "Nintendo",
+   "kind": "company",
+   "n": 20,
+   "latency_s": 1.4,
+   "first_rank": 7,
+   "first_label": "toys",
+   "first_matched": "juguetes",
+   "hits_top10": 2,
+   "generic_top10": 0,
+   "func_top10": 0,
+   "top8": [
+    "Gameplay",
+    "reversing",
+    "trong",
+    "remote",
+    "donde",
+    "reward",
+    "toys",
+    "Jepang"
+   ],
+   "meta": {
+    "relevance_background": "entities",
+    "relevance_panel": 114
+   }
+  },
+  {
+   "query": "Boeing",
+   "kind": "company",
+   "n": 20,
+   "latency_s": 1.6,
+   "first_rank": 5,
+   "first_label": "vehicle",
+   "first_matched": "vehicle",
+   "hits_top10": 2,
+   "generic_top10": 0,
+   "func_top10": 0,
+   "top8": [
+    "ING",
+    "increasingly",
+    "là",
+    "ship",
+    "vehicle",
+    "great",
+    "In",
+    "Plane"
+   ],
+   "meta": {
+    "relevance_background": "entities",
+    "relevance_panel": 114
+   }
+  },
+  {
+   "query": "Ferrari",
+   "kind": "company",
+   "n": 20,
+   "latency_s": 1.4,
+   "first_rank": 1,
+   "first_label": "cars",
+   "first_matched": "automotive",
+   "hits_top10": 1,
+   "generic_top10": 0,
+   "func_top10": 0,
+   "top8": [
+    "cars",
+    "III",
+    "Plane",
+    "wealth",
+    "Driver",
+    "apapun",
+    "们",
+    "will"
+   ],
+   "meta": {
+    "relevance_background": "entities",
+    "relevance_panel": 114
+   }
+  },
+  {
+   "query": "Macbeth",
+   "kind": "work",
+   "n": 20,
+   "latency_s": 1.3,
+   "first_rank": null,
+   "first_label": null,
+   "first_matched": null,
+   "hits_top10": 0,
+   "generic_top10": 1,
+   "func_top10": 1,
+   "top8": [
+    "sebuah",
+    "İlk",
+    "Margin",
+    "around",
+    "zero",
+    "second",
+    "variations",
+    "pocket"
+   ],
+   "meta": {
+    "relevance_background": "entities",
+    "relevance_panel": 114
+   }
+  },
+  {
+   "query": "The Godfather",
+   "kind": "work",
+   "n": 5,
+   "latency_s": 1.5,
+   "first_rank": null,
+   "first_label": null,
+   "first_matched": null,
+   "hits_top10": 0,
+   "generic_top10": 0,
+   "func_top10": 0,
+   "top8": [
+    "THE",
+    "<code>",
+    "closest",
+    "approximate",
+    "Like"
+   ],
+   "meta": {
+    "relevance_background": "entities",
+    "relevance_panel": 114
+   }
+  },
+  {
+   "query": "Pokémon",
+   "kind": "work",
+   "n": 20,
+   "latency_s": 1.6,
+   "first_rank": 13,
+   "first_label": "Jepang",
+   "first_matched": "jepang",
+   "hits_top10": 0,
+   "generic_top10": 0,
+   "func_top10": 0,
+   "top8": [
+    "animais",
+    "Dark",
+    "Animal",
+    "Instant",
+    "Gameplay",
+    "co",
+    "educational",
+    "Training"
+   ],
+   "meta": {
+    "relevance_background": "entities",
+    "relevance_panel": 114
+   }
+  },
+  {
+   "query": "Don Quixote",
+   "kind": "work",
+   "n": 6,
+   "latency_s": 1.4,
+   "first_rank": null,
+   "first_label": null,
+   "first_matched": null,
+   "hits_top10": 0,
+   "generic_top10": 1,
+   "func_top10": 0,
+   "top8": [
+    "mixed",
+    "quote",
+    "Catholic",
+    "why",
+    "Like",
+    "especially"
+   ],
+   "meta": {
+    "relevance_background": "entities",
+    "relevance_panel": 114
+   }
+  },
+  {
+   "query": "tofu",
+   "kind": "other",
+   "n": 12,
+   "latency_s": 1.5,
+   "first_rank": null,
+   "first_label": null,
+   "first_matched": null,
+   "hits_top10": 0,
+   "generic_top10": 1,
+   "func_top10": 1,
+   "top8": [
+    "lleno",
+    "untuk",
+    "external",
+    "để",
+    "into",
+    "Alone",
+    "Somewhere",
+    "Desde"
+   ],
+   "meta": {
+    "relevance_background": "entities",
+    "relevance_panel": 114
+   }
+  },
+  {
+   "query": "penguin",
+   "kind": "other",
+   "n": 20,
+   "latency_s": 1.5,
+   "first_rank": null,
+   "first_label": null,
+   "first_matched": null,
+   "hits_top10": 0,
+   "generic_top10": 0,
+   "func_top10": 0,
+   "top8": [
+    "Bear",
+    "until",
+    "),",
+    "dismin",
+    "Animal",
+    "eighty",
+    "Walk",
+    "ELSE"
+   ],
+   "meta": {
+    "relevance_background": "entities",
+    "relevance_panel": 114
+   }
+  },
+  {
+   "query": "helium",
+   "kind": "other",
+   "n": 20,
+   "latency_s": 1.5,
+   "first_rank": null,
+   "first_label": null,
+   "first_matched": null,
+   "hits_top10": 0,
+   "generic_top10": 0,
+   "func_top10": 0,
+   "top8": [
+    "energy",
+    "Gas",
+    "increasingly",
+    "،",
+    "services",
+    "any",
+    "responses",
+    "Hydrogen"
+   ],
+   "meta": {
+    "relevance_background": "entities",
+    "relevance_panel": 114
+   }
+  },
+  {
+   "query": "volcano",
+   "kind": "other",
+   "n": 20,
+   "latency_s": 1.5,
+   "first_rank": null,
+   "first_label": null,
+   "first_matched": null,
+   "hits_top10": 0,
+   "generic_top10": 0,
+   "func_top10": 0,
+   "top8": [
+    "thousands",
+    "volunteer",
+    "can",
+    "you",
+    "Cause",
+    "riesgo",
+    "Building",
+    "page"
+   ],
+   "meta": {
+    "relevance_background": "entities",
+    "relevance_panel": 114
+   }
+  },
+  {
+   "query": "yoga",
+   "kind": "other",
+   "n": 20,
+   "latency_s": 1.4,
+   "first_rank": 4,
+   "first_label": "Physical",
+   "first_matched": "physical",
+   "hits_top10": 2,
+   "generic_top10": 0,
+   "func_top10": 0,
+   "top8": [
+    "will",
+    "Wellness",
+    "meditation",
+    "Physical",
+    "dance",
+    "Exercise",
+    "prayer",
+    "Joint"
+   ],
+   "meta": {
+    "relevance_background": "entities",
+    "relevance_panel": 114
+   }
+  }
+ ]
+}
