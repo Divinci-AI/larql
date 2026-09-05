@@ -23,6 +23,19 @@ use crate::state::{AppState, LoadedModel};
 use super::handler::ChatGenerationOutput;
 use super::types::ChatMessage;
 
+/// Turn / sequence terminators across the families larql serves; resolved
+/// to ids per model, missing ones skipped.
+const END_OF_TURN_TOKENS: &[&str] = &[
+    "<turn|>",
+    "<end_of_turn>",
+    "<eos>",
+    "</s>",
+    "<|endoftext|>",
+    "<|im_end|>",
+    "<|end_of_turn|>",
+    "<|eot_id|>",
+];
+
 /// Greedy decode under the overlay bound to `session_id`.
 pub(super) fn run_chat_completion_patched(
     state: &AppState,
@@ -58,6 +71,13 @@ pub(super) fn run_chat_completion_patched(
     }
     let prompt_tokens = ids.len();
     let route_mode = larql_inference::KnnRouteMode::from_env();
+    // End-of-turn by id as well as by text: with `skip_special_tokens` a
+    // marker such as `<turn|>` decodes to an empty string, so a text check
+    // alone never fires and the model keeps writing past its own turn.
+    let end_ids: Vec<u32> = END_OF_TURN_TOKENS
+        .iter()
+        .filter_map(|t| model.tokenizer.token_to_id(t))
+        .collect();
 
     let mut text = String::new();
     let mut tokens: Vec<(String, f64)> = Vec::new();
@@ -80,7 +100,9 @@ pub(super) fn run_chat_completion_patched(
             finish_reason = FINISH_REASON_STOP;
             break;
         };
-        if larql_inference::vindex::is_end_of_turn(&token) {
+        let ended_by_id = step.knn_override.is_none()
+            && step.model_top1_id.is_some_and(|id| end_ids.contains(&id));
+        if ended_by_id || larql_inference::vindex::is_end_of_turn(&token) {
             finish_reason = FINISH_REASON_STOP;
             break;
         }
