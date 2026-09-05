@@ -189,21 +189,23 @@ pub async fn handle_chat_completions(
     // differ only in the overlay — and the walk path is the one that
     // works on a vindex without Q4K attention slices. Requests without the
     // header keep the base generator.
-    if let Some(sid) = session_id {
+    // A body-level `patch_set` is the stateless form of the same thing.
+    if session_id.is_some() || req.patch_set.is_some() {
         if req.stream.unwrap_or(false) {
             return Err(OpenAIError::invalid_request(
-                "stream=true is not supported for an edited session (X-Session-Id with patches)",
+                "stream=true is not supported through an overlay (X-Session-Id or patch_set)",
             ));
         }
         if constrained_schema.is_some() {
             return Err(OpenAIError::invalid_request(
-                "tools / response_format are not supported for an edited session (X-Session-Id with patches)",
+                "tools / response_format are not supported through an overlay (X-Session-Id or patch_set)",
             ));
         }
         return run_patched_chat(
             state,
             model_arc,
-            sid,
+            session_id,
+            req.patch_set,
             messages,
             max_tokens,
             stop_strings,
@@ -333,7 +335,8 @@ pub async fn handle_chat_completions(
 async fn run_patched_chat(
     state: Arc<AppState>,
     model: Arc<LoadedModel>,
-    session_id: String,
+    session_id: Option<String>,
+    patch_set: Option<crate::overlay_cache::PatchSetRef>,
     messages: Vec<ChatMessage>,
     max_tokens: usize,
     stop_strings: Vec<String>,
@@ -347,7 +350,8 @@ async fn run_patched_chat(
         super::patched::run_chat_completion_patched(
             &state_for_task,
             &model,
-            &session_id,
+            session_id.as_deref(),
+            patch_set.as_ref(),
             &messages,
             max_tokens,
             &stop_strings,

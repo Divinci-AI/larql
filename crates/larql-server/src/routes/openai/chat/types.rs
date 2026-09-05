@@ -33,6 +33,12 @@ pub struct ChatMessage {
 pub struct ChatCompletionsRequest {
     pub model: Option<String>,
     pub messages: Vec<ChatMessage>,
+    /// Stateless overlay: the patches to decode through, by content hash
+    /// and/or inline (see `overlay_cache::PatchSetRef`). Either this or an
+    /// `X-Session-Id` header routes the completion through the edited
+    /// overlay instead of the base generator. Not part of OpenAI's shape.
+    #[serde(default)]
+    pub patch_set: Option<crate::overlay_cache::PatchSetRef>,
     #[serde(default)]
     pub max_tokens: Option<usize>,
     /// Newer name for `max_tokens` used by current OpenAI SDKs

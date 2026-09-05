@@ -44,6 +44,15 @@ pub(super) fn generate_via_cpu_q4k(
         return GenerateResult::empty_success();
     }
 
+    // A vindex without Q4K attention slices (an unquantised f32 extract such
+    // as gemma4 b20ff753) cannot take the dequant loop: the first layer
+    // panicked with "attn Q4K slices missing for layer 0" and the whole chat
+    // completion died with it. Decode through the dense f32 forward instead —
+    // a full pass per token, slow, but the pass the vindex was built for.
+    if index.attn_kquant_layer_data(0).is_none() {
+        return generate_via_cpu_f32_uncached(weights, tokenizer, token_ids, max_tokens, eos);
+    }
+
     if crate::vindex::supports_cached_decode(weights) {
         let use_direct = crate::vindex::supports_direct_matvec_decode(weights, index);
         generate_via_cpu_q4k_cached(
@@ -317,6 +326,66 @@ fn generate_via_cpu_q4k_uncached(
             detok_ms_total: 0.0,
             dequant_ms_total: 0.0,
         },
+        error: None,
+    }
+}
+
+/// Dense f32 decode for vindexes that carry no Q4K slices. Greedy, one full
+/// forward per generated token (`crate::forward::predict`), the same
+/// stop rule as the Q4K loop.
+fn generate_via_cpu_f32_uncached(
+    weights: &ModelWeights,
+    tokenizer: &tokenizers::Tokenizer,
+    token_ids: &[u32],
+    max_tokens: usize,
+    eos: &EosConfig,
+) -> GenerateResult {
+    let mut tokens: Vec<(String, f64)> = Vec::with_capacity(max_tokens);
+    let mut decode_ms = Vec::with_capacity(max_tokens);
+    let mut ids = token_ids.to_vec();
+    let mut prefill_ms = 0.0;
+
+    for step in 0..max_tokens {
+        let t0 = std::time::Instant::now();
+        let result: PredictResult = crate::forward::predict(weights, tokenizer, &ids, 5);
+        let step_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        if step == 0 {
+            prefill_ms = step_ms;
+        } else {
+            decode_ms.push(step_ms);
+        }
+        let Some(&id) = result.token_ids.first() else {
+            if step == 0 {
+                return GenerateResult {
+                    tokens,
+                    prefill_ms,
+                    decode_ms,
+                    stage_timings: StageTimings::default(),
+                    error: Some(GenerateError::empty_output(
+                        "CPU f32 generation produced no first token",
+                    )),
+                };
+            }
+            break;
+        };
+        let (tok, prob) = result
+            .predictions
+            .first()
+            .map(|p| (p.0.clone(), p.1))
+            .unwrap_or_default();
+        let stop = eos.is_eos_with_tokenizer(id, &tok, tokenizer);
+        tokens.push((tok, prob));
+        ids.push(id);
+        if stop {
+            break;
+        }
+    }
+
+    GenerateResult {
+        tokens,
+        prefill_ms,
+        decode_ms,
+        stage_timings: StageTimings::default(),
         error: None,
     }
 }

@@ -36,11 +36,13 @@ const END_OF_TURN_TOKENS: &[&str] = &[
     "<|eot_id|>",
 ];
 
-/// Greedy decode under the overlay bound to `session_id`.
+/// Greedy decode under the overlay named by `session_id` and/or `patch_set`
+/// (the same resolution rule `/v1/infer` uses).
 pub(super) fn run_chat_completion_patched(
     state: &AppState,
     model: &LoadedModel,
-    session_id: &str,
+    session_id: Option<&str>,
+    patch_set: Option<&crate::overlay_cache::PatchSetRef>,
     messages: &[ChatMessage],
     max_tokens: usize,
     stop_strings: &[String],
@@ -85,7 +87,7 @@ pub(super) fn run_chat_completion_patched(
 
     for _ in 0..max_tokens {
         let step =
-            crate::overlay_cache::with_overlay(state, model, Some(session_id), None, |patched| {
+            crate::overlay_cache::with_overlay(state, model, session_id, patch_set, |patched| {
                 larql_inference::infer_patched(
                     weights,
                     &model.tokenizer,
