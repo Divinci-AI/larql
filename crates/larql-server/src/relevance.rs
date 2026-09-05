@@ -92,7 +92,11 @@ impl Background {
     pub fn from_env() -> Background {
         match std::env::var(Self::ENV) {
             Ok(v) => Background::parse(&v).unwrap_or_else(|| {
-                tracing::warn!("{}={v:?} is not a background; using {}", Self::ENV, Self::DEFAULT.as_str());
+                tracing::warn!(
+                    "{}={v:?} is not a background; using {}",
+                    Self::ENV,
+                    Self::DEFAULT.as_str()
+                );
                 Self::DEFAULT
             }),
             Err(_) => Self::DEFAULT,
@@ -538,16 +542,31 @@ mod tests {
         assert_eq!(r.panel_size(Background::Entities), 0);
     }
 
+    /// The bench entities (`bench/describe/entities.tsv`): what DESCRIBE
+    /// quality is measured on, and therefore what no background may contain.
+    fn bench_entities() -> Vec<String> {
+        let mut names: Vec<String> = include_str!("../../../bench/describe/entities.tsv")
+            .lines()
+            .filter(|l| !l.trim().is_empty() && !l.starts_with('#'))
+            .map(|l| l.split('\t').next().unwrap().trim().to_string())
+            .collect();
+        // The Wikidata labels too: the bench queries "Einstein", the corpus
+        // would carry "Albert Einstein", and that is the same background.
+        let targets: serde_json::Value =
+            serde_json::from_str(include_str!("../../../bench/describe/targets.json")).unwrap();
+        for v in targets.as_object().unwrap().values() {
+            if let Some(l) = v["label"].as_str() {
+                names.push(l.to_string());
+            }
+        }
+        names
+    }
+
     #[test]
-    fn the_entity_panel_never_contains_a_measurement_entity() {
-        for held_out in [
-            "Paris",
-            "France",
-            "Tokyo",
-            "Einstein",
-            "Amazon",
-            "Beethoven",
-        ] {
+    fn the_entity_panel_never_contains_a_bench_entity() {
+        let bench = bench_entities();
+        assert!(bench.len() >= 30, "bench has only {} entities", bench.len());
+        for held_out in bench.iter().map(String::as_str) {
             assert!(
                 !ENTITY_PANEL
                     .iter()
@@ -563,7 +582,11 @@ mod tests {
 
     #[test]
     fn background_names_round_trip() {
-        for b in [Background::Corpus, Background::Entities, Background::Vocabulary] {
+        for b in [
+            Background::Corpus,
+            Background::Entities,
+            Background::Vocabulary,
+        ] {
             assert_eq!(Background::parse(b.as_str()), Some(b));
         }
         assert_eq!(Background::parse("wikipedia"), None);
@@ -574,10 +597,15 @@ mod tests {
     fn the_corpus_is_large_clean_and_holds_out_the_measurement_entities() {
         let names = corpus_names();
         assert!(names.len() >= 1500, "corpus has only {} names", names.len());
-        for held_out in ["Paris", "France", "Tokyo", "Einstein", "Albert Einstein", "Amazon", "Beethoven"] {
-            assert!(!names.iter().any(|n| n.eq_ignore_ascii_case(held_out)), "{held_out} is in the corpus");
+        for held_out in bench_entities().iter().map(String::as_str) {
+            assert!(
+                !names.iter().any(|n| n.eq_ignore_ascii_case(held_out)),
+                "{held_out} is in the corpus"
+            );
         }
-        assert!(names.iter().all(|n| !n.contains('_') && !n.starts_with('#') && n.len() >= 3));
+        assert!(names
+            .iter()
+            .all(|n| !n.contains('_') && !n.starts_with('#') && n.len() >= 3));
         let mut sorted = names.clone();
         sorted.sort_unstable();
         sorted.dedup();

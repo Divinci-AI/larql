@@ -1,0 +1,40 @@
+# query	wikidata	kind
+# The DESCRIBE bench entities. Held out of every relevance background
+# (the hand panel by test, the corpus by the builder), so no entity is ever
+# measured against its own rows. Spread across kinds on purpose.
+Paris	Q90	city
+Tokyo	Q1490	city
+Kyoto	Q34600	city
+Lisbon	Q597	city
+Vienna	Q1741	city
+Havana	Q1563	city
+France	Q142	country
+Japan	Q17	country
+Kenya	Q114	country
+Peru	Q419	country
+Norway	Q20	country
+Thailand	Q869	country
+Einstein	Q937	person
+Beethoven	Q255	person
+Charles Dickens	Q5686	person
+Nikola Tesla	Q9036	person
+Vincent van Gogh	Q5582	person
+Lionel Messi	Q615	person
+Barack Obama	Q76	person
+Freddie Mercury	Q15869	person
+Serena Williams	Q11459	person
+Hayao Miyazaki	Q55400	person
+Amazon	Q3884	company
+Netflix	Q907311	company
+Nintendo	Q8093	company
+Boeing	Q66	company
+Ferrari	Q27586	company
+Macbeth	Q130283	work
+The Godfather	Q47703	work
+Pokémon	Q864	work
+Don Quixote	Q480	work
+tofu	Q177378	other
+penguin	Q9147	other
+helium	Q560	other
+volcano	Q8072	other
+yoga	Q9350	other

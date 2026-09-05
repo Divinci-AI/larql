@@ -28,17 +28,32 @@ DROP = re.compile(r"^(List_of|Lists_of|Deaths_in|Main_Page$|\d{1,4}(_in_|$|_BC)|
 # Search-box noise and adult-site titles that top the daily list: not the
 # population a browse is drawn from, and not something to ship in a data file.
 NOISE = re.compile(r"^(X+|XXX.*|XNXX|XVideos|Pornhub|.*[Pp]orn.*|Sex|Sexual_intercourse)$")
-# The entities DESCRIBE quality is measured against (notes/research, Divinci
-# server repo). Held out so no measurement is against its own background.
-HELD_OUT = {"Paris", "France", "Tokyo", "Einstein", "Albert Einstein", "Amazon",
-            "Amazon (company)", "Beethoven", "Ludwig van Beethoven"}
+# The bench entities (bench/describe/entities.tsv) are held out so no
+# measurement is against its own background. Their Wikidata labels count too:
+# the bench queries "Einstein" but the title is "Albert Einstein".
+def held_out():
+    import pathlib
+    here = pathlib.Path(__file__).resolve().parent.parent / "bench" / "describe"
+    names = set()
+    for line in (here / "entities.tsv").read_text().splitlines():
+        if line.strip() and not line.startswith("#"):
+            names.add(line.split("\t")[0].strip())
+    tj = here / "targets.json"
+    if tj.exists():
+        for v in json.loads(tj.read_text()).values():
+            names.add(v["label"])
+    return names
+
+
+HELD_OUT = held_out()
+HELD_OUT_LOWER = {n.lower() for n in HELD_OUT}
 
 
 def clean(title: str):
     if DROP.search(title) or NOISE.fullmatch(title):
         return None
     t = re.sub(r"_\([^)]*\)$", "", title).replace("_", " ").strip()
-    if len(t) < 3 or re.fullmatch(r"[\d\s.,-]+", t) or t in HELD_OUT:
+    if len(t) < 3 or re.fullmatch(r"[\d\s.,-]+", t) or t.lower() in HELD_OUT_LOWER:
         return None
     return t
 
