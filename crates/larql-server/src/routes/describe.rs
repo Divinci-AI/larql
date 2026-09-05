@@ -110,6 +110,14 @@ pub struct DescribeParams {
     /// which is what inference does. Needs model weights in the vindex.
     #[serde(default = "default_query")]
     pub query: String,
+    /// Residual mode only: a prompt template containing `{entity}`, run
+    /// through the model in place of the bare name; the residual is taken
+    /// at the template's last token. "{entity} is the capital of" puts the
+    /// model in the position of *predicting* the fact, where a bare name's
+    /// last token only encodes the name. The relevance panel is built on
+    /// the same template, so the background matches. Default `{entity}`.
+    #[serde(default = "default_prompt")]
+    pub prompt: String,
     /// Residual mode only: a neutral prompt whose per-layer residual is
     /// subtracted from the entity's before scoring.
     ///
@@ -160,6 +168,7 @@ fn ensure_residual_panel(
     weights: &larql_inference::ModelWeights,
     patched: &larql_vindex::PatchedVindex,
     background: crate::relevance::Background,
+    template: &str,
 ) -> Result<(), ServerError> {
     let names =
         crate::relevance::RelevanceStats::residual_panel_names(background).ok_or_else(|| {
@@ -168,7 +177,7 @@ fn ensure_residual_panel(
                 background.as_str()
             ))
         })?;
-    if model.relevance.has_residual_panel(background) {
+    if model.relevance.has_residual_panel(background, template) {
         return Ok(());
     }
     let _build = model
@@ -176,14 +185,15 @@ fn ensure_residual_panel(
         .residual_build
         .lock()
         .map_err(|_| ServerError::Internal("panel lock".into()))?;
-    if model.relevance.has_residual_panel(background) {
+    if model.relevance.has_residual_panel(background, template) {
         return Ok(());
     }
     let start = std::time::Instant::now();
     let mut rows: std::collections::HashMap<usize, Vec<Vec<f32>>> =
         std::collections::HashMap::new();
     for name in names {
-        for (layer, r) in residuals_for(model, weights, patched, name)? {
+        let text = template.replace("{entity}", name);
+        for (layer, r) in residuals_for(model, weights, patched, &text)? {
             rows.entry(layer).or_default().push(r);
         }
     }
@@ -199,15 +209,16 @@ fn ensure_residual_panel(
         per_layer.insert(layer, m);
     }
     tracing::info!(
-        "residual relevance panel `{}`: {} names, {} layers, {:.1}s",
+        "residual relevance panel `{}` for {:?}: {} names, {} layers, {:.1}s",
         background.as_str(),
+        template,
         names.len(),
         per_layer.len(),
         start.elapsed().as_secs_f32()
     );
     model
         .relevance
-        .install_residual_panel(background, per_layer);
+        .install_residual_panel(background, template, per_layer);
     Ok(())
 }
 
@@ -216,6 +227,22 @@ pub const QUERY_RESIDUAL: &str = "residual";
 
 fn default_query() -> String {
     QUERY_EMBEDDING.into()
+}
+
+pub const PROMPT_BARE: &str = "{entity}";
+fn default_prompt() -> String {
+    PROMPT_BARE.into()
+}
+/// A template must name the entity, and stays short: it is a prompt the
+/// panel's 114 names are each run through.
+fn check_prompt(template: &str) -> Result<(), ServerError> {
+    if !template.contains("{entity}") {
+        return Err(ServerError::BadRequest("prompt must contain `{entity}`".into()));
+    }
+    if template.chars().count() > 200 {
+        return Err(ServerError::BadRequest("prompt must be at most 200 characters".into()));
+    }
+    Ok(())
 }
 
 pub const WINDOW_BY_SCORE: &str = "score";
@@ -328,6 +355,11 @@ pub fn describe_entity_with(
     let mut residual_layers: Option<usize> = None;
     let mut contrasted_layers: usize = 0;
 
+    if params.query == QUERY_EMBEDDING && params.prompt != PROMPT_BARE {
+        return Err(ServerError::BadRequest(
+            "prompt applies to query=residual only".into(),
+        ));
+    }
     let mut trace = match params.query.as_str() {
         QUERY_EMBEDDING => {
             if window_by_relevance {
@@ -355,14 +387,16 @@ pub fn describe_entity_with(
             // The relevance background for residual scores is the panel's
             // residuals, not its embeddings; built here on first use since
             // this route owns inference.
+            check_prompt(&params.prompt)?;
             if params.relevance {
-                ensure_residual_panel(model, weights, patched, background)?;
+                ensure_residual_panel(model, weights, patched, background, &params.prompt)?;
             }
 
             // The production inference path. Its per-layer residuals are the
             // vector each layer's gates were scored against for the last
             // position — exactly what DESCRIBE should be scoring against.
-            let mut by_layer = residuals_for(model, weights, patched, params.entity.as_str())?;
+            let text = params.prompt.replace("{entity}", &params.entity);
+            let mut by_layer = residuals_for(model, weights, patched, &text)?;
 
             if let Some(baseline) = params.baseline.as_deref() {
                 let base = residuals_for(model, weights, patched, baseline)?;
@@ -413,7 +447,7 @@ pub fn describe_entity_with(
     if window_by_relevance {
         for (layer_idx, hits) in trace.layers.iter_mut() {
             let stats = if params.query == QUERY_RESIDUAL {
-                model.relevance.residual_layer(patched, background, *layer_idx)
+                model.relevance.residual_layer(patched, background, &params.prompt, *layer_idx)
             } else {
                 model.relevance.layer(patched, background, *layer_idx)
             };
@@ -460,7 +494,7 @@ pub fn describe_entity_with(
         let layer_stats = if params.relevance && params.query == QUERY_RESIDUAL {
             model
                 .relevance
-                .residual_layer(patched, background, *layer_idx)
+                .residual_layer(patched, background, &params.prompt, *layer_idx)
         } else if params.relevance {
             model.relevance.layer(patched, background, *layer_idx)
         } else {
@@ -674,7 +708,7 @@ pub fn describe_entity_with(
     if params.relevance {
         out["relevance_background"] = serde_json::json!(background.as_str());
         out["relevance_panel"] = serde_json::json!(if params.query == QUERY_RESIDUAL {
-            model.relevance.residual_panel_size(background)
+            model.relevance.residual_panel_size(background, &params.prompt)
         } else {
             model.relevance.panel_size(background)
         });
@@ -682,6 +716,9 @@ pub fn describe_entity_with(
         // residuals. A caller comparing modes must see which it got.
         out["relevance_query"] = serde_json::json!(params.query);
         out["window_by"] = serde_json::json!(params.window_by);
+    }
+    if params.query == QUERY_RESIDUAL && params.prompt != PROMPT_BARE {
+        out["prompt"] = serde_json::json!(params.prompt);
     }
     if params.query != QUERY_EMBEDDING {
         out["query"] = serde_json::json!(params.query);
@@ -743,9 +780,16 @@ async fn describe_with_cache(
                 .unwrap_or(model.relevance.default_background())
                 .as_str(),
             &params.window_by,
-            &match params.baseline.as_deref() {
-                Some(b) => format!("{}~{b}", params.query),
-                None => params.query.clone(),
+            &{
+                let mut q = params.query.clone();
+                if params.prompt != PROMPT_BARE {
+                    q.push('|');
+                    q.push_str(&params.prompt);
+                }
+                match params.baseline.as_deref() {
+                    Some(b) => format!("{q}~{b}"),
+                    None => q,
+                }
             },
         );
         if let Some(cached) = state.describe_cache.get(&key) {
@@ -894,6 +938,9 @@ pub struct DescribeBody {
     /// See `DescribeParams::query`.
     #[serde(default = "default_query")]
     pub query: String,
+    /// See `DescribeParams::prompt`.
+    #[serde(default = "default_prompt")]
+    pub prompt: String,
     /// See `DescribeParams::baseline`.
     #[serde(default)]
     pub baseline: Option<String>,
@@ -918,6 +965,7 @@ impl DescribeBody {
             background,
             window_by,
             query,
+            prompt,
             baseline,
             patch_set,
         } = self;
@@ -936,6 +984,7 @@ impl DescribeBody {
                 background,
                 window_by,
                 query,
+                prompt,
                 baseline,
             },
             patch_set,

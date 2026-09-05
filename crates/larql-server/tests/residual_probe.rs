@@ -28,6 +28,7 @@ fn probe() {
                 background: Some("vocabulary".into()),
                 window_by: "score".into(),
                 query: q.into(),
+                prompt: "{entity}".into(),
                 baseline: None,
             };
             let r = larql_server::routes::describe::describe_entity_with(

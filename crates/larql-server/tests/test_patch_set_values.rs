@@ -96,6 +96,7 @@ fn targets(model: &LoadedModel, ps: Option<&PatchSetRef>, scope: Option<&str>) -
         background: Some("vocabulary".into()),
         window_by: "score".into(),
         query: "embedding".into(),
+        prompt: "{entity}".into(),
         baseline: None,
     };
     let extract = |patched: &larql_vindex::PatchedVindex| {
@@ -329,6 +330,7 @@ fn describe_against(
         background: Some(background.into()),
         window_by: "score".into(),
         query: "embedding".into(),
+        prompt: "{entity}".into(),
         baseline: None,
     };
     larql_server::routes::describe::describe_entity_with(
@@ -556,6 +558,7 @@ fn residual_mode_either_runs_the_model_or_says_why_it_cannot() {
         background: Some("entities".into()),
         window_by: "score".into(),
         query: "residual".into(),
+        prompt: "{entity}".into(),
         baseline: None,
     };
     let r = larql_server::routes::describe::describe_entity_with(
@@ -601,6 +604,7 @@ fn an_unknown_query_mode_is_rejected_not_defaulted() {
         background: Some("vocabulary".into()),
         window_by: "score".into(),
         query: "activations".into(),
+        prompt: "{entity}".into(),
         baseline: None,
     };
     let r = larql_server::routes::describe::describe_entity_with(
@@ -634,6 +638,7 @@ fn contrasting_an_entity_with_itself_scores_nothing() {
         background: Some("entities".into()),
         window_by: "score".into(),
         query: "residual".into(),
+        prompt: "{entity}".into(),
         baseline: Some("[5]".into()),
     };
     let r = larql_server::routes::describe::describe_entity_with(
@@ -843,6 +848,7 @@ fn an_absent_background_takes_the_models_default_and_names_it() {
         background: None,
         window_by: "score".into(),
         query: "embedding".into(),
+        prompt: "{entity}".into(),
         baseline: None,
     };
     let v = larql_server::routes::describe::describe_entity_with(
@@ -891,6 +897,7 @@ fn describe_residual(
         background: Some("entities".into()),
         window_by: "score".into(),
         query: "residual".into(),
+        prompt: "{entity}".into(),
         baseline: None,
     };
     larql_server::routes::describe::describe_entity_with(
@@ -916,7 +923,7 @@ fn residual_relevance_builds_a_residual_panel_and_ranks_by_it() {
     assert!(panel >= 2, "residual panel has {panel} rows");
     assert!(m
         .relevance
-        .has_residual_panel(larql_server::relevance::Background::Entities));
+        .has_residual_panel(larql_server::relevance::Background::Entities, "{entity}"));
     let edges = v["edges"].as_array().unwrap();
     assert!(!edges.is_empty());
     let zs: Vec<f64> = edges
@@ -966,6 +973,7 @@ fn residual_relevance_refuses_a_background_with_no_residual_panel() {
         background: Some("corpus".into()),
         window_by: "score".into(),
         query: "residual".into(),
+        prompt: "{entity}".into(),
         baseline: None,
     };
     let patched = m.patched.blocking_read();
@@ -999,6 +1007,7 @@ fn describe_window_by(model: &LoadedModel, query: &str, window_by: &str, relevan
         background: Some("entities".into()),
         window_by: window_by.into(),
         query: query.into(),
+        prompt: "{entity}".into(),
         baseline: None,
     };
     let patched = model.patched.blocking_read();
@@ -1066,4 +1075,59 @@ fn a_surprise_window_works_for_residual_queries_too() {
         assert!(e["relevance"].as_f64().unwrap().is_finite());
     }
     assert!(per_layer.values().all(|&n| n <= 3), "a layer exceeded its window: {per_layer:?}");
+}
+
+// ══════════════════════════════════════════════════════════════
+// prompt: a template around the entity, with its own panel
+// ══════════════════════════════════════════════════════════════
+
+fn describe_prompt(model: &LoadedModel, query: &str, prompt: &str) -> Result<serde_json::Value, larql_server::error::ServerError> {
+    let params = larql_server::routes::describe::DescribeParams {
+        entity: "[5]".to_string(),
+        band: "all".to_string(),
+        verbose: false,
+        limit: 10_000,
+        window: 5,
+        min_score: 0.0,
+        coherence: false,
+        min_coherence: 0.0,
+        relabel: false,
+        relevance: true,
+        background: Some("entities".into()),
+        window_by: "relevance".into(),
+        query: query.into(),
+        prompt: prompt.into(),
+        baseline: None,
+    };
+    let patched = model.patched.blocking_read();
+    larql_server::routes::describe::describe_entity_with(model, &patched, &params)
+}
+
+#[test]
+fn a_prompt_builds_its_own_residual_panel_and_is_reported() {
+    let Some(m) = tiny() else { return };
+    let v = match describe_prompt(&m, "residual", "{entity} [6]") {
+        Ok(v) => v,
+        Err(e) => { assert!(format!("{e:?}").contains("weights"), "{e:?}"); return; }
+    };
+    assert_eq!(v["prompt"], "{entity} [6]");
+    assert!(m.relevance.has_residual_panel(larql_server::relevance::Background::Entities, "{entity} [6]"));
+    assert!(v["relevance_panel"].as_u64().unwrap() >= 2);
+    // The bare panel is a separate background: asking for it does not reuse this one.
+    let bare = describe_prompt(&m, "residual", "{entity}").unwrap();
+    assert!(bare.get("prompt").is_none(), "the default template is not reported");
+    assert!(m.relevance.has_residual_panel(larql_server::relevance::Background::Entities, "{entity}"));
+}
+
+#[test]
+fn a_prompt_must_name_the_entity_and_is_residual_only() {
+    let Some(m) = tiny() else { return };
+    match describe_prompt(&m, "residual", "the capital of") {
+        Err(larql_server::error::ServerError::BadRequest(msg)) => assert!(msg.contains("{entity}"), "{msg}"),
+        other => panic!("expected BadRequest, got {other:?}"),
+    }
+    match describe_prompt(&m, "embedding", "{entity} is") {
+        Err(larql_server::error::ServerError::BadRequest(msg)) => assert!(msg.contains("residual"), "{msg}"),
+        other => panic!("expected BadRequest, got {other:?}"),
+    }
 }

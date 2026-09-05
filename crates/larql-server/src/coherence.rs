@@ -290,8 +290,16 @@ mod tests {
         let opposed = score_feature(&e, &cands(&[(0, "a"), (3, "d")]), None).unwrap();
 
         assert!(tight.coherence > 0.95, "tight was {}", tight.coherence);
-        assert!(split.coherence.abs() < 0.01, "orthogonal was {}", split.coherence);
-        assert!(opposed.coherence < -0.95, "opposed was {}", opposed.coherence);
+        assert!(
+            split.coherence.abs() < 0.01,
+            "orthogonal was {}",
+            split.coherence
+        );
+        assert!(
+            opposed.coherence < -0.95,
+            "opposed was {}",
+            opposed.coherence
+        );
 
         // The ordering is the whole point: it must separate the populations.
         assert!(tight.coherence > split.coherence);
@@ -305,7 +313,12 @@ mod tests {
         // the `[서울, capital, capitals]` case, where the argmax token is the
         // one that does not belong.
         let e = embeddings();
-        let v = score_feature(&e, &cands(&[(2, "outlier"), (0, "core"), (1, "core2")]), None).unwrap();
+        let v = score_feature(
+            &e,
+            &cands(&[(2, "outlier"), (0, "core"), (1, "core2")]),
+            None,
+        )
+        .unwrap();
         assert_ne!(v.label.as_deref(), Some("outlier"), "picked the outlier");
         assert!(matches!(v.label.as_deref(), Some("core") | Some("core2")));
     }
@@ -323,7 +336,12 @@ mod tests {
     fn unusable_rows_are_skipped_rather_than_poisoning_the_score() {
         let e = embeddings();
         // id 4 is a zero row and id 99 is out of range; neither is a direction.
-        let v = score_feature(&e, &cands(&[(0, "a"), (1, "b"), (4, "zero"), (99, "oob")]), None).unwrap();
+        let v = score_feature(
+            &e,
+            &cands(&[(0, "a"), (1, "b"), (4, "zero"), (99, "oob")]),
+            None,
+        )
+        .unwrap();
         assert_eq!(v.support, 2, "only two rows were usable");
         assert!(v.coherence.is_finite(), "coherence went non-finite");
         assert!(v.coherence > 0.95);
@@ -365,7 +383,11 @@ mod tests {
         let c = cands(&[(0, "일본"), (1, "Japan"), (2, "在日本")]);
 
         let neutral = score_feature(&e, &c, None).unwrap();
-        assert_eq!(neutral.label.as_deref(), Some("일본"), "row 0 is the most central");
+        assert_eq!(
+            neutral.label.as_deref(),
+            Some("일본"),
+            "row 0 is the most central"
+        );
 
         let latin = score_feature(&e, &c, Some(Script::Latin)).unwrap();
         assert_eq!(latin.label.as_deref(), Some("Japan"));
@@ -391,7 +413,11 @@ mod tests {
         let e = multilingual();
         let c = cands(&[(0, "(){"), (1, "일본"), (2, "日本")]);
         let v = score_feature(&e, &c, Some(Script::Latin)).unwrap();
-        assert_eq!(v.label.as_deref(), Some("(){"), "row 0 is most central; no Latin present");
+        assert_eq!(
+            v.label.as_deref(),
+            Some("(){"),
+            "row 0 is most central; no Latin present"
+        );
         // And when a real Latin token exists, braces lose to it.
         let c2 = cands(&[(0, "(){"), (1, "Japan"), (2, "日本")]);
         let v2 = score_feature(&e, &c2, Some(Script::Latin)).unwrap();

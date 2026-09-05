@@ -22,19 +22,33 @@ use std::path::Path;
 fn rss_kb() -> u64 {
     let out = std::process::Command::new("ps")
         .args(["-o", "rss=", "-p", &std::process::id().to_string()])
-        .output().expect("ps");
-    String::from_utf8_lossy(&out.stdout).trim().parse().unwrap_or(0)
+        .output()
+        .expect("ps");
+    String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .parse()
+        .unwrap_or(0)
 }
 
 #[test]
 #[ignore]
 fn measure_overlay_footprint() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/tiny-vindex");
-    let opts = larql_server::bootstrap::load::LoadVindexOptions { no_infer: true, ..Default::default() };
-    let m = larql_server::bootstrap::load::load_single_vindex(root.to_str().unwrap(), opts).unwrap();
+    let opts = larql_server::bootstrap::load::LoadVindexOptions {
+        no_infer: true,
+        ..Default::default()
+    };
+    let m =
+        larql_server::bootstrap::load::load_single_vindex(root.to_str().unwrap(), opts).unwrap();
 
     let base = m.patched.blocking_read();
-    let heap_layers = base.base.gate.gate_vectors.iter().filter(|g| g.is_some()).count();
+    let heap_layers = base
+        .base
+        .gate
+        .gate_vectors
+        .iter()
+        .filter(|g| g.is_some())
+        .count();
     let total_layers = base.base.gate.gate_vectors.len();
     println!("HEAP-RESIDENT gate layers: {heap_layers}/{total_layers}");
     println!("  (0 => gate data is mmap-backed and shared by refcount on clone;");

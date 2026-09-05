@@ -118,10 +118,7 @@ pub fn single_model_router(state: Arc<AppState>) -> Router {
             get(sessions::handle_get_session).delete(sessions::handle_delete_session),
         )
         .route(PATCHES_APPLY, post(patches::handle_apply_patch))
-        .route(
-            PATCHES_APPLY_MEASURED,
-            post(measure::handle_apply_measured),
-        )
+        .route(PATCHES_APPLY_MEASURED, post(measure::handle_apply_measured))
         .route(PATCHES, get(patches::handle_list_patches))
         .route(PATCH_BY_NAME, delete(patches::handle_remove_patch))
         .route(WALK_FFN, post(walk_ffn::handle_walk_ffn))

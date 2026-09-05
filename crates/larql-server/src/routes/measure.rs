@@ -212,6 +212,7 @@ fn read_against(
                 background: None,
                 window_by: "score".into(),
                 query: "embedding".into(),
+                prompt: "{entity}".into(),
                 baseline: None,
             };
             let described = describe_entity_with(model, patched, &params)?;

@@ -130,7 +130,10 @@ pub fn model_functional(id: &str) -> Arc<LoadedModel> {
         config: test_config(),
         patched: std::sync::Arc::new(tokio::sync::RwLock::new(PatchedVindex::new(test_index()))),
         overlay_cache: larql_server::overlay_cache::OverlayCache::with_env_capacity(),
-        relevance: larql_server::relevance::RelevanceStats::from_embeddings(&larql_vindex::ndarray::Array2::<f32>::zeros((0, 0)), 1.0),
+        relevance: larql_server::relevance::RelevanceStats::from_embeddings(
+            &larql_vindex::ndarray::Array2::<f32>::zeros((0, 0)),
+            1.0,
+        ),
         embeddings: {
             let mut e = Array2::<f32>::zeros((8, 4));
             e[[0, 0]] = 1.0;
@@ -175,7 +178,10 @@ pub fn model_infer_enabled(id: &str) -> Arc<LoadedModel> {
         config: test_config(),
         patched: std::sync::Arc::new(tokio::sync::RwLock::new(PatchedVindex::new(test_index()))),
         overlay_cache: larql_server::overlay_cache::OverlayCache::with_env_capacity(),
-        relevance: larql_server::relevance::RelevanceStats::from_embeddings(&larql_vindex::ndarray::Array2::<f32>::zeros((0, 0)), 1.0),
+        relevance: larql_server::relevance::RelevanceStats::from_embeddings(
+            &larql_vindex::ndarray::Array2::<f32>::zeros((0, 0)),
+            1.0,
+        ),
         embeddings: {
             let mut e = Array2::<f32>::zeros((8, 4));
             e[[0, 0]] = 1.0;
@@ -261,7 +267,10 @@ impl ModelBuilder {
                 PatchedVindex::new(test_index()),
             )),
             overlay_cache: larql_server::overlay_cache::OverlayCache::with_env_capacity(),
-            relevance: larql_server::relevance::RelevanceStats::from_embeddings(&larql_vindex::ndarray::Array2::<f32>::zeros((0, 0)), 1.0),
+            relevance: larql_server::relevance::RelevanceStats::from_embeddings(
+                &larql_vindex::ndarray::Array2::<f32>::zeros((0, 0)),
+                1.0,
+            ),
             embeddings: {
                 let mut e = Array2::<f32>::zeros((8, 4));
                 e[[0, 0]] = 1.0;
@@ -358,7 +367,10 @@ pub fn model_with_real_weights_and_labels(
         config,
         patched: std::sync::Arc::new(tokio::sync::RwLock::new(PatchedVindex::new(index))),
         overlay_cache: larql_server::overlay_cache::OverlayCache::with_env_capacity(),
-        relevance: larql_server::relevance::RelevanceStats::from_embeddings(&larql_vindex::ndarray::Array2::<f32>::zeros((0, 0)), 1.0),
+        relevance: larql_server::relevance::RelevanceStats::from_embeddings(
+            &larql_vindex::ndarray::Array2::<f32>::zeros((0, 0)),
+            1.0,
+        ),
         embeddings,
         embed_scale: 1.0,
         tokenizer: fixture_tokenizer,
@@ -440,7 +452,10 @@ pub fn model_with_q4k_weights(
         config,
         patched: std::sync::Arc::new(tokio::sync::RwLock::new(PatchedVindex::new(index))),
         overlay_cache: larql_server::overlay_cache::OverlayCache::with_env_capacity(),
-        relevance: larql_server::relevance::RelevanceStats::from_embeddings(&larql_vindex::ndarray::Array2::<f32>::zeros((0, 0)), 1.0),
+        relevance: larql_server::relevance::RelevanceStats::from_embeddings(
+            &larql_vindex::ndarray::Array2::<f32>::zeros((0, 0)),
+            1.0,
+        ),
         embeddings,
         embed_scale: 1.0,
         tokenizer: fixture_tokenizer,

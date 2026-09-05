@@ -297,7 +297,10 @@ mod tests {
 
     #[test]
     fn a_different_feature_is_a_different_hash() {
-        assert_ne!(patch_set_sha(&[patch("a", 1)]), patch_set_sha(&[patch("a", 2)]));
+        assert_ne!(
+            patch_set_sha(&[patch("a", 1)]),
+            patch_set_sha(&[patch("a", 2)])
+        );
     }
 
     // Order is part of the identity, not noise to be normalised away:
@@ -353,7 +356,10 @@ mod tests {
 
     #[test]
     fn a_caller_scope_is_distinct_from_no_scope() {
-        assert_ne!(overlay_key("m", None, "abc"), overlay_key("m", Some("wl:a"), "abc"));
+        assert_ne!(
+            overlay_key("m", None, "abc"),
+            overlay_key("m", Some("wl:a"), "abc")
+        );
     }
 
     // ── LRU ───────────────────────────────────────────────────────────

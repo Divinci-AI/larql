@@ -187,7 +187,11 @@ async fn one_caller_cannot_file_content_under_another_callers_hash() {
 async fn a_patch_set_request_does_not_touch_global_state() {
     let app = single_model_router(state(vec![model("test")]));
 
-    let plain = get(app.clone(), "/v1/describe?entity=France&band=all&limit=10&min_score=0").await;
+    let plain = get(
+        app.clone(),
+        "/v1/describe?entity=France&band=all&limit=10&min_score=0",
+    )
+    .await;
     let before = body_json(plain.into_body()).await;
 
     let resp = post_json(
@@ -198,7 +202,11 @@ async fn a_patch_set_request_does_not_touch_global_state() {
     .await;
     assert_eq!(resp.status(), StatusCode::OK);
 
-    let plain2 = get(app.clone(), "/v1/describe?entity=France&band=all&limit=10&min_score=0").await;
+    let plain2 = get(
+        app.clone(),
+        "/v1/describe?entity=France&band=all&limit=10&min_score=0",
+    )
+    .await;
     let after = body_json(plain2.into_body()).await;
     assert_eq!(before["edges"], after["edges"]);
 
@@ -230,7 +238,10 @@ async fn an_unknown_hash_is_a_409_naming_what_to_retry_with() {
     assert_eq!(resp.status(), StatusCode::CONFLICT);
     let body = body_json(resp.into_body()).await;
     assert!(
-        body["error"].as_str().unwrap_or("").contains("patch_set_unknown"),
+        body["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("patch_set_unknown"),
         "the error must say what to do: {body}"
     );
 }
@@ -277,7 +288,11 @@ async fn the_get_form_is_unchanged() {
     // exactly as it was, which is what lets a client migrate one call site at
     // a time rather than in a flag day.
     let app = single_model_router(state(vec![model("test")]));
-    let resp = get(app, "/v1/describe?entity=France&band=all&limit=10&min_score=0").await;
+    let resp = get(
+        app,
+        "/v1/describe?entity=France&band=all&limit=10&min_score=0",
+    )
+    .await;
     assert_eq!(resp.status(), StatusCode::OK);
 }
 
@@ -285,7 +300,11 @@ async fn the_get_form_is_unchanged() {
 async fn a_post_without_a_patch_set_behaves_like_the_get() {
     let app = single_model_router(state(vec![model("test")]));
 
-    let g = get(app.clone(), "/v1/describe?entity=France&band=all&limit=10&min_score=0").await;
+    let g = get(
+        app.clone(),
+        "/v1/describe?entity=France&band=all&limit=10&min_score=0",
+    )
+    .await;
     let gb = body_json(g.into_body()).await;
     let p = post_json(app, "/v1/describe", describe_body(None)).await;
     assert_eq!(p.status(), StatusCode::OK);
@@ -293,5 +312,8 @@ async fn a_post_without_a_patch_set_behaves_like_the_get() {
 
     assert_eq!(gb["entity"], pb["entity"]);
     assert_eq!(gb["edges"], pb["edges"]);
-    assert!(pb["latency_ms"].as_f64().is_some(), "POST must answer in the GET's shape");
+    assert!(
+        pb["latency_ms"].as_f64().is_some(),
+        "POST must answer in the GET's shape"
+    );
 }

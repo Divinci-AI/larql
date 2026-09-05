@@ -21,7 +21,7 @@ across six kinds, with the truth derived rather than typed.
 ## Matching
 
 An edge is on-target when any word of any target (≥4 letters, a stop-list
-removed, and any word that is a target for four or more bench entities
+removed, and any word that is a target for a quarter or more of the bench
 removed) shares a five-letter stem with the edge's label or one of its
 neighbour tokens. Conservative by design: "French" matches "France" and
 "physicist" matches "physics", "science" does not match "physics".

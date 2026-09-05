@@ -216,9 +216,11 @@ def describe(args, query):
     return edges, meta
 
 
-# A word that is a target for this many bench entities or more says nothing
-# about any one of them ("capital", "amerika", "besar") and is dropped.
-COMMON_MAX = 4
+# A word that is a target for this share of the bench or more says nothing
+# about any one of them ("capital", "amerika", "besar") and is dropped. A
+# share, not a count: at four of 36, "Japan" (six entities) was dropped and
+# Nintendo's Jepang/Japan hits went unscored (research log §22).
+COMMON_SHARE = 0.25
 
 
 def words_per_entity(entities, targets):
@@ -232,7 +234,7 @@ def words_per_entity(entities, targets):
         per[e["query"]] = w
         for x in w:
             count[x] = count.get(x, 0) + 1
-    common = {w for w, c in count.items() if c >= COMMON_MAX}
+    common = {w for w, c in count.items() if c >= max(2, COMMON_SHARE * len(entities))}
     return {q: w - common for q, w in per.items()}, common
 
 
@@ -240,18 +242,28 @@ def run(args):
     entities = read_entities()
     targets = json.loads(TARGETS.read_text())
     per_words, common = words_per_entity(entities, targets)
-    print(f"{len(common)} words shared by ≥{COMMON_MAX} entities dropped; "
+    print(f"{len(common)} words shared by ≥{COMMON_SHARE:.0%} of entities dropped; "
           f"median words per entity {sorted(len(w) for w in per_words.values())[len(per_words)//2]}")
     rows = []
     all_edges = {}
     for e in entities:
         words = per_words[e["query"]]
         t0 = time.time()
-        try:
-            edges, meta = describe(args, e["query"])
-        except Exception as ex:  # noqa: BLE001
-            rows.append({"query": e["query"], "kind": e["kind"], "error": str(ex)})
-            print(f"{e['query']:18} ERROR {ex}")
+        edges = meta = None
+        for attempt in range(1 + args.retry_errors):
+            try:
+                edges, meta = describe(args, e["query"])
+                break
+            except Exception as ex:  # noqa: BLE001
+                err = str(ex)
+                if attempt < args.retry_errors:
+                    # A gateway timeout on a cold instance (a residual panel
+                    # being built) resolves itself; wait, then ask again.
+                    print(f"{e['query']:18} retry after {err}")
+                    time.sleep(args.retry_wait)
+        if edges is None:
+            rows.append({"query": e["query"], "kind": e["kind"], "error": err})
+            print(f"{e['query']:18} ERROR {err}")
             continue
         dt = time.time() - t0
         all_edges[e["query"]] = edges
@@ -348,6 +360,8 @@ def main():
     ap.add_argument("--bearer-env", default="TOKEN")
     ap.add_argument("--param", action="append", default=[], help="extra DESCRIBE query param k=v")
     ap.add_argument("--timeout", type=int, default=300)
+    ap.add_argument("--retry-errors", type=int, default=2, help="re-ask an entity that errored, this many times")
+    ap.add_argument("--retry-wait", type=int, default=60, help="seconds between retries")
     ap.add_argument("--out")
     ap.add_argument("--baseline")
     args = ap.parse_args()

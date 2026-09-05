@@ -85,7 +85,10 @@ fn make_tiny_model(id: &str) -> Arc<LoadedModel> {
         },
         patched: std::sync::Arc::new(tokio::sync::RwLock::new(patched)),
         overlay_cache: larql_server::overlay_cache::OverlayCache::with_env_capacity(),
-        relevance: larql_server::relevance::RelevanceStats::from_embeddings(&larql_vindex::ndarray::Array2::<f32>::zeros((0, 0)), 1.0),
+        relevance: larql_server::relevance::RelevanceStats::from_embeddings(
+            &larql_vindex::ndarray::Array2::<f32>::zeros((0, 0)),
+            1.0,
+        ),
         embeddings: Array2::<f32>::zeros((4, hidden)),
         embed_scale: 1.0,
         tokenizer,
@@ -189,7 +192,10 @@ fn make_loaded_model_for_warmup() -> Arc<LoadedModel> {
         config,
         patched: std::sync::Arc::new(tokio::sync::RwLock::new(PatchedVindex::new(index))),
         overlay_cache: larql_server::overlay_cache::OverlayCache::with_env_capacity(),
-        relevance: larql_server::relevance::RelevanceStats::from_embeddings(&larql_vindex::ndarray::Array2::<f32>::zeros((0, 0)), 1.0),
+        relevance: larql_server::relevance::RelevanceStats::from_embeddings(
+            &larql_vindex::ndarray::Array2::<f32>::zeros((0, 0)),
+            1.0,
+        ),
         embeddings: Array2::<f32>::zeros((8, hidden)),
         embed_scale: 1.0,
         tokenizer,
