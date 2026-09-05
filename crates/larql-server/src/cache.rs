@@ -42,6 +42,7 @@ impl DescribeCache {
             false,
             true,
             "entities",
+            "score",
             "embedding",
         )
     }
@@ -69,6 +70,7 @@ impl DescribeCache {
         relabel: bool,
         relevance: bool,
         background: &str,
+        window_by: &str,
         query: &str,
     ) -> String {
         // Anything that changes the ANSWER belongs in the key. Coherence
@@ -77,7 +79,7 @@ impl DescribeCache {
         // class of bug as sharing one entry across two overlays, and just as
         // invisible in a log.
         format!(
-            "{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
+            "{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
             session_id.unwrap_or("-"),
             model_id,
             entity,
@@ -90,6 +92,7 @@ impl DescribeCache {
             relabel as u8,
             relevance as u8,
             background,
+            window_by,
             query
         )
     }
@@ -180,7 +183,7 @@ mod tests {
         // never quietly reuse this entry.
         assert_eq!(
             key,
-            "-:gemma-3-4b-it:France:knowledge:20:20:5:0:0:0:1:entities:embedding"
+            "-:gemma-3-4b-it:France:knowledge:20:20:5:0:0:0:1:entities:score:embedding"
         );
     }
 
@@ -215,6 +218,7 @@ mod tests {
             false,
             true,
             "entities",
+            "score",
             "embedding",
         );
         let coh = DescribeCache::key_scoped(
@@ -230,6 +234,7 @@ mod tests {
             false,
             true,
             "entities",
+            "score",
             "embedding",
         );
         let filt = DescribeCache::key_scoped(
@@ -245,6 +250,7 @@ mod tests {
             false,
             true,
             "entities",
+            "score",
             "embedding",
         );
         assert_ne!(raw, coh, "coherence on/off must not share an entry");
@@ -264,6 +270,7 @@ mod tests {
             true,
             true,
             "entities",
+            "score",
             "embedding",
         );
         assert_ne!(coh, rel, "relabel on/off must not share an entry");
@@ -271,7 +278,7 @@ mod tests {
         // entity; sharing a slot would hand a lexical answer to a caller who
         // asked what the model actually computes.
         let res = DescribeCache::key_scoped(
-            None, "m", "Paris", "all", 20, 20, 0.0, false, 0.0, false, true, "entities", "residual",
+            None, "m", "Paris", "all", 20, 20, 0.0, false, 0.0, false, true, "entities", "score", "residual",
         );
         let emb = DescribeCache::key_scoped(
             None,
@@ -286,6 +293,7 @@ mod tests {
             false,
             true,
             "entities",
+            "score",
             "embedding",
         );
         assert_ne!(res, emb, "query modes must not share an entry");
@@ -302,6 +310,7 @@ mod tests {
             false,
             true,
             "vocabulary",
+            "score",
             "embedding",
         );
         assert_ne!(
@@ -325,6 +334,7 @@ mod tests {
             false,
             true,
             "entities",
+            "score",
             "embedding",
         );
         let a = DescribeCache::key_scoped(
@@ -340,6 +350,7 @@ mod tests {
             false,
             true,
             "entities",
+            "score",
             "embedding",
         );
         let b = DescribeCache::key_scoped(
@@ -355,6 +366,7 @@ mod tests {
             false,
             true,
             "entities",
+            "score",
             "embedding",
         );
         assert_ne!(a, b, "two sessions must not share a cache entry");
@@ -376,6 +388,7 @@ mod tests {
                 false,
                 true,
                 "entities",
+                "score",
                 "embedding"
             )
         );
@@ -400,6 +413,7 @@ mod tests {
                 false,
                 true,
                 "entities",
+                "score",
                 "embedding"
             )
         );

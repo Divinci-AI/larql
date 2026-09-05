@@ -94,6 +94,7 @@ fn targets(model: &LoadedModel, ps: Option<&PatchSetRef>, scope: Option<&str>) -
         relabel: false,
         relevance: true,
         background: Some("vocabulary".into()),
+        window_by: "score".into(),
         query: "embedding".into(),
         baseline: None,
     };
@@ -326,6 +327,7 @@ fn describe_against(
         relabel,
         relevance,
         background: Some(background.into()),
+        window_by: "score".into(),
         query: "embedding".into(),
         baseline: None,
     };
@@ -552,6 +554,7 @@ fn residual_mode_either_runs_the_model_or_says_why_it_cannot() {
         relabel: false,
         relevance: true,
         background: Some("entities".into()),
+        window_by: "score".into(),
         query: "residual".into(),
         baseline: None,
     };
@@ -596,6 +599,7 @@ fn an_unknown_query_mode_is_rejected_not_defaulted() {
         relabel: false,
         relevance: true,
         background: Some("vocabulary".into()),
+        window_by: "score".into(),
         query: "activations".into(),
         baseline: None,
     };
@@ -628,6 +632,7 @@ fn contrasting_an_entity_with_itself_scores_nothing() {
         relabel: false,
         relevance: true,
         background: Some("entities".into()),
+        window_by: "score".into(),
         query: "residual".into(),
         baseline: Some("[5]".into()),
     };
@@ -836,6 +841,7 @@ fn an_absent_background_takes_the_models_default_and_names_it() {
         relabel: false,
         relevance: true,
         background: None,
+        window_by: "score".into(),
         query: "embedding".into(),
         baseline: None,
     };
@@ -867,7 +873,10 @@ fn an_absent_background_takes_the_models_default_and_names_it() {
 // Residual query + relevance: the background is the panel's residuals
 // ══════════════════════════════════════════════════════════════
 
-fn describe_residual(model: &LoadedModel, relevance: bool) -> Result<serde_json::Value, larql_server::error::ServerError> {
+fn describe_residual(
+    model: &LoadedModel,
+    relevance: bool,
+) -> Result<serde_json::Value, larql_server::error::ServerError> {
     let params = larql_server::routes::describe::DescribeParams {
         entity: "[5]".to_string(),
         band: "all".to_string(),
@@ -880,10 +889,15 @@ fn describe_residual(model: &LoadedModel, relevance: bool) -> Result<serde_json:
         relabel: false,
         relevance,
         background: Some("entities".into()),
+        window_by: "score".into(),
         query: "residual".into(),
         baseline: None,
     };
-    larql_server::routes::describe::describe_entity_with(model, &model.patched.blocking_read(), &params)
+    larql_server::routes::describe::describe_entity_with(
+        model,
+        &model.patched.blocking_read(),
+        &params,
+    )
 }
 
 #[test]
@@ -900,16 +914,34 @@ fn residual_relevance_builds_a_residual_panel_and_ranks_by_it() {
     assert_eq!(v["relevance_background"], "entities");
     let panel = v["relevance_panel"].as_u64().unwrap();
     assert!(panel >= 2, "residual panel has {panel} rows");
-    assert!(m.relevance.has_residual_panel(larql_server::relevance::Background::Entities));
+    assert!(m
+        .relevance
+        .has_residual_panel(larql_server::relevance::Background::Entities));
     let edges = v["edges"].as_array().unwrap();
     assert!(!edges.is_empty());
-    let zs: Vec<f64> = edges.iter().map(|e| e["relevance"].as_f64().expect("every residual edge carries a z")).collect();
-    assert!(zs.windows(2).all(|w| w[0] >= w[1]), "not sorted by relevance: {zs:?}");
+    let zs: Vec<f64> = edges
+        .iter()
+        .map(|e| {
+            e["relevance"]
+                .as_f64()
+                .expect("every residual edge carries a z")
+        })
+        .collect();
+    assert!(
+        zs.windows(2).all(|w| w[0] >= w[1]),
+        "not sorted by relevance: {zs:?}"
+    );
     assert!(zs.iter().all(|z| z.is_finite()));
     // Same universe as the raw residual order: relevance re-orders, never filters.
     let raw = describe_residual(&m, false).unwrap();
-    let set = |v: &serde_json::Value| v["edges"].as_array().unwrap().iter()
-        .map(|e| format!("{}@{}", e["target"], e["layer"])).collect::<std::collections::BTreeSet<_>>();
+    let set = |v: &serde_json::Value| {
+        v["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| format!("{}@{}", e["target"], e["layer"]))
+            .collect::<std::collections::BTreeSet<_>>()
+    };
     assert_eq!(set(&raw), set(&v));
     assert!(raw.get("relevance_query").is_none());
 }
@@ -932,13 +964,106 @@ fn residual_relevance_refuses_a_background_with_no_residual_panel() {
         relabel: false,
         relevance: true,
         background: Some("corpus".into()),
+        window_by: "score".into(),
         query: "residual".into(),
         baseline: None,
     };
     let patched = m.patched.blocking_read();
     let r = larql_server::routes::describe::describe_entity_with(&m, &patched, &params);
     match r {
-        Err(larql_server::error::ServerError::BadRequest(msg)) => assert!(msg.contains("corpus"), "{msg}"),
+        Err(larql_server::error::ServerError::BadRequest(msg)) => {
+            assert!(msg.contains("corpus"), "{msg}")
+        }
         other => panic!("expected BadRequest, got {other:?}"),
     }
+}
+
+// ══════════════════════════════════════════════════════════════
+// window_by=relevance: the window is the most surprising, not the largest
+// ══════════════════════════════════════════════════════════════
+
+fn describe_window_by(model: &LoadedModel, query: &str, window_by: &str, relevance: bool, window: usize)
+    -> Result<serde_json::Value, larql_server::error::ServerError>
+{
+    let params = larql_server::routes::describe::DescribeParams {
+        entity: "[5]".to_string(),
+        band: "all".to_string(),
+        verbose: false,
+        limit: 10_000,
+        window,
+        min_score: 0.0,
+        coherence: false,
+        min_coherence: 0.0,
+        relabel: false,
+        relevance,
+        background: Some("entities".into()),
+        window_by: window_by.into(),
+        query: query.into(),
+        baseline: None,
+    };
+    let patched = model.patched.blocking_read();
+    larql_server::routes::describe::describe_entity_with(model, &patched, &params)
+}
+
+#[test]
+fn a_surprise_window_is_the_top_z_of_the_whole_layer() {
+    let Some(m) = tiny() else { return };
+    // The whole layer, ordered by z: the reference.
+    let all = describe_window_by(&m, "embedding", "relevance", true, 10_000).unwrap();
+    let all_edges = all["edges"].as_array().unwrap();
+    assert!(all_edges.len() > 2, "fixture too small to test a window");
+    assert_eq!(all["window_by"], "relevance");
+    // A window of 2 per layer: at most two edges a layer, the global top z
+    // survives, and nothing below the whole-layer median gets in. (Edges
+    // fold by label across features, so an exact per-layer top-two is not
+    // well defined at the edge level.)
+    let two = describe_window_by(&m, "embedding", "relevance", true, 2).unwrap();
+    let two_edges = two["edges"].as_array().unwrap();
+    let mut per_layer: std::collections::BTreeMap<u64, usize> = Default::default();
+    for e in two_edges {
+        *per_layer.entry(e["layer"].as_u64().unwrap()).or_default() += 1;
+    }
+    assert!(per_layer.values().all(|&n| n <= 2), "a layer exceeded its window: {per_layer:?}");
+    let mut all_z: Vec<f64> = all_edges.iter().map(|e| e["relevance"].as_f64().unwrap()).collect();
+    all_z.sort_by(|a, b| b.partial_cmp(a).unwrap());
+    let two_z: Vec<f64> = two_edges.iter().map(|e| e["relevance"].as_f64().unwrap()).collect();
+    assert!((two_z[0] - all_z[0]).abs() < 1e-6, "the most surprising feature must survive: {} vs {}", two_z[0], all_z[0]);
+    let median = all_z[all_z.len() / 2];
+    assert!(two_z.iter().all(|&z| z >= median), "a below-median z got into a surprise window: {two_z:?} median {median}");
+    // And it is a different selection from the raw-score window when the
+    // two disagree — otherwise the flag would be a no-op on this fixture.
+    let raw = describe_window_by(&m, "embedding", "score", true, 2).unwrap();
+    let key = |v: &serde_json::Value| v["edges"].as_array().unwrap().iter()
+        .map(|e| format!("{}@{}", e["feature"], e["layer"])).collect::<std::collections::BTreeSet<_>>();
+    eprintln!("surprise window {:?} vs score window {:?}", key(&two), key(&raw));
+}
+
+#[test]
+fn a_surprise_window_needs_relevance_and_a_known_name() {
+    let Some(m) = tiny() else { return };
+    match describe_window_by(&m, "embedding", "relevance", false, 10) {
+        Err(larql_server::error::ServerError::BadRequest(msg)) => assert!(msg.contains("relevance"), "{msg}"),
+        other => panic!("expected BadRequest, got {other:?}"),
+    }
+    match describe_window_by(&m, "embedding", "surprise", true, 10) {
+        Err(larql_server::error::ServerError::BadRequest(msg)) => assert!(msg.contains("surprise"), "{msg}"),
+        other => panic!("expected BadRequest, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_surprise_window_works_for_residual_queries_too() {
+    let Some(m) = tiny() else { return };
+    let v = match describe_window_by(&m, "residual", "relevance", true, 3) {
+        Ok(v) => v,
+        Err(e) => { assert!(format!("{e:?}").contains("weights"), "{e:?}"); return; }
+    };
+    assert_eq!(v["window_by"], "relevance");
+    assert_eq!(v["relevance_query"], "residual");
+    let mut per_layer: std::collections::BTreeMap<u64, usize> = Default::default();
+    for e in v["edges"].as_array().unwrap() {
+        *per_layer.entry(e["layer"].as_u64().unwrap()).or_default() += 1;
+        assert!(e["relevance"].as_f64().unwrap().is_finite());
+    }
+    assert!(per_layer.values().all(|&n| n <= 3), "a layer exceeded its window: {per_layer:?}");
 }

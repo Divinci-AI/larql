@@ -210,6 +210,7 @@ fn read_against(
                 relabel: true,
                 relevance: true,
                 background: None,
+                window_by: "score".into(),
                 query: "embedding".into(),
                 baseline: None,
             };

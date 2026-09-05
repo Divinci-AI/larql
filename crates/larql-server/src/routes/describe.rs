@@ -86,6 +86,15 @@ pub struct DescribeParams {
     /// `relevance_background` / `relevance_panel`.
     #[serde(default)]
     pub background: Option<String>,
+    /// How the per-layer candidate window is chosen. `score` (default):
+    /// the `window` highest raw gate scores, then relevance re-orders them.
+    /// `relevance`: every feature in the layer is z-scored and the `window`
+    /// most surprising are kept — retrieval by surprise, not by magnitude.
+    /// Measured 2026-09-04 (research log §22), a residual query's
+    /// raw-score window was junk that relevance could only re-order.
+    /// Needs `relevance`.
+    #[serde(default = "default_window_by")]
+    pub window_by: String,
     /// What the gates are scored against.
     ///
     /// `embedding` (default): the entity's raw input embedding, averaged over
@@ -152,21 +161,27 @@ fn ensure_residual_panel(
     patched: &larql_vindex::PatchedVindex,
     background: crate::relevance::Background,
 ) -> Result<(), ServerError> {
-    let names = crate::relevance::RelevanceStats::residual_panel_names(background).ok_or_else(|| {
-        ServerError::BadRequest(format!(
-            "background `{}` is not offered for residual queries; use `entities`",
-            background.as_str()
-        ))
-    })?;
+    let names =
+        crate::relevance::RelevanceStats::residual_panel_names(background).ok_or_else(|| {
+            ServerError::BadRequest(format!(
+                "background `{}` is not offered for residual queries; use `entities`",
+                background.as_str()
+            ))
+        })?;
     if model.relevance.has_residual_panel(background) {
         return Ok(());
     }
-    let _build = model.relevance.residual_build.lock().map_err(|_| ServerError::Internal("panel lock".into()))?;
+    let _build = model
+        .relevance
+        .residual_build
+        .lock()
+        .map_err(|_| ServerError::Internal("panel lock".into()))?;
     if model.relevance.has_residual_panel(background) {
         return Ok(());
     }
     let start = std::time::Instant::now();
-    let mut rows: std::collections::HashMap<usize, Vec<Vec<f32>>> = std::collections::HashMap::new();
+    let mut rows: std::collections::HashMap<usize, Vec<Vec<f32>>> =
+        std::collections::HashMap::new();
     for name in names {
         for (layer, r) in residuals_for(model, weights, patched, name)? {
             rows.entry(layer).or_default().push(r);
@@ -178,7 +193,8 @@ fn ensure_residual_panel(
         let ok: Vec<&Vec<f32>> = rs.iter().filter(|r| r.len() == hidden).collect();
         let mut m = larql_vindex::ndarray::Array2::<f32>::zeros((ok.len(), hidden));
         for (i, r) in ok.iter().enumerate() {
-            m.row_mut(i).assign(&larql_vindex::ndarray::Array1::from((*r).clone()));
+            m.row_mut(i)
+                .assign(&larql_vindex::ndarray::Array1::from((*r).clone()));
         }
         per_layer.insert(layer, m);
     }
@@ -189,7 +205,9 @@ fn ensure_residual_panel(
         per_layer.len(),
         start.elapsed().as_secs_f32()
     );
-    model.relevance.install_residual_panel(background, per_layer);
+    model
+        .relevance
+        .install_residual_panel(background, per_layer);
     Ok(())
 }
 
@@ -198,6 +216,12 @@ pub const QUERY_RESIDUAL: &str = "residual";
 
 fn default_query() -> String {
     QUERY_EMBEDDING.into()
+}
+
+pub const WINDOW_BY_SCORE: &str = "score";
+pub const WINDOW_BY_RELEVANCE: &str = "relevance";
+fn default_window_by() -> String {
+    WINDOW_BY_SCORE.into()
 }
 
 fn default_band() -> String {
@@ -259,6 +283,29 @@ pub fn describe_entity_with(
     )
     .ok_or_else(|| ServerError::Internal("entity produced no query".into()))?;
 
+    let window_by_relevance = match params.window_by.as_str() {
+        WINDOW_BY_SCORE => false,
+        WINDOW_BY_RELEVANCE if params.relevance => true,
+        WINDOW_BY_RELEVANCE => {
+            return Err(ServerError::BadRequest(
+                "window_by=relevance needs relevance=true".into(),
+            ))
+        }
+        other => {
+            return Err(ServerError::BadRequest(format!(
+                "window_by must be `{WINDOW_BY_SCORE}` or `{WINDOW_BY_RELEVANCE}`, got `{other}`"
+            )))
+        }
+    };
+    // Selecting by surprise means scoring the whole layer first.
+    let walk_k = |layer: usize| {
+        if window_by_relevance {
+            patched.num_features(layer).max(params.window)
+        } else {
+            params.window
+        }
+    };
+
     let background = match params.background.as_deref() {
         None => model.relevance.default_background(),
         Some(s) => crate::relevance::Background::parse(s).ok_or_else(|| {
@@ -281,8 +328,18 @@ pub fn describe_entity_with(
     let mut residual_layers: Option<usize> = None;
     let mut contrasted_layers: usize = 0;
 
-    let trace = match params.query.as_str() {
-        QUERY_EMBEDDING => patched.walk(&query, &scan_layers, params.window),
+    let mut trace = match params.query.as_str() {
+        QUERY_EMBEDDING => {
+            if window_by_relevance {
+                let mut layers = Vec::with_capacity(scan_layers.len());
+                for &layer in &scan_layers {
+                    layers.extend(patched.walk(&query, &[layer], walk_k(layer)).layers);
+                }
+                larql_vindex::WalkTrace { layers }
+            } else {
+                patched.walk(&query, &scan_layers, params.window)
+            }
+        }
         QUERY_RESIDUAL => {
             if !model.config.has_model_weights {
                 return Err(ServerError::InferenceUnavailable(
@@ -337,7 +394,7 @@ pub fn describe_entity_with(
                     continue;
                 };
                 let r = larql_vindex::ndarray::Array1::from(res.clone());
-                let t = patched.walk(&r, &[layer], params.window);
+                let t = patched.walk(&r, &[layer], walk_k(layer));
                 layers.extend(t.layers);
             }
             residual_layers = Some(layers.len());
@@ -349,6 +406,28 @@ pub fn describe_entity_with(
             )))
         }
     };
+
+    // Window by surprise: z-score every hit against the layer's background
+    // and keep the `window` largest. A layer with no background keeps its
+    // raw-score window (the first `window` hits, which is what walk gave).
+    if window_by_relevance {
+        for (layer_idx, hits) in trace.layers.iter_mut() {
+            let stats = if params.query == QUERY_RESIDUAL {
+                model.relevance.residual_layer(patched, background, *layer_idx)
+            } else {
+                model.relevance.layer(patched, background, *layer_idx)
+            };
+            if let Some(stats) = stats {
+                let mut scored: Vec<(f32, larql_vindex::WalkHit)> = hits
+                    .drain(..)
+                    .map(|h| (stats.z(h.feature, h.gate_score).unwrap_or(f32::NEG_INFINITY), h))
+                    .collect();
+                scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+                hits.extend(scored.into_iter().map(|(_, h)| h));
+            }
+            hits.truncate(params.window);
+        }
+    }
 
     // Aggregate edges by target token (same logic as LQL DESCRIBE).
     struct EdgeInfo {
@@ -379,7 +458,9 @@ pub fn describe_entity_with(
 
     for (layer_idx, hits) in &trace.layers {
         let layer_stats = if params.relevance && params.query == QUERY_RESIDUAL {
-            model.relevance.residual_layer(patched, background, *layer_idx)
+            model
+                .relevance
+                .residual_layer(patched, background, *layer_idx)
         } else if params.relevance {
             model.relevance.layer(patched, background, *layer_idx)
         } else {
@@ -600,6 +681,7 @@ pub fn describe_entity_with(
         // Which population the z is against: the panel's embeddings or its
         // residuals. A caller comparing modes must see which it got.
         out["relevance_query"] = serde_json::json!(params.query);
+        out["window_by"] = serde_json::json!(params.window_by);
     }
     if params.query != QUERY_EMBEDDING {
         out["query"] = serde_json::json!(params.query);
@@ -660,6 +742,7 @@ async fn describe_with_cache(
                 .and_then(crate::relevance::Background::parse)
                 .unwrap_or(model.relevance.default_background())
                 .as_str(),
+            &params.window_by,
             &match params.baseline.as_deref() {
                 Some(b) => format!("{}~{b}", params.query),
                 None => params.query.clone(),
@@ -805,6 +888,9 @@ pub struct DescribeBody {
     /// See `DescribeParams::background`.
     #[serde(default)]
     pub background: Option<String>,
+    /// See `DescribeParams::window_by`.
+    #[serde(default = "default_window_by")]
+    pub window_by: String,
     /// See `DescribeParams::query`.
     #[serde(default = "default_query")]
     pub query: String,
@@ -830,6 +916,7 @@ impl DescribeBody {
             relabel,
             relevance,
             background,
+            window_by,
             query,
             baseline,
             patch_set,
@@ -847,6 +934,7 @@ impl DescribeBody {
                 relabel,
                 relevance,
                 background,
+                window_by,
                 query,
                 baseline,
             },

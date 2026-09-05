@@ -26,6 +26,7 @@ fn probe() {
                 relabel: false,
                 relevance: true,
                 background: Some("vocabulary".into()),
+                window_by: "score".into(),
                 query: q.into(),
                 baseline: None,
             };
