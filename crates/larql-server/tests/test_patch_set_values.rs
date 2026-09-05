@@ -1254,3 +1254,23 @@ fn a_union_needs_relevance() {
         Ok(_) => panic!("a union without relevance has no common ranking key and must be refused"),
     }
 }
+
+#[test]
+fn a_union_calibrates_each_side_against_its_own_window() {
+    let Some(m) = tiny() else { return };
+    let u = match describe_query(&m, "union", true) {
+        Ok(v) => v,
+        Err(e) => { assert!(format!("{e:?}").contains("weights"), "{e:?}"); return; }
+    };
+    let cal = &u["calibration"];
+    for side in ["embedding", "residual"] {
+        let c = &cal[side];
+        assert!(c["scale"].as_f64().unwrap() > 0.0, "{side} scale must be positive: {c}");
+        assert!(c["median"].as_f64().unwrap().is_finite());
+    }
+    // An edge folds hits from both sides, so a per-edge order comparison
+    // against a single-side answer is not well defined; what is checkable
+    // is that the ranking key is the calibrated one and is sorted.
+    let zs: Vec<f64> = u["edges"].as_array().unwrap().iter().map(|e| e["relevance"].as_f64().unwrap()).collect();
+    assert!(zs.windows(2).all(|w| w[0] >= w[1]), "union not sorted by calibrated relevance: {zs:?}");
+}

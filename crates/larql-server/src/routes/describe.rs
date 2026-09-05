@@ -522,6 +522,56 @@ pub fn describe_entity_with(
         .chain(res_trace.iter().map(|t| (t, true)))
         .collect();
 
+    // Per-side calibration for a union. Measured 2026-09-05 (research log
+    // §26): the residual side selects its window by z from every feature in
+    // the layer, so its tail is the maximum of thousands of draws and sits in
+    // a band at z≈4 by selection alone, above the embedding side's true hits
+    // (French 4.5, cars 3.6). Within one request each side's z is therefore
+    // re-expressed against its own window — (z − median) / MAD — so a hit
+    // competes across sides by how far it stands above its own noise floor.
+    // Median and MAD, not mean and std: the tails are what we are measuring.
+    let calibration: std::collections::HashMap<bool, (f32, f32)> = if union {
+        sources
+            .iter()
+            .map(|(trace, residual)| {
+                let mut zs: Vec<f32> = trace
+                    .layers
+                    .iter()
+                    .flat_map(|(layer_idx, hits)| {
+                        let stats = if *residual {
+                            model.relevance.residual_layer(
+                                patched,
+                                background,
+                                &params.prompt,
+                                *layer_idx,
+                            )
+                        } else {
+                            model.relevance.layer(patched, background, *layer_idx)
+                        };
+                        hits.iter()
+                            .filter(|h| *residual || h.gate_score >= params.min_score)
+                            .filter_map(move |h| {
+                                stats.as_ref().and_then(|s| s.z(h.feature, h.gate_score))
+                            })
+                            .collect::<Vec<f32>>()
+                    })
+                    .filter(|z| z.is_finite())
+                    .collect();
+                zs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                let median = |v: &[f32]| if v.is_empty() { 0.0 } else { v[v.len() / 2] };
+                let med = median(&zs);
+                let mut dev: Vec<f32> = zs.iter().map(|z| (z - med).abs()).collect();
+                dev.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                // 1.4826·MAD estimates σ for a normal core; the floor keeps a
+                // degenerate window (all equal) from dividing by zero.
+                let scale = (1.4826 * median(&dev)).max(1e-3);
+                (*residual, (med, scale))
+            })
+            .collect()
+    } else {
+        std::collections::HashMap::new()
+    };
+
     // Aggregate edges by target token (same logic as LQL DESCRIBE).
     struct EdgeInfo {
         gate: f32,
@@ -610,9 +660,13 @@ pub fn describe_entity_with(
                 // The label only moves when asked. Scoring on its own must leave
                 // every `target` byte-identical, or "adopt the filter" would
                 // silently mean "rename the targets" as well.
-                let z = layer_stats
+                let z_raw = layer_stats
                     .as_ref()
                     .and_then(|st| st.z(hit.feature, hit.gate_score));
+                let z = match (z_raw, calibration.get(&residual)) {
+                    (Some(z), Some((med, scale))) => Some((z - med) / scale),
+                    (z, _) => z,
+                };
 
                 let relabelled_to = if params.relabel {
                     verdict.as_ref().and_then(|v| v.label.clone())
@@ -797,6 +851,20 @@ pub fn describe_entity_with(
             out["residual_panel"] = serde_json::json!(model
                 .relevance
                 .residual_panel_size(background, &params.prompt));
+            // What each side's z was re-expressed against, so a caller can
+            // see the noise floor a union hit stood above.
+            let side = |residual: bool| {
+                calibration.get(&residual).map(|(m, s)| {
+                    serde_json::json!({
+                        "median": (m * 100.0).round() / 100.0,
+                        "scale": (s * 100.0).round() / 100.0,
+                    })
+                })
+            };
+            out["calibration"] = serde_json::json!({
+                "embedding": side(false),
+                "residual": side(true),
+            });
         }
         // Which population the z is against: the panel's embeddings or its
         // residuals. A caller comparing modes must see which it got.
