@@ -8,6 +8,63 @@ use super::{apply_norm, dot_proj};
 use larql_models::ModelWeights;
 use ndarray::Array2;
 
+/// Vocabulary rows the PLE stream-2 lookup is allowed to use, from
+/// `LARQL_PLE_KEEP_TOPN` (keep token ids `< N`) or `LARQL_PLE_KEEP_FILE`
+/// (one token id per line). A token outside the keep set contributes a zero
+/// per-layer embedding row, which is exactly what a vocabulary-trimmed
+/// artifact would give it: stream 1 (the projection of the main embedding)
+/// still runs, so the token is not unknown, it just loses its per-layer row.
+///
+/// Experimental instrument for the focused-slice study (2026-09-06):
+/// `ple_weights.bin` is 4.7 GB, 42% of this vindex, and vocabulary trimming
+/// is the largest byte lever left after the walk index. The knob measures
+/// what a trimmed slice would ANSWER before anyone writes the compiler that
+/// drops the rows. Unset: every row is used, and the lookup is unchanged.
+pub fn ple_vocab_keep() -> Option<&'static PleVocabKeep> {
+    static KEEP: std::sync::OnceLock<Option<PleVocabKeep>> = std::sync::OnceLock::new();
+    KEEP.get_or_init(|| {
+        if let Ok(n) = std::env::var("LARQL_PLE_KEEP_TOPN") {
+            if let Ok(n) = n.trim().parse::<usize>() {
+                eprintln!("LARQL_PLE_KEEP_TOPN: PLE stream 2 keeps token ids < {n}");
+                return Some(PleVocabKeep::TopN(n));
+            }
+        }
+        if let Ok(path) = std::env::var("LARQL_PLE_KEEP_FILE") {
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            let ids: std::collections::HashSet<u32> = text
+                .split_whitespace()
+                .filter_map(|t| t.parse::<u32>().ok())
+                .collect();
+            eprintln!(
+                "LARQL_PLE_KEEP_FILE: PLE stream 2 keeps {} token ids from {path}",
+                ids.len()
+            );
+            return Some(PleVocabKeep::Set(ids));
+        }
+        None
+    })
+    .as_ref()
+}
+
+/// Which vocabulary rows [`ple_vocab_keep`] admits.
+#[derive(Debug)]
+pub enum PleVocabKeep {
+    /// Keep token ids strictly below this value.
+    TopN(usize),
+    /// Keep exactly these token ids.
+    Set(std::collections::HashSet<u32>),
+}
+
+impl PleVocabKeep {
+    /// Whether this token still has a per-layer embedding row.
+    pub fn admits(&self, token_id: u32) -> bool {
+        match self {
+            Self::TopN(n) => (token_id as usize) < *n,
+            Self::Set(ids) => ids.contains(&token_id),
+        }
+    }
+}
+
 /// Precompute per-layer input signals from token embeddings.
 ///
 /// Combines two streams:
@@ -86,10 +143,13 @@ pub fn precompute_per_layer_inputs(
 
             // Add stream 2: per-layer token embedding
             if let Some(embed) = ple_embed {
-                let tok = token_ids[s] as usize;
-                let row = embed.row(tok);
-                for d in 0..ple_dim {
-                    layer_input[[s, d]] += row[col_start + d] * embed_scale;
+                let tok_id = token_ids[s];
+                let kept = ple_vocab_keep().is_none_or(|keep| keep.admits(tok_id));
+                if kept {
+                    let row = embed.row(tok_id as usize);
+                    for d in 0..ple_dim {
+                        layer_input[[s, d]] += row[col_start + d] * embed_scale;
+                    }
                 }
             }
 
