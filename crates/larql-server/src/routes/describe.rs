@@ -333,9 +333,11 @@ pub fn describe_entity_with(
             )))
         }
     };
-    // Selecting by surprise means scoring the whole layer first.
+    let union = params.query == QUERY_UNION;
+    // Selecting by surprise means scoring the whole layer first; so does a
+    // union, which calibrates each side against the whole layer.
     let walk_k = |layer: usize| {
-        if window_by_relevance {
+        if window_by_relevance || union {
             patched.num_features(layer).max(params.window)
         } else {
             params.window
@@ -369,7 +371,6 @@ pub fn describe_entity_with(
             "prompt applies to query=residual only".into(),
         ));
     }
-    let union = params.query == QUERY_UNION;
     if union && !params.relevance {
         return Err(ServerError::BadRequest(
             "query=union ranks both sides by relevance; it needs relevance=true".into(),
@@ -396,7 +397,7 @@ pub fn describe_entity_with(
 
     let mut emb_trace: Option<larql_vindex::WalkTrace> = if want_emb {
         Some({
-            if window_by_relevance {
+            if window_by_relevance || union {
                 let mut layers = Vec::with_capacity(scan_layers.len());
                 for &layer in &scan_layers {
                     layers.extend(patched.walk(&query, &[layer], walk_k(layer)).layers);
@@ -476,6 +477,58 @@ pub fn describe_entity_with(
         None
     };
 
+    // Per-side calibration for a union, from the WHOLE layer, before any
+    // window is cut. Measured 2026-09-05 (research log §26, §28): the
+    // residual side's window is the top of thousands of z draws, a tight
+    // extreme-value tail; calibrating against that tail's MAD (§27) made it
+    // worse, amplifying the band to z 6. The noise scale of a side is the
+    // spread of its z over every feature of every scanned layer for this
+    // query — what differs between an embedding query and a residual one —
+    // and a hit is then ranked by how far it stands above that. Median and
+    // MAD, since the tails are what is being measured.
+    let calibration: std::collections::HashMap<bool, (f32, f32)> = if union {
+        let side = |trace: &larql_vindex::WalkTrace, residual: bool| {
+            let mut zs: Vec<f32> = trace
+                .layers
+                .iter()
+                .flat_map(|(layer_idx, hits)| {
+                    let stats = if residual {
+                        model.relevance.residual_layer(
+                            patched,
+                            background,
+                            &params.prompt,
+                            *layer_idx,
+                        )
+                    } else {
+                        model.relevance.layer(patched, background, *layer_idx)
+                    };
+                    hits.iter()
+                        .filter_map(move |h| {
+                            stats.as_ref().and_then(|s| s.z(h.feature, h.gate_score))
+                        })
+                        .collect::<Vec<f32>>()
+                })
+                .filter(|z| z.is_finite())
+                .collect();
+            zs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let median = |v: &[f32]| if v.is_empty() { 0.0 } else { v[v.len() / 2] };
+            let med = median(&zs);
+            let mut dev: Vec<f32> = zs.iter().map(|z| (z - med).abs()).collect();
+            dev.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            // 1.4826·MAD estimates σ for a normal core; the floor keeps a
+            // degenerate layer (all equal) from dividing by zero.
+            let scale = (1.4826 * median(&dev)).max(1e-3);
+            (residual, (med, scale))
+        };
+        emb_trace
+            .iter()
+            .map(|t| side(t, false))
+            .chain(res_trace.iter().map(|t| side(t, true)))
+            .collect()
+    } else {
+        std::collections::HashMap::new()
+    };
+
     // Window by surprise: z-score every hit against the layer's background
     // and keep the `window` largest. A layer with no background keeps its
     // raw-score window (the first `window` hits, which is what walk gave).
@@ -516,61 +569,20 @@ pub fn describe_entity_with(
             surprise_window(t, true);
         }
     }
+    // A union walked the whole layer on the embedding side for calibration;
+    // its window is still the top `window` by score, as in embedding mode.
+    if union && !window_by_relevance {
+        if let Some(t) = emb_trace.as_mut() {
+            for (_, hits) in t.layers.iter_mut() {
+                hits.truncate(params.window);
+            }
+        }
+    }
     let sources: Vec<(&larql_vindex::WalkTrace, bool)> = emb_trace
         .iter()
         .map(|t| (t, false))
         .chain(res_trace.iter().map(|t| (t, true)))
         .collect();
-
-    // Per-side calibration for a union. Measured 2026-09-05 (research log
-    // §26): the residual side selects its window by z from every feature in
-    // the layer, so its tail is the maximum of thousands of draws and sits in
-    // a band at z≈4 by selection alone, above the embedding side's true hits
-    // (French 4.5, cars 3.6). Within one request each side's z is therefore
-    // re-expressed against its own window — (z − median) / MAD — so a hit
-    // competes across sides by how far it stands above its own noise floor.
-    // Median and MAD, not mean and std: the tails are what we are measuring.
-    let calibration: std::collections::HashMap<bool, (f32, f32)> = if union {
-        sources
-            .iter()
-            .map(|(trace, residual)| {
-                let mut zs: Vec<f32> = trace
-                    .layers
-                    .iter()
-                    .flat_map(|(layer_idx, hits)| {
-                        let stats = if *residual {
-                            model.relevance.residual_layer(
-                                patched,
-                                background,
-                                &params.prompt,
-                                *layer_idx,
-                            )
-                        } else {
-                            model.relevance.layer(patched, background, *layer_idx)
-                        };
-                        hits.iter()
-                            .filter(|h| *residual || h.gate_score >= params.min_score)
-                            .filter_map(move |h| {
-                                stats.as_ref().and_then(|s| s.z(h.feature, h.gate_score))
-                            })
-                            .collect::<Vec<f32>>()
-                    })
-                    .filter(|z| z.is_finite())
-                    .collect();
-                zs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                let median = |v: &[f32]| if v.is_empty() { 0.0 } else { v[v.len() / 2] };
-                let med = median(&zs);
-                let mut dev: Vec<f32> = zs.iter().map(|z| (z - med).abs()).collect();
-                dev.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                // 1.4826·MAD estimates σ for a normal core; the floor keeps a
-                // degenerate window (all equal) from dividing by zero.
-                let scale = (1.4826 * median(&dev)).max(1e-3);
-                (*residual, (med, scale))
-            })
-            .collect()
-    } else {
-        std::collections::HashMap::new()
-    };
 
     // Aggregate edges by target token (same logic as LQL DESCRIBE).
     struct EdgeInfo {
