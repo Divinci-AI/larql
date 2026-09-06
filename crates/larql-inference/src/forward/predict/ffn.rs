@@ -9,6 +9,35 @@ use crate::attention::SharedKV;
 use crate::ffn::{FfnBackend, LayerFfnRouter};
 use crate::model::ModelWeights;
 
+/// Layers the walk forward passes skip entirely (residual passthrough), from
+/// `LARQL_SKIP_LAYERS` — e.g. `0-13` or `0,1,2,30-34`. Experimental knob for
+/// the focused-slice layer-drop study (2026-09-05): the bytes stay resident,
+/// only the compute and the layer's contribution are removed, so a run with
+/// this set measures what a band-dropped slice would answer before anyone
+/// builds the compiler that drops the bytes. Empty/unset: nothing is skipped.
+pub fn skipped_layers() -> &'static std::collections::BTreeSet<usize> {
+    static SET: std::sync::OnceLock<std::collections::BTreeSet<usize>> = std::sync::OnceLock::new();
+    SET.get_or_init(|| {
+        let mut set = std::collections::BTreeSet::new();
+        let Ok(spec) = std::env::var("LARQL_SKIP_LAYERS") else {
+            return set;
+        };
+        for part in spec.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            if let Some((a, b)) = part.split_once('-') {
+                if let (Ok(a), Ok(b)) = (a.trim().parse::<usize>(), b.trim().parse::<usize>()) {
+                    set.extend(a..=b);
+                }
+            } else if let Ok(n) = part.parse::<usize>() {
+                set.insert(n);
+            }
+        }
+        if !set.is_empty() {
+            eprintln!("LARQL_SKIP_LAYERS: walk forward skips layers {set:?}");
+        }
+        set
+    })
+}
+
 /// Run a full forward pass with a custom FFN backend for all layers.
 pub fn predict_with_ffn(
     weights: &ModelWeights,
@@ -24,6 +53,9 @@ pub fn predict_with_ffn(
     let mut kv_cache: std::collections::HashMap<usize, SharedKV> = std::collections::HashMap::new();
 
     for layer in 0..num_layers {
+        if skipped_layers().contains(&layer) {
+            continue;
+        }
         let shared_kv = weights
             .arch
             .kv_shared_source_layer(layer)
@@ -78,6 +110,9 @@ pub fn predict_with_ffn_early_exit(
     let mut kv_cache: std::collections::HashMap<usize, SharedKV> = std::collections::HashMap::new();
 
     for layer in 0..num_layers {
+        if skipped_layers().contains(&layer) {
+            continue;
+        }
         let shared_kv = weights
             .arch
             .kv_shared_source_layer(layer)
