@@ -140,6 +140,13 @@ pub struct DescribeParams {
     pub baseline: Option<String>,
 }
 
+/// The most tokens a residual query runs through the model. An entity is a
+/// name and a template is at most 200 characters, so a real request is a
+/// handful of tokens; attention cost grows with the square of the count,
+/// every distinct entity misses the cache, and nothing else bounded the
+/// text. The embedding query is unaffected: it averages embeddings.
+pub const MAX_RESIDUAL_TOKENS: usize = 128;
+
 /// Per-layer last-token residuals for `text`, tokenised as INFER does (with
 /// BOS). One place, so the entity, a baseline and the relevance panel are
 /// all run the same way — a panel built one way and a query another would
@@ -155,6 +162,12 @@ fn residuals_for(
         .encode(text, true)
         .map_err(|e| ServerError::Internal(format!("tokenize error: {e}")))?;
     let ids: Vec<u32> = enc.get_ids().to_vec();
+    if ids.len() > MAX_RESIDUAL_TOKENS {
+        return Err(ServerError::BadRequest(format!(
+            "a residual query runs at most {MAX_RESIDUAL_TOKENS} tokens through the model; this text is {}",
+            ids.len()
+        )));
+    }
     let run = larql_inference::infer_patched(
         weights,
         &model.tokenizer,

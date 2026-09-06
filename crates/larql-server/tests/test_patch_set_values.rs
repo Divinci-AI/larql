@@ -1222,6 +1222,70 @@ fn a_template_the_operator_did_not_enable_is_refused_before_any_work() {
     assert!(m.relevance.residual_template_enabled("{entity}"));
 }
 
+/// The residual query runs the text through the model; the embedding
+/// query averages its tokens. Only the former is bounded.
+#[test]
+fn a_residual_query_over_too_many_tokens_is_refused_and_an_embedding_one_is_not() {
+    let Some(m) = tiny() else { return };
+    if !m.config.has_model_weights {
+        return;
+    }
+    let long = std::iter::repeat_n(
+        "[5]",
+        larql_server::routes::describe::MAX_RESIDUAL_TOKENS + 8,
+    )
+    .collect::<Vec<_>>()
+    .join(" ");
+    let mut params = larql_server::routes::describe::DescribeParams {
+        entity: long,
+        band: "all".to_string(),
+        verbose: false,
+        limit: 10,
+        window: 10,
+        min_score: 0.0,
+        coherence: false,
+        min_coherence: 0.0,
+        relabel: false,
+        relevance: false,
+        background: Some("entities".into()),
+        window_by: "score".into(),
+        query: "residual".into(),
+        prompt: "{entity}".into(),
+        baseline: None,
+    };
+    let patched = m.patched.blocking_read();
+    match larql_server::routes::describe::describe_entity_with(&m, &patched, &params) {
+        Err(larql_server::error::ServerError::BadRequest(msg)) => {
+            assert!(msg.contains("tokens"), "{msg}")
+        }
+        other => panic!("expected BadRequest, got {other:?}"),
+    }
+    // A short entity with a long baseline is the same request in disguise.
+    params.entity = "[5]".into();
+    params.baseline = Some(
+        std::iter::repeat_n(
+            "[6]",
+            larql_server::routes::describe::MAX_RESIDUAL_TOKENS + 8,
+        )
+        .collect::<Vec<_>>()
+        .join(" "),
+    );
+    assert!(matches!(
+        larql_server::routes::describe::describe_entity_with(&m, &patched, &params),
+        Err(larql_server::error::ServerError::BadRequest(_))
+    ));
+    params.baseline = None;
+    params.entity = std::iter::repeat_n(
+        "[5]",
+        larql_server::routes::describe::MAX_RESIDUAL_TOKENS + 8,
+    )
+    .collect::<Vec<_>>()
+    .join(" ");
+    params.query = "embedding".into();
+    larql_server::routes::describe::describe_entity_with(&m, &patched, &params)
+        .expect("the embedding query does not run the model and is not capped");
+}
+
 #[test]
 fn concurrent_first_residual_requests_build_the_panel_once() {
     let Some(m) = tiny() else { return };
