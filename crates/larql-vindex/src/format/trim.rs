@@ -67,6 +67,108 @@ pub const PLE_VOCAB_MAP_KEY: &str = "per_layer_embed_vocab_map";
 /// Negative so it can never be mistaken for a row index.
 pub const PLE_VOCAB_DROPPED: f32 = -1.0;
 
+/// How a corpus-derived keep-set was built, for the caller to report.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KeepSetOrigin {
+    /// Distinct ids the tokenizer actually emitted for the corpus.
+    pub from_corpus: usize,
+    /// Special/added tokens folded in regardless of the corpus.
+    pub specials: usize,
+    /// Ids added by `--keep-bytes`, the single-byte fallback pieces.
+    pub byte_fallback: usize,
+    pub total: usize,
+    pub corpus_lines: usize,
+}
+
+/// Build a keep-set by tokenizing `corpus` with the vindex's own
+/// tokenizer — the honest form of "which rows does this domain use".
+///
+/// Substring matching against `tokenizer.json` over-approximates badly:
+/// it keeps every vocabulary entry that happens to occur anywhere in the
+/// text, including pieces the tokenizer would never emit for it. Running
+/// the real tokenizer keeps exactly the rows the domain's prompts will
+/// look up.
+///
+/// Each line is encoded separately so a corpus reads as a list of
+/// prompts rather than one long document; BPE merges do not cross the
+/// line break that way, which matches how the prompts actually arrive.
+///
+/// `keep_specials` folds in every added/special token — the chat markers
+/// among them. Dropping `<|turn>` from a chat model's table is not a
+/// focused slice, it is a broken one, so this defaults on at the call
+/// sites. `keep_byte_fallback` additionally keeps single-character
+/// pieces, which bounds how badly unseen text degrades at the cost of a
+/// larger table.
+pub fn keep_set_from_corpus(
+    tokenizer: &tokenizers::Tokenizer,
+    corpus: &str,
+    keep_specials: bool,
+    keep_byte_fallback: bool,
+) -> Result<(KeepSet, KeepSetOrigin), VindexError> {
+    let mut ids: BTreeSet<u32> = BTreeSet::new();
+    let mut lines = 0usize;
+    let encode = |text: &str, ids: &mut BTreeSet<u32>| -> Result<(), VindexError> {
+        // add_special_tokens: the encoder adds whatever the tokenizer's
+        // post-processor would add in real use, so a BOS the runtime
+        // sends is not missing from the table.
+        let enc = tokenizer
+            .encode(text, true)
+            .map_err(|e| VindexError::Parse(format!("tokenizing corpus: {e}")))?;
+        ids.extend(enc.get_ids().iter().copied());
+        Ok(())
+    };
+
+    for line in corpus.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        lines += 1;
+        encode(line, &mut ids)?;
+    }
+
+    // Then the whole corpus in one pass. Splitting on lines throws the
+    // newline characters away, and a chat template is mostly newlines —
+    // the first version of this function dropped token 107 ("\n") from a
+    // Gemma 4 keep-set while faithfully keeping `<|turn>`, which would
+    // have shipped a slice whose own prompt format had no rows. The
+    // whole-corpus pass also recovers merges that span a line break.
+    encode(corpus, &mut ids)?;
+    let from_corpus = ids.len();
+
+    let mut specials = 0usize;
+    if keep_specials {
+        // `get_added_tokens_decoder` is keyed BY id: (id, AddedToken).
+        for (id, _token) in tokenizer.get_added_tokens_decoder() {
+            if ids.insert(id) {
+                specials += 1;
+            }
+        }
+    }
+
+    let mut byte_fallback = 0usize;
+    if keep_byte_fallback {
+        for (piece, id) in tokenizer.get_vocab(true) {
+            if piece.chars().count() == 1 && ids.insert(id) {
+                byte_fallback += 1;
+            }
+        }
+    }
+
+    if ids.is_empty() {
+        return Err(VindexError::Parse(
+            "corpus produced no token ids — nothing to keep".into(),
+        ));
+    }
+    let origin = KeepSetOrigin {
+        from_corpus,
+        specials,
+        byte_fallback,
+        total: ids.len(),
+        corpus_lines: lines,
+    };
+    Ok((KeepSet::Ids(ids), origin))
+}
+
 /// Which vocabulary rows a trim keeps.
 #[derive(Debug, Clone)]
 pub enum KeepSet {
@@ -563,6 +665,36 @@ mod tests {
             },
         );
         assert!(err.is_err());
+    }
+
+    /// A chat template is mostly newlines. Splitting the corpus on lines
+    /// throws those characters away, and the first version of
+    /// `keep_set_from_corpus` shipped a keep-set that held `<|turn>` but
+    /// not `"\n"` — a slice whose own prompt format had no rows. The
+    /// whole-corpus pass is what prevents that, so assert on it directly.
+    #[test]
+    fn a_corpus_keep_set_holds_the_newline_rows_its_chat_template_needs() {
+        let tok = match tokenizers::Tokenizer::from_file(
+            std::path::Path::new(&std::env::var("HOME").unwrap_or_default())
+                .join("vindex/gemma4-full-b20ff753/tokenizer.json"),
+        ) {
+            Ok(t) => t,
+            // The real tokenizer is a local asset, not a repo fixture.
+            Err(_) => return,
+        };
+        let corpus = "<|turn>user\nWhat is the capital of France?<turn|>\n<|turn>model\n";
+        let (keep, origin) = keep_set_from_corpus(&tok, corpus, true, false).unwrap();
+        let KeepSet::Ids(ids) = keep else {
+            panic!("expected an id set")
+        };
+        let newline = tok
+            .token_to_id("\n")
+            .expect("tokenizer has a newline token");
+        assert!(
+            ids.contains(&newline),
+            "newline row {newline} was dropped from a chat-templated corpus"
+        );
+        assert!(origin.total >= origin.from_corpus);
     }
 
     #[test]
