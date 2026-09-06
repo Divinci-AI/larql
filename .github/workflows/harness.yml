@@ -16,6 +16,17 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libssl-dev \
+            protobuf-compiler \
+            cmake \
+            g++ \
+            libopenblas-dev
+
       - uses: Swatinem/rust-cache@v2
         with:
           key: harness-v1
