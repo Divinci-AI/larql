@@ -29,4 +29,5 @@ pub mod shannon_cmd;
 pub mod shannon_trace;
 pub mod show_cmd;
 pub mod slice_cmd;
+pub mod trim_cmd;
 pub mod vindex3_cmd;

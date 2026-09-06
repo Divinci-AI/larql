@@ -17,6 +17,7 @@ pub mod lyrw2;
 pub mod moe_manifest;
 pub mod quant;
 pub mod spec;
+pub mod trim;
 pub mod vindex3;
 pub mod weights;
 

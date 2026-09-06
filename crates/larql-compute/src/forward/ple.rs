@@ -8,6 +8,24 @@ use super::{apply_norm, dot_proj};
 use larql_models::ModelWeights;
 use ndarray::Array2;
 
+/// Manifest key of the dense `vocab -> row` map a trimmed vindex carries.
+/// Kept in step with `larql_vindex::format::trim::PLE_VOCAB_MAP_KEY`;
+/// this crate does not depend on larql-vindex, so the name is repeated
+/// rather than imported.
+pub const PLE_VOCAB_MAP_KEY: &str = "per_layer_embed_vocab_map";
+
+/// Row holding `token_id` in a trimmed per-layer embedding table, or
+/// `None` when that row was dropped. The map stores row indices as f32,
+/// which is exact for every index below 2^24, and a negative value marks
+/// a dropped row.
+fn trimmed_row(map: &[f32], token_id: u32) -> Option<usize> {
+    let v = *map.get(token_id as usize)?;
+    if v < 0.0 {
+        return None;
+    }
+    Some(v as usize)
+}
+
 /// Vocabulary rows the PLE stream-2 lookup is allowed to use, from
 /// `LARQL_PLE_KEEP_TOPN` (keep token ids `< N`) or `LARQL_PLE_KEEP_FILE`
 /// (one token id per line). A token outside the keep set contributes a zero
@@ -108,6 +126,11 @@ pub fn precompute_per_layer_inputs(
         .and_then(|key| weights.tensors.get(&key));
     let embed_scale = (ple_dim as f32).sqrt();
 
+    // Written by the focused-slice compiler (`larql_vindex::format::trim`)
+    // when vocabulary rows have been dropped. Absent on every untrimmed
+    // vindex, and absence means "the table is dense".
+    let vocab_map = weights.vectors.get(PLE_VOCAB_MAP_KEY);
+
     // Per-layer projection norm weight
     let proj_norm_w = arch
         .per_layer_projection_norm_key()
@@ -144,11 +167,19 @@ pub fn precompute_per_layer_inputs(
             // Add stream 2: per-layer token embedding
             if let Some(embed) = ple_embed {
                 let tok_id = token_ids[s];
-                let kept = ple_vocab_keep().is_none_or(|keep| keep.admits(tok_id));
-                if kept {
-                    let row = embed.row(tok_id as usize);
-                    for d in 0..ple_dim {
-                        layer_input[[s, d]] += row[col_start + d] * embed_scale;
+                let admitted = ple_vocab_keep().is_none_or(|keep| keep.admits(tok_id));
+                // A trimmed vindex carries a vocab -> row map; without one
+                // the table is dense and the token id IS the row.
+                let row_idx = match vocab_map {
+                    Some(map) => trimmed_row(map, tok_id),
+                    None => Some(tok_id as usize),
+                };
+                if let (true, Some(row_idx)) = (admitted, row_idx) {
+                    if row_idx < embed.nrows() {
+                        let row = embed.row(row_idx);
+                        for d in 0..ple_dim {
+                            layer_input[[s, d]] += row[col_start + d] * embed_scale;
+                        }
                     }
                 }
             }

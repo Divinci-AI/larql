@@ -84,6 +84,10 @@ enum Commands {
     /// Carve a subset of a vindex (client / server / browse / router slice).
     Slice(slice_cmd::SliceArgs),
 
+    /// Write a vocabulary-trimmed vindex — drop per-layer-embedding rows
+    /// a domain never uses (the focused-slice compiler).
+    Trim(trim_cmd::TrimArgs),
+
     /// Publish a vindex to HuggingFace — full vindex plus slice siblings.
     Publish(publish_cmd::PublishArgs),
 
@@ -631,6 +635,7 @@ fn real_main() -> i32 {
         Commands::List(args) => list_cmd::run(args),
         Commands::Show(args) => show_cmd::run(args),
         Commands::Slice(args) => slice_cmd::run(args),
+        Commands::Trim(args) => trim_cmd::run(args),
         Commands::Publish(args) => publish_cmd::run(args),
         Commands::Registry(cmd) => registry_cmd::run(cmd),
         Commands::Rm(args) => rm_cmd::run(args),
