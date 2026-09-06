@@ -16,7 +16,9 @@ across six kinds, with the truth derived rather than typed.
   Divinci API (`--divinci URL --workspace ID`, bearer from `$TOKEN`), matches
   edges to targets, prints per-entity ranks and aggregate metrics, writes a
   JSON with `--out`, diffs against a stored run with `--baseline`.
-- `baselines/` — stored runs. Name them by date, endpoint and params.
+- `baselines/` — stored runs. Name them by date, endpoint and params. A
+  run records only the *kind* of endpoint (`larql` or `divinci`): this is
+  a public repository, and a host or workspace id is not a result.
 
 ## Matching
 

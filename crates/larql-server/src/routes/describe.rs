@@ -116,6 +116,13 @@ pub struct DescribeParams {
     /// model in the position of *predicting* the fact, where a bare name's
     /// last token only encodes the name. The relevance panel is built on
     /// the same template, so the background matches. Default `{entity}`.
+    ///
+    /// Only templates the operator enabled (`LARQL_RESIDUAL_TEMPLATES`,
+    /// `|`-separated; the bare name is always enabled) are accepted with
+    /// `relevance`: a template is a panel build, and a panel build is two
+    /// minutes of CPU behind one lock plus a panel held for the life of
+    /// the model. Measured 2026-09-05 (research log §25), every template
+    /// tried scored below the bare name, so none is enabled by default.
     #[serde(default = "default_prompt")]
     pub prompt: String,
     /// Residual mode only: a neutral prompt whose per-layer residual is
@@ -163,6 +170,15 @@ fn residuals_for(
 /// Build and install the residual relevance panel for `background` unless
 /// one is already there. One forward pass per panel name; concurrent first
 /// requests wait on the build lock rather than each running the panel.
+///
+/// The panel is run against the **base** index, never the requesting
+/// overlay. It is cached per model and shared by every later caller, so a
+/// panel built through one tenant's edits would be the background every
+/// other tenant is ranked against, carrying that tenant's edits with it.
+/// `patched` is only the way to reach the base: overlays share the base
+/// artifact by refcount and keep their edits beside it, so the clone is
+/// cheap and clean. The entity itself is still run through the overlay,
+/// which is what an edit's measurement needs.
 fn ensure_residual_panel(
     model: &LoadedModel,
     weights: &larql_inference::ModelWeights,
@@ -180,6 +196,14 @@ fn ensure_residual_panel(
     if model.relevance.has_residual_panel(background, template) {
         return Ok(());
     }
+    if !model.relevance.residual_template_enabled(template) {
+        return Err(ServerError::BadRequest(format!(
+            "prompt template is not enabled on this server (enabled: {}); set {} to add one",
+            model.relevance.residual_templates().join(" | "),
+            crate::relevance::RESIDUAL_TEMPLATES_ENV
+        )));
+    }
+    let base = larql_vindex::PatchedVindex::new(patched.base().clone());
     let _build = model
         .relevance
         .residual_build
@@ -193,7 +217,7 @@ fn ensure_residual_panel(
         std::collections::HashMap::new();
     for name in names {
         let text = template.replace("{entity}", name);
-        for (layer, r) in residuals_for(model, weights, patched, &text)? {
+        for (layer, r) in residuals_for(model, weights, &base, &text)? {
             rows.entry(layer).or_default().push(r);
         }
     }
@@ -234,10 +258,88 @@ fn default_query() -> String {
     QUERY_EMBEDDING.into()
 }
 
-pub const PROMPT_BARE: &str = "{entity}";
+pub use crate::relevance::PROMPT_BARE;
 fn default_prompt() -> String {
     PROMPT_BARE.into()
 }
+/// Upper bounds on the two size parameters. Both are per-request work a
+/// caller chooses: `window` is how many hits every scanned layer returns
+/// and holds, `limit` how many edges are labelled and serialised. A layer
+/// of the served model has ~10k features, so 10k is as wide as a window can
+/// be in fact, and an answer that long is a dump, not a browse. The
+/// server-api forwards `limit` capped at 1000 and never forwards `window`;
+/// this is the bound for a caller inside the network.
+pub const MAX_LIMIT: usize = 10_000;
+pub const MAX_WINDOW: usize = 10_000;
+
+/// Everything that can be wrong with a request before any work is done,
+/// so a bad request is refused the same way whether or not the entity
+/// tokenises, the model has weights, or a panel is built.
+fn validate(model: &LoadedModel, params: &DescribeParams) -> Result<(), ServerError> {
+    if params.limit > MAX_LIMIT {
+        return Err(ServerError::BadRequest(format!(
+            "limit must be at most {MAX_LIMIT}, got {}",
+            params.limit
+        )));
+    }
+    if params.window > MAX_WINDOW {
+        return Err(ServerError::BadRequest(format!(
+            "window must be at most {MAX_WINDOW}, got {}",
+            params.window
+        )));
+    }
+    match params.window_by.as_str() {
+        WINDOW_BY_SCORE => {}
+        WINDOW_BY_RELEVANCE if params.relevance => {}
+        WINDOW_BY_RELEVANCE => {
+            return Err(ServerError::BadRequest(
+                "window_by=relevance needs relevance=true".into(),
+            ))
+        }
+        other => {
+            return Err(ServerError::BadRequest(format!(
+                "window_by must be `{WINDOW_BY_SCORE}` or `{WINDOW_BY_RELEVANCE}`, got `{other}`"
+            )))
+        }
+    }
+    if let Some(s) = params.background.as_deref() {
+        crate::relevance::Background::parse(s).ok_or_else(|| {
+            ServerError::BadRequest(format!(
+                "background must be `corpus`, `entities` or `vocabulary`, got `{s}`"
+            ))
+        })?;
+    }
+    let want_emb = matches!(params.query.as_str(), QUERY_EMBEDDING | QUERY_UNION);
+    let want_res = matches!(params.query.as_str(), QUERY_RESIDUAL | QUERY_UNION);
+    if !want_emb && !want_res {
+        return Err(ServerError::BadRequest(format!(
+            "query must be `{QUERY_EMBEDDING}`, `{QUERY_RESIDUAL}` or `{QUERY_UNION}`, got `{}`",
+            params.query
+        )));
+    }
+    if params.query == QUERY_UNION && !params.relevance {
+        return Err(ServerError::BadRequest(
+            "query=union ranks both sides by relevance; it needs relevance=true".into(),
+        ));
+    }
+    if params.query == QUERY_EMBEDDING && params.prompt != PROMPT_BARE {
+        return Err(ServerError::BadRequest(
+            "prompt applies to query=residual only".into(),
+        ));
+    }
+    if want_res {
+        check_prompt(&params.prompt)?;
+        if params.relevance && !model.relevance.residual_template_enabled(&params.prompt) {
+            return Err(ServerError::BadRequest(format!(
+                "prompt template is not enabled on this server (enabled: {}); set {} to add one",
+                model.relevance.residual_templates().join(" | "),
+                crate::relevance::RESIDUAL_TEMPLATES_ENV
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// A template must name the entity, and stays short: it is a prompt the
 /// panel's 114 names are each run through.
 fn check_prompt(template: &str) -> Result<(), ServerError> {
@@ -293,6 +395,7 @@ pub fn describe_entity_with(
     params: &DescribeParams,
 ) -> Result<serde_json::Value, ServerError> {
     let start = std::time::Instant::now();
+    validate(model, params)?;
 
     let encoding = model
         .tokenizer
@@ -319,20 +422,8 @@ pub fn describe_entity_with(
     )
     .ok_or_else(|| ServerError::Internal("entity produced no query".into()))?;
 
-    let window_by_relevance = match params.window_by.as_str() {
-        WINDOW_BY_SCORE => false,
-        WINDOW_BY_RELEVANCE if params.relevance => true,
-        WINDOW_BY_RELEVANCE => {
-            return Err(ServerError::BadRequest(
-                "window_by=relevance needs relevance=true".into(),
-            ))
-        }
-        other => {
-            return Err(ServerError::BadRequest(format!(
-                "window_by must be `{WINDOW_BY_SCORE}` or `{WINDOW_BY_RELEVANCE}`, got `{other}`"
-            )))
-        }
-    };
+    // Validated above.
+    let window_by_relevance = params.window_by == WINDOW_BY_RELEVANCE;
     let union = params.query == QUERY_UNION;
     // Selecting by surprise means scoring the whole layer first; so does a
     // union, which calibrates each side against the whole layer.
@@ -366,24 +457,8 @@ pub fn describe_entity_with(
     let mut residual_layers: Option<usize> = None;
     let mut contrasted_layers: usize = 0;
 
-    if params.query == QUERY_EMBEDDING && params.prompt != PROMPT_BARE {
-        return Err(ServerError::BadRequest(
-            "prompt applies to query=residual only".into(),
-        ));
-    }
-    if union && !params.relevance {
-        return Err(ServerError::BadRequest(
-            "query=union ranks both sides by relevance; it needs relevance=true".into(),
-        ));
-    }
     let want_emb = matches!(params.query.as_str(), QUERY_EMBEDDING | QUERY_UNION);
     let want_res = matches!(params.query.as_str(), QUERY_RESIDUAL | QUERY_UNION);
-    if !want_emb && !want_res {
-        return Err(ServerError::BadRequest(format!(
-            "query must be `{QUERY_EMBEDDING}`, `{QUERY_RESIDUAL}` or `{QUERY_UNION}`, got `{}`",
-            params.query
-        )));
-    }
     // The residual side of a union is always windowed by surprise: measured
     // 2026-09-04 (research log §22), its raw-score window is junk.
     let res_surprise = window_by_relevance || union;
@@ -426,7 +501,6 @@ pub fn describe_entity_with(
             // The relevance background for residual scores is the panel's
             // residuals, not its embeddings; built here on first use since
             // this route owns inference.
-            check_prompt(&params.prompt)?;
             if params.relevance {
                 ensure_residual_panel(model, weights, patched, background, &params.prompt)?;
             }

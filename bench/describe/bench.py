@@ -319,7 +319,9 @@ def run(args):
     print("\n" + "  ".join(f"{k}={v:.3f}" if isinstance(v, float) else f"{k}={v}" for k, v in metrics.items()))
     print("by kind: " + "  ".join(f"{k}: hit@10 {v['hit@10']} mrr {v['mrr']} (n={v['n']})" for k, v in by_kind.items()))
     result = {"when": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-              "endpoint": args.larql or f"{args.divinci} ws={args.workspace}", "params": args.param,
+              # Which kind of endpoint, not which one: a stored run lives in a
+              # public repository, and a host and workspace id are not results.
+              "endpoint": "larql" if args.larql else "divinci", "params": args.param,
               "metrics": metrics, "by_kind": by_kind, "rows": rows}
     if args.out:
         Path(args.out).write_text(json.dumps(result, ensure_ascii=False, indent=1) + "\n")

@@ -386,6 +386,11 @@ pub fn load_single_vindex(
         &crate::relevance::corpus_names(),
         crate::relevance::Background::from_env(),
     );
+    relevance.set_residual_templates(crate::relevance::residual_templates_from_env());
+    info!(
+        "  Residual templates enabled: {:?}",
+        relevance.residual_templates()
+    );
     info!(
         "  Relevance panels: {} corpus, {} entities, {} vocabulary; default {}",
         relevance.panel_size(crate::relevance::Background::Corpus),

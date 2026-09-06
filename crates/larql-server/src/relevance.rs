@@ -352,6 +352,43 @@ pub struct RelevanceStats {
     /// Held while a residual panel is being built, so concurrent first
     /// requests do not each run the panel through the model.
     pub residual_build: std::sync::Mutex<()>,
+    /// The prompt templates a residual panel may be built for. Operator
+    /// configuration (`LARQL_RESIDUAL_TEMPLATES`), never the caller's:
+    /// each distinct template costs a full pass of the panel names through
+    /// the model, serialised behind `residual_build`, and a panel held for
+    /// the life of the model. Keyed by caller input that was a CPU and
+    /// memory budget any authenticated tenant could spend at will.
+    residual_templates: RwLock<Vec<String>>,
+    /// Panels built so far; a test of the build lock asserts on it.
+    residual_builds: std::sync::atomic::AtomicU64,
+}
+
+/// The template a residual query uses when it names none: the bare entity.
+pub const PROMPT_BARE: &str = "{entity}";
+/// `|`-separated templates enabling residual panels beyond the bare name.
+/// Measured 2026-09-05 (research log §25), every template tried was worse
+/// than the bare name, so nothing but the bare name is enabled by default.
+pub const RESIDUAL_TEMPLATES_ENV: &str = "LARQL_RESIDUAL_TEMPLATES";
+
+/// The residual templates named by `RESIDUAL_TEMPLATES_ENV`, always
+/// including the bare name. See [`parse_residual_templates`].
+pub fn residual_templates_from_env() -> Vec<String> {
+    parse_residual_templates(std::env::var(RESIDUAL_TEMPLATES_ENV).ok().as_deref())
+}
+
+/// Split a `|`-separated list of templates; blanks dropped, the bare name
+/// always first, and a template without `{entity}` ignored since no
+/// request could ever use it.
+pub fn parse_residual_templates(spec: Option<&str>) -> Vec<String> {
+    let mut out = vec![PROMPT_BARE.to_string()];
+    for t in spec.unwrap_or("").split('|') {
+        let t = t.trim();
+        if t.is_empty() || !t.contains("{entity}") || out.iter().any(|o| o == t) {
+            continue;
+        }
+        out.push(t.to_string());
+    }
+    out
 }
 
 fn stack(rows: Vec<Array1<f32>>, hidden: usize) -> Array2<f32> {
@@ -429,6 +466,8 @@ impl RelevanceStats {
             residual_panels: RwLock::new(HashMap::new()),
             residual_per_layer: RwLock::new(HashMap::new()),
             residual_build: std::sync::Mutex::new(()),
+            residual_templates: RwLock::new(vec![PROMPT_BARE.to_string()]),
+            residual_builds: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -474,6 +513,44 @@ impl RelevanceStats {
         }
     }
 
+    /// Replace the enabled residual templates (the bare name stays enabled).
+    pub fn set_residual_templates(&self, templates: Vec<String>) {
+        let mut v = vec![PROMPT_BARE.to_string()];
+        v.extend(templates.into_iter().filter(|t| t != PROMPT_BARE));
+        if let Ok(mut t) = self.residual_templates.write() {
+            *t = v;
+        }
+    }
+
+    /// Enable one more residual template.
+    pub fn allow_residual_template(&self, template: &str) {
+        if let Ok(mut t) = self.residual_templates.write() {
+            if !t.iter().any(|o| o == template) {
+                t.push(template.to_string());
+            }
+        }
+    }
+
+    pub fn residual_templates(&self) -> Vec<String> {
+        self.residual_templates
+            .read()
+            .map(|t| t.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn residual_template_enabled(&self, template: &str) -> bool {
+        self.residual_templates
+            .read()
+            .map(|t| t.iter().any(|o| o == template))
+            .unwrap_or(false)
+    }
+
+    /// How many residual panels have been installed on this model.
+    pub fn residual_builds(&self) -> u64 {
+        self.residual_builds
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     pub fn has_residual_panel(&self, background: Background, template: &str) -> bool {
         self.residual_panels
             .read()
@@ -497,13 +574,20 @@ impl RelevanceStats {
     /// Install the per-layer residuals of the panel names: `per_layer[l]`
     /// is `[names × hidden]`. Replaces any earlier panel and drops the
     /// stats derived from it.
-    pub fn install_residual_panel(&self, background: Background, template: &str, per_layer: ResidualPanel) {
+    pub fn install_residual_panel(
+        &self,
+        background: Background,
+        template: &str,
+        per_layer: ResidualPanel,
+    ) {
         if let Ok(mut p) = self.residual_panels.write() {
             p.insert((background, template.to_string()), Arc::new(per_layer));
         }
         if let Ok(mut s) = self.residual_per_layer.write() {
             s.retain(|(b, t, _), _| !(*b == background && t == template));
         }
+        self.residual_builds
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// The residual background for `layer`, computing it on first use.
@@ -572,6 +656,31 @@ impl RelevanceStats {
 mod tests {
     use super::*;
     use larql_vindex::ndarray::arr2;
+
+    #[test]
+    fn residual_templates_default_to_the_bare_name_and_parse_the_env() {
+        assert_eq!(parse_residual_templates(None), vec![PROMPT_BARE]);
+        assert_eq!(parse_residual_templates(Some("")), vec![PROMPT_BARE]);
+        // Blanks dropped, the bare name not doubled, a template with no
+        // `{entity}` ignored, order kept.
+        assert_eq!(
+            parse_residual_templates(Some(
+                " {entity} is | |{entity}| the capital of |{entity} is known for"
+            )),
+            vec![PROMPT_BARE, "{entity} is", "{entity} is known for"]
+        );
+        let r = RelevanceStats::from_embeddings(&Array2::<f32>::zeros((0, 0)), 1.0);
+        assert!(r.residual_template_enabled(PROMPT_BARE));
+        assert!(!r.residual_template_enabled("{entity} is"));
+        r.set_residual_templates(vec!["{entity} is".into()]);
+        assert!(r.residual_template_enabled("{entity} is"));
+        assert!(
+            r.residual_template_enabled(PROMPT_BARE),
+            "the bare name cannot be disabled"
+        );
+        r.allow_residual_template("{entity} is");
+        assert_eq!(r.residual_templates().len(), 2, "enabling twice is once");
+    }
 
     #[test]
     fn an_always_on_feature_is_not_surprising_and_a_specific_one_is() {

@@ -278,7 +278,8 @@ mod tests {
         // entity; sharing a slot would hand a lexical answer to a caller who
         // asked what the model actually computes.
         let res = DescribeCache::key_scoped(
-            None, "m", "Paris", "all", 20, 20, 0.0, false, 0.0, false, true, "entities", "score", "residual",
+            None, "m", "Paris", "all", 20, 20, 0.0, false, 0.0, false, true, "entities", "score",
+            "residual",
         );
         let emb = DescribeCache::key_scoped(
             None,

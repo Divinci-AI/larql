@@ -1151,6 +1151,7 @@ fn describe_prompt(
 #[test]
 fn a_prompt_builds_its_own_residual_panel_and_is_reported() {
     let Some(m) = tiny() else { return };
+    m.relevance.allow_residual_template("{entity} [6]");
     let v = match describe_prompt(&m, "residual", "{entity} [6]") {
         Ok(v) => v,
         Err(e) => {
@@ -1192,11 +1193,126 @@ fn a_prompt_must_name_the_entity_and_is_residual_only() {
     }
 }
 
+#[test]
+fn a_template_the_operator_did_not_enable_is_refused_before_any_work() {
+    let Some(m) = tiny() else { return };
+    let before = m.relevance.residual_builds();
+    // Well-formed, short, names the entity: only the allow-list stands in its way.
+    match describe_prompt(&m, "residual", "{entity} is known for") {
+        Err(larql_server::error::ServerError::BadRequest(msg)) => {
+            assert!(msg.contains("not enabled"), "{msg}");
+            assert!(
+                msg.contains(larql_server::relevance::RESIDUAL_TEMPLATES_ENV),
+                "the refusal must say how to enable one: {msg}"
+            );
+        }
+        other => panic!("expected BadRequest, got {other:?}"),
+    }
+    assert_eq!(
+        m.relevance.residual_builds(),
+        before,
+        "a refused template must not have cost a panel build"
+    );
+    assert!(!m.relevance.has_residual_panel(
+        larql_server::relevance::Background::Entities,
+        "{entity} is known for"
+    ));
+    // The bare name is always enabled, whatever the operator set.
+    m.relevance.set_residual_templates(vec![]);
+    assert!(m.relevance.residual_template_enabled("{entity}"));
+}
+
+#[test]
+fn concurrent_first_residual_requests_build_the_panel_once() {
+    let Some(m) = tiny() else { return };
+    if !m.config.has_model_weights {
+        return;
+    }
+    assert_eq!(m.relevance.residual_builds(), 0);
+    let threads: Vec<_> = (0..6)
+        .map(|_| {
+            let m = Arc::clone(&m);
+            std::thread::spawn(move || describe_residual(&m, true).map(|v| v["edges"].clone()))
+        })
+        .collect();
+    let results: Vec<_> = threads
+        .into_iter()
+        .map(|t| t.join().expect("thread panicked").expect("describe failed"))
+        .collect();
+    assert_eq!(
+        m.relevance.residual_builds(),
+        1,
+        "six concurrent first requests must share one panel build"
+    );
+    assert!(
+        results.windows(2).all(|w| w[0] == w[1]),
+        "every waiter must be answered from the same panel"
+    );
+}
+
+/// The residual panel is the background every later caller is ranked
+/// against, so it must not depend on whose overlay asked first.
+#[test]
+fn the_residual_panel_is_built_on_the_base_index_not_the_first_callers_overlay() {
+    let Some(a) = tiny() else { return };
+    if !a.config.has_model_weights {
+        return;
+    }
+    let Some(b) = tiny() else { return };
+    let params = larql_server::routes::describe::DescribeParams {
+        entity: "[5]".to_string(),
+        band: "all".to_string(),
+        verbose: false,
+        limit: 10_000,
+        window: 10_000,
+        min_score: 0.0,
+        coherence: false,
+        min_coherence: 0.0,
+        relabel: false,
+        relevance: true,
+        background: Some("entities".into()),
+        window_by: "relevance".into(),
+        query: "residual".into(),
+        prompt: "{entity}".into(),
+        baseline: None,
+    };
+    // Model A's first residual request comes through a heavily edited
+    // overlay: every feature in the knowledge band's first layer deleted.
+    let n = a.patched.blocking_read().num_features(2);
+    let ps = patch_set((0..n).map(|f| delete_patch(2, f)).collect());
+    let overlay = resolve_overlay(&a, &ps, Some("tenant-a")).unwrap();
+    let _ = larql_server::routes::describe::describe_entity_with(&a, &overlay, &params)
+        .expect("edited-overlay describe");
+    assert_eq!(a.relevance.residual_builds(), 1);
+    // Then a clean caller on A must see exactly what a clean caller on a
+    // model nobody edited sees.
+    let via_a = larql_server::routes::describe::describe_entity_with(
+        &a,
+        &a.patched.blocking_read(),
+        &params,
+    )
+    .unwrap();
+    let via_b = larql_server::routes::describe::describe_entity_with(
+        &b,
+        &b.patched.blocking_read(),
+        &params,
+    )
+    .unwrap();
+    assert_eq!(
+        via_a["edges"], via_b["edges"],
+        "the first tenant's edits leaked into the shared background"
+    );
+}
+
 // ══════════════════════════════════════════════════════════════
 // union: both queries, each hit against its own background
 // ══════════════════════════════════════════════════════════════
 
-fn describe_query(model: &LoadedModel, query: &str, relevance: bool) -> Result<serde_json::Value, larql_server::error::ServerError> {
+fn describe_query(
+    model: &LoadedModel,
+    query: &str,
+    relevance: bool,
+) -> Result<serde_json::Value, larql_server::error::ServerError> {
     let params = larql_server::routes::describe::DescribeParams {
         entity: "[5]".to_string(),
         band: "all".to_string(),
@@ -1223,33 +1339,64 @@ fn a_union_is_both_sides_and_says_which_side_each_edge_came_from() {
     let Some(m) = tiny() else { return };
     let u = match describe_query(&m, "union", true) {
         Ok(v) => v,
-        Err(e) => { assert!(format!("{e:?}").contains("weights"), "{e:?}"); return; }
+        Err(e) => {
+            assert!(format!("{e:?}").contains("weights"), "{e:?}");
+            return;
+        }
     };
     assert_eq!(u["query"], "union");
     assert_eq!(u["relevance_query"], "union");
     assert!(u["residual_panel"].as_u64().unwrap() >= 2);
     let edges = u["edges"].as_array().unwrap();
     assert!(!edges.is_empty());
-    let sources: std::collections::BTreeSet<&str> = edges.iter().map(|e| e["source"].as_str().unwrap()).collect();
-    assert!(sources.iter().all(|s| *s == "embedding" || *s == "residual"), "{sources:?}");
+    let sources: std::collections::BTreeSet<&str> = edges
+        .iter()
+        .map(|e| e["source"].as_str().unwrap())
+        .collect();
+    assert!(
+        sources
+            .iter()
+            .all(|s| *s == "embedding" || *s == "residual"),
+        "{sources:?}"
+    );
     // Every edge of either side is in the union (folded by label), and the
     // union is sorted by relevance.
-    let key = |v: &serde_json::Value| v["edges"].as_array().unwrap().iter()
-        .map(|e| e["target"].as_str().unwrap().to_lowercase()).collect::<std::collections::BTreeSet<_>>();
+    let key = |v: &serde_json::Value| {
+        v["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["target"].as_str().unwrap().to_lowercase())
+            .collect::<std::collections::BTreeSet<_>>()
+    };
     let emb = describe_query(&m, "embedding", true).unwrap();
     let res = describe_query(&m, "residual", true).unwrap();
     let uk = key(&u);
-    assert!(key(&emb).is_subset(&uk), "an embedding edge is missing from the union");
-    assert!(key(&res).is_subset(&uk), "a residual edge is missing from the union");
-    let zs: Vec<f64> = edges.iter().map(|e| e["relevance"].as_f64().unwrap()).collect();
-    assert!(zs.windows(2).all(|w| w[0] >= w[1]), "union not sorted by relevance: {zs:?}");
+    assert!(
+        key(&emb).is_subset(&uk),
+        "an embedding edge is missing from the union"
+    );
+    assert!(
+        key(&res).is_subset(&uk),
+        "a residual edge is missing from the union"
+    );
+    let zs: Vec<f64> = edges
+        .iter()
+        .map(|e| e["relevance"].as_f64().unwrap())
+        .collect();
+    assert!(
+        zs.windows(2).all(|w| w[0] >= w[1]),
+        "union not sorted by relevance: {zs:?}"
+    );
 }
 
 #[test]
 fn a_union_needs_relevance() {
     let Some(m) = tiny() else { return };
     match describe_query(&m, "union", false) {
-        Err(larql_server::error::ServerError::BadRequest(msg)) => assert!(msg.contains("relevance"), "{msg}"),
+        Err(larql_server::error::ServerError::BadRequest(msg)) => {
+            assert!(msg.contains("relevance"), "{msg}")
+        }
         Err(e) => assert!(format!("{e:?}").contains("weights"), "{e:?}"),
         Ok(_) => panic!("a union without relevance has no common ranking key and must be refused"),
     }
@@ -1260,17 +1407,31 @@ fn a_union_calibrates_each_side_against_its_own_window() {
     let Some(m) = tiny() else { return };
     let u = match describe_query(&m, "union", true) {
         Ok(v) => v,
-        Err(e) => { assert!(format!("{e:?}").contains("weights"), "{e:?}"); return; }
+        Err(e) => {
+            assert!(format!("{e:?}").contains("weights"), "{e:?}");
+            return;
+        }
     };
     let cal = &u["calibration"];
     for side in ["embedding", "residual"] {
         let c = &cal[side];
-        assert!(c["scale"].as_f64().unwrap() > 0.0, "{side} scale must be positive: {c}");
+        assert!(
+            c["scale"].as_f64().unwrap() > 0.0,
+            "{side} scale must be positive: {c}"
+        );
         assert!(c["median"].as_f64().unwrap().is_finite());
     }
     // An edge folds hits from both sides, so a per-edge order comparison
     // against a single-side answer is not well defined; what is checkable
     // is that the ranking key is the calibrated one and is sorted.
-    let zs: Vec<f64> = u["edges"].as_array().unwrap().iter().map(|e| e["relevance"].as_f64().unwrap()).collect();
-    assert!(zs.windows(2).all(|w| w[0] >= w[1]), "union not sorted by calibrated relevance: {zs:?}");
+    let zs: Vec<f64> = u["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["relevance"].as_f64().unwrap())
+        .collect();
+    assert!(
+        zs.windows(2).all(|w| w[0] >= w[1]),
+        "union not sorted by calibrated relevance: {zs:?}"
+    );
 }
