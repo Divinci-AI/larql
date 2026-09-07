@@ -67,6 +67,18 @@ pub struct TrimArgs {
     /// Also drop the f32 walk index (`down_features.bin` + `down_meta.bin`).
     #[arg(long)]
     pub drop_walk_index: bool,
+
+    /// Skip `pruning_receipt.json`. The receipt is written by default:
+    /// an artifact that cannot say what left it is not one anybody
+    /// should deploy.
+    #[arg(long)]
+    pub no_receipt: bool,
+
+    /// JSON file of probe results measured against the trimmed artifact,
+    /// embedded in the receipt. Without it the receipt states plainly
+    /// that behaviour was not verified.
+    #[arg(long)]
+    pub probe_results: Option<PathBuf>,
 }
 
 pub fn run(args: TrimArgs) -> Result<(), Box<dyn std::error::Error>> {
@@ -81,8 +93,11 @@ pub fn run(args: TrimArgs) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    let mut keep_origin = None;
+    let mut corpus_sha256 = None;
     let keep = if let Some(corpus_path) = &args.keep_corpus {
         let corpus = std::fs::read_to_string(corpus_path)?;
+        corpus_sha256 = larql_vindex::format::checksums::sha256_file(corpus_path).ok();
         let tokenizer = larql_vindex::format::load::load_vindex_tokenizer(&src)?;
         let (keep, origin) = keep_set_from_corpus(
             &tokenizer,
@@ -106,6 +121,7 @@ pub fn run(args: TrimArgs) -> Result<(), Box<dyn std::error::Error>> {
             );
         }
         println!("  {} ids total", origin.total);
+        keep_origin = Some(origin);
         keep
     } else if let Some(path) = &args.keep_file {
         keep_set_from_file(path)?
@@ -131,11 +147,23 @@ pub fn run(args: TrimArgs) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    let probe_results = match &args.probe_results {
+        Some(path) => Some(
+            serde_json::from_slice::<serde_json::Value>(&std::fs::read(path)?)
+                .map_err(|e| format!("{}: {e}", path.display()))?,
+        ),
+        None => None,
+    };
+
     let report = trim_vindex(
         &src,
         &args.output,
         &TrimOptions {
             keep,
+            write_receipt: !args.no_receipt,
+            keep_origin,
+            corpus_sha256,
+            probe_results,
             drop_walk_index: args.drop_walk_index,
         },
     )?;
@@ -164,5 +192,19 @@ pub fn run(args: TrimArgs) -> Result<(), Box<dyn std::error::Error>> {
         "  unchanged files: {} hard-linked, {} copied",
         report.linked_files, report.copied_files
     );
+    match report.coverage_passed {
+        Some(true) => println!("  receipt: pruning_receipt.json — coverage checks passed"),
+        Some(false) => println!(
+            "  receipt: pruning_receipt.json — COVERAGE CHECKS FAILED, read it before \
+             serving this artifact"
+        ),
+        None => println!("  receipt: not written (--no-receipt)"),
+    }
+    if args.probe_results.is_none() && !args.no_receipt {
+        println!(
+            "  behaviour: NOT verified — the receipt records what was removed, not \
+             that the model still answers"
+        );
+    }
     Ok(())
 }

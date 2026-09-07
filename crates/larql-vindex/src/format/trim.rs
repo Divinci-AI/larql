@@ -169,6 +169,83 @@ pub fn keep_set_from_corpus(
     Ok((KeepSet::Ids(ids), origin))
 }
 
+/// Filename of the receipt a trim writes beside the artifact it produced.
+pub const PRUNING_RECEIPT_JSON: &str = "pruning_receipt.json";
+
+/// Schema tag, so a reader can tell which shape it is holding.
+pub const PRUNING_RECEIPT_VERSION: &str = "larql.pruning_receipt.v1";
+
+/// One structural assertion about the keep-set.
+///
+/// Structural, not behavioural: a passing check says the rows a prompt
+/// format needs are present, never that the model still answers well.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CoverageCheck {
+    pub name: String,
+    /// `required` checks decide `coverage.passed`. `informational` ones
+    /// are reported and never block: a chat template carries optional
+    /// branches (tool calling and its JSON scaffolding) that a focused
+    /// slice is entitled to drop, and failing a build over those would
+    /// be crying wolf.
+    pub severity: String,
+    /// What the check is asserting, in words, so a receipt reads without
+    /// this source file next to it.
+    pub asserts: String,
+    pub required: usize,
+    pub present: usize,
+    /// Ids the keep-set is missing. Empty when the check passes.
+    pub missing: Vec<u32>,
+    pub passed: bool,
+}
+
+/// How a keep-set was derived — enough for a third party to rebuild it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KeepSetProvenance {
+    /// `corpus`, `file`, or `top_n`.
+    pub method: String,
+    pub total_ids: usize,
+    /// SHA-256 over the sorted ids, newline-separated: the keep-set's
+    /// identity, independent of how it was written down.
+    pub sha256: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub corpus_sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tokenizer_sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from_corpus: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub specials: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub byte_fallback: Option<usize>,
+}
+
+/// What a trim removed, what it kept, and what that is checkable against.
+///
+/// The receipt deliberately separates three claims a reader might
+/// conflate. It states what was removed (bytes, rows), it asserts that
+/// the keep-set covers the serving prompt format (structural coverage),
+/// and it carries behavioural evidence only when someone actually
+/// measured it. `behavior.status` is `not_verified` until probe results
+/// are attached, because a compiler cannot know whether the model still
+/// answers — and a receipt that implied otherwise would be the exact
+/// thing this project criticises elsewhere.
+///
+/// Signing and hash-chaining are not done here. The digests below are
+/// what make the artifact independently reproducible: rerun `larql trim`
+/// with the same source and keep-set and the output hashes must match.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PruningReceipt {
+    pub receipt_version: String,
+    pub created_at: String,
+    pub tool: serde_json::Value,
+    pub source: serde_json::Value,
+    pub output: serde_json::Value,
+    pub keep_set: KeepSetProvenance,
+    pub removed: serde_json::Value,
+    pub coverage: serde_json::Value,
+    pub behavior: serde_json::Value,
+}
+
 /// Which vocabulary rows a trim keeps.
 #[derive(Debug, Clone)]
 pub enum KeepSet {
@@ -207,6 +284,9 @@ pub struct TrimReport {
     /// Files hard-linked rather than copied.
     pub linked_files: usize,
     pub copied_files: usize,
+    /// Whether every coverage check passed. `None` when no receipt was
+    /// written, so "not checked" never reads as "passed".
+    pub coverage_passed: Option<bool>,
 }
 
 impl TrimReport {
@@ -224,6 +304,32 @@ pub struct TrimOptions {
     /// answer-preserving (PA-62), at the cost of the FFN planner falling
     /// to its dense last-resort rung.
     pub drop_walk_index: bool,
+    /// Write `pruning_receipt.json` beside the artifact.
+    pub write_receipt: bool,
+    /// How the keep-set was derived, when the caller knows. Recorded in
+    /// the receipt so a third party can rebuild the same set.
+    pub keep_origin: Option<KeepSetOrigin>,
+    /// Digest of the corpus the keep-set came from, when there was one.
+    pub corpus_sha256: Option<String>,
+    /// Probe results measured against the trimmed artifact by whoever
+    /// ran them. Absent means the receipt says so rather than implying
+    /// the model was checked.
+    pub probe_results: Option<serde_json::Value>,
+}
+
+impl TrimOptions {
+    /// Options with no receipt and no provenance — the minimum a trim
+    /// needs. Callers that want a receipt fill the rest in.
+    pub fn bare() -> Self {
+        Self {
+            keep: KeepSet::TopN(0),
+            drop_walk_index: false,
+            write_receipt: false,
+            keep_origin: None,
+            corpus_sha256: None,
+            probe_results: None,
+        }
+    }
 }
 
 /// Write a vocabulary-trimmed copy of `src` into `dst`.
@@ -297,6 +403,7 @@ pub fn trim_vindex(src: &Path, dst: &Path, opts: &TrimOptions) -> Result<TrimRep
         walk_index_bytes: 0,
         linked_files: 0,
         copied_files: 0,
+        coverage_passed: None,
     };
     let dropped_files: &[&str] = if opts.drop_walk_index {
         &[PLE_WEIGHTS_BIN, DOWN_FEATURES_BIN, DOWN_META_BIN]
@@ -423,7 +530,306 @@ pub fn trim_vindex(src: &Path, dst: &Path, opts: &TrimOptions) -> Result<TrimRep
         serde_json::to_vec_pretty(&index).map_err(|e| VindexError::Parse(e.to_string()))?,
     )?;
 
+    // ── 5. the receipt ──
+    if opts.write_receipt {
+        let kept_set: BTreeSet<u32> = kept.iter().copied().collect();
+        let receipt = build_receipt(src, dst, &kept_set, &report, opts)?;
+        report.coverage_passed = Some(
+            receipt
+                .coverage
+                .get("passed")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+        );
+        std::fs::write(
+            dst.join(PRUNING_RECEIPT_JSON),
+            serde_json::to_vec_pretty(&receipt).map_err(|e| VindexError::Parse(e.to_string()))?,
+        )?;
+    }
+
     Ok(report)
+}
+
+/// Chat templates are built out of newlines and turn markers; this is
+/// the file they live in.
+const CHAT_TEMPLATE_JINJA: &str = "chat_template.jinja";
+
+/// Remove jinja control and expression blocks, leaving the literal text
+/// a template emits. Deliberately crude: it is a coverage heuristic, and
+/// keeping slightly too much text only makes the assertion stricter.
+fn strip_jinja(template: &str) -> String {
+    let mut out = String::with_capacity(template.len());
+    let bytes: Vec<char> = template.chars().collect();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let two: String = bytes[i..(i + 2).min(bytes.len())].iter().collect();
+        if two == "{{" || two == "{%" || two == "{#" {
+            let close = match two.as_str() {
+                "{{" => "}}",
+                "{%" => "%}",
+                _ => "#}",
+            };
+            let mut j = i + 2;
+            while j + 1 < bytes.len() {
+                let pair: String = bytes[j..j + 2].iter().collect();
+                if pair == close {
+                    break;
+                }
+                j += 1;
+            }
+            i = (j + 2).min(bytes.len());
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+
+    // Collapse the indentation the jinja left behind. A template source
+    // is indented for humans; the prompt it renders is not, and the
+    // tokenizer has distinct pieces for a run of 11 newlines or 29
+    // spaces. Asserting on those demands rows a rendered prompt never
+    // uses — the second version of this check failed 40 of 43 on
+    // exactly that. Runs collapse to at most a blank line and a single
+    // space, which is what a rendered turn actually contains.
+    let mut collapsed = String::with_capacity(out.len());
+    let mut newlines = 0usize;
+    let mut spaces = 0usize;
+    for ch in out.chars() {
+        match ch {
+            '\n' => {
+                spaces = 0;
+                newlines += 1;
+                if newlines <= 2 {
+                    collapsed.push(ch);
+                }
+            }
+            ' ' | '\t' => {
+                newlines = 0;
+                spaces += 1;
+                if spaces == 1 {
+                    collapsed.push(' ');
+                }
+            }
+            _ => {
+                newlines = 0;
+                spaces = 0;
+                collapsed.push(ch);
+            }
+        }
+    }
+    collapsed
+}
+
+/// Assert that the rows a serving prompt format needs are present.
+///
+/// This encodes a bug rather than a theory. The first corpus keep-set
+/// built for this compiler tokenized line by line, which throws newline
+/// characters away — it kept `<|turn>` and `<turn|>` faithfully and
+/// dropped token 107, `"\n"`. A chat template is mostly newlines, so
+/// that slice's own prompt format had no rows, and nothing about its
+/// size would have revealed it. A keep-set therefore ships with a
+/// coverage assertion, not just a count.
+fn coverage_checks(dir: &Path, kept: &BTreeSet<u32>) -> Result<Vec<CoverageCheck>, VindexError> {
+    let tokenizer = match crate::format::load::load_vindex_tokenizer(dir) {
+        Ok(t) => t,
+        // No tokenizer to check against: say so rather than claiming a pass.
+        Err(_) => {
+            return Ok(vec![CoverageCheck {
+                name: "tokenizer".into(),
+                severity: "required".into(),
+                asserts: "the vindex carries a tokenizer to check the keep-set against".into(),
+                required: 1,
+                present: 0,
+                missing: Vec::new(),
+                passed: false,
+            }])
+        }
+    };
+    let mut checks = Vec::new();
+
+    let special_ids: BTreeSet<u32> = tokenizer
+        .get_added_tokens_decoder()
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
+    let missing: Vec<u32> = special_ids.difference(kept).copied().collect();
+    checks.push(CoverageCheck {
+        name: "added_and_special_tokens".into(),
+        severity: "required".into(),
+        asserts: "every added/special token — the turn and tool markers among them —                   still has a per-layer row"
+            .into(),
+        required: special_ids.len(),
+        present: special_ids.len() - missing.len(),
+        passed: missing.is_empty(),
+        missing,
+    });
+
+    // What the chat template is literally made of, with its jinja
+    // stripped. Tokenizing the raw template instead asserts on `{%`,
+    // `endfor` and variable names a prompt never carries — the first
+    // version of this check did exactly that and reported 24/389 on a
+    // slice that served correctly, which is a broken check, not a broken
+    // artifact. The literal text is the part that reaches the model:
+    // the turn markers, the role words, and the newlines between them.
+    let template_path = dir.join(CHAT_TEMPLATE_JINJA);
+    if let Ok(template) = std::fs::read_to_string(&template_path) {
+        let literals = strip_jinja(&template);
+        if let Ok(enc) = tokenizer.encode(literals.as_str(), false) {
+            let ids: BTreeSet<u32> = enc.get_ids().iter().copied().collect();
+
+            // Required: the whitespace the template is assembled from.
+            // This is the bug that motivated the whole check — a
+            // keep-set held `<|turn>` and `<turn|>` but not `"\n"`, so
+            // the slice's own prompt format had no rows.
+            let ws: BTreeSet<u32> = ids
+                .iter()
+                .copied()
+                .filter(|id| {
+                    tokenizer
+                        .id_to_token(*id)
+                        .is_some_and(|t| !t.is_empty() && t.chars().all(|c| c.is_whitespace()))
+                })
+                .collect();
+            let missing: Vec<u32> = ws.difference(kept).copied().collect();
+            checks.push(CoverageCheck {
+                name: "chat_template_whitespace".into(),
+                severity: "required".into(),
+                asserts: "every whitespace piece the vindex's own chat_template.jinja \
+                          renders — the newlines a turn is built from — still has a row"
+                    .into(),
+                required: ws.len(),
+                present: ws.len() - missing.len(),
+                passed: missing.is_empty(),
+                missing,
+            });
+
+            // Informational: the rest of the template's literal text.
+            // A template's tool-calling branch carries JSON scaffolding
+            // (`properties`, `required`, `enum`) that a slice which
+            // never calls tools is entitled to drop, so a miss here is
+            // something to read, not something to fail on.
+            let missing: Vec<u32> = ids.difference(kept).copied().collect();
+            let present = ids.len() - missing.len();
+            checks.push(CoverageCheck {
+                name: "chat_template_literals".into(),
+                severity: "informational".into(),
+                asserts: "how much of the literal text of chat_template.jinja still has \
+                          rows. Optional branches — tool calling and its JSON \
+                          scaffolding — are legitimately absent from a focused slice, \
+                          so read the missing list rather than treating this as a gate"
+                    .into(),
+                required: ids.len(),
+                present,
+                passed: missing.is_empty(),
+                missing,
+            });
+        }
+    }
+
+    Ok(checks)
+}
+
+/// Build the receipt for a completed trim.
+#[allow(clippy::too_many_arguments)]
+fn build_receipt(
+    src: &Path,
+    dst: &Path,
+    kept: &BTreeSet<u32>,
+    report: &TrimReport,
+    opts: &TrimOptions,
+) -> Result<PruningReceipt, VindexError> {
+    use sha2::{Digest, Sha256};
+    use std::fmt::Write as _;
+
+    let mut ids_text = String::new();
+    for id in kept {
+        let _ = writeln!(ids_text, "{id}");
+    }
+    let keep_sha = format!("{:x}", Sha256::digest(ids_text.as_bytes()));
+
+    let sha = |dir: &Path, name: &str| -> Option<String> {
+        crate::format::checksums::sha256_file(&dir.join(name)).ok()
+    };
+
+    let method = match (&opts.keep, &opts.keep_origin) {
+        (_, Some(_)) => "corpus",
+        (KeepSet::TopN(_), None) => "top_n",
+        (KeepSet::Ids(_), None) => "file",
+    };
+
+    let checks = coverage_checks(src, kept)?;
+    let all_passed = checks
+        .iter()
+        .filter(|c| c.severity == "required")
+        .all(|c| c.passed);
+
+    let source_index: serde_json::Value = std::fs::read(src.join(INDEX_JSON))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or(serde_json::Value::Null);
+
+    Ok(PruningReceipt {
+        receipt_version: PRUNING_RECEIPT_VERSION.into(),
+        created_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs().to_string())
+            .unwrap_or_default(),
+        tool: serde_json::json!({
+            "name": "larql trim",
+            "crate_version": env!("CARGO_PKG_VERSION"),
+        }),
+        source: serde_json::json!({
+            "directory": src.file_name().map(|n| n.to_string_lossy().to_string()),
+            "model": source_index.get("model"),
+            "family": source_index.get("family"),
+            "num_layers": source_index.get("num_layers"),
+            "vocab_size": source_index.get("vocab_size"),
+            "ple_weights_sha256": sha(src, PLE_WEIGHTS_BIN),
+            "tokenizer_sha256": sha(src, TOKENIZER_JSON),
+        }),
+        output: serde_json::json!({
+            "directory": dst.file_name().map(|n| n.to_string_lossy().to_string()),
+            "ple_weights_sha256": sha(dst, PLE_WEIGHTS_BIN),
+            "weight_manifest_sha256": sha(dst, WEIGHT_MANIFEST_JSON),
+            "reproduce": "rerun `larql trim` with the same source and keep-set;                           these digests must match",
+        }),
+        keep_set: KeepSetProvenance {
+            method: method.into(),
+            total_ids: kept.len(),
+            sha256: keep_sha,
+            corpus_sha256: opts.corpus_sha256.clone(),
+            tokenizer_sha256: sha(src, TOKENIZER_JSON),
+            from_corpus: opts.keep_origin.as_ref().map(|o| o.from_corpus),
+            specials: opts.keep_origin.as_ref().map(|o| o.specials),
+            byte_fallback: opts.keep_origin.as_ref().map(|o| o.byte_fallback),
+        },
+        removed: serde_json::json!({
+            "vocab_rows_total": report.vocab_total,
+            "vocab_rows_kept": report.vocab_kept,
+            "vocab_rows_dropped": report.vocab_total.saturating_sub(report.vocab_kept),
+            "ple_bytes_before": report.ple_bytes_before,
+            "ple_bytes_after": report.ple_bytes_after,
+            "walk_index_dropped": report.walk_index_dropped,
+            "walk_index_bytes": report.walk_index_bytes,
+            "total_bytes_saved": report.bytes_saved(),
+        }),
+        coverage: serde_json::json!({
+            "passed": all_passed,
+            "scope": "structural only — these checks say the rows a prompt format needs                       are present, never that the model still answers correctly",
+            "checks": checks,
+        }),
+        behavior: match &opts.probe_results {
+            Some(results) => serde_json::json!({
+                "status": "attached",
+                "note": "probe results supplied by the caller; this compiler did not                          run them and does not vouch for them",
+                "results": results,
+            }),
+            None => serde_json::json!({
+                "status": "not_verified",
+                "note": "no probes were run against this artifact. Removal and coverage                          are recorded above; whether the model still answers is a                          separate measurement, and this receipt does not claim it.",
+            }),
+        },
+    })
 }
 
 fn copy_dir(from: &Path, to: &Path, report: &mut TrimReport) -> Result<(), VindexError> {
@@ -549,6 +955,7 @@ mod tests {
             &TrimOptions {
                 keep: KeepSet::Ids(keep),
                 drop_walk_index: false,
+                ..TrimOptions::bare()
             },
         )
         .unwrap();
@@ -593,6 +1000,7 @@ mod tests {
             &TrimOptions {
                 keep: KeepSet::Ids([1u32, 5, 6].into_iter().collect()),
                 drop_walk_index: false,
+                ..TrimOptions::bare()
             },
         )
         .unwrap();
@@ -632,6 +1040,7 @@ mod tests {
             &TrimOptions {
                 keep: KeepSet::TopN(4),
                 drop_walk_index: true,
+                ..TrimOptions::bare()
             },
         )
         .unwrap();
@@ -662,6 +1071,7 @@ mod tests {
             &TrimOptions {
                 keep: KeepSet::Ids(BTreeSet::new()),
                 drop_walk_index: false,
+                ..TrimOptions::bare()
             },
         );
         assert!(err.is_err());
@@ -698,6 +1108,125 @@ mod tests {
     }
 
     #[test]
+    fn a_receipt_records_what_went_and_refuses_to_claim_the_model_still_works() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        write_fixture(&src, 8, 4);
+
+        let report = trim_vindex(
+            &src,
+            &dst,
+            &TrimOptions {
+                keep: KeepSet::Ids([1u32, 5, 6].into_iter().collect()),
+                drop_walk_index: true,
+                write_receipt: true,
+                ..TrimOptions::bare()
+            },
+        )
+        .unwrap();
+
+        let receipt: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dst.join(PRUNING_RECEIPT_JSON)).unwrap())
+                .unwrap();
+        assert_eq!(receipt["receipt_version"], PRUNING_RECEIPT_VERSION);
+        assert_eq!(receipt["removed"]["vocab_rows_kept"], serde_json::json!(3));
+        assert_eq!(
+            receipt["removed"]["vocab_rows_dropped"],
+            serde_json::json!(5)
+        );
+        assert_eq!(
+            receipt["removed"]["walk_index_dropped"],
+            serde_json::json!(true)
+        );
+        assert_eq!(receipt["keep_set"]["total_ids"], serde_json::json!(3));
+        assert!(receipt["keep_set"]["sha256"].as_str().unwrap().len() == 64);
+
+        // The claim this receipt must never make on its own.
+        assert_eq!(
+            receipt["behavior"]["status"],
+            serde_json::json!("not_verified")
+        );
+        assert!(report.coverage_passed.is_some());
+    }
+
+    #[test]
+    fn attached_probe_results_are_marked_as_the_callers_not_the_compilers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        write_fixture(&src, 8, 4);
+
+        trim_vindex(
+            &src,
+            &dst,
+            &TrimOptions {
+                keep: KeepSet::TopN(4),
+                write_receipt: true,
+                probe_results: Some(serde_json::json!({"France": "Paris"})),
+                ..TrimOptions::bare()
+            },
+        )
+        .unwrap();
+
+        let receipt: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dst.join(PRUNING_RECEIPT_JSON)).unwrap())
+                .unwrap();
+        assert_eq!(receipt["behavior"]["status"], serde_json::json!("attached"));
+        assert_eq!(
+            receipt["behavior"]["results"]["France"],
+            serde_json::json!("Paris")
+        );
+        assert!(receipt["behavior"]["note"]
+            .as_str()
+            .unwrap()
+            .contains("did not"));
+    }
+
+    #[test]
+    fn a_vindex_without_a_tokenizer_fails_coverage_rather_than_passing_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        write_fixture(&src, 8, 4);
+        // The fixture's tokenizer.json is "{}" — not loadable as a tokenizer.
+        let report = trim_vindex(
+            &src,
+            &dst,
+            &TrimOptions {
+                keep: KeepSet::TopN(4),
+                write_receipt: true,
+                ..TrimOptions::bare()
+            },
+        )
+        .unwrap();
+        assert_eq!(report.coverage_passed, Some(false));
+        let receipt: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dst.join(PRUNING_RECEIPT_JSON)).unwrap())
+                .unwrap();
+        assert_eq!(receipt["coverage"]["passed"], serde_json::json!(false));
+    }
+
+    #[test]
+    fn no_receipt_means_coverage_is_unknown_not_passed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        write_fixture(&src, 8, 4);
+        let report = trim_vindex(
+            &src,
+            &dst,
+            &TrimOptions {
+                keep: KeepSet::TopN(4),
+                ..TrimOptions::bare()
+            },
+        )
+        .unwrap();
+        assert_eq!(report.coverage_passed, None);
+        assert!(!dst.join(PRUNING_RECEIPT_JSON).exists());
+    }
+
+    #[test]
     fn ids_beyond_the_table_are_ignored_not_fatal() {
         let tmp = tempfile::tempdir().unwrap();
         let src = tmp.path().join("src");
@@ -710,6 +1239,7 @@ mod tests {
             &TrimOptions {
                 keep: KeepSet::Ids([2u32, 99, 1000].into_iter().collect()),
                 drop_walk_index: false,
+                ..TrimOptions::bare()
             },
         )
         .unwrap();
