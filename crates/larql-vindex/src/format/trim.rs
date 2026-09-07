@@ -287,6 +287,9 @@ pub struct TrimReport {
     /// Whether every coverage check passed. `None` when no receipt was
     /// written, so "not checked" never reads as "passed".
     pub coverage_passed: Option<bool>,
+    /// The trimmed artifact's own vindex id. `None` when the source had
+    /// no publish manifest to re-identify.
+    pub new_vindex_sha256: Option<String>,
 }
 
 impl TrimReport {
@@ -404,6 +407,7 @@ pub fn trim_vindex(src: &Path, dst: &Path, opts: &TrimOptions) -> Result<TrimRep
         linked_files: 0,
         copied_files: 0,
         coverage_passed: None,
+        new_vindex_sha256: None,
     };
     let dropped_files: &[&str] = if opts.drop_walk_index {
         &[PLE_WEIGHTS_BIN, DOWN_FEATURES_BIN, DOWN_META_BIN]
@@ -530,7 +534,13 @@ pub fn trim_vindex(src: &Path, dst: &Path, opts: &TrimOptions) -> Result<TrimRep
         serde_json::to_vec_pretty(&index).map_err(|e| VindexError::Parse(e.to_string()))?,
     )?;
 
-    // ── 5. the receipt ──
+    // ── 5. identity ──
+    // Before the receipt, so the receipt records the artifact's own id.
+    let kept_set_for_id: BTreeSet<u32> = kept.iter().copied().collect();
+    let keep_sha = keep_set_digest(&kept_set_for_id);
+    report.new_vindex_sha256 = rewrite_manifest(src, dst, &keep_sha, opts)?.map(|(sha, _)| sha);
+
+    // ── 6. the receipt ──
     if opts.write_receipt {
         let kept_set: BTreeSet<u32> = kept.iter().copied().collect();
         let receipt = build_receipt(src, dst, &kept_set, &report, opts)?;
@@ -553,6 +563,11 @@ pub fn trim_vindex(src: &Path, dst: &Path, opts: &TrimOptions) -> Result<TrimRep
 /// Chat templates are built out of newlines and turn markers; this is
 /// the file they live in.
 const CHAT_TEMPLATE_JINJA: &str = "chat_template.jinja";
+
+/// The publish manifest — vindex identity, not the weight manifest.
+/// `filenames.rs` has no constant for it (it is written by the publish
+/// path rather than the format writers), so it is named here.
+const MANIFEST_JSON: &str = "manifest.json";
 
 /// Remove jinja control and expression blocks, leaving the literal text
 /// a template emits. Deliberately crude: it is a coverage heuristic, and
@@ -738,14 +753,7 @@ fn build_receipt(
     report: &TrimReport,
     opts: &TrimOptions,
 ) -> Result<PruningReceipt, VindexError> {
-    use sha2::{Digest, Sha256};
-    use std::fmt::Write as _;
-
-    let mut ids_text = String::new();
-    for id in kept {
-        let _ = writeln!(ids_text, "{id}");
-    }
-    let keep_sha = format!("{:x}", Sha256::digest(ids_text.as_bytes()));
+    let keep_sha = keep_set_digest(kept);
 
     let sha = |dir: &Path, name: &str| -> Option<String> {
         crate::format::checksums::sha256_file(&dir.join(name)).ok()
@@ -830,6 +838,118 @@ fn build_receipt(
             }),
         },
     })
+}
+
+/// SHA-256 over the sorted keep-set, newline-separated: the keep-set's
+/// identity, independent of how it was written down. Shared by the
+/// receipt and the artifact id so the two can never disagree.
+fn keep_set_digest(kept: &BTreeSet<u32>) -> String {
+    use sha2::{Digest, Sha256};
+    use std::fmt::Write as _;
+    let mut text = String::new();
+    for id in kept {
+        let _ = writeln!(text, "{id}");
+    }
+    format!("{:x}", Sha256::digest(text.as_bytes()))
+}
+
+/// Give the trimmed artifact its OWN identity.
+///
+/// `manifest.json` carries `vindexSha256` / `shortId`, and Divinci gates
+/// patch compatibility on them (the served-model == vindex eligibility
+/// rule). A trim that hard-links the source manifest therefore ships an
+/// artifact claiming to BE the vindex it was cut from — so a patch built
+/// against the full vindex reads as compatible with a slice that no
+/// longer has the rows it addresses, and Model Edits would apply it
+/// silently. Trimming changes what the model answers, so it has to
+/// change the identity too.
+///
+/// The new sha is derived, not random: sha256 over the source sha, the
+/// keep-set digest and the walk-index flag. Two trims with the same
+/// inputs produce the same id, which is what makes the receipt's
+/// "rerun and compare" claim hold for the manifest as well as the blob.
+fn rewrite_manifest(
+    src: &Path,
+    dst: &Path,
+    keep_sha: &str,
+    opts: &TrimOptions,
+) -> Result<Option<(String, String)>, VindexError> {
+    use sha2::{Digest, Sha256};
+
+    let raw = match std::fs::read(src.join(MANIFEST_JSON)) {
+        Ok(r) => r,
+        // Not every vindex carries one; nothing to re-identify.
+        Err(_) => return Ok(None),
+    };
+    let mut manifest: serde_json::Value = serde_json::from_slice(&raw)
+        .map_err(|e| VindexError::Parse(format!("{MANIFEST_JSON}: {e}")))?;
+    let Some(obj) = manifest.as_object_mut() else {
+        return Ok(None);
+    };
+
+    let source_sha = obj
+        .get("vindexSha256")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let source_short = obj
+        .get("shortId")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+
+    let mut hasher = Sha256::new();
+    hasher.update(source_sha.as_bytes());
+    hasher.update(b"\0keep=");
+    hasher.update(keep_sha.as_bytes());
+    hasher.update(b"\0walk_index_dropped=");
+    hasher.update(if opts.drop_walk_index { b"1" } else { b"0" });
+    let new_sha = format!("{:x}", hasher.finalize());
+    let new_short = new_sha[..8].to_string();
+
+    // Re-checksum what actually landed: ple_weights.bin was rewritten and
+    // the walk index may be gone, so the inherited map is wrong on both.
+    let mut total: u64 = 0;
+    if let Some(files) = obj.get_mut("files").and_then(|f| f.as_object_mut()) {
+        let names: Vec<String> = files.keys().cloned().collect();
+        for name in names {
+            let path = dst.join(&name);
+            if !path.exists() {
+                files.remove(&name);
+                continue;
+            }
+            if let Ok(sum) = crate::format::checksums::sha256_file(&path) {
+                files.insert(name.clone(), serde_json::json!(sum));
+            }
+            total += std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        }
+    }
+
+    obj.insert("vindexSha256".into(), serde_json::json!(new_sha));
+    obj.insert("shortId".into(), serde_json::json!(new_short));
+    if total > 0 {
+        obj.insert("totalBytes".into(), serde_json::json!(total));
+    }
+    obj.insert(
+        "derivedFrom".into(),
+        serde_json::json!({
+            "vindexSha256": source_sha,
+            "shortId": source_short,
+            "how": "larql trim — per-layer embedding vocabulary rows dropped",
+            "keep_set_sha256": keep_sha,
+            "walk_index_dropped": opts.drop_walk_index,
+        }),
+    );
+    // The copy loop hard-linked this file, so it shares an inode with the
+    // SOURCE manifest — writing through it would rewrite the identity of
+    // the vindex we were cut from. Break the link first.
+    let out = dst.join(MANIFEST_JSON);
+    let _ = std::fs::remove_file(&out);
+    std::fs::write(
+        &out,
+        serde_json::to_vec_pretty(&manifest).map_err(|e| VindexError::Parse(e.to_string()))?,
+    )?;
+    Ok(Some((new_sha, new_short)))
 }
 
 fn copy_dir(from: &Path, to: &Path, report: &mut TrimReport) -> Result<(), VindexError> {
@@ -934,6 +1054,21 @@ mod tests {
         std::fs::write(dir.join(DOWN_FEATURES_BIN), vec![3u8; 32]).unwrap();
         std::fs::write(dir.join(DOWN_META_BIN), vec![4u8; 16]).unwrap();
         std::fs::write(dir.join(TOKENIZER_JSON), b"{}").unwrap();
+        std::fs::write(
+            dir.join("manifest.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "vindexSha256": "a".repeat(64),
+                "shortId": "aaaaaaaa",
+                "totalBytes": 999,
+                "files": {
+                    PLE_WEIGHTS_BIN: "stale",
+                    DOWN_FEATURES_BIN: "stale",
+                    TOKENIZER_JSON: "stale",
+                },
+            }))
+            .unwrap(),
+        )
+        .unwrap();
     }
 
     fn read_entries(dir: &Path) -> Vec<WeightEntry> {
@@ -1224,6 +1359,108 @@ mod tests {
         .unwrap();
         assert_eq!(report.coverage_passed, None);
         assert!(!dst.join(PRUNING_RECEIPT_JSON).exists());
+    }
+
+    /// Divinci gates patch compatibility on the manifest's vindex id. A
+    /// trim that inherited it would ship a slice claiming to BE the
+    /// vindex it was cut from, so a patch addressing rows the slice no
+    /// longer has would read as compatible and be applied silently.
+    #[test]
+    fn a_trimmed_artifact_gets_its_own_identity_and_fresh_checksums() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        write_fixture(&src, 8, 4);
+
+        let report = trim_vindex(
+            &src,
+            &dst,
+            &TrimOptions {
+                keep: KeepSet::Ids([1u32, 5, 6].into_iter().collect()),
+                drop_walk_index: true,
+                ..TrimOptions::bare()
+            },
+        )
+        .unwrap();
+
+        let m: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dst.join("manifest.json")).unwrap()).unwrap();
+        let new_sha = m["vindexSha256"].as_str().unwrap();
+        assert_ne!(new_sha, "a".repeat(64), "identity must not be inherited");
+        assert_eq!(report.new_vindex_sha256.as_deref(), Some(new_sha));
+        assert_eq!(m["shortId"].as_str().unwrap(), &new_sha[..8]);
+        assert_eq!(m["derivedFrom"]["shortId"], serde_json::json!("aaaaaaaa"));
+        assert_eq!(
+            m["derivedFrom"]["walk_index_dropped"],
+            serde_json::json!(true)
+        );
+
+        // Checksums are re-derived, and a dropped file leaves the map.
+        let files = m["files"].as_object().unwrap();
+        assert!(
+            !files.contains_key(DOWN_FEATURES_BIN),
+            "dropped file still listed"
+        );
+        assert_ne!(files[PLE_WEIGHTS_BIN], serde_json::json!("stale"));
+        assert_ne!(files[TOKENIZER_JSON], serde_json::json!("stale"));
+    }
+
+    /// The id is derived, not random: the receipt promises that rerunning
+    /// a trim reproduces the artifact, and that has to cover the manifest.
+    #[test]
+    fn the_same_inputs_produce_the_same_identity() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        write_fixture(&src, 8, 4);
+        let run = |dst: &Path| {
+            trim_vindex(
+                src.as_path(),
+                dst,
+                &TrimOptions {
+                    keep: KeepSet::TopN(4),
+                    ..TrimOptions::bare()
+                },
+            )
+            .unwrap()
+            .new_vindex_sha256
+        };
+        let first = run(&tmp.path().join("a"));
+        let second = run(&tmp.path().join("b"));
+        assert_eq!(first, second);
+        // The source manifest must be untouched: the copy loop hard-links
+        // it, so a careless write would rewrite the identity of the vindex
+        // being trimmed FROM.
+        let src_manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(src.join("manifest.json")).unwrap()).unwrap();
+        assert_eq!(
+            src_manifest["vindexSha256"],
+            serde_json::json!("a".repeat(64))
+        );
+        assert!(src_manifest.get("derivedFrom").is_none());
+    }
+
+    /// ...and a different keep-set is a different artifact.
+    #[test]
+    fn a_different_keep_set_is_a_different_artifact() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        write_fixture(&src, 8, 4);
+        let run = |dst: &Path, keep: KeepSet| {
+            trim_vindex(
+                src.as_path(),
+                dst,
+                &TrimOptions {
+                    keep,
+                    ..TrimOptions::bare()
+                },
+            )
+            .unwrap()
+            .new_vindex_sha256
+        };
+        assert_ne!(
+            run(&tmp.path().join("a"), KeepSet::TopN(4)),
+            run(&tmp.path().join("b"), KeepSet::TopN(5))
+        );
     }
 
     #[test]
