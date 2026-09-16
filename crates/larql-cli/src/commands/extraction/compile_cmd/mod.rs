@@ -11,8 +11,29 @@
 //!   compile command, K edges. Gives the "variable answer per prompt"
 //!   demo when each entry's answer comes from a bounded-compute kernel run
 //!   at menu-generation time.
-//! - **Patch** (`--vindex`): replays Insert ops from .vlp patch files into
-//!   the model's FFN slots. Vindex-driven; many edges per run.
+//! - **Patch** (`--vindex`): replays .vlp patch files into the model's FFN
+//!   slots. `insert` installs an edge; `delete` tombstones the slot (zeroes
+//!   gate row, up row, down column — the weight-level twin of the served
+//!   overlay's tombstone, so the checkpoint behaves as the overlay does in
+//!   any engine). Vindex-driven; many edges per run.
+//!
+//! ## The compiled checkpoint must carry the whole patch set, or refuse
+//!
+//! Until 2026-09-15 patch mode matched `PatchOp::Insert` and fell through
+//! every other op with a bare `continue` — no message — then printed
+//! "Compiling patches into weights..." and wrote the file. A patch set of
+//! only DELETE ops therefore compiled to a checkpoint byte-identical to the
+//! base and exited 0. That checkpoint is the artifact a third party is
+//! handed to test an erasure independently, so it was the unmodified model
+//! presented as the erased one.
+//!
+//! The rule now: every op either lands in the weights or fails the run,
+//! **before** anything is written. `insert_knn` / `delete_knn` are a
+//! post-logits mechanism with no FFN-weight expression and are refused by
+//! name; `update` is refused until it has a compile path. An `insert` the
+//! compiler cannot place (no gate vector, target out of vocab) fails too,
+//! unless `--allow-partial` is passed — and then the summary says how many
+//! ops the checkpoint does NOT carry.
 //!
 //! The install primitive in [`edge::install_edge`] mirrors the convention
 //! described in `~/chris-source/chris-experiments/foundations/07_wasm_compute/WASM_GATE_ARCHITECTURE.md` §3.1.2.
@@ -104,6 +125,15 @@ pub struct CompileArgs {
     /// FFN slot to install the compiled edge at (default: 9000).
     #[arg(long, default_value = "9000")]
     pub slot: usize,
+
+    /// Patch mode only. Write the checkpoint even if some `insert` ops
+    /// could not be placed (no gate vector, target token out of vocab).
+    /// Off by default: a checkpoint that carries fewer edits than its
+    /// patch set is a misrepresentation of what was compiled, and the
+    /// default refuses to produce one. Ops the compiler has NO path for
+    /// (`insert_knn`, `delete_knn`, `update`) are refused regardless.
+    #[arg(long, default_value = "false")]
+    pub allow_partial: bool,
 }
 
 pub fn run(args: CompileArgs) -> Result<(), Box<dyn std::error::Error>> {
