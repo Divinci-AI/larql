@@ -42,6 +42,7 @@ use std::path::PathBuf;
 
 use clap::Args;
 
+mod byte_patch;
 mod chat;
 mod detect;
 mod edge;
@@ -125,6 +126,22 @@ pub struct CompileArgs {
     /// FFN slot to install the compiled edge at (default: 9000).
     #[arg(long, default_value = "9000")]
     pub slot: usize,
+
+    /// Write the compiled checkpoint as a BYTE-PATCHED COPY of the base file instead of
+    /// re-serialising a standalone text-only model.
+    ///
+    /// The default writer produces an artifact to SERVE: multimodal towers dropped, config
+    /// rewritten to a text architecture, every tensor re-serialised from the in-memory f32
+    /// representation. It shares no tensor names with its base, so nothing about it can be
+    /// compared byte for byte with the checkpoint it came from.
+    ///
+    /// This produces an artifact to AUDIT: the base file with only the edited slot's gate row,
+    /// up row and down column overwritten. Header, tensor set, names, dtypes and every other
+    /// byte unchanged, so the compiled checkpoint is the base plus a named, bounded, reversible
+    /// difference — which is what lets a third party verify a later deletion by recomputing one
+    /// hash instead of trusting the tool that performed it.
+    #[arg(long, default_value = "false")]
+    pub byte_patch: bool,
 
     /// Patch mode only. Write the checkpoint even if some `insert` ops
     /// could not be placed (no gate vector, target token out of vocab).

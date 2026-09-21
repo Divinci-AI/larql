@@ -164,8 +164,54 @@ pub fn run(args: CompileArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     eprintln!("\nSaving compiled model...");
     std::fs::create_dir_all(&args.output)?;
-    let merged = merge_for_save(&weights, modified);
     let output_file = args.output.join("model.safetensors");
+
+    if args.byte_patch {
+        let base_file = args.base.join("model.safetensors");
+        if !base_file.exists() {
+            return Err(format!(
+                "--byte-patch needs a single-file base checkpoint; {} has no model.safetensors. \
+                 A sharded base is not handled yet, and patching one shard while re-serialising \
+                 the rest would be worse than refusing.",
+                args.base.display()
+            )
+            .into());
+        }
+        let edit = super::byte_patch::SlotEdit {
+            layer: args.layer,
+            slot: args.slot,
+            gate: modified[&gate_key].row(args.slot).to_vec(),
+            up: modified[&up_key].row(args.slot).to_vec(),
+            down: modified[&down_key].column(args.slot).to_vec(),
+        };
+        let receipt = super::byte_patch::write_byte_patched(
+            &base_file,
+            &output_file,
+            &[edit],
+            (&gate_pattern, &up_pattern, &down_pattern),
+        )?;
+        super::byte_patch::copy_sidecars_verbatim(&args.base, &args.output)?;
+        eprintln!(
+            "  byte-patched: {} span(s), {} byte(s) rewritten",
+            receipt.spans, receipt.bytes_written
+        );
+        eprintln!("  base sha256:     {}", receipt.sha256_base);
+        eprintln!("  compiled sha256: {}", receipt.sha256_out);
+        // report the slots the WRITER patched, not the ones the caller asked for: if those
+        // ever diverge, the provenance line should say what actually happened to the file
+        eprintln!(
+            "  differs from its base only inside {}",
+            receipt
+                .slots
+                .iter()
+                .map(|(l, s)| format!("L{l} slot {s}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        return Ok(());
+    }
+
+    let merged = merge_for_save(&weights, modified);
     write_safetensors(&merged.tensors, &merged.vectors, &output_file)?;
 
     let file_size = std::fs::metadata(&output_file)?.len();
