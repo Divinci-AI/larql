@@ -77,12 +77,46 @@ fn sha256_file(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
     Ok(format!("{:x}", h.finalize()))
 }
 
+/// Resolve an in-memory tensor name against the names the FILE actually uses.
+///
+/// `larql_models::loading` strips a container prefix (`model.language_model.` on Gemma-4), so
+/// `detect_ffn_pattern` hands back `layers.24.mlp.gate_proj.weight` while the header holds
+/// `model.language_model.layers.24.mlp.gate_proj.weight`. That prefix difference is the same one
+/// that gives the re-serialised writer zero name overlap with its base, and it reached here as
+/// "tensor ... not in the base checkpoint" on the first real-checkpoint run (2026-09-20).
+///
+/// An exact hit wins. Otherwise exactly one header key must END WITH the name — ambiguity is an
+/// error, not a guess, because patching the wrong tensor is worse than refusing to patch.
+fn resolve_name(header: &serde_json::Value, name: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let obj = header
+        .as_object()
+        .ok_or("safetensors header is not an object")?;
+    if obj.contains_key(name) {
+        return Ok(name.to_string());
+    }
+    let suffix = format!(".{name}");
+    let hits: Vec<&String> = obj
+        .keys()
+        .filter(|k| k.ends_with(&suffix) && *k != "__metadata__")
+        .collect();
+    match hits.len() {
+        1 => Ok(hits[0].clone()),
+        0 => Err(format!("tensor {name} not in the base checkpoint, under that name or any prefix").into()),
+        n => Err(format!(
+            "tensor {name} matches {n} names in the base checkpoint ({:?}); refusing to guess",
+            hits.iter().take(3).collect::<Vec<_>>()
+        )
+        .into()),
+    }
+}
+
 /// `[rows, cols]` and the byte offset of a named BF16 tensor's data.
 fn tensor_meta(
     header: &serde_json::Value,
     data_start: u64,
     name: &str,
 ) -> Result<(usize, usize, u64), Box<dyn std::error::Error>> {
+    let name = &resolve_name(header, name)?;
     let meta = header
         .get(name)
         .ok_or_else(|| format!("tensor {name} not in the base checkpoint"))?;
@@ -363,6 +397,40 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The case a synthetic fixture with file-level names cannot produce, and the one that a
+    /// real checkpoint hit immediately: the loader strips `model.language_model.` so the caller
+    /// hands us a bare name while the header holds the prefixed one.
+    #[test]
+    fn a_bare_in_memory_name_resolves_to_the_prefixed_name_in_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("base.safetensors");
+        let out = dir.path().join("out.safetensors");
+        write_base(&base);
+        let bare = (
+            "layers.{}.mlp.gate_proj.weight",
+            "layers.{}.mlp.up_proj.weight",
+            "layers.{}.mlp.down_proj.weight",
+        );
+        let r = write_byte_patched(&base, &out, &[edit(2)], bare).unwrap();
+        assert_eq!(r.spans, 2 + HIDDEN, "gate row + up row + one byte per down row");
+        assert_ne!(r.sha256_base, r.sha256_out);
+    }
+
+    #[test]
+    fn an_ambiguous_suffix_is_refused_rather_than_guessed() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("base.safetensors");
+        write_base(&base);
+        let (h, _) = read_header(&base).unwrap();
+        // two keys ending in the same suffix: patching either would be a guess
+        let mut obj = h.as_object().unwrap().clone();
+        let v = obj["model.language_model.layers.0.mlp.gate_proj.weight"].clone();
+        obj.insert("vision_tower.layers.0.mlp.gate_proj.weight".into(), v);
+        let doubled = serde_json::Value::Object(obj);
+        let err = resolve_name(&doubled, "layers.0.mlp.gate_proj.weight").unwrap_err();
+        assert!(err.to_string().contains("refusing to guess"), "{err}");
     }
 
     #[test]
