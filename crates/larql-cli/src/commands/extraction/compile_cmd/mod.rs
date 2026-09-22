@@ -44,6 +44,7 @@ use clap::Args;
 
 mod byte_patch;
 mod chat;
+mod constraints;
 mod detect;
 mod edge;
 mod patch;
@@ -126,6 +127,21 @@ pub struct CompileArgs {
     /// FFN slot to install the compiled edge at (default: 9000).
     #[arg(long, default_value = "9000")]
     pub slot: usize,
+
+    /// A control prompt and the answer it must still give AFTER the edge is installed,
+    /// written `"prompt=>expected"`. Repeatable.
+    ///
+    /// `install_edge` writes at whatever magnitude --alpha asks for and nothing downstream used
+    /// to ask what that cost. Measured 2026-09-20 on gemma-4-E2B-it: at alpha 3 the compiled
+    /// checkpoint answers the installed fact AND has forgotten the capital of Italy, and this
+    /// command reported success. Each control is measured before and after the install; if any
+    /// of them changes its top-1 answer, NOTHING IS WRITTEN and the command exits non-zero.
+    ///
+    /// Top-1 rather than a probability threshold on purpose: `forward::predict` is systematically
+    /// peakier than HF's forward pass (see --max-iters), and argmax survives that calibration gap
+    /// where a probability bar does not.
+    #[arg(long = "control", value_name = "PROMPT=>ANSWER")]
+    pub controls: Vec<String>,
 
     /// Write the compiled checkpoint as a BYTE-PATCHED COPY of the base file instead of
     /// re-serialising a standalone text-only model.

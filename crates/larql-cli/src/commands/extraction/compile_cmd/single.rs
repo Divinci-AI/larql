@@ -10,14 +10,53 @@ use std::collections::HashMap;
 
 use ndarray::ArcArray2;
 
+use super::constraints::{
+    collateral_provenance, judge, judge_baselines, parse_control, BalancerOutcome,
+    ControlBaseline, ControlResult, Verdict,
+};
 use super::detect::detect_ffn_pattern;
 use super::edge::install_edge;
 use super::save::{copy_model_config, merge_for_save, write_safetensors};
 use super::CompileArgs;
 
+/// Top-1 continuation for a prompt, wrapped exactly as the trigger prompt was.
+///
+/// A control measured through a different chat wrap than the install is measuring a different
+/// input, so the wrap is threaded through rather than re-decided here.
+fn top1(
+    weights: &larql_models::ModelWeights,
+    tokenizer: &tokenizers::Tokenizer,
+    base: &std::path::Path,
+    prompt: &str,
+    no_chat_template: bool,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let wrapped = if no_chat_template {
+        prompt.to_string()
+    } else {
+        super::chat::render_user_prompt(base, prompt)?
+    };
+    let enc = tokenizer
+        .encode(wrapped.as_str(), true)
+        .map_err(|e| format!("tokenize control: {}", e))?;
+    let pred = larql_inference::forward::predict(weights, tokenizer, enc.get_ids(), 1);
+    Ok(pred
+        .predictions
+        .first()
+        .map(|(t, _)| t.trim().to_string())
+        .unwrap_or_default())
+}
+
 pub fn run(args: CompileArgs) -> Result<(), Box<dyn std::error::Error>> {
     let prompt = args.prompt.as_ref().unwrap();
     let answer = args.answer.as_ref().unwrap();
+
+    // Parse before loading a 10 GB checkpoint: a typo in --control should cost a second, not
+    // the model load plus a forward pass.
+    let control_specs = args
+        .controls
+        .iter()
+        .map(|c| parse_control(c))
+        .collect::<Result<Vec<_>, _>>()?;
 
     eprintln!("LARQL AOT Compiler — single mode");
     eprintln!("  base:   {}", args.base.display());
@@ -103,6 +142,24 @@ pub fn run(args: CompileArgs) -> Result<(), Box<dyn std::error::Error>> {
         modified.insert(key.clone(), original.to_owned().into());
     }
 
+    // ── Control baselines, BEFORE the edge exists ──────────────
+    if !control_specs.is_empty() {
+        eprintln!("\nMeasuring {} control(s) against the base...", control_specs.len());
+    }
+    let mut baselines: Vec<ControlBaseline> = Vec::new();
+    for c in &control_specs {
+        let got = top1(&weights, &tokenizer, &args.base, &c.prompt, args.no_chat_template)?;
+        eprintln!("  {:?} -> {:?}", c.prompt, got);
+        baselines.push(ControlBaseline {
+            prompt: c.prompt.clone(),
+            expected: c.expected.clone(),
+            base_got: got,
+        });
+    }
+    if let Verdict::Refuse(why) = judge_baselines(control_specs.len(), &baselines) {
+        return Err(why.into());
+    }
+
     eprintln!("\nInstalling edge...");
     let stats = install_edge(
         &mut modified,
@@ -128,6 +185,10 @@ pub fn run(args: CompileArgs) -> Result<(), Box<dyn std::error::Error>> {
     );
     const DOWN_SCALE: f32 = 0.85;
     const UP_SCALE: f32 = 1.15;
+    // Disabled and never-converged both fall out of this loop, and used to fall into the same
+    // unconditional write. They are different states: --max-iters 0 makes no claim about the
+    // install, whereas running out of iterations is a claim that failed.
+    let mut balancer = BalancerOutcome::Disabled;
     for iter in 0..args.max_iters {
         // Swap the modified slot tensors into weights for the forward pass
         for key in [&gate_key, &up_key, &down_key] {
@@ -142,12 +203,19 @@ pub fn run(args: CompileArgs) -> Result<(), Box<dyn std::error::Error>> {
             .unwrap_or(0.0);
         eprintln!("  iter {}: prob('{}') = {:.3}", iter, answer, prob);
 
+        balancer = BalancerOutcome::NotConverged {
+            iters: iter + 1,
+            last_prob: prob,
+            floor: args.floor,
+            ceiling: args.ceiling,
+        };
         let scale = if prob > args.ceiling {
             DOWN_SCALE
         } else if prob < args.floor {
             UP_SCALE
         } else {
             eprintln!("  converged");
+            balancer = BalancerOutcome::Converged { prob };
             break;
         };
         let dt = modified.get_mut(&down_key).unwrap();
@@ -161,6 +229,29 @@ pub fn run(args: CompileArgs) -> Result<(), Box<dyn std::error::Error>> {
     for key in [&gate_key, &up_key, &down_key] {
         weights.tensors.insert(key.clone(), modified[key].clone());
     }
+
+    // ── The gate. Everything above measured; this decides. ────
+    let mut results: Vec<ControlResult> = Vec::new();
+    if !control_specs.is_empty() {
+        eprintln!("\nRe-measuring {} control(s) after the install...", control_specs.len());
+    }
+    for b in &baselines {
+        let got = top1(&weights, &tokenizer, &args.base, &b.prompt, args.no_chat_template)?;
+        let intact = got == b.expected;
+        eprintln!("  {:?} -> {:?}{}", b.prompt, got, if intact { "" } else { "   ← CHANGED" });
+        results.push(ControlResult {
+            prompt: b.prompt.clone(),
+            expected: b.expected.clone(),
+            got,
+            intact,
+        });
+    }
+    if let Verdict::Refuse(why) = judge(control_specs.len(), &results, &balancer) {
+        // Refuse BEFORE create_dir_all: a caller who re-runs after a refusal should not find a
+        // half-built output directory that looks like a previous success.
+        return Err(why.into());
+    }
+    eprintln!("\n  {}", collateral_provenance(control_specs.len(), &balancer));
 
     eprintln!("\nSaving compiled model...");
     std::fs::create_dir_all(&args.output)?;
