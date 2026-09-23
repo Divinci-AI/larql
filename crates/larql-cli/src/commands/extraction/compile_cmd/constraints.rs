@@ -10,8 +10,18 @@
 //! `scripts/experiments/surgical-insert.py` has refused in this situation since it was written:
 //! it accepts an alpha only when every installed prompt reaches its probability AND every control
 //! keeps its top-1 AND the neutral paragraph's perplexity ratio stays under a bound, and it exits
-//! non-zero having written nothing when no alpha clears all three. This brings the first two of
-//! those to the shipping compiler.
+//! non-zero having written nothing when no alpha clears all three. This brings all three to the
+//! shipping compiler: controls and the balancer (`judge`), and the fluency bound
+//! (`judge_fluency`, opt-in via `--fluency-text`).
+//!
+//! ## Why the fluency text is scored raw, and why that is sound HERE
+//!
+//! A likelihood measure scored in a format the model is being TRAINED toward moves with format,
+//! not fluency: two optimiser steps took a chat-formatted measure to 0.23x its base (the erasure
+//! programme's §40). A compile trains nothing. It installs one FFN edge, so base and compiled
+//! model are scored on the same text in the same format, and the ratio isolates what the edge did.
+//! Choose a text that is not a memorised passage (the same programme's §38): a famous paragraph
+//! partly measures recall of that paragraph, which is the kind of thing an edge can disturb.
 //!
 //! ## Why top-1 and not a probability threshold
 //!
@@ -209,6 +219,78 @@ pub fn collateral_provenance(requested: usize, balancer: &BalancerOutcome) -> St
     format!("{controls}\n  {bal}")
 }
 
+/// A text's fluency under one model: total negative log-likelihood over its predicted tokens.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Fluency {
+    pub nll: f64,
+    pub tokens: usize,
+}
+
+impl Fluency {
+    pub fn ppl(&self) -> f64 {
+        (self.nll / self.tokens as f64).exp()
+    }
+}
+
+/// exp(mean NLL after - mean NLL before): the per-token perplexity ratio the edge caused.
+pub fn fluency_ratio(before: Fluency, after: Fluency) -> f64 {
+    (after.nll / after.tokens as f64 - before.nll / before.tokens as f64).exp()
+}
+
+/// Refuse a compile whose edge raised the fluency text's perplexity by more than `max_ratio`.
+///
+/// `before`/`after` are `None` only when the measurement could not be made, and a bound that was
+/// requested but not measured REFUSES: "could not check" must never read as "checked and fine".
+pub fn judge_fluency(before: Option<Fluency>, after: Option<Fluency>, max_ratio: f32) -> Verdict {
+    if !(max_ratio >= 1.0) {
+        return Verdict::Refuse(format!(
+            "--max-fluency-ratio {max_ratio} is below 1.0: every edit that changes anything would be refused"
+        ));
+    }
+    let (b, a) = match (before, after) {
+        (Some(b), Some(a)) => (b, a),
+        _ => {
+            return Verdict::Refuse(
+                "a fluency bound was requested but the fluency text could not be measured on both the \
+                 base and the compiled model"
+                    .into(),
+            )
+        }
+    };
+    if b.tokens == 0 || a.tokens != b.tokens {
+        return Verdict::Refuse(format!(
+            "the fluency text was scored over {} token(s) before and {} after; the ratio would compare \
+             different things",
+            b.tokens, a.tokens
+        ));
+    }
+    let ratio = fluency_ratio(b, a);
+    // Compared at f32, the precision the bound was GIVEN in. Widening the bound to f64 turns
+    // `--max-fluency-ratio 1.15` into 1.1499999761…, and a compile landing exactly on 1.15 would be
+    // refused on the seventh decimal place — the same float edge M19's verifier had to settle.
+    if !ratio.is_finite() || (ratio as f32) > max_ratio {
+        return Verdict::Refuse(format!(
+            "the edge raised the fluency text's perplexity {ratio:.3}x ({:.3} -> {:.3}), over the bound of \
+             {max_ratio}x. The checkpoint answers the fact by making the model worse at ordinary text, so \
+             nothing was written.",
+            b.ppl(),
+            a.ppl()
+        ));
+    }
+    Verdict::Pass
+}
+
+/// The one line a compile prints about the fluency bound, whether or not one was requested.
+pub fn fluency_provenance(requested: bool, ratio: Option<f64>, max_ratio: f32) -> String {
+    match (requested, ratio) {
+        (false, _) => "fluency: NO bound requested (--fluency-text); this compile's effect on \
+                       ordinary text was not measured"
+            .into(),
+        (true, Some(r)) => format!("fluency: perplexity ratio {r:.4}x, within the bound of {max_ratio}x"),
+        (true, None) => "fluency: requested but not measured".into(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -356,5 +438,62 @@ mod tests {
         let unchecked = collateral_provenance(0, &BalancerOutcome::Disabled);
         assert!(unchecked.contains("NOT PERFORMED"));
         assert!(unchecked.contains("disabled"));
+    }
+
+    // ── fluency (G4c) ─────────────────────────────────────────────────
+
+    fn fl(ppl: f64, tokens: usize) -> Fluency {
+        Fluency { nll: ppl.ln() * tokens as f64, tokens }
+    }
+
+    #[test]
+    fn fluency_within_the_bound_passes() {
+        assert_eq!(judge_fluency(Some(fl(10.0, 100)), Some(fl(11.0, 100)), 1.15), Verdict::Pass);
+    }
+
+    #[test]
+    fn fluency_over_the_bound_refuses_with_the_numbers() {
+        match judge_fluency(Some(fl(10.0, 100)), Some(fl(12.0, 100)), 1.15) {
+            Verdict::Refuse(why) => assert!(why.contains("1.200x"), "{why}"),
+            v => panic!("expected refusal, got {v:?}"),
+        }
+    }
+
+    #[test]
+    fn fluency_exactly_on_the_bound_passes() {
+        assert_eq!(judge_fluency(Some(fl(10.0, 100)), Some(fl(11.5, 100)), 1.15), Verdict::Pass);
+    }
+
+    #[test]
+    fn an_improvement_passes() {
+        assert_eq!(judge_fluency(Some(fl(10.0, 100)), Some(fl(9.0, 100)), 1.15), Verdict::Pass);
+    }
+
+    #[test]
+    fn requested_but_unmeasured_refuses() {
+        assert!(matches!(judge_fluency(None, Some(fl(10.0, 5)), 1.15), Verdict::Refuse(_)));
+        assert!(matches!(judge_fluency(Some(fl(10.0, 5)), None, 1.15), Verdict::Refuse(_)));
+    }
+
+    #[test]
+    fn different_token_counts_refuse() {
+        assert!(matches!(judge_fluency(Some(fl(10.0, 100)), Some(fl(10.0, 99)), 1.15), Verdict::Refuse(_)));
+    }
+
+    #[test]
+    fn a_bound_below_one_refuses() {
+        assert!(matches!(judge_fluency(Some(fl(10.0, 100)), Some(fl(10.0, 100)), 0.9), Verdict::Refuse(_)));
+    }
+
+    #[test]
+    fn a_nan_ratio_refuses() {
+        let nan = Fluency { nll: f64::NAN, tokens: 100 };
+        assert!(matches!(judge_fluency(Some(fl(10.0, 100)), Some(nan), 1.15), Verdict::Refuse(_)));
+    }
+
+    #[test]
+    fn fluency_provenance_says_when_no_bound_was_requested() {
+        assert!(fluency_provenance(false, None, 1.15).contains("NO bound"));
+        assert!(fluency_provenance(true, Some(1.02), 1.15).contains("1.0200x"));
     }
 }

@@ -11,8 +11,8 @@ use std::collections::HashMap;
 use ndarray::ArcArray2;
 
 use super::constraints::{
-    collateral_provenance, judge, judge_baselines, parse_control, BalancerOutcome,
-    ControlBaseline, ControlResult, Verdict,
+    collateral_provenance, fluency_provenance, fluency_ratio, judge, judge_baselines, judge_fluency,
+    parse_control, BalancerOutcome, ControlBaseline, ControlResult, Fluency, Verdict,
 };
 use super::detect::detect_ffn_pattern;
 use super::edge::install_edge;
@@ -23,6 +23,45 @@ use super::CompileArgs;
 ///
 /// A control measured through a different chat wrap than the install is measuring a different
 /// input, so the wrap is threaded through rather than re-decided here.
+/// Total NLL of `text` under `weights`, over every predicted token. One forward pass: the
+/// pre-norm residual at each position goes through `hidden_to_raw_logits`, the same final norm,
+/// lm_head, scaling and softcap `predict` applies at the last position, then log-softmax.
+fn text_fluency(
+    weights: &larql_models::ModelWeights,
+    tokenizer: &tokenizers::Tokenizer,
+    text: &str,
+) -> Result<Fluency, Box<dyn std::error::Error>> {
+    let enc = tokenizer
+        .encode(text, true)
+        .map_err(|e| format!("tokenize fluency text: {}", e))?;
+    ids_fluency(weights, enc.get_ids())
+}
+
+/// `text_fluency` on token ids. Split out so it is testable against `predict` without a tokenizer
+/// round trip.
+fn ids_fluency(
+    weights: &larql_models::ModelWeights,
+    ids: &[u32],
+) -> Result<Fluency, Box<dyn std::error::Error>> {
+    if ids.len() < 2 {
+        return Err("the fluency text tokenizes to fewer than 2 tokens; there is nothing to score".into());
+    }
+    let rf = larql_inference::forward::predict::forward_raw_logits(
+        larql_models::WeightsView::dense(weights),
+        ids,
+        None,
+    );
+    let mut nll = 0f64;
+    for i in 0..ids.len() - 1 {
+        let row = rf.h_pre_norm.slice(ndarray::s![i..i + 1, ..]).to_owned();
+        let logits = larql_inference::forward::predict::hidden_to_raw_logits(weights, &row);
+        let max = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max) as f64;
+        let lse = max + logits.iter().map(|&l| (l as f64 - max).exp()).sum::<f64>().ln();
+        nll += lse - logits[ids[i + 1] as usize] as f64;
+    }
+    Ok(Fluency { nll, tokens: ids.len() - 1 })
+}
+
 fn top1(
     weights: &larql_models::ModelWeights,
     tokenizer: &tokenizers::Tokenizer,
@@ -160,6 +199,20 @@ pub fn run(args: CompileArgs) -> Result<(), Box<dyn std::error::Error>> {
         return Err(why.into());
     }
 
+    // ── Fluency baseline, BEFORE the edge exists ───────────────
+    let fluency_text = match &args.fluency_text {
+        Some(p) => Some(std::fs::read_to_string(p).map_err(|e| format!("read --fluency-text {}: {}", p.display(), e))?),
+        None => None,
+    };
+    let fluency_before = match &fluency_text {
+        Some(t) => {
+            let f = text_fluency(&weights, &tokenizer, t)?;
+            eprintln!("  fluency (base): ppl {:.3} over {} tokens", f.ppl(), f.tokens);
+            Some(f)
+        }
+        None => None,
+    };
+
     eprintln!("\nInstalling edge...");
     let stats = install_edge(
         &mut modified,
@@ -253,6 +306,20 @@ pub fn run(args: CompileArgs) -> Result<(), Box<dyn std::error::Error>> {
     }
     eprintln!("\n  {}", collateral_provenance(control_specs.len(), &balancer));
 
+    // ── The fluency bound, also BEFORE anything is written ─────
+    let mut measured_ratio = None;
+    if let Some(t) = &fluency_text {
+        let after = text_fluency(&weights, &tokenizer, t).ok();
+        if let Verdict::Refuse(why) = judge_fluency(fluency_before, after, args.max_fluency_ratio) {
+            return Err(why.into());
+        }
+        measured_ratio = match (fluency_before, after) {
+            (Some(b), Some(a)) => Some(fluency_ratio(b, a)),
+            _ => None,
+        };
+    }
+    eprintln!("  {}", fluency_provenance(fluency_text.is_some(), measured_ratio, args.max_fluency_ratio));
+
     eprintln!("\nSaving compiled model...");
     std::fs::create_dir_all(&args.output)?;
     let output_file = args.output.join("model.safetensors");
@@ -325,3 +392,59 @@ pub fn run(args: CompileArgs) -> Result<(), Box<dyn std::error::Error>> {
     );
     Ok(())
 }
+
+#[cfg(test)]
+mod fluency_tests {
+    use super::ids_fluency;
+    use larql_inference::test_utils::make_test_tokenizer;
+    use larql_models::test_fixtures::make_synthetic_e2b_like_weights;
+
+    /// The sequence NLL must agree with `predict`, the path every control is judged by, on the
+    /// Gemma-4-E2B-like architecture (per-layer embeddings, shared KV): the NLL `ids_fluency`
+    /// charges the LAST token equals -ln p(last | prefix) from `predict_with_temperature`, and by
+    /// causality that is exactly what appending the token adds to the prefix's NLL.
+    /// E2B-like synthetic weights, with the final norm given VARIED non-unit weights as a trained
+    /// model has. With the fixture's default, RMS-norm is idempotent, so applying the final norm
+    /// twice changes nothing and a double-norm bug is invisible (mutation-tested 2026-09-23).
+    fn e2b_like_with_real_final_norm() -> larql_models::ModelWeights {
+        let mut w = make_synthetic_e2b_like_weights();
+        let key = w.arch.final_norm_key().to_string();
+        let v: Vec<f32> = (0..w.hidden_size).map(|i| 0.3 + 0.17 * (i % 11) as f32).collect();
+        w.vectors.insert(key, v);
+        w
+    }
+
+    #[test]
+    fn last_token_nll_matches_predict_on_an_e2b_like_model() {
+        let weights = e2b_like_with_real_final_norm();
+        let tokenizer = make_test_tokenizer(weights.vocab_size);
+        let prefix: Vec<u32> = vec![3, 7, 1, 12, 5];
+        let last: u32 = 9;
+        let mut full = prefix.clone();
+        full.push(last);
+
+        let with = ids_fluency(&weights, &full).unwrap();
+        let without = ids_fluency(&weights, &prefix).unwrap();
+        assert_eq!(with.tokens, prefix.len());
+        assert_eq!(without.tokens, prefix.len() - 1);
+        let appended = with.nll - without.nll;
+
+        let pred = larql_inference::forward::predict::predict_with_temperature(
+            &weights, &tokenizer, &prefix, weights.vocab_size, 1.0,
+        );
+        let idx = pred.token_ids.iter().position(|&t| t == last).expect("last token decodes");
+        let p = pred.predictions[idx].1;
+        let expected = -p.ln();
+        assert!(
+            (appended - expected).abs() < 1e-3,
+            "appended NLL {appended} disagrees with predict's -ln p = {expected}"
+        );
+    }
+
+    #[test]
+    fn fewer_than_two_tokens_is_an_error_not_a_zero() {
+        let weights = make_synthetic_e2b_like_weights();
+        assert!(ids_fluency(&weights, &[4]).is_err());
+    }
+}
+

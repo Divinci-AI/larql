@@ -143,6 +143,22 @@ pub struct CompileArgs {
     #[arg(long = "control", value_name = "PROMPT=>ANSWER")]
     pub controls: Vec<String>,
 
+    /// A plain-text file whose per-token perplexity the edge must not raise by more than
+    /// --max-fluency-ratio. Measured on the base before the edge exists and again after; over
+    /// the bound, NOTHING IS WRITTEN and the command exits non-zero.
+    ///
+    /// Controls catch an edit that changes an answer. They cannot catch one that keeps every
+    /// answer and makes the model worse at ordinary text. `surgical-insert.py` has always bounded
+    /// that (x1.15 on a neutral paragraph); this brings the same bound to the shipping compiler.
+    /// Use ordinary expository text, not a famous passage: a memorised passage partly measures
+    /// recall of itself. Opt-in, like --control; a compile without it says so in its output.
+    #[arg(long = "fluency-text", value_name = "FILE")]
+    pub fluency_text: Option<PathBuf>,
+
+    /// Largest allowed perplexity ratio (compiled / base) on --fluency-text.
+    #[arg(long = "max-fluency-ratio", default_value = "1.15")]
+    pub max_fluency_ratio: f32,
+
     /// Write the compiled checkpoint as a BYTE-PATCHED COPY of the base file instead of
     /// re-serialising a standalone text-only model.
     ///
