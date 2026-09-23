@@ -190,6 +190,86 @@ pub fn execute(
     Ok(session.execute(&p.statement)?)
 }
 
+/// Options for [`ask`], mirroring `larql ask`'s flags.
+#[derive(Debug, Clone, Default)]
+pub struct AskOptions {
+    /// Vindex to `USE` before running the proposal.
+    pub vindex: Option<String>,
+    /// Run a proposed write. Without it a write is printed and refused.
+    pub yes: bool,
+    /// Print the proposal and stop, even for a read.
+    pub dry_run: bool,
+}
+
+/// The whole `larql ask` command, against any transport and any output.
+///
+/// Lives here rather than in the CLI binary so the command's contract — the
+/// `--yes` gate, `--dry-run`, and every refusal returning an error so the
+/// process exits non-zero — is testable without a network or a built binary.
+pub fn ask(
+    english: &str,
+    opts: &AskOptions,
+    transport: &dyn Transport,
+    out: &mut dyn std::io::Write,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let proposal = match route(english, &RouterContext::default(), transport)? {
+        Outcome::Proposed(p) => p,
+        Outcome::NoMatch { confidence } => {
+            return Err(format!(
+                "no LQL statement serves this request (confidence {confidence:.2})"
+            )
+            .into());
+        }
+        Outcome::Incomplete {
+            kind,
+            template,
+            missing,
+            ..
+        } => {
+            return Err(format!(
+                "`{}` needs {} — not found in the request. Fill it in and run with `larql lql`:\n  {template}",
+                kind.key(),
+                missing.join(", ")
+            )
+            .into());
+        }
+        Outcome::Unparseable { lql, error, .. } => {
+            return Err(format!(
+                "router produced LQL the parser rejects (a larql bug): `{lql}`: {error}"
+            )
+            .into());
+        }
+    };
+    let class = match proposal.access {
+        Access::Read => "read",
+        Access::Session => "session",
+        Access::Write => "WRITE",
+    };
+    writeln!(
+        out,
+        "{}    [{class}, confidence {:.2}]",
+        proposal.lql, proposal.confidence
+    )?;
+    if opts.dry_run {
+        return Ok(());
+    }
+    // Checked on the PARSED statement's access, the same test `execute`
+    // applies, and before any session exists — a refused write never gets as
+    // far as opening the vindex.
+    if catalog::access(&proposal.statement) == Access::Write && !opts.yes {
+        return Err(Box::new(NlError::NeedsConfirmation { lql: proposal.lql }));
+    }
+    let mut session = Session::new();
+    if let Some(path) = &opts.vindex {
+        let use_stmt = crate::parse(&format!("USE \"{}\";", path.replace('"', "")))?;
+        session.execute(&use_stmt)?;
+    }
+    for line in execute(&proposal, &mut session, opts.yes)? {
+        writeln!(out, "{line}")?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -342,6 +422,111 @@ mod tests {
                 Err(NlError::NeedsConfirmation { .. })
             ),
             "a read was held for confirmation"
+        );
+    }
+
+    fn ask_with(answers: Value, english: &str, opts: AskOptions) -> (Result<(), String>, String) {
+        let mut out = Vec::new();
+        let r = ask(english, &opts, &Scripted(answers), &mut out).map_err(|e| e.to_string());
+        (r, String::from_utf8(out).unwrap())
+    }
+
+    /// `larql ask` on a write, without --yes: prints the proposal, marked WRITE,
+    /// and FAILS — so the process exits non-zero and a script cannot mistake
+    /// "printed a DELETE" for "did it".
+    #[test]
+    fn ask_refuses_an_unconfirmed_write_and_says_so() {
+        let (r, out) = ask_with(
+            json!({ "statement": c("delete"), "entity": c("John Coyle") }),
+            "erase John Coyle",
+            AskOptions::default(),
+        );
+        assert!(
+            out.contains(r#"DELETE FROM EDGES WHERE entity = "John Coyle";"#),
+            "{out}"
+        );
+        assert!(out.contains("[WRITE"), "{out}");
+        let err = r.unwrap_err();
+        assert!(err.contains("re-run with confirmation"), "{err}");
+    }
+
+    /// With --yes the gate opens. No vindex is loaded, so the executor itself
+    /// fails — which is the proof: the error is the executor's, not the gate's.
+    #[test]
+    fn ask_with_yes_lets_a_write_through_the_gate() {
+        let (r, _) = ask_with(
+            json!({ "statement": c("delete"), "entity": c("John Coyle") }),
+            "erase John Coyle",
+            AskOptions {
+                yes: true,
+                ..AskOptions::default()
+            },
+        );
+        if let Err(e) = r {
+            assert!(
+                !e.contains("re-run with confirmation"),
+                "--yes was ignored: {e}"
+            );
+        }
+    }
+
+    /// --dry-run prints and stops, for a write as much as a read, and succeeds.
+    #[test]
+    fn ask_dry_run_prints_and_executes_nothing() {
+        let (r, out) = ask_with(
+            json!({ "statement": c("delete"), "entity": c("John Coyle") }),
+            "erase John Coyle",
+            AskOptions {
+                dry_run: true,
+                ..AskOptions::default()
+            },
+        );
+        assert!(r.is_ok(), "{r:?}");
+        assert!(out.contains("DELETE FROM EDGES"), "{out}");
+    }
+
+    /// A read is not held for confirmation (it runs, and fails only because no
+    /// vindex is loaded).
+    #[test]
+    fn ask_runs_a_read_without_yes() {
+        let (r, out) = ask_with(
+            json!({ "statement": c("stats") }),
+            "give me stats",
+            AskOptions::default(),
+        );
+        assert!(out.contains("STATS;") && out.contains("[read"), "{out}");
+        if let Err(e) = r {
+            assert!(
+                !e.contains("re-run with confirmation"),
+                "a read was gated: {e}"
+            );
+        }
+    }
+
+    #[test]
+    fn ask_reports_a_decline_as_an_error() {
+        let (r, out) = ask_with(
+            json!({ "statement": c("none") }),
+            "tell me a joke",
+            AskOptions::default(),
+        );
+        assert!(r
+            .unwrap_err()
+            .contains("no LQL statement serves this request"));
+        assert!(out.is_empty(), "nothing is proposed for a decline: {out}");
+    }
+
+    #[test]
+    fn ask_reports_a_missing_value_with_the_template() {
+        let (r, _) = ask_with(
+            json!({ "statement": c("delete") }),
+            "forget that fact",
+            AskOptions::default(),
+        );
+        let err = r.unwrap_err();
+        assert!(
+            err.contains("needs entity") && err.contains("DELETE FROM EDGES"),
+            "{err}"
         );
     }
 

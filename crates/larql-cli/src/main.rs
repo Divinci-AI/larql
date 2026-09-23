@@ -722,65 +722,14 @@ fn real_main() -> i32 {
 }
 
 fn run_ask(args: AskArgs) -> Result<(), Box<dyn std::error::Error>> {
-    use larql_lql::nl::{self, catalog::Access, Outcome, RouterContext};
-
-    let transport = nl::HttpTransport::from_env()?;
-    let outcome = nl::route(&args.request, &RouterContext::default(), &transport)?;
-    let proposal = match outcome {
-        Outcome::Proposed(p) => p,
-        Outcome::NoMatch { confidence } => {
-            return Err(format!(
-                "no LQL statement serves this request (confidence {confidence:.2})"
-            )
-            .into());
-        }
-        Outcome::Incomplete {
-            kind,
-            template,
-            missing,
-            ..
-        } => {
-            return Err(format!(
-                "`{}` needs {} — not found in the request. Fill it in and run with `larql lql`:\n  {template}",
-                kind.key(),
-                missing.join(", ")
-            )
-            .into());
-        }
-        Outcome::Unparseable { lql, error, .. } => {
-            return Err(format!(
-                "router produced LQL the parser rejects (a larql bug): `{lql}`: {error}"
-            )
-            .into());
-        }
+    // The command's logic and its tests live in larql_lql::nl::ask.
+    let transport = larql_lql::nl::HttpTransport::from_env()?;
+    let opts = larql_lql::nl::AskOptions {
+        vindex: args.vindex,
+        yes: args.yes,
+        dry_run: args.dry_run,
     };
-
-    let class = match proposal.access {
-        Access::Read => "read",
-        Access::Session => "session",
-        Access::Write => "WRITE",
-    };
-    println!(
-        "{}    [{class}, confidence {:.2}]",
-        proposal.lql, proposal.confidence
-    );
-    if args.dry_run {
-        return Ok(());
-    }
-    if proposal.access == Access::Write && !args.yes {
-        // Non-zero exit: a script must not read "printed a DELETE" as "did it".
-        return Err("not executed: this is a write. Re-run with --yes to execute it.".into());
-    }
-
-    let mut session = larql_lql::Session::new();
-    if let Some(path) = &args.vindex {
-        let use_stmt = larql_lql::parse(&format!("USE \"{}\";", path.replace('"', "")))?;
-        session.execute(&use_stmt)?;
-    }
-    for line in nl::execute(&proposal, &mut session, args.yes)? {
-        println!("{line}");
-    }
-    Ok(())
+    larql_lql::nl::ask(&args.request, &opts, &transport, &mut std::io::stdout())
 }
 
 fn run_dev(cmd: DevCommand) -> Result<(), Box<dyn std::error::Error>> {

@@ -35,11 +35,38 @@ impl HttpTransport {
             return Err("TYPESAFE_API_KEY is empty".to_string());
         }
         let url = std::env::var("TYPESAFE_URL").unwrap_or_else(|_| DEFAULT_URL.to_string());
+        let url = validate_endpoint(&url)?;
         let client = reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(60))
+            // The key rides every request. A redirect could move it — reqwest
+            // strips Authorization across hosts, but not on a same-host
+            // https -> http downgrade — and the API never needs to redirect.
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|e| format!("building HTTP client: {e}"))?;
         Ok(HttpTransport { url, key, client })
+    }
+}
+
+/// Where the bearer key may be sent. TYPESAFE_URL is an override for pointing
+/// at a self-hosted Jev-compatible server or a local mock, and every request
+/// carries TYPESAFE_API_KEY — so a mistyped or hostile value would hand the
+/// key to whoever answers. HTTPS always; plain HTTP only to loopback, which is
+/// the one legitimate unencrypted case (a mock or a server on this machine).
+pub fn validate_endpoint(raw: &str) -> Result<String, String> {
+    let url =
+        reqwest::Url::parse(raw.trim()).map_err(|e| format!("TYPESAFE_URL is not a URL ({e})"))?;
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("TYPESAFE_URL must not carry credentials in the URL".to_string());
+    }
+    let host = url.host_str().unwrap_or_default();
+    match url.scheme() {
+        "https" if !host.is_empty() => Ok(url.to_string()),
+        "http" if matches!(host, "localhost" | "127.0.0.1" | "[::1]" | "::1") => Ok(url.to_string()),
+        "http" => Err(format!(
+            "refusing to send the TypeSafe key over plain http to {host}; use https (http is allowed only to localhost)"
+        )),
+        other => Err(format!("TYPESAFE_URL scheme {other:?} is not allowed; use https")),
     }
 }
 
@@ -252,6 +279,24 @@ pub fn read_noul(answers: &Value, q: &str) -> Option<f64> {
 mod tests {
     use super::*;
     use crate::nl::candidates::extract;
+
+    #[test]
+    fn the_key_is_only_sent_over_https_or_to_loopback() {
+        assert!(validate_endpoint(DEFAULT_URL).is_ok());
+        assert!(validate_endpoint("https://jev.internal.example/v1/systemone").is_ok());
+        assert!(validate_endpoint("http://127.0.0.1:8011/v1/systemone").is_ok());
+        assert!(validate_endpoint("http://localhost:8011/v1/systemone").is_ok());
+        assert!(validate_endpoint("http://[::1]:8011/v1/systemone").is_ok());
+        // Plain http anywhere else would put the bearer key on the wire.
+        assert!(validate_endpoint("http://api.typesafe.ai/v1/systemone").is_err());
+        assert!(validate_endpoint("http://10.0.0.5/v1/systemone").is_err());
+        // A lookalike that merely STARTS with a loopback name is not loopback.
+        assert!(validate_endpoint("http://localhost.evil.example/v1/systemone").is_err());
+        assert!(validate_endpoint("http://127.0.0.1.evil.example/v1/systemone").is_err());
+        assert!(validate_endpoint("ftp://api.typesafe.ai/").is_err());
+        assert!(validate_endpoint("not a url").is_err());
+        assert!(validate_endpoint("https://user:pw@api.typesafe.ai/v1/systemone").is_err());
+    }
 
     #[test]
     fn the_request_offers_every_statement_and_a_decline() {
