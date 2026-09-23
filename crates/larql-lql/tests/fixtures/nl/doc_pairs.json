@@ -1,0 +1,359 @@
+{
+ "about": "English comments written by larql's authors directly above an LQL statement in the docs. Labels the statement KIND only: most comments describe a variant and name no arguments. Mined 2026-09-22; not written for this eval.",
+ "pairs": [
+  {
+   "english": "Browse-only (~3 GB f16 / ~6 GB f32, fast queries, no inference)",
+   "expected_kind": "extract",
+   "lql_example": "EXTRACT MODEL \"google/gemma-3-4b-it\" INTO \"gemma3-4b.vindex\";",
+   "src": "docs/lql-guide.md"
+  },
+  {
+   "english": "With inference support (~6 GB f16 / ~12 GB f32, enables INFER)",
+   "expected_kind": "extract",
+   "lql_example": "EXTRACT MODEL \"google/gemma-3-4b-it\" INTO \"gemma3-4b.vindex\" WITH INFERENCE;",
+   "src": "docs/lql-guide.md"
+  },
+  {
+   "english": "Full (~10 GB f16 / ~18 GB f32, enables COMPILE for recompilation)",
+   "expected_kind": "extract",
+   "lql_example": "EXTRACT MODEL \"google/gemma-3-4b-it\" INTO \"gemma3-4b.vindex\" WITH ALL;",
+   "src": "docs/lql-guide.md"
+  },
+  {
+   "english": "Pick the container generation explicitly. Omitted = no preference, resolved by the extraction-generation policy (docs/vindex-generation-policy.md).",
+   "expected_kind": "extract",
+   "lql_example": "EXTRACT MODEL \"google/gemma-3-4b-it\" INTO \"gemma3-4b.vindex\" FORMAT VINDEX3;",
+   "src": "docs/lql-guide.md"
+  },
+  {
+   "english": "Use a pre-extracted vindex (fast, all operations)",
+   "expected_kind": "use",
+   "lql_example": "USE \"gemma3-4b.vindex\";",
+   "src": "docs/lql-guide.md"
+  },
+  {
+   "english": "Or point directly at model weights (no extraction needed)",
+   "expected_kind": "use",
+   "lql_example": "USE MODEL \"google/gemma-3-4b-it\";",
+   "src": "docs/lql-guide.md"
+  },
+  {
+   "english": "What does the model know about France? Verbose by default: relation labels, also-tokens, layer ranges",
+   "expected_kind": "describe",
+   "lql_example": "DESCRIBE \"France\";",
+   "src": "docs/lql-guide.md"
+  },
+  {
+   "english": "Compact view: top edges, primary layer only",
+   "expected_kind": "describe",
+   "lql_example": "DESCRIBE \"France\" BRIEF;",
+   "src": "docs/lql-guide.md"
+  },
+  {
+   "english": "No labels \u2014 pure model signal",
+   "expected_kind": "describe",
+   "lql_example": "DESCRIBE \"France\" RAW;",
+   "src": "docs/lql-guide.md"
+  },
+  {
+   "english": "Show all layer bands (syntax + knowledge + output)",
+   "expected_kind": "describe",
+   "lql_example": "DESCRIBE \"France\" ALL LAYERS;",
+   "src": "docs/lql-guide.md"
+  },
+  {
+   "english": "Single layer",
+   "expected_kind": "describe",
+   "lql_example": "DESCRIBE \"Mozart\" AT LAYER 26;",
+   "src": "docs/lql-guide.md"
+  },
+  {
+   "english": "Feature scan: which features fire for a prompt?",
+   "expected_kind": "walk",
+   "lql_example": "WALK \"The capital of France is\" TOP 10;",
+   "src": "docs/lql-guide.md"
+  },
+  {
+   "english": "Per-layer trace",
+   "expected_kind": "explain",
+   "lql_example": "EXPLAIN WALK \"The capital of France is\" LAYERS 24-33;",
+   "src": "docs/lql-guide.md"
+  },
+  {
+   "english": "SQL-style edge queries",
+   "expected_kind": "select",
+   "lql_example": "SELECT entity, target FROM EDGES WHERE relation = \"capital\" LIMIT 10;",
+   "src": "docs/lql-guide.md"
+  },
+  {
+   "english": "Synonym-robust relation filter (FR3): if \"seat\" matches no stored relation exactly, it is resolved to a known relation by meaning (\"seat\" \u2192 capital, \"money\" \u2192 currency) via a trained residual probe, then re-run against the canonical relation. Needs a vindex with model weights + relation labels.",
+   "expected_kind": "select",
+   "lql_example": "SELECT * FROM EDGES WHERE relation = \"seat\" LIMIT 5;",
+   "src": "docs/lql-guide.md"
+  },
+  {
+   "english": "Next-token prediction with attention",
+   "expected_kind": "infer",
+   "lql_example": "INFER \"The capital of France is\" TOP 5;",
+   "src": "docs/lql-guide.md"
+  },
+  {
+   "english": "Compare walk (no attention) vs infer (with attention)",
+   "expected_kind": "infer",
+   "lql_example": "INFER \"The capital of France is\" TOP 5 COMPARE;",
+   "src": "docs/lql-guide.md"
+  },
+  {
+   "english": "Full inference trace",
+   "expected_kind": "explain",
+   "lql_example": "EXPLAIN INFER \"The capital of France is\" TOP 5;",
+   "src": "docs/lql-guide.md"
+  },
+  {
+   "english": "FR1 verified router: among the top-k activation candidates, override only with a fact whose entity the prompt actually names \u2014 otherwise abstain and let the model answer. Fixes the legacy \"confident-wrong\" injection. The safe default for open queries. TOPK sets the candidate pool (default 5).",
+   "expected_kind": "infer",
+   "lql_example": "INFER \"The capital of Atlantis is\" ROUTE VERIFY TOP 3;",
+   "src": "docs/lql-guide.md"
+  },
+  {
+   "english": "FR2 two-tier router: VERIFY first, then an activation-alias fallback for when the prompt names an alias rather than the stored entity (e.g. \"Persia\" \u2192 Iran). WARNING: the fallback has no entity-name guard, so on a query about a non-stored entity it can confident-wrong like the legacy gate \u2014 use FALLBACK only for queries known to be aliases of stored entities.",
+   "expected_kind": "infer",
+   "lql_example": "INFER \"The capital of Persia is\" ROUTE VERIFY FALLBACK TOPK 8 TOP 3;",
+   "src": "docs/lql-guide.md"
+  },
+  {
+   "english": "EXIT: retrieval-augmented early exit. When the verified hit fires, the forward short-circuits at the resolved layer \u2014 the stored target is emitted and the remaining layers + lm_head are skipped (parity-exact, ~1.4\u00d7 faster on fact-lookup answer tokens). Verified-only; ignored with FALLBACK.",
+   "expected_kind": "infer",
+   "lql_example": "INFER \"The capital of Atlantis is\" ROUTE VERIFY EXIT TOP 3;",
+   "src": "docs/lql-guide.md"
+  },
+  {
+   "english": "Insert a fact (default KNN retrieval override)",
+   "expected_kind": "insert",
+   "lql_example": "INSERT INTO EDGES (entity, relation, target)",
+   "src": "docs/lql-guide.md"
+  },
+  {
+   "english": "Insert with all COMPOSE knobs: choose the layer, set confidence, and dial the down-vector override strength",
+   "expected_kind": "insert",
+   "lql_example": "INSERT INTO EDGES (entity, relation, target)",
+   "src": "docs/lql-guide.md"
+  },
+  {
+   "english": "Verify",
+   "expected_kind": "describe",
+   "lql_example": "DESCRIBE \"John Coyle\";",
+   "src": "docs/lql-guide.md"
+  },
+  {
+   "english": "Delete",
+   "expected_kind": "delete",
+   "lql_example": "DELETE FROM EDGES WHERE entity = \"John Coyle\" AND relation = \"lives-in\";",
+   "src": "docs/lql-guide.md"
+  },
+  {
+   "english": "Update by entity (works on both heap and mmap-loaded vindexes)",
+   "expected_kind": "update",
+   "lql_example": "UPDATE EDGES SET target = \"London\"",
+   "src": "docs/lql-guide.md"
+  },
+  {
+   "english": "Update by (layer, feature) \u2014 fast-path, bypasses the entity scan",
+   "expected_kind": "update",
+   "lql_example": "UPDATE EDGES SET target = \"London\", confidence = 0.95",
+   "src": "docs/lql-guide.md"
+  },
+  {
+   "english": "Start recording a patch",
+   "expected_kind": "begin_patch",
+   "lql_example": "BEGIN PATCH \"medical-knowledge.vlp\";",
+   "src": "docs/lql-guide.md"
+  },
+  {
+   "english": "Save (base vindex NOT modified)",
+   "expected_kind": "save_patch",
+   "lql_example": "SAVE PATCH;",
+   "src": "docs/lql-guide.md"
+  },
+  {
+   "english": "Apply a patch",
+   "expected_kind": "apply_patch",
+   "lql_example": "APPLY PATCH \"medical-knowledge.vlp\";",
+   "src": "docs/lql-guide.md"
+  },
+  {
+   "english": "Stack multiple patches",
+   "expected_kind": "apply_patch",
+   "lql_example": "APPLY PATCH \"fix-hallucinations.vlp\";",
+   "src": "docs/lql-guide.md"
+  },
+  {
+   "english": "See active patches",
+   "expected_kind": "show_patches",
+   "lql_example": "SHOW PATCHES;",
+   "src": "docs/lql-guide.md"
+  },
+  {
+   "english": "Remove a patch (instantly reverts)",
+   "expected_kind": "remove_patch",
+   "lql_example": "REMOVE PATCH \"fix-hallucinations.vlp\";",
+   "src": "docs/lql-guide.md"
+  },
+  {
+   "english": "Extract diff as a patch",
+   "expected_kind": "diff",
+   "lql_example": "DIFF \"base.vindex\" \"edited.vindex\" INTO PATCH \"changes.vlp\";",
+   "src": "docs/lql-guide.md"
+  },
+  {
+   "english": "See what changed",
+   "expected_kind": "diff",
+   "lql_example": "DIFF \"gemma3-4b.vindex\" CURRENT;",
+   "src": "docs/lql-guide.md"
+  },
+  {
+   "english": "Bake the patches into a fresh standalone vindex (instant on APFS: weight files hardlinked from source, only down_weights.bin gets the override columns rewritten in place).",
+   "expected_kind": "compile",
+   "lql_example": "COMPILE CURRENT INTO VINDEX \"gemma3-4b-medical.vindex\";",
+   "src": "docs/lql-guide.md"
+  },
+  {
+   "english": "Use the compiled vindex like any other \u2014 INFER produces the new facts with no patch overlay loaded.",
+   "expected_kind": "use",
+   "lql_example": "USE \"gemma3-4b-medical.vindex\";",
+   "src": "docs/lql-guide.md"
+  },
+  {
+   "english": "Or compile back to HuggingFace format. The constellation is in the standard down_proj tensors, so loading in Transformers / GGUF runtimes Just Works.",
+   "expected_kind": "compile",
+   "lql_example": "COMPILE CURRENT INTO MODEL \"gemma3-4b-edited/\" FORMAT safetensors;",
+   "src": "docs/lql-guide.md"
+  },
+  {
+   "english": "What does the model predict at each layer?",
+   "expected_kind": "trace",
+   "lql_example": "TRACE \"The capital of France is\";",
+   "src": "docs/lql-guide.md"
+  },
+  {
+   "english": "Track a specific answer through all layers",
+   "expected_kind": "trace",
+   "lql_example": "TRACE \"The capital of France is\" FOR \"Paris\";",
+   "src": "docs/lql-guide.md"
+  },
+  {
+   "english": "Attention vs FFN decomposition at the phase transition",
+   "expected_kind": "trace",
+   "lql_example": "TRACE \"The capital of France is\" DECOMPOSE LAYERS 22-27;",
+   "src": "docs/lql-guide.md"
+  },
+  {
+   "english": "Save the trace to an mmap'd file",
+   "expected_kind": "trace",
+   "lql_example": "TRACE \"The capital of France is\" SAVE \"france.trace\";",
+   "src": "docs/lql-guide.md"
+  },
+  {
+   "english": "Trace all token positions (not just last)",
+   "expected_kind": "trace",
+   "lql_example": "TRACE \"The capital of France is\" POSITIONS ALL SAVE \"france_all.trace\";",
+   "src": "docs/lql-guide.md"
+  },
+  {
+   "english": "Discovered relation types",
+   "expected_kind": "show_relations",
+   "lql_example": "SHOW RELATIONS WITH EXAMPLES;",
+   "src": "docs/lql-guide.md"
+  },
+  {
+   "english": "Layer summary",
+   "expected_kind": "show_layers",
+   "lql_example": "SHOW LAYERS;",
+   "src": "docs/lql-guide.md"
+  },
+  {
+   "english": "Feature details",
+   "expected_kind": "show_features",
+   "lql_example": "SHOW FEATURES 26 LIMIT 20;",
+   "src": "docs/lql-guide.md"
+  },
+  {
+   "english": "Available vindexes in current directory",
+   "expected_kind": "show_models",
+   "lql_example": "SHOW MODELS;",
+   "src": "docs/lql-guide.md"
+  },
+  {
+   "english": "Active patches",
+   "expected_kind": "show_patches",
+   "lql_example": "SHOW PATCHES;",
+   "src": "docs/lql-guide.md"
+  },
+  {
+   "english": "Knowledge graph coverage",
+   "expected_kind": "stats",
+   "lql_example": "STATS;",
+   "src": "docs/lql-guide.md"
+  },
+  {
+   "english": "What does Llama know about France that Gemma doesn't?",
+   "expected_kind": "diff",
+   "lql_example": "DIFF \"gemma3-4b.vindex\" \"llama3-8b.vindex\"",
+   "src": "crates/larql-lql/docs/spec.md"
+  },
+  {
+   "english": "Which model has more knowledge about music?",
+   "expected_kind": "diff",
+   "lql_example": "DIFF \"gemma3-4b.vindex\" \"llama3-8b.vindex\"",
+   "src": "crates/larql-lql/docs/spec.md"
+  },
+  {
+   "english": "Full knowledge comparison report",
+   "expected_kind": "diff",
+   "lql_example": "DIFF \"gemma3-4b.vindex\" \"llama3-70b.vindex\"",
+   "src": "crates/larql-lql/docs/spec.md"
+  },
+  {
+   "english": "Which entities have a capital?",
+   "expected_kind": "select",
+   "lql_example": "SELECT entity, target FROM EDGES",
+   "src": "crates/larql-lql/docs/spec.md"
+  },
+  {
+   "english": "What does the model think is in Europe?",
+   "expected_kind": "select",
+   "lql_example": "SELECT entity FROM EDGES",
+   "src": "crates/larql-lql/docs/spec.md"
+  },
+  {
+   "english": "Find all composers the model knows",
+   "expected_kind": "select",
+   "lql_example": "SELECT entity, target FROM EDGES",
+   "src": "crates/larql-lql/docs/spec.md"
+  },
+  {
+   "english": "Stream edges as they're found, layer by layer",
+   "expected_kind": "describe",
+   "lql_example": "DESCRIBE \"France\" STREAM;",
+   "src": "crates/larql-lql/docs/spec.md"
+  },
+  {
+   "english": "Useful for remote vindexes \u2014 start seeing results before the full scan completes",
+   "expected_kind": "use",
+   "lql_example": "USE REMOTE \"https://models.example.com/llama-70b.vindex\";",
+   "src": "crates/larql-lql/docs/spec.md"
+  },
+  {
+   "english": "Default: KNN mode, residual captured at knowledge.hi \u2212 1.",
+   "expected_kind": "insert",
+   "lql_example": "INSERT INTO EDGES (entity, relation, target)",
+   "src": "crates/larql-lql/README.md"
+  },
+  {
+   "english": "COMPOSE with explicit layer, confidence, alpha.",
+   "expected_kind": "insert",
+   "lql_example": "INSERT INTO EDGES (entity, relation, target)",
+   "src": "crates/larql-lql/README.md"
+  }
+ ]
+}

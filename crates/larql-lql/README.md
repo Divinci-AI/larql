@@ -41,6 +41,52 @@ larql-server).
 The full grammar is in [`docs/spec.md`](docs/spec.md). The user-facing tutorial is in
 [`docs/lql-guide.md`](../../docs/lql-guide.md).
 
+## Asking in English: `larql ask`
+
+```bash
+larql ask "what does the model know about France?" --vindex gemma3-4b.vindex
+# DESCRIBE "France";    [read, confidence 0.97]
+# …DESCRIBE output…
+
+larql ask "erase everything the model knows about John Coyle"
+# DELETE FROM EDGES WHERE entity = "John Coyle";    [WRITE, confidence 0.95]
+# error: not executed: this is a write. Re-run with --yes to execute it.
+```
+
+⚠ **Every request is sent to `api.typesafe.ai`** (TypeSafe's Jev) and needs
+`TYPESAFE_API_KEY`. It is the one network path in `larql-lql`'s routing
+code, and it applies only to `ask`, never to `lql`, `repl` or the server.
+
+How it works (`src/nl/`):
+
+- **Pick, then select.** One request asks Jev to choose the statement from
+  the 30 routable kinds **or `none`**, and to choose each argument from
+  spans that code found in the request: quoted text, capitalised names,
+  paths and model ids, numbers. Jev cannot write text, so it cannot supply
+  a value that is not in the request.
+- **The parser has the last word.** The rendered LQL goes through `parse()`;
+  nothing reaches the executor except a parsed `Statement`.
+- **Writes are proposed, not run.** A write runs only with `--yes`. Whether
+  something is a write is read from the *parsed* statement
+  (`nl::catalog::access`), not from the router's answer. That covers
+  `DIFF … INTO PATCH` and `TRACE … SAVE`, which write files.
+- **A missing value asks rather than guesses.** A `DELETE` or `UPDATE` with
+  no entity, or an `EXTRACT` whose model and output resolve to the same
+  span, comes back as a template to fill in and run with `larql lql`.
+
+Measured 2026-09-22 (`tests/nl_route_eval.rs`, `--ignored`, live):
+
+| set | result |
+|---|---|
+| authored, 42 in scope: statement kind | 42/42 |
+| authored, 42 in scope: kind and every argument (AST-exact) | 38/42 held out; 40/42 after fixes |
+| authored, 12 out of scope: declined | 12/12, then 11/12 on rerun (no writes proposed either time) |
+| doc comments by larql's authors: kind only | 32/59 |
+
+The authored set is single-author. The doc-comment set is independent but
+mostly describes *variants* ("Compact view: top edges"), not requests, so
+it scores something different and the two numbers must not be pooled.
+
 ## INSERT: two modes
 
 `INSERT INTO EDGES` has two install modes. The default is **`KNN`** — a

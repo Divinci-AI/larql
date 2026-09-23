@@ -134,6 +134,11 @@ enum Commands {
     /// Execute a one-shot LQL statement.
     Lql(LqlArgs),
 
+    #[command(next_help_heading = "LQL")]
+    /// Ask in English; get a proposed LQL statement. Sends the request to
+    /// api.typesafe.ai (needs TYPESAFE_API_KEY). Writes run only with --yes.
+    Ask(AskArgs),
+
     // ── Build / extract ─────────────────────────────────────────────
     #[command(next_help_heading = "Build")]
     /// Build a .vindex by decompiling a HuggingFace model.
@@ -413,6 +418,25 @@ struct LqlArgs {
 }
 
 #[derive(clap::Args)]
+struct AskArgs {
+    /// The request, e.g. `what does the model know about France?`.
+    request: String,
+
+    /// Vindex to open before running the proposed statement.
+    #[arg(long, value_name = "VINDEX_PATH")]
+    vindex: Option<String>,
+
+    /// Run a proposed WRITE (INSERT, DELETE, UPDATE, COMPILE, …). Reads run
+    /// without it; a write without it is printed and not executed.
+    #[arg(long)]
+    yes: bool,
+
+    /// Print the proposed LQL and stop, even for a read.
+    #[arg(long)]
+    dry_run: bool,
+}
+
+#[derive(clap::Args)]
 struct ServeArgs {
     /// Path to a .vindex directory (or `hf://` path).
     #[arg(value_name = "VINDEX_PATH")]
@@ -665,6 +689,7 @@ fn real_main() -> i32 {
             larql_lql::run_repl();
             Ok(())
         }
+        Commands::Ask(args) => run_ask(args),
         Commands::Lql(args) => match larql_lql::run_batch(&args.statement) {
             Ok(lines) => {
                 for line in &lines {
@@ -694,6 +719,68 @@ fn real_main() -> i32 {
         return 1;
     }
     0
+}
+
+fn run_ask(args: AskArgs) -> Result<(), Box<dyn std::error::Error>> {
+    use larql_lql::nl::{self, catalog::Access, Outcome, RouterContext};
+
+    let transport = nl::HttpTransport::from_env()?;
+    let outcome = nl::route(&args.request, &RouterContext::default(), &transport)?;
+    let proposal = match outcome {
+        Outcome::Proposed(p) => p,
+        Outcome::NoMatch { confidence } => {
+            return Err(format!(
+                "no LQL statement serves this request (confidence {confidence:.2})"
+            )
+            .into());
+        }
+        Outcome::Incomplete {
+            kind,
+            template,
+            missing,
+            ..
+        } => {
+            return Err(format!(
+                "`{}` needs {} — not found in the request. Fill it in and run with `larql lql`:\n  {template}",
+                kind.key(),
+                missing.join(", ")
+            )
+            .into());
+        }
+        Outcome::Unparseable { lql, error, .. } => {
+            return Err(format!(
+                "router produced LQL the parser rejects (a larql bug): `{lql}`: {error}"
+            )
+            .into());
+        }
+    };
+
+    let class = match proposal.access {
+        Access::Read => "read",
+        Access::Session => "session",
+        Access::Write => "WRITE",
+    };
+    println!(
+        "{}    [{class}, confidence {:.2}]",
+        proposal.lql, proposal.confidence
+    );
+    if args.dry_run {
+        return Ok(());
+    }
+    if proposal.access == Access::Write && !args.yes {
+        // Non-zero exit: a script must not read "printed a DELETE" as "did it".
+        return Err("not executed: this is a write. Re-run with --yes to execute it.".into());
+    }
+
+    let mut session = larql_lql::Session::new();
+    if let Some(path) = &args.vindex {
+        let use_stmt = larql_lql::parse(&format!("USE \"{}\";", path.replace('"', "")))?;
+        session.execute(&use_stmt)?;
+    }
+    for line in nl::execute(&proposal, &mut session, args.yes)? {
+        println!("{line}");
+    }
+    Ok(())
 }
 
 fn run_dev(cmd: DevCommand) -> Result<(), Box<dyn std::error::Error>> {

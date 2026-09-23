@@ -2,6 +2,7 @@ pub mod ast;
 pub mod error;
 pub mod executor;
 pub(crate) mod lexer;
+pub mod nl;
 pub mod parser;
 pub mod relations;
 pub mod repl;
