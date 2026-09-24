@@ -95,9 +95,14 @@ pub fn parse_control(raw: &str) -> Result<ControlSpec, String> {
     let (prompt, expected) = raw
         .split_once("=>")
         .ok_or_else(|| format!("control {raw:?} has no `=>`; expected \"prompt=>expected answer\""))?;
-    let prompt = prompt.trim();
+    // Trim SPACES only, never newlines. A pre-rendered prompt (--no-chat-template) ends in the chat
+    // template's generation prompt, e.g. "<|turn>model\n", and that final newline is a TOKEN. A
+    // full trim() removed it, so every control was measured one token short: an input no probe
+    // and no server ever sends. On gemma-4-E2B-it that turned §28's intact Japan control into a
+    // blank top-1 and made the gate refuse a good compile (erasure programme §53, 2026-09-24).
+    let prompt = prompt.trim_matches(' ');
     let expected = expected.trim();
-    if prompt.is_empty() {
+    if prompt.trim().is_empty() {
         return Err(format!("control {raw:?} has an empty prompt"));
     }
     if expected.is_empty() {
@@ -414,6 +419,19 @@ mod tests {
         let c = parse_control("  What is the capital of Italy?  =>  Rome ").unwrap();
         assert_eq!(c.prompt, "What is the capital of Italy?");
         assert_eq!(c.expected, "Rome");
+    }
+
+    #[test]
+    fn a_pre_rendered_prompt_keeps_its_final_newline_token() {
+        let raw = "<bos><|turn>user\nWhat is the capital of Japan?<turn|>\n<|turn>model\n=>Tokyo";
+        let c = parse_control(raw).unwrap();
+        assert!(c.prompt.ends_with("<|turn>model\n"), "{:?}", c.prompt);
+        assert_eq!(c.expected, "Tokyo");
+    }
+
+    #[test]
+    fn a_whitespace_only_prompt_is_still_empty() {
+        assert!(parse_control("  \n =>Rome").is_err());
     }
 
     #[test]

@@ -62,6 +62,16 @@ fn ids_fluency(
     Ok(Fluency { nll, tokens: ids.len() - 1 })
 }
 
+fn control_tokens(
+    tokenizer: &tokenizers::Tokenizer,
+    base: &std::path::Path,
+    prompt: &str,
+    no_chat_template: bool,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let wrapped = if no_chat_template { prompt.to_string() } else { super::chat::render_user_prompt(base, prompt)? };
+    Ok(tokenizer.encode(wrapped.as_str(), true).map_err(|e| format!("tokenize control: {}", e))?.get_ids().len())
+}
+
 fn top1(
     weights: &larql_models::ModelWeights,
     tokenizer: &tokenizers::Tokenizer,
@@ -188,6 +198,10 @@ pub fn run(args: CompileArgs) -> Result<(), Box<dyn std::error::Error>> {
     let mut baselines: Vec<ControlBaseline> = Vec::new();
     for c in &control_specs {
         let got = top1(&weights, &tokenizer, &args.base, &c.prompt, args.no_chat_template)?;
+        // the token count, printed so a runner can check each control reached larql whole — the
+        // same check the trigger prompt's "prompt tokens:" line has always allowed
+        let n = control_tokens(&tokenizer, &args.base, &c.prompt, args.no_chat_template)?;
+        eprintln!("  control tokens: {}", n);
         eprintln!("  {:?} -> {:?}", c.prompt, got);
         baselines.push(ControlBaseline {
             prompt: c.prompt.clone(),
