@@ -283,47 +283,105 @@ pub fn run(args: CompileArgs) -> Result<(), Box<dyn std::error::Error>> {
         weights.tensors.insert(key.clone(), modified[key].clone());
     }
 
-    // ── The gate. Everything above measured; this decides. ────
-    let mut results: Vec<ControlResult> = Vec::new();
+    // ── In memory: ADVISORY only. ─────────────────────────────
+    // §48 (erasure programme, 2026-09-23): this measurement and the written file disagreed — the
+    // in-memory model blanked a control that the written bytes answer at p 0.9999 — so it no
+    // longer decides anything. It is printed because a disagreement is itself worth seeing.
     if !control_specs.is_empty() {
-        eprintln!("\nRe-measuring {} control(s) after the install...", control_specs.len());
+        eprintln!("\nIn-memory control check (advisory; the gate judges the WRITTEN file)...");
     }
     for b in &baselines {
         let got = top1(&weights, &tokenizer, &args.base, &b.prompt, args.no_chat_template)?;
-        let intact = got == b.expected;
-        eprintln!("  {:?} -> {:?}{}", b.prompt, got, if intact { "" } else { "   ← CHANGED" });
-        results.push(ControlResult {
-            prompt: b.prompt.clone(),
-            expected: b.expected.clone(),
-            got,
-            intact,
-        });
+        let mark = if got == b.expected { "" } else { "   ← differs in memory" };
+        eprintln!("  {:?} -> {:?}{}", b.prompt, got, mark);
     }
-    if let Verdict::Refuse(why) = judge(control_specs.len(), &results, &balancer) {
-        // Refuse BEFORE create_dir_all: a caller who re-runs after a refusal should not find a
-        // half-built output directory that looks like a previous success.
-        return Err(why.into());
-    }
-    eprintln!("\n  {}", collateral_provenance(control_specs.len(), &balancer));
-
-    // ── The fluency bound, also BEFORE anything is written ─────
-    let mut measured_ratio = None;
-    if let Some(t) = &fluency_text {
-        let after = text_fluency(&weights, &tokenizer, t).ok();
-        if let Verdict::Refuse(why) = judge_fluency(fluency_before, after, args.max_fluency_ratio) {
-            return Err(why.into());
+    if std::env::var_os("LARQL_COMPILE_DIAG").is_some() && !control_specs.is_empty() {
+        // Same in-memory model, with ONLY the edited slot rounded through bf16 as the file stores
+        // it. If this agrees with the written file where the unrounded one did not, the
+        // disagreement is the rounding of the edge.
+        let mut rounded = modified.clone();
+        {
+            let g = rounded.get_mut(&gate_key).unwrap();
+            let r = super::staging::round_through_bf16(&g.row(args.slot).to_vec());
+            g.row_mut(args.slot).iter_mut().zip(r).for_each(|(x, v)| *x = v);
         }
-        measured_ratio = match (fluency_before, after) {
-            (Some(b), Some(a)) => Some(fluency_ratio(b, a)),
-            _ => None,
-        };
+        {
+            let u = rounded.get_mut(&up_key).unwrap();
+            let r = super::staging::round_through_bf16(&u.row(args.slot).to_vec());
+            u.row_mut(args.slot).iter_mut().zip(r).for_each(|(x, v)| *x = v);
+        }
+        {
+            let d = rounded.get_mut(&down_key).unwrap();
+            let r = super::staging::round_through_bf16(&d.column(args.slot).to_vec());
+            d.column_mut(args.slot).iter_mut().zip(r).for_each(|(x, v)| *x = v);
+        }
+        for key in [&gate_key, &up_key, &down_key] {
+            weights.tensors.insert(key.clone(), rounded[key].clone());
+        }
+        eprintln!("  diag: in memory with the edited slot rounded through bf16:");
+        for b in &baselines {
+            let got = top1(&weights, &tokenizer, &args.base, &b.prompt, args.no_chat_template)?;
+            eprintln!("    {:?} -> {:?}", b.prompt, got);
+        }
     }
-    eprintln!("  {}", fluency_provenance(fluency_text.is_some(), measured_ratio, args.max_fluency_ratio));
 
-    eprintln!("\nSaving compiled model...");
-    std::fs::create_dir_all(&args.output)?;
-    let output_file = args.output.join("model.safetensors");
+    // ── Write into STAGING. Nothing reaches the output until the written file is judged. ──
+    super::staging::check_output_free(&args.output)?;
+    let stage = super::staging::staging_dir(&args.output);
+    super::staging::create(&stage)?;
+    eprintln!("\nWriting compiled model to staging {}...", stage.display());
+    let written = write_checkpoint(&args, &stage, &weights, modified, &gate_key, &up_key, &down_key,
+                                   (&gate_pattern, &up_pattern, &down_pattern));
+    if let Err(e) = written {
+        super::staging::discard(&stage)?;
+        return Err(e);
+    }
+    // free the in-memory model before loading the written one: two f32 copies of a 10 GB
+    // checkpoint do not fit on the machines this runs on
+    drop(weights);
 
+    // ── The gate: judged on the file as written, reloaded from disk. ──
+    let verdict = judge_written(
+        &stage,
+        &tokenizer,
+        &args,
+        &baselines,
+        control_specs.len(),
+        &balancer,
+        fluency_before,
+        fluency_text.as_deref(),
+    );
+    match verdict {
+        Ok((collateral, fluency)) => {
+            super::staging::promote(&stage, &args.output)?;
+            eprintln!("\n  {}", collateral);
+            eprintln!("  {}", fluency);
+            eprintln!("  judged on the written file; promoted to {}", args.output.display());
+            Ok(())
+        }
+        Err(why) => {
+            // Refuse with NO output directory: a caller who re-runs after a refusal must not find
+            // a half-built output that looks like a previous success.
+            super::staging::discard(&stage)?;
+            Err(why.into())
+        }
+    }
+}
+
+/// Write the checkpoint into `dir` (the staging directory): a byte-patched copy of the base, or a
+/// re-serialised text-only model. Consumes `modified`.
+#[allow(clippy::too_many_arguments)]
+fn write_checkpoint(
+    args: &CompileArgs,
+    dir: &std::path::Path,
+    weights: &larql_models::ModelWeights,
+    modified: HashMap<String, ArcArray2<f32>>,
+    gate_key: &str,
+    up_key: &str,
+    down_key: &str,
+    patterns: (&str, &str, &str),
+) -> Result<(), Box<dyn std::error::Error>> {
+    let output_file = dir.join("model.safetensors");
     if args.byte_patch {
         let base_file = args.base.join("model.safetensors");
         if !base_file.exists() {
@@ -338,40 +396,25 @@ pub fn run(args: CompileArgs) -> Result<(), Box<dyn std::error::Error>> {
         let edit = super::byte_patch::SlotEdit {
             layer: args.layer,
             slot: args.slot,
-            gate: modified[&gate_key].row(args.slot).to_vec(),
-            up: modified[&up_key].row(args.slot).to_vec(),
-            down: modified[&down_key].column(args.slot).to_vec(),
+            gate: modified[gate_key].row(args.slot).to_vec(),
+            up: modified[up_key].row(args.slot).to_vec(),
+            down: modified[down_key].column(args.slot).to_vec(),
         };
-        let receipt = super::byte_patch::write_byte_patched(
-            &base_file,
-            &output_file,
-            &[edit],
-            (&gate_pattern, &up_pattern, &down_pattern),
-        )?;
-        super::byte_patch::copy_sidecars_verbatim(&args.base, &args.output)?;
-        eprintln!(
-            "  byte-patched: {} span(s), {} byte(s) rewritten",
-            receipt.spans, receipt.bytes_written
-        );
+        let receipt = super::byte_patch::write_byte_patched(&base_file, &output_file, &[edit], patterns)?;
+        super::byte_patch::copy_sidecars_verbatim(&args.base, dir)?;
+        eprintln!("  byte-patched: {} span(s), {} byte(s) rewritten", receipt.spans, receipt.bytes_written);
         eprintln!("  base sha256:     {}", receipt.sha256_base);
         eprintln!("  compiled sha256: {}", receipt.sha256_out);
         // report the slots the WRITER patched, not the ones the caller asked for: if those
         // ever diverge, the provenance line should say what actually happened to the file
         eprintln!(
             "  differs from its base only inside {}",
-            receipt
-                .slots
-                .iter()
-                .map(|(l, s)| format!("L{l} slot {s}"))
-                .collect::<Vec<_>>()
-                .join(", ")
+            receipt.slots.iter().map(|(l, s)| format!("L{l} slot {s}")).collect::<Vec<_>>().join(", ")
         );
         return Ok(());
     }
-
-    let merged = merge_for_save(&weights, modified);
+    let merged = merge_for_save(weights, modified);
     write_safetensors(&merged.tensors, &merged.vectors, &output_file)?;
-
     let file_size = std::fs::metadata(&output_file)?.len();
     eprintln!(
         "  saved: {} ({:.1} GB, {} tensors, {} vectors)",
@@ -380,17 +423,53 @@ pub fn run(args: CompileArgs) -> Result<(), Box<dyn std::error::Error>> {
         merged.tensors.len(),
         merged.vectors.len(),
     );
-
-    copy_model_config(&args.base, &args.output);
-
-    eprintln!("\nDone.");
-    eprintln!(
-        "  larql compile --base {} --prompt \"...\" --answer \"{}\" → {}",
-        args.base.display(),
-        answer,
-        args.output.display()
-    );
+    copy_model_config(&args.base, dir);
     Ok(())
+}
+
+/// Reload the written checkpoint and apply the collateral gate and the fluency bound to IT.
+/// Returns the two provenance lines on a pass, the refusal reason otherwise.
+#[allow(clippy::too_many_arguments)]
+fn judge_written(
+    dir: &std::path::Path,
+    tokenizer: &tokenizers::Tokenizer,
+    args: &CompileArgs,
+    baselines: &[ControlBaseline],
+    requested: usize,
+    balancer: &BalancerOutcome,
+    fluency_before: Option<Fluency>,
+    fluency_text: Option<&str>,
+) -> Result<(String, String), String> {
+    eprintln!("\nReloading the written file to judge it...");
+    let w = larql_models::loading::load_model_dir(dir).map_err(|e| format!("reload written checkpoint: {e}"))?;
+    let mut results: Vec<ControlResult> = Vec::new();
+    if requested > 0 {
+        eprintln!("Re-measuring {} control(s) on the written file...", requested);
+    }
+    for b in baselines {
+        let got = top1(&w, tokenizer, &args.base, &b.prompt, args.no_chat_template).map_err(|e| e.to_string())?;
+        let intact = got == b.expected;
+        eprintln!("  {:?} -> {:?}{}", b.prompt, got, if intact { "" } else { "   ← CHANGED" });
+        results.push(ControlResult { prompt: b.prompt.clone(), expected: b.expected.clone(), got, intact });
+    }
+    if let Verdict::Refuse(why) = judge(requested, &results, balancer) {
+        return Err(why);
+    }
+    let mut measured_ratio = None;
+    if let Some(t) = fluency_text {
+        let after = text_fluency(&w, tokenizer, t).ok();
+        if let Verdict::Refuse(why) = judge_fluency(fluency_before, after, args.max_fluency_ratio) {
+            return Err(why);
+        }
+        measured_ratio = match (fluency_before, after) {
+            (Some(b), Some(a)) => Some(fluency_ratio(b, a)),
+            _ => None,
+        };
+    }
+    Ok((
+        collateral_provenance(requested, balancer),
+        fluency_provenance(fluency_text.is_some(), measured_ratio, args.max_fluency_ratio),
+    ))
 }
 
 #[cfg(test)]

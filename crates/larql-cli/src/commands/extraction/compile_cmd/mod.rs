@@ -50,6 +50,7 @@ mod edge;
 mod patch;
 mod save;
 mod single;
+mod staging;
 
 #[derive(Args)]
 pub struct CompileArgs {
